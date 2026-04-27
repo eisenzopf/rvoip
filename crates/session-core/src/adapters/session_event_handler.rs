@@ -428,6 +428,36 @@ impl SessionCrossCrateEventHandler {
         None
     }
 
+    /// Extract a quoted Debug string field and unescape its contents.
+    ///
+    /// `AuthRequired.challenge` carries a header value such as
+    /// `Digest realm="asterisk", nonce="..."`. In a derived `Debug`
+    /// representation those inner quotes are escaped, so the simpler
+    /// `extract_field` helper stops after `Digest realm=\` and drops the
+    /// nonce. Keep this helper local to the Debug-string bridge until these
+    /// handlers are moved to typed events.
+    fn extract_debug_string_field(&self, event_str: &str, field_prefix: &str) -> Option<String> {
+        let start = event_str.find(field_prefix)? + field_prefix.len();
+        let mut value = String::new();
+        let mut escaped = false;
+
+        for ch in event_str[start..].chars() {
+            if escaped {
+                value.push(ch);
+                escaped = false;
+                continue;
+            }
+
+            match ch {
+                '\\' => escaped = true,
+                '"' => return Some(value),
+                _ => value.push(ch),
+            }
+        }
+
+        None
+    }
+
     // Dialog event handlers
     async fn handle_dialog_created(&self, event_str: &str) -> Result<()> {
         // Extract dialog_id and call_id
@@ -854,7 +884,7 @@ impl SessionCrossCrateEventHandler {
             })
             .unwrap_or(401);
         let challenge = self
-            .extract_field(event_str, "challenge: \"")
+            .extract_debug_string_field(event_str, "challenge: \"")
             .unwrap_or_default();
 
         info!(
@@ -1489,7 +1519,7 @@ impl SessionCrossCrateEventHandler {
                 .extract_field(event_str, "reason: ")
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}", 
+            info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}",
                   session_id, reason);
 
             // Process DialogTerminated to complete Terminating → Terminated transition

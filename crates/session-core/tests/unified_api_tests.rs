@@ -5,7 +5,11 @@
 use rvoip_session_core::api::unified::{Config, UnifiedCoordinator};
 use rvoip_session_core::state_table::types::SessionId;
 use rvoip_session_core::types::CallState;
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_core::types::{ContentLength, HeaderName, TypedHeader};
+use rvoip_sip_core::{parse_message, Message, Method};
 use std::time::Duration;
+use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
 /// Create a test configuration with unique ports.
@@ -25,6 +29,59 @@ fn test_config(base_port: u16) -> Config {
 async fn test_create_coordinator() {
     let coordinator = UnifiedCoordinator::new(test_config(15200)).await;
     assert!(coordinator.is_ok());
+}
+
+#[tokio::test]
+async fn inbound_options_gets_dialog_core_200_without_session_state() {
+    let port = 15228;
+    let coordinator = UnifiedCoordinator::new(test_config(port)).await.unwrap();
+
+    let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = socket.local_addr().unwrap();
+    let target_uri = format!("sip:test@127.0.0.1:{port}");
+    let request = SimpleRequestBuilder::new(Method::Options, &target_uri)
+        .unwrap()
+        .from("Asterisk", "sip:asterisk@example.com", Some("ast-tag"))
+        .to("Endpoint", &target_uri, None)
+        .call_id("session-core-options-call-id")
+        .cseq(1)
+        .via(
+            &source_addr.to_string(),
+            "UDP",
+            Some("z9hG4bK-session-core-options"),
+        )
+        .max_forwards(70)
+        .header(TypedHeader::ContentLength(ContentLength::new(0)))
+        .build();
+
+    socket
+        .send_to(
+            &Message::Request(request).to_bytes(),
+            format!("127.0.0.1:{port}"),
+        )
+        .await
+        .unwrap();
+
+    let mut buf = [0u8; 4096];
+    let (len, _) = timeout(Duration::from_secs(1), socket.recv_from(&mut buf))
+        .await
+        .expect("timed out waiting for OPTIONS response")
+        .unwrap();
+
+    let message = parse_message(&buf[..len]).unwrap();
+    let response = match message {
+        Message::Response(response) => response,
+        other => panic!("expected OPTIONS response, got {other:?}"),
+    };
+
+    assert_eq!(response.status_code(), 200);
+    assert!(response.header(&HeaderName::Allow).is_some());
+    assert!(response.header(&HeaderName::ContentLength).is_some());
+    rvoip_sip_core::validation::validate_wire_response(&response).unwrap();
+    assert!(
+        coordinator.list_sessions().await.is_empty(),
+        "OPTIONS qualify must not create session-core state"
+    );
 }
 
 #[tokio::test]

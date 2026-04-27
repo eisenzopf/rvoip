@@ -1342,6 +1342,7 @@ impl UnifiedCoordinator {
         // Create dialog config - use hybrid mode to support both incoming and outgoing calls
         let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_from_uri(&config.local_uri)
+            .with_auto_options()
             .with_100rel(config.use_100rel)
             .with_session_timer(config.session_timer_secs)
             .with_min_se(config.session_timer_min_se)

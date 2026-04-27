@@ -91,6 +91,16 @@ impl DialogEventHub {
         &self,
         event: SessionCoordinationEvent,
     ) -> Result<()> {
+        let _ = self.try_publish_session_coordination_event(event).await?;
+        Ok(())
+    }
+
+    /// Publish a session coordination event and report whether it mapped to a
+    /// cross-crate event.
+    pub(crate) async fn try_publish_session_coordination_event(
+        &self,
+        event: SessionCoordinationEvent,
+    ) -> Result<bool> {
         debug!("Publishing session coordination event: {:?}", event);
 
         // Convert to cross-crate event
@@ -103,14 +113,14 @@ impl DialogEventHub {
                 .publish(Arc::new(cross_crate_event))
                 .await?;
             info!("✅ [event_hub] Published cross-crate event successfully");
+            Ok(true)
         } else {
             info!(
                 "⚠️ [event_hub] convert_coordination_to_cross_crate returned None for: {:?}",
                 event
             );
+            Ok(false)
         }
-
-        Ok(())
     }
 
     /// Publish a cross-crate event directly

@@ -68,6 +68,10 @@ pub async fn execute_action(
                 session.local_sdp = Some(sdp.clone());
                 info!("Generated SDP with {} bytes", sdp.len());
             }
+            // Persist before SendINVITE. A fast 401/407 can re-enter the
+            // state machine while SendINVITE is still awaiting, and the auth
+            // retry needs the original SDP offer from the store.
+            session_store.update_session(session.clone()).await?;
         }
         Action::SendRejectResponse => {
             let status = session.reject_status.unwrap_or(486);

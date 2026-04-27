@@ -102,8 +102,13 @@ pub fn validate_wire_request(request: &Request) -> Result<()> {
         )));
     }
 
-    if request.method == Method::Register && !has_header(headers, HeaderName::Contact) {
-        return Err(validation_error("REGISTER request missing Contact header"));
+    if matches!(request.method, Method::Invite | Method::Register)
+        && !has_header(headers, HeaderName::Contact)
+    {
+        return Err(validation_error(format!(
+            "{} request missing Contact header",
+            request.method
+        )));
     }
 
     Ok(())

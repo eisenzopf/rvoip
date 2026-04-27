@@ -29,6 +29,78 @@ use crate::manager::{DialogManager, MessageExtensions, SessionCoordinator};
 use crate::transaction::TransactionKey;
 use rvoip_sip_core::Response;
 
+/// Returns true when a 401/407 carries the matching auth challenge header.
+///
+/// RFC 3261 §22.2 says these final responses are not terminal failures for a
+/// UAC that can retry with credentials. The session layer must see them as
+/// `AuthRequired`, not as a completed failed call.
+pub(crate) fn response_has_auth_challenge(response: &Response) -> bool {
+    use rvoip_sip_core::types::header::HeaderName;
+    use rvoip_sip_core::types::headers::HeaderAccess;
+
+    let header_name = match response.status_code() {
+        401 => HeaderName::WwwAuthenticate,
+        407 => HeaderName::ProxyAuthenticate,
+        _ => return false,
+    };
+
+    response.raw_header_value(&header_name).is_some()
+}
+
+#[cfg(test)]
+mod auth_challenge_classification_tests {
+    use super::response_has_auth_challenge;
+    use rvoip_sip_core::types::{
+        auth::{ProxyAuthenticate, WwwAuthenticate},
+        status::StatusCode,
+        TypedHeader,
+    };
+    use rvoip_sip_core::Response;
+
+    #[test]
+    fn detects_401_with_www_authenticate_as_retryable_challenge() {
+        let mut response = Response::new(StatusCode::Unauthorized);
+        response
+            .headers
+            .push(TypedHeader::WwwAuthenticate(WwwAuthenticate::new(
+                "asterisk", "nonce",
+            )));
+
+        assert!(response_has_auth_challenge(&response));
+    }
+
+    #[test]
+    fn detects_407_with_proxy_authenticate_as_retryable_challenge() {
+        let mut response = Response::new(StatusCode::ProxyAuthenticationRequired);
+        response
+            .headers
+            .push(TypedHeader::ProxyAuthenticate(ProxyAuthenticate::new(
+                "proxy", "nonce",
+            )));
+
+        assert!(response_has_auth_challenge(&response));
+    }
+
+    #[test]
+    fn rejects_401_without_matching_challenge() {
+        let response = Response::new(StatusCode::Unauthorized);
+
+        assert!(!response_has_auth_challenge(&response));
+    }
+
+    #[test]
+    fn rejects_non_auth_failure_with_auth_like_header() {
+        let mut response = Response::new(StatusCode::Forbidden);
+        response
+            .headers
+            .push(TypedHeader::WwwAuthenticate(WwwAuthenticate::new(
+                "asterisk", "nonce",
+            )));
+
+        assert!(!response_has_auth_challenge(&response));
+    }
+}
+
 /// Response-specific handling operations
 pub trait ResponseHandler {
     /// Handle responses to client transactions
@@ -1032,7 +1104,7 @@ impl DialogManager {
                             matches!(se.refresher, None | Some(Refresher::Uac));
                     }
                 }
-            } else if response.status_code() >= 300 {
+            } else if response.status_code() >= 300 && !response_has_auth_challenge(&response) {
                 // 3xx+ response - terminate dialog
                 dialog.terminate();
                 debug!(
@@ -1064,6 +1136,12 @@ impl DialogManager {
             SessionCoordinationEvent::CallAnswered {
                 dialog_id: dialog_id.clone(),
                 session_answer: response.body_string().unwrap_or_default(),
+            }
+        } else if response_has_auth_challenge(&response) {
+            SessionCoordinationEvent::ResponseReceived {
+                dialog_id: dialog_id.clone(),
+                response: response.clone(),
+                transaction_id: _transaction_id.clone(),
             }
         } else if response.status_code() >= 300 {
             // E5: RFC 3261 §21.3 Redirect responses (300/301/302/305/380) carry
@@ -1366,7 +1444,7 @@ impl DialogManager {
                 .await?;
             }
 
-            status if status >= 400 && status < 500 => {
+            status if status >= 400 && status < 500 && !response_has_auth_challenge(&response) => {
                 // Client error - may require dialog termination
                 warn!(
                     "Client error {} for dialog {} - considering termination",
@@ -1382,6 +1460,13 @@ impl DialogManager {
                     method: "Unknown".to_string(), // TODO: Extract from transaction context
                 })
                 .await?;
+            }
+
+            status if matches!(status, 401 | 407) => {
+                debug!(
+                    "Auth challenge {} for dialog {} - deferring terminal failure handling",
+                    status, dialog_id
+                );
             }
 
             status if status >= 500 => {

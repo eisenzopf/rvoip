@@ -23,6 +23,30 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+fn sdp_origin_session_id(raw_id: &str) -> String {
+    let candidate = raw_id
+        .strip_prefix("media-session-")
+        .or_else(|| raw_id.strip_prefix("session-"))
+        .unwrap_or(raw_id);
+
+    if !candidate.is_empty() && candidate.bytes().all(|b| b.is_ascii_digit()) {
+        return candidate.to_string();
+    }
+
+    if let Ok(uuid) = uuid::Uuid::parse_str(candidate) {
+        let bytes = uuid.as_u128().to_be_bytes();
+        let low = u64::from_be_bytes(bytes[8..16].try_into().expect("uuid low bytes"));
+        return low.max(1).to_string();
+    }
+
+    let mut hash = 14_695_981_039_346_656_037u64;
+    for byte in raw_id.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    hash.to_string()
+}
+
 /// Audio format for recording
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum AudioFormat {
@@ -1023,7 +1047,7 @@ impl MediaAdapter {
             .map(|sa| sa.port())
             .unwrap_or_else(|| info.rtp_port.unwrap_or(info.config.local_addr.port()));
         let elapsed_secs = info.created_at.elapsed().as_secs().to_string();
-        let dialog_id_str = info.dialog_id.as_str().to_string();
+        let origin_session_id = sdp_origin_session_id(info.dialog_id.as_str());
         let advertised_ip = public.map(|sa| sa.ip()).unwrap_or(self.local_ip);
         let local_ip_str = advertised_ip.to_string();
 
@@ -1052,7 +1076,7 @@ impl MediaAdapter {
         let mut media_builder = SdpBuilder::new("Session")
             .origin(
                 "-",
-                &dialog_id_str,
+                &origin_session_id,
                 &elapsed_secs,
                 "IN",
                 "IP4",
@@ -1810,8 +1834,9 @@ mod sdp_format_tests {
     /// production shape: PCMU + PCMA + telephone-event, RTP/AVP profile.
     fn build_offer(dialog_id: &str, elapsed_secs: u64, ip: &str, port: u16) -> String {
         let elapsed = elapsed_secs.to_string();
+        let origin_session_id = sdp_origin_session_id(dialog_id);
         SdpBuilder::new("Session")
-            .origin("-", dialog_id, &elapsed, "IN", "IP4", ip)
+            .origin("-", &origin_session_id, &elapsed, "IN", "IP4", ip)
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/AVP")
@@ -1852,6 +1877,7 @@ mod sdp_format_tests {
     /// only `0 101` (no PCMA); both have been merged into the unified
     /// shape below.
     fn legacy_offer(dialog_id: &str, elapsed_secs: u64, ip: &str, port: u16) -> String {
+        let origin_session_id = sdp_origin_session_id(dialog_id);
         format!(
             "v=0\r\n\
              o=- {} {} IN IP4 {}\r\n\
@@ -1864,7 +1890,7 @@ mod sdp_format_tests {
              a=rtpmap:101 telephone-event/8000\r\n\
              a=fmtp:101 0-15\r\n\
              a=sendrecv\r\n",
-            dialog_id, elapsed_secs, ip, ip, port,
+            origin_session_id, elapsed_secs, ip, ip, port,
         )
     }
 
@@ -1925,6 +1951,33 @@ mod sdp_format_tests {
         assert_eq!(m.port, 5004);
         assert_eq!(m.protocol, "RTP/AVP");
         assert_eq!(m.formats, vec!["0", "8", "101"]);
+    }
+
+    #[test]
+    fn offer_origin_uses_numeric_session_id() {
+        let sdp = build_offer(
+            "media-session-3e071bea-bda5-4758-bf05-8bce16c690e6",
+            0,
+            "10.0.0.1",
+            5004,
+        );
+        let origin = sdp
+            .lines()
+            .find(|line| line.starts_with("o="))
+            .expect("origin line");
+        let fields: Vec<&str> = origin.trim_start_matches("o=").split_whitespace().collect();
+
+        assert_eq!(fields.len(), 6, "origin line was: {}", origin);
+        assert!(
+            fields[1].bytes().all(|b| b.is_ascii_digit()),
+            "SDP sess-id must be numeric for PJMEDIA/Asterisk interop: {}",
+            origin
+        );
+        assert!(
+            fields[1].len() <= 20,
+            "SDP sess-id should fit common 64-bit parser limits: {}",
+            origin
+        );
     }
 
     /// Sprint 2.5 P2 regression: every plaintext (RTP/AVP) offer must
@@ -2058,14 +2111,19 @@ mod sdp_format_tests {
             .map(|sa| sa.port())
             .unwrap_or(local_port_fallback);
 
-        let sdp = build_offer("dlg", 0, &advertised_ip.to_string(), port);
+        let dialog_id = "dlg";
+        let origin_session_id = sdp_origin_session_id(dialog_id);
+        let sdp = build_offer(dialog_id, 0, &advertised_ip.to_string(), port);
         assert!(
             sdp.contains("c=IN IP4 203.0.113.42\r\n"),
             "c= must carry public IP when override set:\n{}",
             sdp
         );
         assert!(
-            sdp.contains("o=- dlg 0 IN IP4 203.0.113.42\r\n"),
+            sdp.contains(&format!(
+                "o=- {} 0 IN IP4 203.0.113.42\r\n",
+                origin_session_id
+            )),
             "o= must carry public IP when override set:\n{}",
             sdp
         );

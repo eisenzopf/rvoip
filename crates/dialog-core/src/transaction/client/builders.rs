@@ -355,10 +355,13 @@ impl InviteBuilder {
             .via(&local_addr.to_string(), "UDP", Some(&branch))
             .max_forwards(self.max_forwards.into());
 
-        // Add Contact header if specified
-        if let Some(contact) = self.contact {
-            builder = builder.contact(&contact, None);
-        }
+        // INVITE establishes or refreshes a dialog, so Contact is mandatory.
+        // If the caller did not supply one, advertise the local UA binding
+        // using the From URI user and local socket address.
+        let contact = self
+            .contact
+            .unwrap_or_else(|| default_contact_uri(&from_uri, local_addr));
+        builder = builder.contact(&contact, None);
 
         // Add Route headers
         for route in self.route_set {
@@ -392,6 +395,40 @@ impl InviteBuilder {
 impl Default for InviteBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn default_contact_uri(from_uri: &str, local_addr: SocketAddr) -> String {
+    let user = from_uri
+        .strip_prefix("sip:")
+        .or_else(|| from_uri.strip_prefix("sips:"))
+        .and_then(|rest| rest.split('@').next())
+        .map(|user| user.split(';').next().unwrap_or(user))
+        .filter(|user| !user.is_empty())
+        .unwrap_or("user");
+    format!("sip:{}@{}", user, local_addr)
+}
+
+#[cfg(test)]
+mod invite_builder_tests {
+    use super::*;
+    use rvoip_sip_core::types::headers::HeaderAccess;
+
+    #[test]
+    fn invite_builder_adds_default_contact() {
+        let request = InviteBuilder::new()
+            .from_to("sip:1001@pbx.example.com", "sip:1002@pbx.example.com")
+            .request_uri("sip:1002@pbx.example.com")
+            .local_address("192.0.2.10:5070".parse().unwrap())
+            .with_sdp("v=0\r\n")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request.raw_header_value(&HeaderName::Contact).unwrap(),
+            "<sip:1001@192.0.2.10:5070>"
+        );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
 }
 

@@ -7,7 +7,7 @@
 //! ## Key Responsibilities
 //!
 //! - Processing transaction events and routing to appropriate dialogs
-//! - Managing transaction-to-dialog associations  
+//! - Managing transaction-to-dialog associations
 //! - Handling transaction completion and cleanup
 //! - Converting between transaction and dialog abstractions
 //! - Coordinating request sending through transaction layer
@@ -17,6 +17,7 @@ use crate::api::config::RelUsage;
 use crate::dialog::DialogId;
 use crate::errors::DialogResult;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
+use crate::protocol::response_handler::response_has_auth_challenge;
 use crate::transaction::builders::{dialog_quick, dialog_utils};
 use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
@@ -229,7 +230,7 @@ impl TransactionIntegration for DialogManager {
 
                 // For certain methods in confirmed dialogs, remote tag is required
                 (_, crate::dialog::DialogState::Confirmed) => {
-                    error!("Dialog {} in Confirmed state but missing remote tag for {} request. Dialog details: local_tag={:?}, remote_tag={:?}", 
+                    error!("Dialog {} in Confirmed state but missing remote tag for {} request. Dialog details: local_tag={:?}, remote_tag={:?}",
                            dialog_id, method, dialog.local_tag, dialog.remote_tag);
                     return Err(crate::errors::DialogError::protocol_error(&format!(
                         "{} request in confirmed dialog missing remote tag",
@@ -252,7 +253,7 @@ impl TransactionIntegration for DialogManager {
                             let sdp_content = body_string.ok_or_else(|| {
                                 crate::errors::DialogError::protocol_error("re-INVITE request requires SDP content for session modification")
                             })?;
-                            
+
                             dialog_quick::reinvite_for_dialog(
                                 &template.call_id,
                                 &template.local_uri.to_string(),
@@ -269,7 +270,7 @@ impl TransactionIntegration for DialogManager {
                         None => {
                             // Initial INVITE: No remote tag yet, creating new dialog
                             use crate::transaction::client::builders::InviteBuilder;
-                            
+
                             let mut invite_builder = InviteBuilder::new()
                                 .from_detailed(
                                     Some("User"), // Display name
@@ -277,7 +278,7 @@ impl TransactionIntegration for DialogManager {
                                     Some(&local_tag)
                                 )
                                 .to_detailed(
-                                    Some("User"), // Display name  
+                                    Some("User"), // Display name
                                     template.remote_uri.to_string(),
                                     None // No remote tag for initial INVITE
                                 )
@@ -285,28 +286,28 @@ impl TransactionIntegration for DialogManager {
                                 .cseq(template.cseq_number)
                                 .request_uri(template.target_uri.to_string())
                                 .local_address(self.local_address);
-                            
+
                             // Add route set if present
                             for route in &template.route_set {
                                 invite_builder = invite_builder.add_route(route.clone());
                             }
-                            
+
                             // Add SDP content if provided
                             if let Some(sdp_content) = body_string {
                                 invite_builder = invite_builder.with_sdp(sdp_content);
                             }
-                            
+
                             invite_builder.build()
                         }
                     }
                 },
-                
+
                 Method::Bye => {
                     // BYE requires both tags in established dialogs
                     let remote_tag = remote_tag.ok_or_else(|| {
                         crate::errors::DialogError::protocol_error("BYE request requires remote tag in established dialog")
                     })?;
-                    
+
                     dialog_quick::bye_for_dialog(
                         &template.call_id,
                         &template.local_uri.to_string(),
@@ -319,13 +320,13 @@ impl TransactionIntegration for DialogManager {
                         None,
                     )
                 },
-                
+
                 Method::Refer => {
                     // REFER requires both tags in established dialogs
                     let remote_tag = remote_tag.ok_or_else(|| {
                         crate::errors::DialogError::protocol_error("REFER request requires remote tag in established dialog")
                     })?;
-                    
+
                     // Extract the target URI from the body if it's in the old format ("Refer-To: <uri>")
                     // Otherwise use it directly as the target URI
                     let target_uri = if let Some(body) = body_string.clone() {
@@ -338,7 +339,7 @@ impl TransactionIntegration for DialogManager {
                     } else {
                         "sip:unknown".to_string()
                     };
-                    
+
                     dialog_quick::refer_for_dialog(
                         &template.call_id,
                         &template.local_uri.to_string(),
@@ -351,13 +352,13 @@ impl TransactionIntegration for DialogManager {
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
-                
+
                 Method::Update => {
-                    // UPDATE requires both tags in established dialogs  
+                    // UPDATE requires both tags in established dialogs
                     let remote_tag = remote_tag.ok_or_else(|| {
                         crate::errors::DialogError::protocol_error("UPDATE request requires remote tag in established dialog")
                     })?;
-                    
+
                     dialog_quick::update_for_dialog(
                         &template.call_id,
                         &template.local_uri.to_string(),
@@ -370,13 +371,13 @@ impl TransactionIntegration for DialogManager {
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
-                
+
                 Method::Info => {
                     // INFO requires both tags in established dialogs
                     let remote_tag = remote_tag.ok_or_else(|| {
                         crate::errors::DialogError::protocol_error("INFO request requires remote tag in established dialog")
                     })?;
-                    
+
                     let content = body_string.unwrap_or_else(|| "Application info".to_string());
                     dialog_quick::info_for_dialog(
                         &template.call_id,
@@ -391,7 +392,7 @@ impl TransactionIntegration for DialogManager {
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
-                
+
                 Method::Notify => {
                     // NOTIFY requires both tags in established dialogs
                     let remote_tag = remote_tag.ok_or_else(|| {
@@ -412,13 +413,13 @@ impl TransactionIntegration for DialogManager {
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
-                
+
                 Method::Message => {
                     // MESSAGE requires both tags in established dialogs
                     let remote_tag = remote_tag.ok_or_else(|| {
                         crate::errors::DialogError::protocol_error("MESSAGE request requires remote tag in established dialog")
                     })?;
-                    
+
                     let content = body_string.unwrap_or_else(|| "".to_string());
                     dialog_quick::message_for_dialog(
                         &template.call_id,
@@ -433,13 +434,13 @@ impl TransactionIntegration for DialogManager {
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                     )
                 },
-                
+
                 _ => {
                     // For any other method, require established dialog
                     let remote_tag = remote_tag.ok_or_else(|| {
                         crate::errors::DialogError::protocol_error(&format!("{} request requires remote tag in established dialog", method))
                     })?;
-                    
+
                     // Use dialog template + utility function
                     let template_struct = DialogRequestTemplate {
                         call_id: template.call_id,
@@ -453,7 +454,7 @@ impl TransactionIntegration for DialogManager {
                         route_set: template.route_set.clone(),
                         contact: None,
                     };
-                    
+
                     request_builder_from_dialog_template(
                         &template_struct,
                         method.clone(),
@@ -1534,7 +1535,7 @@ impl DialogManager {
                 .await;
             }
 
-            status if status >= 400 && status < 500 => {
+            status if status >= 400 && status < 500 && !response_has_auth_challenge(&response) => {
                 // Client error - may require dialog termination
                 warn!(
                     "Client error {} for dialog {} - considering termination",
@@ -1550,6 +1551,13 @@ impl DialogManager {
                     method: "Unknown".to_string(), // TODO: Extract from transaction context
                 })
                 .await;
+            }
+
+            status if matches!(status, 401 | 407) => {
+                debug!(
+                    "Auth challenge {} for dialog {} - deferring terminal failure handling",
+                    status, dialog_id
+                );
             }
 
             status if status >= 500 => {

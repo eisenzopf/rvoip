@@ -803,6 +803,48 @@ impl DialogManager {
         }
     }
 
+    /// Try to emit a session coordination event and report whether any session
+    /// consumer path accepted it. This is intentionally narrower than
+    /// `emit_session_coordination_event`: protocol handlers that need a
+    /// definite answer can use this to choose a local fallback, while existing
+    /// fire-and-forget event paths keep their current behavior.
+    pub(crate) async fn try_emit_session_coordination_event(
+        &self,
+        event: SessionCoordinationEvent,
+    ) -> DialogResult<bool> {
+        if let Some(hub) = self.event_hub.read().await.as_ref() {
+            match hub
+                .try_publish_session_coordination_event(event.clone())
+                .await
+            {
+                Ok(true) => return Ok(true),
+                Ok(false) => {
+                    debug!(
+                        "Session coordination event did not map to a cross-crate event: {:?}",
+                        event
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to publish session coordination event to global bus: {}",
+                        e
+                    );
+                }
+            }
+        }
+
+        if let Some(sender) = self.session_coordinator.read().await.as_ref() {
+            match sender.send(event.clone()).await {
+                Ok(()) => return Ok(true),
+                Err(e) => {
+                    warn!("Failed to send session coordination event: {}", e);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
     /// **CENTRAL DISPATCHER**: Handle incoming SIP messages
     ///
     /// This is the main entry point for processing SIP messages in dialog-core.

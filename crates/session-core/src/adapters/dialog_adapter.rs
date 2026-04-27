@@ -255,11 +255,23 @@ impl DialogAdapter {
         auth_header_name: &str,
         auth_header_value: String,
     ) -> Result<()> {
-        let dialog_id = self
-            .session_to_dialog
-            .get(session_id)
-            .map(|e| e.value().clone())
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?;
+        // Fast-RTT race: an auth challenge can arrive while the original
+        // `SendINVITE` action is still awaiting dialog-core's
+        // `make_call_for_session`. The dialog exists in dialog-core, but the
+        // session-core s2d map is inserted immediately after that await
+        // returns. Poll briefly so the retry can reuse the just-created
+        // dialog instead of failing spuriously with SessionNotFound.
+        use tokio::time::{Duration, Instant};
+        let start = Instant::now();
+        let dialog_id = loop {
+            if let Some(entry) = self.session_to_dialog.get(session_id) {
+                break entry.value().clone();
+            }
+            if start.elapsed() >= Duration::from_secs(1) {
+                return Err(SessionError::SessionNotFound(session_id.0.clone()));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
 
         self.dialog_api
             .send_invite_with_auth(&dialog_id, sdp, auth_header_name, auth_header_value)

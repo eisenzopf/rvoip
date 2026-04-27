@@ -280,13 +280,8 @@ impl ProtocolHandlers for DialogManager {
                 source,
             };
 
-            if let Err(e) = self.notify_session_layer(event).await {
-                debug!(
-                    "Failed to notify session layer of OPTIONS: {}, sending fallback response",
-                    e
-                );
-
-                // Fallback: send basic 200 OK with supported methods
+            if !self.try_emit_session_coordination_event(event).await? {
+                debug!("No session layer OPTIONS consumer; sending fallback response");
                 self.send_basic_options_response(&transaction_id, &request)
                     .await?;
             }
