@@ -21,7 +21,7 @@ use rvoip_infra_common::events::cross_crate::{
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 /// Window within which repeated RFC 5626 flow-failure events for the
@@ -51,6 +51,10 @@ pub struct SessionCrossCrateEventHandler {
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
 
+    /// Internal state-machine event stream owned by session-core.
+    state_machine_event_rx:
+        Option<Arc<Mutex<mpsc::Receiver<crate::state_machine::executor::SessionEvent>>>>,
+
     /// Last RFC 5626 `OutboundFlowFailed`-driven refresh per AoR, used
     /// to debounce storms of pong-timeout / connection-closed events
     /// (multiple transport signals can observe the same underlying
@@ -75,6 +79,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: None,
+            state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
         }
     }
@@ -94,6 +99,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
+            state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
         }
     }
@@ -116,6 +122,30 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx,
         )
+    }
+
+    /// Preferred constructor for UnifiedCoordinator. In addition to
+    /// cross-crate bus subscriptions, this owns the internal state-machine
+    /// event stream that publishes app-visible call state events.
+    pub(crate) fn with_event_broadcast_and_state_machine_events(
+        state_machine: Arc<StateMachineExecutor>,
+        global_coordinator: Arc<GlobalEventCoordinator>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        registry: Arc<SessionRegistry>,
+        incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
+        state_machine_event_rx: mpsc::Receiver<crate::state_machine::executor::SessionEvent>,
+    ) -> Self {
+        let mut handler = Self::with_incoming_call_channel(
+            state_machine,
+            global_coordinator,
+            dialog_adapter,
+            media_adapter,
+            registry,
+            incoming_call_tx,
+        );
+        handler.state_machine_event_rx = Some(Arc::new(Mutex::new(state_machine_event_rx)));
+        handler
     }
 
     /// Deprecated: use `with_event_broadcast` instead.
@@ -253,7 +283,53 @@ impl SessionCrossCrateEventHandler {
             }
         });
 
+        if let Some(state_machine_event_rx) = &self.state_machine_event_rx {
+            let state_machine_event_rx = state_machine_event_rx.clone();
+            let handler = self.clone();
+            let mut shutdown = shutdown_rx;
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() { break; }
+                        }
+                        event = async {
+                            let mut rx = state_machine_event_rx.lock().await;
+                            rx.recv().await
+                        } => {
+                            let Some(event) = event else { break };
+                            handler.handle_state_machine_event(event).await;
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(())
+    }
+
+    async fn handle_state_machine_event(
+        &self,
+        event: crate::state_machine::executor::SessionEvent,
+    ) {
+        let api_event = match event {
+            crate::state_machine::executor::SessionEvent::Custom { session_id, event } => {
+                match event.as_str() {
+                    "CallOnHold" => Some(crate::api::events::Event::CallOnHold {
+                        call_id: session_id,
+                    }),
+                    "CallResumed" => Some(crate::api::events::Event::CallResumed {
+                        call_id: session_id,
+                    }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(api_event) = api_event {
+            publish_api_event(&self.global_coordinator, api_event);
+        }
     }
 }
 

@@ -57,14 +57,23 @@ credentials, local bind address, and media ports.
 
 | Script | Description |
 |--------|-------------|
-| `./examples/asterisk/run.sh` | Register two endpoints through Asterisk and verify bidirectional audio |
-| `./examples/asterisk/hold_resume/run.sh` | Register two endpoints, exercise hold/resume through Asterisk, and verify pre/post-resume audio |
-| `./examples/asterisk/tls_srtp_hold_resume/run.sh` | Register two endpoints over SIP TLS, require SDES-SRTP, exercise hold/resume, and verify pre/post-resume audio |
+| `./examples/asterisk/run.sh` | Run the full sequence: TLS registration, UDP registration, TLS/SRTP hold/resume, then UDP hold/resume |
+| `./examples/asterisk/registration/run.sh` | Register secure user 1001 over SIP TLS, then UDP user 2001 |
+| `./examples/asterisk/tls_srtp_hold_resume/run.sh` | Register TLS/SRTP users 1001/1002 over SIP TLS, require SDES-SRTP, exercise hold/resume, and verify pre/post-resume audio |
+| `./examples/asterisk/udp_hold_resume/run.sh` | Register UDP users 2001/2002, exercise hold/resume, and verify pre/post-resume audio |
+
+The Asterisk lab profile uses users `1001` and `1002` for SIP TLS with
+mandatory SDES-SRTP, and users `2001` and `2002` for UDP/plain RTP. All four
+users share the single `SIP_PASSWORD` value from `.env`; endpoint auth
+usernames default to the endpoint number.
 
 For the TLS/SRTP Asterisk example, configure Asterisk PJSIP with a TLS
-transport, endpoint media encryption set to SDES/SRTP mandatory, and a TLS
-trust policy that accepts the client certificate or CA configured in
-`examples/asterisk/.env`.
+transport and endpoint media encryption set to mandatory SDES/SRTP. The RVOIP
+endpoints run as SIP TLS clients: Asterisk presents the server certificate, and
+the endpoints verify it with system roots, `TLS_CA_PATH`, or dev-only
+`TLS_INSECURE=1`. Endpoint `TLS_CERT_PATH`/`TLS_KEY_PATH` values are only needed
+for direct-UAS/listener TLS or mutual-TLS deployments, not for the normal
+Asterisk registered-client flow.
 
 ## Running peers individually
 

@@ -264,7 +264,7 @@ impl TransactionIntegration for DialogManager {
                                 template.cseq_number,
                                 self.local_address,
                                 if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
-                                None // Let reinvite_for_dialog generate appropriate Contact
+                                self.local_contact_uri()
                             )
                         },
                         None => {
@@ -290,6 +290,10 @@ impl TransactionIntegration for DialogManager {
                             // Add route set if present
                             for route in &template.route_set {
                                 invite_builder = invite_builder.add_route(route.clone());
+                            }
+
+                            if let Some(contact) = self.local_contact_uri() {
+                                invite_builder = invite_builder.contact(contact);
                             }
 
                             // Add SDP content if provided
@@ -721,6 +725,10 @@ impl DialogManager {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
+            if let Some(contact) = self.local_contact_uri() {
+                invite_builder = invite_builder.contact(contact);
+            }
+
             if let Some(sdp_content) = body_string {
                 invite_builder = invite_builder.with_sdp(sdp_content);
             }
@@ -861,6 +869,10 @@ impl DialogManager {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
+            if let Some(contact) = self.local_contact_uri() {
+                invite_builder = invite_builder.contact(contact);
+            }
+
             if let Some(sdp_content) = body_string {
                 invite_builder = invite_builder.with_sdp(sdp_content);
             }
@@ -995,6 +1007,10 @@ impl DialogManager {
 
             for route in &template.route_set {
                 invite_builder = invite_builder.add_route(route.clone());
+            }
+
+            if let Some(contact) = self.local_contact_uri() {
+                invite_builder = invite_builder.contact(contact);
             }
 
             if let Some(sdp_content) = body_string {

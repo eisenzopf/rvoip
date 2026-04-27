@@ -47,7 +47,7 @@ pub use api::incoming::{IncomingCall, IncomingCallGuard};
 
 // Configuration & registration
 pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
-pub use api::{Config, RegistrationHandle, UnifiedCoordinator};
+pub use api::{Config, RegistrationHandle, SipTlsMode, UnifiedCoordinator};
 
 // Events
 pub use api::events::Event;

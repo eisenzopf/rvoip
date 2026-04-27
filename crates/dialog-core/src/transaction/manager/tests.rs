@@ -111,6 +111,7 @@ mod tests {
         Ok(builder
             .from("Alice", "sip:alice@example.com", Some("alice-tag"))
             .to("Bob", "sip:bob@example.com", None)
+            .contact("sip:alice@127.0.0.1:5060", None)
             .call_id("test-call-id-1234")
             .cseq(101)
             .via("127.0.0.1:5060", "UDP", Some("z9hG4bK.originalbranchvalue"))
@@ -707,6 +708,7 @@ mod tests {
             .cseq(102)
             .via("127.0.0.1:5060", "UDP", Some("z9hG4bK.message-branch"))
             .max_forwards(70)
+            .content_type("text/plain")
             .body("Hello, Bob!".as_bytes().to_vec())
             .build();
 

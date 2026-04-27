@@ -1,4 +1,4 @@
-//! Asterisk hold/resume endpoint 1001: register, call 1002, hold, resume,
+//! Asterisk UDP hold/resume endpoint 2001: register, call 2002, hold, resume,
 //! and verify the call remains usable by sending distinct pre/post tones.
 
 #[path = "../common.rs"]
@@ -26,24 +26,24 @@ async fn main() -> ExampleResult<()> {
     load_env();
     init_tracing();
 
-    let cfg = endpoint_config("1001", 5070, 16000, 16100)?;
+    let cfg = endpoint_config("2001", 5080, 17000, 17100)?;
     let mut peer = StreamPeer::with_config(cfg.stream_config()).await?;
     let registration = register_endpoint(&mut peer, &cfg).await?;
 
     let settle = post_register_settle_duration()?;
     if !settle.is_zero() {
         println!(
-            "[1001] Waiting {}s for Asterisk OPTIONS qualify before calling...",
+            "[2001] Waiting {}s for Asterisk OPTIONS qualify before calling...",
             settle.as_secs()
         );
         sleep(settle).await;
     }
 
-    let target = cfg.outbound_call_uri("1002");
-    println!("[1001] Calling {}...", target);
+    let target = cfg.outbound_call_uri("2002");
+    println!("[2001] Calling {}...", target);
     let handle = peer.call(&target).await?;
     peer.wait_for_answered(handle.id()).await?;
-    println!("[1001] Call established.");
+    println!("[2001] Call established.");
 
     let audio = handle.audio().await?;
     let (sender, mut receiver) = audio.split();
@@ -58,7 +58,7 @@ async fn main() -> ExampleResult<()> {
     });
 
     let mut frame_index = 0usize;
-    println!("[1001] Sending pre-hold {:.0}Hz tone.", PRE_HOLD_TONE_HZ);
+    println!("[2001] Sending pre-hold {:.0}Hz tone.", PRE_HOLD_TONE_HZ);
     send_tone_segment(
         &sender,
         PRE_HOLD_TONE_HZ,
@@ -67,13 +67,13 @@ async fn main() -> ExampleResult<()> {
     )
     .await?;
 
-    println!("[1001] Putting call on hold...");
+    println!("[2001] Putting call on hold...");
     handle.hold().await?;
     wait_for_hold_state(&handle).await?;
-    println!("[1001] On hold: {}", handle.is_on_hold().await);
+    println!("[2001] On hold: {}", handle.is_on_hold().await);
 
     println!(
-        "[1001] Sending best-effort during-hold {:.0}Hz tone.",
+        "[2001] Sending best-effort during-hold {:.0}Hz tone.",
         DURING_HOLD_TONE_HZ
     );
     send_tone_segment(
@@ -85,13 +85,13 @@ async fn main() -> ExampleResult<()> {
     .await?;
     sleep(Duration::from_millis(500)).await;
 
-    println!("[1001] Resuming call...");
+    println!("[2001] Resuming call...");
     handle.resume().await?;
     wait_for_active_state(&handle).await?;
-    println!("[1001] Active again: {}", handle.is_active().await);
+    println!("[2001] Active again: {}", handle.is_active().await);
 
     println!(
-        "[1001] Sending post-resume {:.0}Hz tone.",
+        "[2001] Sending post-resume {:.0}Hz tone.",
         POST_RESUME_TONE_HZ
     );
     send_tone_segment(
@@ -103,7 +103,7 @@ async fn main() -> ExampleResult<()> {
     .await?;
 
     drop(sender);
-    println!("[1001] Tone phases complete; hanging up.");
+    println!("[2001] Tone phases complete; hanging up.");
     handle.hangup().await?;
     handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
 
@@ -119,11 +119,11 @@ async fn main() -> ExampleResult<()> {
     recv_task.abort();
 
     let received = received_buf.lock().map(|g| g.clone()).unwrap_or_default();
-    let wav = save_wav(&cfg.output_dir, "hold_resume_1001_received.wav", &received)?;
-    println!("[1001] Received audio saved to {}", wav.display());
+    let wav = save_wav(&cfg.output_dir, "hold_resume_2001_received.wav", &received)?;
+    println!("[2001] Received audio saved to {}", wav.display());
 
     peer.unregister(&registration).await.ok();
-    println!("[1001] Done.");
+    println!("[2001] Done.");
     Ok(())
 }
 

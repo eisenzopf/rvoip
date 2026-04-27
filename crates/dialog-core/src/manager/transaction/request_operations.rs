@@ -209,7 +209,7 @@ impl DialogManager {
                             template.cseq_number,
                             self.local_address,
                             if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
-                            None // Let reinvite_for_dialog generate appropriate Contact
+                            self.local_contact_uri()
                         )
                     },
                     None => {
@@ -235,6 +235,10 @@ impl DialogManager {
                         // Add route set if present
                         for route in &template.route_set {
                             invite_builder = invite_builder.add_route(route.clone());
+                        }
+
+                        if let Some(contact) = self.local_contact_uri() {
+                            invite_builder = invite_builder.contact(contact);
                         }
 
                         // Add SDP content if provided
@@ -395,7 +399,7 @@ impl DialogManager {
                     cseq: template.cseq_number,
                     local_address: self.local_address,
                     route_set: template.route_set.clone(),
-                    contact: None,
+                    contact: self.local_contact_uri(),
                 };
 
                 dialog_utils::request_builder_from_dialog_template(

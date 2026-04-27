@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 use crate::error::{Error, Result};
 use crate::transport::tcp::pool::PoolConfig;
 use crate::transport::tcp::TcpTransport;
-use crate::transport::tls::TlsTransport;
+use crate::transport::tls::{TlsRole, TlsTransport};
 use crate::transport::udp::UdpTransport;
 use crate::transport::ws::WebSocketTransport;
 use crate::transport::{Transport, TransportEvent};
@@ -87,6 +87,14 @@ pub struct TransportFactoryConfig {
     pub tls_key_path: Option<String>,
     /// Path to TLS CA file for client authentication
     pub tls_ca_path: Option<String>,
+    /// TLS socket role for TLS transports created by this factory.
+    pub tls_role: TlsRole,
+    /// Optional client certificate for mutual TLS.
+    pub tls_client_cert_path: Option<String>,
+    /// Optional client private key for mutual TLS.
+    pub tls_client_key_path: Option<String>,
+    /// Dev-only insecure server certificate verification.
+    pub tls_insecure_skip_verify: bool,
 }
 
 impl Default for TransportFactoryConfig {
@@ -97,6 +105,10 @@ impl Default for TransportFactoryConfig {
             tls_cert_path: None,
             tls_key_path: None,
             tls_ca_path: None,
+            tls_role: TlsRole::ClientAndServer,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
+            tls_insecure_skip_verify: false,
         }
     }
 }
@@ -140,28 +152,35 @@ impl TransportFactory {
                 Ok((Arc::new(transport), rx))
             }
             TransportType::Tls => {
-                // Check if TLS certificates are provided
-                let cert_path = self.config.tls_cert_path.as_ref().ok_or_else(|| {
-                    Error::InvalidState("TLS certificate path not provided".to_string())
-                })?;
-                let key_path =
-                    self.config.tls_key_path.as_ref().ok_or_else(|| {
-                        Error::InvalidState("TLS key path not provided".to_string())
-                    })?;
-
                 use std::path::PathBuf;
                 let client_cfg = crate::transport::tls::TlsClientConfig {
                     extra_ca_path: self.config.tls_ca_path.as_ref().map(PathBuf::from),
-                    insecure_skip_verify: false,
+                    insecure_skip_verify: self.config.tls_insecure_skip_verify,
+                    client_cert_path: self.config.tls_client_cert_path.as_ref().map(PathBuf::from),
+                    client_key_path: self.config.tls_client_key_path.as_ref().map(PathBuf::from),
                 };
-                let (transport, rx) = TlsTransport::bind_with_client_config(
-                    bind_addr,
-                    std::path::Path::new(cert_path),
-                    std::path::Path::new(key_path),
-                    None,
-                    client_cfg,
-                )
-                .await?;
+                let (transport, rx) = match self.config.tls_role {
+                    TlsRole::ClientOnly => {
+                        TlsTransport::client_only(bind_addr, None, client_cfg).await?
+                    }
+                    TlsRole::ServerOnly | TlsRole::ClientAndServer => {
+                        // Check if TLS certificates are provided for listener roles.
+                        let cert_path = self.config.tls_cert_path.as_ref().ok_or_else(|| {
+                            Error::InvalidState("TLS certificate path not provided".to_string())
+                        })?;
+                        let key_path = self.config.tls_key_path.as_ref().ok_or_else(|| {
+                            Error::InvalidState("TLS key path not provided".to_string())
+                        })?;
+                        TlsTransport::bind_with_client_config(
+                            bind_addr,
+                            std::path::Path::new(cert_path),
+                            std::path::Path::new(key_path),
+                            None,
+                            client_cfg,
+                        )
+                        .await?
+                    }
+                };
                 Ok((Arc::new(transport), rx))
             }
             TransportType::WebSocket => {

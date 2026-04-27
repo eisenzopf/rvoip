@@ -93,6 +93,10 @@ async fn sips_call_establishes_through_tls_transport() {
     let mut alice_cfg = Config::local("alice", alice_sip_port);
     alice_cfg.tls_cert_path = Some(cert_path.clone());
     alice_cfg.tls_key_path = Some(key_path.clone());
+    alice_cfg.contact_uri = Some(format!(
+        "sips:alice@127.0.0.1:{};transport=tls",
+        alice_sip_port + 1
+    ));
     // Self-signed cert isn't in the system trust store; allow it for
     // this test only.
     alice_cfg.tls_insecure_skip_verify = true;
@@ -100,6 +104,10 @@ async fn sips_call_establishes_through_tls_transport() {
     let mut bob_cfg = Config::local("bob", bob_sip_port);
     bob_cfg.tls_cert_path = Some(cert_path.clone());
     bob_cfg.tls_key_path = Some(key_path.clone());
+    bob_cfg.contact_uri = Some(format!(
+        "sips:bob@127.0.0.1:{};transport=tls",
+        bob_sip_port + 1
+    ));
     bob_cfg.tls_insecure_skip_verify = true;
 
     let alice = UnifiedCoordinator::new(alice_cfg)

@@ -208,6 +208,12 @@ impl DialogManagerConfig {
         self.dialog_config().local_address
     }
 
+    /// Local Contact URI override used for dialog-creating and
+    /// target-refresh requests, when configured.
+    pub fn local_contact_uri(&self) -> Option<&str> {
+        self.dialog_config().local_contact_uri.as_deref()
+    }
+
     /// Check if this configuration supports outgoing calls
     pub fn supports_outgoing_calls(&self) -> bool {
         match self {

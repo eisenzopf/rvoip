@@ -189,6 +189,12 @@ pub struct DialogConfig {
     /// addresses like "192.168.1.100:5060" for targeted binding.
     pub local_address: SocketAddr,
 
+    /// Optional local Contact URI to advertise in dialog-creating and
+    /// target-refresh messages. When unset, dialog-core falls back to
+    /// method-specific defaults derived from the local address.
+    #[serde(default)]
+    pub local_contact_uri: Option<String>,
+
     /// User agent string to include in SIP messages
     ///
     /// This appears in the User-Agent header of outgoing SIP requests
@@ -254,6 +260,7 @@ impl Default for DialogConfig {
     fn default() -> Self {
         Self {
             local_address: "0.0.0.0:5060".parse().unwrap(),
+            local_contact_uri: None,
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),

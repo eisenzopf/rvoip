@@ -34,6 +34,26 @@ pub struct TlsClientConfig {
     /// not** be enabled in production builds. The TLS handshake still
     /// runs end-to-end (encrypted), but identity is not verified.
     pub insecure_skip_verify: bool,
+    /// Optional PEM-encoded client certificate chain for mutual TLS.
+    /// Normal SIP TLS client/B2BUA deployments do not need this; set it
+    /// only when the remote server explicitly requires client auth.
+    pub client_cert_path: Option<PathBuf>,
+    /// Optional PEM-encoded PKCS#8 private key for
+    /// [`TlsClientConfig::client_cert_path`].
+    pub client_key_path: Option<PathBuf>,
+}
+
+/// TLS socket role for a SIP transport instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TlsRole {
+    /// Outbound TLS client only. Does not bind a TLS listener and does
+    /// not require a local server certificate/key.
+    ClientOnly,
+    /// Inbound TLS listener only. Requires a local certificate/key.
+    ServerOnly,
+    /// Both inbound listener and outbound client. Requires a local
+    /// certificate/key for the listener side.
+    ClientAndServer,
 }
 
 /// TLS transport implementation for SIP.
@@ -47,8 +67,9 @@ pub struct TlsTransport {
     /// Local address the server side listens on.
     local_addr: SocketAddr,
 
-    /// TLS acceptor for inbound connections (server side).
-    acceptor: TlsAcceptor,
+    /// TLS acceptor for inbound connections (server side). `None` in
+    /// client-only mode.
+    acceptor: Option<TlsAcceptor>,
 
     /// TLS connector used for outbound dials. Holds the rustls
     /// `ClientConfig` (root store, cert verifier, etc.) so each
@@ -73,6 +94,7 @@ impl fmt::Debug for TlsTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TlsTransport")
             .field("local_addr", &self.local_addr)
+            .field("has_acceptor", &self.acceptor.is_some())
             .field("connections", &self.connections)
             .field("closed", &self.closed)
             .finish()
@@ -139,7 +161,7 @@ impl TlsTransport {
 
         let transport = Self {
             local_addr: actual_addr,
-            acceptor,
+            acceptor: Some(acceptor),
             connector,
             connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             event_tx: Some(tx),
@@ -149,12 +171,56 @@ impl TlsTransport {
         tokio::spawn(Self::accept_loop(
             listener,
             actual_addr,
-            transport.acceptor.clone(),
+            transport
+                .acceptor
+                .clone()
+                .expect("TLS listener mode must have an acceptor"),
             transport.connections.clone(),
             transport.event_tx.clone().unwrap(),
         ));
 
         Ok((transport, rx))
+    }
+
+    /// Create a TLS transport that only dials outbound TLS
+    /// connections. This is the correct shape for a registered SIP UA
+    /// behind an upstream proxy/B2BUA such as Asterisk: the peer owns
+    /// the TLS server certificate, and this endpoint verifies it.
+    ///
+    /// `local_addr` is the logical SIP address used by upper layers for
+    /// Via/Contact construction. No TCP listener is bound here, so the
+    /// OS may choose a different ephemeral source port for each outbound
+    /// connection. Responses and inbound requests from the peer are
+    /// expected to arrive on the established TLS flow.
+    pub async fn client_only(
+        local_addr: SocketAddr,
+        event_tx: Option<mpsc::Sender<TransportEvent>>,
+        client_cfg: TlsClientConfig,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        let connector = TlsConnector::from(Arc::new(build_client_config(&client_cfg)?));
+
+        let (tx, rx) = if let Some(tx) = event_tx {
+            (tx, mpsc::channel::<TransportEvent>(100).1)
+        } else {
+            mpsc::channel::<TransportEvent>(100)
+        };
+
+        info!(
+            "TLS client-only transport configured with logical local address {}",
+            local_addr
+        );
+
+        Ok((
+            Self {
+                local_addr,
+                acceptor: None,
+                connector,
+                connections: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                event_tx: Some(tx),
+                closed: Arc::new(AtomicBool::new(false)),
+            },
+            rx,
+        ))
     }
 
     /// Accept loop driving an already-bound `TcpListener`.
@@ -556,6 +622,12 @@ fn try_consume_keepalive_frame(buffer: &mut BytesMut) -> Option<KeepAliveFrame> 
 /// CA bundle (added to the same root store) and an insecure-skip mode
 /// (dev only — accepts any cert without identity verification).
 fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
+    if cfg.client_cert_path.is_some() ^ cfg.client_key_path.is_some() {
+        return Err(Error::InvalidState(
+            "TLS client certificate and key must be provided together".to_string(),
+        ));
+    }
+
     #[cfg(feature = "dev-insecure-tls")]
     {
         if cfg.insecure_skip_verify {
@@ -563,11 +635,22 @@ fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
                 "TLS client built with insecure_skip_verify=true — \
                  server certificates will NOT be validated. Dev only."
             );
-            let cfg = ClientConfig::builder()
+            let builder = ClientConfig::builder()
                 .with_safe_defaults()
-                .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
-                .with_no_client_auth();
-            return Ok(cfg);
+                .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier));
+            return match (&cfg.client_cert_path, &cfg.client_key_path) {
+                (Some(cert_path), Some(key_path)) => {
+                    let certs = load_certs(cert_path)?;
+                    let key = load_private_key(key_path)?;
+                    builder.with_client_auth_cert(certs, key).map_err(|e| {
+                        Error::TlsHandshakeFailed(format!(
+                            "TLS client certificate/key config failed: {}",
+                            e
+                        ))
+                    })
+                }
+                _ => Ok(builder.with_no_client_auth()),
+            };
         }
     }
     #[cfg(not(feature = "dev-insecure-tls"))]
@@ -633,10 +716,22 @@ fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
         );
     }
 
-    Ok(ClientConfig::builder()
+    let builder = ClientConfig::builder()
         .with_safe_defaults()
-        .with_root_certificates(root_store)
-        .with_no_client_auth())
+        .with_root_certificates(root_store);
+    match (&cfg.client_cert_path, &cfg.client_key_path) {
+        (Some(cert_path), Some(key_path)) => {
+            let certs = load_certs(cert_path)?;
+            let key = load_private_key(key_path)?;
+            builder.with_client_auth_cert(certs, key).map_err(|e| {
+                Error::TlsHandshakeFailed(format!(
+                    "TLS client certificate/key config failed: {}",
+                    e
+                ))
+            })
+        }
+        _ => Ok(builder.with_no_client_auth()),
+    }
 }
 
 /// Cert verifier that accepts every server cert. Dev only — gated

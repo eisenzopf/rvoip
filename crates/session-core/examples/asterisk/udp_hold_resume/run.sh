@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Asterisk hold/resume example: register 1001 and 1002, call through
+# Asterisk UDP hold/resume example: register 2001 and 2002, call through
 # Asterisk, exercise a mid-call hold/resume, and verify audio before and
 # after resume.
 set -eu
@@ -7,20 +7,20 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 OUT_DIR="$SCRIPT_DIR/output"
-LOG_1001="$OUT_DIR/1001.log"
-LOG_1002="$OUT_DIR/1002.log"
+LOG_2001="$OUT_DIR/2001.log"
+LOG_2002="$OUT_DIR/2002.log"
 LOG_ANALYZE="$OUT_DIR/analyze.log"
 
-PID_1001=""
-PID_1002=""
+PID_2001=""
+PID_2002=""
 PID_ANALYZE=""
-TAIL_1001=""
-TAIL_1002=""
+TAIL_2001=""
+TAIL_2002=""
 TAIL_ANALYZE=""
 LAST_TAIL_PID=""
 
 cleanup() {
-  for pid in $PID_1001 $PID_1002 $PID_ANALYZE $TAIL_1001 $TAIL_1002 $TAIL_ANALYZE; do
+  for pid in $PID_2001 $PID_2002 $PID_ANALYZE $TAIL_2001 $TAIL_2002 $TAIL_ANALYZE; do
     if [ -n "$pid" ]; then
       kill "$pid" 2>/dev/null || true
     fi
@@ -80,37 +80,40 @@ cd "$WORKSPACE_ROOT"
 rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
-echo "Building Asterisk hold/resume endpoint examples..."
+export SIP_TRANSPORT=UDP
+export SIP_PORT="${SIP_PORT:-5060}"
+
+echo "Building Asterisk UDP hold/resume endpoint examples..."
 cargo build -p rvoip-session-core \
-  --example asterisk_hold_resume_1001 \
-  --example asterisk_hold_resume_1002 \
-  --example asterisk_hold_resume_analyze
+  --example asterisk_udp_hold_resume_2001 \
+  --example asterisk_udp_hold_resume_2002 \
+  --example asterisk_udp_hold_resume_analyze
 
-echo "[1002] Starting"
-AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --example asterisk_hold_resume_1002 --quiet \
-  >"$LOG_1002" 2>&1 &
-PID_1002=$!
-start_prefix_log "1002" "$LOG_1002"
-TAIL_1002=$LAST_TAIL_PID
+echo "[2002] Starting"
+AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --example asterisk_udp_hold_resume_2002 --quiet \
+  >"$LOG_2002" 2>&1 &
+PID_2002=$!
+start_prefix_log "2002" "$LOG_2002"
+TAIL_2002=$LAST_TAIL_PID
 
-wait_for_log "$LOG_1002" "Registered; waiting for call" "$PID_1002" "1002" 30
+wait_for_log "$LOG_2002" "Registered; waiting for call" "$PID_2002" "2002" 30
 
-echo "[1001] Starting"
-AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --example asterisk_hold_resume_1001 --quiet \
-  >"$LOG_1001" 2>&1 &
-PID_1001=$!
-start_prefix_log "1001" "$LOG_1001"
-TAIL_1001=$LAST_TAIL_PID
+echo "[2001] Starting"
+AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --example asterisk_udp_hold_resume_2001 --quiet \
+  >"$LOG_2001" 2>&1 &
+PID_2001=$!
+start_prefix_log "2001" "$LOG_2001"
+TAIL_2001=$LAST_TAIL_PID
 
-wait_for_child "$PID_1001" "1001"
-wait_for_child "$PID_1002" "1002"
+wait_for_child "$PID_2001" "2001"
+wait_for_child "$PID_2002" "2002"
 
-kill "$TAIL_1001" "$TAIL_1002" 2>/dev/null || true
-TAIL_1001=""
-TAIL_1002=""
+kill "$TAIL_2001" "$TAIL_2002" 2>/dev/null || true
+TAIL_2001=""
+TAIL_2002=""
 
 echo "[ANALYZE] Starting"
-AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --example asterisk_hold_resume_analyze --quiet \
+AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --example asterisk_udp_hold_resume_analyze --quiet \
   >"$LOG_ANALYZE" 2>&1 &
 PID_ANALYZE=$!
 start_prefix_log "ANALYZE" "$LOG_ANALYZE"
@@ -118,5 +121,5 @@ TAIL_ANALYZE=$LAST_TAIL_PID
 wait_for_child "$PID_ANALYZE" "ANALYZE"
 
 echo
-echo "=== Asterisk hold/resume example complete ==="
+echo "=== Asterisk UDP hold/resume example complete ==="
 echo "Output directory: $OUT_DIR"

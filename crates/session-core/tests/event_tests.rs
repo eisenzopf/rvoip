@@ -124,6 +124,7 @@ fn test_call_on_hold_event() {
     };
     assert_eq!(e.call_id(), Some(&id));
     assert!(!e.is_call_event()); // hold is not a lifecycle event
+    assert!(e.is_call_state_event());
 }
 
 #[test]
@@ -133,6 +134,26 @@ fn test_call_resumed_event() {
         call_id: id.clone(),
     };
     assert_eq!(e.call_id(), Some(&id));
+    assert!(!e.is_call_event());
+    assert!(e.is_call_state_event());
+}
+
+#[test]
+fn test_remote_hold_resume_events() {
+    let id = test_id();
+    let hold = Event::RemoteCallOnHold {
+        call_id: id.clone(),
+    };
+    let resume = Event::RemoteCallResumed {
+        call_id: id.clone(),
+    };
+
+    assert_eq!(hold.call_id(), Some(&id));
+    assert_eq!(resume.call_id(), Some(&id));
+    assert!(!hold.is_call_event());
+    assert!(!resume.is_call_event());
+    assert!(hold.is_call_state_event());
+    assert!(resume.is_call_state_event());
 }
 
 #[test]
@@ -146,6 +167,10 @@ fn test_call_muted_unmuted_events() {
     };
     assert_eq!(muted.call_id(), Some(&id));
     assert_eq!(unmuted.call_id(), Some(&id));
+    assert!(!muted.is_call_event());
+    assert!(!unmuted.is_call_event());
+    assert!(muted.is_call_state_event());
+    assert!(unmuted.is_call_state_event());
 }
 
 // ── Media events ────────────────────────────────────────────────────────────

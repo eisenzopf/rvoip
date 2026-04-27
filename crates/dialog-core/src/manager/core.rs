@@ -726,6 +726,14 @@ impl DialogManager {
         self.local_address
     }
 
+    /// Configured local Contact URI, if the application supplied one.
+    pub fn local_contact_uri(&self) -> Option<String> {
+        self.config.read().ok().and_then(|g| {
+            g.as_ref()
+                .and_then(|c| c.local_contact_uri().map(str::to_string))
+        })
+    }
+
     // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
     // REMOVED: set_dialog_event_sender() - Use GlobalEventCoordinator instead
     // REMOVED: setup_dialog_event_channel() - Use GlobalEventCoordinator instead

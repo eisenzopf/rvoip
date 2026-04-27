@@ -2,7 +2,7 @@
 //!
 //! These tests demonstrate the unified coordinator API usage
 
-use rvoip_session_core::api::unified::{Config, UnifiedCoordinator};
+use rvoip_session_core::api::unified::{Config, SipTlsMode, UnifiedCoordinator};
 use rvoip_session_core::state_table::types::SessionId;
 use rvoip_session_core::types::CallState;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -29,6 +29,33 @@ fn test_config(base_port: u16) -> Config {
 async fn test_create_coordinator() {
     let coordinator = UnifiedCoordinator::new(test_config(15200)).await;
     assert!(coordinator.is_ok());
+}
+
+#[tokio::test]
+async fn tls_client_only_config_does_not_require_endpoint_certificates() {
+    let mut config = test_config(15229);
+    config.sip_tls_mode = SipTlsMode::ClientOnly;
+    config.local_uri = "sips:test@127.0.0.1".to_string();
+    config.contact_uri = Some("sips:test@127.0.0.1:15229;transport=tls".to_string());
+
+    let coordinator = UnifiedCoordinator::new(config).await;
+    assert!(
+        coordinator.is_ok(),
+        "client-only SIP TLS must not require tls_cert_path/tls_key_path: {:?}",
+        coordinator.err()
+    );
+}
+
+#[tokio::test]
+async fn tls_listener_modes_require_endpoint_certificates() {
+    let mut config = test_config(15230);
+    config.sip_tls_mode = SipTlsMode::ServerOnly;
+
+    let coordinator = UnifiedCoordinator::new(config).await;
+    assert!(
+        coordinator.is_err(),
+        "server-side SIP TLS listener mode must require tls_cert_path/tls_key_path"
+    );
 }
 
 #[tokio::test]

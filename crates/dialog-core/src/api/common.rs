@@ -624,12 +624,26 @@ impl CallHandle {
             // Use the dialog-aware response builder that adds To tags
             // Get the actual local address from the dialog handle
             let local_addr = self.dialog_handle.dialog_manager.local_address();
-            let mut response = response_builders::create_ok_response_with_dialog_info(
-                &original_request,
-                "server",                     // contact_user
-                &local_addr.ip().to_string(), // contact_host - use actual local IP
-                Some(local_addr.port()),      // contact_port - use actual local port
-            );
+            let mut response =
+                if let Some(contact_uri) = self.dialog_handle.dialog_manager.local_contact_uri() {
+                    response_builders::create_ok_response_with_contact_uri(
+                        &original_request,
+                        &contact_uri,
+                    )
+                    .map_err(|e| ApiError::Internal {
+                        message: format!(
+                            "Invalid configured local Contact URI {}: {}",
+                            contact_uri, e
+                        ),
+                    })?
+                } else {
+                    response_builders::create_ok_response_with_dialog_info(
+                        &original_request,
+                        "server",                     // contact_user
+                        &local_addr.ip().to_string(), // contact_host - use actual local IP
+                        Some(local_addr.port()),      // contact_port - use actual local port
+                    )
+                };
 
             // Add SDP body if provided
             if let Some(sdp) = &sdp_answer {

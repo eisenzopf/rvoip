@@ -1017,12 +1017,26 @@ impl UnifiedDialogApi {
                 // Use special response builder for 200 OK to INVITE that adds To tag
                 use crate::transaction::utils::response_builders;
                 let local_addr = self.manager.core().local_address;
-                let mut response = response_builders::create_ok_response_with_dialog_info(
-                    &original_request,
-                    "server",
-                    &local_addr.ip().to_string(),
-                    Some(local_addr.port()),
-                );
+                let mut response =
+                    if let Some(contact_uri) = self.manager.core().local_contact_uri() {
+                        response_builders::create_ok_response_with_contact_uri(
+                            &original_request,
+                            &contact_uri,
+                        )
+                        .map_err(|e| ApiError::Internal {
+                            message: format!(
+                                "Invalid configured local Contact URI {}: {}",
+                                contact_uri, e
+                            ),
+                        })?
+                    } else {
+                        response_builders::create_ok_response_with_dialog_info(
+                            &original_request,
+                            "server",
+                            &local_addr.ip().to_string(),
+                            Some(local_addr.port()),
+                        )
+                    };
 
                 // Add SDP if provided
                 if let Some(sdp_body) = body {

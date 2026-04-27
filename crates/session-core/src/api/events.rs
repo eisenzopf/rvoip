@@ -317,7 +317,7 @@ impl Event {
         }
     }
 
-    /// Check if this is a call-related event
+    /// Check if this is a call lifecycle event
     pub fn is_call_event(&self) -> bool {
         matches!(
             self,
@@ -326,10 +326,19 @@ impl Event {
                 | Event::CallEnded { .. }
                 | Event::CallFailed { .. }
                 | Event::CallCancelled { .. }
-                | Event::CallOnHold { .. }
+        )
+    }
+
+    /// Check if this is a call state/control event
+    pub fn is_call_state_event(&self) -> bool {
+        matches!(
+            self,
+            Event::CallOnHold { .. }
                 | Event::CallResumed { .. }
                 | Event::RemoteCallOnHold { .. }
                 | Event::RemoteCallResumed { .. }
+                | Event::CallMuted { .. }
+                | Event::CallUnmuted { .. }
         )
     }
 

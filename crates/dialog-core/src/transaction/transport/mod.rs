@@ -17,6 +17,7 @@ use crate::transaction::error::{Error, Result};
 
 pub mod multiplexed;
 pub use multiplexed::MultiplexedTransport;
+pub use rvoip_sip_transport::transport::tls::TlsRole;
 
 /// Configuration options for the TransportManager
 #[derive(Debug, Clone)]
@@ -29,6 +30,9 @@ pub struct TransportManagerConfig {
     pub enable_ws: bool,
     /// Whether to enable TLS (for TCP and WebSocket)
     pub enable_tls: bool,
+    /// TLS socket role for SIP TLS. Client-only mode dials TLS peers
+    /// without binding a TLS listener or requiring a local cert/key.
+    pub tls_role: TlsRole,
     /// Local addresses to bind to (if empty, will bind to all interfaces)
     pub bind_addresses: Vec<SocketAddr>,
     /// Default event channel capacity
@@ -41,6 +45,10 @@ pub struct TransportManagerConfig {
     /// trust store on the client side. Useful for enterprise PKI /
     /// private carriers.
     pub tls_extra_ca_path: Option<String>,
+    /// Optional client certificate for mutual TLS.
+    pub tls_client_cert_path: Option<String>,
+    /// Optional client private key for mutual TLS.
+    pub tls_client_key_path: Option<String>,
     /// **Dev only.** When `true`, server certificates are accepted
     /// without identity verification. The TLS handshake still runs
     /// end-to-end (encrypted), but a malicious peer can MITM. Required
@@ -56,11 +64,14 @@ impl Default for TransportManagerConfig {
             enable_tcp: true,
             enable_ws: true,
             enable_tls: false,
+            tls_role: TlsRole::ClientAndServer,
             bind_addresses: vec![],
             default_channel_capacity: 100,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
             tls_insecure_skip_verify: false,
         }
     }
@@ -171,11 +182,20 @@ impl TransportManager {
             // unless the caller already accounted for it via
             // [`TransportManagerConfig::tls_bind_addresses`] (TODO).
             if self.config.enable_tls {
-                if self.config.tls_cert_path.is_none() || self.config.tls_key_path.is_none() {
+                if self.config.tls_role != TlsRole::ClientOnly
+                    && (self.config.tls_cert_path.is_none() || self.config.tls_key_path.is_none())
+                {
                     warn!("TLS is enabled but certificate or key path is missing");
                 } else {
-                    let addresses = if self.config.bind_addresses.is_empty() {
+                    let base_addresses = if self.config.bind_addresses.is_empty() {
                         vec!["0.0.0.0:5061".parse().unwrap()]
+                    } else {
+                        self.config.bind_addresses.clone()
+                    };
+                    let addresses = if self.config.tls_role == TlsRole::ClientOnly {
+                        base_addresses
+                    } else if self.config.bind_addresses.is_empty() {
+                        base_addresses
                     } else {
                         self.config
                             .bind_addresses
@@ -296,10 +316,9 @@ impl TransportManager {
     }
 
     /// Adds a TCP transport — or, when `tls = true`, a TLS-over-TCP
-    /// transport — to the manager. The TLS path requires
-    /// `tls_cert_path` + `tls_key_path` to be set on the manager
-    /// config; honours `tls_extra_ca_path` and the dev-only
-    /// `tls_insecure_skip_verify` knob via `TlsClientConfig`.
+    /// transport — to the manager. TLS listener roles require
+    /// `tls_cert_path` + `tls_key_path`; client-only TLS does not bind
+    /// a listener and only needs client trust settings.
     pub async fn add_tcp_transport(
         &self,
         bind_addr: SocketAddr,
@@ -309,34 +328,50 @@ impl TransportManager {
             use rvoip_sip_transport::transport::tls::{TlsClientConfig, TlsTransport};
             use std::path::{Path, PathBuf};
 
-            let cert_path = self.config.tls_cert_path.as_ref().ok_or_else(|| {
-                Error::Transport("TLS enabled but tls_cert_path is missing".into())
-            })?;
-            let key_path = self.config.tls_key_path.as_ref().ok_or_else(|| {
-                Error::Transport("TLS enabled but tls_key_path is missing".into())
-            })?;
             let client_cfg = TlsClientConfig {
                 extra_ca_path: self.config.tls_extra_ca_path.as_ref().map(PathBuf::from),
                 insecure_skip_verify: self.config.tls_insecure_skip_verify,
+                client_cert_path: self.config.tls_client_cert_path.as_ref().map(PathBuf::from),
+                client_key_path: self.config.tls_client_key_path.as_ref().map(PathBuf::from),
             };
 
             // Pass the manager's combined event sender so TLS events
             // (incoming SIP messages, errors) flow through the same
             // pipeline as UDP/TCP — no separate forwarder task needed.
-            let (transport, _rx_unused) = TlsTransport::bind_with_client_config(
-                bind_addr,
-                Path::new(cert_path),
-                Path::new(key_path),
-                Some(self.event_tx.clone()),
-                client_cfg,
-            )
-            .await
-            .map_err(|e| {
-                Error::Transport(format!(
-                    "Failed to bind TLS transport to {}: {}",
-                    bind_addr, e
-                ))
-            })?;
+            let (transport, _rx_unused) = match self.config.tls_role {
+                TlsRole::ClientOnly => {
+                    TlsTransport::client_only(bind_addr, Some(self.event_tx.clone()), client_cfg)
+                        .await
+                        .map_err(|e| {
+                            Error::Transport(format!(
+                                "Failed to configure client-only TLS transport at {}: {}",
+                                bind_addr, e
+                            ))
+                        })?
+                }
+                TlsRole::ServerOnly | TlsRole::ClientAndServer => {
+                    let cert_path = self.config.tls_cert_path.as_ref().ok_or_else(|| {
+                        Error::Transport("TLS enabled but tls_cert_path is missing".into())
+                    })?;
+                    let key_path = self.config.tls_key_path.as_ref().ok_or_else(|| {
+                        Error::Transport("TLS enabled but tls_key_path is missing".into())
+                    })?;
+                    TlsTransport::bind_with_client_config(
+                        bind_addr,
+                        Path::new(cert_path),
+                        Path::new(key_path),
+                        Some(self.event_tx.clone()),
+                        client_cfg,
+                    )
+                    .await
+                    .map_err(|e| {
+                        Error::Transport(format!(
+                            "Failed to bind TLS transport to {}: {}",
+                            bind_addr, e
+                        ))
+                    })?
+                }
+            };
             // `local_addr()` reports the OS-assigned port (important
             // when `bind_addr` used port 0). Use the actual port in the
             // registry key so MultiplexedTransport can find it.
@@ -955,6 +990,8 @@ mod tests {
         .to("user", "sip:user@example.com", None)
         .call_id("test-call-id")
         .cseq(1)
+        .max_forwards(70)
+        .contact("sip:user@127.0.0.1:5060", None)
         .build();
 
         // Get local address

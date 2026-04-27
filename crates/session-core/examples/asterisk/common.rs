@@ -8,7 +8,7 @@ use std::time::Duration;
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::{
     api::unified::RegistrationHandle, types::Credentials, Config, Registration, SessionHandle,
-    StreamPeer,
+    SipTlsMode, StreamPeer,
 };
 use tokio::time::sleep;
 
@@ -17,8 +17,10 @@ pub type ExampleResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub const SAMPLE_RATE: u32 = 8000;
 pub const FRAME_SIZE: usize = 160;
 pub const TONE_FRAMES: usize = 150;
-pub const ENDPOINT_1001_TONE_HZ: f32 = 440.0;
-pub const ENDPOINT_1002_TONE_HZ: f32 = 880.0;
+pub const ENDPOINT_2001_TONE_HZ: f32 = 440.0;
+pub const ENDPOINT_2002_TONE_HZ: f32 = 880.0;
+pub const ENDPOINT_1001_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
+pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
 pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
 pub const DOMINANCE_RATIO: f32 = 5.0;
 pub const DEFAULT_POST_REGISTER_SETTLE_SECS: u64 = 5;
@@ -72,7 +74,16 @@ impl EndpointConfig {
 
     pub fn call_uri(&self, target: &str) -> String {
         let scheme = self.uri_scheme();
-        if self.sip_port == default_port_for_transport(&self.transport) {
+        if self.is_tls() {
+            format!(
+                "{}:{}@{}:{}{}",
+                scheme,
+                target,
+                self.sip_server,
+                self.sip_port,
+                transport_suffix(&self.transport)
+            )
+        } else if self.sip_port == default_port_for_transport(&self.transport) {
             format!("{}:{}@{}", scheme, target, self.sip_server)
         } else {
             format!(
@@ -94,6 +105,7 @@ impl EndpointConfig {
     pub fn stream_config(&self) -> Config {
         let mut config = Config::on(&self.username, self.local_ip, self.local_port);
         config.local_uri = self.aor_uri();
+        config.contact_uri = Some(self.contact_uri());
         config.credentials = Some(Credentials::new(&self.auth_username, &self.password));
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
@@ -106,9 +118,10 @@ impl EndpointConfig {
         }
 
         let mut config = self.stream_config();
-        config.tls_cert_path = Some(required_path("TLS_CERT_PATH")?);
-        config.tls_key_path = Some(required_path("TLS_KEY_PATH")?);
+        config.sip_tls_mode = SipTlsMode::ClientOnly;
         config.tls_extra_ca_path = optional_path("TLS_CA_PATH");
+        config.tls_client_cert_path = optional_path("TLS_CLIENT_CERT_PATH");
+        config.tls_client_key_path = optional_path("TLS_CLIENT_KEY_PATH");
         #[cfg(feature = "dev-insecure-tls")]
         {
             config.tls_insecure_skip_verify = env_bool("TLS_INSECURE", false)?;
@@ -137,11 +150,7 @@ impl EndpointConfig {
     }
 
     fn contact_port(&self) -> u16 {
-        if self.is_tls() {
-            self.local_port.saturating_add(1)
-        } else {
-            self.local_port
-        }
+        self.local_port
     }
 }
 

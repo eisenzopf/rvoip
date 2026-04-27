@@ -49,6 +49,7 @@ pub struct InviteBuilder {
     call_id: Option<String>,
     cseq: u32,
     local_address: Option<SocketAddr>,
+    via_transport: Option<String>,
     branch: Option<String>,
     route_set: Vec<Uri>,
     contact: Option<String>,
@@ -71,6 +72,7 @@ impl InviteBuilder {
             call_id: None,
             cseq: 1,
             local_address: None,
+            via_transport: None,
             branch: None,
             route_set: Vec::new(),
             contact: None,
@@ -139,6 +141,7 @@ impl InviteBuilder {
             call_id: Some(call_id.into()),
             cseq,
             local_address: Some(local_address),
+            via_transport: None,
             branch: None,          // Will be auto-generated
             route_set: Vec::new(), // Can be added with add_route()
             contact: None,         // Can be set with contact()
@@ -195,6 +198,7 @@ impl InviteBuilder {
             call_id: Some(call_id.into()),
             cseq,
             local_address: Some(local_address),
+            via_transport: None,
             branch: None, // Will be auto-generated
             route_set,
             contact,
@@ -265,6 +269,12 @@ impl InviteBuilder {
         self
     }
 
+    /// Set the transport token used in the top Via header.
+    pub fn via_transport(mut self, transport: impl Into<String>) -> Self {
+        self.via_transport = Some(transport.into());
+        self
+    }
+
     /// Set a specific Call-ID (auto-generated if not specified)
     pub fn call_id(mut self, call_id: impl Into<String>) -> Self {
         self.call_id = Some(call_id.into());
@@ -329,6 +339,9 @@ impl InviteBuilder {
         let from_tag = self
             .from_tag
             .unwrap_or_else(|| format!("tag-{}", Uuid::new_v4().simple()));
+        let via_transport = self
+            .via_transport
+            .unwrap_or_else(|| via_transport_for_uris(&request_uri, Some(&from_uri)));
 
         // Build the request
         let mut builder = SimpleRequestBuilder::new(Method::Invite, &request_uri)
@@ -352,7 +365,7 @@ impl InviteBuilder {
         builder = builder
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), "UDP", Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into());
 
         // INVITE establishes or refreshes a dialog, so Contact is mandatory.
@@ -360,7 +373,7 @@ impl InviteBuilder {
         // using the From URI user and local socket address.
         let contact = self
             .contact
-            .unwrap_or_else(|| default_contact_uri(&from_uri, local_addr));
+            .unwrap_or_else(|| default_contact_uri(&from_uri, local_addr, &via_transport));
         builder = builder.contact(&contact, None);
 
         // Add Route headers
@@ -398,7 +411,33 @@ impl Default for InviteBuilder {
     }
 }
 
-fn default_contact_uri(from_uri: &str, local_addr: SocketAddr) -> String {
+fn via_transport_for_uri(uri: &str) -> String {
+    let lower = uri.to_ascii_lowercase();
+    if lower.starts_with("sips:") || lower.contains(";transport=tls") {
+        "TLS".to_string()
+    } else if lower.contains(";transport=tcp") {
+        "TCP".to_string()
+    } else if lower.contains(";transport=wss") {
+        "WSS".to_string()
+    } else if lower.contains(";transport=ws") {
+        "WS".to_string()
+    } else {
+        "UDP".to_string()
+    }
+}
+
+fn via_transport_for_uris(request_uri: &str, local_uri: Option<&str>) -> String {
+    let request_transport = via_transport_for_uri(request_uri);
+    if request_transport != "UDP" {
+        return request_transport;
+    }
+    local_uri
+        .map(via_transport_for_uri)
+        .filter(|transport| transport != "UDP")
+        .unwrap_or(request_transport)
+}
+
+fn default_contact_uri(from_uri: &str, local_addr: SocketAddr, via_transport: &str) -> String {
     let user = from_uri
         .strip_prefix("sip:")
         .or_else(|| from_uri.strip_prefix("sips:"))
@@ -406,7 +445,11 @@ fn default_contact_uri(from_uri: &str, local_addr: SocketAddr) -> String {
         .map(|user| user.split(';').next().unwrap_or(user))
         .filter(|user| !user.is_empty())
         .unwrap_or("user");
-    format!("sip:{}@{}", user, local_addr)
+    if via_transport.eq_ignore_ascii_case("TLS") || from_uri.starts_with("sips:") {
+        format!("sips:{}@{};transport=tls", user, local_addr)
+    } else {
+        format!("sip:{}@{}", user, local_addr)
+    }
 }
 
 #[cfg(test)]
@@ -427,6 +470,24 @@ mod invite_builder_tests {
         assert_eq!(
             request.raw_header_value(&HeaderName::Contact).unwrap(),
             "<sip:1001@192.0.2.10:5070>"
+        );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[test]
+    fn invite_builder_uses_tls_via_and_sips_contact_for_sips_call() {
+        let request = InviteBuilder::new()
+            .from_to("sips:1001@pbx.example.com", "sips:1002@pbx.example.com")
+            .request_uri("sips:1002@pbx.example.com;transport=tls")
+            .local_address("192.0.2.10:5070".parse().unwrap())
+            .with_sdp("v=0\r\n")
+            .build()
+            .unwrap();
+
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+        assert_eq!(
+            request.raw_header_value(&HeaderName::Contact).unwrap(),
+            "<sips:1001@192.0.2.10:5070;transport=tls>"
         );
         rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
@@ -459,6 +520,7 @@ pub struct ByeBuilder {
     request_uri: Option<String>,
     cseq: u32,
     local_address: Option<SocketAddr>,
+    via_transport: Option<String>,
     route_set: Vec<Uri>,
     custom_headers: Vec<TypedHeader>,
     max_forwards: u8,
@@ -476,6 +538,7 @@ impl ByeBuilder {
             request_uri: None,
             cseq: 1,
             local_address: None,
+            via_transport: None,
             route_set: Vec::new(),
             custom_headers: Vec::new(),
             max_forwards: 70,
@@ -564,6 +627,7 @@ impl ByeBuilder {
             request_uri: Some(request_uri.into()),
             cseq,
             local_address: Some(local_address),
+            via_transport: None,
             route_set,
             custom_headers: Vec::new(),
             max_forwards: 70,
@@ -579,6 +643,12 @@ impl ByeBuilder {
     /// Set the local address for Via header
     pub fn local_address(mut self, addr: SocketAddr) -> Self {
         self.local_address = Some(addr);
+        self
+    }
+
+    /// Set the transport token used in the top Via header.
+    pub fn via_transport(mut self, transport: impl Into<String>) -> Self {
+        self.via_transport = Some(transport.into());
         self
     }
 
@@ -625,6 +695,9 @@ impl ByeBuilder {
 
         // Generate branch for this request
         let branch = generate_branch();
+        let via_transport = self
+            .via_transport
+            .unwrap_or_else(|| via_transport_for_uris(&request_uri, Some(&from_uri)));
 
         // Build the request
         let mut builder = SimpleRequestBuilder::new(Method::Bye, &request_uri)
@@ -635,7 +708,7 @@ impl ByeBuilder {
             .to("User", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), "UDP", Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into())
             .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
@@ -686,6 +759,7 @@ pub struct RegisterBuilder {
     contact_uri: Option<String>,
     contact_header: Option<Contact>,
     local_address: Option<SocketAddr>,
+    via_transport: Option<String>,
     expires: Option<u32>,
     call_id: Option<String>,
     cseq: u32,
@@ -704,6 +778,7 @@ impl RegisterBuilder {
             contact_uri: None,
             contact_header: None,
             local_address: None,
+            via_transport: None,
             expires: None,
             call_id: None,
             cseq: 1,
@@ -746,6 +821,12 @@ impl RegisterBuilder {
     /// Set the local address
     pub fn local_address(mut self, addr: SocketAddr) -> Self {
         self.local_address = Some(addr);
+        self
+    }
+
+    /// Set the transport token used in the top Via header.
+    pub fn via_transport(mut self, transport: impl Into<String>) -> Self {
+        self.via_transport = Some(transport.into());
         self
     }
 
@@ -793,9 +874,16 @@ impl RegisterBuilder {
             .unwrap_or_else(|| format!("reg-{}", Uuid::new_v4()));
         let from_tag = format!("tag-{}", Uuid::new_v4().simple());
         let branch = generate_branch();
-        let contact_uri = self
-            .contact_uri
-            .unwrap_or_else(|| format!("sip:user@{}", local_addr));
+        let via_transport = self
+            .via_transport
+            .unwrap_or_else(|| via_transport_for_uris(&registrar_uri, Some(&from_uri)));
+        let contact_uri = self.contact_uri.unwrap_or_else(|| {
+            if via_transport.eq_ignore_ascii_case("TLS") {
+                format!("sips:user@{};transport=tls", local_addr)
+            } else {
+                format!("sip:user@{}", local_addr)
+            }
+        });
 
         // Build the request
         let mut builder = SimpleRequestBuilder::new(Method::Register, &registrar_uri)
@@ -810,7 +898,7 @@ impl RegisterBuilder {
             .to("", &aor_uri, None)
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), "UDP", Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into())
             .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
@@ -882,6 +970,26 @@ mod register_builder_tests {
     }
 
     #[test]
+    fn register_builder_uses_tls_via_for_sips_registrar() {
+        let request = RegisterBuilder::new()
+            .registrar("sips:pbx.example.com:5061;transport=tls")
+            .aor("sips:1001@pbx.example.com")
+            .user_info("sips:1001@pbx.example.com", "")
+            .contact("sips:1001@192.0.2.10:5070;transport=tls")
+            .local_address("192.0.2.10:5070".parse().unwrap())
+            .expires(3600)
+            .build()
+            .unwrap();
+
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+        assert_eq!(
+            request.raw_header_value(&HeaderName::Contact).unwrap(),
+            "<sips:1001@192.0.2.10:5070;transport=tls>"
+        );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[test]
     fn register_builder_preserves_custom_authorization() {
         let request = RegisterBuilder::new()
             .registrar("sip:pbx.example.com:5060")
@@ -938,6 +1046,7 @@ pub struct InDialogRequestBuilder {
     request_uri: Option<String>,
     cseq: u32,
     local_address: Option<SocketAddr>,
+    via_transport: Option<String>,
     route_set: Vec<Uri>,
     body: Option<String>,
     content_type: Option<String>,
@@ -960,6 +1069,7 @@ impl InDialogRequestBuilder {
             request_uri: None,
             cseq: 1,
             local_address: None,
+            via_transport: None,
             route_set: Vec::new(),
             body: None,
             content_type: None,
@@ -990,6 +1100,7 @@ impl InDialogRequestBuilder {
         self.request_uri = Some(to_uri_string); // Default to To URI
         self.cseq = cseq;
         self.local_address = Some(local_address);
+        self.via_transport = None;
         self
     }
 
@@ -1014,7 +1125,14 @@ impl InDialogRequestBuilder {
         self.request_uri = Some(request_uri.into());
         self.cseq = cseq;
         self.local_address = Some(local_address);
+        self.via_transport = None;
         self.route_set = route_set;
+        self
+    }
+
+    /// Set the transport token used in the top Via header.
+    pub fn via_transport(mut self, transport: impl Into<String>) -> Self {
+        self.via_transport = Some(transport.into());
         self
     }
 
@@ -1096,6 +1214,9 @@ impl InDialogRequestBuilder {
 
         // Generate branch for this request
         let branch = generate_branch();
+        let via_transport = self
+            .via_transport
+            .unwrap_or_else(|| via_transport_for_uris(&request_uri, Some(&from_uri)));
 
         // Build the request
         let mut builder = SimpleRequestBuilder::new(self.method.clone(), &request_uri)
@@ -1106,7 +1227,7 @@ impl InDialogRequestBuilder {
             .to("User", &to_uri, Some(&to_tag))
             .call_id(&call_id)
             .cseq(self.cseq)
-            .via(&local_addr.to_string(), "UDP", Some(&branch))
+            .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into());
 
         // Add Event header for NOTIFY requests

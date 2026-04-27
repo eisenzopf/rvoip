@@ -162,28 +162,19 @@ path = "examples/advanced/concurrent_calls/client.rs"
 name = "advanced_registrar_server"
 path = "examples/advanced/registrar_server.rs"
 
-# Remote Asterisk softphone example
+# Remote Asterisk examples
 [[example]]
-name = "asterisk_softphone"
-path = "examples/asterisk/softphone.rs"
+name = "asterisk_registration"
+path = "examples/asterisk/registration/register.rs"
 [[example]]
-name = "asterisk_1001"
-path = "examples/asterisk/endpoint_1001.rs"
+name = "asterisk_udp_hold_resume_2001"
+path = "examples/asterisk/udp_hold_resume/endpoint_2001.rs"
 [[example]]
-name = "asterisk_1002"
-path = "examples/asterisk/endpoint_1002.rs"
+name = "asterisk_udp_hold_resume_2002"
+path = "examples/asterisk/udp_hold_resume/endpoint_2002.rs"
 [[example]]
-name = "asterisk_audio_analyze"
-path = "examples/asterisk/analyze.rs"
-[[example]]
-name = "asterisk_hold_resume_1001"
-path = "examples/asterisk/hold_resume/endpoint_1001.rs"
-[[example]]
-name = "asterisk_hold_resume_1002"
-path = "examples/asterisk/hold_resume/endpoint_1002.rs"
-[[example]]
-name = "asterisk_hold_resume_analyze"
-path = "examples/asterisk/hold_resume/analyze.rs"
+name = "asterisk_udp_hold_resume_analyze"
+path = "examples/asterisk/udp_hold_resume/analyze.rs"
 [[example]]
 name = "asterisk_tls_srtp_hold_resume_1001"
 path = "examples/asterisk/tls_srtp_hold_resume/endpoint_1001.rs"

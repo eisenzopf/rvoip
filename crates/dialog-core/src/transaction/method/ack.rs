@@ -184,6 +184,7 @@ pub fn create_ack_for_2xx(
 
     // Create a new branch ID
     let branch = format!("z9hG4bK{}", Uuid::new_v4().to_string().replace("-", ""));
+    let via_transport = invite_request.first_via_transport().unwrap_or("UDP");
 
     // Build the ACK request
     let mut builder = SimpleRequestBuilder::new(Method::Ack, &request_uri.to_string())
@@ -194,7 +195,7 @@ pub fn create_ack_for_2xx(
         .header(TypedHeader::To(to))
         .header(TypedHeader::CallId(call_id))
         .header(TypedHeader::CSeq(CSeq::new(cseq_num, Method::Ack)))
-        .via(&local_addr.to_string(), "UDP", Some(&branch))
+        .via(&local_addr.to_string(), via_transport, Some(&branch))
         .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
         .header(TypedHeader::ContentLength(ContentLength::new(0)));
 

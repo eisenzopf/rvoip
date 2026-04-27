@@ -203,6 +203,31 @@ pub fn create_ok_response_with_dialog_info(
     response
 }
 
+/// Create a 200 OK response for INVITE using an explicit Contact URI.
+pub fn create_ok_response_with_contact_uri(
+    request: &Request,
+    contact_uri: &str,
+) -> std::result::Result<Response, rvoip_sip_core::error::Error> {
+    let to_tag = format!("tag-{}", Uuid::new_v4().simple());
+    let mut response = create_response(request, StatusCode::Ok);
+
+    if let Some(TypedHeader::To(to)) = response.header(&HeaderName::To) {
+        let new_to = to.clone().with_tag(&to_tag);
+        response
+            .headers
+            .retain(|h| !matches!(h, TypedHeader::To(_)));
+        response.headers.push(TypedHeader::To(new_to));
+    }
+
+    let contact_addr = Address::new(Uri::from_str(contact_uri)?);
+    let contact = Contact::new_params(vec![ContactParamInfo {
+        address: contact_addr,
+    }]);
+    response.headers.push(TypedHeader::Contact(contact));
+
+    Ok(response)
+}
+
 /// Create a 180 Ringing response with To-tag for early dialog establishment
 ///
 /// This function creates a 180 Ringing response that includes a To-tag,

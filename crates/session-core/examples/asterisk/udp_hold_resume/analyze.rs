@@ -5,10 +5,10 @@ mod common;
 
 use common::{
     analyze_samples, assert_audio_path, endpoint_config, init_tracing, load_env, print_analysis,
-    read_wav, ExampleResult, ENDPOINT_1001_TONE_HZ, ENDPOINT_1002_TONE_HZ, SAMPLE_RATE,
+    read_wav, ExampleResult, ENDPOINT_2001_TONE_HZ, ENDPOINT_2002_TONE_HZ, SAMPLE_RATE,
 };
 
-const PRE_HOLD_TONE_HZ: f32 = ENDPOINT_1001_TONE_HZ;
+const PRE_HOLD_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
 const DURING_HOLD_TONE_HZ: f32 = 550.0;
 const POST_RESUME_TONE_HZ: f32 = 660.0;
 const WINDOW_SAMPLES: usize = SAMPLE_RATE as usize;
@@ -18,61 +18,61 @@ fn main() -> ExampleResult<()> {
     load_env();
     init_tracing();
 
-    let cfg = endpoint_config("1001", 5070, 16000, 16100)?;
-    let endpoint_1001_wav = cfg.output_dir.join("hold_resume_1001_received.wav");
-    let endpoint_1002_wav = cfg.output_dir.join("hold_resume_1002_received.wav");
+    let cfg = endpoint_config("2001", 5080, 17000, 17100)?;
+    let endpoint_2001_wav = cfg.output_dir.join("hold_resume_2001_received.wav");
+    let endpoint_2002_wav = cfg.output_dir.join("hold_resume_2002_received.wav");
 
-    let endpoint_1001 = assert_audio_path(
-        &endpoint_1001_wav,
-        ENDPOINT_1002_TONE_HZ,
-        ENDPOINT_1001_TONE_HZ,
+    let endpoint_2001 = assert_audio_path(
+        &endpoint_2001_wav,
+        ENDPOINT_2002_TONE_HZ,
+        ENDPOINT_2001_TONE_HZ,
     )?;
 
-    let endpoint_1002_samples = read_wav(&endpoint_1002_wav)?;
-    if endpoint_1002_samples.len() < MIN_CALLER_SAMPLES {
+    let endpoint_2002_samples = read_wav(&endpoint_2002_wav)?;
+    if endpoint_2002_samples.len() < MIN_CALLER_SAMPLES {
         return Err(format!(
             "{} too short: {} samples (expected at least {})",
-            endpoint_1002_wav.display(),
-            endpoint_1002_samples.len(),
+            endpoint_2002_wav.display(),
+            endpoint_2002_samples.len(),
             MIN_CALLER_SAMPLES
         )
         .into());
     }
 
-    let first_window = &endpoint_1002_samples[..WINDOW_SAMPLES];
-    let last_window = &endpoint_1002_samples[endpoint_1002_samples.len() - WINDOW_SAMPLES..];
+    let first_window = &endpoint_2002_samples[..WINDOW_SAMPLES];
+    let last_window = &endpoint_2002_samples[endpoint_2002_samples.len() - WINDOW_SAMPLES..];
     let pre_hold = assert_window_tone(
-        "1002 pre-hold window",
+        "2002 pre-hold window",
         first_window,
         PRE_HOLD_TONE_HZ,
         POST_RESUME_TONE_HZ,
     )?;
     let post_resume = assert_window_tone(
-        "1002 post-resume window",
+        "2002 post-resume window",
         last_window,
         POST_RESUME_TONE_HZ,
         PRE_HOLD_TONE_HZ,
     )?;
     let during_hold_probe = analyze_samples(
-        &endpoint_1002_samples,
+        &endpoint_2002_samples,
         DURING_HOLD_TONE_HZ,
         PRE_HOLD_TONE_HZ,
     )?;
 
     println!("=== Asterisk hold/resume audio analysis ===");
     print_analysis(
-        "1001 received 1002 reference tone",
-        &endpoint_1001_wav,
-        &endpoint_1001,
+        "2001 received 2002 reference tone",
+        &endpoint_2001_wav,
+        &endpoint_2001,
     );
-    print_analysis("1002 pre-hold caller tone", &endpoint_1002_wav, &pre_hold);
+    print_analysis("2002 pre-hold caller tone", &endpoint_2002_wav, &pre_hold);
     print_analysis(
-        "1002 post-resume caller tone",
-        &endpoint_1002_wav,
+        "2002 post-resume caller tone",
+        &endpoint_2002_wav,
         &post_resume,
     );
     println!(
-        "1002 during-hold {:.0}Hz probe magnitude {:.1} (informational; exact hold media behavior is PBX-dependent)",
+        "2002 during-hold {:.0}Hz probe magnitude {:.1} (informational; exact hold media behavior is PBX-dependent)",
         DURING_HOLD_TONE_HZ, during_hold_probe.expected_magnitude
     );
     println!("Hold/resume audio path verification passed.");

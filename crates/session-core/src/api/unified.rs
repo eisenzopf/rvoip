@@ -21,6 +21,28 @@ use tokio::sync::{mpsc, RwLock};
 pub use rvoip_dialog_core::api::RelUsage;
 pub use rvoip_media_core::relay::controller::{AudioSource, BridgeError, BridgeHandle};
 
+/// SIP TLS operating mode for signalling transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SipTlsMode {
+    /// Disable SIP TLS transport.
+    Disabled,
+    /// Dial outbound TLS connections only. This is the normal mode for
+    /// registering to an upstream proxy/B2BUA such as Asterisk; no local
+    /// certificate/key is required.
+    ClientOnly,
+    /// Bind a SIP TLS listener only. Requires a local certificate/key.
+    ServerOnly,
+    /// Bind a listener and support outbound TLS dials. Requires a local
+    /// certificate/key for the listener side.
+    ClientAndServer,
+}
+
+impl Default for SipTlsMode {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
 /// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -135,16 +157,32 @@ pub struct Config {
     /// (transport-layer hook).
     pub outbound_keepalive_interval_secs: u64,
 
-    /// Path to the PEM-encoded TLS server certificate (RFC 3261 §26.2 /
-    /// RFC 5630). Both this **and** [`Config::tls_key_path`] must be set
-    /// to enable TLS — when both are present, TLS is auto-enabled and
-    /// `sips:` URIs / `;transport=tls` URI parameters route through the
-    /// `MultiplexedTransport` to the TLS listener. `None` disables TLS.
+    /// SIP TLS signalling mode.
+    pub sip_tls_mode: SipTlsMode,
+
+    /// Optional Contact URI override used by dialog-core for
+    /// dialog-creating and target-refresh requests. Registrations can
+    /// still override Contact per REGISTER via [`Registration`].
+    pub contact_uri: Option<String>,
+
+    /// Path to the PEM-encoded TLS listener certificate (RFC 3261
+    /// §26.2 / RFC 5630). Required only for [`SipTlsMode::ServerOnly`]
+    /// and [`SipTlsMode::ClientAndServer`]. It is not required for
+    /// [`SipTlsMode::ClientOnly`], where this endpoint connects to a
+    /// remote TLS server and verifies that server's certificate.
     pub tls_cert_path: Option<std::path::PathBuf>,
 
-    /// Path to the PEM-encoded PKCS#8 private key matching
+    /// Path to the PEM-encoded PKCS#8 listener private key matching
     /// [`Config::tls_cert_path`].
     pub tls_key_path: Option<std::path::PathBuf>,
+
+    /// Optional PEM-encoded client certificate chain for mutual TLS.
+    /// Leave unset for normal server-authenticated SIP TLS.
+    pub tls_client_cert_path: Option<std::path::PathBuf>,
+
+    /// Optional PEM-encoded PKCS#8 private key matching
+    /// [`Config::tls_client_cert_path`].
+    pub tls_client_key_path: Option<std::path::PathBuf>,
 
     /// Optional path to a PEM-encoded CA bundle to *add to* the system
     /// trust store on the client side. Used for enterprise PKI / private
@@ -317,8 +355,12 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            sip_tls_mode: SipTlsMode::Disabled,
+            contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
             tls_extra_ca_path: None,
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
@@ -360,8 +402,12 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            sip_tls_mode: SipTlsMode::Disabled,
+            contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
             tls_extra_ca_path: None,
             #[cfg(feature = "dev-insecure-tls")]
             tls_insecure_skip_verify: false,
@@ -552,10 +598,8 @@ impl UnifiedCoordinator {
             config.state_table_path.as_deref(),
         ));
 
-        // Bridge state-table publish events into the public API event bus.
         let (state_event_tx, state_event_rx) =
             mpsc::channel::<crate::state_machine::executor::SessionEvent>(100);
-        spawn_state_machine_api_event_bridge(state_event_rx, global_coordinator.clone());
 
         let state_machine = Arc::new(StateMachine::new_with_custom_table(
             state_table,
@@ -593,14 +637,16 @@ impl UnifiedCoordinator {
 
         // Create and start the centralized event handler.
         // Events are published to the global coordinator's "session_to_app" channel.
-        let event_handler = crate::adapters::SessionCrossCrateEventHandler::with_event_broadcast(
-            state_machine.clone(),
-            global_coordinator.clone(),
-            dialog_adapter.clone(),
-            media_adapter.clone(),
-            registry.clone(),
-            incoming_tx,
-        );
+        let event_handler =
+            crate::adapters::SessionCrossCrateEventHandler::with_event_broadcast_and_state_machine_events(
+                state_machine.clone(),
+                global_coordinator.clone(),
+                dialog_adapter.clone(),
+                media_adapter.clone(),
+                registry.clone(),
+                incoming_tx,
+                state_event_rx,
+            );
 
         // Start the event handler (sets up channels and subscriptions)
         event_handler.start(shutdown_rx).await?;
@@ -1282,15 +1328,54 @@ impl UnifiedCoordinator {
         // routes outbound INVITEs to the right flavour based on the
         // Request-URI's scheme + `;transport=` parameter.
         //
-        // TLS auto-enables when both `tls_cert_path` and `tls_key_path`
-        // are provided in the config. `sips:` URIs and
-        // `;transport=tls` URI hints route through the TLS listener.
-        // (See `crates/TLS_SIP_IMPLEMENTATION_PLAN.md` for the design.)
-        let enable_tls = config.tls_cert_path.is_some() && config.tls_key_path.is_some();
+        let explicit_mode = config.sip_tls_mode;
+        let legacy_listener_tls = explicit_mode == SipTlsMode::Disabled
+            && config.tls_cert_path.is_some()
+            && config.tls_key_path.is_some();
+        let effective_tls_mode = if legacy_listener_tls {
+            SipTlsMode::ClientAndServer
+        } else {
+            explicit_mode
+        };
+        let enable_tls = effective_tls_mode != SipTlsMode::Disabled;
         if config.tls_cert_path.is_some() ^ config.tls_key_path.is_some() {
             tracing::warn!(
                 "session-core Config has tls_cert_path xor tls_key_path set; \
-                 TLS requires both — listener will not bind"
+                 TLS listener roles require both"
+            );
+        }
+        if matches!(
+            effective_tls_mode,
+            SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer
+        ) && (config.tls_cert_path.is_none() || config.tls_key_path.is_none())
+        {
+            return Err(SessionError::ConfigError(
+                "SIP TLS listener modes require tls_cert_path and tls_key_path".to_string(),
+            ));
+        }
+        if config.tls_client_cert_path.is_some() ^ config.tls_client_key_path.is_some() {
+            return Err(SessionError::ConfigError(
+                "TLS client certificate and key must be provided together".to_string(),
+            ));
+        }
+
+        let tls_role = match effective_tls_mode {
+            SipTlsMode::Disabled => {
+                rvoip_dialog_core::transaction::transport::TlsRole::ClientAndServer
+            }
+            SipTlsMode::ClientOnly => {
+                rvoip_dialog_core::transaction::transport::TlsRole::ClientOnly
+            }
+            SipTlsMode::ServerOnly => {
+                rvoip_dialog_core::transaction::transport::TlsRole::ServerOnly
+            }
+            SipTlsMode::ClientAndServer => {
+                rvoip_dialog_core::transaction::transport::TlsRole::ClientAndServer
+            }
+        };
+        if matches!(effective_tls_mode, SipTlsMode::ClientOnly) {
+            tracing::info!(
+                "SIP TLS client-only mode enabled; no local endpoint certificate/key required"
             );
         }
         let transport_config = TransportManagerConfig {
@@ -1298,6 +1383,7 @@ impl UnifiedCoordinator {
             enable_tcp: true,
             enable_ws: false,
             enable_tls,
+            tls_role,
             bind_addresses: vec![config.bind_addr],
             tls_cert_path: config
                 .tls_cert_path
@@ -1305,6 +1391,14 @@ impl UnifiedCoordinator {
                 .map(|p| p.to_string_lossy().into_owned()),
             tls_key_path: config
                 .tls_key_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            tls_client_cert_path: config
+                .tls_client_cert_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            tls_client_key_path: config
+                .tls_client_key_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             tls_extra_ca_path: config
@@ -1351,6 +1445,10 @@ impl UnifiedCoordinator {
             .with_100rel(config.use_100rel)
             .with_session_timer(config.session_timer_secs)
             .with_min_se(config.session_timer_min_se)
+            .with_dialog_config(|mut dialog| {
+                dialog.local_contact_uri = config.contact_uri.clone();
+                dialog
+            })
             .build();
 
         // Create dialog API with global event coordination AND transaction events
@@ -1491,7 +1589,11 @@ impl UnifiedCoordinator {
     /// ```
     pub async fn register_with(&self, reg: Registration) -> Result<RegistrationHandle> {
         let from_uri = reg.from_uri.as_deref().unwrap_or(&self.config.local_uri);
-        let contact_uri = reg.contact_uri.as_deref().unwrap_or(&self.config.local_uri);
+        let contact_uri = reg
+            .contact_uri
+            .as_deref()
+            .or(self.config.contact_uri.as_deref())
+            .unwrap_or(&self.config.local_uri);
         self.register(
             &reg.registrar,
             from_uri,
@@ -1646,37 +1748,6 @@ impl Registration {
         self.contact_uri = Some(uri.into());
         self
     }
-}
-
-fn spawn_state_machine_api_event_bridge(
-    mut rx: mpsc::Receiver<crate::state_machine::executor::SessionEvent>,
-    global_coordinator: Arc<GlobalEventCoordinator>,
-) {
-    tokio::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            let api_event = match event {
-                crate::state_machine::executor::SessionEvent::Custom { session_id, event } => {
-                    match event.as_str() {
-                        "CallOnHold" => Some(crate::api::events::Event::CallOnHold {
-                            call_id: session_id,
-                        }),
-                        "CallResumed" => Some(crate::api::events::Event::CallResumed {
-                            call_id: session_id,
-                        }),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-
-            if let Some(api_event) = api_event {
-                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-                if let Err(e) = global_coordinator.publish(wrapped).await {
-                    tracing::warn!("Failed to publish state-machine API event: {}", e);
-                }
-            }
-        }
-    });
 }
 
 /// Sprint 3 A6 — best-effort STUN probe for the RTP-side public

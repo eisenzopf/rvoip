@@ -1,10 +1,11 @@
 //! End-to-end TLS handshake test for `TlsTransport`.
 //!
 //! Generates a self-signed RSA cert via `rcgen`, binds a server-side
-//! `TlsTransport` on it, then has a client-side `TlsTransport` (with
+//! `TlsTransport` on it, then has a client-only `TlsTransport` (with
 //! `insecure_skip_verify=true` to accept the self-signed cert) dial it
-//! and exchange a real SIP REGISTER request. Asserts the server's
-//! `TransportEvent::MessageReceived` carries the original method.
+//! without any local endpoint cert/key and exchange a real SIP REGISTER
+//! request. Asserts the server's `TransportEvent::MessageReceived`
+//! carries the original method.
 //!
 //! This is the regression check for **Step 1B** of the TLS roadmap
 //! (`crates/TLS_SIP_IMPLEMENTATION_PLAN.md`): the client connector at
@@ -69,20 +70,17 @@ async fn tls_client_connect_and_send_succeeds_against_self_signed_server() {
     // Give the listener a moment to actually bind.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Client side: another TlsTransport on a different ephemeral port,
-    // built with insecure_skip_verify=true so it accepts our
-    // self-signed cert (production deployments load real certs via
-    // `extra_ca_path` or a system trust store; see
-    // `crates/TLS_SIP_IMPLEMENTATION_PLAN.md` Step 1C).
+    // Client side: client-only TLS, with no local endpoint cert/key.
+    // It accepts our self-signed server cert only because this dev test
+    // opts into insecure_skip_verify.
     let client_addr = loopback_addr(0);
-    let (client_transport, _client_rx) = TlsTransport::bind_with_client_config(
+    let (client_transport, _client_rx) = TlsTransport::client_only(
         client_addr,
-        &cert_path,
-        &key_path,
         None,
         TlsClientConfig {
             extra_ca_path: None,
             insecure_skip_verify: true,
+            ..Default::default()
         },
     )
     .await
@@ -138,9 +136,9 @@ async fn tls_client_default_validation_rejects_self_signed_cert() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let (client_transport, _client_rx) =
-        TlsTransport::bind(loopback_addr(0), &cert_path, &key_path, None)
+        TlsTransport::client_only(loopback_addr(0), None, TlsClientConfig::default())
             .await
-            .expect("client bind");
+            .expect("client config");
 
     let result = tokio::time::timeout(
         Duration::from_secs(5),
