@@ -7,7 +7,7 @@
 //! ## Features
 //!
 //! - **ITU-T G.711 Compliant**: Passes official compliance tests
-//! - **Real Audio Tested**: Validated with actual speech samples  
+//! - **Real Audio Tested**: Validated with actual speech samples
 //! - **Good Quality**: ~37 dB SNR with real speech
 //! - **Lookup Table Optimized**: Fast O(1) encoding/decoding
 //!
@@ -53,7 +53,7 @@
 //!
 //! The WAV roundtrip tests automatically download real speech samples and validate:
 //! - Signal-to-Noise Ratio (SNR) measurement
-//! - Round-trip audio quality preservation  
+//! - Round-trip audio quality preservation
 //! - Proper encoding/decoding with real audio data
 //! - Output WAV files for manual quality assessment
 //!

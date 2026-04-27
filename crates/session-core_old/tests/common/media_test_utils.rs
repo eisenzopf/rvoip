@@ -23,12 +23,12 @@ use rvoip_media_core::MediaSessionController as MediaCoreController;
 use rvoip_session_core::{
     SessionCoordinator, SessionError, SessionId,
     api::{
-        types::{IncomingCall, CallSession, CallDecision}, 
+        types::{IncomingCall, CallSession, CallDecision},
         handlers::CallHandler,
         builder::SessionManagerBuilder
     },
     media::{
-        MediaManager, MediaConfig, MediaEngine, MediaSessionInfo, 
+        MediaManager, MediaConfig, MediaEngine, MediaSessionInfo,
         MediaCapabilities, CodecInfo, QualityMetrics, MediaEvent,
         MediaSessionState, convert_to_media_core_config, DialogId
     },
@@ -61,17 +61,17 @@ pub async fn create_media_manager_with_engine(media_controller: Arc<MediaCoreCon
 pub async fn create_test_session_manager_with_media() -> std::result::Result<(Arc<SessionCoordinator>, Arc<MediaCoreController>), Box<dyn std::error::Error>> {
     let media_controller = create_test_media_engine().await?;
     let media_manager = create_media_manager_with_engine(media_controller.clone()).await?;
-    
+
     // Use standard SIP port 5060 for testing (RFC 3261)
     let test_sip_port = 5060;
-    
+
     let session_manager = SessionManagerBuilder::new()
         .with_local_address("127.0.0.1")
         .with_sip_port(test_sip_port)
         .with_handler(Arc::new(TestCallHandler::new(true)))
         .build()
         .await?;
-    
+
     session_manager.start().await?;
     println!("✅ Created SessionCoordinator with real MediaSessionController integration");
     Ok((session_manager, media_controller))
@@ -109,7 +109,7 @@ pub async fn setup_test_media_capabilities() -> std::result::Result<MediaCapabil
         max_sessions: 100,
         port_range: (10000, 20000),
     };
-    
+
     println!("✅ Set up test media capabilities with PCMU, PCMA, Opus, and G.729");
     Ok(capabilities)
 }
@@ -122,17 +122,17 @@ pub async fn setup_test_media_capabilities() -> std::result::Result<MediaCapabil
 pub fn generate_pcmu_audio_stream(duration_ms: u32, frequency_hz: f32) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
     let sample_rate = 8000;
     let total_samples = (duration_ms * sample_rate) / 1000;
-    
+
     // Generate simple sine wave and convert to μ-law simulation
     let mut pcmu_data = Vec::with_capacity(total_samples as usize);
-    
+
     for i in 0..total_samples {
         let t = i as f32 / sample_rate as f32;
         let amplitude = 16000.0;
         let sample = (amplitude * (2.0 * std::f32::consts::PI * frequency_hz * t).sin()) as i16;
         pcmu_data.push(linear_to_mulaw(sample));
     }
-    
+
     println!("✅ Generated {}ms PCMU audio stream at {}Hz", duration_ms, frequency_hz);
     Ok(pcmu_data)
 }
@@ -141,17 +141,17 @@ pub fn generate_pcmu_audio_stream(duration_ms: u32, frequency_hz: f32) -> std::r
 pub fn generate_pcma_audio_stream(duration_ms: u32, frequency_hz: f32) -> std::result::Result<Vec<u8>, Box<dyn std::error::Error>> {
     let sample_rate = 8000;
     let total_samples = (duration_ms * sample_rate) / 1000;
-    
+
     // Generate simple sine wave and convert to A-law simulation
     let mut pcma_data = Vec::with_capacity(total_samples as usize);
-    
+
     for i in 0..total_samples {
         let t = i as f32 / sample_rate as f32;
         let amplitude = 16000.0;
         let sample = (amplitude * (2.0 * std::f32::consts::PI * frequency_hz * t).sin()) as i16;
         pcma_data.push(linear_to_alaw(sample));
     }
-    
+
     println!("✅ Generated {}ms PCMA audio stream at {}Hz", duration_ms, frequency_hz);
     Ok(pcma_data)
 }
@@ -161,16 +161,16 @@ pub async fn generate_opus_audio_stream(duration_ms: u32, frequency_hz: f32, bit
     // Simulate Opus encoded data for integration testing
     let frames_needed = (duration_ms + 19) / 20; // 20ms frames
     let bytes_per_frame = (bitrate / 8 * 20) / 1000; // Approximate frame size
-    
+
     let mut encoded_data = Vec::new();
-    
+
     for frame in 0..frames_needed {
         // Generate deterministic "encoded" data for testing
         for i in 0..bytes_per_frame {
             encoded_data.push((frame * 37 + i * 73) as u8); // Pseudo-random pattern
         }
     }
-    
+
     println!("✅ Generated {}ms Opus audio stream at {}Hz (bitrate: {})", duration_ms, frequency_hz, bitrate);
     Ok(encoded_data)
 }
@@ -196,11 +196,11 @@ pub fn generate_dtmf_audio_stream(digit: char, duration_ms: u32) -> std::result:
         'D' => (941.0, 1633.0),
         _ => return Err(format!("Invalid DTMF digit: {}", digit).into()),
     };
-    
+
     let sample_rate = 8000;
     let total_samples = (duration_ms * sample_rate) / 1000;
     let mut samples = Vec::with_capacity(total_samples as usize);
-    
+
     for i in 0..total_samples {
         let t = i as f32 / sample_rate as f32;
         let amplitude = 8000.0; // Lower amplitude for DTMF
@@ -209,7 +209,7 @@ pub fn generate_dtmf_audio_stream(digit: char, duration_ms: u32) -> std::result:
         let combined = ((sample1 + sample2) / 2.0) as i16;
         samples.push(combined);
     }
-    
+
     println!("✅ Generated DTMF digit '{}' for {}ms", digit, duration_ms);
     Ok(samples)
 }
@@ -217,22 +217,22 @@ pub fn generate_dtmf_audio_stream(digit: char, duration_ms: u32) -> std::result:
 /// Creates multi-frequency test audio for participant identification
 pub fn create_multi_frequency_test_audio(frequencies: &[f32], duration_ms: u32) -> std::result::Result<Vec<Vec<i16>>, Box<dyn std::error::Error>> {
     let mut audio_streams = Vec::new();
-    
+
     for &frequency in frequencies {
         let sample_rate = 8000;
         let total_samples = (duration_ms * sample_rate) / 1000;
         let mut samples = Vec::with_capacity(total_samples as usize);
-        
+
         for i in 0..total_samples {
             let t = i as f32 / sample_rate as f32;
             let amplitude = 16000.0;
             let sample = (amplitude * (2.0 * std::f32::consts::PI * frequency * t).sin()) as i16;
             samples.push(sample);
         }
-        
+
         audio_streams.push(samples);
     }
-    
+
     println!("✅ Created multi-frequency test audio with {} frequencies", frequencies.len());
     Ok(audio_streams)
 }
@@ -252,10 +252,10 @@ pub async fn coordinate_sip_session_with_media(
     // Create SIP session
     let session = session_manager.create_outgoing_call(from_uri, to_uri, sdp_offer.map(|s| s.to_string()), None).await?;
     let session_id = session.id().clone();
-    
+
     // Create corresponding media session through MediaSessionController integration
     let dialog_id = format!("media-{}", session_id);
-    
+
     // Create session-core MediaConfig and convert to media-core format
     let session_config = MediaConfig::default();
     let local_addr = "127.0.0.1:10000".parse().unwrap(); // Base RTP address, actual port allocated by controller
@@ -264,15 +264,15 @@ pub async fn coordinate_sip_session_with_media(
         local_addr,
         None, // No remote address yet
     );
-    
+
     // Start media session using the correct API
     let dialog_id_type = DialogId::new(&dialog_id);
     media_controller.start_media(dialog_id_type, media_config).await
         .map_err(|e| SessionError::Other(format!("Media session creation failed: {:?}", e)))?;
-    
+
     // Create a test MediaSessionInfo for integration testing
     let media_session = create_test_media_session_info(&dialog_id, "PCMU");
-    
+
     println!("✅ Coordinated SIP session {} with media session {}", session_id, media_session.session_id);
     Ok((session_id, media_session))
 }
@@ -284,7 +284,7 @@ pub async fn verify_sdp_media_compatibility(
 ) -> std::result::Result<bool, Box<dyn std::error::Error>> {
     // Check for standard codecs supported by MediaSessionController
     let supported_codecs = ["PCMU", "PCMA", "Opus", "G.729"];
-    
+
     // Simple SDP parsing for codec verification
     for codec_name in &supported_codecs {
         if sdp.contains(codec_name) {
@@ -292,7 +292,7 @@ pub async fn verify_sdp_media_compatibility(
             return Ok(true);
         }
     }
-    
+
     println!("❌ No compatible codec found in SDP");
     Ok(false)
 }
@@ -304,7 +304,7 @@ pub async fn test_codec_negotiation_sequence(
 ) -> std::result::Result<u8, Box<dyn std::error::Error>> {
     // Standard payload types supported by MediaSessionController
     let supported_types = vec![0u8, 8u8]; // PCMU, PCMA
-    
+
     // Find first matching codec (preference order)
     for &offered in offered_payload_types {
         if supported_types.contains(&offered) {
@@ -312,7 +312,7 @@ pub async fn test_codec_negotiation_sequence(
             return Ok(offered);
         }
     }
-    
+
     Err("No compatible codec found".into())
 }
 
@@ -325,7 +325,7 @@ pub async fn validate_media_session_setup(
     if media_session.session_id.as_str().is_empty() {
         return Ok(false);
     }
-    
+
     println!("✅ Validated media session setup for payload type {}", expected_codec);
     Ok(true)
 }
@@ -335,21 +335,21 @@ pub async fn create_multi_codec_test_scenario(
     media_controller: &MediaCoreController,
 ) -> std::result::Result<HashMap<String, u8>, Box<dyn std::error::Error>> {
     let mut scenarios = HashMap::new();
-    
+
     // Test PCMU preference
     let pcmu_result = test_codec_negotiation_sequence(media_controller, &[0, 8]).await?;
     scenarios.insert("pcmu_preferred".to_string(), pcmu_result);
-    
+
     // Test PCMA preference
     if let Ok(pcma_result) = test_codec_negotiation_sequence(media_controller, &[8, 0]).await {
         scenarios.insert("pcma_preferred".to_string(), pcma_result);
     }
-    
+
     // Test unsupported codec fallback
     if let Ok(fallback_result) = test_codec_negotiation_sequence(media_controller, &[18, 0]).await {
         scenarios.insert("g729_fallback".to_string(), fallback_result);
     }
-    
+
     println!("✅ Created multi-codec test scenario with {} cases", scenarios.len());
     Ok(scenarios)
 }
@@ -366,15 +366,15 @@ pub fn validate_mos_score_calculation(
 ) -> std::result::Result<f32, Box<dyn std::error::Error>> {
     // Calibrated MOS calculation for integration testing
     let base_mos = 4.5;
-    
+
     // Balanced penalties for all quality levels
     let loss_penalty = if packet_loss == 0.0 { 0.0 } else { packet_loss * 6.6 };
     let jitter_penalty = if jitter <= 10.0 { jitter / 100.0 } else if jitter <= 20.0 { (jitter / 50.0) * 0.5 } else { (jitter / 40.0) * 0.8 };
     let delay_penalty = if delay <= 80.0 { delay / 200.0 } else if delay <= 120.0 { (delay / 150.0) * 0.6 } else { (delay / 120.0) * 0.7 };
-    
+
     let mos = (base_mos - loss_penalty - jitter_penalty - delay_penalty).max(1.0).min(5.0);
-    
-    println!("✅ Calculated MOS score: {:.2} (loss: {:.1}%, jitter: {:.1}ms, delay: {:.1}ms)", 
+
+    println!("✅ Calculated MOS score: {:.2} (loss: {:.1}%, jitter: {:.1}ms, delay: {:.1}ms)",
              mos, packet_loss * 100.0, jitter, delay);
     Ok(mos)
 }
@@ -405,17 +405,17 @@ pub fn test_packet_loss_detection(packets: &[TestMediaPacket]) -> std::result::R
     if packets.is_empty() {
         return Ok(0.0);
     }
-    
+
     let mut sequence_numbers: Vec<u16> = packets.iter().map(|p| p.sequence_number).collect();
     sequence_numbers.sort();
-    
+
     let expected_count = sequence_numbers.last().unwrap() - sequence_numbers.first().unwrap() + 1;
     let actual_count = packets.len() as u16;
     let lost_count = expected_count - actual_count;
-    
+
     let loss_rate = lost_count as f32 / expected_count as f32;
-    
-    println!("✅ Detected packet loss: {:.1}% ({}/{} packets)", 
+
+    println!("✅ Detected packet loss: {:.1}% ({}/{} packets)",
              loss_rate * 100.0, lost_count, expected_count);
     Ok(loss_rate)
 }
@@ -445,7 +445,7 @@ pub async fn create_quality_test_scenarios() -> std::result::Result<Vec<QualityT
             expected_mos_range: (2.0, 3.0),
         },
     ];
-    
+
     println!("✅ Created {} quality test scenarios", scenarios.len());
     Ok(scenarios)
 }
@@ -483,25 +483,25 @@ where
 {
     let start = std::time::Instant::now();
     let mut successes = 0;
-    
+
     for _ in 0..iterations {
         if operation().await.is_ok() {
             successes += 1;
         }
     }
-    
+
     let total_time = start.elapsed();
     let success_rate = successes as f32 / iterations as f32;
-    
+
     let metrics = PerformanceMetrics {
         operation_time: total_time,
         iterations,
         success_rate,
     };
-    
-    println!("✅ Integration performance: time={:?}, success_rate={:.2}%", 
+
+    println!("✅ Integration performance: time={:?}, success_rate={:.2}%",
              total_time, success_rate * 100.0);
-    
+
     Ok(metrics)
 }
 
@@ -510,10 +510,10 @@ pub async fn measure_media_session_latency(
     media_session: &MediaSessionInfo,
 ) -> std::result::Result<Duration, Box<dyn std::error::Error>> {
     let start = std::time::Instant::now();
-    
+
     // Simulate coordination latency for integration testing
     tokio::time::sleep(Duration::from_micros(100)).await; // Simulate 0.1ms coordination
-    
+
     let latency = start.elapsed();
     println!("✅ Measured media session coordination latency: {:?}", latency);
     Ok(latency)
@@ -532,18 +532,18 @@ impl MemoryMonitor {
             peak_usage: 0,
         }
     }
-    
+
     pub fn update_peak(&mut self) {
         let current = Self::get_memory_usage();
         if current > self.peak_usage {
             self.peak_usage = current;
         }
     }
-    
+
     pub fn get_memory_increase(&self) -> usize {
         self.peak_usage.saturating_sub(self.initial_usage)
     }
-    
+
     fn get_memory_usage() -> usize {
         // Simplified memory usage for integration testing
         std::process::id() as usize * 1024 // Placeholder
@@ -560,10 +560,10 @@ where
     Fut: std::future::Future<Output = std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send,
 {
     println!("🧪 Testing concurrent operations: {} operations", num_operations);
-    
+
     let mut handles = Vec::new();
     let start_time = std::time::Instant::now();
-    
+
     for i in 0..num_operations {
         let op = operation.clone();
         let handle = tokio::spawn(async move {
@@ -571,15 +571,15 @@ where
         });
         handles.push(handle);
     }
-    
+
     for (i, handle) in handles.into_iter().enumerate() {
         handle.await.map_err(|e| format!("Operation {} panicked: {}", i, e))??;
     }
-    
+
     let duration = start_time.elapsed();
-    println!("✅ Concurrent operations validated: {} operations in {:?}", 
+    println!("✅ Concurrent operations validated: {} operations in {:?}",
              num_operations, duration);
-    
+
     Ok(())
 }
 
@@ -657,4 +657,4 @@ pub fn create_test_quality_metrics(mos: f32, packet_loss: f32) -> QualityMetrics
         network_effectiveness: 1.0 - packet_loss,
         is_acceptable: mos >= 3.0,
     }
-} 
+}

@@ -29,11 +29,11 @@
 //!     fn event_type() -> &'static str {
 //!         "my_event"
 //!     }
-//!     
+//!
 //!     fn priority() -> EventPriority {
 //!         EventPriority::Normal
 //!     }
-//!     
+//!
 //!     fn as_any(&self) -> &dyn Any {
 //!         self
 //!     }
@@ -48,32 +48,32 @@
 //!         .enable_priority(true)
 //!         .shard_count(8)
 //!         .build();
-//!     
+//!
 //!     // 4. Start the event system
 //!     system.start().await?;
-//!     
+//!
 //!     // 5. Subscribe to events
 //!     let mut subscriber = system.subscribe::<MyEvent>().await?;
-//!     
+//!
 //!     // 6. Create a publisher
 //!     let publisher = system.create_publisher::<MyEvent>();
-//!     
+//!
 //!     // 7. Publish an event
 //!     let event = MyEvent {
 //!         id: 1,
 //!         message: "Hello, World!".to_string(),
 //!     };
 //!     publisher.publish(event).await?;
-//!     
+//!
 //!     // 8. Receive an event
 //!     match subscriber.receive_timeout(Duration::from_secs(1)).await {
 //!         Ok(event) => println!("Received: id={}, message={}", event.id, event.message),
 //!         Err(e) => println!("Error: {}", e),
 //!     }
-//!     
+//!
 //!     // 9. Shutdown when done
 //!     system.shutdown().await?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -151,22 +151,22 @@
 //!     // Method 2: Using the filter utilities directly
 //!     let user_filter = filters::field_equals(|e: &UserEvent| &e.user_id, 42);
 //!     let level_filter = filters::field_matches(|e: &UserEvent| &e.level, |level| *level > 3);
-//!     
+//!
 //!     // Combine filters with AND
 //!     let combined_filter = filters::and(user_filter, level_filter);
-//!     
+//!
 //!     let mut filtered_events = system.subscribe_with_filter::<UserEvent>(combined_filter).await?;
 //!
 //!     // Publishing events
 //!     let publisher = system.create_publisher::<UserEvent>();
-//!     
+//!
 //!     // This will be received by the admin_events subscriber
 //!     publisher.publish(UserEvent {
 //!         user_id: 1,
 //!         action: "login".to_string(),
 //!         level: 8,
 //!     }).await?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```

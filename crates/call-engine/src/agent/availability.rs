@@ -70,19 +70,19 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::agent::AvailabilityTracker;
-/// 
+///
 /// let mut tracker = AvailabilityTracker::new();
-/// 
+///
 /// // Register agent activity
 /// tracker.update_activity("agent-001".to_string());
-/// 
+///
 /// // Check if agent is active (5-minute timeout)
 /// if tracker.is_agent_active("agent-001", 300) {
 ///     println!("✅ Agent is active");
 /// } else {
 ///     println!("⚠️ Agent appears inactive");
 /// }
-/// 
+///
 /// // Check activity with different timeout
 /// if tracker.is_agent_active("agent-001", 60) {
 ///     println!("Agent active within last minute");
@@ -93,7 +93,7 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::agent::availability::{AvailabilityTracker, ActivityType, AvailabilityConfig};
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let config = AvailabilityConfig {
 ///     default_timeout_seconds: 300,    // 5 minutes default
@@ -102,17 +102,17 @@ use crate::error::{CallCenterError, Result};
 ///     enable_activity_history: true,
 ///     max_history_entries: 1000,
 /// };
-/// 
+///
 /// let mut tracker = AvailabilityTracker::with_config(config);
-/// 
+///
 /// // Record different types of activity
 /// tracker.record_activity("agent-001", ActivityType::SipRegister)?;
 /// tracker.record_activity("agent-001", ActivityType::CallHandling)?;
 /// tracker.record_activity("agent-001", ActivityType::WebInterface)?;
-/// 
+///
 /// // Get detailed availability status
 /// let status = tracker.get_availability_status("agent-001")?;
-/// 
+///
 /// match status {
 ///     Some(info) => {
 ///         println!("Agent Status:");
@@ -133,30 +133,30 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut tracker = AvailabilityTracker::new();
-/// 
+///
 /// // Simulate multiple agents with activity
 /// let agents = vec!["agent-001", "agent-002", "agent-003", "agent-004"];
-/// 
+///
 /// for agent in &agents {
 ///     tracker.update_activity(agent.to_string());
 /// }
-/// 
+///
 /// // Get availability summary for all agents
 /// let summary = tracker.get_availability_summary(300)?; // 5-minute timeout
-/// 
+///
 /// println!("📊 Availability Summary:");
 /// println!("  Total agents: {}", summary.total_agents);
 /// println!("  Active agents: {}", summary.active_agents);
 /// println!("  Inactive agents: {}", summary.inactive_agents);
 /// println!("  Activity rate: {:.1}%", summary.activity_percentage);
-/// 
+///
 /// // Get detailed breakdown
 /// for agent_info in summary.agent_details {
 ///     let status = if agent_info.is_active { "🟢" } else { "🔴" };
-///     println!("  {} {}: {} seconds ago", 
+///     println!("  {} {}: {} seconds ago",
 ///              status, agent_info.agent_id, agent_info.seconds_since_last_activity);
 /// }
 /// # Ok(())
@@ -168,28 +168,28 @@ use crate::error::{CallCenterError, Result};
 /// ```rust
 /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
 /// use chrono::{Utc, Duration};
-/// 
+///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let tracker = AvailabilityTracker::new();
-/// 
+///
 /// // Analyze activity patterns over time
 /// let end_time = Utc::now();
 /// let start_time = end_time - Duration::hours(8); // Last 8 hours
-/// 
+///
 /// let analysis = tracker.analyze_activity_patterns("agent-001", start_time, end_time).await?;
-/// 
+///
 /// println!("📈 Activity Pattern Analysis for agent-001:");
 /// println!("  Total activities: {}", analysis.total_activities);
 /// println!("  Average interval: {:.1} minutes", analysis.average_activity_interval_minutes);
 /// println!("  Peak activity hour: {}", analysis.peak_activity_hour);
 /// println!("  Inactive periods: {}", analysis.inactive_periods.len());
-/// 
+///
 /// // Show longest inactive periods
 /// for (i, period) in analysis.inactive_periods.iter().take(3).enumerate() {
-///     println!("  {}. Inactive for {} minutes at {}", 
+///     println!("  {}. Inactive for {} minutes at {}",
 ///              i + 1, period.duration_minutes, period.start_time.format("%H:%M"));
 /// }
-/// 
+///
 /// // Get recommendations
 /// for recommendation in analysis.recommendations {
 ///     println!("💡 {}", recommendation);
@@ -203,35 +203,35 @@ use crate::error::{CallCenterError, Result};
 /// ```rust
 /// use rvoip_call_engine::agent::availability::{AvailabilityTracker, HeartbeatManager};
 /// use std::time::Duration;
-/// 
+///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut tracker = AvailabilityTracker::new();
-/// 
+///
 /// // Configure heartbeat monitoring
 /// let heartbeat_config = HeartbeatManager {
 ///     interval: Duration::from_secs(30),    // 30-second heartbeats
 ///     timeout_multiplier: 3,                // 90 seconds timeout
 ///     enable_automatic_recovery: true,
 /// };
-/// 
+///
 /// tracker.configure_heartbeat(heartbeat_config)?;
-/// 
+///
 /// // Start heartbeat monitoring for an agent
 /// tracker.start_heartbeat_monitoring("agent-001").await?;
-/// 
+///
 /// // Simulate heartbeat reception
 /// loop {
 ///     // In a real system, this would be triggered by actual heartbeats
 ///     tracker.receive_heartbeat("agent-001").await?;
-///     
+///
 ///     // Check for agents that missed heartbeats
 ///     let missed_heartbeats = tracker.check_missed_heartbeats().await?;
-///     
+///
 ///     for agent_id in missed_heartbeats {
 ///         println!("💔 Agent {} missed heartbeat - marking as potentially inactive", agent_id);
 ///         tracker.handle_missed_heartbeat(&agent_id).await?;
 ///     }
-///     
+///
 ///     tokio::time::sleep(Duration::from_secs(30)).await;
 ///     break; // For example purposes
 /// }
@@ -241,13 +241,13 @@ use crate::error::{CallCenterError, Result};
 pub struct AvailabilityTracker {
     /// Last activity time for each agent
     last_activity: HashMap<String, ActivityInfo>,
-    
+
     /// Configuration for availability tracking
     config: AvailabilityConfig,
-    
+
     /// Activity history for pattern analysis
     activity_history: HashMap<String, Vec<ActivityRecord>>,
-    
+
     /// Heartbeat monitoring state
     heartbeat_state: HashMap<String, HeartbeatState>,
 }
@@ -257,16 +257,16 @@ pub struct AvailabilityTracker {
 pub struct ActivityInfo {
     /// When the last activity occurred
     pub last_activity_time: Instant,
-    
+
     /// Type of the last activity
     pub last_activity_type: ActivityType,
-    
+
     /// UTC timestamp of last activity for external systems
     pub last_activity_utc: DateTime<Utc>,
-    
+
     /// Number of activities recorded today
     pub activities_today: u32,
-    
+
     /// Whether agent is currently considered active
     pub is_currently_active: bool,
 }
@@ -295,16 +295,16 @@ pub enum ActivityType {
 pub struct AvailabilityConfig {
     /// Default timeout in seconds for considering an agent inactive
     pub default_timeout_seconds: u64,
-    
+
     /// Interval for heartbeat monitoring
     pub heartbeat_interval_seconds: u64,
-    
+
     /// Seconds before timeout to send inactivity warning
     pub inactivity_warning_seconds: u64,
-    
+
     /// Whether to maintain activity history
     pub enable_activity_history: bool,
-    
+
     /// Maximum number of history entries per agent
     pub max_history_entries: usize,
 }
@@ -314,22 +314,22 @@ pub struct AvailabilityConfig {
 pub struct AvailabilityStatus {
     /// Agent identifier
     pub agent_id: String,
-    
+
     /// Seconds since last recorded activity
     pub seconds_since_last_activity: u64,
-    
+
     /// Type of last activity
     pub last_activity_type: ActivityType,
-    
+
     /// Whether agent is considered active
     pub is_active: bool,
-    
+
     /// Whether agent is approaching timeout (warning threshold)
     pub near_timeout_warning: bool,
-    
+
     /// Number of activities recorded today
     pub activities_today: u32,
-    
+
     /// UTC timestamp of last activity
     pub last_activity_utc: DateTime<Utc>,
 }
@@ -339,19 +339,19 @@ pub struct AvailabilityStatus {
 pub struct AvailabilitySummary {
     /// Total number of tracked agents
     pub total_agents: usize,
-    
+
     /// Number of currently active agents
     pub active_agents: usize,
-    
+
     /// Number of currently inactive agents
     pub inactive_agents: usize,
-    
+
     /// Percentage of agents that are active
     pub activity_percentage: f64,
-    
+
     /// Detailed information for each agent
     pub agent_details: Vec<AgentAvailabilityDetail>,
-    
+
     /// Summary generation timestamp
     pub generated_at: DateTime<Utc>,
 }
@@ -361,13 +361,13 @@ pub struct AvailabilitySummary {
 pub struct AgentAvailabilityDetail {
     /// Agent identifier
     pub agent_id: String,
-    
+
     /// Seconds since last activity
     pub seconds_since_last_activity: u64,
-    
+
     /// Whether agent is considered active
     pub is_active: bool,
-    
+
     /// Last activity type
     pub last_activity_type: ActivityType,
 }
@@ -377,10 +377,10 @@ pub struct AgentAvailabilityDetail {
 pub struct ActivityRecord {
     /// When the activity occurred
     pub timestamp: DateTime<Utc>,
-    
+
     /// Type of activity
     pub activity_type: ActivityType,
-    
+
     /// Duration since previous activity
     pub interval_since_previous: Option<Duration>,
 }
@@ -390,25 +390,25 @@ pub struct ActivityRecord {
 pub struct ActivityPatternAnalysis {
     /// Agent being analyzed
     pub agent_id: String,
-    
+
     /// Analysis time period
     pub analysis_period: (DateTime<Utc>, DateTime<Utc>),
-    
+
     /// Total number of activities in period
     pub total_activities: u32,
-    
+
     /// Average interval between activities in minutes
     pub average_activity_interval_minutes: f64,
-    
+
     /// Hour of day with peak activity (0-23)
     pub peak_activity_hour: u8,
-    
+
     /// Periods of inactivity longer than threshold
     pub inactive_periods: Vec<InactivePeriod>,
-    
+
     /// Pattern-based recommendations
     pub recommendations: Vec<String>,
-    
+
     /// Overall activity score (0.0 - 1.0)
     pub activity_score: f64,
 }
@@ -418,10 +418,10 @@ pub struct ActivityPatternAnalysis {
 pub struct InactivePeriod {
     /// When inactivity started
     pub start_time: DateTime<Utc>,
-    
+
     /// When activity resumed
     pub end_time: DateTime<Utc>,
-    
+
     /// Duration of inactivity in minutes
     pub duration_minutes: u64,
 }
@@ -431,10 +431,10 @@ pub struct InactivePeriod {
 pub struct HeartbeatManager {
     /// Expected interval between heartbeats
     pub interval: Duration,
-    
+
     /// Multiplier for timeout (interval * multiplier)
     pub timeout_multiplier: u32,
-    
+
     /// Whether to automatically recover from missed heartbeats
     pub enable_automatic_recovery: bool,
 }
@@ -444,10 +444,10 @@ pub struct HeartbeatManager {
 struct HeartbeatState {
     /// Last heartbeat received
     last_heartbeat: Instant,
-    
+
     /// Number of consecutive missed heartbeats
     missed_count: u32,
-    
+
     /// Whether heartbeat monitoring is active
     monitoring_active: bool,
 }
@@ -462,14 +462,14 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// let tracker = AvailabilityTracker::new();
     /// println!("Availability tracker initialized with default settings");
     /// ```
     pub fn new() -> Self {
         Self::with_config(AvailabilityConfig::default())
     }
-    
+
     /// Create a new availability tracker with custom configuration
     ///
     /// Initializes a new availability tracker with the specified configuration.
@@ -483,7 +483,7 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::{AvailabilityTracker, AvailabilityConfig};
-    /// 
+    ///
     /// let config = AvailabilityConfig {
     ///     default_timeout_seconds: 180,      // 3 minutes
     ///     heartbeat_interval_seconds: 30,    // 30 seconds
@@ -491,7 +491,7 @@ impl AvailabilityTracker {
     ///     enable_activity_history: true,
     ///     max_history_entries: 500,
     /// };
-    /// 
+    ///
     /// let tracker = AvailabilityTracker::with_config(config);
     /// ```
     pub fn with_config(config: AvailabilityConfig) -> Self {
@@ -502,7 +502,7 @@ impl AvailabilityTracker {
             heartbeat_state: HashMap::new(),
         }
     }
-    
+
     /// Update agent activity timestamp with default activity type
     ///
     /// Records current activity for the specified agent using a generic activity type.
@@ -516,19 +516,19 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// let mut tracker = AvailabilityTracker::new();
-    /// 
+    ///
     /// // Record activity for an agent
     /// tracker.update_activity("agent-001".to_string());
-    /// 
+    ///
     /// // Agent is now considered active
     /// assert!(tracker.is_agent_active("agent-001", 300));
     /// ```
     pub fn update_activity(&mut self, agent_id: String) {
         let _ = self.record_activity(&agent_id, ActivityType::Custom("general".to_string()));
     }
-    
+
     /// Record specific type of activity for an agent
     ///
     /// Records activity with a specific activity type, enabling more detailed
@@ -547,10 +547,10 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::{AvailabilityTracker, ActivityType};
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut tracker = AvailabilityTracker::new();
-    /// 
+    ///
     /// // Record different types of activities
     /// tracker.record_activity("agent-001", ActivityType::SipRegister)?;
     /// tracker.record_activity("agent-001", ActivityType::CallHandling)?;
@@ -561,7 +561,7 @@ impl AvailabilityTracker {
     pub fn record_activity(&mut self, agent_id: &str, activity_type: ActivityType) -> Result<()> {
         let now = Instant::now();
         let now_utc = Utc::now();
-        
+
         // Update main activity tracking
         let activity_info = self.last_activity.entry(agent_id.to_string())
             .or_insert_with(|| ActivityInfo {
@@ -571,41 +571,41 @@ impl AvailabilityTracker {
                 activities_today: 0,
                 is_currently_active: true,
             });
-        
+
         // Update activity info
         activity_info.last_activity_time = now;
         activity_info.last_activity_type = activity_type.clone();
         activity_info.last_activity_utc = now_utc;
         activity_info.activities_today += 1;
         activity_info.is_currently_active = true;
-        
+
         // Record in history if enabled
         if self.config.enable_activity_history {
             let history = self.activity_history.entry(agent_id.to_string())
                 .or_insert_with(Vec::new);
-            
+
             // Calculate interval since previous activity
             let interval_since_previous = history.last()
                 .map(|last| now_utc.signed_duration_since(last.timestamp).to_std().ok())
                 .flatten();
-            
-                    // Add new record  
+
+                    // Add new record
         history.push(ActivityRecord {
             timestamp: now_utc,
             activity_type: activity_type.clone(),
             interval_since_previous,
         });
-        
+
         // Limit history size
         if history.len() > self.config.max_history_entries {
             history.remove(0);
         }
     }
-    
+
     debug!("📊 Activity recorded for {}: {:?}", agent_id, activity_type);
         Ok(())
     }
-    
+
     /// Check if agent is considered active within timeout period
     ///
     /// Determines if an agent is active based on their last recorded activity
@@ -624,10 +624,10 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// let mut tracker = AvailabilityTracker::new();
     /// tracker.update_activity("agent-001".to_string());
-    /// 
+    ///
     /// // Check with different timeout values
     /// assert!(tracker.is_agent_active("agent-001", 300));  // 5 minutes
     /// assert!(tracker.is_agent_active("agent-001", 60));   // 1 minute
@@ -640,7 +640,7 @@ impl AvailabilityTracker {
             false
         }
     }
-    
+
     /// Get detailed availability status for an agent
     ///
     /// Returns comprehensive availability information including activity timing,
@@ -658,15 +658,15 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let tracker = AvailabilityTracker::new();
-    /// 
+    ///
     /// match tracker.get_availability_status("agent-001")? {
     ///     Some(status) => {
-    ///         println!("Agent {} last active {} seconds ago", 
+    ///         println!("Agent {} last active {} seconds ago",
     ///                  status.agent_id, status.seconds_since_last_activity);
-    ///         
+    ///
     ///         if status.near_timeout_warning {
     ///             println!("⚠️ Agent approaching inactivity timeout");
     ///         }
@@ -683,7 +683,7 @@ impl AvailabilityTracker {
             let seconds_since_last = activity_info.last_activity_time.elapsed().as_secs();
             let is_active = seconds_since_last < self.config.default_timeout_seconds;
             let near_timeout = seconds_since_last > self.config.inactivity_warning_seconds;
-            
+
             Ok(Some(AvailabilityStatus {
                 agent_id: agent_id.to_string(),
                 seconds_since_last_activity: seconds_since_last,
@@ -697,7 +697,7 @@ impl AvailabilityTracker {
             Ok(None)
         }
     }
-    
+
     /// Get availability summary for all tracked agents
     ///
     /// Returns comprehensive availability statistics across all agents
@@ -715,12 +715,12 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let tracker = AvailabilityTracker::new();
-    /// 
+    ///
     /// let summary = tracker.get_availability_summary(300)?; // 5-minute timeout
-    /// 
+    ///
     /// println!("Availability Summary:");
     /// println!("  Total: {}", summary.total_agents);
     /// println!("  Active: {}", summary.active_agents);
@@ -732,15 +732,15 @@ impl AvailabilityTracker {
     pub fn get_availability_summary(&self, timeout_seconds: u64) -> Result<AvailabilitySummary> {
         let mut agent_details = Vec::new();
         let mut active_count = 0;
-        
+
         for (agent_id, activity_info) in &self.last_activity {
             let seconds_since_last = activity_info.last_activity_time.elapsed().as_secs();
             let is_active = seconds_since_last < timeout_seconds;
-            
+
             if is_active {
                 active_count += 1;
             }
-            
+
             agent_details.push(AgentAvailabilityDetail {
                 agent_id: agent_id.clone(),
                 seconds_since_last_activity: seconds_since_last,
@@ -748,7 +748,7 @@ impl AvailabilityTracker {
                 last_activity_type: activity_info.last_activity_type.clone(),
             });
         }
-        
+
         let total_agents = agent_details.len();
         let inactive_agents = total_agents - active_count;
         let activity_percentage = if total_agents > 0 {
@@ -756,7 +756,7 @@ impl AvailabilityTracker {
         } else {
             0.0
         };
-        
+
         Ok(AvailabilitySummary {
             total_agents,
             active_agents: active_count,
@@ -766,7 +766,7 @@ impl AvailabilityTracker {
             generated_at: Utc::now(),
         })
     }
-    
+
     /// Analyze activity patterns for an agent over a time period
     ///
     /// Performs comprehensive analysis of agent activity patterns including
@@ -787,15 +787,15 @@ impl AvailabilityTracker {
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
     /// use chrono::{Utc, Duration};
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let tracker = AvailabilityTracker::new();
-    /// 
+    ///
     /// let end_time = Utc::now();
     /// let start_time = end_time - Duration::hours(4);
-    /// 
+    ///
     /// let analysis = tracker.analyze_activity_patterns("agent-001", start_time, end_time).await?;
-    /// 
+    ///
     /// println!("Activity Analysis:");
     /// println!("  Activities: {}", analysis.total_activities);
     /// println!("  Avg interval: {:.1}min", analysis.average_activity_interval_minutes);
@@ -810,33 +810,33 @@ impl AvailabilityTracker {
         end_time: DateTime<Utc>,
     ) -> Result<ActivityPatternAnalysis> {
         let history = self.activity_history.get(agent_id);
-        
+
         if let Some(records) = history {
             // Filter records within time period
             let period_records: Vec<_> = records.iter()
                 .filter(|r| r.timestamp >= start_time && r.timestamp <= end_time)
                 .collect();
-            
+
             let total_activities = period_records.len() as u32;
-            
+
             // Calculate average interval
             let total_interval_minutes: f64 = period_records.iter()
                 .filter_map(|r| r.interval_since_previous)
                 .map(|d| d.as_secs() as f64 / 60.0)
                 .sum();
-            
+
             let average_interval = if period_records.len() > 1 {
                 total_interval_minutes / (period_records.len() - 1) as f64
             } else {
                 0.0
             };
-            
+
             // Find peak activity hour (simplified)
             let peak_hour = 12; // TODO: Implement actual peak detection
-            
+
             // TODO: Implement full pattern analysis
             let activity_score = if total_activities > 0 { 0.8 } else { 0.0 };
-            
+
             Ok(ActivityPatternAnalysis {
                 agent_id: agent_id.to_string(),
                 analysis_period: (start_time, end_time),
@@ -867,7 +867,7 @@ impl AvailabilityTracker {
             })
         }
     }
-    
+
     /// Configure heartbeat monitoring
     ///
     /// Sets up heartbeat monitoring configuration for proactive agent availability detection.
@@ -881,16 +881,16 @@ impl AvailabilityTracker {
     /// ```rust
     /// use rvoip_call_engine::agent::availability::{AvailabilityTracker, HeartbeatManager};
     /// use std::time::Duration;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut tracker = AvailabilityTracker::new();
-    /// 
+    ///
     /// let config = HeartbeatManager {
     ///     interval: Duration::from_secs(30),
     ///     timeout_multiplier: 3,
     ///     enable_automatic_recovery: true,
     /// };
-    /// 
+    ///
     /// tracker.configure_heartbeat(config)?;
     /// # Ok(())
     /// # }
@@ -900,7 +900,7 @@ impl AvailabilityTracker {
         info!("Heartbeat monitoring configured: {:?}", heartbeat_config);
         Ok(())
     }
-    
+
     /// Start heartbeat monitoring for an agent
     ///
     /// Begins active heartbeat monitoring for the specified agent.
@@ -913,7 +913,7 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut tracker = AvailabilityTracker::new();
     /// tracker.start_heartbeat_monitoring("agent-001").await?;
@@ -926,11 +926,11 @@ impl AvailabilityTracker {
             missed_count: 0,
             monitoring_active: true,
         });
-        
+
         info!("🫀 Started heartbeat monitoring for agent: {}", agent_id);
         Ok(())
     }
-    
+
     /// Receive heartbeat from an agent
     ///
     /// Records receipt of a heartbeat signal from an agent.
@@ -943,7 +943,7 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut tracker = AvailabilityTracker::new();
     /// tracker.receive_heartbeat("agent-001").await?;
@@ -956,14 +956,14 @@ impl AvailabilityTracker {
             state.last_heartbeat = Instant::now();
             state.missed_count = 0;
         }
-        
+
         // Record as activity
         self.record_activity(agent_id, ActivityType::Heartbeat)?;
-        
+
         debug!("💓 Heartbeat received from agent: {}", agent_id);
         Ok(())
     }
-    
+
     /// Check for agents that have missed heartbeats
     ///
     /// Returns a list of agents that have missed their expected heartbeats.
@@ -976,10 +976,10 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let tracker = AvailabilityTracker::new();
-    /// 
+    ///
     /// let missed = tracker.check_missed_heartbeats().await?;
     /// for agent_id in missed {
     ///     println!("💔 Agent {} missed heartbeat", agent_id);
@@ -990,16 +990,16 @@ impl AvailabilityTracker {
     pub async fn check_missed_heartbeats(&self) -> Result<Vec<String>> {
         let mut missed = Vec::new();
         let timeout_duration = Duration::from_secs(90); // TODO: Use config
-        
+
         for (agent_id, state) in &self.heartbeat_state {
             if state.monitoring_active && state.last_heartbeat.elapsed() > timeout_duration {
                 missed.push(agent_id.clone());
             }
         }
-        
+
         Ok(missed)
     }
-    
+
     /// Handle missed heartbeat for an agent
     ///
     /// Processes a missed heartbeat situation for an agent, potentially
@@ -1013,7 +1013,7 @@ impl AvailabilityTracker {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::availability::AvailabilityTracker;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut tracker = AvailabilityTracker::new();
     /// tracker.handle_missed_heartbeat("agent-001").await?;
@@ -1024,10 +1024,10 @@ impl AvailabilityTracker {
         if let Some(state) = self.heartbeat_state.get_mut(agent_id) {
             state.missed_count += 1;
             warn!("💔 Agent {} missed heartbeat (count: {})", agent_id, state.missed_count);
-            
+
             // TODO: Implement recovery procedures
         }
-        
+
         Ok(())
     }
 }
@@ -1048,4 +1048,4 @@ impl Default for AvailabilityConfig {
             max_history_entries: 1000,
         }
     }
-} 
+}

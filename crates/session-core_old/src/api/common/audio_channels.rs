@@ -8,7 +8,7 @@ use crate::coordinator::SessionCoordinator;
 use crate::errors::Result;
 
 /// Setup bidirectional audio channels for a call session
-/// 
+///
 /// Returns (tx, rx) where:
 /// - tx: Send audio frames to remote party
 /// - rx: Receive audio frames from remote party
@@ -17,21 +17,21 @@ pub async fn setup_audio_channels(
     session_id: &SessionId,
 ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
     // Media session should already be ready when this is called
-    
+
     // Create channels for bidirectional audio with larger buffers
     let (tx_to_remote, mut rx_from_app) = mpsc::channel::<AudioFrame>(1000);
     let (tx_to_app, rx_from_remote) = mpsc::channel::<AudioFrame>(1000);
-    
+
     // Subscribe to incoming audio from remote
     let mut audio_subscriber = MediaControl::subscribe_to_audio_frames(coordinator, session_id).await?;
-    
+
     // Task to forward incoming audio to the application - made resilient
     let session_id_clone = session_id.clone();
     tokio::spawn(async move {
         tracing::info!("Audio receiver task started for session {}", session_id_clone);
         let mut frame_count = 0;
         let mut consecutive_failures = 0;
-        
+
         loop {
             match tokio::time::timeout(tokio::time::Duration::from_secs(1), audio_subscriber.recv()).await {
                 Ok(Some(frame)) => {
@@ -62,7 +62,7 @@ pub async fn setup_audio_channels(
         }
         tracing::info!("Audio receiver task completed for session {} - total frames: {}", session_id_clone, frame_count);
     });
-    
+
     // Task to forward outgoing audio from the application
     let coordinator_clone = coordinator.clone();
     let session_id_clone = session_id.clone();
@@ -75,7 +75,7 @@ pub async fn setup_audio_channels(
         }
         tracing::debug!("Audio sender task ended for session {}", session_id_clone);
     });
-    
+
     Ok((tx_to_remote, rx_from_remote))
 }
 

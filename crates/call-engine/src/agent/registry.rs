@@ -79,10 +79,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::{AgentRegistry, Agent, AgentStatus};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! // Create a new agent profile
 //! let agent = Agent {
 //!     id: "agent-001".to_string(),
@@ -94,11 +94,11 @@
 //!     department: Some("Sales".to_string()),
 //!     extension: Some("101".to_string()),
 //! };
-//! 
+//!
 //! // Register the agent
 //! let agent_id = registry.register_agent(agent).await?;
 //! println!("✅ Agent registered with ID: {}", agent_id);
-//! 
+//!
 //! // Update agent status
 //! registry.update_agent_status(&agent_id, AgentStatus::Available)?;
 //! println!("🟢 Agent is now available for calls");
@@ -111,16 +111,16 @@
 //! ```rust
 //! use rvoip_call_engine::agent::{AgentRegistry, AgentStatus};
 //! use rvoip_session_core::SessionId;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! // Simulate agent login
 //! let session_id = SessionId::new();
 //! registry.set_agent_session("agent-001".to_string(), session_id.clone())?;
-//! 
+//!
 //! println!("🔗 Agent session established: {}", session_id);
-//! 
+//!
 //! // Verify agent is available
 //! if let Some(status) = registry.get_agent_status("agent-001") {
 //!     match status {
@@ -130,7 +130,7 @@
 //!         AgentStatus::Offline => println!("❌ Agent offline"),
 //!     }
 //! }
-//! 
+//!
 //! // Later, agent logout
 //! registry.remove_agent_session("agent-001")?;
 //! println!("🔌 Agent session terminated");
@@ -142,10 +142,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::{AgentRegistry, Agent, AgentStatus};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! // Register agents with different skills
 //! let agents = vec![
 //!     Agent {
@@ -169,15 +169,15 @@
 //!         extension: Some("301".to_string()),
 //!     },
 //! ];
-//! 
+//!
 //! for agent in agents {
 //!     registry.register_agent(agent).await?;
 //! }
-//! 
+//!
 //! // Find agents with specific skills
 //! let sales_agents = registry.find_agents_with_skills(&["sales".to_string()]).await?;
 //! println!("💼 Found {} sales agents", sales_agents.len());
-//! 
+//!
 //! let multilingual_agents = registry.find_agents_with_skills(&["spanish".to_string()]).await?;
 //! println!("🌍 Found {} Spanish-speaking agents", multilingual_agents.len());
 //! # Ok(())
@@ -188,10 +188,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::{AgentRegistry, Agent, AgentStatus};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! // Register multiple agents with different statuses
 //! let agent_configs = vec![
 //!     ("agent-001", AgentStatus::Available),
@@ -200,7 +200,7 @@
 //!     ("agent-004", AgentStatus::PostCallWrapUp),
 //!     ("agent-005", AgentStatus::Offline),
 //! ];
-//! 
+//!
 //! for (id, status) in agent_configs {
 //!     let agent = Agent {
 //!         id: id.to_string(),
@@ -212,23 +212,23 @@
 //!         department: Some("General".to_string()),
 //!         extension: None,
 //!     };
-//!     
+//!
 //!     registry.register_agent(agent).await?;
 //!     registry.update_agent_status(id, status)?;
 //! }
-//! 
+//!
 //! // Get comprehensive statistics
 //! let stats = registry.get_statistics();
-//! 
+//!
 //! println!("📊 Agent Statistics:");
 //! println!("  Total agents: {}", stats.total);
-//! println!("  Available: {} ({:.1}%)", stats.available, 
+//! println!("  Available: {} ({:.1}%)", stats.available,
 //!          stats.available as f64 / stats.total as f64 * 100.0);
 //! println!("  Busy: {} ({:.1}%)", stats.busy,
 //!          stats.busy as f64 / stats.total as f64 * 100.0);
 //! println!("  Post-call wrap-up: {}", stats.post_call_wrap_up);
 //! println!("  Offline: {}", stats.offline);
-//! 
+//!
 //! // Find available agents for routing
 //! let available_agents = registry.find_available_agents();
 //! println!("🟢 Available for routing: {:?}", available_agents);
@@ -241,29 +241,29 @@
 //! ```rust
 //! use rvoip_call_engine::agent::{AgentRegistry, AgentStatus};
 //! use rvoip_session_core::SessionId;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! let agent_id = "agent-advanced";
-//! 
+//!
 //! // Simulate call handling workflow
 //! println!("📞 Incoming call for agent");
-//! 
+//!
 //! // Agent receives first call
 //! let call_session_1 = SessionId::new();
 //! registry.update_agent_status(agent_id, AgentStatus::Busy(vec![call_session_1.clone()]))?;
-//! 
+//!
 //! // Agent receives second call (if configured for multiple)
 //! let call_session_2 = SessionId::new();
 //! registry.update_agent_status(agent_id, AgentStatus::Busy(vec![call_session_1, call_session_2]))?;
-//! 
+//!
 //! println!("🏃 Agent handling multiple calls");
-//! 
+//!
 //! // Calls complete, agent enters wrap-up
 //! registry.update_agent_status(agent_id, AgentStatus::PostCallWrapUp)?;
 //! println!("📝 Agent in post-call wrap-up");
-//! 
+//!
 //! // Wrap-up complete, agent available again
 //! registry.update_agent_status(agent_id, AgentStatus::Available)?;
 //! println!("✅ Agent available for new calls");
@@ -275,17 +275,17 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::{AgentRegistry, Agent, AgentStatus};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! // Integration with HR system
 //! let hr_data = vec![
 //!     ("alice.smith", "Sales", "101", vec!["sales", "english"]),
 //!     ("bob.jones", "Support", "201", vec!["support", "technical"]),
 //!     ("carol.garcia", "Billing", "301", vec!["billing", "spanish", "english"]),
 //! ];
-//! 
+//!
 //! for (username, dept, ext, skills) in hr_data {
 //!     let agent = Agent {
 //!         id: format!("hr-{}", username),
@@ -297,18 +297,18 @@
 //!         department: Some(dept.to_string()),
 //!         extension: Some(ext.to_string()),
 //!     };
-//!     
+//!
 //!     let agent_id = registry.register_agent(agent).await?;
 //!     println!("👤 Imported agent from HR: {}", agent_id);
 //! }
-//! 
+//!
 //! // Integration with workforce management
 //! let wfm_schedules = vec![
 //!     ("hr-alice.smith", "09:00-17:00", AgentStatus::Available),
 //!     ("hr-bob.jones", "13:00-21:00", AgentStatus::Available),
 //!     ("hr-carol.garcia", "off-shift", AgentStatus::Offline),
 //! ];
-//! 
+//!
 //! for (agent_id, schedule, status) in wfm_schedules {
 //!     registry.update_agent_status(agent_id, status)?;
 //!     println!("📅 Updated schedule for {}: {}", agent_id, schedule);
@@ -347,7 +347,7 @@ use crate::error::{CallCenterError, Result};
 pub struct AgentRegistry {
     /// Active agent sessions (agent_id -> session_id)
     active_sessions: HashMap<String, SessionId>,
-    
+
     /// Current agent status tracking
     agent_status: HashMap<String, AgentStatus>,
 }
@@ -361,25 +361,25 @@ pub struct AgentRegistry {
 pub struct Agent {
     /// Unique agent identifier
     pub id: String,
-    
+
     /// SIP URI for agent communication
     pub sip_uri: String,
-    
+
     /// Human-readable agent name
     pub display_name: String,
-    
+
     /// List of agent skills for routing
     pub skills: Vec<String>,
-    
+
     /// Maximum number of concurrent calls
     pub max_concurrent_calls: u32,
-    
+
     /// Current agent status
     pub status: AgentStatus,
-    
+
     /// Department assignment (optional)
     pub department: Option<String>,
-    
+
     /// Phone extension (optional)
     pub extension: Option<String>,
 }
@@ -396,7 +396,7 @@ pub enum AgentStatus {
     /// new calls according to routing rules. This is the primary state for
     /// automatic call distribution.
     Available,
-    
+
     /// Agent is busy with calls
     ///
     /// The agent is currently handling one or more calls. The vector contains
@@ -404,7 +404,7 @@ pub enum AgentStatus {
     /// agent may still be eligible for additional calls if under the maximum
     /// concurrent call limit.
     Busy(Vec<SessionId>),
-    
+
     /// Agent is in post-call wrap-up time
     ///
     /// The agent has completed a call and is performing post-call activities
@@ -412,7 +412,7 @@ pub enum AgentStatus {
     /// temporarily unavailable for new calls but will automatically return
     /// to Available status after the wrap-up period.
     PostCallWrapUp,
-    
+
     /// Agent is offline
     ///
     /// The agent is not logged in or is otherwise unavailable. This is the
@@ -423,7 +423,7 @@ pub enum AgentStatus {
 
 impl FromStr for AgentStatus {
     type Err = String;
-    
+
     /// Parse agent status from string representation
     ///
     /// Supports various string formats including case-insensitive matching
@@ -442,7 +442,7 @@ impl FromStr for AgentStatus {
     /// ```rust
     /// use rvoip_call_engine::agent::AgentStatus;
     /// use std::str::FromStr;
-    /// 
+    ///
     /// # fn example() -> Result<(), String> {
     /// let status1 = AgentStatus::from_str("available")?;
     /// let status2 = AgentStatus::from_str("BUSY")?;
@@ -475,10 +475,10 @@ impl ToString for AgentStatus {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentStatus;
-    /// 
+    ///
     /// let status = AgentStatus::Available;
     /// assert_eq!(status.to_string(), "available");
-    /// 
+    ///
     /// let busy_status = AgentStatus::Busy(vec![]);
     /// assert_eq!(busy_status.to_string(), "busy(0)");
     /// ```
@@ -503,7 +503,7 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
-    /// 
+    ///
     /// let registry = AgentRegistry::new();
     /// println!("Agent registry initialized");
     /// ```
@@ -513,7 +513,7 @@ impl AgentRegistry {
             agent_status: HashMap::new(),
         }
     }
-    
+
     /// Register a new agent
     ///
     /// Adds a new agent to the registry with their complete profile information.
@@ -532,10 +532,10 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::{AgentRegistry, Agent, AgentStatus};
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registry = AgentRegistry::new();
-    /// 
+    ///
     /// let agent = Agent {
     ///     id: "agent-001".to_string(),
     ///     sip_uri: "sip:alice@call-center.com".to_string(),
@@ -546,7 +546,7 @@ impl AgentRegistry {
     ///     department: Some("Sales".to_string()),
     ///     extension: Some("101".to_string()),
     /// };
-    /// 
+    ///
     /// let agent_id = registry.register_agent(agent).await?;
     /// println!("Agent registered: {}", agent_id);
     /// # Ok(())
@@ -554,14 +554,14 @@ impl AgentRegistry {
     /// ```
     pub async fn register_agent(&mut self, agent: Agent) -> Result<String> {
         info!("👤 Registering agent: {} ({})", agent.display_name, agent.sip_uri);
-        
+
         let agent_id = agent.id.clone();
         self.agent_status.insert(agent_id.clone(), agent.status.clone());
-        
+
         info!("✅ Agent registered: {}", agent_id);
         Ok(agent_id)
     }
-    
+
     /// Update agent status
     ///
     /// Changes the operational status of an agent. This method is used to
@@ -581,13 +581,13 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::{AgentRegistry, AgentStatus};
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registry = AgentRegistry::new();
-    /// 
+    ///
     /// // Update agent to available status
     /// registry.update_agent_status("agent-001", AgentStatus::Available)?;
-    /// 
+    ///
     /// // Update agent to busy with specific call
     /// use rvoip_session_core::SessionId;
     /// let call_session = SessionId::new();
@@ -597,7 +597,7 @@ impl AgentRegistry {
     /// ```
     pub fn update_agent_status(&mut self, agent_id: &str, status: AgentStatus) -> Result<()> {
         info!("🔄 Agent {} status: {:?}", agent_id, status);
-        
+
         if self.agent_status.contains_key(agent_id) {
             self.agent_status.insert(agent_id.to_string(), status);
             Ok(())
@@ -605,7 +605,7 @@ impl AgentRegistry {
             Err(CallCenterError::not_found(format!("Agent not found: {}", agent_id)))
         }
     }
-    
+
     /// Set agent session (when agent logs in)
     ///
     /// Establishes a session for an agent, typically called when the agent
@@ -627,20 +627,20 @@ impl AgentRegistry {
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
     /// use rvoip_session_core::SessionId;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registry = AgentRegistry::new();
-    /// 
+    ///
     /// let session_id = SessionId::new();
     /// registry.set_agent_session("agent-001".to_string(), session_id)?;
-    /// 
+    ///
     /// println!("Agent session established");
     /// # Ok(())
     /// # }
     /// ```
     pub fn set_agent_session(&mut self, agent_id: String, session_id: SessionId) -> Result<()> {
         info!("🔗 Agent {} session: {}", agent_id, session_id);
-        
+
         if self.agent_status.contains_key(&agent_id) {
             self.active_sessions.insert(agent_id.clone(), session_id);
             self.update_agent_status(&agent_id, AgentStatus::Available)?;
@@ -649,7 +649,7 @@ impl AgentRegistry {
             Err(CallCenterError::not_found(format!("Agent not found: {}", agent_id)))
         }
     }
-    
+
     /// Remove agent session (when agent logs out)
     ///
     /// Terminates an agent's session and transitions them to Offline status.
@@ -668,10 +668,10 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registry = AgentRegistry::new();
-    /// 
+    ///
     /// registry.remove_agent_session("agent-001")?;
     /// println!("Agent session terminated");
     /// # Ok(())
@@ -679,7 +679,7 @@ impl AgentRegistry {
     /// ```
     pub fn remove_agent_session(&mut self, agent_id: &str) -> Result<()> {
         info!("🔌 Agent {} logged out", agent_id);
-        
+
         if self.active_sessions.remove(agent_id).is_some() {
             self.update_agent_status(agent_id, AgentStatus::Offline)?;
             Ok(())
@@ -687,7 +687,7 @@ impl AgentRegistry {
             Err(CallCenterError::not_found(format!("No active session for agent: {}", agent_id)))
         }
     }
-    
+
     /// Get agent by ID
     ///
     /// Retrieves complete agent profile information by agent identifier.
@@ -706,10 +706,10 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let registry = AgentRegistry::new();
-    /// 
+    ///
     /// match registry.get_agent("agent-001").await? {
     ///     Some(agent) => {
     ///         println!("Agent: {} ({})", agent.display_name, agent.sip_uri);
@@ -727,7 +727,7 @@ impl AgentRegistry {
         warn!("🚧 get_agent not yet implemented - returning None");
         Ok(None)
     }
-    
+
     /// Get agent status
     ///
     /// Retrieves the current operational status of an agent. This reflects
@@ -745,9 +745,9 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::{AgentRegistry, AgentStatus};
-    /// 
+    ///
     /// let registry = AgentRegistry::new();
-    /// 
+    ///
     /// match registry.get_agent_status("agent-001") {
     ///     Some(AgentStatus::Available) => println!("Agent is available"),
     ///     Some(AgentStatus::Busy(calls)) => println!("Agent busy with {} calls", calls.len()),
@@ -759,7 +759,7 @@ impl AgentRegistry {
     pub fn get_agent_status(&self, agent_id: &str) -> Option<&AgentStatus> {
         self.agent_status.get(agent_id)
     }
-    
+
     /// Get agent session
     ///
     /// Retrieves the active session identifier for an agent. This is used
@@ -777,9 +777,9 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
-    /// 
+    ///
     /// let registry = AgentRegistry::new();
-    /// 
+    ///
     /// if let Some(session_id) = registry.get_agent_session("agent-001") {
     ///     println!("Agent session: {}", session_id);
     /// } else {
@@ -789,7 +789,7 @@ impl AgentRegistry {
     pub fn get_agent_session(&self, agent_id: &str) -> Option<&SessionId> {
         self.active_sessions.get(agent_id)
     }
-    
+
     /// Find available agents (excludes agents in post-call wrap-up)
     ///
     /// Returns a list of agent IDs that are currently available for call
@@ -804,12 +804,12 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
-    /// 
+    ///
     /// let registry = AgentRegistry::new();
-    /// 
+    ///
     /// let available_agents = registry.find_available_agents();
     /// println!("Available agents: {:?}", available_agents);
-    /// 
+    ///
     /// if available_agents.is_empty() {
     ///     println!("No agents available for routing");
     /// } else {
@@ -822,7 +822,7 @@ impl AgentRegistry {
             .map(|(id, _)| id.clone())
             .collect()
     }
-    
+
     /// Find agents with specific skills
     ///
     /// Searches for agents that possess all the specified skills. This method
@@ -841,24 +841,24 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let registry = AgentRegistry::new();
-    /// 
+    ///
     /// // Find agents with sales and English skills
     /// let sales_agents = registry.find_agents_with_skills(&[
     ///     "sales".to_string(),
     ///     "english".to_string(),
     /// ]).await?;
-    /// 
+    ///
     /// println!("Found {} sales agents with English skills", sales_agents.len());
-    /// 
+    ///
     /// // Find technical support agents
     /// let tech_agents = registry.find_agents_with_skills(&[
     ///     "technical".to_string(),
     ///     "support".to_string(),
     /// ]).await?;
-    /// 
+    ///
     /// println!("Found {} technical support agents", tech_agents.len());
     /// # Ok(())
     /// # }
@@ -868,7 +868,7 @@ impl AgentRegistry {
         warn!("🚧 find_agents_with_skills not yet implemented");
         Ok(Vec::new())
     }
-    
+
     /// Get all agent statistics
     ///
     /// Returns comprehensive statistics about all agents in the registry,
@@ -883,10 +883,10 @@ impl AgentRegistry {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::AgentRegistry;
-    /// 
+    ///
     /// let registry = AgentRegistry::new();
     /// let stats = registry.get_statistics();
-    /// 
+    ///
     /// println!("Agent Statistics:");
     /// println!("  Total: {}", stats.total);
     /// println!("  Available: {} ({:.1}%)", stats.available,
@@ -909,7 +909,7 @@ impl AgentRegistry {
         let offline = self.agent_status.values()
             .filter(|a| matches!(a, AgentStatus::Offline))
             .count();
-        
+
         AgentStats { total, available, busy, post_call_wrap_up, offline }
     }
 }
@@ -928,16 +928,16 @@ impl Default for AgentRegistry {
 pub struct AgentStats {
     /// Total number of registered agents
     pub total: usize,
-    
+
     /// Number of agents currently available for calls
     pub available: usize,
-    
+
     /// Number of agents currently busy with calls
     pub busy: usize,
-    
+
     /// Number of agents in post-call wrap-up
     pub post_call_wrap_up: usize,
-    
+
     /// Number of agents currently offline
     pub offline: usize,
-} 
+}

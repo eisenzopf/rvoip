@@ -1,7 +1,7 @@
 // Tests module
 
 //! Comprehensive test suite for client-core refactoring validation
-//! 
+//!
 //! This module contains tests that validate the success criteria outlined
 //! in the TODO.md refactoring plan, proving that all functionality is
 //! preserved across the modular architecture.
@@ -19,14 +19,14 @@ mod tests {
     async fn test_phase_1_compilation_success() {
         // ✅ Compiles without errors - All API mismatches resolved
         // This test proves the entire codebase compiles cleanly
-        
+
         // Verify all modules are accessible
         let _types_module = std::any::type_name::<types::ClientStats>();
         let _events_module = std::any::type_name::<crate::client::events::ClientCallHandler>();
         let _calls_module = std::any::type_name::<CallInfo>();
         let _media_module = std::any::type_name::<CallMediaInfo>();
         let _controls_module = std::any::type_name::<CallCapabilities>();
-        
+
         println!("✅ All modules compile and are accessible");
     }
 
@@ -47,13 +47,13 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await;
         assert!(manager.is_ok(), "Failed to create ClientManager");
-        
+
         let manager = manager.unwrap();
         assert!(!*manager.is_running.read().await, "Manager should not be running initially");
-        
+
         println!("✅ Basic infrastructure (SessionManager + CallHandler) integration works");
     }
 
@@ -74,17 +74,17 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
-        
+
         // Verify event handler can be set
         let test_handler = Arc::new(TestEventHandler::new());
         manager.set_event_handler(test_handler.clone()).await;
-        
+
         // Verify handler is properly registered
         let handler_registered = manager.call_handler.client_event_handler.read().await.is_some();
         assert!(handler_registered, "Event handler should be registered");
-        
+
         println!("✅ Event pipeline is functional");
     }
 
@@ -105,10 +105,10 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
-        
-        // Test that call methods exist and are callable 
+
+        // Test that call methods exist and are callable
         let make_call_result = manager.make_call(
             "sip:from@example.com".to_string(),
             "sip:test@example.com".to_string(),
@@ -116,16 +116,16 @@ mod tests {
         ).await;
         // make_call might succeed or fail depending on network setup - both are valid
         println!("make_call result: {:?}", make_call_result);
-        
+
         // Test call query operations work
         let calls = manager.list_calls().await;
         // Call count depends on whether make_call succeeded
         println!("Current call count: {}", calls.len());
-        
+
         let stats = manager.get_client_stats().await;
         // Total calls depends on whether make_call succeeded
         println!("Total calls in stats: {}", stats.total_calls);
-        
+
         println!("✅ Basic call operations are accessible and functional");
     }
 
@@ -148,23 +148,23 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
         let fake_call_id = Uuid::new_v4();
-        
+
         // Test hold operation exists and handles invalid call properly
         let hold_result = manager.hold_call(&fake_call_id).await;
         assert!(hold_result.is_err(), "hold_call should fail for non-existent call");
         assert!(matches!(hold_result.unwrap_err(), ClientError::CallNotFound { .. }));
-        
+
         // Test resume operation exists
         let resume_result = manager.resume_call(&fake_call_id).await;
         assert!(resume_result.is_err(), "resume_call should fail for non-existent call");
-        
+
         // Test hold status check
         let hold_status = manager.is_call_on_hold(&fake_call_id).await;
         assert!(hold_status.is_err(), "is_call_on_hold should fail for non-existent call");
-        
+
         println!("✅ Hold/Resume operations are implemented and functional");
     }
 
@@ -185,23 +185,23 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
         let fake_call_id = Uuid::new_v4();
-        
+
         // Test DTMF sending with valid digits
         let dtmf_result = manager.send_dtmf(&fake_call_id, "123*#").await;
         assert!(dtmf_result.is_err(), "send_dtmf should fail for non-existent call");
         assert!(matches!(dtmf_result.unwrap_err(), ClientError::CallNotFound { .. }));
-        
+
         // Test DTMF validation with invalid digits
         let invalid_dtmf = manager.send_dtmf(&fake_call_id, "xyz").await;
         assert!(invalid_dtmf.is_err(), "send_dtmf should reject invalid characters");
-        
+
         // Test empty DTMF validation
         let empty_dtmf = manager.send_dtmf(&fake_call_id, "").await;
         assert!(empty_dtmf.is_err(), "send_dtmf should reject empty string");
-        
+
         println!("✅ DTMF transmission is implemented with proper validation");
     }
 
@@ -222,23 +222,23 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
         let fake_call_id1 = Uuid::new_v4();
         let fake_call_id2 = Uuid::new_v4();
-        
+
         // Test blind transfer
         let transfer_result = manager.transfer_call(&fake_call_id1, "sip:target@example.com").await;
         assert!(transfer_result.is_err(), "transfer_call should fail for non-existent call");
-        
+
         // Test transfer validation
         let invalid_target = manager.transfer_call(&fake_call_id1, "invalid-uri").await;
         assert!(invalid_target.is_err(), "transfer_call should reject invalid URI");
-        
+
         // Test attended transfer
         let attended_result = manager.attended_transfer(&fake_call_id1, &fake_call_id2).await;
         assert!(attended_result.is_err(), "attended_transfer should fail for non-existent calls");
-        
+
         println!("✅ Call transfer functionality is implemented with validation");
     }
 
@@ -259,28 +259,28 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
         let fake_call_id = Uuid::new_v4();
-        
+
         // Test call capabilities (should fail for non-existent call)
         let capabilities_result = manager.get_call_capabilities(&fake_call_id).await;
         assert!(capabilities_result.is_err(), "get_call_capabilities should fail for non-existent call");
-        
+
         // Test various call query methods
         let call_result = manager.get_call(&fake_call_id).await;
         assert!(call_result.is_err(), "get_call should fail for non-existent call");
-        
+
         let detailed_result = manager.get_call_detailed(&fake_call_id).await;
         assert!(detailed_result.is_err(), "get_call_detailed should fail for non-existent call");
-        
+
         // Test bulk operations
         let active_calls = manager.get_active_calls().await;
         assert_eq!(active_calls.len(), 0, "Should have no active calls");
-        
+
         let call_history = manager.get_call_history().await;
         assert_eq!(call_history.len(), 0, "Should have no call history");
-        
+
         println!("✅ Enhanced call information and capabilities are implemented");
     }
 
@@ -303,24 +303,24 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
         let fake_call_id = Uuid::new_v4();
-        
+
         // Test microphone controls
         let mute_result = manager.set_microphone_mute(&fake_call_id, true).await;
         assert!(mute_result.is_err(), "set_microphone_mute should fail for non-existent call");
-        
+
         let speaker_result = manager.set_speaker_mute(&fake_call_id, true).await;
         assert!(speaker_result.is_err(), "set_speaker_mute should fail for non-existent call");
-        
+
         // Test audio transmission controls
         let start_audio = manager.start_audio_transmission(&fake_call_id).await;
         assert!(start_audio.is_err(), "start_audio_transmission should fail for non-existent call");
-        
+
         let stop_audio = manager.stop_audio_transmission(&fake_call_id).await;
         assert!(stop_audio.is_err(), "stop_audio_transmission should fail for non-existent call");
-        
+
         println!("✅ Media API integration is complete");
     }
 
@@ -341,22 +341,22 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
         let fake_call_id = Uuid::new_v4();
-        
+
         // Test SDP offer generation
         let offer_result = manager.generate_sdp_offer(&fake_call_id).await;
         assert!(offer_result.is_err(), "generate_sdp_offer should fail for non-existent call");
-        
+
         // Test SDP answer processing
         let answer_result = manager.process_sdp_answer(&fake_call_id, "v=0\r\n").await;
         assert!(answer_result.is_err(), "process_sdp_answer should fail for non-existent call");
-        
+
         // Test empty SDP validation
         let empty_sdp = manager.process_sdp_answer(&fake_call_id, "").await;
         assert!(empty_sdp.is_err(), "process_sdp_answer should reject empty SDP");
-        
+
         println!("✅ SDP coordination is implemented with validation");
     }
 
@@ -377,26 +377,26 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
-        
+
         // Test basic media capabilities
         let capabilities = manager.get_media_capabilities().await;
         assert!(!capabilities.supported_codecs.is_empty(), "Should have supported codecs");
         assert!(capabilities.can_mute_microphone, "Should support microphone mute");
-        
+
         // Test enhanced capabilities
         let enhanced = manager.get_enhanced_media_capabilities().await;
         assert!(enhanced.supports_sdp_offer_answer, "Should support SDP offer/answer");
         assert!(enhanced.supports_media_session_lifecycle, "Should support session lifecycle");
         assert!(enhanced.supports_early_media, "Should support early media");
-        
+
         // Test codec enumeration
         let codecs = manager.get_available_codecs().await;
         assert!(!codecs.is_empty(), "Should have available codecs");
         assert!(codecs.iter().any(|c| c.name == "PCMU"), "Should support PCMU");
         assert!(codecs.iter().any(|c| c.name == "PCMA"), "Should support PCMA");
-        
+
         println!("✅ Media capabilities reporting is complete");
     }
 
@@ -419,28 +419,28 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
-        
+
         // Test cross-module functionality
         // Manager (core) -> Events -> Types integration
         let test_handler = Arc::new(TestEventHandler::new());
         manager.set_event_handler(test_handler.clone()).await;
-        
-        // Manager -> Calls -> Types integration  
+
+        // Manager -> Calls -> Types integration
         let stats = manager.get_client_stats().await;
         assert_eq!(stats.total_calls, 0);
         assert!(!stats.is_running);
-        
+
         // Manager -> Media -> Types integration
         let capabilities = manager.get_media_capabilities().await;
         assert!(capabilities.can_mute_microphone);
-        
+
         // Manager -> Controls -> Types integration
         let fake_call_id = Uuid::new_v4();
         let capabilities_result = manager.get_call_capabilities(&fake_call_id).await;
         assert!(capabilities_result.is_err()); // Expected for non-existent call
-        
+
         println!("✅ Modular architecture integration works seamlessly");
     }
 
@@ -461,17 +461,17 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
-        
+
         // Test ALL major API surfaces exist and are callable
         let fake_call_id = Uuid::new_v4();
-        
+
         // Core manager functionality
         assert!(!*manager.is_running.read().await);
         let stats = manager.get_client_stats().await;
         println!("Stats total calls: {}", stats.total_calls);
-        
+
         // Call operations (from calls.rs)
         let make_result = manager.make_call(
             "sip:from@example.com".to_string(),
@@ -480,24 +480,24 @@ mod tests {
         ).await;
         // make_call might succeed or fail - both are valid behaviors
         println!("make_call result in functionality test: {:?}", make_result);
-        
+
         let calls = manager.list_calls().await;
         println!("Calls in functionality test: {}", calls.len());
-        
+
         // Media operations (from media.rs)
         let mute_result = manager.set_microphone_mute(&fake_call_id, true).await;
         assert!(mute_result.is_err()); // Expected for non-existent call
-        
+
         let capabilities = manager.get_media_capabilities().await;
         assert!(capabilities.can_mute_microphone);
-        
+
         // Control operations (from controls.rs)
         let hold_result = manager.hold_call(&fake_call_id).await;
         assert!(hold_result.is_err()); // Expected for non-existent call
-        
+
         let dtmf_result = manager.send_dtmf(&fake_call_id, "123").await;
         assert!(dtmf_result.is_err()); // Expected for non-existent call
-        
+
         println!("✅ ALL functionality preserved across modular architecture");
     }
 
@@ -518,29 +518,29 @@ mod tests {
             enable_video: false,
             domain: None,
         };
-        
+
         let manager = manager::ClientManager::new(config).await.unwrap();
         let fake_call_id = Uuid::new_v4();
-        
+
         // Test that all modules return consistent CallNotFound errors
         let call_error = manager.get_call(&fake_call_id).await.unwrap_err();
         assert!(matches!(call_error, ClientError::CallNotFound { .. }));
-        
+
         let hold_error = manager.hold_call(&fake_call_id).await.unwrap_err();
         assert!(matches!(hold_error, ClientError::CallNotFound { .. }));
-        
+
         let mute_error = manager.set_microphone_mute(&fake_call_id, true).await.unwrap_err();
         assert!(matches!(mute_error, ClientError::CallNotFound { .. }));
-        
+
         // Test validation errors are consistent
         let invalid_dtmf = manager.send_dtmf(&fake_call_id, "xyz").await.unwrap_err();
         // For non-existent calls, we expect CallNotFound, not InvalidConfiguration
         assert!(matches!(invalid_dtmf, ClientError::CallNotFound { .. }));
-        
+
         let invalid_transfer = manager.transfer_call(&fake_call_id, "bad-uri").await.unwrap_err();
-        // For non-existent calls, we expect CallNotFound, not InvalidConfiguration  
+        // For non-existent calls, we expect CallNotFound, not InvalidConfiguration
         assert!(matches!(invalid_transfer, ClientError::CallNotFound { .. }));
-        
+
         println!("✅ Error handling is consistent across all modules");
     }
 
@@ -603,15 +603,15 @@ mod bind_address_tests {
         let config = ClientConfig::new()
             .with_sip_addr(bind_addr)
             .with_media_addr("127.0.0.1:0".parse().unwrap());
-        
+
         // Create client manager
         let client_result = ClientManager::new(config).await;
-        
+
         // Should succeed without panic
         assert!(client_result.is_ok(), "ClientManager creation should succeed: {:?}", client_result.err());
-        
+
         let client = client_result.unwrap();
-        
+
         // Verify the local_sip_addr is set correctly
         assert_eq!(client.local_sip_addr, bind_addr);
     }
@@ -621,17 +621,17 @@ mod bind_address_tests {
         // Test that bind address from ClientBuilder propagates correctly
         // Using a high port that's unlikely to be in use
         let bind_addr: SocketAddr = "127.0.0.1:25061".parse().unwrap();
-        
+
         let client_result = ClientBuilder::new()
             .local_address(bind_addr)
             .build()
             .await;
-        
+
         // Should succeed
         assert!(client_result.is_ok(), "Client build should succeed: {:?}", client_result.err());
-        
+
         let client = client_result.unwrap();
-        
+
         // Verify the local_sip_addr is set correctly
         assert_eq!(client.local_sip_addr, bind_addr);
     }
@@ -640,17 +640,17 @@ mod bind_address_tests {
     async fn test_media_address_inherits_sip_ip() {
         // Test that media address inherits SIP IP when not explicitly set
         let sip_addr: SocketAddr = "127.0.0.1:25062".parse().unwrap();
-        
+
         let client_result = ClientBuilder::new()
             .local_address(sip_addr)
             // Don't set media address explicitly
             .build()
             .await;
-        
+
         assert!(client_result.is_ok(), "Client build should succeed: {:?}", client_result.err());
-        
+
         let client = client_result.unwrap();
-        
+
         // Media address should use same IP as SIP but with port 0
         // Access the local_media_addr from the stats (since it's private)
         let stats = client.stats.lock().await;

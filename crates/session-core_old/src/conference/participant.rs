@@ -150,4 +150,4 @@ impl ConferenceParticipant {
 
         Ok(())
     }
-} 
+}

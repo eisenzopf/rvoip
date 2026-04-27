@@ -2,7 +2,7 @@
 //!
 //! This test suite verifies that dialog-core properly handles:
 //! - SUBSCRIBE creating dialogs
-//! - Subscription state management  
+//! - Subscription state management
 //! - NOTIFY processing
 //! - Event package support
 //! - Subscription refresh and termination

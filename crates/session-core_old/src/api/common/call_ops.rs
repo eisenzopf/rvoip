@@ -55,7 +55,7 @@ pub async fn transfer(
         // For bare numbers/usernames, we need to add a default domain
         format!("sip:{}@localhost", target)
     };
-    
+
     SessionControl::transfer_session(coordinator, session_id, &formatted_target).await
 }
 

@@ -3,7 +3,7 @@
 //! This example demonstrates Phase 3: Advanced Security Features including:
 //! - Key rotation and lifecycle management
 //! - Multi-stream key syndication
-//! - Error recovery and fallback mechanisms  
+//! - Error recovery and fallback mechanisms
 //! - Security policy enforcement
 //! - Production-grade security monitoring
 

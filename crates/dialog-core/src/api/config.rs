@@ -898,7 +898,7 @@ pub struct Credentials {
     /// Username for authentication
     pub username: String,
 
-    /// Password for authentication  
+    /// Password for authentication
     pub password: String,
 
     /// Realm (optional, will be extracted from challenge if not provided)

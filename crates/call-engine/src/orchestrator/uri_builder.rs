@@ -62,7 +62,7 @@
 //! ```rust
 //! use rvoip_call_engine::orchestrator::uri_builder::SipUriBuilder;
 //! use rvoip_call_engine::config::GeneralConfig;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = GeneralConfig {
 //!     local_ip: "192.168.1.100".to_string(),
@@ -71,24 +71,24 @@
 //!     call_center_service: "cc".to_string(),
 //!     ..Default::default()
 //! };
-//! 
+//!
 //! let builder = SipUriBuilder::new(&config);
-//! 
+//!
 //! // Build basic agent URI
 //! let agent_uri = builder.agent_uri("alice");
 //! println!("👤 Basic Agent URI: {}", agent_uri);
 //! // Output: sip:alice@192.168.1.100
-//! 
+//!
 //! // Build call center URI
 //! let call_center_uri = builder.call_center_uri();
 //! println!("📞 Call Center URI: {}", call_center_uri);
 //! // Output: sip:cc@call-center.com
-//! 
+//!
 //! // Build registrar URI
 //! let registrar_uri = builder.registrar_uri();
 //! println!("📋 Registrar URI: {}", registrar_uri);
 //! // Output: sip:registrar@registrar.call-center.com
-//! 
+//!
 //! // Build contact URI with port
 //! let contact_uri = builder.contact_uri("alice", Some(5071));
 //! println!("🌐 Contact URI: {}", contact_uri);
@@ -102,22 +102,22 @@
 //! ```rust
 //! use rvoip_call_engine::orchestrator::uri_builder::SipUriBuilder;
 //! use rvoip_call_engine::config::GeneralConfig;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = GeneralConfig::default();
 //! let builder = SipUriBuilder::new(&config);
-//! 
+//!
 //! // Build agent URIs with different methods
 //! let agent_uri = builder.agent_uri("alice.johnson");
 //! println!("👩‍💼 Agent URI: {}", agent_uri);
-//! 
+//!
 //! let contact_uri = builder.contact_uri("alice.johnson", Some(5071));
 //! println!("📞 Contact URI: {}", contact_uri);
-//! 
+//!
 //! // Build fallback URI
 //! let fallback_uri = builder.agent_uri_with_fallback("alice.johnson", Some(&contact_uri));
 //! println!("🔄 Fallback URI: {}", fallback_uri);
-//! 
+//!
 //! // Multiple agent URIs
 //! let agents = vec!["alice", "bob", "carol"];
 //! println!("\n👥 Multiple Agent URIs:");
@@ -134,30 +134,30 @@
 //! ```rust
 //! use rvoip_call_engine::orchestrator::uri_builder::SipUriBuilder;
 //! use rvoip_call_engine::config::GeneralConfig;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = GeneralConfig::default();
 //! let builder = SipUriBuilder::new(&config);
-//! 
+//!
 //! // Build customer-related URIs using actual API
-//! let customer_uri = builder.agent_uri("customer123");  
+//! let customer_uri = builder.agent_uri("customer123");
 //! println!("⭐ Customer URI: {}", customer_uri);
-//! 
+//!
 //! // Build contact URIs for different customers
 //! let vip_contact = builder.contact_uri("vip-customer", Some(5071));
 //! println!("💎 VIP Contact URI: {}", vip_contact);
-//! 
+//!
 //! // Build registrar URI for customer authentication
 //! let registrar_uri = builder.registrar_uri();
 //! println!("📞 Registrar URI: {}", registrar_uri);
-//! 
+//!
 //! // Example of URI building patterns
 //! let customers = vec![
 //!     ("customer-001", None),
 //!     ("vip-customer", Some(5071)),
 //!     ("premium-customer", Some(5072)),
 //! ];
-//! 
+//!
 //! println!("\n🎯 Customer URI Patterns:");
 //! for (customer, port) in customers {
 //!     let uri = builder.contact_uri(customer, port);
@@ -167,32 +167,32 @@
 //! # }
 //! ```
 //!
-//! ### Service URI Generation  
+//! ### Service URI Generation
 //!
 //! ```rust
 //! use rvoip_call_engine::orchestrator::uri_builder::SipUriBuilder;
 //! use rvoip_call_engine::config::GeneralConfig;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = GeneralConfig::default();
 //! let builder = SipUriBuilder::new(&config);
-//! 
+//!
 //! // Build queue service URI using agent_uri (adapted for services)
 //! let queue_uri = builder.agent_uri("technical-support-queue");
 //! println!("📋 Technical Support Queue URI: {}", queue_uri);
-//! 
+//!
 //! // Build IVR service URI
 //! let ivr_uri = builder.agent_uri("main-ivr");
 //! println!("\n📱 Main IVR Service URI: {}", ivr_uri);
-//! 
+//!
 //! // Build conference service URI
 //! let conference_uri = builder.agent_uri("conf-12345");
 //! println!("\n🎤 Conference Service URI: {}", conference_uri);
-//! 
+//!
 //! // Build recording service URI
 //! let recording_uri = builder.agent_uri("recording-service");
 //! println!("\n📹 Recording Service URI: {}", recording_uri);
-//! 
+//!
 //! // Generate service contact URIs with different ports
 //! let services = vec![
 //!     ("queue", Some(5060)),
@@ -200,7 +200,7 @@
 //!     ("conference", Some(5062)),
 //!     ("recording", None),
 //! ];
-//! 
+//!
 //! println!("\n⚙️ Service Contact URIs:");
 //! for (service_name, port) in services {
 //!     let contact_uri = builder.contact_uri(service_name, port);
@@ -215,21 +215,21 @@
 //! ```rust
 //! use rvoip_call_engine::orchestrator::uri_builder::SipUriBuilder;
 //! use rvoip_call_engine::config::GeneralConfig;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = GeneralConfig::default();
 //! let builder = SipUriBuilder::new(&config);
-//! 
+//!
 //! // Batch URI operations for multiple agents
 //! let agent_names = vec!["alice", "bob", "carol", "diana"];
-//! 
+//!
 //! println!("🔧 URI Generation Patterns:");
 //! println!("\n👥 Batch Agent URI Creation:");
 //! for name in &agent_names {
 //!     let uri = builder.agent_uri(name);
 //!     println!("  {}: {}", name, uri);
 //! }
-//! 
+//!
 //! // Generate contact URIs with different ports for load balancing
 //! println!("\n📞 Contact URIs with Port Distribution:");
 //! for (i, name) in agent_names.iter().enumerate() {
@@ -237,13 +237,13 @@
 //!     let contact_uri = builder.contact_uri(name, port);
 //!     println!("  {}: {}", name, contact_uri);
 //! }
-//! 
+//!
 //! // URI fallback examples
 //! println!("\n🔄 URI Fallback Examples:");
 //! let custom_contact = Some("sip:alice@custom.domain.com:5071");
 //! let fallback_uri = builder.agent_uri_with_fallback("alice", custom_contact);
 //! println!("  With custom contact: {}", fallback_uri);
-//! 
+//!
 //! let default_fallback = builder.agent_uri_with_fallback("alice", None);
 //! println!("  Default fallback: {}", default_fallback);
 //! # Ok(())
@@ -259,23 +259,23 @@
 //! ```rust
 //! # use rvoip_call_engine::orchestrator::uri_builder::SipUriBuilder;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! // Integration with agent registration:
 //! println!("🔗 Agent Registration Integration:");
-//! 
+//!
 //! println!("  📝 Registration Process:");
 //! println!("     1. Agent provides basic information");
 //! println!("     2. URI builder creates standardized agent URI");
 //! println!("     3. URI includes extension, department, skills");
 //! println!("     4. URI used for SIP registration with session-core");
 //! println!("     5. URI stored in agent database for routing");
-//! 
+//!
 //! println!("  🎯 Routing Integration:");
 //! println!("     ↳ URIs parsed for agent capability matching");
 //! println!("     ↳ Skills extracted for routing decisions");
 //! println!("     ↳ Department used for load balancing");
 //! println!("     ↳ Extension used for direct transfers");
-//! 
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -289,25 +289,25 @@
 //! ```rust
 //! # use rvoip_call_engine::orchestrator::uri_builder::SipUriBuilder;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! println!("⚡ URI Builder Performance:");
-//! 
+//!
 //! println!("  🚀 Construction Efficiency:");
 //! println!("     ↳ String builder pattern minimizes allocations");
 //! println!("     ↳ Parameter encoding cache for common values");
 //! println!("     ↳ Compiled regex patterns for validation");
 //! println!("     ↳ Reusable builder instances");
-//! 
+//!
 //! println!("  💾 Memory Optimization:");
 //! println!("     ↳ Efficient parameter storage");
 //! println!("     ↳ Minimal overhead per URI");
 //! println!("     ↳ Optimized string concatenation");
-//! 
+//!
 //! println!("  📊 Scalability:");
 //! println!("     ↳ Thread-safe builder operations");
 //! println!("     ↳ Concurrent URI construction");
 //! println!("     ↳ Batch processing support");
-//! 
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -397,4 +397,4 @@ mod tests {
             "sip:alice@127.0.0.1"
         );
     }
-} 
+}

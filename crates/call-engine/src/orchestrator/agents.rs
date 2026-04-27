@@ -40,10 +40,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::{Agent, AgentId, AgentStatus}};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Create agent profile
 //! let agent = Agent {
 //!     id: "agent-001".to_string(),
@@ -55,11 +55,11 @@
 //!     skills: vec!["technical_support".to_string(), "billing".to_string()],
 //!     max_concurrent_calls: 2,
 //! };
-//! 
+//!
 //! // Register agent with the call center
 //! let session_id = engine.register_agent(&agent).await?;
 //! println!("✅ Agent {} registered with session: {}", agent.id, session_id);
-//! 
+//!
 //! // Agent is now available for call assignment
 //! println!("📞 Agent ready to receive calls");
 //! # Ok(())
@@ -70,24 +70,24 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::{AgentId, AgentStatus}};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! let agent_id = AgentId("agent-001".to_string());
-//! 
+//!
 //! // Update agent status to available
 //! engine.update_agent_status(&agent_id, AgentStatus::Available).await?;
 //! println!("🟢 Agent {} is now available", agent_id);
-//! 
+//!
 //! // Agent receives a call - status automatically updates to busy
 //! engine.update_agent_status(&agent_id, AgentStatus::Busy(vec![rvoip_session_core::SessionId("call-123".to_string())])).await?;
 //! println!("🔴 Agent {} is now busy with calls", agent_id);
-//! 
+//!
 //! // After call ends - agent enters post-call wrap-up
 //! engine.update_agent_status(&agent_id, AgentStatus::PostCallWrapUp).await?;
 //! println!("🟡 Agent {} in post-call wrap-up", agent_id);
-//! 
+//!
 //! // Agent completes wrap-up and becomes available again
 //! engine.update_agent_status(&agent_id, AgentStatus::Available).await?;
 //! println!("✅ Agent {} ready for next call", agent_id);
@@ -99,12 +99,12 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::AgentId};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! let agent_id = AgentId("agent-001".to_string());
-//! 
+//!
 //! // Get detailed agent information
 //! if let Some(agent_info) = engine.get_agent_info(&agent_id).await {
 //!     println!("👤 Agent Information:");
@@ -117,7 +117,7 @@
 //! } else {
 //!     println!("❌ Agent not found");
 //! }
-//! 
+//!
 //! // List all agents
 //! let all_agents = engine.list_agents().await;
 //! println!("\n👥 All Agents ({}):", all_agents.len());
@@ -138,20 +138,20 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Get comprehensive queue statistics
 //! let queue_stats = engine.get_queue_stats().await?;
-//! 
+//!
 //! println!("📊 Queue Statistics:");
 //! for (queue_name, stats) in queue_stats {
 //!     println!("  Queue: {}", queue_name);
 //!     println!("    Total Calls: {}", stats.total_calls);
 //!     println!("    Average Wait: {:.1}s", stats.average_wait_time_seconds);
 //!     println!("    Longest Wait: {:.1}s", stats.longest_wait_time_seconds);
-//!     
+//!
 //!     // Performance indicators
 //!     if stats.average_wait_time_seconds > 60 {
 //!         println!("    ⚠️ High wait times detected");
@@ -168,10 +168,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::{Agent, AgentId, AgentStatus}};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Register multiple agents with different skills
 //! let agents = vec![
 //!     Agent {
@@ -205,13 +205,13 @@
 //!         max_concurrent_calls: 4,
 //!     },
 //! ];
-//! 
+//!
 //! // Register all agents
 //! for agent in agents {
 //!     match engine.register_agent(&agent).await {
 //!         Ok(session_id) => {
 //!             println!("✅ Registered {} (skills: {:?})", agent.id, agent.skills);
-//!             
+//!
 //!             // Make agent available
 //!             let agent_id = AgentId(agent.id);
 //!             engine.update_agent_status(&agent_id, AgentStatus::Available).await?;
@@ -221,14 +221,14 @@
 //!         }
 //!     }
 //! }
-//! 
+//!
 //! // Monitor agent capacity
 //! let all_agents = engine.list_agents().await;
 //! let total_capacity: usize = all_agents.iter()
 //!     .filter(|a| matches!(a.status, rvoip_call_engine::agent::AgentStatus::Available))
 //!     .map(|a| a.max_calls)
 //!     .sum();
-//! 
+//!
 //! println!("📈 Total system capacity: {} concurrent calls", total_capacity);
 //! # Ok(())
 //! # }
@@ -239,23 +239,23 @@
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::AgentId};
 //! use tokio::time::{interval, Duration};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Real-time monitoring dashboard
 //! async fn monitor_agents(engine: &CallCenterEngine) -> Result<(), Box<dyn std::error::Error>> {
 //!     let mut interval = interval(Duration::from_secs(30));
-//!     
+//!
 //!     loop {
 //!         interval.tick().await;
-//!         
+//!
 //!         let agents = engine.list_agents().await;
 //!         let mut available = 0;
 //!         let mut busy = 0;
 //!         let mut wrap_up = 0;
 //!         let mut offline = 0;
-//!         
+//!
 //!         for agent in &agents {
 //!             match agent.status {
 //!                 rvoip_call_engine::agent::AgentStatus::Available => available += 1,
@@ -264,19 +264,19 @@
 //!                 rvoip_call_engine::agent::AgentStatus::Offline => offline += 1,
 //!             }
 //!         }
-//!         
+//!
 //!         println!("📊 Agent Status Update:");
 //!         println!("  🟢 Available: {}", available);
 //!         println!("  🔴 Busy: {}", busy);
 //!         println!("  🟡 Wrap-up: {}", wrap_up);
 //!         println!("  ⚫ Offline: {}", offline);
-//!         
+//!
 //!         // Calculate utilization
 //!         let online_agents = available + busy + wrap_up;
 //!         if online_agents > 0 {
 //!             let utilization = (busy as f64 / online_agents as f64) * 100.0;
 //!             println!("  📈 Utilization: {:.1}%", utilization);
-//!             
+//!
 //!             // Alerts
 //!             if utilization > 90.0 {
 //!                 println!("  🚨 High utilization warning!");
@@ -285,14 +285,14 @@
 //!                 println!("  ⚠️ No agents available - all busy!");
 //!             }
 //!         }
-//!         
+//!
 //!         // In a real implementation, this would run continuously
 //!         break; // Exit for documentation example
 //!     }
-//!     
+//!
 //!     Ok(())
 //! }
-//! 
+//!
 //! // Start monitoring (would run in background)
 //! monitor_agents(&engine).await?;
 //! # Ok(())
@@ -309,7 +309,7 @@
 //! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::{Agent, AgentStatus}};
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Agent registration creates session-core session
 //! let agent = Agent {
 //!     id: "agent-integration".to_string(),
@@ -321,13 +321,13 @@
 //!     skills: vec!["integration_test".to_string()],
 //!     max_concurrent_calls: 1,
 //! };
-//! 
+//!
 //! // Registration automatically:
 //! // 1. Creates session-core outgoing call for registration
 //! // 2. Updates database with agent information
 //! // 3. Tracks agent session for future operations
 //! let session_id = engine.register_agent(&agent).await?;
-//! 
+//!
 //! println!("🔗 Agent registered with session-core session: {}", session_id);
 //! println!("💾 Agent information persisted to database");
 //! println!("📞 Agent ready for call assignment via session-core");
@@ -343,19 +343,19 @@
 //! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::{AgentId, AgentStatus}};
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! let agent_id = AgentId("database-sync-test".to_string());
-//! 
+//!
 //! // Status updates are automatically persisted
 //! engine.update_agent_status(&agent_id, AgentStatus::Available).await?;
 //! // ↳ Updates database agents table
 //! // ↳ Updates available_since timestamp for fairness
 //! // ↳ Triggers queue assignment check
-//! 
+//!
 //! engine.update_agent_status(&agent_id, AgentStatus::Busy(vec![rvoip_session_core::SessionId("call-123".to_string())])).await?;
 //! // ↳ Updates agent status and current_calls count
 //! // ↳ Removes from available agents pool
-//! 
+//!
 //! println!("💾 All agent status changes automatically persisted");
 //! println!("🔄 Database maintains real-time agent state");
 //! # Ok(())
@@ -372,14 +372,14 @@
 //! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Agent selection algorithms consider:
 //! // - Round-robin fairness with last-agent exclusion
 //! // - Current call load balancing
 //! // - Skill matching requirements
 //! // - Performance ratings
 //! // - Available-since timestamps for fairness
-//! 
+//!
 //! let agents = engine.list_agents().await;
 //! println!("🎯 Agent selection considers {} factors:", 5);
 //! println!("  1. Round-robin fairness");
@@ -387,7 +387,7 @@
 //! println!("  3. Skill requirements");
 //! println!("  4. Performance ratings");
 //! println!("  5. Availability timing");
-//! 
+//!
 //! // Selection is O(n log n) due to sorting by availability
 //! println!("⚡ Selection complexity: O(n log n) for {} agents", agents.len());
 //! # Ok(())
@@ -402,14 +402,14 @@
 //! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::{AgentId, AgentStatus}};
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Concurrent status updates are safe
 //! let agent_ids = vec![
 //!     AgentId("agent-001".to_string()),
 //!     AgentId("agent-002".to_string()),
 //!     AgentId("agent-003".to_string()),
 //! ];
-//! 
+//!
 //! // Multiple agents can be updated concurrently
 //! let mut success_count = 0;
 //! for agent_id in agent_ids {
@@ -417,7 +417,7 @@
 //!         success_count += 1;
 //!     }
 //! }
-//! 
+//!
 //! println!("✅ Successfully updated {} agents concurrently", success_count);
 //! println!("🔒 Thread-safe operations with database consistency");
 //! # Ok(())
@@ -432,7 +432,7 @@
 //! # use rvoip_call_engine::{CallCenterEngine, CallCenterConfig, agent::{Agent, AgentId, AgentStatus}};
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Graceful error handling for registration
 //! let agent = Agent {
 //!     id: "test-agent".to_string(),
@@ -444,7 +444,7 @@
 //!     skills: vec!["test".to_string()],
 //!     max_concurrent_calls: 1,
 //! };
-//! 
+//!
 //! match engine.register_agent(&agent).await {
 //!     Ok(session_id) => {
 //!         println!("✅ Agent registered successfully: {}", session_id);
@@ -458,7 +458,7 @@
 //!         // - Configuration problems
 //!     }
 //! }
-//! 
+//!
 //! // Graceful handling of status updates
 //! let agent_id = AgentId("test-agent".to_string());
 //! match engine.update_agent_status(&agent_id, AgentStatus::Available).await {
@@ -489,9 +489,9 @@ use super::types::AgentInfo;
 impl CallCenterEngine {
     /// Register an agent with skills and performance tracking
     pub async fn register_agent(&self, agent: &Agent) -> CallCenterResult<SessionId> {
-        info!("👤 Registering agent {} with session-core: {} (skills: {:?})", 
+        info!("👤 Registering agent {} with session-core: {} (skills: {:?})",
               agent.id, agent.sip_uri, agent.skills);
-        
+
         // Use SessionControl trait to create outgoing call for agent registration
         let session = SessionControl::create_outgoing_call(
             self.session_manager(),
@@ -501,10 +501,10 @@ impl CallCenterEngine {
         )
         .await
         .map_err(|e| CallCenterError::orchestration(&format!("Failed to create agent session: {}", e)))?;
-        
+
         let session_id = session.id;
         let agent_id = AgentId(agent.id.clone());
-        
+
         // Register agent in database
         if let Some(db_manager) = &self.db_manager {
             // Extract username from SIP URI
@@ -513,22 +513,22 @@ impl CallCenterEngine {
                 .and_then(|s| s.split('@').next())
                 .unwrap_or(&agent.id)
                 .to_string();
-            
+
             db_manager.upsert_agent(&agent_id.0, &username, Some(&agent.sip_uri)).await
                 .map_err(|e| CallCenterError::database(&format!("Failed to register agent in database: {}", e)))?;
-            
+
             info!("✅ Agent {} registered in database", agent_id);
         }
-        
-        info!("✅ Agent {} registered with session-core (session: {}, max calls: {})", 
+
+        info!("✅ Agent {} registered with session-core (session: {}, max calls: {})",
               agent.id, session_id, agent.max_concurrent_calls);
         Ok(session_id)
     }
-    
+
     /// Update agent status (Available, Busy, Away, etc.)
     pub async fn update_agent_status(&self, agent_id: &AgentId, new_status: AgentStatus) -> CallCenterResult<()> {
         info!("🔄 Updating agent {} status to {:?}", agent_id, new_status);
-        
+
         // Get current agent info from database
         let old_status = if let Some(db_manager) = &self.db_manager {
             match db_manager.get_agent(&agent_id.0).await {
@@ -536,7 +536,7 @@ impl CallCenterEngine {
                     // Update status in database
                     db_manager.update_agent_status(&agent_id.0, new_status.clone()).await
                         .map_err(|e| CallCenterError::database(&format!("Failed to update agent status: {}", e)))?;
-                    
+
                     // Return old status for logging
                     match db_agent.status.as_str() {
                         "AVAILABLE" => AgentStatus::Available,
@@ -555,9 +555,9 @@ impl CallCenterEngine {
         } else {
             return Err(CallCenterError::database("Database not configured"));
         };
-        
+
         info!("✅ Agent {} status updated from {:?} to {:?}", agent_id, old_status, new_status);
-        
+
         // If agent became available, check for queued calls
         if matches!(new_status, AgentStatus::Available) {
             let agent_id_clone = agent_id.clone();
@@ -566,10 +566,10 @@ impl CallCenterEngine {
                 engine.try_assign_queued_calls_to_agent(agent_id_clone).await;
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Get detailed agent information
     pub async fn get_agent_info(&self, agent_id: &AgentId) -> Option<AgentInfo> {
         if let Some(db_manager) = &self.db_manager {
@@ -588,7 +588,7 @@ impl CallCenterEngine {
             None
         }
     }
-    
+
     /// List all agents with their current status
     pub async fn list_agents(&self) -> Vec<AgentInfo> {
         if let Some(db_manager) = &self.db_manager {
@@ -610,19 +610,19 @@ impl CallCenterEngine {
             vec![]
         }
     }
-    
+
     /// Get queue statistics for monitoring
     pub async fn get_queue_stats(&self) -> CallCenterResult<Vec<(String, QueueStats)>> {
         let queue_manager = self.queue_manager.read().await;
         let queue_ids = vec!["general", "sales", "support", "billing", "vip", "premium", "overflow"];
-        
+
         let mut stats = Vec::new();
         for queue_id in queue_ids {
             if let Ok(queue_stat) = queue_manager.get_queue_stats(queue_id) {
                 stats.push((queue_id.to_string(), queue_stat));
             }
         }
-        
+
         Ok(stats)
     }
-} 
+}

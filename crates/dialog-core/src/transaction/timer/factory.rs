@@ -82,7 +82,7 @@ use super::types::{Timer, TimerSettings, TimerType};
 /// which specifies timer behavior for different transaction types:
 ///
 /// - Section 17.1.1: INVITE Client Transaction
-/// - Section 17.1.2: Non-INVITE Client Transaction  
+/// - Section 17.1.2: Non-INVITE Client Transaction
 /// - Section 17.2.1: INVITE Server Transaction
 /// - Section 17.2.2: Non-INVITE Server Transaction
 #[derive(Debug, Clone)]

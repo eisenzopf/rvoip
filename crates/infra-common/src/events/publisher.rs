@@ -159,9 +159,9 @@ impl<E: StaticEvent> FastPublisher<E> {
         if success_count > 0 {
             if let Some(ref e) = last_error {
                 tracing::warn!(
-                    "FastPublisher batch partially succeeded: {}/{} events published, last error: {}", 
-                    success_count, 
-                    success_count + 1, 
+                    "FastPublisher batch partially succeeded: {}/{} events published, last error: {}",
+                    success_count,
+                    success_count + 1,
                     e
                 );
             }

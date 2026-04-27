@@ -9,16 +9,16 @@ use crate::errors::Result;
 pub trait UacEventHandler: Send + Sync {
     /// Called when a call state changes
     async fn on_call_state_changed(&self, session_id: SessionId, old_state: CallState, new_state: CallState);
-    
+
     /// Called when registration state changes
     async fn on_registration_state_changed(&self, registered: bool, reason: Option<String>);
-    
+
     /// Called when media starts flowing
     async fn on_media_established(&self, session_id: SessionId);
-    
+
     /// Called when DTMF is received
     async fn on_dtmf_received(&self, session_id: SessionId, digit: char);
-    
+
     /// Called on call quality update
     async fn on_quality_update(&self, session_id: SessionId, mos_score: f32);
 }

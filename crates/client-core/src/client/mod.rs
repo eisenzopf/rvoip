@@ -1,24 +1,24 @@
 //! High-level SIP client implementation
-//! 
+//!
 //! This module provides the core client functionality for VoIP applications.
-//! 
+//!
 //! # Architecture Overview
-//! 
+//!
 //! The client module is organized into several sub-modules:
-//! 
+//!
 //! - **`manager`** - The main ClientManager that coordinates all operations
 //! - **`calls`** - Call management functionality (make, answer, hangup)
-//! - **`registration`** - SIP registration handling  
+//! - **`registration`** - SIP registration handling
 //! - **`media`** - Media session control (audio mute, codec selection)
 //! - **`handlers`** - Event handlers and callbacks
-//! 
+//!
 //! # Usage Guide
-//! 
+//!
 //! ## Basic Call Flow
-//! 
+//!
 //! ```
 //! use rvoip_client_core::{ClientBuilder, ClientEvent, call::CallState};
-//! 
+//!
 //! # tokio_test::block_on(async {
 //! // 1. Create client with proper configuration
 //! let client = ClientBuilder::new()
@@ -27,78 +27,78 @@
 //!     .build()
 //!     .await
 //!     .expect("Failed to build client");
-//! 
+//!
 //! // 2. Subscribe to events (test the API)
 //! let events = client.subscribe_events();
-//! 
+//!
 //! // 3. Test event subscription works
 //! drop(events); // Clean up receiver
-//! 
+//!
 //! // Client was successfully created with the specified configuration
 //! println!("Client created successfully!");
 //! # })
 //! ```
-//! 
+//!
 //! ## Best Practices
-//! 
+//!
 //! ### 1. Always Handle Events
-//! 
+//!
 //! The event system is crucial for tracking call state and handling errors:
-//! 
+//!
 //! ```
 //! use rvoip_client_core::{ClientBuilder, ClientEvent};
-//! 
+//!
 //! # tokio_test::block_on(async {
 //! let client = ClientBuilder::new()
 //!     .local_address("127.0.0.1:5061".parse().unwrap())
 //!     .build()
 //!     .await
 //!     .expect("Failed to build client");
-//! 
+//!
 //! let mut events = client.subscribe_events();
-//! 
+//!
 //! // Test that we can pattern match on event types
 //! // (This demonstrates the API without requiring actual events)
 //! if let Ok(_) = events.try_recv() {
 //!     // This won't execute since we haven't generated events,
 //!     // but it shows the pattern matching API
 //! }
-//! 
+//!
 //! drop(events);
 //! # })
 //! ```
-//! 
+//!
 //! ### 2. Proper Resource Cleanup
-//! 
+//!
 //! Always clean up resources when shutting down:
-//! 
+//!
 //! ```
 //! use rvoip_client_core::ClientBuilder;
-//! 
+//!
 //! # tokio_test::block_on(async {
 //! let client = ClientBuilder::new()
 //!     .local_address("127.0.0.1:5062".parse().unwrap())
 //!     .build()
 //!     .await
 //!     .expect("Failed to build client");
-//! 
+//!
 //! // Test the cleanup APIs (they work but return empty results when no operations have occurred)
 //! let registrations = client.get_all_registrations().await;
 //! assert!(registrations.is_empty()); // No registrations yet
-//! 
+//!
 //! let calls = client.get_active_calls().await;
 //! assert!(calls.is_empty()); // No calls yet
-//! 
+//!
 //! // These APIs are available for proper cleanup when needed
-//! println!("Cleanup APIs verified: {} registrations, {} calls", 
+//! println!("Cleanup APIs verified: {} registrations, {} calls",
 //!          registrations.len(), calls.len());
 //! # })
 //! ```
-//! 
+//!
 //! ### 3. Registration Management
-//! 
+//!
 //! Keep registrations fresh and handle failures:
-//! 
+//!
 //! ```rust,no_run
 //! # use rvoip_client_core::Client;
 //! # use std::sync::Arc;
@@ -124,11 +124,11 @@
 //! # Ok(())
 //! # }
 //! ```
-//! 
+//!
 //! ### 4. Media Control
-//! 
+//!
 //! Handle media operations gracefully:
-//! 
+//!
 //! ```rust,no_run
 //! # use rvoip_client_core::Client;
 //! # use std::sync::Arc;
@@ -138,7 +138,7 @@
 //!     Ok(_) => println!("Microphone muted"),
 //!     Err(e) => eprintln!("Failed to mute: {}", e),
 //! }
-//! 
+//!
 //! // Get media info before operations
 //! if let Ok(info) = client.get_call_media_info(&call_id).await {
 //!     println!("Current codec: {:?}", info.codec);
@@ -147,18 +147,18 @@
 //! # Ok(())
 //! # }
 //! ```
-//! 
+//!
 //! ## Common Patterns
-//! 
+//!
 //! ### Auto-Answer Incoming Calls
-//! 
+//!
 //! ```rust,no_run
 //! # use rvoip_client_core::{Client, ClientEvent};
 //! # use std::sync::Arc;
 //! # async fn example(client: Arc<Client>) {
 //! let answer_client = client.clone();
 //! let mut events = client.subscribe_events();
-//! 
+//!
 //! tokio::spawn(async move {
 //!     while let Ok(event) = events.recv().await {
 //!         if let ClientEvent::IncomingCall { info, .. } = event {
@@ -174,9 +174,9 @@
 //! });
 //! # }
 //! ```
-//! 
+//!
 //! ### Call Transfer
-//! 
+//!
 //! ```rust,no_run
 //! # use rvoip_client_core::Client;
 //! # use std::sync::Arc;
@@ -188,7 +188,7 @@
 //!     "sip:charlie@example.com".to_string(),
 //!     Some("Transferring Bob's call".to_string()),
 //! ).await?;
-//! 
+//!
 //! // Wait for answer...
 //! // Then transfer
 //! client.transfer_call(&call_id, "sip:charlie@example.com").await?;
@@ -251,17 +251,17 @@ pub use recovery::{
 };
 
 /// Type alias for the main client interface
-/// 
+///
 /// This provides a more convenient name for the `ClientManager` type,
 /// allowing users to simply use `Client` instead of `ClientManager`.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```rust
 /// use rvoip_client_core::Client;
 /// use rvoip_client_core::ClientBuilder;
 /// use std::sync::Arc;
-/// 
+///
 /// # tokio_test::block_on(async {
 /// let client: Arc<Client> = ClientBuilder::new()
 ///     .local_address("127.0.0.1:5080".parse().unwrap())

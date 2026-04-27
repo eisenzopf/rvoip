@@ -29,7 +29,7 @@ pub trait EventPackage: Send + Sync {
         Duration::from_secs(60) // 1 minute default minimum
     }
 
-    /// Get the maximum allowed subscription duration  
+    /// Get the maximum allowed subscription duration
     fn max_expires(&self) -> Duration {
         Duration::from_secs(86400) // 24 hours default maximum
     }

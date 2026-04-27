@@ -704,7 +704,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
                         rtp_ts, from_ssrc, to_ssrc, result
                     );
                 } else {
-                    debug!("Failed to convert timestamp {} from SSRC={:08x} to SSRC={:08x} - insufficient sync data", 
+                    debug!("Failed to convert timestamp {} from SSRC={:08x} to SSRC={:08x} - insufficient sync data",
                            rtp_ts, from_ssrc, to_ssrc);
                 }
                 Ok(result)
@@ -798,7 +798,7 @@ impl MediaTransportClient for DefaultMediaTransportClient {
         if let Some(session_media_sync) = session.media_sync() {
             if let Ok(sync) = session_media_sync.read() {
                 let synchronized = sync.are_synchronized(ssrc1, ssrc2, tolerance_ms);
-                debug!("Streams synchronized check: SSRC1={:08x}, SSRC2={:08x}, tolerance={}ms, result={}", 
+                debug!("Streams synchronized check: SSRC1={:08x}, SSRC2={:08x}, tolerance={}ms, result={}",
                        ssrc1, ssrc2, tolerance_ms, synchronized);
                 Ok(synchronized)
             } else {

@@ -692,7 +692,7 @@ impl Request {
 
     /// Retrieves the From display name, if present
     ///
-    /// # Returns  
+    /// # Returns
     /// An optional From display name string
     pub fn from_display_name(&self) -> Option<&str> {
         self.from().and_then(|from| from.address().display_name())
@@ -717,7 +717,7 @@ impl Request {
     /// Retrieves the To display name, if present
     ///
     /// # Returns
-    /// An optional To display name string  
+    /// An optional To display name string
     pub fn to_display_name(&self) -> Option<&str> {
         self.to().and_then(|to| to.address().display_name())
     }

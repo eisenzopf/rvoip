@@ -28,11 +28,11 @@ pub async fn enable_header_extensions(
     if *header_extensions_enabled.read().await {
         return Ok(true);
     }
-    
+
     // Set format and enabled flag
     *header_extension_format.write().await = format;
     *header_extensions_enabled.write().await = true;
-    
+
     debug!("Enabled header extensions with format: {:?}", format);
     Ok(true)
 }
@@ -49,7 +49,7 @@ pub async fn configure_header_extension(
     if !*header_extensions_enabled.read().await {
         return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
     }
-    
+
     // Check if ID is valid for the current format
     let format = *header_extension_format.read().await;
     match format {
@@ -71,11 +71,11 @@ pub async fn configure_header_extension(
             // No specific validation for legacy format
         },
     }
-    
+
     // Add mapping
     let mut mappings = header_extension_mappings.write().await;
     mappings.insert(id, uri.clone());
-    
+
     debug!("Configured header extension ID {} -> URI: {}", id, uri);
     Ok(())
 }
@@ -93,11 +93,11 @@ pub async fn configure_header_extensions(
             header_extensions_enabled,
             header_extension_format,
             header_extension_mappings,
-            id, 
+            id,
             uri
         ).await?;
     }
-    
+
     Ok(())
 }
 
@@ -113,23 +113,23 @@ pub async fn add_header_extension_for_client(
     if !*header_extensions_enabled.read().await {
         return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
     }
-    
+
     // Make sure the client exists
     let clients_guard = clients.read().await;
     if !clients_guard.contains_key(client_id) {
         return Err(MediaTransportError::ClientNotFound(client_id.to_string()));
     }
     drop(clients_guard);
-    
+
     // Add extension to pending list for this client
     let mut pending = pending_extensions.write().await;
-    
+
     // Get or create the pending list for this client
     let client_pending = pending.entry(client_id.to_string()).or_insert_with(Vec::new);
-    
+
     // Add the extension
     client_pending.push(extension);
-    
+
     Ok(())
 }
 
@@ -144,12 +144,12 @@ pub async fn add_header_extension_for_all_clients(
     if !*header_extensions_enabled.read().await {
         return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
     }
-    
+
     // Get all client IDs
     let clients_guard = clients.read().await;
     let client_ids: Vec<String> = clients_guard.keys().cloned().collect();
     drop(clients_guard);
-    
+
     // Add extension for each client
     for client_id in client_ids {
         add_header_extension_for_client(
@@ -160,7 +160,7 @@ pub async fn add_header_extension_for_all_clients(
             extension.clone()
         ).await?;
     }
-    
+
     Ok(())
 }
 
@@ -178,10 +178,10 @@ pub async fn add_audio_level_extension_for_client(
     if !*header_extensions_enabled.read().await {
         return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
     }
-    
+
     // Clamp level to 0-127
     let level = level.min(127);
-    
+
     // For audio level, the format is:
     // - Bit 7 (MSB): Voice activity flag (0 = active, 1 = inactive)
     // - Bits 0-6: Level (0-127 dB)
@@ -192,11 +192,11 @@ pub async fn add_audio_level_extension_for_client(
         // For inactive voice, the MSB is 1
         vec![level | 0x80]
     };
-    
+
     // Find the audio level extension ID
     let audio_level_id = {
         let mappings = header_extension_mappings.read().await;
-        
+
         // Look for urn:ietf:params:rtp-hdrext:ssrc-audio-level in mappings
         let mut id = None;
         for (mapping_id, uri) in mappings.iter() {
@@ -205,18 +205,18 @@ pub async fn add_audio_level_extension_for_client(
                 break;
             }
         }
-        
+
         // Default to ID 1 if not found
         id.unwrap_or(1)
     };
-    
+
     // Create extension
     let extension = HeaderExtension {
         id: audio_level_id,
         uri: "urn:ietf:params:rtp-hdrext:ssrc-audio-level".to_string(),
         data,
     };
-    
+
     // Add extension for client
     add_header_extension_for_client(
         header_extensions_enabled,
@@ -240,12 +240,12 @@ pub async fn add_audio_level_extension_for_all_clients(
     if !*header_extensions_enabled.read().await {
         return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
     }
-    
+
     // Get all client IDs
     let clients_guard = clients.read().await;
     let client_ids: Vec<String> = clients_guard.keys().cloned().collect();
     drop(clients_guard);
-    
+
     // Add audio level extension for each client
     for client_id in client_ids {
         add_audio_level_extension_for_client(
@@ -258,7 +258,7 @@ pub async fn add_audio_level_extension_for_all_clients(
             level
         ).await?;
     }
-    
+
     Ok(())
 }
 
@@ -272,11 +272,11 @@ pub async fn get_received_header_extensions(
     if !*header_extensions_enabled.read().await {
         return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
     }
-    
+
     // Get extensions for this client
     let extensions = received_extensions.read().await;
     let client_extensions = extensions.get(client_id).cloned().unwrap_or_default();
-    
+
     Ok(client_extensions)
 }
 
@@ -291,14 +291,14 @@ pub async fn get_received_audio_level(
     if !*header_extensions_enabled.read().await {
         return Err(MediaTransportError::ConfigError("Header extensions are not enabled".to_string()));
     }
-    
+
     // Get all extensions for this client
     let client_extensions = get_received_header_extensions(
         header_extensions_enabled,
         received_extensions,
         client_id
     ).await?;
-    
+
     // Look for audio level extension (typically ID 1)
     for ext in client_extensions {
         // Find by URI if mapped, or by common ID 1
@@ -306,21 +306,21 @@ pub async fn get_received_audio_level(
             let mappings = header_extension_mappings.read().await;
             mappings.get(&ext.id).map(|uri| uri == "urn:ietf:params:rtp-hdrext:ssrc-audio-level").unwrap_or(ext.id == 1)
         };
-        
+
         if is_audio_level && !ext.data.is_empty() {
             // Parse audio level data
             let byte = ext.data[0];
-            
+
             // Extract voice activity flag (0 = active, 1 = inactive)
             let voice_activity = (byte & 0x80) == 0;
-            
+
             // Extract level (0-127 dB)
             let level = byte & 0x7F;
-            
+
             return Ok(Some((voice_activity, level)));
         }
     }
-    
+
     Ok(None)
 }
 
@@ -330,7 +330,7 @@ pub async fn clear_pending_header_extensions(
 ) -> Result<(), MediaTransportError> {
     let mut pending = pending_extensions.write().await;
     pending.clear();
-    
+
     debug!("Cleared all pending header extensions");
     Ok(())
-} 
+}

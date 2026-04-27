@@ -17,10 +17,10 @@ use common::*;
 #[tokio::test]
 async fn test_event_processor_creation() {
     let mut helper = EventTestHelper::new().await.unwrap();
-    
+
     // Verify processor is running
     assert!(helper.processor().is_running().await);
-    
+
     helper.cleanup().await.unwrap();
 }
 
@@ -28,7 +28,7 @@ async fn test_event_processor_creation() {
 async fn test_event_publishing_basic() {
     let mut helper = EventTestHelper::new().await.unwrap();
     helper.subscribe().await.unwrap();
-    
+
     let session_id = SessionId("test-session-1".to_string());
     let event = SessionEvent::SessionCreated {
         session_id: session_id.clone(),
@@ -36,14 +36,14 @@ async fn test_event_publishing_basic() {
         to: "sip:bob@localhost".to_string(),
         call_state: CallState::Initiating,
     };
-    
+
     // Publish event
     helper.publish_event(event.clone()).await.unwrap();
-    
+
     // Wait for and verify event
     let received_event = helper.wait_for_event(Duration::from_secs(1)).await;
     assert!(received_event.is_some());
-    
+
     if let Some(SessionEvent::SessionCreated { session_id: received_id, from, to, call_state }) = received_event {
         assert_eq!(received_id, session_id);
         assert_eq!(from, "sip:alice@localhost");
@@ -52,7 +52,7 @@ async fn test_event_publishing_basic() {
     } else {
         panic!("Received wrong event type");
     }
-    
+
     helper.cleanup().await.unwrap();
 }
 
@@ -60,9 +60,9 @@ async fn test_event_publishing_basic() {
 async fn test_event_publishing_multiple_types() {
     let mut helper = EventTestHelper::new().await.unwrap();
     helper.subscribe().await.unwrap();
-    
+
     let session_id = SessionId("multi-event-session".to_string());
-    
+
     let events = vec![
         SessionEvent::SessionCreated {
             session_id: session_id.clone(),
@@ -84,17 +84,17 @@ async fn test_event_publishing_multiple_types() {
             reason: "Normal termination".to_string(),
         },
     ];
-    
+
     // Publish all events
     for event in &events {
         helper.publish_event(event.clone()).await.unwrap();
     }
-    
+
     // Receive and verify all events
     for expected_event in &events {
         let received_event = helper.wait_for_event(Duration::from_secs(1)).await;
         assert!(received_event.is_some());
-        
+
         match (&received_event.unwrap(), expected_event) {
             (SessionEvent::SessionCreated { session_id: r_id, .. }, SessionEvent::SessionCreated { session_id: e_id, .. }) => {
                 assert_eq!(r_id, e_id);
@@ -111,7 +111,7 @@ async fn test_event_publishing_multiple_types() {
             _ => panic!("Event type mismatch"),
         }
     }
-    
+
     helper.cleanup().await.unwrap();
 }
 
@@ -119,40 +119,40 @@ async fn test_event_publishing_multiple_types() {
 async fn test_event_publishing_without_subscribers() {
     let helper = EventTestHelper::new().await.unwrap();
     // Note: No subscription
-    
+
     let event = SessionEvent::SessionCreated {
         session_id: SessionId("no-sub-test".to_string()),
         from: "sip:alice@localhost".to_string(),
         to: "sip:bob@localhost".to_string(),
         call_state: CallState::Initiating,
     };
-    
+
     // Should not fail to publish even without subscribers
     let result = helper.publish_event(event).await;
     assert!(result.is_ok());
-    
+
     helper.cleanup().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_event_subscription_and_unsubscription() {
     let mut helper = EventTestHelper::new().await.unwrap();
-    
+
     // Subscribe
     helper.subscribe().await.unwrap();
-    
+
     let event = SessionEvent::SessionCreated {
         session_id: SessionId("sub-test".to_string()),
         from: "sip:alice@localhost".to_string(),
         to: "sip:bob@localhost".to_string(),
         call_state: CallState::Initiating,
     };
-    
+
     // Publish and receive event
     helper.publish_event(event.clone()).await.unwrap();
     let received = helper.wait_for_event(Duration::from_secs(1)).await;
     assert!(received.is_some());
-    
+
     helper.cleanup().await.unwrap();
 }
 
@@ -160,10 +160,10 @@ async fn test_event_subscription_and_unsubscription() {
 async fn test_event_filtering() {
     let mut helper = EventTestHelper::new().await.unwrap();
     helper.subscribe().await.unwrap();
-    
+
     let session1_id = SessionId("session-1".to_string());
     let session2_id = SessionId("session-2".to_string());
-    
+
     // Publish events for different sessions
     helper.publish_event(SessionEvent::SessionCreated {
         session_id: session1_id.clone(),
@@ -171,14 +171,14 @@ async fn test_event_filtering() {
         to: "sip:bob@localhost".to_string(),
         call_state: CallState::Initiating,
     }).await.unwrap();
-    
+
     helper.publish_event(SessionEvent::SessionCreated {
         session_id: session2_id.clone(),
         from: "sip:charlie@localhost".to_string(),
         to: "sip:david@localhost".to_string(),
         call_state: CallState::Initiating,
     }).await.unwrap();
-    
+
     // Wait for specific session event
     let session1_event = helper.wait_for_specific_event(
         Duration::from_secs(2),
@@ -187,34 +187,34 @@ async fn test_event_filtering() {
             _ => false,
         }
     ).await;
-    
+
     assert!(session1_event.is_some());
     if let Some(SessionEvent::SessionCreated { session_id, .. }) = session1_event {
         assert_eq!(session_id, session1_id);
     }
-    
+
     helper.cleanup().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_event_processor_start_stop() {
     let processor = Arc::new(SessionEventProcessor::new());
-    
+
     // Initially not running
     assert!(!processor.is_running().await);
-    
+
     // Start processor
     processor.start().await.unwrap();
     assert!(processor.is_running().await);
-    
+
     // Stop processor
     processor.stop().await.unwrap();
     assert!(!processor.is_running().await);
-    
+
     // Should be able to start again
     processor.start().await.unwrap();
     assert!(processor.is_running().await);
-    
+
     processor.stop().await.unwrap();
 }
 
@@ -222,22 +222,22 @@ async fn test_event_processor_start_stop() {
 async fn test_event_processor_multiple_subscribers() {
     let processor = Arc::new(SessionEventProcessor::new());
     processor.start().await.unwrap();
-    
+
     // Create multiple subscribers
     let mut subscriber1 = processor.subscribe().await.unwrap();
     let mut subscriber2 = processor.subscribe().await.unwrap();
     let mut subscriber3 = processor.subscribe().await.unwrap();
-    
+
     let event = SessionEvent::SessionCreated {
         session_id: SessionId("multi-sub-test".to_string()),
         from: "sip:alice@localhost".to_string(),
         to: "sip:bob@localhost".to_string(),
         call_state: CallState::Initiating,
     };
-    
+
     // Publish event
     processor.publish_event(event).await.unwrap();
-    
+
     // All subscribers should receive the event
     match tokio::time::timeout(Duration::from_secs(1), subscriber1.receive()).await {
         Ok(Ok(_)) => {}, // Event received
@@ -251,7 +251,7 @@ async fn test_event_processor_multiple_subscribers() {
         Ok(Ok(_)) => {}, // Event received
         _ => panic!("Subscriber 3 failed to receive event"),
     }
-    
+
     processor.stop().await.unwrap();
 }
 
@@ -259,9 +259,9 @@ async fn test_event_processor_multiple_subscribers() {
 async fn test_event_ordering() {
     let mut helper = EventTestHelper::new().await.unwrap();
     helper.subscribe().await.unwrap();
-    
+
     let session_id = SessionId("ordering-test".to_string());
-    
+
     // Publish events in sequence
     let events = vec![
         SessionEvent::SessionCreated {
@@ -285,17 +285,17 @@ async fn test_event_ordering() {
             reason: "Normal completion".to_string(),
         },
     ];
-    
+
     // Publish all events quickly
     for event in &events {
         helper.publish_event(event.clone()).await.unwrap();
     }
-    
+
     // Verify events are received in order
     for (i, expected_event) in events.iter().enumerate() {
         let received_event = helper.wait_for_event(Duration::from_secs(1)).await;
         assert!(received_event.is_some(), "Failed to receive event {}", i);
-        
+
         match (&received_event.unwrap(), expected_event) {
             (SessionEvent::SessionCreated { .. }, SessionEvent::SessionCreated { .. }) => {},
             (SessionEvent::StateChanged { new_state: r_state, .. }, SessionEvent::StateChanged { new_state: e_state, .. }) => {
@@ -305,7 +305,7 @@ async fn test_event_ordering() {
             _ => panic!("Event order mismatch at position {}", i),
         }
     }
-    
+
     helper.cleanup().await.unwrap();
 }
 
@@ -313,25 +313,25 @@ async fn test_event_ordering() {
 async fn test_event_error_handling() {
     let mut helper = EventTestHelper::new().await.unwrap();
     helper.subscribe().await.unwrap();
-    
+
     // Test error event
     let error_event = SessionEvent::Error {
         session_id: Some(SessionId("error-test".to_string())),
         error: "Test error condition".to_string(),
     };
-    
+
     helper.publish_event(error_event).await.unwrap();
-    
+
     let received_event = helper.wait_for_event(Duration::from_secs(1)).await;
     assert!(received_event.is_some());
-    
+
     if let Some(SessionEvent::Error { session_id, error }) = received_event {
         assert!(session_id.is_some());
         assert_eq!(error, "Test error condition");
     } else {
         panic!("Expected error event");
     }
-    
+
     helper.cleanup().await.unwrap();
 }
 
@@ -339,10 +339,10 @@ async fn test_event_error_handling() {
 async fn test_event_performance() {
     let mut helper = EventTestHelper::new().await.unwrap();
     helper.subscribe().await.unwrap();
-    
+
     let event_count = 1000;
     let start = std::time::Instant::now();
-    
+
     // Publish many events
     for i in 0..event_count {
         let event = SessionEvent::SessionCreated {
@@ -351,17 +351,17 @@ async fn test_event_performance() {
             to: "sip:target@localhost".to_string(),
             call_state: CallState::Initiating,
         };
-        
+
         helper.publish_event(event).await.unwrap();
     }
-    
+
     let publish_time = start.elapsed();
     println!("Published {} events in {:?}", event_count, publish_time);
-    
+
     // Receive all events
     let receive_start = std::time::Instant::now();
     let mut received_count = 0;
-    
+
     while received_count < event_count {
         if helper.wait_for_event(Duration::from_millis(100)).await.is_some() {
             received_count += 1;
@@ -369,14 +369,14 @@ async fn test_event_performance() {
             break; // Timeout
         }
     }
-    
+
     let receive_time = receive_start.elapsed();
     println!("Received {} events in {:?}", received_count, receive_time);
-    
+
     assert_eq!(received_count, event_count);
     assert!(publish_time < Duration::from_secs(5), "Publishing took too long");
     assert!(receive_time < Duration::from_secs(10), "Receiving took too long");
-    
+
     helper.cleanup().await.unwrap();
 }
 
@@ -384,13 +384,13 @@ async fn test_event_performance() {
 async fn test_concurrent_event_publishing() {
     let processor = Arc::new(SessionEventProcessor::new());
     processor.start().await.unwrap();
-    
+
     let mut subscriber = processor.subscribe().await.unwrap();
-    
+
     let concurrent_publishers = 10;
     let events_per_publisher = 10;
     let mut handles = Vec::new();
-    
+
     // Spawn concurrent publishers
     for publisher_id in 0..concurrent_publishers {
         let processor_clone = Arc::clone(&processor);
@@ -402,74 +402,74 @@ async fn test_concurrent_event_publishing() {
                     to: "sip:target@localhost".to_string(),
                     call_state: CallState::Initiating,
                 };
-                
+
                 processor_clone.publish_event(event).await.unwrap();
             }
         });
         handles.push(handle);
     }
-    
+
     // Wait for all publishers to complete
     for handle in handles {
         handle.await.unwrap();
     }
-    
+
     // Receive all events
     let total_events = concurrent_publishers * events_per_publisher;
     let mut received_count = 0;
-    
+
     while received_count < total_events {
         match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
             Ok(Ok(_)) => received_count += 1,
             _ => break,
         }
     }
-    
+
     assert_eq!(received_count, total_events);
-    
+
     processor.stop().await.unwrap();
 }
 
 #[tokio::test]
 async fn test_event_processor_restart() {
     let processor = Arc::new(SessionEventProcessor::new());
-    
+
     // Start, publish, stop
     processor.start().await.unwrap();
     let mut subscriber1 = processor.subscribe().await.unwrap();
-    
+
     let event1 = SessionEvent::SessionCreated {
         session_id: SessionId("restart-test-1".to_string()),
         from: "sip:alice@localhost".to_string(),
         to: "sip:bob@localhost".to_string(),
         call_state: CallState::Initiating,
     };
-    
+
     processor.publish_event(event1).await.unwrap();
     match tokio::time::timeout(Duration::from_secs(1), subscriber1.receive()).await {
         Ok(Ok(_)) => {}, // Event received
         _ => panic!("Failed to receive first event"),
     }
-    
+
     processor.stop().await.unwrap();
-    
+
     // Restart and verify it works again
     processor.start().await.unwrap();
     let mut subscriber2 = processor.subscribe().await.unwrap();
-    
+
     let event2 = SessionEvent::SessionCreated {
         session_id: SessionId("restart-test-2".to_string()),
         from: "sip:charlie@localhost".to_string(),
         to: "sip:david@localhost".to_string(),
         call_state: CallState::Initiating,
     };
-    
+
     processor.publish_event(event2).await.unwrap();
     match tokio::time::timeout(Duration::from_secs(1), subscriber2.receive()).await {
         Ok(Ok(_)) => {}, // Event received
         _ => panic!("Failed to receive second event"),
     }
-    
+
     processor.stop().await.unwrap();
 }
 
@@ -477,9 +477,9 @@ async fn test_event_processor_restart() {
 async fn test_event_types_comprehensive() {
     let mut helper = EventTestHelper::new().await.unwrap();
     helper.subscribe().await.unwrap();
-    
+
     let session_id = SessionId("comprehensive-test".to_string());
-    
+
     // Test all event types
     let events = vec![
         SessionEvent::SessionCreated {
@@ -506,14 +506,14 @@ async fn test_event_types_comprehensive() {
             reason: "Error recovery".to_string(),
         },
     ];
-    
+
     // Publish and verify each event type
     for event in events {
         helper.publish_event(event.clone()).await.unwrap();
-        
+
         let received = helper.wait_for_event(Duration::from_secs(1)).await;
         assert!(received.is_some());
-        
+
         // Verify event type matches
         match (&received.unwrap(), &event) {
             (SessionEvent::SessionCreated { .. }, SessionEvent::SessionCreated { .. }) => {},
@@ -524,6 +524,6 @@ async fn test_event_types_comprehensive() {
             _ => panic!("Event type mismatch"),
         }
     }
-    
+
     helper.cleanup().await.unwrap();
-} 
+}

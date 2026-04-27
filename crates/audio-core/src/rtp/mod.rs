@@ -34,13 +34,13 @@ pub struct RtpPacket {
 pub trait RtpPayloadFormat {
     /// Pack encoded audio data into RTP payload
     fn pack_payload(&self, data: &[u8]) -> Vec<u8>;
-    
+
     /// Unpack RTP payload to encoded audio data
     fn unpack_payload(&self, payload: &[u8]) -> Result<Vec<u8>, AudioError>;
-    
+
     /// Get payload type
     fn payload_type(&self) -> u8;
-    
+
     /// Get samples per packet
     fn samples_per_packet(&self) -> usize;
 }
@@ -50,7 +50,7 @@ impl RtpPayloadHandler {
     pub fn new(codec_name: String, payload_type: u8, sample_rate: u32, ssrc: u32) -> Self {
         // Default to 20ms packets
         let samples_per_packet = (sample_rate * 20 / 1000) as usize;
-        
+
         Self {
             codec_name,
             payload_type,
@@ -118,7 +118,7 @@ impl RtpPayloadHandler {
         let mut data = Vec::with_capacity(12 + packet.payload.len());
 
         // First byte: V(2) + P(1) + X(1) + CC(4)
-        let byte0 = (packet.version << 6) | 
+        let byte0 = (packet.version << 6) |
                    (if packet.padding { 0x20 } else { 0 }) |
                    (if packet.extension { 0x10 } else { 0 });
         data.push(byte0);
@@ -267,7 +267,7 @@ mod tests {
     fn test_rtp_packet_creation() {
         let mut handler = RtpPayloadHandler::new("PCMU".to_string(), 0, 8000, 0x12345678);
         let data = vec![0x80, 0x01, 0x02, 0x03];
-        
+
         let packet = handler.create_packet(&data, false);
         assert_eq!(packet.version, 2);
         assert_eq!(packet.payload_type, 0);
@@ -293,7 +293,7 @@ mod tests {
 
         let handler = RtpPayloadHandler::new("PCMU".to_string(), 0, 8000, 0xDEADBEEF);
         let serialized = handler.serialize_packet(&packet);
-        
+
         assert_eq!(serialized.len(), 16); // 12 byte header + 4 byte payload
         assert_eq!(serialized[0], 0x80); // Version 2
         assert_eq!(serialized[1], 0x00); // Payload type 0
@@ -312,7 +312,7 @@ mod tests {
 
         let handler = RtpPayloadHandler::new("PCMU".to_string(), 0, 8000, 0xDEADBEEF);
         let packet = handler.parse_packet(&data).unwrap();
-        
+
         assert_eq!(packet.version, 2);
         assert_eq!(packet.payload_type, 0);
         assert_eq!(packet.sequence_number, 0x1234);
@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn test_jitter_buffer() {
         let mut buffer = JitterBuffer::new(10);
-        
+
         // Add packet with sequence 0
         let packet1 = RtpPacket {
             version: 2,
@@ -338,13 +338,13 @@ mod tests {
             payload: vec![0x01],
         };
         buffer.add_packet(packet1);
-        
+
         // Should be able to get packet 0
         assert!(buffer.has_packets());
         let retrieved = buffer.get_next_packet().unwrap();
         assert_eq!(retrieved.sequence_number, 0);
         assert_eq!(retrieved.payload, vec![0x01]);
-        
+
         // Should not have more packets
         assert!(!buffer.has_packets());
     }

@@ -7,7 +7,7 @@
 //! ## Registration Processing
 //!
 //! - **Contact Registration**: Register endpoint locations
-//! - **Expires Handling**: Process registration lifetimes  
+//! - **Expires Handling**: Process registration lifetimes
 //! - **De-registration**: Handle contact removal (Expires: 0)
 //! - **Authentication**: Support authentication challenges
 //! - **Forwarding**: Route to session layer for actual registration logic

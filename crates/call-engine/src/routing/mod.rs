@@ -91,14 +91,14 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::routing::{RoutingEngine, RoutingDecision};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create routing engine with default policies
 //! let routing_engine = RoutingEngine::new();
-//! 
+//!
 //! // Route an incoming call
 //! let decision = routing_engine.route_call("incoming-call-info").await?;
-//! 
+//!
 //! match decision {
 //!     RoutingDecision::DirectToAgent { agent_id } => {
 //!         println!("Route directly to agent: {}", agent_id);
@@ -118,21 +118,21 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::routing::SkillMatcher;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let skill_matcher = SkillMatcher::new();
-//! 
+//!
 //! // Define call requirements
 //! let required_skills = vec!["english".to_string(), "billing".to_string()];
 //! let preferred_skills = vec!["tier2".to_string()];
-//! 
+//!
 //! // Find best agent match
 //! // let best_agent = skill_matcher.find_best_match(
 //! //     &required_skills,
 //! //     &preferred_skills,
 //! //     &available_agents
 //! // )?;
-//! 
+//!
 //! println!("Skill-based routing configured");
 //! # Ok(())
 //! # }
@@ -142,19 +142,19 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::routing::RoutingPolicies;
-//! 
+//!
 //! # fn example() {
 //! let mut policies = RoutingPolicies::new();
-//! 
+//!
 //! // Configure business hour routing
 //! // policies.set_business_hours("09:00", "17:00", vec!["Mon", "Tue", "Wed", "Thu", "Fri"]);
-//! 
+//!
 //! // Configure VIP customer routing
 //! // policies.set_vip_routing(true);
-//! 
+//!
 //! // Configure geographic preferences
 //! // policies.set_geographic_routing(true);
-//! 
+//!
 //! println!("Advanced routing policies configured");
 //! # }
 //! ```
@@ -229,10 +229,10 @@
 //! ```rust
 //! use rvoip_call_engine::routing::RoutingEngine;
 //! use rvoip_call_engine::error::CallCenterError;
-//! 
+//!
 //! # async fn example() {
 //! let routing_engine = RoutingEngine::new();
-//! 
+//!
 //! match routing_engine.route_call("call-info").await {
 //!     Ok(decision) => println!("Routing decision: {:?}", decision),
 //!     Err(CallCenterError::Routing(msg)) => println!("Routing error: {}", msg),
@@ -270,9 +270,9 @@ pub mod skills;
 
 pub use engine::{RoutingEngine, RoutingDecision};
 pub use policies::{
-    RoutingPolicies, TimeBasedRules as TimeBasedRule, BusinessHours, 
+    RoutingPolicies, TimeBasedRules as TimeBasedRule, BusinessHours,
     GeographicRules as GeographicRule,
-    SkillRequirement as PoliciesSkillRequirement, 
+    SkillRequirement as PoliciesSkillRequirement,
     SkillLevel as PoliciesSkillLevel, RoutingDecision as PoliciesRoutingDecision
 };
 pub use skills::{
@@ -282,4 +282,4 @@ pub use skills::{
 };
 
 // Re-export queue's CallContext since routing docs reference it
-pub use crate::queue::CallContext; 
+pub use crate::queue::CallContext;

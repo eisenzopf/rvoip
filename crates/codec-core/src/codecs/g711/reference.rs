@@ -16,7 +16,7 @@
 //! - Applies 1's complement for negative values
 //! - Toggles even bits (XOR with 0x55)
 //!
-//! ### μ-law Compression  
+//! ### μ-law Compression
 //! - Uses 14 Most Significant Bits (MSBs) from input
 //! - Produces 8 Least Significant Bits (LSBs) on output
 //! - Adds bias of 33 (0x21) for processing

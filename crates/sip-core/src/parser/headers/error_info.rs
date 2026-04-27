@@ -367,7 +367,7 @@ mod tests {
 
         // Check parameters
         assert_eq!(infos[0].params.len(), 1);
-        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(v)) 
+        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(v))
             if n == "reason" && v.to_string() == "busy"));
 
         // Test case insensitivity of header name
@@ -452,7 +452,7 @@ mod tests {
         // First URI should have "reason=busy" parameter
         assert_eq!(infos[0].params.len(), 1);
         assert!(
-            matches!(&infos[0].params[0], Param::Other(n, Some(GenericValue::Token(v))) 
+            matches!(&infos[0].params[0], Param::Other(n, Some(GenericValue::Token(v)))
             if n == "reason" && v == "busy")
         );
 
@@ -491,19 +491,19 @@ mod tests {
 
         // Verify each parameter type
         // Token parameter
-        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(v)) 
+        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(v))
             if n == "reason" && v.to_string() == "busy"));
 
         // Numeric parameter
-        assert!(matches!(&infos[0].params[1], Param::Other(n, Some(v)) 
+        assert!(matches!(&infos[0].params[1], Param::Other(n, Some(v))
             if n == "id" && v.to_string() == "1"));
 
         // Flag parameter (no value)
-        assert!(matches!(&infos[0].params[2], Param::Other(n, None) 
+        assert!(matches!(&infos[0].params[2], Param::Other(n, None)
             if n == "critical"));
 
         // Quoted string parameter
-        assert!(matches!(&infos[0].params[3], Param::Other(n, Some(v)) 
+        assert!(matches!(&infos[0].params[3], Param::Other(n, Some(v))
             if n == "info" && v.to_string().contains("quoted value")));
 
         // Test parameter with URI as value
@@ -655,7 +655,7 @@ mod tests {
 
         // Check parameters
         assert_eq!(infos[0].params.len(), 1);
-        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(v)) 
+        assert!(matches!(&infos[0].params[0], Param::Other(n, Some(v))
             if n == "reason" && v.to_string() == "Foo"));
 
         // Check comment

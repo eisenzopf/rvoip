@@ -96,7 +96,7 @@ impl CodecCapability {
 pub struct CodecNegotiator {
     /// Local codec capabilities
     local_capabilities: Vec<CodecCapability>,
-    /// Remote codec capabilities  
+    /// Remote codec capabilities
     remote_capabilities: Vec<CodecCapability>,
     /// Negotiation preferences
     preferences: NegotiationPreferences,

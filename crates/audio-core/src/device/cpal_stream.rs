@@ -30,10 +30,10 @@ fn find_best_config(
             })?
             .collect()
     };
-    
+
     let desired_rate = desired_format.sample_rate;
     let desired_channels = desired_format.channels;
-    
+
     // First, try to find exact match
     for config in &supported_configs {
         if config.channels() == desired_channels &&
@@ -48,7 +48,7 @@ fn find_best_config(
             return Ok((config.with_sample_rate(cpal::SampleRate(desired_rate)), hardware_format));
         }
     }
-    
+
     // If no exact match, find the best alternative
     if supported_configs.is_empty() {
         return Err(AudioError::DeviceError {
@@ -57,11 +57,11 @@ fn find_best_config(
             reason: "No supported configurations".to_string(),
         });
     }
-    
+
     // Pick the first config and adjust to the closest supported values
     let config = &supported_configs[0];
     let hardware_channels = config.channels();
-    
+
     // Pick the closest sample rate
     let hardware_rate = if desired_rate < config.min_sample_rate().0 {
         config.min_sample_rate().0
@@ -70,20 +70,20 @@ fn find_best_config(
     } else {
         desired_rate
     };
-    
+
     let hardware_format = AudioFormat::new(
         hardware_rate,
         hardware_channels,
         16,
         desired_format.frame_size_ms,
     );
-    
+
     eprintln!(
         "🎵 Hardware format: {}Hz {} ch (requested: {}Hz {} ch)",
         hardware_rate, hardware_channels,
         desired_rate, desired_channels
     );
-    
+
     Ok((config.with_sample_rate(cpal::SampleRate(hardware_rate)), hardware_format))
 }
 
@@ -96,25 +96,25 @@ pub fn create_capture_stream(
 ) -> AudioResult<cpal::Stream> {
     // Find the best hardware configuration
     let (config, hardware_format) = find_best_config(device, &desired_format, true)?;
-    
+
     // Create format converter if needed
     let converter = if hardware_format.is_compatible_with(&desired_format) {
         None
     } else {
-        eprintln!("📐 Creating format converter for capture: {} -> {}", 
-            hardware_format.description(), 
+        eprintln!("📐 Creating format converter for capture: {} -> {}",
+            hardware_format.description(),
             desired_format.description()
         );
         Some(Arc::new(Mutex::new(FormatConverter::new(hardware_format.clone(), desired_format.clone())?)))
     };
-    
+
     let err_fn = |err| eprintln!("Audio capture stream error: {}", err);
-    
+
     // Calculate samples per frame for the hardware format
     let hw_samples_per_frame = hardware_format.samples_per_frame();
     let mut buffer = Vec::with_capacity(hw_samples_per_frame);
     let mut timestamp = 0u32;
-    
+
     // Build the stream
     let stream = device.build_input_stream(
         &config.into(),
@@ -123,12 +123,12 @@ pub fn create_capture_stream(
             for &sample in data {
                 let i16_sample = (sample * i16::MAX as f32) as i16;
                 buffer.push(i16_sample);
-                
+
                 // When we have a full frame, send it
                 if buffer.len() >= hw_samples_per_frame {
                     let frame_samples: Vec<i16> = buffer.drain(..hw_samples_per_frame).collect();
                     let hw_frame = AudioFrame::new(frame_samples, hardware_format.clone(), timestamp);
-                    
+
                     // Convert format if needed
                     let output_frame = if let Some(ref converter) = converter {
                         match converter.lock().unwrap().convert_frame(&hw_frame) {
@@ -141,10 +141,10 @@ pub fn create_capture_stream(
                     } else {
                         hw_frame
                     };
-                    
+
                     // Try to send, but don't block if receiver is full
                     let _ = frame_tx.try_send(output_frame);
-                    
+
                     timestamp = timestamp.wrapping_add(hw_samples_per_frame as u32);
                 }
             }
@@ -156,14 +156,14 @@ pub fn create_capture_stream(
         operation: "build stream".to_string(),
         reason: e.to_string(),
     })?;
-    
+
     // Start the stream
     stream.play().map_err(|e| AudioError::DeviceError {
         device: device.name().unwrap_or_default(),
         operation: "start stream".to_string(),
         reason: e.to_string(),
     })?;
-    
+
     Ok(stream)
 }
 
@@ -176,25 +176,25 @@ pub fn create_playback_stream(
 ) -> AudioResult<cpal::Stream> {
     // Find the best hardware configuration
     let (config, hardware_format) = find_best_config(device, &desired_format, false)?;
-    
+
     // Create format converter if needed
     let converter = if desired_format.is_compatible_with(&hardware_format) {
         None
     } else {
-        eprintln!("📐 Creating format converter for playback: {} -> {}", 
-            desired_format.description(), 
+        eprintln!("📐 Creating format converter for playback: {} -> {}",
+            desired_format.description(),
             hardware_format.description()
         );
         Some(Arc::new(Mutex::new(FormatConverter::new(desired_format.clone(), hardware_format.clone())?)))
     };
-    
+
     let err_fn = |err| eprintln!("Audio playback stream error: {}", err);
-    
+
     // Playback buffer to smooth out timing
     let mut playback_buffer = Vec::new();
     let hw_samples_per_frame = hardware_format.samples_per_frame();
     let silence_frame = vec![0f32; hw_samples_per_frame];
-    
+
     // Build the stream
     let stream = device.build_output_stream(
         &config.into(),
@@ -217,7 +217,7 @@ pub fn create_playback_stream(
                         } else {
                             input_frame
                         };
-                        
+
                         // Convert i16 to f32 and add to buffer
                         for &sample in &hw_frame.samples {
                             let f32_sample = sample as f32 / i16::MAX as f32;
@@ -230,12 +230,12 @@ pub fn create_playback_stream(
                     }
                 }
             }
-            
+
             // Fill output buffer
             for (out_sample, &buf_sample) in data.iter_mut().zip(playback_buffer.iter()) {
                 *out_sample = buf_sample;
             }
-            
+
             // Remove consumed samples
             playback_buffer.drain(..data.len().min(playback_buffer.len()));
         },
@@ -246,13 +246,13 @@ pub fn create_playback_stream(
         operation: "build stream".to_string(),
         reason: e.to_string(),
     })?;
-    
+
     // Start the stream
     stream.play().map_err(|e| AudioError::DeviceError {
         device: device.name().unwrap_or_default(),
         operation: "start stream".to_string(),
         reason: e.to_string(),
     })?;
-    
+
     Ok(stream)
 }

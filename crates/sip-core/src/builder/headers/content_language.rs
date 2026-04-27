@@ -80,7 +80,7 @@ use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAcces
 ///     "This message contains both English and French content.\n\n\
 ///      Ce message contient du contenu en anglais et en français."
 /// );
-///     
+///
 /// let request = SimpleRequestBuilder::new(Method::Message, "sip:support@example.com").unwrap()
 ///     .content_type_text()
 ///     .content_languages(&["en", "fr"])  // Message contains both languages

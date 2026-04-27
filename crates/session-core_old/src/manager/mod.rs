@@ -10,4 +10,4 @@ pub mod cleanup;
 
 // Re-export the main SessionManager and coordinator
 // pub use core::SessionManager; // Disabled - using SessionCoordinator directly
-// pub use coordinator::SessionCoordinator; // MIGRATION: Use crate::coordinator::SessionCoordinator instead 
+// pub use coordinator::SessionCoordinator; // MIGRATION: Use crate::coordinator::SessionCoordinator instead

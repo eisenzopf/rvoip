@@ -12,7 +12,7 @@ use crate::agent::AgentStatus;
 impl DatabaseManager {
     /// Convenience methods for agent operations
     /// (All actual implementations are in the main mod.rs file)
-    
+
     pub async fn get_agent(&self, agent_id: &str) -> Result<Option<DbAgent>> {
         let agents = sqlx::query_as!(
             DbAgent,
@@ -22,10 +22,10 @@ impl DatabaseManager {
         )
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(agents)
     }
-    
+
     pub async fn list_agents(&self) -> Result<Vec<DbAgent>> {
         let agents = sqlx::query_as!(
             DbAgent,
@@ -34,10 +34,10 @@ impl DatabaseManager {
         )
         .fetch_all(&self.pool)
         .await?;
-        
+
         Ok(agents)
     }
-    
+
     pub async fn mark_agent_offline(&self, agent_id: &str) -> Result<()> {
         sqlx::query!(
             "UPDATE agents SET status = 'OFFLINE', current_calls = 0 WHERE agent_id = ?1",
@@ -45,13 +45,13 @@ impl DatabaseManager {
         )
         .execute(&self.pool)
         .await?;
-        
+
         Ok(())
     }
-    
+
     pub async fn update_agent_heartbeat(&self, agent_id: &str) -> Result<()> {
         let now = chrono::Utc::now();
-        
+
         sqlx::query!(
             "UPDATE agents SET last_heartbeat = ?1 WHERE agent_id = ?2",
             now,
@@ -59,7 +59,7 @@ impl DatabaseManager {
         )
         .execute(&self.pool)
         .await?;
-        
+
         Ok(())
     }
-} 
+}

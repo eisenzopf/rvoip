@@ -70,7 +70,7 @@ pub fn create_test_bridge_with_config(bridge_id: &str, config: BridgeTestConfig)
         auto_start: config.auto_start,
         auto_stop_on_empty: config.auto_stop_on_empty,
     };
-    
+
     // Note: SessionBridge constructor doesn't take BridgeConfig in current implementation
     // This would need to be updated when BridgeConfig integration is added
     SessionBridge::new(bridge_id.to_string())
@@ -85,11 +85,11 @@ pub fn create_test_session_ids(count: usize) -> Vec<SessionId> {
 pub fn create_bridge_with_sessions(bridge_id: &str, session_count: usize) -> (SessionBridge, Vec<SessionId>) {
     let mut bridge = create_test_bridge(bridge_id);
     let session_ids = create_test_session_ids(session_count);
-    
+
     for session_id in &session_ids {
         bridge.add_session(session_id.clone()).expect("Failed to add session to bridge");
     }
-    
+
     (bridge, session_ids)
 }
 
@@ -163,7 +163,7 @@ pub struct BridgeIntegrationHelper {
 impl BridgeIntegrationHelper {
     pub async fn new(manager_count: usize, bridge_count: usize) -> Result<Self, rvoip_session_core::SessionError> {
         let mut managers = Vec::new();
-        
+
         // Create session managers
         for i in 0..manager_count {
             let handler = TestCallHandler::new(true);
@@ -174,14 +174,14 @@ impl BridgeIntegrationHelper {
             ).await?;
             managers.push(manager);
         }
-        
+
         // Create bridges
         let mut bridges = Vec::new();
         for i in 0..bridge_count {
             let bridge = SessionBridge::new(format!("test-bridge-{}", i));
             bridges.push(Arc::new(Mutex::new(bridge)));
         }
-        
+
         Ok(Self { managers, bridges })
     }
 
@@ -189,16 +189,16 @@ impl BridgeIntegrationHelper {
         if caller_idx >= self.managers.len() || callee_idx >= self.managers.len() {
             return Err(rvoip_session_core::SessionError::Other("Manager index out of bounds".to_string()));
         }
-        
+
         let caller = &self.managers[caller_idx];
         let callee = &self.managers[callee_idx];
-        
+
         let caller_addr = caller.get_bound_address();
         let callee_addr = callee.get_bound_address();
-        
+
         let from_uri = format!("sip:user{}@{}", caller_idx, caller_addr.ip());
         let to_uri = format!("sip:user{}@{}", callee_idx, callee_addr);
-        
+
         caller.create_outgoing_call(&from_uri, &to_uri, Some("test SDP".to_string())).await
     }
 
@@ -206,7 +206,7 @@ impl BridgeIntegrationHelper {
         if bridge_idx >= self.bridges.len() {
             return Err(rvoip_session_core::SessionError::Other("Bridge index out of bounds".to_string()));
         }
-        
+
         let bridge = self.bridges[bridge_idx].clone();
         let mut bridge_guard = bridge.lock().await;
         bridge_guard.add_session(session_id)
@@ -216,7 +216,7 @@ impl BridgeIntegrationHelper {
         if bridge_idx >= self.bridges.len() {
             return Err(rvoip_session_core::SessionError::Other("Bridge index out of bounds".to_string()));
         }
-        
+
         let bridge = self.bridges[bridge_idx].clone();
         let mut bridge_guard = bridge.lock().await;
         bridge_guard.start()
@@ -226,7 +226,7 @@ impl BridgeIntegrationHelper {
         if bridge_idx >= self.bridges.len() {
             return None;
         }
-        
+
         let bridge = self.bridges[bridge_idx].clone();
         let bridge_guard = bridge.lock().await;
         Some((bridge_guard.is_active(), bridge_guard.session_count()))
@@ -238,7 +238,7 @@ impl BridgeIntegrationHelper {
             let mut bridge_guard = bridge.lock().await;
             let _ = bridge_guard.stop();
         }
-        
+
         // Cleanup managers
         cleanup_managers(self.managers.clone()).await
     }
@@ -258,11 +258,11 @@ pub fn create_bridge_scenario(
     start_bridge: bool,
 ) -> (SessionBridge, Vec<SessionId>) {
     let (mut bridge, session_ids) = create_bridge_with_sessions(bridge_id, session_count);
-    
+
     if start_bridge {
         bridge.start().expect("Failed to start bridge");
     }
-    
+
     (bridge, session_ids)
 }
 
@@ -282,30 +282,30 @@ impl BridgePerformanceTest {
     pub fn new(bridge_id: &str, session_count: usize) -> Self {
         let bridge = create_test_bridge(bridge_id);
         let session_ids = create_test_session_ids(session_count);
-        
+
         Self { bridge, session_ids }
     }
-    
+
     pub async fn run_add_session_benchmark(&mut self) -> Duration {
         let start = std::time::Instant::now();
-        
+
         for session_id in &self.session_ids {
             self.bridge.add_session(session_id.clone()).expect("Failed to add session");
         }
-        
+
         start.elapsed()
     }
-    
+
     pub async fn run_remove_session_benchmark(&mut self) -> Duration {
         let start = std::time::Instant::now();
-        
+
         for session_id in &self.session_ids {
             self.bridge.remove_session(session_id).expect("Failed to remove session");
         }
-        
+
         start.elapsed()
     }
-    
+
     pub fn verify_final_state(&self) {
         assert_eq!(self.bridge.session_count(), 0, "Bridge should be empty after performance test");
     }
@@ -321,49 +321,49 @@ impl BridgeConcurrencyTest {
         let bridges = (0..bridge_count)
             .map(|i| Arc::new(Mutex::new(create_test_bridge(&format!("concurrent-bridge-{}", i)))))
             .collect();
-            
+
         Self { bridges }
     }
-    
+
     pub async fn run_concurrent_operations(&self, operations_per_bridge: usize) -> Vec<Result<(), String>> {
         let mut handles = Vec::new();
-        
+
         for (i, bridge) in self.bridges.iter().enumerate() {
             let bridge_clone = bridge.clone();
             let handle = tokio::spawn(async move {
                 let session_ids = create_test_session_ids(operations_per_bridge);
-                
+
                 // Start bridge
                 {
                     let mut bridge_guard = bridge_clone.lock().await;
                     bridge_guard.start().map_err(|e| format!("Failed to start bridge {}: {:?}", i, e))?;
                 }
-                
+
                 // Add sessions
                 for session_id in &session_ids {
                     let mut bridge_guard = bridge_clone.lock().await;
                     bridge_guard.add_session(session_id.clone())
                         .map_err(|e| format!("Failed to add session to bridge {}: {:?}", i, e))?;
                 }
-                
+
                 // Remove sessions
                 for session_id in &session_ids {
                     let mut bridge_guard = bridge_clone.lock().await;
                     bridge_guard.remove_session(session_id)
                         .map_err(|e| format!("Failed to remove session from bridge {}: {:?}", i, e))?;
                 }
-                
+
                 // Stop bridge
                 {
                     let mut bridge_guard = bridge_clone.lock().await;
                     bridge_guard.stop().map_err(|e| format!("Failed to stop bridge {}: {:?}", i, e))?;
                 }
-                
+
                 Ok::<(), String>(())
             });
             handles.push(handle);
         }
-        
+
         let mut results = Vec::new();
         for handle in handles {
             match handle.await {
@@ -371,7 +371,7 @@ impl BridgeConcurrencyTest {
                 Err(e) => results.push(Err(format!("Task failed: {:?}", e))),
             }
         }
-        
+
         results
     }
-} 
+}

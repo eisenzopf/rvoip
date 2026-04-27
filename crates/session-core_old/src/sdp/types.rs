@@ -17,25 +17,25 @@ pub enum SdpRole {
 pub struct NegotiatedMediaConfig {
     /// The negotiated codec both parties will use
     pub codec: String,
-    
+
     /// Local RTP endpoint
     pub local_addr: SocketAddr,
-    
+
     /// Remote RTP endpoint
     pub remote_addr: SocketAddr,
-    
+
     /// Local SDP (our offer or answer)
     pub local_sdp: String,
-    
+
     /// Remote SDP (their offer or answer)
     pub remote_sdp: String,
-    
+
     /// Our role in the negotiation
     pub role: SdpRole,
-    
+
     /// Negotiated ptime (packetization time)
     pub ptime: Option<u8>,
-    
+
     /// Whether DTMF is supported
     pub dtmf_enabled: bool,
-} 
+}

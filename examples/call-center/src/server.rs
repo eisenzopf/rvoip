@@ -20,27 +20,27 @@ struct Args {
     /// Server bind address (IP:PORT)
     #[arg(short, long, default_value = "0.0.0.0:5060")]
     bind_addr: String,
-    
+
     /// Server IP address for SIP communication (used in SIP URIs and contact headers)
     #[arg(short, long, default_value = "127.0.0.1")]
     domain: String,
-    
+
     /// Database path (use ":memory:" for in-memory database)
     #[arg(long, default_value = ":memory:")]
     database_path: String,
-    
+
     /// Maximum concurrent calls per agent
     #[arg(long, default_value = "1")]
     max_calls_per_agent: u32,
-    
+
     /// Maximum wait time in queue (seconds)
     #[arg(long, default_value = "60")]
     max_wait_time: u64,
-    
+
     /// Maximum queue size
     #[arg(long, default_value = "10")]
     max_queue_size: usize,
-    
+
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
@@ -49,14 +49,14 @@ struct Args {
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    
+
     // Create logs directory
     std::fs::create_dir_all("logs")?;
-    
+
     // Initialize logging with file output
     let file_appender = tracing_appender::rolling::never("logs", "server.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    
+
     let log_level = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
@@ -79,23 +79,23 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Step 1: Configure the call center
     let mut config = CallCenterConfig::default();
-    
+
     // CRITICAL FIX: Use domain IP for signaling address to fix SDP generation
     // Instead of using 0.0.0.0, use the domain IP with the specified port
     let signaling_addr = format!("{}:{}", args.domain, bind_addr.port()).parse()
         .map_err(|e| format!("Invalid signaling address: {}", e))?;
     config.general.local_signaling_addr = signaling_addr;
-    
+
     config.general.domain = args.domain.clone();
     config.general.local_ip = args.domain.clone(); // CRITICAL: Use domain IP for SIP URIs and contact headers
-    
+
     // Set media address to use the domain IP as well
     let media_addr = format!("{}:10000", args.domain).parse()
         .map_err(|e| format!("Invalid media address: {}", e))?;
     config.general.local_media_addr = media_addr;
-    
+
     config.agents.default_max_concurrent_calls = args.max_calls_per_agent;
-    
+
     // Set queue parameters
     config.queues.default_max_wait_time = args.max_wait_time;
     config.queues.max_queue_size = args.max_queue_size;
@@ -108,7 +108,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("   Max calls per agent: {}", config.agents.default_max_concurrent_calls);
     info!("   Queue max wait time: {}s", config.queues.default_max_wait_time);
     info!("   Max queue size: {}", config.queues.max_queue_size);
-    
+
     info!("🔧 IMPORTANT: Using domain IP {} for both SIP signaling and media to fix SDP generation", args.domain);
 
     // Step 2: Create the call center server
@@ -151,14 +151,14 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("   - Agent registrations: sip:REGISTER");
     info!("   - Customer calls: sip:support@{}", args.domain);
     info!("   - Press Ctrl+C to shutdown");
-    
+
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
-    
+
     // Cleanup
     info!("🔚 Shutting down call center server...");
     server_handle.abort();
     info!("👋 Call center server shutdown complete");
 
     Ok(())
-} 
+}

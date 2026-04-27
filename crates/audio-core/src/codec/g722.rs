@@ -3,7 +3,7 @@ use crate::error::AudioError;
 use super::{CodecType, AudioCodecTrait, CodecConfig};
 
 /// G.722 wideband audio codec implementation
-/// 
+///
 /// G.722 uses sub-band coding to encode 16kHz audio at 64kbps
 /// It splits the signal into high and low frequency bands
 pub struct G722Encoder {
@@ -17,7 +17,7 @@ pub struct G722Encoder {
 struct G722EncoderState {
     // Low-band encoder state
     low_band_encoder: AdpcmEncoder,
-    // High-band encoder state  
+    // High-band encoder state
     high_band_encoder: AdpcmEncoder,
     // QMF analysis filter state
     qmf_state: [i32; 24],
@@ -79,7 +79,7 @@ impl G722Encoder {
                 format!("G.722 only supports 16kHz sample rate, got {}", config.sample_rate)
             ));
         }
-        
+
         if config.channels != 1 {
             return Err(AudioError::invalid_configuration(
                 format!("G.722 only supports mono audio, got {} channels", config.channels)
@@ -99,14 +99,14 @@ impl AudioCodecTrait for G722Encoder {
         // Ensure frame format matches codec requirements
         if frame.format.sample_rate != self.config.sample_rate {
             return Err(AudioError::invalid_format(
-                format!("Frame sample rate {} doesn't match codec sample rate {}", 
+                format!("Frame sample rate {} doesn't match codec sample rate {}",
                        frame.format.sample_rate, self.config.sample_rate)
             ));
         }
 
         if frame.format.channels != self.config.channels as u16 {
             return Err(AudioError::invalid_format(
-                format!("Frame channels {} doesn't match codec channels {}", 
+                format!("Frame channels {} doesn't match codec channels {}",
                        frame.format.channels, self.config.channels)
             ));
         }
@@ -116,14 +116,14 @@ impl AudioCodecTrait for G722Encoder {
 
         // Encode samples
         let mut encoded = Vec::with_capacity(pcm_samples.len() / 2);
-        
+
         for chunk in pcm_samples.chunks(2) {
             let input = if chunk.len() == 2 {
                 [chunk[0], chunk[1]]
             } else {
                 [chunk[0], 0] // Pad with zero if odd number of samples
             };
-            
+
             let encoded_byte = self.encoder_state.encode_sample(input);
             encoded.push(encoded_byte);
         }
@@ -133,7 +133,7 @@ impl AudioCodecTrait for G722Encoder {
 
     fn decode(&mut self, data: &[u8]) -> Result<AudioFrame, AudioError> {
         let mut samples = Vec::with_capacity(data.len() * 2);
-        
+
         for &byte in data {
             let decoded_samples = self.decoder_state.decode_sample(byte);
             // Use i16 samples directly
@@ -184,14 +184,14 @@ impl G722EncoderState {
     fn encode_sample(&mut self, input: [i16; 2]) -> u8 {
         // Store input samples
         self.input_buffer = input;
-        
+
         // QMF analysis - split into high and low frequency bands
         let (low_band, high_band) = self.qmf_analysis();
-        
+
         // Encode each band using ADPCM
         let low_bits = self.low_band_encoder.encode(low_band);
         let high_bits = self.high_band_encoder.encode(high_band);
-        
+
         // Combine bits: 6 bits for low band + 2 bits for high band
         ((low_bits & 0x3F) | ((high_bits & 0x03) << 6)) as u8
     }
@@ -201,7 +201,7 @@ impl G722EncoderState {
         // In a real implementation, this would use proper QMF filter coefficients
         let low_band = (self.input_buffer[0] as i32 + self.input_buffer[1] as i32) / 2;
         let high_band = (self.input_buffer[0] as i32 - self.input_buffer[1] as i32) / 2;
-        
+
         (low_band, high_band)
     }
 }
@@ -221,11 +221,11 @@ impl G722DecoderState {
         // Extract bits: 6 bits for low band + 2 bits for high band
         let low_bits = (input & 0x3F) as i32;
         let high_bits = ((input >> 6) & 0x03) as i32;
-        
+
         // Decode each band using ADPCM
         let low_band = self.low_band_decoder.decode(low_bits);
         let high_band = self.high_band_decoder.decode(high_bits);
-        
+
         // QMF synthesis - combine bands back to time domain
         self.qmf_synthesis(low_band, high_band)
     }
@@ -235,7 +235,7 @@ impl G722DecoderState {
         // In a real implementation, this would use proper QMF filter coefficients
         let sample1 = ((low_band + high_band) / 2).clamp(-32768, 32767) as i16;
         let sample2 = ((low_band - high_band) / 2).clamp(-32768, 32767) as i16;
-        
+
         [sample1, sample2]
     }
 }
@@ -252,19 +252,19 @@ impl AdpcmEncoder {
     fn encode(&mut self, input: i32) -> i32 {
         // Simplified ADPCM encoding
         // This is a basic implementation - real G.722 would use more complex algorithms
-        
+
         // Prediction
         let predicted = self.predict();
-        
+
         // Difference
         let diff = input - predicted;
-        
+
         // Quantization
         let quantized = self.quantize(diff);
-        
+
         // Update state
         self.update_encoder(quantized, input);
-        
+
         quantized
     }
 
@@ -283,7 +283,7 @@ impl AdpcmEncoder {
     fn update_encoder(&mut self, quantized: i32, input: i32) {
         // Update predictor state
         self.s = input;
-        
+
         // Update scale factor
         self.det = (self.det * 15 + 8) / 16;
         if self.det < 1 {
@@ -303,19 +303,19 @@ impl AdpcmDecoder {
 
     fn decode(&mut self, quantized: i32) -> i32 {
         // Simplified ADPCM decoding
-        
+
         // Prediction
         let predicted = self.predict();
-        
+
         // Dequantization
         let diff = self.dequantize(quantized);
-        
+
         // Reconstruction
         let reconstructed = predicted + diff;
-        
+
         // Update state
         self.update_decoder(quantized, reconstructed);
-        
+
         reconstructed
     }
 
@@ -333,7 +333,7 @@ impl AdpcmDecoder {
     fn update_decoder(&mut self, quantized: i32, reconstructed: i32) {
         // Update predictor state
         self.s = reconstructed;
-        
+
         // Update scale factor
         self.det = (self.det * 15 + 8) / 16;
         if self.det < 1 {
@@ -355,7 +355,7 @@ mod tests {
             bitrate: 64000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let encoder = G722Encoder::new(config);
         assert!(encoder.is_ok());
     }
@@ -369,7 +369,7 @@ mod tests {
             bitrate: 64000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let encoder = G722Encoder::new(config);
         assert!(encoder.is_err());
     }
@@ -383,9 +383,9 @@ mod tests {
             bitrate: 64000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let mut encoder = G722Encoder::new(config).unwrap();
-        
+
         // Test with sine wave samples (even number for proper chunking)
         let samples = vec![0, 16384, 32767, 16384, 0, -16384, -32767, -16384];
         let frame = AudioFrame {
@@ -400,15 +400,15 @@ mod tests {
             sequence: 0,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         // Encode
         let encoded = encoder.encode(&frame).unwrap();
         assert_eq!(encoded.len(), samples.len() / 2); // G.722 compresses 2:1
-        
+
         // Decode
         let decoded_frame = encoder.decode(&encoded).unwrap();
         assert_eq!(decoded_frame.samples.len(), samples.len());
-        
+
         // Check that decoding produces reasonable output
         // G.722 is lossy, so we expect some distortion
         for (original, decoded) in samples.iter().zip(decoded_frame.samples.iter()) {
@@ -426,7 +426,7 @@ mod tests {
             bitrate: 64000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let mut encoder = G722Encoder::new(config).unwrap();
         assert!(encoder.reset().is_ok());
     }
@@ -440,7 +440,7 @@ mod tests {
             bitrate: 64000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let encoder = G722Encoder::new(config).unwrap();
         assert_eq!(encoder.codec_type(), CodecType::G722);
     }
@@ -449,16 +449,16 @@ mod tests {
     fn test_adpcm_encoder_decoder() {
         let mut encoder = AdpcmEncoder::new();
         let mut decoder = AdpcmDecoder::new();
-        
+
         let test_samples = vec![0, 1000, 2000, 1000, 0, -1000, -2000, -1000];
-        
+
         for sample in test_samples {
             let encoded = encoder.encode(sample);
             let decoded = decoder.decode(encoded);
-            
+
             // ADPCM is lossy, so we expect some error
             let error = (sample - decoded).abs();
             assert!(error < sample.abs() / 2 + 1000);
         }
     }
-} 
+}

@@ -28,7 +28,7 @@ impl AudioDevice for CpalAudioDevice {
     fn info(&self) -> &AudioDeviceInfo {
         &self.info
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -47,7 +47,7 @@ impl CpalAudioDevice {
 pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDeviceInfo>> {
     let host = cpal::default_host();
     let mut devices = Vec::new();
-    
+
     let device_iter: Box<dyn Iterator<Item = cpal::Device>> = match direction {
         AudioDirection::Input => Box::new(host.input_devices().map_err(|e| {
             AudioError::DeviceError {
@@ -64,7 +64,7 @@ pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDevi
             }
         })?),
     };
-    
+
     // Get default device name for comparison
     let default_device = match direction {
         AudioDirection::Input => host.default_input_device(),
@@ -73,28 +73,28 @@ pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDevi
     let default_name = default_device
         .as_ref()
         .and_then(|d| d.name().ok());
-    
+
     for device in device_iter {
         let name = device.name().unwrap_or_else(|_| "Unknown Device".to_string());
         let id = name.clone(); // Use name as ID for simplicity
-        
+
         // Get supported configs
         let mut supported_sample_rates = Vec::new();
         let mut supported_channels = Vec::new();
-        
+
         match direction {
             AudioDirection::Input => {
                 if let Ok(configs) = device.supported_input_configs() {
                     for config in configs {
                         let sample_rate_range = config.min_sample_rate().0..=config.max_sample_rate().0;
-                        
+
                         // Add common sample rates that fall within the range
                         for &rate in &[8000, 16000, 44100, 48000] {
                             if sample_rate_range.contains(&rate) && !supported_sample_rates.contains(&rate) {
                                 supported_sample_rates.push(rate);
                             }
                         }
-                        
+
                         let channels = config.channels() as u16;
                         if !supported_channels.contains(&channels) {
                             supported_channels.push(channels);
@@ -106,14 +106,14 @@ pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDevi
                 if let Ok(configs) = device.supported_output_configs() {
                     for config in configs {
                         let sample_rate_range = config.min_sample_rate().0..=config.max_sample_rate().0;
-                        
+
                         // Add common sample rates that fall within the range
                         for &rate in &[8000, 16000, 44100, 48000] {
                             if sample_rate_range.contains(&rate) && !supported_sample_rates.contains(&rate) {
                                 supported_sample_rates.push(rate);
                             }
                         }
-                        
+
                         let channels = config.channels() as u16;
                         if !supported_channels.contains(&channels) {
                             supported_channels.push(channels);
@@ -122,7 +122,7 @@ pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDevi
                 }
             }
         }
-        
+
         // Ensure we have at least some defaults
         if supported_sample_rates.is_empty() {
             supported_sample_rates = vec![48000];
@@ -130,9 +130,9 @@ pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDevi
         if supported_channels.is_empty() {
             supported_channels = vec![2];
         }
-        
+
         let is_default = default_name.as_ref() == Some(&name);
-        
+
         let device_info = AudioDeviceInfo {
             id: id.clone(),
             name: name.clone(),
@@ -142,10 +142,10 @@ pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDevi
             supported_channels,
             supported_bit_depths: vec![16], // CPAL typically uses f32, but we'll convert to i16
         };
-        
+
         devices.push(device_info);
     }
-    
+
     Ok(devices)
 }
 
@@ -153,7 +153,7 @@ pub fn list_cpal_devices(direction: AudioDirection) -> AudioResult<Vec<AudioDevi
 #[cfg(feature = "device-cpal")]
 pub fn get_default_cpal_device(direction: AudioDirection) -> AudioResult<Arc<CpalAudioDevice>> {
     let host = cpal::default_host();
-    
+
     let device = match direction {
         AudioDirection::Input => host.default_input_device(),
         AudioDirection::Output => host.default_output_device(),
@@ -163,26 +163,26 @@ pub fn get_default_cpal_device(direction: AudioDirection) -> AudioResult<Arc<Cpa
         operation: "get".to_string(),
         reason: format!("No default {:?} device found", direction),
     })?;
-    
+
     let name = device.name().unwrap_or_else(|_| "Default Device".to_string());
-    
+
     // Get device capabilities
     let mut supported_sample_rates = Vec::new();
     let mut supported_channels = Vec::new();
-    
+
     match direction {
         AudioDirection::Input => {
             if let Ok(configs) = device.supported_input_configs() {
                 for config in configs {
                     let sample_rate_range = config.min_sample_rate().0..=config.max_sample_rate().0;
-                    
+
                     // Add common sample rates that fall within the range
                     for &rate in &[8000, 16000, 44100, 48000] {
                         if sample_rate_range.contains(&rate) && !supported_sample_rates.contains(&rate) {
                             supported_sample_rates.push(rate);
                         }
                     }
-                    
+
                     let channels = config.channels() as u16;
                     if !supported_channels.contains(&channels) {
                         supported_channels.push(channels);
@@ -194,14 +194,14 @@ pub fn get_default_cpal_device(direction: AudioDirection) -> AudioResult<Arc<Cpa
             if let Ok(configs) = device.supported_output_configs() {
                 for config in configs {
                     let sample_rate_range = config.min_sample_rate().0..=config.max_sample_rate().0;
-                    
+
                     // Add common sample rates that fall within the range
                     for &rate in &[8000, 16000, 44100, 48000] {
                         if sample_rate_range.contains(&rate) && !supported_sample_rates.contains(&rate) {
                             supported_sample_rates.push(rate);
                         }
                     }
-                    
+
                     let channels = config.channels() as u16;
                     if !supported_channels.contains(&channels) {
                         supported_channels.push(channels);
@@ -210,7 +210,7 @@ pub fn get_default_cpal_device(direction: AudioDirection) -> AudioResult<Arc<Cpa
             }
         }
     }
-    
+
     // Ensure we have at least some defaults
     if supported_sample_rates.is_empty() {
         supported_sample_rates = vec![48000];
@@ -218,7 +218,7 @@ pub fn get_default_cpal_device(direction: AudioDirection) -> AudioResult<Arc<Cpa
     if supported_channels.is_empty() {
         supported_channels = vec![2];
     }
-    
+
     let device_info = AudioDeviceInfo {
         id: name.clone(),
         name,
@@ -228,7 +228,7 @@ pub fn get_default_cpal_device(direction: AudioDirection) -> AudioResult<Arc<Cpa
         supported_channels,
         supported_bit_depths: vec![16],
     };
-    
+
     Ok(Arc::new(CpalAudioDevice {
         info: device_info,
         device,
@@ -239,7 +239,7 @@ pub fn get_default_cpal_device(direction: AudioDirection) -> AudioResult<Arc<Cpa
 #[cfg(feature = "device-cpal")]
 pub fn get_cpal_device_by_id(id: &str, direction: AudioDirection) -> AudioResult<Arc<CpalAudioDevice>> {
     let host = cpal::default_host();
-    
+
     let device_iter: Box<dyn Iterator<Item = cpal::Device>> = match direction {
         AudioDirection::Input => Box::new(host.input_devices().map_err(|e| {
             AudioError::DeviceError {
@@ -256,27 +256,27 @@ pub fn get_cpal_device_by_id(id: &str, direction: AudioDirection) -> AudioResult
             }
         })?),
     };
-    
+
     for device in device_iter {
         if let Ok(name) = device.name() {
             if name == id {
                 // Found the device
                 let mut supported_sample_rates = Vec::new();
                 let mut supported_channels = Vec::new();
-                
+
                 match direction {
                     AudioDirection::Input => {
                         if let Ok(configs) = device.supported_input_configs() {
                             for config in configs {
                                 let sample_rate_range = config.min_sample_rate().0..=config.max_sample_rate().0;
-                                
+
                                 // Add common sample rates that fall within the range
                                 for &rate in &[8000, 16000, 44100, 48000] {
                                     if sample_rate_range.contains(&rate) && !supported_sample_rates.contains(&rate) {
                                         supported_sample_rates.push(rate);
                                     }
                                 }
-                                
+
                                 let channels = config.channels() as u16;
                                 if !supported_channels.contains(&channels) {
                                     supported_channels.push(channels);
@@ -288,14 +288,14 @@ pub fn get_cpal_device_by_id(id: &str, direction: AudioDirection) -> AudioResult
                         if let Ok(configs) = device.supported_output_configs() {
                             for config in configs {
                                 let sample_rate_range = config.min_sample_rate().0..=config.max_sample_rate().0;
-                                
+
                                 // Add common sample rates that fall within the range
                                 for &rate in &[8000, 16000, 44100, 48000] {
                                     if sample_rate_range.contains(&rate) && !supported_sample_rates.contains(&rate) {
                                         supported_sample_rates.push(rate);
                                     }
                                 }
-                                
+
                                 let channels = config.channels() as u16;
                                 if !supported_channels.contains(&channels) {
                                     supported_channels.push(channels);
@@ -304,7 +304,7 @@ pub fn get_cpal_device_by_id(id: &str, direction: AudioDirection) -> AudioResult
                         }
                     }
                 }
-                
+
                 // Ensure we have at least some defaults
                 if supported_sample_rates.is_empty() {
                     supported_sample_rates = vec![48000];
@@ -312,7 +312,7 @@ pub fn get_cpal_device_by_id(id: &str, direction: AudioDirection) -> AudioResult
                 if supported_channels.is_empty() {
                     supported_channels = vec![2];
                 }
-                
+
                 let device_info = AudioDeviceInfo {
                     id: name.clone(),
                     name,
@@ -322,7 +322,7 @@ pub fn get_cpal_device_by_id(id: &str, direction: AudioDirection) -> AudioResult
                     supported_channels,
                     supported_bit_depths: vec![16],
                 };
-                
+
                 return Ok(Arc::new(CpalAudioDevice {
                     info: device_info,
                     device,
@@ -330,7 +330,7 @@ pub fn get_cpal_device_by_id(id: &str, direction: AudioDirection) -> AudioResult
             }
         }
     }
-    
+
     Err(AudioError::DeviceError {
         device: id.to_string(),
         operation: "get".to_string(),

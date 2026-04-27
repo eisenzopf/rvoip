@@ -1,5 +1,5 @@
 //! Multiple simultaneous calls tests for SimplePeer API
-//! 
+//!
 //! Demonstrates:
 //! - Handling multiple incoming calls
 //! - Making multiple outgoing calls
@@ -17,21 +17,21 @@ async fn test_multiple_incoming_calls() -> Result<()> {
         .local_addr("127.0.0.1")
         .port(5060)
         .await?;
-    
+
     let mut alice = SimplePeer::new("alice")
         .local_addr("127.0.0.1")
         .port(5061)
         .await?;
-    
+
     let mut charlie = SimplePeer::new("charlie")
         .local_addr("127.0.0.1")
         .port(5062)
         .await?;
-    
+
     // Bob handles multiple incoming calls
     let bob_handle = tokio::spawn(async move {
         let mut call_count = 0;
-        
+
         // First call from Alice
         if let Ok(Some(incoming)) = timeout(Duration::from_secs(5), bob.next_incoming()).await {
             println!("Bob received call 1 from: {}", incoming.from);
@@ -39,7 +39,7 @@ async fn test_multiple_incoming_calls() -> Result<()> {
             let _call = incoming.accept().await.unwrap();
             call_count += 1;
         }
-        
+
         // Second call from Charlie
         if let Ok(Some(incoming)) = timeout(Duration::from_secs(5), bob.next_incoming()).await {
             println!("Bob received call 2 from: {}", incoming.from);
@@ -47,26 +47,26 @@ async fn test_multiple_incoming_calls() -> Result<()> {
             let _call = incoming.accept().await.unwrap();
             call_count += 1;
         }
-        
+
         println!("Bob handled {} calls", call_count);
         assert_eq!(call_count, 2, "Bob should receive 2 calls");
-        
+
         sleep(Duration::from_secs(1)).await;
         bob.shutdown().await.unwrap();
     });
-    
+
     sleep(Duration::from_millis(500)).await;
-    
+
     // Alice calls Bob
     let alice_call = alice.call("bob@127.0.0.1")
         .port(5060)
         .await?;
-    
+
     // Charlie calls Bob
     let charlie_call = charlie.call("bob@127.0.0.1")
         .port(5060)
         .await?;
-    
+
     // Wait for calls to be active
     for _ in 0..10 {
         if alice_call.is_active().await && charlie_call.is_active().await {
@@ -74,14 +74,14 @@ async fn test_multiple_incoming_calls() -> Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    
+
     alice_call.hangup().await?;
     charlie_call.hangup().await?;
-    
+
     alice.shutdown().await?;
     charlie.shutdown().await?;
     let _ = bob_handle.await;
-    
+
     Ok(())
 }
 
@@ -93,17 +93,17 @@ async fn test_multiple_outgoing_calls() -> Result<()> {
         .local_addr("127.0.0.1")
         .port(5063)
         .await?;
-    
+
     let mut bob = SimplePeer::new("bob")
         .local_addr("127.0.0.1")
         .port(5064)
         .await?;
-    
+
     let mut charlie = SimplePeer::new("charlie")
         .local_addr("127.0.0.1")
         .port(5065)
         .await?;
-    
+
     // Bob accepts calls
     let bob_handle = tokio::spawn(async move {
         if let Some(incoming) = bob.next_incoming().await {
@@ -113,7 +113,7 @@ async fn test_multiple_outgoing_calls() -> Result<()> {
         }
         bob.shutdown().await.unwrap();
     });
-    
+
     // Charlie accepts calls
     let charlie_handle = tokio::spawn(async move {
         if let Some(incoming) = charlie.next_incoming().await {
@@ -123,20 +123,20 @@ async fn test_multiple_outgoing_calls() -> Result<()> {
         }
         charlie.shutdown().await.unwrap();
     });
-    
+
     sleep(Duration::from_millis(500)).await;
-    
+
     // Alice calls both Bob and Charlie
     println!("Alice calling Bob...");
     let call_to_bob = alice.call("bob@127.0.0.1")
         .port(5064)
         .await?;
-    
+
     println!("Alice calling Charlie...");
     let call_to_charlie = alice.call("charlie@127.0.0.1")
         .port(5065)
         .await?;
-    
+
     // Wait for calls to become active
     for _ in 0..10 {
         if call_to_bob.is_active().await && call_to_charlie.is_active().await {
@@ -145,17 +145,17 @@ async fn test_multiple_outgoing_calls() -> Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    
+
     // Alice manages both calls
     sleep(Duration::from_secs(1)).await;
-    
+
     call_to_bob.hangup().await?;
     call_to_charlie.hangup().await?;
     alice.shutdown().await?;
-    
+
     let _ = bob_handle.await;
     let _ = charlie_handle.await;
-    
+
     Ok(())
 }
 
@@ -167,17 +167,17 @@ async fn test_call_bridging() -> Result<()> {
         .local_addr("127.0.0.1")
         .port(5066)
         .await?;
-    
+
     let mut bob = SimplePeer::new("bob")
         .local_addr("127.0.0.1")
         .port(5067)
         .await?;
-    
+
     let mut charlie = SimplePeer::new("charlie")
         .local_addr("127.0.0.1")
         .port(5068)
         .await?;
-    
+
     // Bob accepts calls
     let bob_handle = tokio::spawn(async move {
         if let Some(incoming) = bob.next_incoming().await {
@@ -186,7 +186,7 @@ async fn test_call_bridging() -> Result<()> {
         }
         bob.shutdown().await.unwrap();
     });
-    
+
     // Charlie accepts calls
     let charlie_handle = tokio::spawn(async move {
         if let Some(incoming) = charlie.next_incoming().await {
@@ -195,18 +195,18 @@ async fn test_call_bridging() -> Result<()> {
         }
         charlie.shutdown().await.unwrap();
     });
-    
+
     sleep(Duration::from_millis(500)).await;
-    
+
     // Alice calls Bob and Charlie
     let call_to_bob = alice.call("bob@127.0.0.1")
         .port(5067)
         .await?;
-    
+
     let call_to_charlie = alice.call("charlie@127.0.0.1")
         .port(5068)
         .await?;
-    
+
     // Wait for calls to become active
     for _ in 0..10 {
         if call_to_bob.is_active().await && call_to_charlie.is_active().await {
@@ -214,18 +214,18 @@ async fn test_call_bridging() -> Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    
+
     // Bridge the calls (Bob and Charlie can talk to each other)
     println!("Bridging calls between Bob and Charlie...");
     call_to_bob.bridge(call_to_charlie).await?;
-    
+
     sleep(Duration::from_secs(1)).await;
-    
+
     call_to_bob.hangup().await?;
     alice.shutdown().await?;
-    
+
     let _ = bob_handle.await;
     let _ = charlie_handle.await;
-    
+
     Ok(())
 }

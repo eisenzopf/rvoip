@@ -63,41 +63,41 @@ pub struct SessionCoordinator {
     pub registry: Arc<InternalSessionRegistry>,
     pub event_processor: Arc<SessionEventProcessor>,
     pub cleanup_manager: Arc<CleanupManager>,
-    
+
     // Subsystem managers
     pub dialog_manager: Arc<DialogManager>,
     pub media_manager: Arc<MediaManager>,
     pub conference_manager: Arc<ConferenceManager>,
-    
+
     // Subsystem coordinators
     pub dialog_coordinator: Arc<SessionDialogCoordinator>,
     pub media_coordinator: Arc<SessionMediaCoordinator>,
     pub presence_coordinator: Arc<RwLock<super::presence::PresenceCoordinator>>,
-    
+
     // SDP Negotiator
     pub sdp_negotiator: Arc<SdpNegotiator>,
-    
+
     // User handler
     pub handler: Option<Arc<dyn CallHandler>>,
-    
+
     // Configuration
     pub config: SessionManagerConfig,
-    
+
     // Event processing - now using unified broadcast channel only
     // Internal events are also published through the broadcast channel
-    
+
     // Bridge event subscribers
     pub bridge_event_subscribers: Arc<RwLock<Vec<mpsc::UnboundedSender<BridgeEvent>>>>,
-    
+
     // Negotiated media configs
     pub negotiated_configs: Arc<RwLock<HashMap<SessionId, NegotiatedMediaConfig>>>,
-    
+
     // Two-phase termination tracking
     pub pending_cleanups: Arc<Mutex<HashMap<SessionId, CleanupTracker>>>,
-    
+
     // Session readiness tracking for on_call_established
     pub session_readiness: Arc<RwLock<HashMap<SessionId, SessionReadiness>>>,
-    
+
     // Shutdown handles for event loops
     event_loop_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     dialog_event_loop_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -115,7 +115,7 @@ impl SessionCoordinator {
         if let Err(e) = Self::increase_file_descriptor_limit() {
             tracing::warn!("Failed to increase file descriptor limit: {}. System may not handle high concurrent call volumes.", e);
         }
-        
+
         // Create core services
         let registry = Arc::new(InternalSessionRegistry::new());
         let event_processor = Arc::new(SessionEventProcessor::new());
@@ -135,7 +135,7 @@ impl SessionCoordinator {
 
         // Create media subsystem - use configured local bind address
         let local_bind_addr = config.local_bind_addr;
-        
+
         // Create media config from session config
         let media_config = crate::media::types::MediaConfig {
             preferred_codecs: config.media_config.preferred_codecs.clone(),
@@ -150,14 +150,14 @@ impl SessionCoordinator {
             preferred_ptime: config.media_config.preferred_ptime,
             custom_sdp_attributes: config.media_config.custom_sdp_attributes.clone(),
         };
-        
+
         let media_manager = Arc::new(MediaManager::with_port_range_and_config(
             local_bind_addr,
             config.media_port_start,
             config.media_port_end,
             media_config,
         ));
-        
+
         // Create SDP negotiator
         let sdp_negotiator = Arc::new(SdpNegotiator::new(
             config.media_config.clone(),
@@ -167,7 +167,7 @@ impl SessionCoordinator {
         // Create dialog coordination channel only
         // Internal events now use the broadcast channel from event_processor
         let (dialog_coord_tx, dialog_coord_rx) = mpsc::channel(1000);
-        
+
         // Create subsystem coordinators
         let session_to_dialog = Arc::new(DashMap::new());
         let dialog_coordinator = Arc::new(SessionDialogCoordinator::new(
@@ -183,7 +183,7 @@ impl SessionCoordinator {
         let media_coordinator = Arc::new(SessionMediaCoordinator::new(
             media_manager.clone()
         ));
-        
+
         // Create presence coordinator
         let mut presence_coordinator = super::presence::PresenceCoordinator::new();
         presence_coordinator.set_dialog_manager(dialog_manager.clone());
@@ -218,33 +218,33 @@ impl SessionCoordinator {
 
         Ok(coordinator)
     }
-    
+
     /// Increase the file descriptor limit for high concurrent call volumes
-    /// 
+    ///
     /// This is necessary because each RTP session requires at least one UDP socket,
     /// and each socket uses a file descriptor. For 500+ concurrent calls, we need
     /// thousands of file descriptors available.
     fn increase_file_descriptor_limit() -> std::result::Result<(), Box<dyn std::error::Error>> {
         use rlimit::{Resource, setrlimit, getrlimit};
-        
+
         // First, get the current limits
         let (soft, hard) = getrlimit(Resource::NOFILE)?;
-        
+
         // We want at least 10,000 file descriptors for high concurrency
         const DESIRED_LIMIT: u64 = 10000;
-        
+
         // Only increase if current limit is lower
         if soft < DESIRED_LIMIT {
             // Try to set to our desired limit, but respect the hard limit
             let new_limit = DESIRED_LIMIT.min(hard);
             setrlimit(Resource::NOFILE, new_limit, new_limit)?;
-            
-            tracing::info!("Increased file descriptor limit from {} to {} (hard limit: {})", 
+
+            tracing::info!("Increased file descriptor limit from {} to {} (hard limit: {})",
                          soft, new_limit, hard);
         } else {
             tracing::debug!("File descriptor limit already sufficient: {} (hard: {})", soft, hard);
         }
-        
+
         Ok(())
     }
 
@@ -270,7 +270,7 @@ impl SessionCoordinator {
                 tracing::error!("Dialog event loop error: {}", e);
             }
         });
-        
+
         // Store the dialog event loop handle
         let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
         *dialog_event_loop_handle = Some(dialog_handle);
@@ -280,7 +280,7 @@ impl SessionCoordinator {
         let handle = tokio::spawn(async move {
             coordinator.run_event_loop().await;
         });
-        
+
         // Store the handle for clean shutdown
         let mut event_loop_handle = self.event_loop_handle.lock().await;
         *event_loop_handle = Some(handle);
@@ -293,17 +293,17 @@ impl SessionCoordinator {
     pub async fn start(&self) -> Result<()> {
         self.dialog_manager.start().await
             .map_err(|e| SessionError::internal(&format!("Failed to start dialog manager: {}", e)))?;
-        
+
         self.cleanup_manager.start().await?;
-        
+
         // No need for separate broadcast listener - the main event loop now handles everything
-        
+
         tracing::info!("SessionCoordinator started");
         Ok(())
     }
 
     /// Stop all subsystems in proper order with verification
-    /// 
+    ///
     /// Orchestrates shutdown in proper order with confirmation at each step:
     /// 1. Send ShutdownInitiated event
     /// 2. Wait for components to acknowledge and shutdown in order
@@ -311,7 +311,7 @@ impl SessionCoordinator {
     pub async fn stop(&self) -> Result<()> {
         tracing::info!("🛑 SessionCoordinator stop() called - event-based shutdown");
         tracing::debug!("🛑 SHUTDOWN: SessionCoordinator stop() called - event-based shutdown with acknowledgments");
-        
+
         // Create a temporary event subscriber to track shutdown progress
         let mut shutdown_subscriber = match self.event_processor.subscribe().await {
             Ok(sub) => sub,
@@ -321,28 +321,28 @@ impl SessionCoordinator {
                 return self.direct_shutdown().await;
             }
         };
-        
+
         // Step 1: Initiate shutdown
         tracing::debug!("📤 SHUTDOWN: Sending ShutdownInitiated event");
         self.publish_event(SessionEvent::ShutdownInitiated {
             reason: Some("Coordinator stop() called".to_string()),
         }).await?;
-        
+
         // Step 2: Wait for acknowledgments with timeout
         let timeout = std::time::Duration::from_secs(5);
         let start = std::time::Instant::now();
-        
+
         // Track which components have completed
         let mut transport_done = false;
         let mut transaction_done = false;
         let mut dialog_done = false;
-        
+
         while !transport_done || !transaction_done || !dialog_done {
             if start.elapsed() > timeout {
                 tracing::debug!("⚠️ SHUTDOWN: Timeout waiting for components, forcing shutdown");
                 break;
             }
-            
+
             // Wait for shutdown events with a small timeout
             match tokio::time::timeout(
                 std::time::Duration::from_millis(100),
@@ -374,37 +374,37 @@ impl SessionCoordinator {
                 }
             }
         }
-        
+
         // Step 3: Stop event processor (after all shutdown events processed)
         tracing::debug!("🛑 SHUTDOWN: Stopping event processor...");
         self.event_processor.stop().await?;
         tracing::debug!("✅ SHUTDOWN: Event processor stopped");
-        
+
         // Step 4: Cancel event loop tasks
         tracing::debug!("🛑 SHUTDOWN: Cancelling event loops...");
         let mut event_loop_handle = self.event_loop_handle.lock().await;
         if let Some(handle) = event_loop_handle.take() {
             handle.abort();
         }
-        
+
         let mut dialog_event_loop_handle = self.dialog_event_loop_handle.lock().await;
         if let Some(handle) = dialog_event_loop_handle.take() {
             handle.abort();
         }
         tracing::debug!("✅ SHUTDOWN: Event loops cancelled");
-        
+
         // Step 5: Stop cleanup manager
         tracing::debug!("🛑 SHUTDOWN: Stopping cleanup manager...");
         self.cleanup_manager.stop().await?;
         tracing::debug!("✅ SHUTDOWN: Cleanup manager stopped");
-        
+
         // Step 6: Clean up remaining sessions
         let active_session_ids = self.registry.list_active_sessions().await
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to list active sessions: {}", e);
                 Vec::new()
             });
-        
+
         if !active_session_ids.is_empty() {
             tracing::debug!("🛑 SHUTDOWN: Cleaning up {} remaining sessions", active_session_ids.len());
             for session_id in active_session_ids {
@@ -412,27 +412,27 @@ impl SessionCoordinator {
                 let _ = self.registry.unregister_session(&session_id).await;
             }
         }
-        
+
         tracing::info!("SessionCoordinator stopped - event-based shutdown complete");
         tracing::debug!("✅ SHUTDOWN: SessionCoordinator fully stopped");
         Ok(())
     }
-    
+
     /// Direct shutdown fallback when event system is unavailable
     async fn direct_shutdown(&self) -> Result<()> {
         tracing::debug!("⚠️ SHUTDOWN: Using direct shutdown fallback");
-        
+
         // Direct stop of dialog manager
         if let Err(e) = self.dialog_manager.stop().await {
             tracing::warn!("Dialog manager stop error: {}", e);
         }
-        
+
         // Small drain
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        
+
         // Stop event processor
         self.event_processor.stop().await?;
-        
+
         // Cancel loops
         if let Some(handle) = self.event_loop_handle.lock().await.take() {
             handle.abort();
@@ -440,10 +440,10 @@ impl SessionCoordinator {
         if let Some(handle) = self.dialog_event_loop_handle.lock().await.take() {
             handle.abort();
         }
-        
+
         // Stop cleanup manager
         self.cleanup_manager.stop().await?;
-        
+
         Ok(())
     }
 
@@ -451,17 +451,17 @@ impl SessionCoordinator {
     pub fn get_bound_address(&self) -> std::net::SocketAddr {
         self.dialog_manager.get_bound_address()
     }
-    
+
     /// Get a reference to the dialog coordinator
     pub fn dialog_coordinator(&self) -> &Arc<SessionDialogCoordinator> {
         &self.dialog_coordinator
     }
-    
+
     /// Helper method to publish events through the unified broadcast channel
     pub async fn publish_event(&self, event: SessionEvent) -> Result<()> {
         self.event_processor.publish_event(event).await
     }
-    
+
     /// Get a reference to the configuration
     pub fn config(&self) -> &SessionManagerConfig {
         &self.config
@@ -470,24 +470,24 @@ impl SessionCoordinator {
     /// Start media session
     pub(crate) async fn start_media_session(&self, session_id: &SessionId) -> Result<()> {
         tracing::debug!("🚀 start_media_session called for {}", session_id);
-        
+
         // Check if media session already exists for THIS specific session
         if let Ok(Some(_)) = self.media_manager.get_media_info(session_id).await {
             tracing::debug!("⏭️ Media session already exists for {}, skipping duplicate creation", session_id);
             return Ok(());
         }
-        
+
         // Also check if session mapping exists directly for THIS specific session
         if self.media_manager.has_session_mapping(session_id).await {
             tracing::debug!("⏭️ Session mapping exists for {}, skipping media creation", session_id);
             return Ok(());
         }
-        
+
         tracing::debug!("🎬 Creating new media session for {}", session_id);
         match self.media_coordinator.on_session_created(session_id).await {
             Ok(()) => {
                 tracing::debug!("✅ Successfully created media session for {}", session_id);
-                
+
                 // Check if SDP negotiation already happened (upfront SDP case)
                 // If we have negotiated config, publish MediaSessionReady immediately
                 if let Some(_negotiated) = self.negotiated_configs.read().await.get(session_id) {
@@ -515,7 +515,7 @@ impl SessionCoordinator {
                         tracing::debug!("No negotiated config yet for {}, MediaSessionReady will be published after SDP negotiation", session_id);
                     }
                 }
-                
+
                 Ok(())
             }
             Err(e) => {
@@ -529,14 +529,14 @@ impl SessionCoordinator {
     pub(crate) async fn stop_media_session(&self, session_id: &SessionId) -> Result<()> {
         self.media_coordinator.on_session_terminated(session_id).await
             .map_err(|e| SessionError::internal(&format!("Failed to stop media: {}", e)))?;
-        
+
         // Send cleanup confirmation for media layer
         // Media cleanup is synchronous, so we can immediately confirm
         let _ = self.publish_event(SessionEvent::CleanupConfirmation {
             session_id: session_id.clone(),
             layer: "Media".to_string(),
         }).await;
-        
+
         Ok(())
     }
 
@@ -552,10 +552,10 @@ impl SessionCoordinator {
             our_offer,
             their_answer,
         ).await?;
-        
+
         // Store negotiated config
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
-        
+
         // Emit MediaNegotiated event
         let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
@@ -563,19 +563,19 @@ impl SessionCoordinator {
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
         }).await;
-        
+
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
         // will be published later when start_media_session is called
         if let Ok(Some(media_info)) = self.media_manager.get_media_info(session_id).await {
-            tracing::info!("✅ Media session exists for UAC {}, has remote SDP: {}", 
+            tracing::info!("✅ Media session exists for UAC {}, has remote SDP: {}",
                 session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
             let _ = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
             }).await;
-            
+
             // CRITICAL: Also publish MediaFlowEstablished for UAC
             // This ensures both UAC and UAS publish the event when media is ready
             tracing::info!("📢 Publishing MediaFlowEstablished event for UAC session {} after SDP negotiation", session_id);
@@ -598,10 +598,10 @@ impl SessionCoordinator {
             }).await;
             tracing::info!("✅ MediaFlowEstablished event published for UAC {}", session_id);
         }
-        
+
         Ok(negotiated)
     }
-    
+
     /// Negotiate SDP as UAS (we received offer, generate answer)
     pub async fn negotiate_sdp_as_uas(
         &self,
@@ -613,10 +613,10 @@ impl SessionCoordinator {
             session_id,
             their_offer,
         ).await?;
-        
+
         // Store negotiated config
         self.negotiated_configs.write().await.insert(session_id.clone(), negotiated.clone());
-        
+
         // Emit MediaNegotiated event
         let _ = self.publish_event(SessionEvent::MediaNegotiated {
             session_id: session_id.clone(),
@@ -624,19 +624,19 @@ impl SessionCoordinator {
             remote_addr: negotiated.remote_addr,
             codec: negotiated.codec.clone(),
         }).await;
-        
+
         // Only emit MediaSessionReady if media session already exists
         // For upfront SDP cases, the media session doesn't exist yet and MediaSessionReady
         // will be published later when start_media_session is called
         if let Ok(Some(media_info)) = self.media_manager.get_media_info(session_id).await {
-            tracing::info!("✅ Media session exists for UAS {}, has remote SDP: {}", 
+            tracing::info!("✅ Media session exists for UAS {}, has remote SDP: {}",
                 session_id, media_info.remote_sdp.is_some());
             let dialog_id = self.dialog_coordinator.get_dialog_id_for_session(session_id).await;
             let _ = self.publish_event(SessionEvent::MediaSessionReady {
                 session_id: session_id.clone(),
                 dialog_id,
             }).await;
-            
+
             // CRITICAL: Also publish MediaFlowEstablished for UAS
             // This is needed because when accept_incoming_call directly calls
             // negotiate_sdp_as_uas, it doesn't go through the SdpNegotiationRequested
@@ -662,26 +662,26 @@ impl SessionCoordinator {
             }).await;
             tracing::info!("✅ MediaFlowEstablished event published for UAS {}", session_id);
         }
-        
+
         Ok((answer, negotiated))
     }
-    
+
     /// Get negotiated media configuration for a session
     pub async fn get_negotiated_config(&self, session_id: &SessionId) -> Option<NegotiatedMediaConfig> {
         self.negotiated_configs.read().await.get(session_id).cloned()
     }
-    
+
     /// Get the event processor for publishing events
     pub fn event_processor(&self) -> Option<Arc<SessionEventProcessor>> {
         Some(self.event_processor.clone())
     }
-    
+
     /// Start music-on-hold for a session
     pub(crate) async fn start_music_on_hold(&self, session_id: &SessionId) -> Result<()> {
         // Check if MoH file is configured
         if let Some(moh_path) = &self.config.media_config.music_on_hold_path {
             tracing::info!("Starting music-on-hold from: {}", moh_path.display());
-            
+
             // Load WAV file using media-core
             match rvoip_media_core::audio::load_music_on_hold(moh_path).await {
                 Ok(ulaw_samples) => {
@@ -691,17 +691,17 @@ impl SessionCoordinator {
                         ulaw_samples,
                         true  // repeat the music
                     ).await
-                    .map_err(|e| SessionError::MediaIntegration { 
-                        message: format!("Failed to start MoH transmission: {}", e) 
+                    .map_err(|e| SessionError::MediaIntegration {
+                        message: format!("Failed to start MoH transmission: {}", e)
                     })?;
-                    
+
                     tracing::info!("Music-on-hold started for session: {}", session_id);
                     Ok(())
                 }
                 Err(e) => {
                     // Return error so caller can fallback to mute
-                    Err(SessionError::MediaIntegration { 
-                        message: format!("Failed to load MoH file: {}", e) 
+                    Err(SessionError::MediaIntegration {
+                        message: format!("Failed to load MoH file: {}", e)
                     })
                 }
             }
@@ -712,19 +712,19 @@ impl SessionCoordinator {
             ))
         }
     }
-    
+
     /// Stop music-on-hold and resume microphone audio
     pub(crate) async fn stop_music_on_hold(&self, session_id: &SessionId) -> Result<()> {
         // Resume normal microphone audio
         self.media_manager.start_audio_transmission(session_id).await
-            .map_err(|e| SessionError::MediaIntegration { 
-                message: format!("Failed to resume microphone audio: {}", e) 
+            .map_err(|e| SessionError::MediaIntegration {
+                message: format!("Failed to resume microphone audio: {}", e)
             })?;
-        
+
         tracing::info!("Music-on-hold stopped, microphone resumed for session: {}", session_id);
         Ok(())
     }
-    
+
     /// Get the event sender for compatibility with existing code
     /// This provides access to the broadcast sender from the event processor
     pub async fn event_tx(&self) -> Result<tokio::sync::mpsc::Sender<crate::manager::events::SessionEvent>> {

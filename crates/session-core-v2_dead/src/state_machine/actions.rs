@@ -18,7 +18,7 @@ pub async fn execute_action(
     session_store: &Arc<SessionStore>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
-    
+
     match action {
         // Dialog actions
         Action::CreateDialog => {
@@ -60,10 +60,10 @@ pub async fn execute_action(
             let to = session.remote_uri.clone()
                 .ok_or_else(|| "remote_uri not set for session".to_string())?;
             info!("Sending INVITE from {} to {} with SDP: {}", from, to, session.local_sdp.is_some());
-            
+
             // This will create the real dialog in dialog-core
             dialog_adapter.send_invite_with_details(&session.session_id, &from, &to, session.local_sdp.clone()).await?;
-            
+
             // Now get the real dialog ID that was created
             if let Some(real_dialog_id) = dialog_adapter.session_to_dialog.get(&session.session_id) {
                 // Convert RvoipDialogId to our DialogId type
@@ -88,7 +88,7 @@ pub async fn execute_action(
         Action::SendCANCEL => {
             dialog_adapter.send_cancel(&session.session_id).await?;
         }
-        
+
         // Call control actions
         Action::HoldCall => {
             // Send re-INVITE with sendonly SDP
@@ -123,7 +123,7 @@ pub async fn execute_action(
             // Stop recording the media session
             media_adapter.stop_recording(&session.session_id).await?;
         }
-        
+
         // Media actions
         Action::StartMediaSession => {
             media_adapter.start_session(&session.session_id).await?;
@@ -173,7 +173,7 @@ pub async fn execute_action(
                 info!("SDP negotiated as UAS for session {}", session.session_id);
             }
         }
-        
+
         // State updates
         Action::SetCondition(condition, value) => {
             match condition {
@@ -204,7 +204,7 @@ pub async fn execute_action(
         Action::StoreNegotiatedConfig => {
             // Already handled by negotiate actions
         }
-        
+
         // Callbacks
         Action::TriggerCallEstablished => {
             session.call_established_triggered = true;
@@ -213,7 +213,7 @@ pub async fn execute_action(
         Action::TriggerCallTerminated => {
             info!("Call terminated for session {}", session.session_id);
         }
-        
+
         // Cleanup
         Action::StartDialogCleanup => {
             dialog_adapter.cleanup_session(&session.session_id).await?;
@@ -223,11 +223,11 @@ pub async fn execute_action(
             media_adapter.cleanup_session(&session.session_id).await?;
             debug!("Media cleanup completed for session {}", session.session_id);
         }
-        
+
         // New actions for extended functionality
         Action::SendReINVITE => {
             debug!("Sending re-INVITE for session {}", session.session_id);
-            
+
             // Generate SDP based on current state
             let sdp = if session.call_state == crate::types::CallState::Active {
                 // Going to hold - use sendonly
@@ -252,46 +252,46 @@ pub async fn execute_action(
                     }
                 })
             };
-            
+
             if let Some(sdp_data) = sdp {
                 dialog_adapter.send_reinvite_session(&session.session_id, sdp_data).await?;
             }
         }
-        
+
         Action::PlayAudioFile(file) => {
             debug!("Playing audio file {} for session {}", file, session.session_id);
             media_adapter.play_audio_file(&session.session_id, file).await?;
         }
-        
+
         Action::StartRecordingMedia => {
             debug!("Starting recording for session {}", session.session_id);
             let recording_path = media_adapter.start_recording(&session.session_id).await?;
             info!("Recording started at: {}", recording_path);
         }
-        
+
         Action::StopRecordingMedia => {
             debug!("Stopping recording for session {}", session.session_id);
             media_adapter.stop_recording(&session.session_id).await?;
         }
-        
+
         Action::CreateBridge(other_session) => {
             debug!("Creating bridge between {} and {}", session.session_id, other_session);
             media_adapter.create_bridge(&session.session_id, other_session).await?;
             // Update session state
             session.bridged_to = Some(other_session.clone());
         }
-        
+
         Action::DestroyBridge => {
             debug!("Destroying bridge for session {}", session.session_id);
             media_adapter.destroy_bridge(&session.session_id).await?;
             session.bridged_to = None;
         }
-        
+
         Action::InitiateBlindTransfer(target) => {
             debug!("Blind transfer from {} to {}", session.session_id, target);
             dialog_adapter.send_refer_session(&session.session_id, target).await?;
         }
-        
+
         Action::InitiateAttendedTransfer(target) => {
             debug!("Attended transfer from {} to {}", session.session_id, target);
             // For attended transfer, we first establish a consultation call
@@ -300,14 +300,14 @@ pub async fn execute_action(
             dialog_adapter.send_refer_session(&session.session_id, target).await?;
             info!("Attended transfer initiated (using blind transfer for now)");
         }
-        
+
         // Conference actions
         Action::CreateAudioMixer => {
             debug!("Creating audio mixer for conference");
             let mixer_id = media_adapter.create_audio_mixer().await?;
             session.conference_mixer_id = Some(mixer_id);
         }
-        
+
         Action::RedirectToMixer => {
             debug!("Redirecting session {} to mixer", session.session_id);
             if let Some(mixer_id) = &session.conference_mixer_id {
@@ -316,13 +316,13 @@ pub async fn execute_action(
                 }
             }
         }
-        
+
         Action::ConnectToMixer => {
             debug!("Connecting session {} to conference mixer", session.session_id);
             // This would connect to an existing conference mixer
             // Implementation depends on media adapter capabilities
         }
-        
+
         Action::DisconnectFromMixer => {
             debug!("Disconnecting session {} from mixer", session.session_id);
             if let Some(_media_id) = &session.media_session_id {
@@ -330,21 +330,21 @@ pub async fn execute_action(
                 warn!("restore_direct_media not implemented yet");
             }
         }
-        
+
         Action::MuteToMixer => {
             debug!("Muting session {} to mixer", session.session_id);
             if let Some(media_id) = &session.media_session_id {
                 media_adapter.set_mute(media_id.clone(), true).await?;
             }
         }
-        
+
         Action::UnmuteToMixer => {
             debug!("Unmuting session {} to mixer", session.session_id);
             if let Some(media_id) = &session.media_session_id {
                 media_adapter.set_mute(media_id.clone(), false).await?;
             }
         }
-        
+
         Action::DestroyMixer => {
             debug!("Destroying conference mixer");
             if let Some(mixer_id) = &session.conference_mixer_id {
@@ -352,7 +352,7 @@ pub async fn execute_action(
                 session.conference_mixer_id = None;
             }
         }
-        
+
         // Media direction actions
         Action::UpdateMediaDirection { direction } => {
             debug!("Updating media direction to {:?}", direction);
@@ -367,7 +367,7 @@ pub async fn execute_action(
                 media_adapter.set_media_direction(media_id.clone(), media_direction).await?;
             }
         }
-        
+
         // Additional call control
         Action::SendREFER => {
             debug!("Sending REFER for transfer");
@@ -376,7 +376,7 @@ pub async fn execute_action(
                 dialog_adapter.send_refer_session(&session.session_id, target).await?;
             }
         }
-        
+
         Action::SendREFERWithReplaces => {
             debug!("Sending REFER with Replaces for attended transfer");
             use crate::session_store::TransferState;
@@ -389,21 +389,21 @@ pub async fn execute_action(
                 error!("No consultation session ID for attended transfer");
             }
         }
-        
+
         Action::MuteLocalAudio => {
             debug!("Muting local audio");
             if let Some(media_id) = &session.media_session_id {
                 media_adapter.set_mute(media_id.clone(), true).await?;
             }
         }
-        
+
         Action::UnmuteLocalAudio => {
             debug!("Unmuting local audio");
             if let Some(media_id) = &session.media_session_id {
                 media_adapter.set_mute(media_id.clone(), false).await?;
             }
         }
-        
+
         Action::CreateConsultationCall => {
             debug!("Creating consultation call for attended transfer");
 
@@ -419,7 +419,7 @@ pub async fn execute_action(
                 warn!("No transfer target set for consultation call");
             }
         }
-        
+
         Action::TerminateConsultationCall => {
             debug!("Terminating consultation call");
             use crate::session_store::TransferState;
@@ -448,7 +448,7 @@ pub async fn execute_action(
                 info!("Consultation call terminated");
             }
         }
-        
+
         Action::SendDTMFTone => {
             debug!("Sending DTMF tone");
             if let Some(digits) = &session.dtmf_digits {
@@ -459,7 +459,7 @@ pub async fn execute_action(
                 }
             }
         }
-        
+
         Action::StartRecordingMixer => {
             debug!("Starting recording of conference mixer");
             if let Some(mixer_id) = &session.conference_mixer_id {
@@ -467,7 +467,7 @@ pub async fn execute_action(
                 media_adapter.start_recording(&mixer_session_id).await?;
             }
         }
-        
+
         Action::StopRecordingMixer => {
             debug!("Stopping recording of conference mixer");
             if let Some(mixer_id) = &session.conference_mixer_id {
@@ -482,14 +482,14 @@ pub async fn execute_action(
             dialog_adapter.cleanup_session(&session.session_id).await?;
             media_adapter.cleanup_session(&session.session_id).await?;
         }
-        
+
         Action::StartEmergencyCleanup => {
             error!("Starting emergency cleanup for session {}", session.session_id);
             // Best-effort cleanup on error
             let _ = dialog_adapter.cleanup_session(&session.session_id).await;
             let _ = media_adapter.cleanup_session(&session.session_id).await;
         }
-        
+
         Action::AttemptMediaRecovery => {
             warn!("Attempting media recovery for session {}", session.session_id);
             // Try to recover from media errors
@@ -498,7 +498,7 @@ pub async fn execute_action(
                 warn!("attempt_recovery not implemented yet");
             }
         }
-        
+
         Action::Custom(action_name) => {
             debug!("Custom action '{}' for session {}", action_name, session.session_id);
             // Handle custom SIP actions
@@ -525,7 +525,7 @@ pub async fn execute_action(
                 }
             }
         }
-        
+
         // Blind transfer recipient actions (Phase 2B - will be fully implemented)
         Action::AcceptTransferREFER => {
             debug!("Accepting REFER request for transfer");
@@ -730,7 +730,7 @@ pub async fn execute_action(
             }
             info!("Media flow restored for session {}", session.session_id);
         }
-        
+
         Action::HoldCurrentCall => {
             debug!("Putting current call on hold for transfer");
 
@@ -749,7 +749,7 @@ pub async fn execute_action(
 
             info!("Call {} put on hold", session.session_id);
         }
-        
+
         Action::CleanupResources => {
             debug!("Cleaning up resources for session {}", session.session_id);
             // TODO: Implement resource cleanup
@@ -829,6 +829,6 @@ pub async fn execute_action(
             }
         }
     }
-    
+
     Ok(())
 }

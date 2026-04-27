@@ -1,5 +1,5 @@
 //! Authentication and authorization module for session-core
-//! 
+//!
 //! Provides OAuth 2.0 Bearer token validation (RFC 8898) for SIP
 
 pub mod oauth;

@@ -9,7 +9,7 @@
 //! ```text
 //! API Layer
 //! ├── unified.rs         ← **NEW**: Single API for all scenarios
-//! ├── client.rs          ← Legacy: Client-specific operations  
+//! ├── client.rs          ← Legacy: Client-specific operations
 //! ├── server/            ← Legacy: Server-specific operations
 //! ├── common.rs          ← Shared: DialogHandle, CallHandle
 //! └── config.rs          ← Shared: Configuration types
@@ -48,7 +48,7 @@
 //! // Client for outgoing calls
 //! let client = DialogClient::new("127.0.0.1:0").await?;
 //!
-//! // Server for incoming calls  
+//! // Server for incoming calls
 //! let server = DialogServer::new("0.0.0.0:5060").await?;
 //! # Ok(())
 //! # }

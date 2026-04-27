@@ -11,7 +11,7 @@ use crate::session::Session;
 use crate::errors::{Result, SessionError};
 
 /// Internal registry that stores full Session objects
-/// 
+///
 /// This registry is used internally by the SessionCoordinator and related
 /// components to store complete session data including SDP information.
 /// It provides conversion methods to expose only CallSession through the public API.
@@ -67,7 +67,7 @@ impl InternalSessionRegistry {
     /// Update session state
     pub async fn update_session_state(&self, session_id: &SessionId, state: CallState) -> Result<()> {
         let mut sessions = self.sessions.write().await;
-        
+
         if let Some(session) = sessions.get_mut(session_id) {
             session.update_call_state(state)?;
             Ok(())
@@ -84,7 +84,7 @@ impl InternalSessionRegistry {
         remote_sdp: Option<String>,
     ) -> Result<()> {
         let mut sessions = self.sessions.write().await;
-        
+
         if let Some(session) = sessions.get_mut(session_id) {
             if local_sdp.is_some() {
                 session.local_sdp = local_sdp;
@@ -175,7 +175,7 @@ impl InternalSessionRegistry {
         F: FnOnce(&mut Session) -> Result<R>,
     {
         let mut sessions = self.sessions.write().await;
-        
+
         if let Some(session) = sessions.get_mut(session_id) {
             f(session)
         } else {
@@ -230,7 +230,7 @@ mod tests {
         // Update SDP
         let local_sdp = "v=0\r\no=test 123 456 IN IP4 0.0.0.0\r\n";
         let remote_sdp = "v=0\r\no=remote 789 012 IN IP4 0.0.0.0\r\n";
-        
+
         registry.update_session_sdp(
             &session_id,
             Some(local_sdp.to_string()),

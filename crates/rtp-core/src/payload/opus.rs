@@ -34,7 +34,7 @@ impl OpusBandwidth {
             Self::Fullband => 48000,
         }
     }
-    
+
     /// Get a descriptive name for this bandwidth
     pub fn name(&self) -> &'static str {
         match self {
@@ -79,19 +79,19 @@ impl OpusPayloadFormat {
             bandwidth: OpusBandwidth::Fullband,
         }
     }
-    
+
     /// Set the maximum bitrate
     pub fn with_max_bitrate(mut self, max_bitrate: u32) -> Self {
         self.max_bitrate = max_bitrate;
         self
     }
-    
+
     /// Set the bandwidth mode
     pub fn with_bandwidth(mut self, bandwidth: OpusBandwidth) -> Self {
         self.bandwidth = bandwidth;
         self
     }
-    
+
     /// Set the preferred frame duration
     pub fn with_duration(mut self, duration_ms: u32) -> Self {
         // Opus supports 2.5, 5, 10, 20, 40, 60, 80, 100, and 120 ms
@@ -103,12 +103,12 @@ impl OpusPayloadFormat {
         };
         self
     }
-    
+
     /// Get the maximum bitrate
     pub fn max_bitrate(&self) -> u32 {
         self.max_bitrate
     }
-    
+
     /// Get the bandwidth mode
     pub fn bandwidth(&self) -> OpusBandwidth {
         self.bandwidth
@@ -119,26 +119,26 @@ impl PayloadFormat for OpusPayloadFormat {
     fn payload_type(&self) -> u8 {
         self.payload_type
     }
-    
+
     fn clock_rate(&self) -> u32 {
         self.clock_rate
     }
-    
+
     fn channels(&self) -> u8 {
         self.channels
     }
-    
+
     fn preferred_packet_duration(&self) -> u32 {
         self.preferred_duration
     }
-    
+
     fn packet_size_from_duration(&self, duration_ms: u32) -> usize {
         // Opus is a variable bitrate codec, so this is just an estimate
         // Maximum bytes = bitrate * duration / 8 bits per byte
         let max_bytes = (self.max_bitrate * duration_ms) / (8 * 1000);
         max_bytes as usize
     }
-    
+
     fn duration_from_packet_size(&self, packet_size: usize) -> u32 {
         // This is a rough estimate based on max bitrate
         // In practice, TOC byte in Opus packets needs to be examined
@@ -146,19 +146,19 @@ impl PayloadFormat for OpusPayloadFormat {
         let bits = packet_size as u32 * 8;
         (bits * 1000) / self.max_bitrate
     }
-    
+
     fn pack(&self, media_data: &[u8], _timestamp: u32) -> Bytes {
         // This would typically involve Opus encoding
         // For this implementation, we'll just forward the already-encoded data
         Bytes::copy_from_slice(media_data)
     }
-    
+
     fn unpack(&self, payload: &[u8], _timestamp: u32) -> Bytes {
         // This would typically involve Opus decoding
         // For this implementation, we'll just forward the encoded data
         Bytes::copy_from_slice(payload)
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -167,7 +167,7 @@ impl PayloadFormat for OpusPayloadFormat {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_opus_payload_format() {
         // Create a mono Opus format with dynamic PT 101
@@ -175,31 +175,31 @@ mod tests {
             .with_max_bitrate(32000) // 32 kbit/s
             .with_bandwidth(OpusBandwidth::Wideband)
             .with_duration(20); // 20ms
-        
+
         assert_eq!(format.payload_type(), 101);
         assert_eq!(format.clock_rate(), 48000);
         assert_eq!(format.channels(), 1);
         assert_eq!(format.preferred_packet_duration(), 20);
         assert_eq!(format.max_bitrate(), 32000);
         assert_eq!(format.bandwidth(), OpusBandwidth::Wideband);
-        
+
         // 20ms at 48kHz = 960 samples
         assert_eq!(format.samples_from_duration(20), 960);
-        
+
         // 20ms of Opus at 32kbit/s = 80 bytes (max)
         assert_eq!(format.packet_size_from_duration(20), 80);
-        
+
         // Test with stereo
         let stereo_format = OpusPayloadFormat::new(102, 2)
             .with_max_bitrate(64000); // 64 kbit/s
-            
+
         assert_eq!(stereo_format.channels(), 2);
         assert_eq!(stereo_format.max_bitrate(), 64000);
-        
+
         // 20ms of stereo Opus at 64kbit/s = 160 bytes (max)
         assert_eq!(stereo_format.packet_size_from_duration(20), 160);
     }
-    
+
     #[test]
     fn test_opus_bandwidth_modes() {
         assert_eq!(OpusBandwidth::Narrowband.sampling_rate(), 8000);
@@ -208,4 +208,4 @@ mod tests {
         assert_eq!(OpusBandwidth::SuperWideband.sampling_rate(), 24000);
         assert_eq!(OpusBandwidth::Fullband.sampling_rate(), 48000);
     }
-} 
+}

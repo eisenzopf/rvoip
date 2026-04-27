@@ -15,4 +15,4 @@ pub mod traits;
 pub mod request_operations;
 
 // Re-export the main types for external use
-pub use traits::{TransactionIntegration, TransactionHelpers}; 
+pub use traits::{TransactionIntegration, TransactionHelpers};

@@ -78,7 +78,7 @@ use std::str::FromStr;
 ///     .content_type_sdp()
 ///     .body(sdp.to_string())
 ///     .build();
-///     
+///
 /// // Create a request with Content-Type set to text/plain
 /// let request = SimpleRequestBuilder::new(Method::Message, "sip:example.com").unwrap()
 ///     .content_type_text()
@@ -216,12 +216,12 @@ use std::str::FromStr;
 ///     .done()
 ///     .build()
 ///     .unwrap();
-///     
+///
 /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
 ///     .content_type_sdp()
 ///     .body(sdp.to_string())
 ///     .build();
-///     
+///
 /// // Create a request with Content-Type set to application/json
 /// let request = SimpleRequestBuilder::new(Method::Message, "sip:example.com").unwrap()
 ///     .content_type_json()
@@ -262,13 +262,13 @@ use std::str::FromStr;
 ///     .content_type_sipfrag()  // Sets Content-Type: message/sipfrag
 ///     .body("SIP/2.0 200 OK\r\nCSeq: 1 INVITE\r\nContact: <sip:bob@192.0.2.4>\r\n")
 ///     .build();
-///     
+///
 /// // Create a MESSAGE with multimedia messaging content
 /// let message = SimpleRequestBuilder::new(Method::Message, "sip:user@example.com").unwrap()
 ///     .content_type_custom("application", "vnd.3gpp.sms")  // 3GPP SMS format
 ///     .body("01000B915121551532F40000A723719C0E4ACF41F4329E0E")  // Binary SMS content (hex encoded)
 ///     .build();
-///     
+///
 /// // Create a MESSAGE with CPIM content for instant messaging federation
 /// let message = SimpleRequestBuilder::new(Method::Message, "sip:user@example.com").unwrap()
 ///     .content_type_custom("message", "cpim")  // Common Presence and Instant Messaging
@@ -610,7 +610,7 @@ pub trait ContentTypeBuilderExt {
     ///     .content_type_custom("application", "vnd.3gpp.sms")
     ///     .body("01000B915121551532F40000A723719C0E4ACF41F4329E0E")  // Binary SMS content (hex encoded)
     ///     .build();
-    ///     
+    ///
     /// // MSRP relay setup (Message Session Relay Protocol)
     /// let msrp_message = SimpleRequestBuilder::new(Method::Message, "sip:bob@example.com").unwrap()
     ///     .content_type_custom("message", "msrp-setup")
@@ -620,7 +620,7 @@ pub trait ContentTypeBuilderExt {
     ///         "a=path:msrp://atlanta.example.com:7654/jshA7weztas;tcp\r\n"
     ///     ))
     ///     .build();
-    ///     
+    ///
     /// // PIDF presence information
     /// let publish = SimpleRequestBuilder::new(Method::Publish, "sip:bob@example.com").unwrap()
     ///     .content_type_custom("application", "pidf+xml")
@@ -667,7 +667,7 @@ pub trait ContentTypeBuilderExt {
     ///         "</message>\r\n"
     ///     ))
     ///     .build();
-    ///     
+    ///
     /// // Create a message with multipart Content-Type using the MultipartBuilder
     /// use rvoip_sip_core::builder::headers::MimeVersionBuilderExt;
     /// use rvoip_sip_core::builder::multipart::{MultipartBuilder, MultipartPartBuilder};

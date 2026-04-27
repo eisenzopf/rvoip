@@ -48,7 +48,7 @@ impl DtmfTone {
             Self::D => 'D',
         }
     }
-    
+
     pub fn from_char(c: char) -> Option<Self> {
         match c {
             '0' => Some(Self::Digit0),

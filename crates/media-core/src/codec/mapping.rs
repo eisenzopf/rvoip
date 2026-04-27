@@ -167,7 +167,7 @@ impl CodecMapper {
         if !dynamic_range::is_dynamic(payload_type)
             && self.payload_to_name.contains_key(&payload_type)
         {
-            warn!("Attempting to register dynamic codec '{}' with static payload type {} (should be in range {}-{})", 
+            warn!("Attempting to register dynamic codec '{}' with static payload type {} (should be in range {}-{})",
                   name, payload_type, dynamic_range::DYNAMIC_START, dynamic_range::DYNAMIC_END);
             return;
         }

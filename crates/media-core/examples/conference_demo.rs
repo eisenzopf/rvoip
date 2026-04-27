@@ -184,7 +184,7 @@ async fn simulate_conference_call(
                         cpu_usage,
                         reason,
                     } => {
-                        warn!("⚠️ Conference event: Performance warning - {}μs latency, {:.1}% CPU ({})", 
+                        warn!("⚠️ Conference event: Performance warning - {}μs latency, {:.1}% CPU ({})",
                               latency_us, cpu_usage * 100.0, reason);
                     }
                 }

@@ -1,5 +1,5 @@
 //! Integration tests for error recovery and retry mechanisms
-//! 
+//!
 //! Tests retry logic, error categorization, and recovery strategies.
 
 use rvoip_client_core::{
@@ -20,7 +20,7 @@ use serial_test::serial;
 #[tokio::test]
 async fn test_retry_with_backoff_basic() {
     let attempts = Arc::new(AtomicU32::new(0));
-    
+
     let result = retry_with_backoff(
         "test_operation",
         RetryConfig::quick(),
@@ -38,7 +38,7 @@ async fn test_retry_with_backoff_basic() {
             }
         }
     ).await;
-    
+
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "Success");
     assert_eq!(attempts.load(Ordering::SeqCst), 3); // Failed twice, succeeded on third
@@ -48,7 +48,7 @@ async fn test_retry_with_backoff_basic() {
 #[tokio::test]
 async fn test_retry_non_recoverable() {
     let attempts = Arc::new(AtomicU32::new(0));
-    
+
     let result: Result<i32, _> = retry_with_backoff(
         "test_operation",
         RetryConfig::default(),
@@ -63,7 +63,7 @@ async fn test_retry_non_recoverable() {
             }
         }
     ).await;
-    
+
     assert!(result.is_err());
     assert_eq!(attempts.load(Ordering::SeqCst), 1); // Should not retry
 }
@@ -76,13 +76,13 @@ async fn test_retry_configurations() {
     assert_eq!(quick_config.max_attempts, 5);
     assert!(quick_config.initial_delay < Duration::from_millis(100));
     assert!(quick_config.use_jitter);
-    
+
     // Test slow config
     let slow_config = RetryConfig::slow();
     assert_eq!(slow_config.max_attempts, 3);
     assert!(slow_config.initial_delay >= Duration::from_secs(1));
     assert!(!slow_config.use_jitter);
-    
+
     // Test custom config
     let custom_config = RetryConfig {
         max_attempts: 10,
@@ -101,16 +101,16 @@ async fn test_error_context() {
     let result: Result<(), ClientError> = Err(ClientError::NetworkError {
         reason: "Connection failed".to_string()
     });
-    
+
     let with_context = result.context("Failed to connect to server");
     assert!(with_context.is_err());
     assert!(with_context.unwrap_err().to_string().contains("Failed to connect to server"));
-    
+
     // Test lazy context
     let result: Result<(), ClientError> = Err(ClientError::CallNotFound {
         call_id: uuid::Uuid::new_v4()
     });
-    
+
     let with_lazy_context = result.with_context(|| {
         format!("Call lookup failed at {}", chrono::Utc::now())
     });
@@ -130,10 +130,10 @@ async fn test_with_timeout() {
             Ok::<&str, ClientError>("Success")
         }
     ).await;
-    
+
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), "Success");
-    
+
     // Test timeout
     let result = with_timeout(
         "slow_operation",
@@ -143,7 +143,7 @@ async fn test_with_timeout() {
             Ok::<&str, ClientError>("Should timeout")
         }
     ).await;
-    
+
     assert!(result.is_err());
     match result {
         Err(ClientError::OperationTimeout { duration_ms }) => {
@@ -162,14 +162,14 @@ async fn test_network_error_recovery() {
     };
     let recovery = RecoveryStrategies::recover_network_error(&error, "test_context").await;
     assert!(matches!(recovery, Some(RecoveryAction::RetryWithBackoff(_))));
-    
+
     // Test connection refused recovery
     let error = ClientError::NetworkError {
         reason: "connection refused".to_string()
     };
     let recovery = RecoveryStrategies::recover_network_error(&error, "test_context").await;
     assert!(matches!(recovery, Some(RecoveryAction::WaitAndRetry(_))));
-    
+
     // Test server unreachable recovery
     let error = ClientError::ServerUnreachable {
         server: "example.com".to_string()
@@ -187,14 +187,14 @@ async fn test_registration_error_recovery() {
     };
     let recovery = RecoveryStrategies::recover_registration_error(&error, "test_context").await;
     assert!(matches!(recovery, Some(RecoveryAction::UpdateCredentials)));
-    
+
     // Test server busy recovery
     let error = ClientError::RegistrationFailed {
         reason: "503 Service Unavailable".to_string()
     };
     let recovery = RecoveryStrategies::recover_registration_error(&error, "test_context").await;
     assert!(matches!(recovery, Some(RecoveryAction::WaitAndRetry(_))));
-    
+
     // Test expired registration recovery
     let error = ClientError::RegistrationExpired;
     let recovery = RecoveryStrategies::recover_registration_error(&error, "test_context").await;
@@ -210,14 +210,14 @@ async fn test_media_error_recovery() {
     };
     let recovery = RecoveryStrategies::recover_media_error(&error, "test_context").await;
     assert!(matches!(recovery, Some(RecoveryAction::RenegotiateCodecs)));
-    
+
     // Test port allocation failure recovery
     let error = ClientError::MediaNegotiationFailed {
         reason: "Failed to allocate RTP port".to_string()
     };
     let recovery = RecoveryStrategies::recover_media_error(&error, "test_context").await;
     assert!(matches!(recovery, Some(RecoveryAction::ReallocatePorts)));
-    
+
     // Test no compatible codecs recovery
     let error = ClientError::NoCompatibleCodecs;
     let recovery = RecoveryStrategies::recover_media_error(&error, "test_context").await;
@@ -236,7 +236,7 @@ async fn test_error_categorization() {
         (ClientError::InvalidConfiguration { field: "test".to_string(), reason: "test".to_string() }, "configuration"),
         (ClientError::InternalError { message: "test".to_string() }, "system"),
     ];
-    
+
     for (error, expected_category) in test_cases {
         assert_eq!(error.category(), expected_category);
     }
@@ -249,7 +249,7 @@ async fn test_is_recoverable() {
     assert!(ClientError::NetworkError { reason: "test".to_string() }.is_recoverable());
     assert!(ClientError::ConnectionTimeout.is_recoverable());
     assert!(ClientError::TransportFailed { reason: "test".to_string() }.is_recoverable());
-    
+
     // Non-recoverable errors
     assert!(!ClientError::InvalidConfiguration { field: "test".to_string(), reason: "test".to_string() }.is_recoverable());
     assert!(!ClientError::NotImplemented { feature: "test".to_string(), reason: "test".to_string() }.is_recoverable());
@@ -262,7 +262,7 @@ async fn test_is_auth_error() {
     assert!(ClientError::AuthenticationFailed { reason: "test".to_string() }.is_auth_error());
     assert!(ClientError::NotRegistered.is_auth_error());
     assert!(ClientError::RegistrationExpired.is_auth_error());
-    
+
     assert!(!ClientError::NetworkError { reason: "test".to_string() }.is_auth_error());
     assert!(!ClientError::CallNotFound { call_id: uuid::Uuid::new_v4() }.is_auth_error());
 }
@@ -306,4 +306,4 @@ async fn test_client_retry_integration() {
     }
 
     client.stop().await.expect("Failed to stop client");
-} 
+}

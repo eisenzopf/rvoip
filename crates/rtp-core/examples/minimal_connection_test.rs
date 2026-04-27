@@ -110,7 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         for i in 0..20 {
             match tokio::time::timeout(Duration::from_millis(100), frame_receiver.recv()).await {
                 Ok(Ok((client_id, frame))) => {
-                    println!("[MONITOR] Frame received! Client ID: {}, Frame seq: {}, PT: {}, size: {} bytes", 
+                    println!("[MONITOR] Frame received! Client ID: {}, Frame seq: {}, PT: {}, size: {} bytes",
                              client_id, frame.sequence, frame.payload_type, frame.data.len());
                 }
                 Ok(Err(e)) => {

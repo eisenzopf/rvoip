@@ -62,20 +62,20 @@ use crate::agent::{AgentId, AgentStatus};
 /// ```rust
 /// use rvoip_call_engine::routing::{RoutingPolicies, TimeBasedRule};
 /// use chrono::NaiveTime;
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut policies = RoutingPolicies::new();
-/// 
+///
 /// // Configure business hours
 /// policies.set_business_hours(
 ///     NaiveTime::from_hms_opt(9, 0, 0).unwrap(),  // 9:00 AM
 ///     NaiveTime::from_hms_opt(17, 0, 0).unwrap(), // 5:00 PM
 ///     vec!["monday", "tuesday", "wednesday", "thursday", "friday"]
 /// )?;
-/// 
+///
 /// // Configure after-hours routing
 /// policies.set_after_hours_queue("after_hours_support")?;
-/// 
+///
 /// // Check if current time is business hours
 /// if policies.is_business_hours() {
 ///     println!("Routing to regular agents");
@@ -90,15 +90,15 @@ use crate::agent::{AgentId, AgentStatus};
 ///
 /// ```rust
 /// use rvoip_call_engine::routing::policies::{RoutingPolicies, SkillRequirement, SkillLevel};
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut policies = RoutingPolicies::new();
-/// 
+///
 /// // Configure VIP customer routing
 /// policies.add_vip_customer("customer-12345")?;
 /// policies.set_vip_queue("vip_support")?;
 /// policies.set_vip_escalation_time(30)?; // 30 seconds max wait
-/// 
+///
 /// // Check routing for a customer
 /// let customer_id = "customer-12345";
 /// if policies.is_vip_customer(customer_id) {
@@ -113,10 +113,10 @@ use crate::agent::{AgentId, AgentStatus};
 ///
 /// ```rust
 /// use rvoip_call_engine::routing::policies::{RoutingPolicies, SkillRequirement, SkillLevel};
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut policies = RoutingPolicies::new();
-/// 
+///
 /// // Configure skill requirements for different call types
 /// policies.add_skill_requirement(
 ///     "technical_support",
@@ -126,14 +126,14 @@ use crate::agent::{AgentId, AgentStatus};
 ///         SkillRequirement::new("tier2", SkillLevel::Basic, false),          // Preferred
 ///     ]
 /// )?;
-/// 
+///
 /// // Configure escalation rules
 /// policies.add_escalation_rule(
 ///     "technical_support",
 ///     120, // After 2 minutes, escalate to tier 2
 ///     vec![SkillRequirement::new("tier2", SkillLevel::Advanced, true)]
 /// )?;
-/// 
+///
 /// println!("Skill-based routing configured");
 /// # Ok(())
 /// # }
@@ -143,23 +143,23 @@ use crate::agent::{AgentId, AgentStatus};
 ///
 /// ```rust
 /// use rvoip_call_engine::routing::policies::RoutingPolicies;
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut policies = RoutingPolicies::new();
-/// 
+///
 /// // Configure geographic routing preferences
 /// policies.add_geographic_rule(
 ///     "US",
 ///     vec!["agent-us-001", "agent-us-002"],
 ///     "english"
 /// )?;
-/// 
+///
 /// policies.add_geographic_rule(
 ///     "CA",
 ///     vec!["agent-ca-001", "agent-ca-002"],
 ///     "english,french"
 /// )?;
-/// 
+///
 /// // Route based on caller location
 /// let caller_country = "US";
 /// if let Some(preferred_agents) = policies.get_geographic_agents(caller_country) {
@@ -171,22 +171,22 @@ use crate::agent::{AgentId, AgentStatus};
 pub struct RoutingPolicies {
     /// Time-based routing rules
     time_rules: TimeBasedRules,
-    
+
     /// Customer priority and VIP rules
     customer_rules: CustomerRules,
-    
+
     /// Skill-based routing requirements
     skill_rules: SkillBasedRules,
-    
+
     /// Geographic routing preferences
     geographic_rules: GeographicRules,
-    
+
     /// Load balancing configuration
     load_balancing: LoadBalancingRules,
-    
+
     /// Emergency and failover rules
     emergency_rules: EmergencyRules,
-    
+
     /// Custom business rules
     custom_rules: HashMap<String, CustomRule>,
 }
@@ -196,16 +196,16 @@ pub struct RoutingPolicies {
 pub struct TimeBasedRules {
     /// Business hours definition
     pub business_hours: BusinessHours,
-    
+
     /// After-hours routing configuration
     pub after_hours_queue: Option<String>,
-    
+
     /// Holiday routing overrides
     pub holiday_rules: HashMap<String, HolidayRule>,
-    
+
     /// Time zone for routing decisions
     pub timezone: String,
-    
+
     /// Maintenance windows
     pub maintenance_windows: Vec<MaintenanceWindow>,
 }
@@ -215,13 +215,13 @@ pub struct TimeBasedRules {
 pub struct BusinessHours {
     /// Start time for business hours
     pub start_time: NaiveTime,
-    
+
     /// End time for business hours
     pub end_time: NaiveTime,
-    
+
     /// Days of week for business hours
     pub business_days: Vec<String>,
-    
+
     /// Time zone identifier
     pub timezone: String,
 }
@@ -231,13 +231,13 @@ pub struct BusinessHours {
 pub struct HolidayRule {
     /// Holiday name
     pub name: String,
-    
+
     /// Holiday date
     pub date: DateTime<Utc>,
-    
+
     /// Special routing queue for this holiday
     pub queue: Option<String>,
-    
+
     /// Whether to use after-hours routing
     pub use_after_hours: bool,
 }
@@ -247,13 +247,13 @@ pub struct HolidayRule {
 pub struct MaintenanceWindow {
     /// Window start time
     pub start: DateTime<Utc>,
-    
+
     /// Window end time
     pub end: DateTime<Utc>,
-    
+
     /// Maintenance routing queue
     pub maintenance_queue: String,
-    
+
     /// Message for callers during maintenance
     pub message: String,
 }
@@ -263,16 +263,16 @@ pub struct MaintenanceWindow {
 pub struct CustomerRules {
     /// VIP customer identifiers
     pub vip_customers: HashMap<String, VipCustomerConfig>,
-    
+
     /// Customer tier definitions
     pub customer_tiers: HashMap<String, CustomerTier>,
-    
+
     /// VIP routing queue
     pub vip_queue: Option<String>,
-    
+
     /// VIP escalation time (seconds)
     pub vip_escalation_time: u64,
-    
+
     /// Account-specific routing rules
     pub account_rules: HashMap<String, AccountRule>,
 }
@@ -282,13 +282,13 @@ pub struct CustomerRules {
 pub struct VipCustomerConfig {
     /// Customer identifier
     pub customer_id: String,
-    
+
     /// VIP tier level
     pub tier: u8,
-    
+
     /// Dedicated agent if any
     pub dedicated_agent: Option<String>,
-    
+
     /// Maximum wait time before escalation
     pub max_wait_time: u64,
 }
@@ -298,13 +298,13 @@ pub struct VipCustomerConfig {
 pub struct CustomerTier {
     /// Tier name
     pub name: String,
-    
+
     /// Priority level (lower = higher priority)
     pub priority: u8,
-    
+
     /// Preferred queue
     pub preferred_queue: Option<String>,
-    
+
     /// Maximum wait time
     pub max_wait_time: u64,
 }
@@ -314,13 +314,13 @@ pub struct CustomerTier {
 pub struct AccountRule {
     /// Account identifier
     pub account_id: String,
-    
+
     /// Dedicated agents for this account
     pub dedicated_agents: Vec<String>,
-    
+
     /// Preferred skills for this account
     pub preferred_skills: Vec<String>,
-    
+
     /// Account-specific queue
     pub account_queue: Option<String>,
 }
@@ -330,13 +330,13 @@ pub struct AccountRule {
 pub struct SkillBasedRules {
     /// Skill requirements by call type
     pub call_type_requirements: HashMap<String, Vec<SkillRequirement>>,
-    
+
     /// Escalation rules based on skills
     pub escalation_rules: HashMap<String, EscalationRule>,
-    
+
     /// Skill proficiency levels
     pub skill_levels: HashMap<String, SkillDefinition>,
-    
+
     /// Fallback rules when skills not available
     pub fallback_rules: FallbackRules,
 }
@@ -346,13 +346,13 @@ pub struct SkillBasedRules {
 pub struct SkillRequirement {
     /// Skill name
     pub skill_name: String,
-    
+
     /// Required proficiency level
     pub level: SkillLevel,
-    
+
     /// Whether this skill is required or preferred
     pub required: bool,
-    
+
     /// Weight for skill matching algorithm
     pub weight: f32,
 }
@@ -375,16 +375,16 @@ pub enum SkillLevel {
 pub struct SkillDefinition {
     /// Skill name
     pub name: String,
-    
+
     /// Skill category
     pub category: String,
-    
+
     /// Skill description
     pub description: String,
-    
+
     /// Whether this skill can be substituted
     pub substitutable: bool,
-    
+
     /// Alternative skills that can substitute
     pub substitutes: Vec<String>,
 }
@@ -394,13 +394,13 @@ pub struct SkillDefinition {
 pub struct EscalationRule {
     /// Call type this rule applies to
     pub call_type: String,
-    
+
     /// Time in seconds before escalation
     pub escalation_time: u64,
-    
+
     /// Required skills after escalation
     pub escalated_skills: Vec<SkillRequirement>,
-    
+
     /// Target queue for escalation
     pub escalated_queue: Option<String>,
 }
@@ -410,13 +410,13 @@ pub struct EscalationRule {
 pub struct FallbackRules {
     /// Enable fallback to agents without perfect skill match
     pub allow_partial_match: bool,
-    
+
     /// Minimum skill match percentage required
     pub min_match_percentage: f32,
-    
+
     /// Fallback queue when no agents available
     pub fallback_queue: String,
-    
+
     /// Time to wait before using fallback rules
     pub fallback_delay: u64,
 }
@@ -426,13 +426,13 @@ pub struct FallbackRules {
 pub struct GeographicRules {
     /// Country-based agent preferences
     pub country_preferences: HashMap<String, CountryRule>,
-    
+
     /// Language preferences by region
     pub language_preferences: HashMap<String, Vec<String>>,
-    
+
     /// Time zone aware routing
     pub timezone_aware: bool,
-    
+
     /// Default routing for unknown locations
     pub default_routing: Option<String>,
 }
@@ -442,13 +442,13 @@ pub struct GeographicRules {
 pub struct CountryRule {
     /// Country code
     pub country_code: String,
-    
+
     /// Preferred agents for this country
     pub preferred_agents: Vec<String>,
-    
+
     /// Required languages
     pub required_languages: Vec<String>,
-    
+
     /// Preferred time zone
     pub timezone: Option<String>,
 }
@@ -458,13 +458,13 @@ pub struct CountryRule {
 pub struct LoadBalancingRules {
     /// Load balancing strategy
     pub strategy: LoadBalancingStrategy,
-    
+
     /// Maximum calls per agent
     pub max_calls_per_agent: u32,
-    
+
     /// Weight factors for load balancing
     pub weight_factors: WeightFactors,
-    
+
     /// Enable adaptive load balancing
     pub adaptive_balancing: bool,
 }
@@ -489,13 +489,13 @@ pub enum LoadBalancingStrategy {
 pub struct WeightFactors {
     /// Weight for agent performance
     pub performance_weight: f32,
-    
+
     /// Weight for current workload
     pub workload_weight: f32,
-    
+
     /// Weight for skill match quality
     pub skill_match_weight: f32,
-    
+
     /// Weight for customer satisfaction scores
     pub satisfaction_weight: f32,
 }
@@ -505,13 +505,13 @@ pub struct WeightFactors {
 pub struct EmergencyRules {
     /// Emergency routing queue
     pub emergency_queue: String,
-    
+
     /// System overload threshold
     pub overload_threshold: f32,
-    
+
     /// Failover routing rules
     pub failover_rules: Vec<FailoverRule>,
-    
+
     /// Emergency contact information
     pub emergency_contacts: Vec<String>,
 }
@@ -521,10 +521,10 @@ pub struct EmergencyRules {
 pub struct FailoverRule {
     /// Trigger condition
     pub trigger: FailoverTrigger,
-    
+
     /// Action to take
     pub action: FailoverAction,
-    
+
     /// Priority of this rule
     pub priority: u8,
 }
@@ -560,16 +560,16 @@ pub enum FailoverAction {
 pub struct CustomRule {
     /// Rule name
     pub name: String,
-    
+
     /// Rule description
     pub description: String,
-    
+
     /// Rule conditions (simplified as key-value pairs)
     pub conditions: HashMap<String, String>,
-    
+
     /// Rule actions
     pub actions: HashMap<String, String>,
-    
+
     /// Rule priority
     pub priority: u8,
 }
@@ -584,7 +584,7 @@ impl RoutingPolicies {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::policies::RoutingPolicies;
-    /// 
+    ///
     /// let policies = RoutingPolicies::new();
     /// println!("Routing policies initialized with defaults");
     /// ```
@@ -652,7 +652,7 @@ impl RoutingPolicies {
             custom_rules: HashMap::new(),
         }
     }
-    
+
     /// Configure business hours
     ///
     /// Sets the business hours for the call center, affecting time-based routing decisions.
@@ -668,10 +668,10 @@ impl RoutingPolicies {
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingPolicies;
     /// use chrono::NaiveTime;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut policies = RoutingPolicies::new();
-    /// 
+    ///
     /// policies.set_business_hours(
     ///     NaiveTime::from_hms_opt(8, 30, 0).unwrap(),  // 8:30 AM
     ///     NaiveTime::from_hms_opt(18, 0, 0).unwrap(),  // 6:00 PM
@@ -692,15 +692,15 @@ impl RoutingPolicies {
             .into_iter()
             .map(|s| s.to_string())
             .collect();
-        
+
         info!("📅 Business hours configured: {} to {} on {:?}",
               start_time.format("%H:%M"),
               end_time.format("%H:%M"),
               self.time_rules.business_hours.business_days);
-        
+
         Ok(())
     }
-    
+
     /// Set after-hours routing queue
     ///
     /// Configures the queue to use for calls received outside business hours.
@@ -713,7 +713,7 @@ impl RoutingPolicies {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingPolicies;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut policies = RoutingPolicies::new();
     /// policies.set_after_hours_queue("night_support")?;
@@ -725,7 +725,7 @@ impl RoutingPolicies {
         info!("🌙 After-hours queue set to: {}", queue_name);
         Ok(())
     }
-    
+
     /// Check if current time is within business hours
     ///
     /// Returns true if the current time falls within the configured business hours.
@@ -738,10 +738,10 @@ impl RoutingPolicies {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingPolicies;
-    /// 
+    ///
     /// # fn example() {
     /// let policies = RoutingPolicies::new();
-    /// 
+    ///
     /// if policies.is_business_hours() {
     ///     println!("Currently in business hours");
     /// } else {
@@ -752,27 +752,27 @@ impl RoutingPolicies {
     pub fn is_business_hours(&self) -> bool {
         let now = Utc::now();
         let current_time = now.time();
-        
+
         // TODO: Implement proper timezone handling
         let current_weekday = match now.weekday() {
             Weekday::Mon => "monday",
-            Weekday::Tue => "tuesday", 
+            Weekday::Tue => "tuesday",
             Weekday::Wed => "wednesday",
             Weekday::Thu => "thursday",
             Weekday::Fri => "friday",
             Weekday::Sat => "saturday",
             Weekday::Sun => "sunday",
         };
-        
+
         let is_business_day = self.time_rules.business_hours.business_days
             .contains(&current_weekday.to_string());
-        
+
         let in_time_range = current_time >= self.time_rules.business_hours.start_time
             && current_time <= self.time_rules.business_hours.end_time;
-        
+
         is_business_day && in_time_range
     }
-    
+
     /// Add a VIP customer
     ///
     /// Registers a customer as VIP for priority routing treatment.
@@ -785,7 +785,7 @@ impl RoutingPolicies {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingPolicies;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut policies = RoutingPolicies::new();
     /// policies.add_vip_customer("enterprise-customer-001")?;
@@ -799,12 +799,12 @@ impl RoutingPolicies {
             dedicated_agent: None,
             max_wait_time: 30,
         };
-        
+
         self.customer_rules.vip_customers.insert(customer_id.to_string(), vip_config);
         info!("⭐ VIP customer added: {}", customer_id);
         Ok(())
     }
-    
+
     /// Check if a customer is VIP
     ///
     /// Returns true if the specified customer is registered as VIP.
@@ -819,7 +819,7 @@ impl RoutingPolicies {
     pub fn is_vip_customer(&self, customer_id: &str) -> bool {
         self.customer_rules.vip_customers.contains_key(customer_id)
     }
-    
+
     /// Set VIP routing queue
     ///
     /// Configures the queue to use for VIP customers.
@@ -832,7 +832,7 @@ impl RoutingPolicies {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingPolicies;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut policies = RoutingPolicies::new();
     /// policies.set_vip_queue("platinum_support")?;
@@ -844,14 +844,14 @@ impl RoutingPolicies {
         info!("⭐ VIP queue set to: {}", queue_name);
         Ok(())
     }
-    
+
     /// Get VIP queue name
     ///
     /// Returns the configured VIP queue name if set.
     pub fn get_vip_queue(&self) -> Option<&String> {
         self.customer_rules.vip_queue.as_ref()
     }
-    
+
     /// Set VIP escalation time
     ///
     /// Sets the maximum wait time for VIP customers before escalation.
@@ -864,7 +864,7 @@ impl RoutingPolicies {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingPolicies;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut policies = RoutingPolicies::new();
     /// policies.set_vip_escalation_time(15)?; // 15 seconds max wait
@@ -876,7 +876,7 @@ impl RoutingPolicies {
         info!("⭐ VIP escalation time set to: {}s", seconds);
         Ok(())
     }
-    
+
     /// Add skill requirement for a call type
     ///
     /// Configures the required and preferred skills for a specific type of call.
@@ -887,13 +887,13 @@ impl RoutingPolicies {
     /// * `requirements` - List of skill requirements
     ///
     /// # Examples
-/// 
+///
 /// ```rust
 /// use rvoip_call_engine::routing::policies::{RoutingPolicies, SkillRequirement, SkillLevel};
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut policies = RoutingPolicies::new();
-/// 
+///
 /// policies.add_skill_requirement(
 ///     "billing_support",
 ///     vec![
@@ -915,7 +915,7 @@ impl RoutingPolicies {
               call_type, requirements.len());
         Ok(())
     }
-    
+
     /// Add escalation rule
     ///
     /// Configures automatic escalation rules for calls that wait too long.
@@ -927,13 +927,13 @@ impl RoutingPolicies {
     /// * `escalated_skills` - Skills required after escalation
     ///
     /// # Examples
-/// 
+///
 /// ```rust
 /// use rvoip_call_engine::routing::policies::{RoutingPolicies, SkillRequirement, SkillLevel};
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut policies = RoutingPolicies::new();
-/// 
+///
 /// policies.add_escalation_rule(
 ///     "technical_support",
 ///     180, // 3 minutes
@@ -954,12 +954,12 @@ impl RoutingPolicies {
             escalated_skills,
             escalated_queue: None,
         };
-        
+
         self.skill_rules.escalation_rules.insert(call_type.to_string(), rule);
         info!("⬆️ Escalation rule added for '{}': {}s timeout", call_type, escalation_time);
         Ok(())
     }
-    
+
     /// Add geographic routing rule
     ///
     /// Configures preferred agents and languages for specific geographic regions.
@@ -974,10 +974,10 @@ impl RoutingPolicies {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingPolicies;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut policies = RoutingPolicies::new();
-    /// 
+    ///
     /// policies.add_geographic_rule(
     ///     "FR",
     ///     vec!["agent-paris-001", "agent-lyon-002"],
@@ -999,13 +999,13 @@ impl RoutingPolicies {
             required_languages: languages.split(',').map(|s| s.trim().to_string()).collect(),
             timezone: None,
         };
-        
+
         self.geographic_rules.country_preferences.insert(country_code.to_string(), rule);
         info!("🌍 Geographic rule added for {}: {} agents, languages: {}",
               country_code, agents_count, languages);
         Ok(())
     }
-    
+
     /// Get preferred agents for a geographic region
     ///
     /// Returns the list of preferred agents for the specified country.
@@ -1022,7 +1022,7 @@ impl RoutingPolicies {
             .get(country_code)
             .map(|rule| &rule.preferred_agents)
     }
-    
+
     /// Evaluate routing decision
     ///
     /// Applies all configured policies to determine the best routing decision
@@ -1041,15 +1041,15 @@ impl RoutingPolicies {
     /// ```rust
     /// use rvoip_call_engine::routing::{RoutingPolicies, CallContext};
     /// use std::collections::HashMap;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let policies = RoutingPolicies::new();
-    /// 
+    ///
     /// let mut context = HashMap::new();
     /// context.insert("customer_id".to_string(), "vip-customer-001".to_string());
     /// context.insert("call_type".to_string(), "technical_support".to_string());
     /// context.insert("country".to_string(), "US".to_string());
-    /// 
+    ///
     /// let decision = policies.evaluate_routing(&context);
     /// println!("Routing decision: {:?}", decision);
     /// # Ok(())
@@ -1066,7 +1066,7 @@ impl RoutingPolicies {
                 };
             }
         }
-        
+
         // Check VIP status
         if let Some(customer_id) = call_context.get("customer_id") {
             if self.is_vip_customer(customer_id) {
@@ -1079,7 +1079,7 @@ impl RoutingPolicies {
                 }
             }
         }
-        
+
         // Check geographic preferences
         if let Some(country) = call_context.get("country") {
             if let Some(agents) = self.get_geographic_agents(country) {
@@ -1091,7 +1091,7 @@ impl RoutingPolicies {
                 }
             }
         }
-        
+
         // Default routing
         RoutingDecision::Queue {
             queue_id: "general".to_string(),
@@ -1140,7 +1140,7 @@ impl SkillRequirement {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::{SkillRequirement, SkillLevel};
-    /// 
+    ///
     /// let requirement = SkillRequirement::new("english", SkillLevel::Advanced, true);
     /// println!("Created skill requirement: {:?}", requirement);
     /// ```
@@ -1158,4 +1158,4 @@ impl Default for RoutingPolicies {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

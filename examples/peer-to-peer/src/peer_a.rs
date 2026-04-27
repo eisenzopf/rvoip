@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rvoip::{
     client_core::{
-        ClientConfig, ClientEventHandler, ClientError, 
+        ClientConfig, ClientEventHandler, ClientError,
         IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
         CallAction, CallId, CallState, MediaConfig,
         client::ClientManager,
@@ -28,11 +28,11 @@ impl PeerAHandler {
             call_id: Arc::new(Mutex::new(None)),
         }
     }
-    
+
     async fn set_client_manager(&self, client: Arc<ClientManager>) {
         *self.client_manager.write().await = Some(client);
     }
-    
+
     pub async fn is_call_completed(&self) -> bool {
         *self.call_completed.lock().await
     }
@@ -41,7 +41,7 @@ impl PeerAHandler {
 #[async_trait::async_trait]
 impl ClientEventHandler for PeerAHandler {
     async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
-        info!("📞 [PEER A] Incoming call: {} from {} to {}", 
+        info!("📞 [PEER A] Incoming call: {} from {} to {}",
             call_info.call_id, call_info.caller_uri, call_info.callee_uri);
         CallAction::Accept
     }
@@ -56,20 +56,20 @@ impl ClientEventHandler for PeerAHandler {
             CallState::Terminated => "📴",
             _ => "❓",
         };
-        
-        info!("{} [PEER A] Call {} state: {:?} → {:?}", 
+
+        info!("{} [PEER A] Call {} state: {:?} → {:?}",
             state_emoji, status_info.call_id, status_info.previous_state, status_info.new_state);
-        
+
         if status_info.new_state == CallState::Connected {
             info!("🎉 [PEER A] Call connected! Starting media session...");
-            
+
             // Start audio transmission
             if let Some(client) = self.client_manager.read().await.as_ref() {
                 match client.start_audio_transmission(&status_info.call_id).await {
                     Ok(_) => info!("🎵 [PEER A] Audio transmission started"),
                     Err(e) => error!("❌ [PEER A] Failed to start audio: {}", e),
                 }
-                
+
                 // Get media info
                 if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
                     info!("📊 [PEER A] Media info - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
@@ -107,7 +107,7 @@ impl ClientEventHandler for PeerAHandler {
 async fn main() -> Result<()> {
     // Create logs directory
     std::fs::create_dir_all("logs")?;
-    
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -139,10 +139,10 @@ async fn main() -> Result<()> {
     // Create handler and client
     let handler = Arc::new(PeerAHandler::new());
     let client = ClientManager::new(config).await?;
-    
+
     handler.set_client_manager(client.clone()).await;
     client.set_event_handler(handler.clone()).await;
-    
+
     // Start the client
     client.start().await?;
     info!("✅ [PEER A] Client started and ready");
@@ -155,10 +155,10 @@ async fn main() -> Result<()> {
     info!("📞 [PEER A] Initiating call to Peer B...");
     let from_uri = "sip:alice@127.0.0.1:5060".to_string();
     let to_uri = "sip:bob@127.0.0.1:5061".to_string();
-    
+
     let call_id = client.make_call(from_uri, to_uri, None).await?;
     info!("📞 [PEER A] Call initiated with ID: {}", call_id);
-    
+
     // Store the call ID
     *handler.call_id.lock().await = Some(call_id.clone());
 
@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
     // Get final statistics
     if let Ok(Some(rtp_stats)) = client.get_rtp_statistics(&call_id).await {
         info!("📊 [PEER A] Final RTP Stats - Sent: {} packets ({} bytes), Received: {} packets ({} bytes)",
-            rtp_stats.packets_sent, rtp_stats.bytes_sent, 
+            rtp_stats.packets_sent, rtp_stats.bytes_sent,
             rtp_stats.packets_received, rtp_stats.bytes_received);
     }
 
@@ -189,4 +189,4 @@ async fn main() -> Result<()> {
     info!("✅ [PEER A] Demo completed successfully!");
 
     Ok(())
-} 
+}

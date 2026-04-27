@@ -67,14 +67,14 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::monitoring::{SupervisorMonitor, MetricsCollector, CallCenterEvents};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = rvoip_call_engine::CallCenterEngine::new(Default::default(), None).await?;
 //! // Initialize monitoring components
 //! let supervisor_monitor = SupervisorMonitor::new(engine.clone());
 //! let metrics_collector = MetricsCollector::new(engine.clone());
 //! let event_system = CallCenterEvents::new();
-//! 
+//!
 //! println!("Monitoring system initialized");
 //! # Ok(())
 //! # }
@@ -84,30 +84,30 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::monitoring::SupervisorMonitor;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = rvoip_call_engine::CallCenterEngine::new(Default::default(), None).await?;
 //! let monitor = SupervisorMonitor::new(engine);
-//! 
+//!
 //! // Example monitoring loop for supervisor dashboard
 //! loop {
 //!     // Get current call center status
 //!     // let stats = monitor.get_realtime_stats().await?;
-//!     
+//!
 //!     // Display key metrics
 //!     // println!("📊 Call Center Dashboard");
 //!     // println!("   Active Calls: {}", stats.active_calls);
 //!     // println!("   Available Agents: {}", stats.available_agents);
 //!     // println!("   Queue Length: {}", stats.total_queued);
 //!     // println!("   Service Level: {:.1}%", stats.service_level);
-//!     
+//!
 //!     // Check for alerts
 //!     // if let Some(alerts) = monitor.check_alerts().await? {
 //!     //     for alert in alerts {
 //!     //         println!("🚨 Alert: {}", alert.message);
 //!     //     }
 //!     // }
-//!     
+//!
 //!     // Update every 5 seconds
 //!     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 //!     break; // For example purposes
@@ -120,23 +120,23 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::monitoring::MetricsCollector;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = rvoip_call_engine::CallCenterEngine::new(Default::default(), None).await?;
 //! let metrics = MetricsCollector::new(engine);
-//! 
+//!
 //! // Collect various metrics
 //! // metrics.record_call_start("call-123", "agent-001").await?;
 //! // metrics.record_call_end("call-123", 180, "resolved").await?; // 3 minutes
 //! // metrics.record_agent_status_change("agent-001", "available", "busy").await?;
 //! // metrics.record_queue_event("support", "enqueue", 1).await?;
-//! 
+//!
 //! // Generate performance report
 //! // let report = metrics.generate_performance_report(
 //! //     chrono::Utc::now() - chrono::Duration::hours(24), // Last 24 hours
 //! //     chrono::Utc::now()
 //! // ).await?;
-//! 
+//!
 //! println!("Metrics collection configured");
 //! # Ok(())
 //! # }
@@ -185,7 +185,7 @@
 //! # }
 //! ```
 //!
-//! ### **Agent Events**  
+//! ### **Agent Events**
 //! ```rust
 //! # use chrono::{DateTime, Utc};
 //! # enum AgentEvent {
@@ -299,4 +299,4 @@ pub mod events;
 
 pub use supervisor::SupervisorMonitor;
 pub use metrics::MetricsCollector;
-pub use events::CallCenterEvents; 
+pub use events::CallCenterEvents;

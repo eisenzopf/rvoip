@@ -34,30 +34,30 @@ pub type DialogResult<T> = Result<T, DialogError>;
 pub enum DialogError {
     #[error("Dialog session not found: {session_id}")]
     SessionNotFound { session_id: String },
-    
+
     #[error("Dialog configuration error: {message}")]
     Configuration { message: String },
-    
+
     #[error("SIP processing error: {message}")]
     SipProcessing { message: String },
-    
+
     #[error("Dialog creation failed: {reason}")]
     DialogCreation { reason: String },
-    
+
     #[error("Dialog-core error: {source}")]
-    DialogCore { 
+    DialogCore {
         #[from]
-        source: Box<dyn std::error::Error + Send + Sync> 
+        source: Box<dyn std::error::Error + Send + Sync>
     },
-    
+
     #[error("Session coordination error: {message}")]
     Coordination { message: String },
 }
 
 impl From<DialogError> for crate::errors::SessionError {
     fn from(err: DialogError) -> Self {
-        crate::errors::SessionError::DialogIntegration { 
-            message: err.to_string() 
+        crate::errors::SessionError::DialogIntegration {
+            message: err.to_string()
         }
     }
-} 
+}

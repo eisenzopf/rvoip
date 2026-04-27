@@ -6,7 +6,7 @@ use rvoip_sip_client::types::CallState;
 fn test_terminating_state_exists() {
     // Verify Terminating state exists in the CallState enum
     let state = CallState::Terminating;
-    
+
     match state {
         CallState::Terminating => {
             assert!(true, "Terminating state exists in sip-client");
@@ -19,7 +19,7 @@ fn test_terminating_state_exists() {
 fn test_terminating_vs_terminated() {
     let terminating = CallState::Terminating;
     let terminated = CallState::Terminated;
-    
+
     // These should be different states
     assert_ne!(terminating, terminated, "Terminating and Terminated are distinct");
 }
@@ -37,12 +37,12 @@ fn test_all_call_states_unique() {
         CallState::Terminating,
         CallState::Terminated,
     ];
-    
+
     // Verify each state is unique
     for i in 0..states.len() {
         for j in 0..states.len() {
             if i != j {
-                assert_ne!(states[i], states[j], 
+                assert_ne!(states[i], states[j],
                     "State at index {} should not equal state at index {}", i, j);
             }
         }
@@ -53,11 +53,11 @@ fn test_all_call_states_unique() {
 fn test_state_serialization() {
     // Test that states can be serialized (important for API compatibility)
     use serde_json;
-    
+
     let state = CallState::Terminating;
     let serialized = serde_json::to_string(&state).expect("Should serialize");
     assert_eq!(serialized, "\"Terminating\"");
-    
+
     let deserialized: CallState = serde_json::from_str(&serialized).expect("Should deserialize");
     assert_eq!(deserialized, CallState::Terminating);
 }
@@ -65,7 +65,7 @@ fn test_state_serialization() {
 #[cfg(test)]
 mod state_transition_tests {
     use super::*;
-    
+
     #[test]
     fn test_valid_state_transitions() {
         // Test that certain state transitions make sense
@@ -84,7 +84,7 @@ mod state_transition_tests {
                 _ => true, // Other transitions not tested here
             }
         }
-        
+
         assert!(is_valid_transition(CallState::Connected, CallState::Terminating));
         assert!(is_valid_transition(CallState::OnHold, CallState::Terminating));
         assert!(is_valid_transition(CallState::Terminating, CallState::Terminated));

@@ -108,8 +108,8 @@ impl SecurityRtpTransport {
                                             ssrc: decrypted_packet.header.ssrc,
                                         };
 
-                                        debug!("Successfully decrypted and parsed: SSRC={:08x}, PT={}, seq={}, payload={} bytes", 
-                                               decrypted_packet.header.ssrc, decrypted_packet.header.payload_type, 
+                                        debug!("Successfully decrypted and parsed: SSRC={:08x}, PT={}, seq={}, payload={} bytes",
+                                               decrypted_packet.header.ssrc, decrypted_packet.header.payload_type,
                                                decrypted_packet.header.sequence_number, decrypted_packet.payload.len());
 
                                         // Forward the decrypted event
@@ -141,8 +141,8 @@ impl SecurityRtpTransport {
                             // Parse as regular RTP packet
                             match RtpPacket::parse(packet_data) {
                                 Ok(rtp_packet) => {
-                                    debug!("Parsed plain RTP packet: SSRC={:08x}, PT={}, seq={}, payload={} bytes", 
-                                           rtp_packet.header.ssrc, rtp_packet.header.payload_type, 
+                                    debug!("Parsed plain RTP packet: SSRC={:08x}, PT={}, seq={}, payload={} bytes",
+                                           rtp_packet.header.ssrc, rtp_packet.header.payload_type,
                                            rtp_packet.header.sequence_number, rtp_packet.payload.len());
 
                                     let rtp_event = RtpEvent::MediaReceived {

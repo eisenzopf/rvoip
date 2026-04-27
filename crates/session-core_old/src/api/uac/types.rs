@@ -10,28 +10,28 @@ use crate::errors::Result;
 pub struct UacConfig {
     /// SIP identity (e.g., "sip:alice@example.com")
     pub identity: String,
-    
+
     /// SIP server address (e.g., "192.168.1.100:5060")
     pub server_addr: String,
-    
+
     /// Local bind address (e.g., "0.0.0.0:5061")
     pub local_addr: String,
-    
+
     /// Username for authentication (optional)
     pub username: Option<String>,
-    
+
     /// Password for authentication (optional)
     pub password: Option<String>,
-    
+
     /// User agent string
     pub user_agent: String,
-    
+
     /// Enable auto-answer for testing
     pub auto_answer: bool,
-    
+
     /// Registration expiry in seconds
     pub registration_expiry: u32,
-    
+
     /// Call timeout in seconds
     pub call_timeout: u32,
 }
@@ -57,16 +57,16 @@ impl Default for UacConfig {
 pub struct CallOptions {
     /// Custom SDP offer (if not provided, will be auto-generated)
     pub custom_sdp: Option<String>,
-    
+
     /// Custom headers to include in INVITE
     pub custom_headers: Vec<(String, String)>,
-    
+
     /// Enable early media
     pub early_media: bool,
-    
+
     /// Preferred codecs in order
     pub preferred_codecs: Vec<String>,
-    
+
     /// Call timeout override in seconds
     pub timeout: Option<u32>,
 }

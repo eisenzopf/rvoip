@@ -1,5 +1,5 @@
 //! UAC (User Agent Client) API
-//! 
+//!
 //! Provides high-level client APIs for making outgoing SIP calls with
 //! progressive disclosure of complexity.
 

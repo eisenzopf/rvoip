@@ -15,12 +15,12 @@ pub mod test_audio;
 pub trait AudioDevice: Send + Sync + std::fmt::Debug {
     /// Get device information
     fn info(&self) -> &crate::types::AudioDeviceInfo;
-    
+
     /// Check if the device supports the given format
     fn supports_format(&self, format: &crate::types::AudioFormat) -> bool {
         self.info().supports_format(format)
     }
-    
+
     /// Get as Any for downcasting
     fn as_any(&self) -> &dyn std::any::Any {
         // Default implementation that panics - concrete types should override
@@ -43,7 +43,7 @@ impl AudioDeviceManager {
             test_provider: None,
         })
     }
-    
+
     /// Create a new audio device manager with test provider
     #[cfg(feature = "test-audio")]
     pub async fn with_test_provider(provider: test_audio::TestAudioProvider) -> crate::error::AudioResult<Self> {
@@ -62,12 +62,12 @@ impl AudioDeviceManager {
             };
             return Ok(vec![device.info().clone()]);
         }
-        
+
         #[cfg(feature = "device-cpal")]
         {
             cpal_backend::list_cpal_devices(direction)
         }
-        
+
         #[cfg(not(feature = "device-cpal"))]
         {
             // Fallback to mock devices if CPAL is not enabled
@@ -93,7 +93,7 @@ impl AudioDeviceManager {
                     ]
                 }
             };
-            
+
             Ok(devices)
         }
     }
@@ -107,13 +107,13 @@ impl AudioDeviceManager {
                 crate::types::AudioDirection::Output => provider.get_output_device(),
             });
         }
-        
+
         #[cfg(feature = "device-cpal")]
         {
             cpal_backend::get_default_cpal_device(direction)
                 .map(|device| device as std::sync::Arc<dyn AudioDevice>)
         }
-        
+
         #[cfg(not(feature = "device-cpal"))]
         {
             // Create a mock device for fallback
@@ -125,7 +125,7 @@ impl AudioDeviceManager {
             Ok(std::sync::Arc::new(MockAudioDevice { info: device_info }))
         }
     }
-    
+
     /// Get a specific device by ID
     pub async fn get_device_by_id(&self, id: &str, direction: crate::types::AudioDirection) -> crate::error::AudioResult<std::sync::Arc<dyn AudioDevice>> {
         #[cfg(feature = "device-cpal")]
@@ -133,7 +133,7 @@ impl AudioDeviceManager {
             cpal_backend::get_cpal_device_by_id(id, direction)
                 .map(|device| device as std::sync::Arc<dyn AudioDevice>)
         }
-        
+
         #[cfg(not(feature = "device-cpal"))]
         {
             // For mock, just return a device with the requested ID
@@ -157,8 +157,8 @@ impl AudioDevice for MockAudioDevice {
     fn info(&self) -> &crate::types::AudioDeviceInfo {
         &self.info
     }
-    
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-} 
+}

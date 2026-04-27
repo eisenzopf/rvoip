@@ -97,16 +97,16 @@ impl Default for CodecConfig {
 pub trait AudioCodecTrait: Send + Sync {
     /// Encode PCM audio frame to compressed format
     fn encode(&mut self, frame: &AudioFrame) -> Result<Vec<u8>, AudioError>;
-    
+
     /// Decode compressed audio data to PCM frame
     fn decode(&mut self, data: &[u8]) -> Result<AudioFrame, AudioError>;
-    
+
     /// Get codec configuration
     fn config(&self) -> &CodecConfig;
-    
+
     /// Reset codec state
     fn reset(&mut self) -> Result<(), AudioError>;
-    
+
     /// Get codec type
     fn codec_type(&self) -> CodecType;
 }
@@ -333,9 +333,9 @@ impl CodecQualityMetrics {
         let jitter_score = ((50.0 - self.jitter_ms.min(50.0)) / 50.0) * 100.0;
         let rtt_score = ((200.0 - self.rtt_ms.min(200.0)) / 200.0) * 100.0;
 
-        self.quality_score = (mos_weight * mos_score + 
-                             loss_weight * loss_score + 
-                             jitter_weight * jitter_score + 
+        self.quality_score = (mos_weight * mos_score +
+                             loss_weight * loss_score +
+                             jitter_weight * jitter_score +
                              rtt_weight * rtt_score) as u8;
     }
 }
@@ -349,11 +349,11 @@ mod tests {
         assert_eq!(CodecType::G711Pcmu.default_sample_rate(), 8000);
         assert_eq!(CodecType::G711Pcmu.payload_type(), 0);
         assert_eq!(CodecType::G711Pcmu.sdp_name(), "PCMU");
-        
+
         assert_eq!(CodecType::G729.default_sample_rate(), 8000);
         assert_eq!(CodecType::G729.payload_type(), 18);
         assert_eq!(CodecType::G729.sdp_name(), "G729");
-        
+
         assert_eq!(CodecType::Opus.default_sample_rate(), 48000);
         assert_eq!(CodecType::Opus.payload_type(), 111);
         assert_eq!(CodecType::Opus.sdp_name(), "opus");
@@ -362,16 +362,16 @@ mod tests {
     #[test]
     fn test_codec_negotiation() {
         let negotiator = CodecNegotiator::new();
-        
+
         let remote_caps = vec![
             CodecCapability::g711_pcmu(),
             CodecCapability::g729(),
             CodecCapability::opus(),
         ];
-        
+
         let result = negotiator.negotiate(&remote_caps);
         assert!(result.is_some());
-        
+
         let config = result.unwrap();
         assert_eq!(config.codec, CodecType::Opus); // Should prefer Opus (higher quality)
     }
@@ -386,8 +386,8 @@ mod tests {
             bitrate_utilization: 0.8,
             quality_score: 0,
         };
-        
+
         metrics.calculate_quality_score();
         assert!(metrics.quality_score > 80);
     }
-} 
+}

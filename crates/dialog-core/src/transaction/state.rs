@@ -198,7 +198,7 @@ pub enum TransactionLifecycle {
 
     /// Grace period for processing late-arriving messages
     /// - Silently processes messages to prevent errors
-    /// - Does not emit events to Transaction User  
+    /// - Does not emit events to Transaction User
     /// - Command channel still open
     Draining,
 

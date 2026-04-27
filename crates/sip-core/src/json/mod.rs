@@ -252,7 +252,7 @@ impl Error for SipJsonError {}
 /// fn parse_json(input: &str) -> SipJsonResult<SipValue> {
 ///     let json_value = serde_json::from_str(input)
 ///         .map_err(|e| SipJsonError::DeserializeError(e))?;
-///     
+///
 ///     Ok(SipValue::from_json_value(&json_value))
 /// }
 ///

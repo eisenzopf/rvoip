@@ -186,7 +186,7 @@ pub enum SessionCoordinationEvent {
         negotiated_sdp: Option<String>,
     },
 
-    /// ACK received for 2xx response (UAS side - RFC compliant media start point)  
+    /// ACK received for 2xx response (UAS side - RFC compliant media start point)
     AckReceived {
         /// Dialog ID that received the ACK
         dialog_id: DialogId,

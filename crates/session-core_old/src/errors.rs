@@ -12,46 +12,46 @@ pub type Result<T> = std::result::Result<T, SessionError>;
 pub enum SessionError {
     /// Invalid session state for the requested operation
     InvalidState(String),
-    
+
     /// Session not found
     SessionNotFound(String),
-    
+
     /// Media-related error
     MediaError(String),
-    
+
     /// Media integration error
     MediaIntegration { message: String },
-    
+
     /// Dialog integration error
     DialogIntegration { message: String },
-    
+
     /// SIP protocol error
     SipError(String),
-    
+
     /// Network/transport error
     NetworkError(String),
-    
+
     /// Configuration error
     ConfigError(String),
-    
+
     /// Resource limit exceeded
     ResourceLimitExceeded(String),
-    
+
     /// Timeout error
     Timeout(String),
-    
+
     /// Invalid URI format
     InvalidUri(String),
-    
+
     /// Feature not supported
     NotSupported { feature: String, reason: String },
-    
+
     /// Feature not implemented yet
     NotImplemented { feature: String },
-    
+
     /// Protocol error (e.g., invalid SIP response)
     ProtocolError { message: String },
-    
+
     /// Generic error with message
     Other(String),
 }
@@ -135,4 +135,4 @@ impl SessionError {
     pub fn invalid_uri(msg: &str) -> Self {
         SessionError::InvalidUri(msg.to_string())
     }
-} 
+}

@@ -107,19 +107,19 @@ impl ConferenceApi for ConferenceManager {
         // Find the conference
         if let Some(mut conference_entry) = self.conferences.get_mut(conference_id) {
             let conference = conference_entry.value_mut();
-            
+
             // Create participant with better SIP URI
             let sip_uri = format!("sip:{}@conference.local", session_id.as_str());
             let participant = crate::conference::participant::ConferenceParticipant::new(
                 session_id.clone(),
                 sip_uri
             );
-            
+
             // Add to conference
             conference.add_participant(participant.clone())?;
-            
+
             let participant_info = participant.to_participant_info();
-            
+
             // Publish event
             self.publish_event(ConferenceEvent::ParticipantJoined {
                 conference_id: conference_id.clone(),
@@ -127,7 +127,7 @@ impl ConferenceApi for ConferenceManager {
                 participant_info: participant_info.clone(),
                 joined_at: std::time::Instant::now(),
             }).await;
-            
+
             Ok(participant_info)
         } else {
             Err(crate::errors::SessionError::session_not_found(&format!("Conference {}", conference_id)))
@@ -137,7 +137,7 @@ impl ConferenceApi for ConferenceManager {
     async fn leave_conference(&self, conference_id: &ConferenceId, session_id: &SessionId) -> Result<()> {
         if let Some(mut conference_entry) = self.conferences.get_mut(conference_id) {
             let conference = conference_entry.value_mut();
-            
+
             if conference.remove_participant(session_id).is_some() {
                 self.publish_event(ConferenceEvent::ParticipantLeft {
                     conference_id: conference_id.clone(),
@@ -195,11 +195,11 @@ impl ConferenceApi for ConferenceManager {
     async fn update_participant_status(&self, conference_id: &ConferenceId, session_id: &SessionId, status: ParticipantStatus) -> Result<()> {
         if let Some(mut conference_entry) = self.conferences.get_mut(conference_id) {
             let conference = conference_entry.value_mut();
-            
+
             if let Some(mut participant_entry) = conference.participants.get_mut(session_id) {
                 let old_status = participant_entry.status.clone();
                 participant_entry.update_status(status.clone());
-                
+
                 // Publish status change event
                 self.publish_event(ConferenceEvent::ParticipantStatusChanged {
                     conference_id: conference_id.clone(),
@@ -208,7 +208,7 @@ impl ConferenceApi for ConferenceManager {
                     new_status: status,
                     changed_at: std::time::Instant::now(),
                 }).await;
-                
+
                 Ok(())
             } else {
                 Err(crate::errors::SessionError::session_not_found(&session_id.to_string()))
@@ -222,10 +222,10 @@ impl ConferenceApi for ConferenceManager {
         // Get conference configuration and participants
         let config = self.get_conference_config(conference_id).await?;
         let participants = self.list_participants(conference_id).await?;
-        
+
         // Generate unique media port for this session
         let media_port = 10000 + ((session_id.as_str().len() * 17) % 1000) as u16;
-        
+
         // Create session timestamp
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -286,21 +286,21 @@ impl ConferenceApi for ConferenceManager {
     async fn update_conference_config(&self, conference_id: &ConferenceId, config: ConferenceConfig) -> Result<()> {
         if let Some(mut conference_entry) = self.conferences.get_mut(conference_id) {
             let conference = conference_entry.value_mut();
-            
+
             // Update configuration
             conference.config = config.clone();
             conference.last_updated = std::time::Instant::now();
-            
+
             // Publish configuration update event
             self.publish_event(ConferenceEvent::StatsUpdated {
                 conference_id: conference_id.clone(),
                 stats: conference.get_stats(),
                 updated_at: std::time::Instant::now(),
             }).await;
-            
+
             Ok(())
         } else {
             Err(crate::errors::SessionError::session_not_found(&format!("Conference {}", conference_id)))
         }
     }
-} 
+}

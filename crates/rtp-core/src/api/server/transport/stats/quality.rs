@@ -14,19 +14,19 @@ use crate::api::server::transport::core::connection::ClientConnection;
 /// Estimate quality level based on media statistics
 pub fn estimate_quality_level(media_stats: &MediaStats) -> QualityLevel {
     // Simple estimation based on jitter, packet loss, and available bandwidth
-    
+
     // Calculate an average quality level based on all streams
     if media_stats.streams.is_empty() {
         return QualityLevel::Unknown;
     }
-    
+
     let mut quality_sum = 0;
     let mut stream_count = 0;
-    
+
     for stream in media_stats.streams.values() {
         // Convert the numeric indicators to a quality level
         let quality = calculate_stream_quality(stream);
-        
+
         // Convert quality level to numeric value for averaging
         let quality_value = match quality {
             QualityLevel::Excellent => 5,
@@ -36,21 +36,21 @@ pub fn estimate_quality_level(media_stats: &MediaStats) -> QualityLevel {
             QualityLevel::Bad => 1,
             QualityLevel::Unknown => 0,
         };
-        
+
         if quality_value > 0 {
             quality_sum += quality_value;
             stream_count += 1;
         }
     }
-    
+
     // If no streams had enough data for quality estimation
     if stream_count == 0 {
         return QualityLevel::Unknown;
     }
-    
+
     // Calculate average quality and map back to enum
     let avg_quality = quality_sum as f32 / stream_count as f32;
-    
+
     match avg_quality {
         x if x >= 4.5 => QualityLevel::Excellent,
         x if x >= 3.5 => QualityLevel::Good,
@@ -66,18 +66,18 @@ fn calculate_stream_quality(stream: &StreamStats) -> QualityLevel {
     if stream.packet_count < 10 {
         return QualityLevel::Unknown;
     }
-    
+
     // Packet loss percentage (0.0 to 1.0)
     let packet_loss = stream.fraction_lost;
-    
+
     // Jitter in milliseconds
     let jitter_ms = stream.jitter_ms;
-    
+
     // Round trip time in milliseconds (if available)
     let rtt_ms = stream.rtt_ms.unwrap_or(0.0);
-    
+
     // Assign scores for each metric (0-100, higher is better)
-    
+
     // Packet loss score (100 = no loss, 0 = 20% loss or more)
     let packet_loss_score = if packet_loss <= 0.001 { // Less than 0.1% loss
         100.0
@@ -96,7 +96,7 @@ fn calculate_stream_quality(stream: &StreamStats) -> QualityLevel {
     } else { // 20% or more loss
         0.0
     };
-    
+
     // Jitter score (100 = very low jitter, 0 = high jitter)
     let jitter_score = if jitter_ms <= 1.0 {
         100.0
@@ -113,7 +113,7 @@ fn calculate_stream_quality(stream: &StreamStats) -> QualityLevel {
     } else {
         0.0
     };
-    
+
     // RTT score (100 = very low RTT, 0 = high RTT)
     let rtt_score = if rtt_ms == 0.0 { // Unknown RTT
         50.0 // Neutral score
@@ -132,13 +132,13 @@ fn calculate_stream_quality(stream: &StreamStats) -> QualityLevel {
     } else {
         0.0
     };
-    
+
     // Calculate overall quality score with weights:
     // - Packet loss is most important (weight 50%)
     // - Jitter is second (weight 30%)
     // - RTT is third (weight 20%)
     let quality_score = packet_loss_score * 0.5 + jitter_score * 0.3 + rtt_score * 0.2;
-    
+
     // Map score to quality level
     match quality_score {
         x if x >= 90.0 => QualityLevel::Excellent,
@@ -155,24 +155,24 @@ pub async fn get_stats(
 ) -> Result<MediaStats, MediaTransportError> {
     // Aggregate stats from all clients
     let clients_guard = clients.read().await;
-    
+
     let mut agg_stats = MediaStats::default();
-    
+
     // Set the session duration
     if let Some(client) = clients_guard.values().next() {
         // Simply use the system time as session duration - better than nothing
         agg_stats.session_duration = std::time::Duration::from_secs(0);
     }
-    
+
     // Create stream entries for each client's statistics
     for client in clients_guard.values() {
         if !client.connected {
             continue;
         }
-        
+
         let session = client.session.lock().await;
         let rtp_stats = session.get_stats();
-        
+
         // Create a stream entry
         let mut stream_stats = StreamStats {
             direction: crate::api::common::stats::Direction::Inbound,
@@ -195,13 +195,13 @@ pub async fn get_stats(
             quality: QualityLevel::Unknown,
             available_bandwidth_bps: None,
         };
-        
+
         // Calculate stream quality
         stream_stats.quality = calculate_stream_quality(&stream_stats);
-        
+
         // Add to our aggregate stats
         agg_stats.streams.insert(stream_stats.ssrc, stream_stats);
-        
+
         // Update aggregate bandwidth - we don't have estimated_bitrate_bps, so calculate it based on received data
         // This is a very simplistic estimation
         let now = std::time::SystemTime::now();
@@ -211,10 +211,10 @@ pub async fn get_stats(
             agg_stats.downstream_bandwidth_bps += bitrate;
         }
     }
-    
+
     // Set quality level based on aggregated stats
     agg_stats.quality = estimate_quality_level(&agg_stats);
-    
+
     Ok(agg_stats)
 }
 
@@ -227,22 +227,22 @@ pub async fn get_client_stats(
     let clients_guard = clients.read().await;
     let client = clients_guard.get(client_id)
         .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
-    
+
     // Check if client is connected
     if !client.connected {
         return Err(MediaTransportError::ClientNotConnected(client_id.to_string()));
     }
-    
+
     // Get stats
     let session = client.session.lock().await;
     let rtp_stats = session.get_stats();
-    
+
     // Create the MediaStats struct
     let mut media_stats = MediaStats::default();
-    
+
     // Set session duration - use elapsed time since client connection
     media_stats.session_duration = client.created_at.elapsed().unwrap_or_default();
-    
+
     // Calculate estimated bitrate based on received data and session duration
     let session_duration_secs = media_stats.session_duration.as_secs_f64();
     let bitrate = if session_duration_secs > 0.0 {
@@ -250,7 +250,7 @@ pub async fn get_client_stats(
     } else {
         0
     };
-    
+
     // Create a stream entry
     let mut stream_stats = StreamStats {
         direction: crate::api::common::stats::Direction::Inbound,
@@ -273,18 +273,18 @@ pub async fn get_client_stats(
         quality: QualityLevel::Unknown,
         available_bandwidth_bps: None,
     };
-    
+
     // Calculate stream quality
     stream_stats.quality = calculate_stream_quality(&stream_stats);
-    
+
     // Add to our stats
     media_stats.streams.insert(stream_stats.ssrc, stream_stats.clone());
-    
+
     // Set the downstream bandwidth
     media_stats.downstream_bandwidth_bps = bitrate;
-    
+
     // Set the quality level
     media_stats.quality = calculate_stream_quality(&stream_stats);
-    
+
     Ok(media_stats)
-} 
+}

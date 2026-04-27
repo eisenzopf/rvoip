@@ -44,41 +44,41 @@ async fn test_session_coordination_setup() {
 
     // Start the manager
     manager.start().await.expect("Failed to start manager");
-    
+
     println!("✅ Session manager created and started");
-    
+
     // Wait a moment for initialization
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
+
     // Check that we can get basic info
     let addr = manager.get_bound_address();
     println!("📍 Manager bound to: {}", addr);
-    
+
     let stats = manager.get_stats().await.expect("Failed to get stats");
     println!("📊 Initial stats: {} active sessions", stats.active_sessions);
-    
+
     // Try to create an outgoing call (this should work)
     let call_result = manager.create_outgoing_call(
         "sip:test@127.0.0.1",
         "sip:remote@example.com",
         Some("v=0\r\no=test 123 456 IN IP4 127.0.0.1\r\n".to_string())
     ).await;
-    
+
     match call_result {
         Ok(call) => {
-            println!("✅ Outgoing call created: {} -> {} (state: {:?})", 
+            println!("✅ Outgoing call created: {} -> {} (state: {:?})",
                      call.from, call.to, call.state());
         },
         Err(e) => {
             println!("❌ Failed to create outgoing call: {}", e);
         }
     }
-    
+
     // Check stats again
     let stats = manager.get_stats().await.expect("Failed to get stats");
     println!("📊 Final stats: {} active sessions", stats.active_sessions);
-    
+
     // Clean up
     manager.stop().await.expect("Failed to stop manager");
     println!("🏁 Test completed");
-} 
+}

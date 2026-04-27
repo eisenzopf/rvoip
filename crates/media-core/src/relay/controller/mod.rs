@@ -794,7 +794,7 @@ impl MediaSessionController {
 
                     // TODO: Implement clock rate updates in rtp-core session
                     // This would require updating the scheduler, jitter buffers, and timing calculations
-                    debug!("Clock rate change noted for dialog {} ({}Hz), but full update requires rtp-core enhancement", 
+                    debug!("Clock rate change noted for dialog {} ({}Hz), but full update requires rtp-core enhancement",
                            dialog_id, new_clock_rate);
                 }
 

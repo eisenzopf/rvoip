@@ -196,7 +196,7 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
         // In lenient mode, be more forgiving with incomplete bodies
         if mode == ParseMode::Lenient {
             let actual_length = rest.len();
-            eprintln!("Warning: Content-Length ({}) exceeds available body data ({}). Using available data.", 
+            eprintln!("Warning: Content-Length ({}) exceeds available body data ({}). Using available data.",
                     content_length, actual_length);
             let (final_rest, body_slice) = take(actual_length)(rest)?;
             let body = Bytes::copy_from_slice(body_slice);
@@ -485,7 +485,7 @@ mod tests {
         let (rem, header) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(header.name, HeaderName::Subject);
-        assert!(matches!(header.value, HeaderValue::Raw(ref v) if 
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if
             std::str::from_utf8(v).unwrap() == "UTF-8 Chars - こんにちは"));
     }
 
@@ -657,7 +657,7 @@ mod tests {
         let (rem, header) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(header.name, HeaderName::Via);
-        assert!(matches!(header.value, HeaderValue::Raw(ref v) if 
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if
             v == b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds, SIP/2.0/TCP bigbox3.site3.atlanta.com"));
     }
 
@@ -672,7 +672,7 @@ mod tests {
         let (rem, header) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(header.name, HeaderName::From);
-        assert!(matches!(header.value, HeaderValue::Raw(ref v) if 
+        assert!(matches!(header.value, HeaderValue::Raw(ref v) if
             v == b"\"Caller\" <sip:caller@atlanta.example.com>;tag=958465702;param=val"));
     }
 

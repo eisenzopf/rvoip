@@ -17,7 +17,7 @@ use super::traits::{TransactionIntegration, TransactionHelpers};
 /// Implementation of TransactionIntegration for DialogManager
 impl TransactionIntegration for DialogManager {
     /// Send a request within a dialog using transaction-core
-    /// 
+    ///
     /// Implements proper request creation within dialogs using Phase 3 dialog functions
     /// for significantly simplified and more maintainable code.
     async fn send_request_in_dialog(
@@ -27,7 +27,7 @@ impl TransactionIntegration for DialogManager {
         body: Option<bytes::Bytes>,
     ) -> DialogResult<TransactionKey> {
         debug!("Sending {} request for dialog {} using Phase 3 dialog functions", method, dialog_id);
-        
+
         // Get destination and dialog context
         let (destination, request, event_package, subscription_state) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
@@ -84,7 +84,7 @@ impl TransactionIntegration for DialogManager {
 
             (destination, request, event_package, subscription_state)
         };
-        
+
         // Use transaction-core helpers to create appropriate transaction
         let transaction_id = if method == Method::Invite {
             self.transaction_manager
@@ -97,11 +97,11 @@ impl TransactionIntegration for DialogManager {
         }.map_err(|e| crate::errors::DialogError::TransactionError {
             message: format!("Failed to create {} transaction: {}", method, e),
         })?;
-        
+
         // Associate transaction with dialog BEFORE sending
         self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
         debug!("✅ Associated {} transaction {} with dialog {}", method, transaction_id, dialog_id);
-        
+
         // Send the request using transaction-core
         self.transaction_manager
             .send_request(&transaction_id)
@@ -109,14 +109,14 @@ impl TransactionIntegration for DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to send request: {}", e),
             })?;
-        
+
         debug!("Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions", method, dialog_id, transaction_id);
-        
+
         Ok(transaction_id)
     }
-    
+
     /// Send a response using transaction-core
-    /// 
+    ///
     /// Delegates response sending to transaction-core while maintaining dialog state.
     async fn send_transaction_response(
         &self,
@@ -124,7 +124,7 @@ impl TransactionIntegration for DialogManager {
         response: Response,
     ) -> DialogResult<()> {
         debug!("Sending response {} for transaction {}", response.status_code(), transaction_id);
-        
+
         // Use transaction-core to send the response
         self.transaction_manager
             .send_response(transaction_id, response)
@@ -132,7 +132,7 @@ impl TransactionIntegration for DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to send response: {}", e),
             })?;
-        
+
         debug!("Successfully sent response for transaction {}", transaction_id);
         Ok(())
     }
@@ -141,15 +141,15 @@ impl TransactionIntegration for DialogManager {
 /// Implementation of TransactionHelpers for DialogManager
 impl TransactionHelpers for DialogManager {
     /// Associate a transaction with a dialog
-    /// 
+    ///
     /// Creates the mapping between transactions and dialogs for proper message routing.
     fn link_transaction_to_dialog(&self, transaction_id: &TransactionKey, dialog_id: &DialogId) {
         self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
         debug!("Linked transaction {} to dialog {}", transaction_id, dialog_id);
     }
-    
+
     /// Create ACK for 2xx response using transaction-core helpers
-    /// 
+    ///
     /// Uses transaction-core's ACK creation helpers while maintaining dialog-core concerns.
     async fn create_ack_for_success_response(
         &self,
@@ -157,7 +157,7 @@ impl TransactionHelpers for DialogManager {
         response: &Response,
     ) -> DialogResult<Request> {
         debug!("Creating ACK for 2xx response using transaction-core helpers");
-        
+
         // Use transaction-core's helper method to create ACK for 2xx response
         // This ensures proper ACK construction according to RFC 3261
         let ack_request = self.transaction_manager
@@ -166,7 +166,7 @@ impl TransactionHelpers for DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to create ACK for 2xx using transaction-core: {}", e),
             })?;
-        
+
         debug!("Successfully created ACK for 2xx response");
         Ok(ack_request)
     }
@@ -175,7 +175,7 @@ impl TransactionHelpers for DialogManager {
 /// Helper methods for request building
 impl DialogManager {
     /// Build a SIP request using Phase 3 dialog functions
-    /// 
+    ///
     /// This method encapsulates the complex request building logic using
     /// transaction-core's Phase 3 dialog quick functions.
     fn build_dialog_request(
@@ -198,7 +198,7 @@ impl DialogManager {
                         let sdp_content = body_string.ok_or_else(|| {
                             crate::errors::DialogError::protocol_error("re-INVITE request requires SDP content for session modification")
                         })?;
-                        
+
                         dialog_quick::reinvite_for_dialog(
                             &template.call_id,
                             &template.local_uri.to_string(),
@@ -215,7 +215,7 @@ impl DialogManager {
                     None => {
                         // Initial INVITE: No remote tag yet, creating new dialog
                         use rvoip_dialog_core::client::builders::InviteBuilder;
-                        
+
                         let mut invite_builder = InviteBuilder::new()
                             .from_detailed(
                                 Some("User"), // Display name
@@ -223,7 +223,7 @@ impl DialogManager {
                                 Some(&local_tag)
                             )
                             .to_detailed(
-                                Some("User"), // Display name  
+                                Some("User"), // Display name
                                 template.remote_uri.to_string(),
                                 None // No remote tag for initial INVITE
                             )
@@ -231,28 +231,28 @@ impl DialogManager {
                             .cseq(template.cseq_number)
                             .request_uri(template.target_uri.to_string())
                             .local_address(self.local_address);
-                        
+
                         // Add route set if present
                         for route in &template.route_set {
                             invite_builder = invite_builder.add_route(route.clone());
                         }
-                        
+
                         // Add SDP content if provided
                         if let Some(sdp_content) = body_string {
                             invite_builder = invite_builder.with_sdp(sdp_content);
                         }
-                        
+
                         invite_builder.build()
                     }
                 }
             },
-            
+
             Method::Bye => {
                 // BYE requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error("BYE request requires remote tag in established dialog")
                 })?;
-                
+
                 dialog_quick::bye_for_dialog(
                     &template.call_id,
                     &template.local_uri.to_string(),
@@ -265,13 +265,13 @@ impl DialogManager {
                     None,
                 )
             },
-            
+
             Method::Refer => {
                 // REFER requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error("REFER request requires remote tag in established dialog")
                 })?;
-                
+
                 let target_uri = body_string.clone().unwrap_or_else(|| "sip:unknown".to_string());
                 dialog_quick::refer_for_dialog(
                     &template.call_id,
@@ -285,13 +285,13 @@ impl DialogManager {
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
-            
+
             Method::Update => {
-                // UPDATE requires both tags in established dialogs  
+                // UPDATE requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error("UPDATE request requires remote tag in established dialog")
                 })?;
-                
+
                 dialog_quick::update_for_dialog(
                     &template.call_id,
                     &template.local_uri.to_string(),
@@ -304,13 +304,13 @@ impl DialogManager {
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
-            
+
             Method::Info => {
                 // INFO requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error("INFO request requires remote tag in established dialog")
                 })?;
-                
+
                 let content = body_string.unwrap_or_else(|| "Application info".to_string());
                 dialog_quick::info_for_dialog(
                     &template.call_id,
@@ -325,7 +325,7 @@ impl DialogManager {
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
-            
+
             Method::Notify => {
                 // NOTIFY requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
@@ -356,13 +356,13 @@ impl DialogManager {
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
-            
+
             Method::Message => {
                 // MESSAGE requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error("MESSAGE request requires remote tag in established dialog")
                 })?;
-                
+
                 let content = body_string.unwrap_or_else(|| "".to_string());
                 dialog_quick::message_for_dialog(
                     &template.call_id,
@@ -377,13 +377,13 @@ impl DialogManager {
                     if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
                 )
             },
-            
+
             _ => {
                 // For any other method, require established dialog
                 let remote_tag = remote_tag.ok_or_else(|| {
                     crate::errors::DialogError::protocol_error(&format!("{} request requires remote tag in established dialog", method))
                 })?;
-                
+
                 // Use dialog template + utility function
                 let template_struct = dialog_utils::DialogRequestTemplate {
                     call_id: template.call_id.clone(),
@@ -397,7 +397,7 @@ impl DialogManager {
                     route_set: template.route_set.clone(),
                     contact: None,
                 };
-                
+
                 dialog_utils::request_builder_from_dialog_template(
                     &template_struct,
                     method.clone(),
@@ -410,7 +410,7 @@ impl DialogManager {
             message: format!("Failed to build {} request using Phase 3 dialog functions: {}", method, e),
             context: None,
         })?;
-        
+
         Ok(request)
     }
-} 
+}

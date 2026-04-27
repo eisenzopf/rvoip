@@ -3,7 +3,7 @@ use rvoip_session_core::api::control::SessionControl;
 //
 // This module provides shared test utilities for testing session-core functionality
 // across different SIP dialog types (INVITE, BYE, INFO, etc.).
-// 
+//
 // The helpers ensure consistent test setup and provide real event-driven testing
 // using the infra-common zero-copy event system.
 
@@ -23,7 +23,7 @@ pub use manager_test_utils::*;
 pub mod session_test_utils;
 pub use session_test_utils::*;
 
-// Re-export API test utilities  
+// Re-export API test utilities
 pub mod api_test_utils;
 pub use api_test_utils::*;
 
@@ -100,21 +100,21 @@ impl CallHandler for EventTrackingHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         // Track the incoming call
         self.incoming_calls.lock().await.push(call.clone());
-        
+
         // Send event notification
         if let Ok(tx) = self.call_events.try_lock() {
             let _ = tx.send(CallEvent::IncomingCall(call.id.clone()));
         }
-        
+
         CallDecision::Accept(None)
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         tracing::info!("Call {} ended: {}", call.id(), reason);
-        
+
         // Track the ended call
         self.ended_calls.lock().await.push((call.id().clone(), reason.to_string()));
-        
+
         // Send event notification
         if let Ok(tx) = self.call_events.try_lock() {
             let _ = tx.send(CallEvent::CallEnded(call.id().clone(), reason.to_string()));
@@ -159,7 +159,7 @@ pub async fn wait_for_state_change(
     timeout: Duration,
 ) -> Option<(CallState, CallState)> {
     let start = std::time::Instant::now();
-    
+
     while start.elapsed() < timeout {
         match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
             Ok(Ok(event)) => {
@@ -172,7 +172,7 @@ pub async fn wait_for_state_change(
             _ => {}
         }
     }
-    
+
     None
 }
 
@@ -195,14 +195,14 @@ pub async fn wait_for_session_created(
 /// Wait for a session terminated event
 pub async fn wait_for_session_terminated(
     subscriber: &mut SessionEventSubscriber,
-    session_id: &SessionId,  
+    session_id: &SessionId,
     timeout: Duration,
 ) -> Option<String> {
     let start = std::time::Instant::now();
-    
+
     // First yield to allow any pending events to propagate
     tokio::task::yield_now().await;
-    
+
     while start.elapsed() < timeout {
         match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
             Ok(Ok(event)) => {
@@ -222,7 +222,7 @@ pub async fn wait_for_session_terminated(
             }
         }
     }
-    
+
     println!("Timeout waiting for SessionTerminated event for session {}", session_id);
     None
 }
@@ -234,7 +234,7 @@ pub async fn wait_for_terminated_state(
     timeout: Duration,
 ) -> bool {
     let start = std::time::Instant::now();
-    
+
     while start.elapsed() < timeout {
         match tokio::time::timeout(Duration::from_millis(100), subscriber.receive()).await {
             Ok(Ok(event)) => {
@@ -249,7 +249,7 @@ pub async fn wait_for_terminated_state(
             }
         }
     }
-    
+
     false
 }
 
@@ -261,14 +261,14 @@ pub async fn create_session_manager(
 ) -> Result<Arc<SessionCoordinator>, SessionError> {
     let port = port.unwrap_or_else(|| get_test_ports().0);
     let from_uri = from_uri.unwrap_or("sip:test@localhost");
-    
+
     let manager = SessionManagerBuilder::new()
         .with_local_address(from_uri)
         .with_sip_port(port)
         .with_handler(handler)
         .build()
         .await?;
-    
+
     manager.start().await?;
     Ok(manager)
 }
@@ -277,10 +277,10 @@ pub async fn create_session_manager(
 pub async fn create_session_manager_pair() -> Result<(Arc<SessionCoordinator>, Arc<SessionCoordinator>, mpsc::UnboundedReceiver<CallEvent>), SessionError> {
 //     let (handler_a, _) = EventTrackingHandler::new();
 //     let (handler_b, call_events) = EventTrackingHandler::new();
-    
+
     // Get unique ports for this test
     let (port_a, port_b) = get_test_ports();
-    
+
     // Create two session managers on different SIP and media ports
     let manager_a = SessionManagerBuilder::new()
         .with_local_address("sip:alice@127.0.0.1")
@@ -289,7 +289,7 @@ pub async fn create_session_manager_pair() -> Result<(Arc<SessionCoordinator>, A
         .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
         .build()
         .await?;
-    
+
     let manager_b = SessionManagerBuilder::new()
         .with_local_address("sip:bob@127.0.0.1")
         .with_sip_port(port_b)
@@ -297,21 +297,21 @@ pub async fn create_session_manager_pair() -> Result<(Arc<SessionCoordinator>, A
         .with_handler(Arc::new(media_test_utils::TestCallHandler::new(true)))
         .build()
         .await?;
-    
+
     // Start managers to get actual bound addresses
     manager_a.start().await?;
     manager_b.start().await?;
-    
+
     // Get actual bound addresses
     let addr_a = manager_a.get_bound_address();
     let addr_b = manager_b.get_bound_address();
-    
+
     println!("Manager A bound to: {}", addr_a);
     println!("Manager B bound to: {}", addr_b);
-    
+
     // Create dummy call events receiver for now
     let (_tx, call_events) = mpsc::unbounded_channel();
-    
+
     Ok((manager_a, manager_b, call_events))
 }
 
@@ -322,7 +322,7 @@ pub async fn create_session_manager_pair_with_handlers(
 ) -> Result<(Arc<SessionCoordinator>, Arc<SessionCoordinator>), SessionError> {
     // Get unique ports for this test
     let (port_a, port_b) = get_test_ports();
-    
+
     // Create two session managers on different ports
     let manager_a = SessionManagerBuilder::new()
         .with_local_address("sip:alice@127.0.0.1")
@@ -330,25 +330,25 @@ pub async fn create_session_manager_pair_with_handlers(
         .with_handler(handler_a)
         .build()
         .await?;
-    
+
     let manager_b = SessionManagerBuilder::new()
         .with_local_address("sip:bob@127.0.0.1")
         .with_sip_port(port_b)
         .with_handler(handler_b)
         .build()
         .await?;
-    
+
     // Start managers to get actual bound addresses
     manager_a.start().await?;
     manager_b.start().await?;
-    
+
     // Get actual bound addresses
     let addr_a = manager_a.get_bound_address();
     let addr_b = manager_b.get_bound_address();
-    
+
     println!("Manager A bound to: {}", addr_a);
     println!("Manager B bound to: {}", addr_b);
-    
+
     Ok((manager_a, manager_b))
 }
 
@@ -360,7 +360,7 @@ pub async fn establish_call_between_managers(
 ) -> Result<(CallSession, Option<SessionId>), SessionError> {
     establish_call_between_managers_with_sdp(
         caller,
-        callee, 
+        callee,
         call_events,
         Some("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\n...".to_string())
     ).await
@@ -376,27 +376,27 @@ pub async fn establish_call_between_managers_with_sdp(
     // Get actual bound addresses
     let caller_addr = caller.get_bound_address();
     let callee_addr = callee.get_bound_address();
-    
+
     // Subscribe to session events to wait for state changes
     let mut caller_events = caller.event_processor.subscribe().await
         .map_err(|_| SessionError::Other("Failed to subscribe to events".to_string()))?;
     let mut callee_events = callee.event_processor.subscribe().await
         .map_err(|_| SessionError::Other("Failed to subscribe to events".to_string()))?;
-    
+
     // Create outgoing call from A to B using B's actual address
     let from_uri = format!("sip:alice@{}", caller_addr.ip());
     let to_uri = format!("sip:bob@{}", callee_addr);
-    
+
     println!("Making call: {} -> {}", from_uri, to_uri);
-    
+
     let call = caller.create_outgoing_call(&from_uri, &to_uri, sdp).await?;
     let caller_session_id = call.id().clone();
-    
+
     // Wait for caller's session to reach Active state
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(3);
     let mut caller_active = false;
-    
+
     while start.elapsed() < timeout && !caller_active {
         match tokio::time::timeout(Duration::from_millis(100), caller_events.receive()).await {
             Ok(Ok(event)) => {
@@ -410,15 +410,15 @@ pub async fn establish_call_between_managers_with_sdp(
             _ => {}
         }
     }
-    
+
     if !caller_active {
         return Err(SessionError::Other("Timeout waiting for caller session to become active".to_string()));
     }
-    
+
     // Find the callee's session ID by waiting for SessionCreated event
     let mut callee_session_id = None;
     let start = std::time::Instant::now();
-    
+
     while start.elapsed() < timeout && callee_session_id.is_none() {
         match tokio::time::timeout(Duration::from_millis(100), callee_events.receive()).await {
             Ok(Ok(event)) => {
@@ -430,12 +430,12 @@ pub async fn establish_call_between_managers_with_sdp(
             _ => {}
         }
     }
-    
+
     // Wait for callee's session to reach Active state if we found it
     if let Some(ref callee_id) = callee_session_id {
         let start = std::time::Instant::now();
         let mut callee_active = false;
-        
+
         while start.elapsed() < timeout && !callee_active {
             match tokio::time::timeout(Duration::from_millis(100), callee_events.receive()).await {
                 Ok(Ok(event)) => {
@@ -450,7 +450,7 @@ pub async fn establish_call_between_managers_with_sdp(
             }
         }
     }
-    
+
     Ok((call, callee_session_id))
 }
 
@@ -462,11 +462,11 @@ pub async fn verify_session_exists(
 ) -> Result<CallSession, SessionError> {
     let session = manager.get_session(session_id).await?
         .ok_or_else(|| SessionError::session_not_found(&session_id.to_string()))?;
-    
+
     if let Some(expected) = expected_state {
         assert_eq!(session.state(), expected, "Session state mismatch");
     }
-    
+
     Ok(session)
 }
 
@@ -476,13 +476,13 @@ pub async fn verify_session_removed(
     session_id: &SessionId,
 ) -> Result<(), SessionError> {
     let session = manager.get_session(session_id).await?;
-    
+
     if let Some(session) = session {
         // Session might still exist but should be in Terminated state
         assert_eq!(
-            session.state(), 
-            &CallState::Terminated, 
-            "Session {} should be terminated, but is in state {:?}", 
+            session.state(),
+            &CallState::Terminated,
+            "Session {} should be terminated, but is in state {:?}",
             session_id,
             session.state()
         );
@@ -539,7 +539,7 @@ impl TestConfig {
             cleanup_delay: Duration::from_millis(25),
         }
     }
-    
+
     pub fn slow() -> Self {
         Self {
             default_timeout: Duration::from_secs(2),
@@ -555,4 +555,4 @@ pub use bridge_test_utils::*;
 pub use media_test_utils::*;
 pub use manager_test_utils::*;
 pub use session_test_utils::*;
-pub use coordination_test_utils::*; 
+pub use coordination_test_utils::*;

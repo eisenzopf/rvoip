@@ -1,22 +1,22 @@
 //! RVOIP Session Core Library
 //!
-//! This library provides Session Initiation Protocol (SIP) session and dialog management 
-//! for the RVOIP stack. It serves as the middle layer between low-level SIP transaction 
+//! This library provides Session Initiation Protocol (SIP) session and dialog management
+//! for the RVOIP stack. It serves as the middle layer between low-level SIP transaction
 //! processing and high-level application logic.
-//! 
+//!
 //! # Overview
-//! 
+//!
 //! Session-core coordinates SIP dialogs, media sessions, and call control operations
 //! while integrating with dialog-core (SIP protocol), media-core (audio processing),
 //! and providing APIs for higher-level applications.
-//! 
+//!
 //! # Quick Start
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! use std::sync::Arc;
 //! use std::net::SocketAddr;
-//! 
+//!
 //! # fn main() {
 //! # let rt = tokio::runtime::Runtime::new().unwrap();
 //! # rt.block_on(async {
@@ -29,23 +29,23 @@
 //!     .build()
 //!     .await
 //!     .unwrap();
-//!     
+//!
 //! // Start accepting calls
 //! SessionControl::start(&coordinator).await.unwrap();
 //! # });
 //! # }
 //! ```
-//! 
+//!
 //! # Network Configuration
-//! 
+//!
 //! ## Bind Address Propagation
-//! 
+//!
 //! Session-core respects configured bind addresses and propagates them through all layers:
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! use std::net::SocketAddr;
-//! 
+//!
 //! # fn main() {
 //! # let rt = tokio::runtime::Runtime::new().unwrap();
 //! # rt.block_on(async {
@@ -61,18 +61,18 @@
 //! # });
 //! # }
 //! ```
-//! 
+//!
 //! The configured IP propagates to dialog-core and transport layers.
 //! No more hardcoded 0.0.0.0 addresses when you specify an IP.
-//! 
+//!
 //! ## Media Port Configuration
-//! 
+//!
 //! The library supports automatic port allocation when you use port 0:
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! use std::net::SocketAddr;
-//! 
+//!
 //! # fn main() {
 //! # let rt = tokio::runtime::Runtime::new().unwrap();
 //! # rt.block_on(async {
@@ -87,10 +87,10 @@
 //! # });
 //! # }
 //! ```
-//! 
+//!
 //! When port is 0:
 //! - It means "allocate automatically when needed"
-//! - Actual allocation happens when media sessions are created  
+//! - Actual allocation happens when media sessions are created
 //! - Uses the configured media_port_start to media_port_end range
 //! - Each session gets unique ports from the pool
 
@@ -125,7 +125,7 @@ pub mod prelude {
     // pub use crate::manager::SessionManager; // Disabled - using SessionCoordinator directly
     pub use crate::dialog::DialogManager;  // NEW
     pub use crate::conference::prelude::*; // NEW - Conference functionality
-    
+
     // Audio streaming types
     pub use crate::api::types::{AudioFrame, AudioStreamConfig};
 }
@@ -152,13 +152,13 @@ pub mod testing {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Initialize the session core library
-/// 
+///
 /// This should be called once at application startup to initialize
 /// any global state or resources.
 pub fn init() {
     // Initialize logging if not already done
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     // Any other global initialization
     tracing::info!("RVoIP Session Core v{} initialized", VERSION);
-} 
+}

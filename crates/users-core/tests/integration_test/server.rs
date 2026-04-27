@@ -1,5 +1,5 @@
 //! Integration test server for users-core
-//! 
+//!
 //! This module provides a test server with aggressive rate limiting
 //! configurations for integration testing.
 
@@ -46,7 +46,7 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
     let temp_dir = TempDir::new()?;
     let db_path = temp_dir.path().join("test_users.db");
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
-    
+
     // Configure with aggressive rate limits for testing
     let config = UsersConfig {
         database_url: db_url,
@@ -75,7 +75,7 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
     // Initialize authentication service
     let auth_service = Arc::new(init(config.clone()).await?);
     info!("Test auth service initialized");
-    
+
     // Create test admin user
     match auth_service.create_user(CreateUserRequest {
         username: "admin".to_string(),
@@ -110,7 +110,7 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
         lockout_duration: Duration::from_secs(2), // 2 seconds for quick testing
         cleanup_interval: Duration::from_secs(60),
     };
-    
+
     // Create API state with custom rate limiter
     let rate_limiter = EnhancedRateLimiter::new(rate_limit_config);
     let api_state = ApiState {
@@ -121,35 +121,35 @@ pub async fn start_test_server() -> anyhow::Result<TestServer> {
             ..Default::default()
         })),
     };
-    
+
     // Create router with our custom state that has aggressive rate limiting
     let app = users_core::api::create_router_with_state(api_state);
-    
+
     // Bind to any available port
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let url = format!("http://{}", addr);
-    
+
     info!("Test server starting on {}", url);
-    
+
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    
+
     // Spawn server task
     tokio::spawn(async move {
         let server = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
             });
-        
+
         if let Err(e) = server.await {
             tracing::error!("Server error: {}", e);
         }
     });
-    
+
     // Wait a bit for server to start
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
+
     Ok(TestServer {
         url,
         auth_service,

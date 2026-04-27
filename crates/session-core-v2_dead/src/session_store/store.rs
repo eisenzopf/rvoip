@@ -12,13 +12,13 @@ use crate::types::CallState;
 pub struct SessionStore {
     /// Primary storage - all active sessions
     pub(crate) sessions: Arc<RwLock<HashMap<SessionId, SessionState>>>,
-    
+
     /// Index by dialog ID
     pub(crate) by_dialog: Arc<RwLock<HashMap<DialogId, SessionId>>>,
-    
+
     /// Index by call ID
     pub(crate) by_call_id: Arc<RwLock<HashMap<CallId, SessionId>>>,
-    
+
     /// Index by media session ID
     pub(crate) by_media_id: Arc<RwLock<HashMap<MediaSessionId, SessionId>>>,
 }
@@ -33,7 +33,7 @@ impl SessionStore {
             by_media_id: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Create a new session
     pub async fn create_session(
         &self,
@@ -47,18 +47,18 @@ impl SessionStore {
         } else {
             SessionState::new(session_id.clone(), role)
         };
-        
+
         let mut sessions = self.sessions.write().await;
         if sessions.contains_key(&session_id) {
             return Err(format!("Session {} already exists", session_id).into());
         }
-        
+
         sessions.insert(session_id.clone(), session.clone());
         info!("Created new session {} with role {:?}", session_id, role);
-        
+
         Ok(session)
     }
-    
+
     /// Get a session by ID
     pub async fn get_session(
         &self,
@@ -74,7 +74,7 @@ impl SessionStore {
             .cloned()
             .ok_or_else(|| format!("Session {} not found", session_id).into())
     }
-    
+
     /// Update a session
     pub async fn update_session(
         &self,
@@ -82,7 +82,7 @@ impl SessionStore {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let session_id = session.session_id.clone();
         let mut sessions = self.sessions.write().await;
-        
+
         // Update indexes if IDs have changed
         if let Some(old_session) = sessions.get(&session_id) {
             // Remove old indexes
@@ -94,7 +94,7 @@ impl SessionStore {
                     self.by_dialog.write().await.insert(new_id.clone(), session_id.clone());
                 }
             }
-            
+
             if old_session.media_session_id != session.media_session_id {
                 if let Some(old_id) = &old_session.media_session_id {
                     self.by_media_id.write().await.remove(old_id);
@@ -103,7 +103,7 @@ impl SessionStore {
                     self.by_media_id.write().await.insert(new_id.clone(), session_id.clone());
                 }
             }
-            
+
             if old_session.call_id != session.call_id {
                 if let Some(old_id) = &old_session.call_id {
                     self.by_call_id.write().await.remove(old_id);
@@ -113,20 +113,20 @@ impl SessionStore {
                 }
             }
         }
-        
+
         sessions.insert(session_id.clone(), session);
         debug!("Updated session {}", session_id);
-        
+
         Ok(())
     }
-    
+
     /// Remove a session
     pub async fn remove_session(
         &self,
         session_id: &SessionId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut sessions = self.sessions.write().await;
-        
+
         if let Some(session) = sessions.remove(session_id) {
             // Clean up indexes
             if let Some(dialog_id) = &session.dialog_id {
@@ -138,14 +138,14 @@ impl SessionStore {
             if let Some(call_id) = &session.call_id {
                 self.by_call_id.write().await.remove(call_id);
             }
-            
+
             info!("Removed session {}", session_id);
             Ok(())
         } else {
             Err(format!("Session {} not found", session_id).into())
         }
     }
-    
+
     /// Find session by dialog ID
     pub async fn find_by_dialog(
         &self,
@@ -158,7 +158,7 @@ impl SessionStore {
             None
         }
     }
-    
+
     /// Find session by media session ID
     pub async fn find_by_media_id(
         &self,
@@ -171,7 +171,7 @@ impl SessionStore {
             None
         }
     }
-    
+
     /// Find session by call ID
     pub async fn find_by_call_id(
         &self,
@@ -184,7 +184,7 @@ impl SessionStore {
             None
         }
     }
-    
+
     /// Get all active sessions
     pub async fn get_all_sessions(&self) -> Vec<SessionState> {
         let sessions = self.sessions.read().await;
@@ -288,14 +288,14 @@ impl SessionStore {
 
         pairs
     }
-    
+
     /* Old cleanup - replaced by cleanup.rs
     /// Clean up stale sessions
     pub async fn cleanup_stale_sessions_old(&self, max_age: Duration) {
         let mut sessions = self.sessions.write().await;
         let now = Instant::now();
         let mut to_remove = Vec::new();
-        
+
         for (id, session) in sessions.iter() {
             let should_remove = match session.call_state {
                 CallState::Terminated | CallState::Failed(_) => {
@@ -307,12 +307,12 @@ impl SessionStore {
                     session.session_duration() > max_age
                 }
             };
-            
+
             if should_remove {
                 to_remove.push(id.clone());
             }
         }
-        
+
         for id in to_remove {
             if let Some(session) = sessions.remove(&id) {
                 // Clean up indexes
@@ -325,18 +325,18 @@ impl SessionStore {
                 if let Some(call_id) = &session.call_id {
                     self.by_call_id.write().await.remove(call_id);
                 }
-                
+
                 warn!("Cleaned up stale session {}", id);
             }
         }
     }
     */
-    
+
     /// Get session statistics
     pub async fn get_stats(&self) -> SessionStats {
         let sessions = self.sessions.read().await;
         let mut stats = SessionStats::default();
-        
+
         for session in sessions.values() {
             stats.total += 1;
             match session.call_state {
@@ -357,23 +357,23 @@ impl SessionStore {
                 CallState::Failed(_) => stats.failed += 1,
                 CallState::Muted => stats.active += 1, // Count as active
                 CallState::ConsultationCall => stats.active += 1, // Count as active
-                
+
                 // Registration states
                 CallState::Registering => stats.initiating += 1, // Count as initiating
                 CallState::Registered => stats.idle += 1, // Count as idle (ready for calls)
                 CallState::Unregistering => stats.terminating += 1, // Count as terminating
-                
+
                 // Subscription/Presence states
                 CallState::Subscribing => stats.initiating += 1, // Count as initiating
                 CallState::Subscribed => stats.idle += 1, // Count as idle (subscription active)
                 CallState::Publishing => stats.initiating += 1, // Count as initiating
-                
+
                 // Authentication and routing states
                 CallState::Authenticating => stats.initiating += 1, // Count as initiating
                 CallState::Messaging => stats.active += 1, // Count as active
             }
         }
-        
+
         stats
     }
 }

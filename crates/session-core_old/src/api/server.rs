@@ -1,5 +1,5 @@
 //! Server-oriented Session Management API
-//! 
+//!
 //! Provides server-specific functionality for call centers, PBXs, and other
 //! server applications that need to manage multiple sessions and bridges.
 
@@ -18,22 +18,22 @@ use super::bridge::{BridgeId, BridgeInfo, BridgeEvent};
 pub trait ServerSessionManager: Send + Sync {
     /// Create a bridge between two or more sessions
     async fn bridge_sessions(&self, session1: &SessionId, session2: &SessionId) -> Result<BridgeId>;
-    
+
     /// Destroy an existing bridge
     async fn destroy_bridge(&self, bridge_id: &BridgeId) -> Result<()>;
-    
+
     /// Get the bridge a session is part of (if any)
     async fn get_session_bridge(&self, session_id: &SessionId) -> Result<Option<BridgeId>>;
-    
+
     /// Remove a session from a bridge
     async fn remove_session_from_bridge(&self, bridge_id: &BridgeId, session_id: &SessionId) -> Result<()>;
-    
+
     /// List all active bridges
     async fn list_bridges(&self) -> Vec<BridgeInfo>;
-    
+
     /// Subscribe to bridge events
     async fn subscribe_to_bridge_events(&self) -> mpsc::UnboundedReceiver<BridgeEvent>;
-    
+
     /// Create a pre-allocated outgoing session (for agent registration)
     async fn create_outgoing_session(&self) -> Result<SessionId>;
 }
@@ -83,15 +83,15 @@ pub async fn create_full_server_manager(
 ) -> Result<Arc<dyn ServerSessionManager>> {
     // TODO: Implement server-specific session manager
     // For now, return an error indicating this is not yet implemented
-    Err(crate::errors::SessionError::NotImplemented { 
-        feature: "Server session manager".to_string() 
+    Err(crate::errors::SessionError::NotImplemented {
+        feature: "Server session manager".to_string()
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_server_config_default() {
         let config = ServerConfig::default();

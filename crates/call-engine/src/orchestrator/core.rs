@@ -58,12 +58,12 @@ pub(super) struct CallCenterState {
 }
 
 /// Primary call center orchestration engine
-/// 
+///
 /// This is the main orchestration component that integrates with rvoip-session-core
 /// to provide comprehensive call center functionality on top of SIP session management.
-/// 
+///
 /// The `CallCenterEngine` serves as the central coordinator for:
-/// 
+///
 /// - **Agent Management**: Registration, authentication, and availability tracking
 /// - **Call Routing**: Intelligent routing based on skills, availability, and business rules
 /// - **Queue Management**: Call queuing with priorities and overflow handling
@@ -101,11 +101,11 @@ pub(super) struct CallCenterState {
 ///
 /// ```
 /// use rvoip_call_engine::prelude::*;
-/// 
+///
 /// # async fn example() -> Result<()> {
 /// let config = CallCenterConfig::default();
 /// let engine = CallCenterEngine::new(config, None).await?;
-/// 
+///
 /// println!("Call center engine started successfully!");
 /// # Ok(())
 /// # }
@@ -116,7 +116,7 @@ pub(super) struct CallCenterState {
 /// ```
 /// use rvoip_call_engine::prelude::*;
 /// use std::sync::Arc;
-/// 
+///
 /// # async fn example(engine: Arc<CallCenterEngine>) -> Result<()> {
 /// let agent = Agent {
 ///     id: "agent-001".to_string(),
@@ -128,7 +128,7 @@ pub(super) struct CallCenterState {
 ///     department: Some("sales".to_string()),
 ///     extension: Some("1001".to_string()),
 /// };
-/// 
+///
 /// let session_id = engine.register_agent(&agent).await?;
 /// println!("Agent registered with session: {}", session_id);
 /// # Ok(())
@@ -140,7 +140,7 @@ pub(super) struct CallCenterState {
 /// ```
 /// use rvoip_call_engine::prelude::*;
 /// use std::sync::Arc;
-/// 
+///
 /// # async fn example(engine: Arc<CallCenterEngine>) -> Result<()> {
 /// let stats = engine.get_stats().await;
 /// println!("Call center status:");
@@ -153,37 +153,37 @@ pub(super) struct CallCenterState {
 pub struct CallCenterEngine {
     /// Configuration for the call center
     pub(super) config: CallCenterConfig,
-    
+
     /// Database manager for persistent storage
     pub(super) db_manager: Option<Arc<DatabaseManager>>,
-    
+
     /// Session-core coordinator integration
     pub(super) session_coordinator: Option<Arc<SessionCoordinator>>,
-    
+
     /// Queue manager for call queuing and routing
     pub(super) queue_manager: Arc<RwLock<QueueManager>>,
-    
+
     /// Bridge event receiver for real-time notifications
     pub(super) bridge_events: Option<mpsc::UnboundedReceiver<BridgeEvent>>,
-    
+
     /// Call tracking and routing with detailed info
     pub(super) active_calls: Arc<DashMap<SessionId, CallInfo>>,
-    
+
     /// Call routing statistics and metrics
     pub(super) routing_stats: Arc<RwLock<RoutingStats>>,
-    
+
     /// Agent registry for agent management
     pub(crate) agent_registry: Arc<Mutex<AgentRegistry>>,
-    
+
     /// SIP Registrar for handling agent registrations
     pub(crate) sip_registrar: Arc<Mutex<SipRegistrar>>,
-    
+
     /// Track active queue monitors to prevent duplicates
     pub(super) active_queue_monitors: Arc<DashSet<String>>,
-    
+
     /// Session ID to Dialog ID mappings for robust lookup
     pub session_to_dialog: Arc<DashMap<String, String>>,
-    
+
     /// Pending agent assignments waiting for answer
     pub(super) pending_assignments: Arc<DashMap<SessionId, PendingAssignment>>,
 }
@@ -210,17 +210,17 @@ impl CallCenterEngine {
     ///
     /// ```
     /// use rvoip_call_engine::prelude::*;
-    /// 
+    ///
     /// # async fn example() -> Result<()> {
     /// // In-memory call center for testing
     /// let engine1 = CallCenterEngine::new(
-    ///     CallCenterConfig::default(), 
+    ///     CallCenterConfig::default(),
     ///     None
     /// ).await?;
-    /// 
+    ///
     /// // Persistent call center for production
     /// let engine2 = CallCenterEngine::new(
-    ///     CallCenterConfig::default(), 
+    ///     CallCenterConfig::default(),
     ///     Some("callcenter.db".to_string())
     /// ).await?;
     /// # Ok(())
@@ -238,7 +238,7 @@ impl CallCenterEngine {
         db_path: Option<String>,
     ) -> CallCenterResult<Arc<Self>> {
         info!("🚀 Creating CallCenterEngine with session-core CallHandler integration");
-        
+
         // Initialize the database manager
         let db_manager = if let Some(path) = db_path.as_ref() {
             match DatabaseManager::new(path).await {
@@ -254,7 +254,7 @@ impl CallCenterEngine {
         } else {
             None
         };
-        
+
         // First, create a placeholder engine that will be updated
         let placeholder_engine = Arc::new(Self {
             config: config.clone(),
@@ -270,12 +270,12 @@ impl CallCenterEngine {
             session_to_dialog: Arc::new(DashMap::new()),
             pending_assignments: Arc::new(DashMap::new()),
         });
-        
+
         // Create CallHandler with weak reference to placeholder
         let handler = Arc::new(CallCenterCallHandler {
             engine: Arc::downgrade(&placeholder_engine),
         });
-        
+
         // Create session coordinator with our CallHandler
         // CRITICAL: Configure both SIP address and media bind address to use the configured IP
         let sip_uri = format!("sip:call-center@{}", config.general.local_ip);
@@ -291,12 +291,12 @@ impl CallCenterEngine {
             .build()
             .await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to create session coordinator: {}", e)))?;
-        
+
         info!("✅ SessionCoordinator created with CallCenterCallHandler");
-        
+
         // Drop the placeholder and create the real engine with coordinator
         drop(placeholder_engine);
-        
+
         let engine = Arc::new(Self {
             config,
             db_manager,
@@ -311,7 +311,7 @@ impl CallCenterEngine {
             session_to_dialog: Arc::new(DashMap::new()),
             pending_assignments: Arc::new(DashMap::new()),
         });
-        
+
         // CRITICAL FIX: Update the handler's weak reference to point to the real engine
         // Since handler is Arc, we need to get a mutable reference
         // We'll use unsafe to cast away the Arc's immutability for this one-time update
@@ -319,12 +319,12 @@ impl CallCenterEngine {
             let handler_ptr = Arc::as_ptr(&handler) as *mut CallCenterCallHandler;
             (*handler_ptr).engine = Arc::downgrade(&engine);
         }
-        
+
         info!("✅ Call center engine initialized with session-core integration");
-        
+
         Ok(engine)
     }
-    
+
     /// Get comprehensive orchestrator statistics and performance metrics
     ///
     /// Returns a snapshot of the current call center state including active calls,
@@ -344,17 +344,17 @@ impl CallCenterEngine {
     /// ```
     /// use rvoip_call_engine::prelude::*;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example(engine: Arc<CallCenterEngine>) -> Result<()> {
     /// let stats = engine.get_stats().await;
-    /// 
+    ///
     /// println!("📊 Call Center Dashboard");
     /// println!("   Active calls: {}", stats.active_calls);
     /// println!("   Available agents: {}", stats.available_agents);
     /// println!("   Busy agents: {}", stats.busy_agents);
     /// println!("   Queued calls: {}", stats.queued_calls);
     /// println!("   Total handled: {}", stats.total_calls_handled);
-    /// 
+    ///
     /// println!("📈 Routing Performance");
     /// println!("   Direct routes: {}", stats.routing_stats.calls_routed_directly);
     /// println!("   Queued routes: {}", stats.routing_stats.calls_queued);
@@ -364,12 +364,12 @@ impl CallCenterEngine {
     /// ```
     pub async fn get_stats(&self) -> OrchestratorStats {
         let bridges = self.list_active_bridges().await;
-        
+
         let queued_calls = self.active_calls
             .iter()
             .filter(|entry| matches!(entry.value().status, CallStatus::Queued))
             .count();
-            
+
         // Count available vs busy agents from database
         let (available_count, busy_count) = if let Some(db_manager) = &self.db_manager {
             match db_manager.get_agent_stats().await {
@@ -382,9 +382,9 @@ impl CallCenterEngine {
         } else {
             (0, 0)
         };
-        
+
         let routing_stats = self.routing_stats.read().await;
-        
+
         OrchestratorStats {
             active_calls: self.active_calls.len(),
             active_bridges: bridges.len(),
@@ -395,7 +395,7 @@ impl CallCenterEngine {
             routing_stats: routing_stats.clone(),
         }
     }
-    
+
     /// Get the underlying session coordinator for advanced SIP operations
     ///
     /// Provides access to the rvoip-session-core coordinator for advanced
@@ -410,10 +410,10 @@ impl CallCenterEngine {
     /// ```
     /// use rvoip_call_engine::prelude::*;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example(engine: Arc<CallCenterEngine>) -> Result<()> {
     /// let session_manager = engine.session_manager();
-    /// 
+    ///
     /// // Access session-core functionality directly
     /// // let custom_session = session_manager.create_session(...).await?;
     /// # Ok(())
@@ -429,7 +429,7 @@ impl CallCenterEngine {
     pub fn session_manager(&self) -> &Arc<SessionCoordinator> {
         self.session_coordinator.as_ref().unwrap()
     }
-    
+
     /// Get call center configuration
     ///
     /// Returns a reference to the current call center configuration.
@@ -440,10 +440,10 @@ impl CallCenterEngine {
     /// ```
     /// use rvoip_call_engine::prelude::*;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example(engine: Arc<CallCenterEngine>) {
     /// let config = engine.config();
-    /// 
+    ///
     /// println!("Max concurrent calls: {}", config.general.max_concurrent_calls);
     /// println!("Max agents: {}", config.general.max_agents);
     /// println!("Routing strategy: {:?}", config.routing.default_strategy);
@@ -452,7 +452,7 @@ impl CallCenterEngine {
     pub fn config(&self) -> &CallCenterConfig {
         &self.config
     }
-    
+
     /// Get database manager reference for direct database operations
     ///
     /// Provides access to the database manager for custom queries,
@@ -467,7 +467,7 @@ impl CallCenterEngine {
     /// ```
     /// use rvoip_call_engine::prelude::*;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example(engine: Arc<CallCenterEngine>) -> Result<()> {
     /// if let Some(db) = engine.database_manager() {
     ///     match db.get_available_agents().await {
@@ -483,7 +483,7 @@ impl CallCenterEngine {
     pub fn database_manager(&self) -> Option<&Arc<DatabaseManager>> {
         self.db_manager.as_ref()
     }
-    
+
     /// Start monitoring session events including REGISTER requests and call events
     ///
     /// Begins monitoring all session events from the underlying SIP stack,
@@ -500,13 +500,13 @@ impl CallCenterEngine {
     ///
     /// ```
     /// use rvoip_call_engine::prelude::*;
-    /// 
+    ///
     /// # async fn example() -> Result<()> {
     /// let engine = CallCenterEngine::new(CallCenterConfig::default(), None).await?;
-    /// 
+    ///
     /// // Start event monitoring (essential for call center operation)
     /// engine.clone().start_event_monitoring().await?;
-    /// 
+    ///
     /// println!("Call center is now monitoring for calls and registrations");
     /// # Ok(())
     /// # }
@@ -516,7 +516,7 @@ impl CallCenterEngine {
     ///
     /// This method spawns a background task that continuously processes:
     /// - Agent REGISTER requests
-    /// - Incoming call INVITE requests  
+    /// - Incoming call INVITE requests
     /// - Call state changes
     /// - Media quality events
     /// - Call termination events
@@ -527,13 +527,13 @@ impl CallCenterEngine {
     /// - `CallCenterError::Integration` - Session-core integration failure
     pub async fn start_event_monitoring(self: Arc<Self>) -> CallCenterResult<()> {
         info!("Starting session event monitoring for REGISTER and other events");
-        
+
         let session_manager = self.session_manager();
-        
+
         // Subscribe to session events
         let mut event_subscriber = session_manager.event_processor.subscribe().await
             .map_err(|e| CallCenterError::orchestration(&format!("Failed to subscribe to events: {}", e)))?;
-        
+
         // Spawn event processing task
         let engine = self.clone();
         tokio::spawn(async move {
@@ -543,10 +543,10 @@ impl CallCenterEngine {
                 }
             }
         });
-        
+
         Ok(())
     }
-    
+
     /// Handle session events from the SIP stack
     ///
     /// Internal method that processes various session events and routes them
@@ -563,7 +563,7 @@ impl CallCenterEngine {
         }
         Ok(())
     }
-    
+
     /// Update call state tracking when call states change
     ///
     /// Internal method that maintains consistency between session-core call states
@@ -584,7 +584,7 @@ impl CallCenterEngine {
         }
         Ok(())
     }
-    
+
     /// Route incoming call when it starts ringing
     ///
     /// Internal method called when a new call arrives that needs to be routed
@@ -593,7 +593,7 @@ impl CallCenterEngine {
         // This is handled in process_incoming_call
         Ok(())
     }
-    
+
     /// Clean up resources when call terminates
     ///
     /// Internal method that handles cleanup when a call ends, including
@@ -602,7 +602,7 @@ impl CallCenterEngine {
         // This is handled in handle_call_termination
         self.handle_call_termination(session_id.clone()).await
     }
-    
+
     /// Record quality metrics for a call
     ///
     /// Records call quality information for monitoring and reporting purposes.
@@ -619,27 +619,27 @@ impl CallCenterEngine {
     /// ```
     /// use rvoip_call_engine::prelude::*;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example(engine: Arc<CallCenterEngine>, session_id: SessionId) -> Result<()> {
     /// // Record good quality metrics
     /// engine.record_quality_metrics(&session_id, 4.2, 0.1).await?;
-    /// 
-    /// // Record poor quality metrics  
+    ///
+    /// // Record poor quality metrics
     /// engine.record_quality_metrics(&session_id, 2.1, 5.5).await?;
     /// # Ok(())
     /// # }
     /// ```
     pub async fn record_quality_metrics(
-        &self, 
-        session_id: &SessionId, 
-        mos_score: f32, 
+        &self,
+        session_id: &SessionId,
+        mos_score: f32,
         packet_loss: f32
     ) -> CallCenterResult<()> {
         // TODO: Store quality metrics in database
         debug!("Recording quality metrics for {}: MOS={}, Loss={}%", session_id, mos_score, packet_loss);
         Ok(())
     }
-    
+
     /// Alert supervisors about poor call quality
     ///
     /// Generates alerts for supervisors when call quality falls below acceptable
@@ -651,16 +651,16 @@ impl CallCenterEngine {
     /// * `mos_score` - Current Mean Opinion Score
     /// * `alert_level` - Severity level of the quality issue
     pub async fn alert_poor_quality(
-        &self, 
-        session_id: &SessionId, 
-        mos_score: f32, 
+        &self,
+        session_id: &SessionId,
+        mos_score: f32,
         alert_level: MediaQualityAlertLevel
     ) -> CallCenterResult<()> {
         // TODO: Send alerts to supervisors
         warn!("Poor quality alert for {}: MOS={}, Level={:?}", session_id, mos_score, alert_level);
         Ok(())
     }
-    
+
     /// Process DTMF input for IVR or call features
     ///
     /// Handles DTMF (touch-tone) input from callers for Interactive Voice Response
@@ -671,15 +671,15 @@ impl CallCenterEngine {
     /// * `session_id` - The session ID generating the DTMF
     /// * `digit` - The DTMF digit pressed ('0'-'9', '*', '#')
     pub async fn process_dtmf_input(
-        &self, 
-        session_id: &SessionId, 
+        &self,
+        session_id: &SessionId,
         digit: char
     ) -> CallCenterResult<()> {
         // TODO: Implement DTMF handling for IVR
         info!("DTMF '{}' received for session {}", digit, session_id);
         Ok(())
     }
-    
+
     /// Update media flow status for a call
     ///
     /// Tracks media flow status (audio start/stop) for monitoring and
@@ -692,17 +692,17 @@ impl CallCenterEngine {
     /// * `active` - Whether media flow is active or stopped
     /// * `codec` - Audio codec being used
     pub async fn update_media_flow(
-        &self, 
-        session_id: &SessionId, 
-        direction: MediaFlowDirection, 
-        active: bool, 
+        &self,
+        session_id: &SessionId,
+        direction: MediaFlowDirection,
+        active: bool,
         codec: &str
     ) -> CallCenterResult<()> {
         // TODO: Track media flow status
         debug!("Media flow update for {}: {:?} {} ({})", session_id, direction, if active { "started" } else { "stopped" }, codec);
         Ok(())
     }
-    
+
     /// Log warning for monitoring and troubleshooting
     ///
     /// Logs warnings with appropriate categorization for monitoring systems
@@ -714,9 +714,9 @@ impl CallCenterEngine {
     /// * `category` - Warning category for filtering and routing
     /// * `message` - Warning message
     pub async fn log_warning(
-        &self, 
-        session_id: Option<&SessionId>, 
-        category: WarningCategory, 
+        &self,
+        session_id: Option<&SessionId>,
+        category: WarningCategory,
         message: &str
     ) -> CallCenterResult<()> {
         // TODO: Log to monitoring system
@@ -726,9 +726,9 @@ impl CallCenterEngine {
         }
         Ok(())
     }
-    
+
     // === Public accessor methods for APIs ===
-    
+
     /// Get read access to active calls tracking
     ///
     /// Provides access to the active calls collection for API implementations
@@ -736,14 +736,14 @@ impl CallCenterEngine {
     pub fn active_calls(&self) -> &Arc<DashMap<SessionId, CallInfo>> {
         &self.active_calls
     }
-    
+
     /// Get read access to routing statistics
     ///
     /// Provides access to routing performance metrics for APIs and reporting.
     pub fn routing_stats(&self) -> &Arc<RwLock<RoutingStats>> {
         &self.routing_stats
     }
-    
+
     /// Get read access to queue manager
     ///
     /// Provides access to the queue manager for API implementations
@@ -751,7 +751,7 @@ impl CallCenterEngine {
     pub fn queue_manager(&self) -> &Arc<RwLock<QueueManager>> {
         &self.queue_manager
     }
-    
+
     /// Assign a specific agent to a call (public for supervisor API)
     ///
     /// Allows supervisors to manually assign agents to specific calls,
@@ -767,11 +767,11 @@ impl CallCenterEngine {
     /// ```
     /// use rvoip_call_engine::prelude::*;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example(engine: Arc<CallCenterEngine>) -> Result<()> {
     /// let session_id = SessionId::new(); // From incoming call
     /// let agent_id = AgentId::from("agent-specialist-001");
-    /// 
+    ///
     /// // Supervisor assigns specialist agent to complex call
     /// engine.assign_agent_to_call(session_id, agent_id).await?;
     /// # Ok(())
@@ -780,7 +780,7 @@ impl CallCenterEngine {
     pub async fn assign_agent_to_call(&self, session_id: SessionId, agent_id: AgentId) -> CallCenterResult<()> {
         self.assign_specific_agent_to_call(session_id, agent_id).await
     }
-    
+
     /// Ensure a queue exists (public for admin API)
     ///
     /// Creates a queue if it doesn't already exist. Used by administrative
@@ -792,7 +792,7 @@ impl CallCenterEngine {
     pub async fn create_queue(&self, queue_id: &str) -> CallCenterResult<()> {
         self.ensure_queue_exists(queue_id).await
     }
-    
+
     /// Process all queues to assign waiting calls to available agents
     ///
     /// Attempts to match queued calls with available agents across all queues.
@@ -812,11 +812,11 @@ impl CallCenterEngine {
     /// ```
     /// use rvoip_call_engine::prelude::*;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example(engine: Arc<CallCenterEngine>) -> Result<()> {
     /// // Manually trigger queue processing
     /// engine.process_all_queues().await?;
-    /// 
+    ///
     /// println!("Queue processing completed");
     /// # Ok(())
     /// # }
@@ -829,10 +829,10 @@ impl CallCenterEngine {
     /// - Should not be called too frequently to avoid performance impact
     pub async fn process_all_queues(&self) -> CallCenterResult<()> {
         let mut queue_manager = self.queue_manager.write().await;
-        
+
         // Get all queue IDs
         let queue_ids: Vec<String> = queue_manager.get_queue_ids();
-        
+
         for queue_id in queue_ids {
             // Process each queue
             while let Some(queued_call) = queue_manager.dequeue_for_agent(&queue_id)? {
@@ -848,18 +848,18 @@ impl CallCenterEngine {
                 } else {
                     vec![]
                 };
-                
+
                 if let Some(agent) = available_agents.first() {
                     let agent_id = AgentId::from(agent.agent_id.clone());
                     // Assign the call to the agent
-                    info!("🎯 Assigning queued call {} to available agent {}", 
+                    info!("🎯 Assigning queued call {} to available agent {}",
                           queued_call.session_id, agent_id);
-                    
+
                     // We need to drop the queue_manager lock before calling assign_specific_agent_to_call
                     drop(queue_manager);
-                    
+
                     if let Err(e) = self.assign_specific_agent_to_call(
-                        queued_call.session_id.clone(), 
+                        queued_call.session_id.clone(),
                         agent_id
                     ).await {
                         error!("Failed to assign call to agent: {}", e);
@@ -877,10 +877,10 @@ impl CallCenterEngine {
                 }
             }
         }
-        
+
         Ok(())
     }
-} 
+}
 
 // Make CallCenterEngine cloneable for async operations
 impl Clone for CallCenterEngine {
@@ -900,4 +900,4 @@ impl Clone for CallCenterEngine {
             pending_assignments: self.pending_assignments.clone(),
         }
     }
-} 
+}

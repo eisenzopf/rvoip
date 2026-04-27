@@ -162,7 +162,7 @@
 //! if let Message::Request(request) = message {
 //!     assert_eq!(request.method(), Method::Invite);
 //!     assert_eq!(request.uri().to_string(), "sip:bob@example.com");
-//!     
+//!
 //!     // Get headers and display them
 //!     if let Some(from_header) = request.header(&HeaderName::From) {
 //!         println!("From: {}", from_header);

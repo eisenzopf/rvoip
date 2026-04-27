@@ -224,11 +224,11 @@ mod tests {
             .iter()
             .any(|p| matches!(p, Param::Method(m) if m == "REFER")));
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v)))
                 if n == "audio" && v == "on")
         ));
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v)))
                 if n == "video" && v == "off")
         ));
     }

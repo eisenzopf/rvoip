@@ -72,7 +72,7 @@ impl ConferenceRoom {
             .iter()
             .filter(|entry| entry.value().is_active())
             .count();
-        
+
         let audio_participants = self.participants
             .iter()
             .filter(|entry| entry.value().audio_active)
@@ -190,7 +190,7 @@ impl ConferenceRoom {
             .iter()
             .filter(|entry| entry.value().is_active())
             .count();
-        
+
         // Terminate if no active participants or only one left
         active_count <= 1
     }
@@ -234,4 +234,4 @@ impl ConferenceRoom {
             local_ip
         )
     }
-} 
+}

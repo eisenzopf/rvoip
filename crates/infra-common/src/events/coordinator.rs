@@ -206,7 +206,7 @@ impl EventBusAdapter for MonolithicEventBus {
     }
 }
 
-/// Event handler that forwards to a channel  
+/// Event handler that forwards to a channel
 struct ChannelForwarder {
     tx: mpsc::Sender<Arc<dyn CrossCrateEvent>>,
 }

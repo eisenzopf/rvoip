@@ -29,15 +29,15 @@ async fn test_client_manager_list_audio_devices() {
     };
 
     let client_manager = ClientManager::new(config).await.unwrap();
-    
+
     // Test listing input devices
     let input_devices = client_manager.list_audio_devices(AudioDirection::Input).await.unwrap();
     assert!(!input_devices.is_empty(), "Should have at least one input device");
-    
+
     // Test listing output devices
     let output_devices = client_manager.list_audio_devices(AudioDirection::Output).await.unwrap();
     assert!(!output_devices.is_empty(), "Should have at least one output device");
-    
+
     println!("✅ ClientManager can list audio devices");
 }
 
@@ -57,17 +57,17 @@ async fn test_client_manager_get_default_audio_devices() {
     };
 
     let client_manager = ClientManager::new(config).await.unwrap();
-    
+
     // Test getting default input device
     let default_input = client_manager.get_default_audio_device(AudioDirection::Input).await.unwrap();
     assert_eq!(default_input.direction, AudioDirection::Input);
     assert!(!default_input.name.is_empty());
-    
+
     // Test getting default output device
     let default_output = client_manager.get_default_audio_device(AudioDirection::Output).await.unwrap();
     assert_eq!(default_output.direction, AudioDirection::Output);
     assert!(!default_output.name.is_empty());
-    
+
     println!("✅ ClientManager can get default audio devices");
 }
 
@@ -87,20 +87,20 @@ async fn test_client_manager_audio_session_management() {
     };
 
     let client_manager = ClientManager::new(config).await.unwrap();
-    
+
     // Test getting active audio sessions (should be empty initially)
     let (playback_sessions, capture_sessions) = client_manager.get_active_audio_sessions().await;
     assert!(playback_sessions.is_empty(), "Should have no active playback sessions initially");
     assert!(capture_sessions.is_empty(), "Should have no active capture sessions initially");
-    
+
     // Test checking if audio is active for a non-existent call
     let fake_call_id = Uuid::new_v4();
     let playback_active = client_manager.is_audio_playback_active(&fake_call_id).await;
     let capture_active = client_manager.is_audio_capture_active(&fake_call_id).await;
-    
+
     assert!(!playback_active, "Playback should not be active for non-existent call");
     assert!(!capture_active, "Capture should not be active for non-existent call");
-    
+
     println!("✅ ClientManager audio session management works");
 }
 
@@ -121,22 +121,22 @@ async fn test_client_manager_audio_operations_error_handling() {
 
     let client_manager = ClientManager::new(config).await.unwrap();
     let fake_call_id = Uuid::new_v4();
-    
+
     // Test starting audio playback for non-existent call
     let result = client_manager.start_audio_playback(&fake_call_id, "mock-output-1").await;
     assert!(result.is_err(), "Should fail for non-existent call");
-    
+
     // Test starting audio capture for non-existent call
     let result = client_manager.start_audio_capture(&fake_call_id, "mock-input-1").await;
     assert!(result.is_err(), "Should fail for non-existent call");
-    
+
     // Test stopping audio operations for non-existent call (should still work)
     let result = client_manager.stop_audio_playback(&fake_call_id).await;
     assert!(result.is_ok(), "Stop operations should be safe for non-existent calls");
-    
+
     let result = client_manager.stop_audio_capture(&fake_call_id).await;
     assert!(result.is_ok(), "Stop operations should be safe for non-existent calls");
-    
+
     println!("✅ ClientManager audio operations error handling works");
 }
 
@@ -156,16 +156,16 @@ async fn test_client_manager_stop_all_audio_sessions() {
     };
 
     let client_manager = ClientManager::new(config).await.unwrap();
-    
+
     // Test stopping all audio sessions (should work even if no sessions exist)
     let result = client_manager.stop_all_audio_sessions().await;
     assert!(result.is_ok(), "Should be able to stop all audio sessions");
-    
+
     // Verify no sessions are active after stopping all
     let (playback_sessions, capture_sessions) = client_manager.get_active_audio_sessions().await;
     assert!(playback_sessions.is_empty(), "Should have no active playback sessions after stopping all");
     assert!(capture_sessions.is_empty(), "Should have no active capture sessions after stopping all");
-    
+
     println!("✅ ClientManager can stop all audio sessions");
 }
 
@@ -185,25 +185,25 @@ async fn test_client_manager_audio_device_integration_api() {
     };
 
     let client_manager = ClientManager::new(config).await.unwrap();
-    
+
     // Test that all audio device methods are available and working
     let input_devices = client_manager.list_audio_devices(AudioDirection::Input).await.unwrap();
     let output_devices = client_manager.list_audio_devices(AudioDirection::Output).await.unwrap();
-    
+
     assert!(!input_devices.is_empty(), "Should have input devices");
     assert!(!output_devices.is_empty(), "Should have output devices");
-    
+
     // Test that we can get default devices
     let default_input = client_manager.get_default_audio_device(AudioDirection::Input).await.unwrap();
     let default_output = client_manager.get_default_audio_device(AudioDirection::Output).await.unwrap();
-    
+
     assert_eq!(default_input.direction, AudioDirection::Input);
     assert_eq!(default_output.direction, AudioDirection::Output);
-    
+
     // Test that we can query session state
     let (playback_sessions, capture_sessions) = client_manager.get_active_audio_sessions().await;
     assert!(playback_sessions.is_empty());
     assert!(capture_sessions.is_empty());
-    
+
     println!("✅ ClientManager audio device integration API works correctly");
-} 
+}

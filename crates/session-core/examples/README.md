@@ -59,6 +59,12 @@ credentials, local bind address, and media ports.
 |--------|-------------|
 | `./examples/asterisk/run.sh` | Register two endpoints through Asterisk and verify bidirectional audio |
 | `./examples/asterisk/hold_resume/run.sh` | Register two endpoints, exercise hold/resume through Asterisk, and verify pre/post-resume audio |
+| `./examples/asterisk/tls_srtp_hold_resume/run.sh` | Register two endpoints over SIP TLS, require SDES-SRTP, exercise hold/resume, and verify pre/post-resume audio |
+
+For the TLS/SRTP Asterisk example, configure Asterisk PJSIP with a TLS
+transport, endpoint media encryption set to SDES/SRTP mandatory, and a TLS
+trust policy that accepts the client certificate or CA configured in
+`examples/asterisk/.env`.
 
 ## Running peers individually
 

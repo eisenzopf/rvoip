@@ -28,7 +28,7 @@ pub enum EventAffinity {
 pub enum PlaneType {
     /// Transport plane: sip-transport + rtp-core transport
     Transport,
-    /// Media plane: media-core + rtp-core media processing  
+    /// Media plane: media-core + rtp-core media processing
     Media,
     /// Signaling plane: session-core + dialog-core + transaction-core
     Signaling,
@@ -50,13 +50,13 @@ pub enum PlaneDeployment {
 pub struct FederatedBusConfig {
     /// Local plane type for this instance
     pub local_plane: PlaneType,
-    
+
     /// Deployment configuration for each plane
     pub plane_deployments: std::collections::HashMap<PlaneType, PlaneDeployment>,
-    
+
     /// Event system capacity
     pub capacity: usize,
-    
+
     /// Enable high-performance mode
     pub use_static_fast_path: bool,
 }
@@ -67,7 +67,7 @@ impl Default for FederatedBusConfig {
         deployments.insert(PlaneType::Transport, PlaneDeployment::Local);
         deployments.insert(PlaneType::Media, PlaneDeployment::Local);
         deployments.insert(PlaneType::Signaling, PlaneDeployment::Local);
-        
+
         Self {
             local_plane: PlaneType::Signaling,
             plane_deployments: deployments,
@@ -81,13 +81,13 @@ impl Default for FederatedBusConfig {
 pub struct RvoipFederatedBus {
     /// Configuration
     config: FederatedBusConfig,
-    
+
     /// Local event system (infra-common)
     local_system: Arc<rvoip_infra_common::events::system::EventSystem>,
-    
+
     /// Local publisher
     local_publisher: Box<dyn EventPublisher<SessionEvent>>,
-    
+
     /// Network transport for remote events (future Phase 3)
     /// TODO: Implement QUIC transport in Phase 3
     network_transport: Option<Arc<dyn NetworkTransport>>,
@@ -105,27 +105,27 @@ impl RvoipFederatedBus {
     pub fn new() -> Self {
         Self::with_config(FederatedBusConfig::default())
     }
-    
+
     /// Create with custom configuration
     pub fn with_config(config: FederatedBusConfig) -> Self {
         // Register SessionEvent as a StaticEvent type
         rvoip_infra_common::events::registry::register_static_event::<SessionEvent>();
-        
+
         let implementation = if config.use_static_fast_path {
             ImplementationType::StaticFastPath
         } else {
             ImplementationType::ZeroCopy
         };
-        
+
         let local_system = Arc::new(
             EventSystemBuilder::new()
                 .implementation(implementation)
                 .channel_capacity(config.capacity)
                 .build()
         );
-        
+
         let local_publisher = local_system.create_publisher::<SessionEvent>();
-        
+
         Self {
             config,
             local_system,
@@ -133,23 +133,23 @@ impl RvoipFederatedBus {
             network_transport: None, // TODO: Phase 3
         }
     }
-    
+
     /// Start the federated bus
     pub async fn start(&self) -> Result<()> {
         self.local_system.start().await
             .map_err(|e| SessionError::internal(&format!("Failed to start local system: {}", e)))
     }
-    
+
     /// Shutdown the federated bus
     pub async fn shutdown(&self) -> Result<()> {
         self.local_system.shutdown().await
             .map_err(|e| SessionError::internal(&format!("Failed to shutdown local system: {}", e)))
     }
-    
+
     /// Publish an event with intelligent routing
     pub async fn publish_event(&self, event: SessionEvent) -> Result<()> {
         let affinity = self.determine_event_affinity(&event);
-        
+
         match affinity {
             EventAffinity::IntraPlane => {
                 // Event stays local - use high-performance local system
@@ -192,13 +192,13 @@ impl RvoipFederatedBus {
             }
         }
     }
-    
+
     /// Subscribe to events on the local plane
     pub async fn subscribe(&self) -> Result<Box<dyn EventSubscriber<SessionEvent>>> {
         self.local_system.subscribe::<SessionEvent>().await
             .map_err(|e| SessionError::internal(&format!("Subscribe failed: {}", e)))
     }
-    
+
     /// Subscribe with filtering
     pub async fn subscribe_filtered<F>(&self, filter: F) -> Result<Box<dyn EventSubscriber<SessionEvent>>>
     where
@@ -207,7 +207,7 @@ impl RvoipFederatedBus {
         self.local_system.subscribe_filtered(filter).await
             .map_err(|e| SessionError::internal(&format!("Filtered subscribe failed: {}", e)))
     }
-    
+
     /// Determine event affinity for intelligent routing
     fn determine_event_affinity(&self, event: &SessionEvent) -> EventAffinity {
         match event {
@@ -216,22 +216,22 @@ impl RvoipFederatedBus {
             SessionEvent::AudioFrameReceived { .. } |
             SessionEvent::AudioFrameRequested { .. } |
             SessionEvent::MediaQuality { .. } => EventAffinity::IntraPlane,
-            
+
             // Media negotiation crosses signaling <-> media boundary
             SessionEvent::MediaNegotiated { .. } |
             SessionEvent::SdpNegotiationRequested { .. } |
             SessionEvent::SdpEvent { .. } => EventAffinity::InterPlane { target_plane: PlaneType::Media },
-            
+
             // Transfer and call control stay in signaling plane
             SessionEvent::IncomingTransferRequest { .. } |
             SessionEvent::TransferProgress { .. } |
             SessionEvent::SessionCreated { .. } |
             SessionEvent::StateChanged { .. } => EventAffinity::IntraPlane,
-            
+
             // Critical events broadcast to all planes
             SessionEvent::SessionTerminated { .. } |
             SessionEvent::Error { .. } => EventAffinity::GlobalBroadcast,
-            
+
             // Default to intra-plane for safety
             _ => EventAffinity::IntraPlane,
         }
@@ -248,12 +248,12 @@ impl Default for RvoipFederatedBus {
 mod tests {
     use super::*;
     use crate::api::types::*;
-    
+
     #[tokio::test]
     async fn test_federated_bus_local_mode() {
         let bus = RvoipFederatedBus::new();
         bus.start().await.unwrap();
-        
+
         // Test publishing events
         let event = SessionEvent::SessionCreated {
             session_id: SessionId::new(),
@@ -261,16 +261,16 @@ mod tests {
             to: "user@example.com".to_string(),
             call_state: CallState::Initiating,
         };
-        
+
         bus.publish_event(event).await.unwrap();
-        
+
         bus.shutdown().await.unwrap();
     }
-    
+
     #[test]
     fn test_event_affinity_classification() {
         let bus = RvoipFederatedBus::new();
-        
+
         // Test RTP events stay intra-plane
         let rtp_event = SessionEvent::RtpPacketProcessed {
             session_id: SessionId::new(),
@@ -284,15 +284,15 @@ mod tests {
                 allocation_reduction_percentage: 90.0,
             },
         };
-        
+
         assert_eq!(bus.determine_event_affinity(&rtp_event), EventAffinity::IntraPlane);
-        
+
         // Test session termination broadcasts globally
         let term_event = SessionEvent::SessionTerminated {
             session_id: SessionId::new(),
             reason: "Test termination".to_string(),
         };
-        
+
         assert_eq!(bus.determine_event_affinity(&term_event), EventAffinity::GlobalBroadcast);
     }
 }

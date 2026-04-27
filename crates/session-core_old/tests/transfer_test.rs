@@ -93,17 +93,17 @@ async fn test_blind_transfer_flow() {
     // Now Bob transfers Alice to Charlie
     // This would normally be done via a SIP REFER message from Bob's SIP client
     // For testing, we'll simulate this by sending a REFER request
-    
+
     // Note: In a real scenario, Bob's SIP client would send:
     // REFER sip:alice@127.0.0.1:35060 SIP/2.0
     // Refer-To: sip:charlie@127.0.0.1:35062
     // Referred-By: sip:bob@127.0.0.1:35061
-    
+
     println!("🔄 Bob initiating transfer to Charlie...");
-    
+
     // For now, we can test that the infrastructure is in place
     // The actual REFER would come from a SIP client or we'd need to simulate it
-    
+
     // Wait a bit to ensure everything is stable
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -111,6 +111,6 @@ async fn test_blind_transfer_flow() {
     alice.stop().await.expect("Failed to stop Alice");
     bob.stop().await.expect("Failed to stop Bob");
     charlie.stop().await.expect("Failed to stop Charlie");
-    
+
     println!("✅ Transfer infrastructure test completed");
 }

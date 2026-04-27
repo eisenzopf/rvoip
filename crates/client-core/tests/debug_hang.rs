@@ -6,17 +6,17 @@ use std::time::Duration;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_minimal_client_creation() {
     println!("Test starting...");
-    
+
     // Try with timeout on the whole test
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         println!("Creating client builder...");
         let builder = ClientBuilder::new()
             .user_agent("DebugTest/1.0")
             .local_address("127.0.0.1:15900".parse().unwrap());
-        
+
         println!("Building client...");
         let client = builder.build().await;
-        
+
         match client {
             Ok(c) => {
                 println!("Client built successfully");
@@ -28,7 +28,7 @@ async fn test_minimal_client_creation() {
             }
         }
     }).await;
-    
+
     match result {
         Ok(Ok(_)) => println!("Test passed"),
         Ok(Err(e)) => panic!("Client creation failed: {}", e),
@@ -41,4 +41,4 @@ async fn test_minimal_no_client() {
     println!("Simple test without client - should complete");
     tokio::time::sleep(Duration::from_millis(100)).await;
     println!("Test completed");
-} 
+}

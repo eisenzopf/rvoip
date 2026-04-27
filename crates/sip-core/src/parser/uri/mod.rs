@@ -1316,7 +1316,7 @@ mod tests {
                 assert!(matches!(uri.host, Host::Domain(d) if d == "+1-212-555-1234"));
                 assert_eq!(uri.parameters.len(), 1);
                 assert!(uri.parameters.iter().any(
-                    |p| matches!(p, Param::Other(k, Some(GenericValue::Token(v))) 
+                    |p| matches!(p, Param::Other(k, Some(GenericValue::Token(v)))
                         if k == "phone-context" && v == "nyc.example.com")
                 ));
             }

@@ -18,13 +18,13 @@ pub enum SipClientEvent {
         /// Display name if available
         display_name: Option<String>,
     },
-    
+
     /// Outgoing call initiated
     OutgoingCall {
         /// The call object
         call: std::sync::Arc<Call>,
     },
-    
+
     /// Call state changed
     CallStateChanged {
         /// The call object
@@ -36,7 +36,7 @@ pub enum SipClientEvent {
         /// Reason for the change
         reason: Option<String>,
     },
-    
+
     /// Call connected
     CallConnected {
         /// Call ID
@@ -46,7 +46,7 @@ pub enum SipClientEvent {
         /// Remote SDP
         remote_sdp: String,
     },
-    
+
     /// Call terminated
     CallTerminated {
         /// Call ID
@@ -56,13 +56,13 @@ pub enum SipClientEvent {
         /// Call duration in seconds
         duration_secs: u64,
     },
-    
+
     /// Call ended
     CallEnded {
         /// The call
         call: std::sync::Arc<Call>,
     },
-    
+
     // Audio events
     /// Audio device changed
     AudioDeviceChanged {
@@ -73,7 +73,7 @@ pub enum SipClientEvent {
         /// New device name
         new_device: Option<String>,
     },
-    
+
     /// Audio level changed
     AudioLevelChanged {
         /// Call ID (if during a call)
@@ -85,7 +85,7 @@ pub enum SipClientEvent {
         /// Peak level (0.0 to 1.0)
         peak: f32,
     },
-    
+
     /// Audio device error
     AudioDeviceError {
         /// Error message
@@ -93,7 +93,7 @@ pub enum SipClientEvent {
         /// Device that failed
         device: Option<String>,
     },
-    
+
     /// Call was transferred (outgoing transfer)
     CallTransferred {
         /// The call that was transferred
@@ -101,7 +101,7 @@ pub enum SipClientEvent {
         /// Target URI for the transfer
         target: String,
     },
-    
+
     /// Incoming transfer request received
     IncomingTransferRequest {
         /// The call being transferred
@@ -113,7 +113,7 @@ pub enum SipClientEvent {
         /// Whether this is attended transfer (has Replaces)
         is_attended: bool,
     },
-    
+
     /// Transfer progress notification
     TransferProgress {
         /// Call ID of the original call
@@ -123,19 +123,19 @@ pub enum SipClientEvent {
         /// Optional message
         message: Option<String>,
     },
-    
+
     /// Call was put on hold
     CallOnHold {
         /// The call that was put on hold
         call: std::sync::Arc<Call>,
     },
-    
+
     /// Call was resumed from hold
     CallResumed {
         /// The call that was resumed
         call: std::sync::Arc<Call>,
     },
-    
+
     // Quality events
     /// Call quality report
     CallQualityReport {
@@ -144,7 +144,7 @@ pub enum SipClientEvent {
         /// Quality metrics
         metrics: AudioQualityMetrics,
     },
-    
+
     /// Network quality changed
     NetworkQualityChanged {
         /// Call ID (if during a call)
@@ -156,7 +156,7 @@ pub enum SipClientEvent {
         /// Round-trip time in milliseconds
         rtt_ms: f64,
     },
-    
+
     // Codec events
     /// Codec changed during call
     CodecChanged {
@@ -169,7 +169,7 @@ pub enum SipClientEvent {
         /// Reason for change
         reason: String,
     },
-    
+
     /// Codec negotiation failed
     CodecNegotiationFailed {
         /// Call ID
@@ -179,7 +179,7 @@ pub enum SipClientEvent {
         /// Available remote codecs
         remote_codecs: Vec<String>,
     },
-    
+
     // Registration events
     /// Registration status changed
     RegistrationStatusChanged {
@@ -190,7 +190,7 @@ pub enum SipClientEvent {
         /// Optional reason
         reason: Option<String>,
     },
-    
+
     /// Registration successful
     RegistrationSuccessful {
         /// Server URI
@@ -198,7 +198,7 @@ pub enum SipClientEvent {
         /// Expiry time in seconds
         expires: u32,
     },
-    
+
     /// Registration failed
     RegistrationFailed {
         /// Server URI
@@ -208,13 +208,13 @@ pub enum SipClientEvent {
         /// SIP response code
         code: Option<u16>,
     },
-    
+
     /// Registration expired
     RegistrationExpired {
         /// Server URI
         server: String,
     },
-    
+
     // Error events
     /// General error occurred
     Error {
@@ -225,14 +225,14 @@ pub enum SipClientEvent {
         /// Error category
         category: ErrorCategory,
     },
-    
+
     // Client lifecycle events
     /// Client started
     Started,
-    
+
     /// Client stopped
     Stopped,
-    
+
     // Media events
     /// Media started
     MediaStarted {
@@ -241,7 +241,7 @@ pub enum SipClientEvent {
         /// Media type (audio/video)
         media_type: String,
     },
-    
+
     /// Media stopped
     MediaStopped {
         /// The call
@@ -249,7 +249,7 @@ pub enum SipClientEvent {
         /// Media type (audio/video)
         media_type: String,
     },
-    
+
     /// DTMF sent
     DtmfSent {
         /// The call
@@ -257,7 +257,7 @@ pub enum SipClientEvent {
         /// DTMF digits
         digits: String,
     },
-    
+
     /// Quality report
     QualityReport {
         /// The call
@@ -269,20 +269,20 @@ pub enum SipClientEvent {
         /// Jitter in milliseconds
         jitter_ms: f32,
     },
-    
+
     // Network events
     /// Network connected
     NetworkConnected {
         /// Optional reason
         reason: Option<String>,
     },
-    
+
     /// Network disconnected
     NetworkDisconnected {
         /// Reason for disconnection
         reason: String,
     },
-    
+
     // Recovery events
     /// Recovery succeeded for a component
     RecoverySucceeded {
@@ -291,7 +291,7 @@ pub enum SipClientEvent {
         /// Number of attempts it took
         attempts: u32,
     },
-    
+
     /// Recovery failed for a component
     RecoveryFailed {
         /// Component that failed to recover
@@ -301,16 +301,16 @@ pub enum SipClientEvent {
         /// Number of attempts made
         attempts: u32,
     },
-    
+
     /// Connection lost
     ConnectionLost {
         /// Reason for connection loss
         reason: String,
     },
-    
+
     /// Connection restored
     ConnectionRestored,
-    
+
     /// Degradation applied
     DegradationApplied {
         /// Degradation level (0 = normal, higher = more degraded)
@@ -318,7 +318,7 @@ pub enum SipClientEvent {
         /// Actions taken
         actions: crate::recovery::DegradationActions,
     },
-    
+
     // Reconnection events
     /// Reconnection failed
     ReconnectionFailed {
@@ -327,16 +327,16 @@ pub enum SipClientEvent {
         /// Error message
         error: String,
     },
-    
+
     /// Registration restored after reconnection
     RegistrationRestored,
-    
+
     /// Call recovered after disconnection
     CallRecovered {
         /// Recovered call ID
         call_id: CallId,
     },
-    
+
     /// Call lost and cannot be recovered
     CallLost {
         /// Lost call ID
@@ -344,7 +344,7 @@ pub enum SipClientEvent {
         /// Reason for loss
         reason: String,
     },
-    
+
     /// Audio devices restored after reconnection
     AudioDevicesRestored,
 }
@@ -392,7 +392,7 @@ impl EventIterator {
     pub fn new(stream: EventStream) -> Self {
         Self { stream }
     }
-    
+
     /// Get the next event (async)
     pub async fn next(&mut self) -> Option<SipClientEvent> {
         use tokio_stream::StreamExt;
@@ -415,23 +415,23 @@ impl EventEmitter {
         let (sender, _) = broadcast::channel(capacity);
         Self { sender }
     }
-    
+
     /// Emit an event
     pub fn emit(&self, event: SipClientEvent) {
         // Ignore send errors (no receivers)
         let _ = self.sender.send(event);
     }
-    
+
     /// Subscribe to events
     pub fn subscribe(&self) -> EventStream {
         BroadcastStream::new(self.sender.subscribe())
     }
-    
+
     /// Subscribe to events with a simple iterator
     pub fn subscribe_simple(&self) -> EventIterator {
         EventIterator::new(self.subscribe())
     }
-    
+
     /// Get the number of active receivers
     pub fn receiver_count(&self) -> usize {
         self.sender.receiver_count()
@@ -458,12 +458,12 @@ impl EventAggregator {
             client_events: None,
         }
     }
-    
+
     /// Set the client event receiver
     pub fn set_client_events(&mut self, receiver: tokio::sync::mpsc::UnboundedReceiver<rvoip_client_core::ClientEvent>) {
         self.client_events = Some(receiver);
     }
-    
+
     /// Start aggregating events
     pub async fn start(mut self) {
         loop {
@@ -476,9 +476,9 @@ impl EventAggregator {
                         self.emitter.emit(sip_event);
                     }
                 }
-                
+
                 // Add more event sources here as needed
-                
+
                 else => {
                     // All channels closed, exit
                     break;
@@ -486,7 +486,7 @@ impl EventAggregator {
             }
         }
     }
-    
+
     /// Convert client-core event to SIP client event
     fn convert_client_event(&self, event: rvoip_client_core::ClientEvent) -> Option<SipClientEvent> {
         // This would need to be reimplemented to work with Arc<Call>

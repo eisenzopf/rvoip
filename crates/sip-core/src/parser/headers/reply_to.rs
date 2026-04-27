@@ -135,11 +135,11 @@ mod tests {
 
         // Check for parameters
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v)))
                 if n == "hours" && v == "24x7")
         ));
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v)))
                 if n == "priority" && v == "high")
         ));
     }
@@ -194,11 +194,11 @@ mod tests {
 
         // Check header parameters
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v)))
                 if n == "department" && v == "sales")
         ));
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v)))
                 if n == "language" && v == "en")
         ));
     }
@@ -234,7 +234,7 @@ mod tests {
 
         // Check quoted string parameter
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Quoted(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Quoted(v)))
                 if n == "note" && v == "Call back ASAP")
         ));
     }
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(rem, b"  ");
         assert_eq!(address.display_name, Some("Sales Team".to_string()));
         assert!(address.params.iter().any(
-            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v)))
                 if n == "priority" && v == "high")
         ));
     }

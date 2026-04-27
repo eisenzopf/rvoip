@@ -32,4 +32,4 @@ impl SessionGroups {
     pub fn get_group_sessions(&self, group_name: &str) -> Vec<SessionId> {
         self.groups.get(group_name).cloned().unwrap_or_default()
     }
-} 
+}

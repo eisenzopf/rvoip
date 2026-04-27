@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// ```
 /// use rvoip_call_engine::prelude::CallCenterConfig;
-/// 
+///
 /// let config = CallCenterConfig::default();
 /// assert_eq!(config.general.max_concurrent_calls, 1000);
 /// assert_eq!(config.agents.default_max_concurrent_calls, 3);
@@ -32,17 +32,17 @@ use serde::{Deserialize, Serialize};
 ///
 /// ```
 /// use rvoip_call_engine::prelude::{CallCenterConfig, RoutingStrategy, LoadBalanceStrategy};
-/// 
+///
 /// let mut config = CallCenterConfig::default();
-/// 
+///
 /// // Configure high-capacity setup
 /// config.general.max_concurrent_calls = 5000;
 /// config.general.max_agents = 1000;
-/// 
+///
 /// // Enable advanced routing
 /// config.routing.default_strategy = RoutingStrategy::SkillBased;
 /// config.routing.load_balance_strategy = LoadBalanceStrategy::LeastBusy;
-/// 
+///
 /// // Validate configuration
 /// config.validate().expect("Configuration should be valid");
 /// ```
@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// ```
 /// use rvoip_call_engine::prelude::CallCenterConfig;
-/// 
+///
 /// let config = CallCenterConfig::default();
 /// match config.validate() {
 ///     Ok(()) => println!("Configuration is valid"),
@@ -64,19 +64,19 @@ use serde::{Deserialize, Serialize};
 pub struct CallCenterConfig {
     /// General call center settings including networking and system limits
     pub general: GeneralConfig,
-    
+
     /// Agent management configuration including skills and availability tracking
     pub agents: AgentConfig,
-    
+
     /// Queue management configuration including priorities and overflow policies
     pub queues: QueueConfig,
-    
+
     /// Call routing configuration including strategies and load balancing
     pub routing: RoutingConfig,
-    
+
     /// Monitoring and metrics configuration
     pub monitoring: MonitoringConfig,
-    
+
     /// Database configuration for persistent storage
     pub database: DatabaseConfig,
 }
@@ -100,13 +100,13 @@ pub struct CallCenterConfig {
 ///
 /// ```
 /// use rvoip_call_engine::prelude::GeneralConfig;
-/// 
+///
 /// let config = GeneralConfig::default();
-/// 
+///
 /// // Generate URIs for agents
 /// let agent_uri = config.agent_sip_uri("alice");
 /// assert_eq!(agent_uri, "sip:alice@127.0.0.1");
-/// 
+///
 /// let call_center_uri = config.call_center_uri();
 /// assert_eq!(call_center_uri, "sip:call-center@call-center.local");
 /// ```
@@ -117,73 +117,73 @@ pub struct GeneralConfig {
     /// This includes both active calls and calls in queue. When this limit is reached,
     /// new incoming calls will be rejected with a busy signal.
     pub max_concurrent_calls: usize,
-    
+
     /// Maximum number of agents that can be registered with the system
     ///
     /// This limit helps prevent resource exhaustion and ensures predictable
     /// system performance.
     pub max_agents: usize,
-    
+
     /// Default call timeout in seconds
     ///
     /// How long to wait for call setup operations before timing out.
     /// This applies to INVITE transactions and bridge setup operations.
     pub default_call_timeout: u64,
-    
+
     /// Session cleanup interval for removing stale sessions
     ///
     /// How often the system checks for and removes abandoned or stale sessions.
     pub cleanup_interval: Duration,
-    
+
     /// Local signaling address for SIP messages
     ///
     /// The address and port where the call center listens for incoming SIP messages.
     /// Typically this is port 5060 for standard SIP.
     pub local_signaling_addr: SocketAddr,
-    
+
     /// Local media address range start for RTP streams
     ///
     /// The starting address and port for RTP media streams. The system will allocate
     /// port pairs starting from this address for each call.
     pub local_media_addr: SocketAddr,
-    
+
     /// User agent string sent in SIP messages
     ///
     /// Identifies the call center software in SIP headers.
     pub user_agent: String,
-    
+
     /// SIP domain name for the call center
     ///
     /// Used in SIP URIs and routing decisions.
     pub domain: String,
-    
+
     /// Local IP address for SIP URIs
     ///
     /// The IP address used in SIP URIs and contact headers. Should be reachable
     /// by agents and external SIP endpoints.
     pub local_ip: String,
-    
+
     /// Registrar domain for agent registration
     ///
     /// The domain that agents should use when registering with the call center.
     pub registrar_domain: String,
-    
+
     /// Call center service URI prefix
     ///
     /// The service name used in call center SIP URIs.
     pub call_center_service: String,
-    
+
     /// BYE timeout configuration in seconds
     ///
     /// How long to wait for BYE responses before considering the request failed.
     /// Prevents hanging connections when call termination fails.
     pub bye_timeout_seconds: u64,
-    
+
     /// BYE retry attempts
     ///
     /// Number of times to retry sending BYE requests when they fail or timeout.
     pub bye_retry_attempts: u32,
-    
+
     /// Race condition prevention delay in milliseconds
     ///
     /// Small delay to prevent race conditions during call termination.
@@ -205,7 +205,7 @@ pub struct GeneralConfig {
 ///
 /// ```
 /// use rvoip_call_engine::prelude::AgentConfig;
-/// 
+///
 /// let config = AgentConfig {
 ///     enable_skill_based_routing: true,
 ///     default_skills: vec!["english".to_string(), "general".to_string()],
@@ -221,26 +221,26 @@ pub struct AgentConfig {
     /// When agents register without specifying their capacity, this value
     /// is used as their maximum concurrent call limit.
     pub default_max_concurrent_calls: u32,
-    
+
     /// Agent availability timeout in seconds
     ///
     /// How long an agent can remain idle before being considered unavailable.
     /// After this timeout, the agent may be automatically logged out.
     pub availability_timeout: u64,
-    
+
     /// Auto-logout timeout for idle agents in seconds
     ///
     /// Agents who remain idle (no calls or activity) for this duration
     /// will be automatically logged out to free up system resources.
     pub auto_logout_timeout: u64,
-    
+
     /// Enable skill-based routing for call assignment
     ///
     /// When true, incoming calls will only be routed to agents whose skills
     /// match the call requirements. When false, calls can be routed to any
     /// available agent.
     pub enable_skill_based_routing: bool,
-    
+
     /// Default skills assigned to new agents
     ///
     /// When agents register without specifying skills, they receive these
@@ -269,7 +269,7 @@ pub struct AgentConfig {
 ///
 /// ```
 /// use rvoip_call_engine::prelude::QueueConfig;
-/// 
+///
 /// let config = QueueConfig {
 ///     default_max_wait_time: 180, // 3 minutes
 ///     max_queue_size: 20,
@@ -286,25 +286,25 @@ pub struct QueueConfig {
     /// How long calls will wait in queue before being redirected, transferred
     /// to voicemail, or handled by overflow policies.
     pub default_max_wait_time: u64,
-    
+
     /// Maximum queue size (number of calls)
     ///
     /// When a queue reaches this size, new calls will be rejected or handled
     /// by overflow policies rather than being added to the queue.
     pub max_queue_size: usize,
-    
+
     /// Enable queue priorities for different call types
     ///
     /// Allows calls to be queued with different priority levels, ensuring
     /// high-priority calls are handled first.
     pub enable_priorities: bool,
-    
+
     /// Enable overflow routing when queues are full
     ///
     /// When enabled, calls that cannot be queued will be routed to alternate
     /// destinations or handled with special policies.
     pub enable_overflow: bool,
-    
+
     /// Queue announcement interval (seconds)
     ///
     /// How often to play queue position and wait time announcements to
@@ -336,7 +336,7 @@ pub struct QueueConfig {
 ///
 /// ```
 /// use rvoip_call_engine::prelude::{RoutingConfig, RoutingStrategy, LoadBalanceStrategy};
-/// 
+///
 /// let config = RoutingConfig {
 ///     default_strategy: RoutingStrategy::SkillBased,
 ///     enable_load_balancing: true,
@@ -352,24 +352,24 @@ pub struct RoutingConfig {
     ///
     /// The primary algorithm used to select agents for incoming calls.
     pub default_strategy: RoutingStrategy,
-    
+
     /// Enable load balancing across agents
     ///
     /// When true, routing decisions consider current agent workload to
     /// ensure even distribution of calls.
     pub enable_load_balancing: bool,
-    
+
     /// Load balancing strategy to use
     ///
     /// The algorithm used for load balancing when enabled.
     pub load_balance_strategy: LoadBalanceStrategy,
-    
+
     /// Enable geographic-based routing
     ///
     /// When true, calls can be routed based on geographic location of
     /// callers and agents (requires additional configuration).
     pub enable_geographic_routing: bool,
-    
+
     /// Enable time-based routing rules
     ///
     /// When true, routing decisions can consider time of day, day of week,
@@ -445,7 +445,7 @@ pub enum LoadBalanceStrategy {
 ///
 /// ```
 /// use rvoip_call_engine::prelude::MonitoringConfig;
-/// 
+///
 /// let config = MonitoringConfig {
 ///     enable_realtime_monitoring: true,
 ///     metrics_interval: 5, // Collect metrics every 5 seconds
@@ -461,24 +461,24 @@ pub struct MonitoringConfig {
     ///
     /// Provides live statistics and monitoring capabilities for supervisors.
     pub enable_realtime_monitoring: bool,
-    
+
     /// Metrics collection interval in seconds
     ///
     /// How often the system collects and updates performance metrics.
     /// Lower values provide more real-time data but use more resources.
     pub metrics_interval: u64,
-    
+
     /// Enable call recording for quality assurance
     ///
     /// When enabled, calls can be recorded for training and quality purposes.
     /// Requires additional storage and legal compliance considerations.
     pub enable_call_recording: bool,
-    
+
     /// Enable quality monitoring and alerts
     ///
     /// Monitors call quality metrics and generates alerts for poor quality calls.
     pub enable_quality_monitoring: bool,
-    
+
     /// Dashboard update interval in seconds
     ///
     /// How often supervisor dashboards are refreshed with new data.
@@ -504,7 +504,7 @@ pub struct MonitoringConfig {
 ///
 /// ```
 /// use rvoip_call_engine::prelude::DatabaseConfig;
-/// 
+///
 /// // Persistent database with connection pooling
 /// let config = DatabaseConfig {
 ///     database_path: "/var/lib/callcenter/data.db".to_string(),
@@ -523,29 +523,29 @@ pub struct DatabaseConfig {
     /// Specifies where to store the SQLite database file. Use ":memory:"
     /// or empty string for in-memory database (data not persisted).
     pub database_path: String,
-    
+
     /// Enable database connection pooling
     ///
     /// Maintains multiple database connections for better performance
     /// under concurrent load.
     pub enable_connection_pooling: bool,
-    
+
     /// Maximum number of database connections in pool
     ///
     /// Only used when connection pooling is enabled.
     pub max_connections: u32,
-    
+
     /// Database query timeout in seconds
     ///
     /// How long to wait for database queries before timing out.
     pub query_timeout: u64,
-    
+
     /// Enable automatic database backups
     ///
     /// When enabled, the system will periodically create backup copies
     /// of the database file.
     pub enable_auto_backup: bool,
-    
+
     /// Backup interval in seconds
     ///
     /// How often to create automatic backups when enabled.
@@ -567,12 +567,12 @@ impl CallCenterConfig {
     ///
     /// ```
     /// use rvoip_call_engine::prelude::CallCenterConfig;
-    /// 
+    ///
     /// let mut config = CallCenterConfig::default();
-    /// 
+    ///
     /// // This should pass validation
     /// assert!(config.validate().is_ok());
-    /// 
+    ///
     /// // This should fail validation
     /// config.general.max_concurrent_calls = 0;
     /// assert!(config.validate().is_err());
@@ -590,56 +590,56 @@ impl CallCenterConfig {
         if self.general.local_ip.is_empty() {
             return Err("local_ip cannot be empty".to_string());
         }
-        
+
         // Basic IP address validation (IPv4 or IPv6)
         if !self.general.local_ip.parse::<std::net::IpAddr>().is_ok() {
             return Err(format!("Invalid IP address format: {}", self.general.local_ip));
         }
-        
+
         // Validate domain names are not empty
         if self.general.domain.is_empty() {
             return Err("domain cannot be empty".to_string());
         }
-        
+
         if self.general.registrar_domain.is_empty() {
             return Err("registrar_domain cannot be empty".to_string());
         }
-        
+
         if self.general.call_center_service.is_empty() {
             return Err("call_center_service cannot be empty".to_string());
         }
-        
+
         // Validate numeric constraints
         if self.general.max_concurrent_calls == 0 {
             return Err("max_concurrent_calls must be greater than 0".to_string());
         }
-        
+
         if self.general.max_agents == 0 {
             return Err("max_agents must be greater than 0".to_string());
         }
-        
+
         // Validate queue configuration
         if self.queues.max_queue_size == 0 {
             return Err("max_queue_size must be greater than 0".to_string());
         }
-        
+
         // PHASE 0.24: Validate BYE configuration
         if self.general.bye_timeout_seconds == 0 {
             return Err("bye_timeout_seconds must be greater than 0".to_string());
         }
-        
+
         if self.general.bye_timeout_seconds > 300 {
             return Err("bye_timeout_seconds cannot exceed 300 seconds (5 minutes)".to_string());
         }
-        
+
         if self.general.bye_retry_attempts > 10 {
             return Err("bye_retry_attempts cannot exceed 10".to_string());
         }
-        
+
         if self.general.bye_race_delay_ms > 5000 {
             return Err("bye_race_delay_ms cannot exceed 5000ms (5 seconds)".to_string());
         }
-        
+
         Ok(())
     }
 }
@@ -667,7 +667,7 @@ impl GeneralConfig {
     ///
     /// ```
     /// use rvoip_call_engine::prelude::GeneralConfig;
-    /// 
+    ///
     /// let config = GeneralConfig::default();
     /// let uri = config.agent_sip_uri("alice");
     /// assert_eq!(uri, "sip:alice@127.0.0.1");
@@ -675,7 +675,7 @@ impl GeneralConfig {
     pub fn agent_sip_uri(&self, username: &str) -> String {
         format!("sip:{}@{}", username, self.local_ip)
     }
-    
+
     /// Generate call center SIP URI
     ///
     /// Creates the main SIP URI for the call center service.
@@ -684,7 +684,7 @@ impl GeneralConfig {
     ///
     /// ```
     /// use rvoip_call_engine::prelude::GeneralConfig;
-    /// 
+    ///
     /// let config = GeneralConfig::default();
     /// let uri = config.call_center_uri();
     /// assert_eq!(uri, "sip:call-center@call-center.local");
@@ -692,7 +692,7 @@ impl GeneralConfig {
     pub fn call_center_uri(&self) -> String {
         format!("sip:{}@{}", self.call_center_service, self.domain)
     }
-    
+
     /// Generate registrar URI
     ///
     /// Creates the SIP URI for agent registration requests.
@@ -701,7 +701,7 @@ impl GeneralConfig {
     ///
     /// ```
     /// use rvoip_call_engine::prelude::GeneralConfig;
-    /// 
+    ///
     /// let config = GeneralConfig::default();
     /// let uri = config.registrar_uri();
     /// assert_eq!(uri, "sip:registrar@call-center.local");
@@ -709,7 +709,7 @@ impl GeneralConfig {
     pub fn registrar_uri(&self) -> String {
         format!("sip:registrar@{}", self.registrar_domain)
     }
-    
+
     /// Generate contact URI for an agent with optional port
     ///
     /// Creates a contact URI for an agent, optionally including a specific port number.
@@ -718,13 +718,13 @@ impl GeneralConfig {
     ///
     /// ```
     /// use rvoip_call_engine::prelude::GeneralConfig;
-    /// 
+    ///
     /// let config = GeneralConfig::default();
-    /// 
+    ///
     /// // Without port
     /// let uri1 = config.agent_contact_uri("alice", None);
     /// assert_eq!(uri1, "sip:alice@127.0.0.1");
-    /// 
+    ///
     /// // With port
     /// let uri2 = config.agent_contact_uri("alice", Some(5061));
     /// assert_eq!(uri2, "sip:alice@127.0.0.1:5061");
@@ -751,7 +751,7 @@ impl Default for GeneralConfig {
             local_ip: "127.0.0.1".to_string(),  // Safe default for development
             registrar_domain: "call-center.local".to_string(),
             call_center_service: "call-center".to_string(),
-            
+
             // PHASE 0.24: BYE handling configuration with production-ready defaults
             bye_timeout_seconds: 15,     // Increased from 5s to 15s for better reliability
             bye_retry_attempts: 3,       // Allow 3 retry attempts for failed BYEs
@@ -819,4 +819,4 @@ impl Default for DatabaseConfig {
             backup_interval: 3600, // 1 hour
         }
     }
-} 
+}

@@ -1,5 +1,5 @@
 //! Unified peer API for P2P and client scenarios
-//! 
+//!
 //! This module provides a simplified interface for SIP peers that can both
 //! make and receive calls, abstracting away the UAC/UAS distinction.
 
@@ -14,12 +14,12 @@ use crate::coordinator::SessionCoordinator;
 use crate::errors::{Result, SessionError};
 
 /// A SIP peer that can make and receive calls
-/// 
+///
 /// # Example
 /// ```
 /// # use rvoip_session_core::api::SimplePeer;
 /// # use rvoip_session_core::errors::Result;
-/// # 
+/// #
 /// # #[tokio::main]
 /// # async fn main() -> Result<()> {
 /// # // Use a random port to avoid conflicts when tests run in parallel
@@ -29,19 +29,19 @@ use crate::errors::{Result, SessionError};
 ///     .local_addr("127.0.0.1")  // Optional, defaults to 0.0.0.0
 ///     .port(port)               // Optional, defaults to 5060
 ///     .await?;
-/// 
+///
 /// // Register with SIP server (for receiving calls)
 /// alice.register("sip:registrar@example.com").await?;
-/// 
+///
 /// // Make call - auto-detects protocol, defaults to port 5060
 /// // let call = alice.call("bob@127.0.0.1").await?;
-/// 
+///
 /// // Check for incoming calls
 /// if let Some(incoming) = alice.try_incoming() {
 ///     // let call = incoming.accept().await?;
 ///     // Handle the call...
 /// }
-/// 
+///
 /// # alice.shutdown().await?;
 /// # Ok(())
 /// # }
@@ -68,7 +68,7 @@ impl PeerBuilder {
         self.local_addr = Some(addr.to_string());
         self
     }
-    
+
     /// Set the port to bind to (default: 5060)
     pub fn port(mut self, port: u16) -> Self {
         self.port = Some(port);
@@ -85,7 +85,7 @@ impl std::future::IntoFuture for PeerBuilder {
         Box::pin(async move {
             let local_addr = self.local_addr.unwrap_or_else(|| "0.0.0.0".to_string());
             let port = self.port.unwrap_or(5060);
-            
+
             SimplePeer::create(&self.identity, &local_addr, port).await
         })
     }
@@ -109,13 +109,13 @@ impl<'a> CallBuilder<'a> {
             call_id: None,
         }
     }
-    
+
     /// Set the port for the target (default: 5060)
     pub fn port(mut self, port: u16) -> Self {
         self.port = Some(port);
         self
     }
-    
+
     /// Set a custom call ID
     pub fn call_id(mut self, id: &str) -> Self {
         self.call_id = Some(id.to_string());
@@ -153,7 +153,7 @@ impl CallHandler for IncomingCallRouter {
         if let Some(coordinator) = self.coordinator.read().await.as_ref() {
             // Add coordinator to the call so it can accept/reject
             call.coordinator = Some(coordinator.clone());
-            
+
             if self.tx.send(call).await.is_ok() {
                 CallDecision::Defer  // We'll handle it via the channel
             } else {
@@ -163,7 +163,7 @@ impl CallHandler for IncomingCallRouter {
             CallDecision::Reject("Not ready".to_string())
         }
     }
-    
+
     async fn on_call_ended(&self, _call: crate::api::types::CallSession, _reason: &str) {
         // TODO: Could notify via another channel if needed
     }
@@ -175,14 +175,14 @@ impl SimplePeer {
     pub fn presence_coordinator(&self) -> Arc<RwLock<crate::coordinator::presence::PresenceCoordinator>> {
         self.coordinator.presence_coordinator.clone()
     }
-    
+
     /// Create a new peer with builder pattern
-    /// 
+    ///
     /// # Example
     /// ```
     /// # use rvoip_session_core::api::SimplePeer;
     /// # use rvoip_session_core::errors::Result;
-    /// # 
+    /// #
     /// # #[tokio::main]
     /// # async fn main() -> Result<()> {
     /// # // Use a random port to avoid conflicts when tests run in parallel
@@ -202,25 +202,25 @@ impl SimplePeer {
             port: None,
         }
     }
-    
+
     /// Internal method to create a peer with specific configuration
     async fn create(identity: &str, local_addr: &str, port: u16) -> Result<Self> {
         use crate::api::builder::SessionManagerBuilder;
-        
+
         // Create channel for incoming calls
         let (tx, rx) = mpsc::channel(100);
-        
+
         // Create handler with a deferred coordinator reference
-        let handler = Arc::new(IncomingCallRouter { 
+        let handler = Arc::new(IncomingCallRouter {
             tx,
             coordinator: Arc::new(RwLock::new(None)),
         });
-        
+
         // Parse the bind address
         let bind_addr = format!("{}:{}", local_addr, port);
         let local_bind_addr = bind_addr.parse()
             .map_err(|_| SessionError::ConfigError("Invalid address".to_string()))?;
-        
+
         // Use SessionManagerBuilder to properly create the coordinator with handler
         let coordinator = SessionManagerBuilder::new()
             .with_sip_port(port)
@@ -229,10 +229,10 @@ impl SimplePeer {
             .with_handler(handler.clone())
             .build()
             .await?;
-        
+
         // Now set the coordinator reference in the handler
         *handler.coordinator.write().await = Some(coordinator.clone());
-        
+
         Ok(Self {
             identity: identity.to_string(),
             coordinator,
@@ -242,9 +242,9 @@ impl SimplePeer {
             port,
         })
     }
-    
+
     /// Register with a SIP server
-    /// 
+    ///
     /// After registration, you can make calls using just the username
     /// (e.g., "bob" instead of "bob@server.com").
     pub async fn register(&mut self, server: &str) -> Result<()> {
@@ -253,7 +253,7 @@ impl SimplePeer {
         tracing::info!("Registered {} to {}", self.identity, server);
         Ok(())
     }
-    
+
     /// Unregister from the SIP server
     pub async fn unregister(&mut self) -> Result<()> {
         if let Some(server) = self.registrar.take() {
@@ -262,21 +262,21 @@ impl SimplePeer {
         }
         Ok(())
     }
-    
+
     /// Make an outgoing call with builder pattern for advanced options
-    /// 
+    ///
     /// # Arguments
     /// * `target` - The call target. Can be:
     ///   - Full SIP URI: "sip:bob@example.com:5060"
     ///   - User@host: "bob@example.com" (uses port 5060)
     ///   - Just username (if registered): "bob"
     ///   - Phone number: "tel:+14155551234" or "+14155551234"
-    /// 
+    ///
     /// # Example
     /// ```
     /// # use rvoip_session_core::api::SimplePeer;
     /// # use rvoip_session_core::errors::Result;
-    /// # 
+    /// #
     /// # #[tokio::main]
     /// # async fn main() -> Result<()> {
     /// # // Use a random port to avoid conflicts when tests run in parallel
@@ -284,7 +284,7 @@ impl SimplePeer {
     /// # let mut peer = SimplePeer::new("alice").port(port).await?;
     /// // Simple call with default port (would connect in real scenario)
     /// // let call = peer.call("bob@example.com").await?;
-    /// 
+    ///
     /// // Call with custom port (would connect in real scenario)
     /// // let call2 = peer.call("charlie@example.com")
     /// //     .port(5070)
@@ -297,7 +297,7 @@ impl SimplePeer {
     pub fn call(&self, target: &str) -> CallBuilder {
         CallBuilder::new(self, target)
     }
-    
+
     /// Internal method to make a call with options
     async fn call_with_options(
         &self,
@@ -306,7 +306,7 @@ impl SimplePeer {
         call_id: Option<&str>,
     ) -> Result<SimpleCall> {
         let port = port.unwrap_or(5060);
-        
+
         // Auto-detect protocol and format URI
         let target_uri = if target.starts_with("sip:") {
             target.to_string()
@@ -331,9 +331,9 @@ impl SimplePeer {
             // Default to SIP with port
             format!("sip:{}:{}", target, port)
         };
-        
+
         let from_uri = format!("sip:{}@{}:{}", self.identity, self.local_addr, self.port);
-        
+
         // Use SessionControl to create the call
         use crate::api::control::SessionControl;
         let prepared = SessionControl::prepare_outgoing_call(
@@ -341,57 +341,57 @@ impl SimplePeer {
             &from_uri,
             &target_uri,
         ).await?;
-        
+
         // TODO: Set call_id if provided
         // if let Some(id) = call_id {
         //     prepared.set_call_id(id);
         // }
-        
+
         let session = SessionControl::initiate_prepared_call(
             &self.coordinator,
             &prepared,
         ).await?;
-        
+
         // Create SimpleCall
         SimpleCall::from_session(session, self.coordinator.clone()).await
     }
-    
+
     /// Get the next incoming call (blocking)
-    /// 
+    ///
     /// This will wait until an incoming call arrives.
     pub async fn next_incoming(&mut self) -> Option<IncomingCall> {
         self.incoming_calls.recv().await
     }
-    
+
     /// Try to get an incoming call (non-blocking)
-    /// 
+    ///
     /// Returns immediately with None if no calls are waiting.
     pub fn try_incoming(&mut self) -> Option<IncomingCall> {
         self.incoming_calls.try_recv().ok()
     }
-    
+
     /// Get the peer's identity
     pub fn identity(&self) -> &str {
         &self.identity
     }
-    
+
     /// Get the peer's local address
     pub fn local_addr(&self) -> &str {
         &self.local_addr
     }
-    
+
     /// Get the peer's SIP port
     pub fn port(&self) -> u16 {
         self.port
     }
-    
+
     /// Get the registrar if registered
     pub fn registrar(&self) -> Option<&str> {
         self.registrar.as_deref()
     }
-    
+
     /// Shutdown the peer
-    /// 
+    ///
     /// This will unregister (if registered) and stop the coordinator.
     pub async fn shutdown(mut self) -> Result<()> {
         self.unregister().await?;

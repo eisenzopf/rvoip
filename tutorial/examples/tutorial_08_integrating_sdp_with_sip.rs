@@ -12,12 +12,12 @@ use bytes::Bytes;
 
 fn main() -> Result<()> {
     println!("Tutorial 08: Integrating SDP with SIP\n");
-    
+
     // Example 1: Creating a SIP INVITE with SDP Offer
     let invite = create_invite_with_sdp()?;
     println!("Example 1: SIP INVITE with SDP Offer\n");
     println!("{}\n", invite);
-    
+
     // Example 2: Extracting and parsing SDP from a SIP message
     println!("Example 2: Extracting SDP from SIP message\n");
     if let Some(sdp_result) = extract_sdp_from_message(&invite) {
@@ -33,33 +33,33 @@ fn main() -> Result<()> {
     } else {
         println!("No SDP content found or wrong content type\n");
     }
-    
+
     // Example 3: Creating a 200 OK response with SDP Answer
     println!("Example 3: SIP 200 OK with SDP Answer\n");
     let response = create_response_with_sdp_answer(&invite)?;
     println!("{}\n", response);
-    
+
     // Example 4: Creating an ACK to complete the dialog establishment
     println!("Example 4: SIP ACK to complete dialog\n");
     let ack = create_ack_for_response(&response, &invite)?;
     println!("{}\n", ack);
-    
+
     // Example 5: Creating a re-INVITE to modify the session
     println!("Example 5: SIP re-INVITE to modify session\n");
     let reinvite = create_reinvite_with_updated_sdp(&invite)?;
     println!("{}\n", reinvite);
-    
+
     // Example 6: Handling SDP negotiation failures
     println!("Example 6: Handling incompatible SDP\n");
     // Create an INVITE with unsupported codecs for testing
     let invite_with_unsupported_codecs = create_invite_with_unsupported_sdp()?;
     let error_response = handle_incompatible_sdp(&invite_with_unsupported_codecs)?;
     println!("{}\n", error_response);
-    
+
     // Example 7: Complete SIP/SDP dialog example
     println!("Example 7: Complete SIP/SDP dialog flow\n");
     demonstrate_complete_dialog_flow()?;
-    
+
     Ok(())
 }
 
@@ -78,10 +78,10 @@ fn create_invite_with_sdp() -> Result<Message> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     // 2. Convert SDP to string for inclusion in SIP message
     let sdp_string = sdp.to_string();
-    
+
     // 3. Create SIP INVITE request with SDP offer
     let invite = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
         .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
@@ -96,7 +96,7 @@ fn create_invite_with_sdp() -> Result<Message> {
         // Include SDP as body
         .body(Bytes::from(sdp_string))
         .build();
-    
+
     Ok(Message::Request(invite))
 }
 
@@ -107,14 +107,14 @@ fn extract_sdp_from_message(message: &Message) -> Option<std::result::Result<Sdp
     if !bytes.is_empty() {
         // Convert bytes to string
         let body_str = std::str::from_utf8(bytes).ok()?;
-        
+
         // For SIP messages with SDP, verify this looks like SDP (starts with v=0)
         // This is a simplified approach since we know it's supposed to be SDP
         if body_str.trim_start().starts_with("v=0") {
             return Some(SdpSession::from_str(body_str));
         }
     }
-    
+
     None
 }
 
@@ -126,7 +126,7 @@ fn create_response_with_sdp_answer(invite: &Message) -> Result<Message> {
     } else {
         return Err(rvoip_sip_core::Error::Parser("No SDP in INVITE".into()));
     };
-    
+
     // Create SDP answer based on the offer
     // In a real-world scenario, we would examine the offer and select compatible codecs
     let sdp_answer = SdpBuilder::new("Answer Session")
@@ -140,7 +140,7 @@ fn create_response_with_sdp_answer(invite: &Message) -> Result<Message> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     // Create 200 OK response with SDP answer
     let response = if let Message::Request(req) = invite {
         // Use the new helper method to create a response from the request
@@ -154,12 +154,12 @@ fn create_response_with_sdp_answer(invite: &Message) -> Result<Message> {
         .content_type("application/sdp")
         .body(Bytes::from(sdp_answer.to_string()))
         .build();
-        
+
         Message::Response(response)
     } else {
         return Err(rvoip_sip_core::Error::Parser("Not a request".into()));
     };
-    
+
     Ok(response)
 }
 
@@ -169,10 +169,10 @@ fn create_ack_for_response(response: &Message, original_invite: &Message) -> Res
     let to_display_name = response.path_str_or("headers.To.display_name", "");
     let to_uri = response.path_str_or("headers.To.uri", "");
     let to_tag = response.path_str("headers.To.params[0].Tag");
-    
+
     // Use a simple default for the contact URI
     let contact_uri = "sip:bob@192.0.2.4";
-    
+
     // Get From, To, Call-ID, and CSeq from original INVITE
     let from_display_name = original_invite.path_str_or("headers.From.display_name", "Alice");
     let from_uri = original_invite.path_str_or("headers.From.uri", "sip:alice@atlanta.example.com");
@@ -181,7 +181,7 @@ fn create_ack_for_response(response: &Message, original_invite: &Message) -> Res
     let cseq = original_invite.path("headers.CSeq.seq")
         .and_then(|v| v.as_i64())
         .unwrap_or(314159) as u32;
-    
+
     // Create ACK request
     let ack = RequestBuilder::new(Method::Ack, contact_uri)?
         .from(&from_display_name, &from_uri, from_tag.as_deref())
@@ -191,7 +191,7 @@ fn create_ack_for_response(response: &Message, original_invite: &Message) -> Res
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
         .max_forwards(70)
         .build();
-    
+
     Ok(Message::Request(ack))
 }
 
@@ -215,7 +215,7 @@ fn create_reinvite_with_updated_sdp(original_invite: &Message) -> Result<Message
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     // Get headers from the original INVITE using JSON path
     let from_display_name = original_invite.path_str_or("headers.From.display_name", "Alice");
     let from_uri = original_invite.path_str_or("headers.From.uri", "sip:alice@atlanta.example.com");
@@ -223,12 +223,12 @@ fn create_reinvite_with_updated_sdp(original_invite: &Message) -> Result<Message
     let to_display_name = original_invite.path_str_or("headers.To.display_name", "Bob");
     let to_uri = original_invite.path_str_or("headers.To.uri", "sip:bob@biloxi.example.com");
     let call_id = original_invite.path_str_or("headers.CallId", "3848276298220188511@atlanta.example.com");
-    
+
     // Get CSeq and increment
     let cseq = original_invite.path("headers.CSeq.seq")
         .and_then(|v| v.as_i64())
         .unwrap_or(314159) as u32 + 1;
-    
+
     // Create re-INVITE with new SDP
     let reinvite = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
         .from(&from_display_name, &from_uri, from_tag.as_deref())
@@ -241,7 +241,7 @@ fn create_reinvite_with_updated_sdp(original_invite: &Message) -> Result<Message
         .content_type("application/sdp")
         .body(Bytes::from(updated_sdp.to_string()))
         .build();
-    
+
     Ok(Message::Request(reinvite))
 }
 
@@ -259,7 +259,7 @@ fn create_invite_with_unsupported_sdp() -> Result<Message> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     // Create SIP INVITE
     let invite = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
         .from("Alice", "sip:alice@atlanta.example.com", Some("9fxced76sl"))
@@ -272,7 +272,7 @@ fn create_invite_with_unsupported_sdp() -> Result<Message> {
         .content_type("application/sdp")
         .body(Bytes::from(sdp.to_string()))
         .build();
-    
+
     Ok(Message::Request(invite))
 }
 
@@ -280,34 +280,34 @@ fn create_invite_with_unsupported_sdp() -> Result<Message> {
 fn handle_incompatible_sdp(invite: &Message) -> Result<Message> {
     // Extract SDP from incoming INVITE
     let sdp_option = extract_sdp_from_message(invite);
-    
+
     // Check if the SDP is compatible
     match sdp_option {
         Some(Ok(sdp)) => {
             // In a real implementation, we would check supported codecs
             // For this example, we'll assume incompatibility
-            
+
             println!("Received SDP with unsupported codecs:");
             for media in &sdp.media_descriptions {
                 if media.media == "audio" {
                     println!("Audio formats: {:?}", media.formats);
-                    
+
                     if let Message::Request(req) = invite {
                         // Try parsing URI for warning
                         let warning_agent = Uri::from_str("sip:biloxi.example.com").unwrap_or_else(|_| {
                             // Fallback to domain with SIP scheme
                             Uri::sip("biloxi.example.com")
                         });
-                        
+
                         // Create a 488 Not Acceptable Here response
                         let response = ResponseBuilder::error_response(
                             req,
-                            StatusCode::NotAcceptableHere, 
+                            StatusCode::NotAcceptableHere,
                             None
                         )
                         .warning(304, warning_agent, "Incompatible media format")
                         .build();
-                        
+
                         return Ok(Message::Response(response));
                     }
                 }
@@ -323,7 +323,7 @@ fn handle_incompatible_sdp(invite: &Message) -> Result<Message> {
                     Some("Invalid SDP")
                 )
                 .build();
-                
+
                 return Ok(Message::Response(response));
             }
         },
@@ -337,12 +337,12 @@ fn handle_incompatible_sdp(invite: &Message) -> Result<Message> {
                     Some("SDP Required")
                 )
                 .build();
-                
+
                 return Ok(Message::Response(response));
             }
         }
     }
-    
+
     // If we reach here, there's another issue with the request
     if let Message::Request(req) = invite {
         // Create a 400 Bad Request response
@@ -352,10 +352,10 @@ fn handle_incompatible_sdp(invite: &Message) -> Result<Message> {
             None
         )
         .build();
-        
+
         return Ok(Message::Response(response));
     }
-    
+
     Err(rvoip_sip_core::Error::Parser("Not a request".into()))
 }
 
@@ -366,7 +366,7 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
     let from_tag = "9fxced76sl";
     let to_tag = "8a8sdg87s";  // Will be added by Bob
     let cseq = 314159;
-    
+
     // Step 1: Create and send INVITE with SDP offer
     println!("Step 1: Initial INVITE with SDP offer");
     let invite = RequestBuilder::new(Method::Invite, "sip:bob@biloxi.example.com")?
@@ -380,9 +380,9 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .content_type("application/sdp")
         .body(Bytes::from(create_offer_sdp("alice", "atlanta.example.com")?))
         .build();
-    
+
     println!("{}\n", Message::Request(invite));
-    
+
     // Step 2: Receive 180 Ringing (no SDP)
     println!("Step 2: 180 Ringing (no SDP)");
     let ringing = ResponseBuilder::new(StatusCode::Ringing, None)
@@ -393,9 +393,9 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds7"))
         .contact("sip:bob@192.0.2.4", None)
         .build();
-    
+
     println!("{}\n", Message::Response(ringing));
-    
+
     // Step 3: Receive 200 OK with SDP answer
     println!("Step 3: 200 OK with SDP answer");
     let ok_response = ResponseBuilder::new(StatusCode::Ok, None)
@@ -408,15 +408,15 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .content_type("application/sdp")
         .body(Bytes::from(create_answer_sdp("bob", "biloxi.example.com")?))
         .build();
-    
+
     println!("{}\n", Message::Response(ok_response));
-    
+
     // Step 4: Send ACK to acknowledge the 200 OK
     println!("Step 4: ACK to acknowledge 200 OK");
-    
+
     // Using JSON path accessors to get contact URI
     let contact_uri = "sip:bob@192.0.2.4".to_string();
-    
+
     let ack = RequestBuilder::new(Method::Ack, &contact_uri)?
         .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
         .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
@@ -425,15 +425,15 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds9"))
         .max_forwards(70)
         .build();
-    
+
     println!("{}\n", Message::Request(ack));
-    
+
     // Step 5: After some time, send re-INVITE to add video
     println!("Step 5: re-INVITE to add video");
-    
+
     // Using convenience methods from SipMessageJson
     let contact_uri = "sip:bob@192.0.2.4".to_string();
-    
+
     let reinvite = RequestBuilder::new(Method::Invite, &contact_uri)?
         .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
         .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
@@ -445,12 +445,12 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .content_type("application/sdp")
         .body(Bytes::from(create_updated_sdp("alice", "atlanta.example.com")?))
         .build();
-    
+
     println!("{}\n", Message::Request(reinvite));
-    
+
     // Step 6: Receive 200 OK for re-INVITE with updated SDP
     println!("Step 6: 200 OK for re-INVITE with updated SDP");
-    
+
     let ok_reinvite = ResponseBuilder::new(StatusCode::Ok, None)
         .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
         .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
@@ -461,15 +461,15 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .content_type("application/sdp")
         .body(Bytes::from(create_video_answer_sdp("bob", "biloxi.example.com")?))
         .build();
-    
+
     println!("{}\n", Message::Response(ok_reinvite));
-    
+
     // Step 7: ACK the 200 OK for re-INVITE
     println!("Step 7: ACK for 200 OK of re-INVITE");
-    
+
     // Using convenience methods to access URI
     let contact_uri = "sip:bob@192.0.2.4".to_string();
-    
+
     let ack_reinvite = RequestBuilder::new(Method::Ack, &contact_uri)?
         .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
         .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
@@ -478,12 +478,12 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds11"))
         .max_forwards(70)
         .build();
-    
+
     println!("{}\n", Message::Request(ack_reinvite));
-    
+
     // Step 8: Later, send BYE to terminate the session
     println!("Step 8: BYE to terminate session");
-    
+
     let bye = RequestBuilder::new(Method::Bye, &contact_uri)?
         .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
         .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
@@ -492,12 +492,12 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds12"))
         .max_forwards(70)
         .build();
-    
+
     println!("{}\n", Message::Request(bye));
-    
+
     // Step 9: Receive 200 OK for BYE
     println!("Step 9: 200 OK for BYE");
-    
+
     let ok_bye = ResponseBuilder::new(StatusCode::Ok, None)
         .from("Alice", "sip:alice@atlanta.example.com", Some(from_tag))
         .to("Bob", "sip:bob@biloxi.example.com", Some(to_tag))
@@ -505,11 +505,11 @@ fn demonstrate_complete_dialog_flow() -> Result<()> {
         .cseq(cseq + 2, Method::Bye)
         .via("atlanta.example.com:5060", "UDP", Some("z9hG4bKnashds12"))
         .build();
-    
+
     println!("{}\n", Message::Response(ok_bye));
-    
+
     println!("Dialog completed successfully!");
-    
+
     Ok(())
 }
 
@@ -526,7 +526,7 @@ fn create_offer_sdp(username: &str, domain: &str) -> Result<String> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     Ok(sdp.to_string())
 }
 
@@ -541,7 +541,7 @@ fn create_answer_sdp(username: &str, domain: &str) -> Result<String> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     Ok(sdp.to_string())
 }
 
@@ -564,7 +564,7 @@ fn create_updated_sdp(username: &str, domain: &str) -> Result<String> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     Ok(sdp.to_string())
 }
 
@@ -586,6 +586,6 @@ fn create_video_answer_sdp(username: &str, domain: &str) -> Result<String> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     Ok(sdp.to_string())
-} 
+}

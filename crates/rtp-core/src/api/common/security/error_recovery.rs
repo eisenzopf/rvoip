@@ -60,7 +60,7 @@ impl RecoveryStrategy {
         match self {
             Self::ImmediateFallback => "Immediate fallback".to_string(),
             Self::RetryWithBackoff { max_retries, initial_delay, max_delay } => {
-                format!("Retry with backoff: {} retries, {:.1}s-{:.1}s delay", 
+                format!("Retry with backoff: {} retries, {:.1}s-{:.1}s delay",
                        max_retries, initial_delay.as_secs_f64(), max_delay.as_secs_f64())
             },
             Self::Manual => "Manual intervention required".to_string(),
@@ -316,7 +316,7 @@ impl ErrorRecoveryManager {
         error: SecurityError,
     ) -> Result<RecoveryAction, SecurityError> {
         let failure_type = FailureType::from_error(&error);
-        
+
         info!("Handling security failure: {:?} method failed with {:?}", method, failure_type);
         debug!("Error details: {}", error);
 
@@ -371,7 +371,7 @@ impl ErrorRecoveryManager {
                 max_delay,
             );
 
-            info!("Retrying {:?} method (attempt {}/{}) after {:?} delay", 
+            info!("Retrying {:?} method (attempt {}/{}) after {:?} delay",
                   method, retry_attempt, max_retries, delay);
 
             // Wait for backoff delay
@@ -388,7 +388,7 @@ impl ErrorRecoveryManager {
                     Err(e) => {
                         let failure_type = FailureType::from_error(&e);
                         self.record_failure(method, failure_type, e.to_string(), retry_attempt).await;
-                        warn!("Retry {}/{} failed for {:?} method: {}", 
+                        warn!("Retry {}/{} failed for {:?} method: {}",
                               retry_attempt, max_retries, method, e);
                     }
                 }
@@ -403,7 +403,7 @@ impl ErrorRecoveryManager {
     /// Attempt to fallback to the next available method
     async fn attempt_fallback(&self, failed_method: KeyExchangeMethod) -> Result<RecoveryAction, SecurityError> {
         let mut fallback_attempts = self.fallback_attempts.write().await;
-        
+
         if *fallback_attempts >= self.config.max_fallback_attempts {
             warn!("Maximum fallback attempts ({}) reached", self.config.max_fallback_attempts);
             *self.state.write().await = RecoveryState::Exhausted;
@@ -415,10 +415,10 @@ impl ErrorRecoveryManager {
 
         // Find the next available method
         let next_method = self.find_next_available_method(failed_method).await;
-        
+
         match next_method {
             Some(method) => {
-                info!("Attempting fallback to {:?} method (attempt {}/{})", 
+                info!("Attempting fallback to {:?} method (attempt {}/{})",
                       method, *fallback_attempts, self.config.max_fallback_attempts);
 
                 // Set cooldown for the failed method
@@ -500,7 +500,7 @@ impl ErrorRecoveryManager {
 
         let new_context = UnifiedSecurityContext::new(config)?;
         new_context.initialize().await?;
-        
+
         *self.security_context.write().await = Some(new_context);
         Ok(())
     }
@@ -540,14 +540,14 @@ impl ErrorRecoveryManager {
     pub async fn get_failure_statistics(&self) -> FailureStatistics {
         let history = self.failure_history.read().await;
         let mut stats = FailureStatistics::default();
-        
+
         for record in history.iter() {
             stats.total_failures += 1;
-            
+
             let method_stats = stats.failures_by_method.entry(record.method)
                 .or_insert(0);
             *method_stats += 1;
-            
+
             let type_stats = stats.failures_by_type.entry(record.failure_type)
                 .or_insert(0);
             *type_stats += 1;
@@ -609,8 +609,8 @@ impl FailureStatistics {
         if self.total_failures == 0 {
             return 0.0;
         }
-        
+
         let method_failures = self.failures_by_method.get(&method).unwrap_or(&0);
         (*method_failures as f64) / (self.total_failures as f64)
     }
-} 
+}

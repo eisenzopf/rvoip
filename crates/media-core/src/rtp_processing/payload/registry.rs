@@ -260,7 +260,7 @@ pub fn get_media_type(payload_type: u8) -> MediaType {
     get_global_registry().get_media_type(payload_type)
 }
 
-/// Get codec name for payload type (convenience function)  
+/// Get codec name for payload type (convenience function)
 pub fn get_codec_name(payload_type: u8) -> String {
     get_global_registry().get_codec_name(payload_type)
 }

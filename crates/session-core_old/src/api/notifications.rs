@@ -1,5 +1,5 @@
 //! Enhanced Notification System
-//! 
+//!
 //! Provides server-oriented call notification handling.
 
 use async_trait::async_trait;
@@ -39,19 +39,19 @@ impl CallerInfo {
             contact: None,
         }
     }
-    
+
     /// Builder method to set display name
     pub fn with_display_name(mut self, name: impl Into<String>) -> Self {
         self.display_name = Some(name.into());
         self
     }
-    
+
     /// Builder method to set user agent
     pub fn with_user_agent(mut self, agent: impl Into<String>) -> Self {
         self.user_agent = Some(agent.into());
         self
     }
-    
+
     /// Builder method to set contact
     pub fn with_contact(mut self, contact: impl Into<String>) -> Self {
         self.contact = Some(contact.into());
@@ -64,10 +64,10 @@ impl CallerInfo {
 pub trait IncomingCallNotification: Send + Sync {
     /// Handle incoming call with detailed event information
     async fn on_incoming_call(&self, event: IncomingCallEvent) -> CallDecision;
-    
+
     /// Handle call termination by remote party
     async fn on_call_terminated_by_remote(&self, session_id: SessionId, call_id: String);
-    
+
     /// Handle call ended by server
     async fn on_call_ended_by_server(&self, session_id: SessionId, call_id: String);
 }
@@ -82,13 +82,13 @@ pub trait NotificationSetter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_caller_info_builder() {
         let info = CallerInfo::new("sip:alice@example.com", "sip:bob@example.com")
             .with_display_name("Alice")
             .with_user_agent("RVOIP/1.0");
-            
+
         assert_eq!(info.from, "sip:alice@example.com");
         assert_eq!(info.to, "sip:bob@example.com");
         assert_eq!(info.display_name, Some("Alice".to_string()));

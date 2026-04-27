@@ -20,4 +20,4 @@ pub mod presence_aggregation;
 // Re-exports
 pub use coordinator::{SessionCoordinator, CleanupTracker, CleanupLayer};
 pub use transfer::TransferHandler;
-pub use registrar_integration::RegistrarIntegration; 
+pub use registrar_integration::RegistrarIntegration;

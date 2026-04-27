@@ -41,7 +41,7 @@ use crate::{Error, Result};
 ///     .call_id("publish-test")
 ///     .cseq(1)
 ///     .build();
-///     
+///
 /// assert!(validate_publish_request(&request).is_ok());
 /// ```
 pub fn validate_publish_request(request: &Request) -> Result<()> {
@@ -126,7 +126,7 @@ pub fn validate_publish_request(request: &Request) -> Result<()> {
 ///     .call_id("subscribe-test")
 ///     .cseq(1)
 ///     .build();
-///     
+///
 /// assert!(validate_subscribe_request(&request).is_ok());
 /// ```
 pub fn validate_subscribe_request(request: &Request) -> Result<()> {
@@ -211,7 +211,7 @@ pub fn validate_subscribe_request(request: &Request) -> Result<()> {
 ///     .call_id("notify-test")
 ///     .cseq(1)
 ///     .build();
-///     
+///
 /// assert!(validate_notify_request(&request).is_ok());
 /// ```
 pub fn validate_notify_request(request: &Request) -> Result<()> {

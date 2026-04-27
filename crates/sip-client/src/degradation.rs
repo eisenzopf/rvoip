@@ -22,7 +22,7 @@ use tracing::{debug, info, warn};
 pub struct CodecFallbackChain {
     /// Ordered list of codecs from highest to lowest quality
     codecs: Vec<CodecType>,
-    
+
     /// Current codec index
     current_index: usize,
 }
@@ -35,20 +35,20 @@ impl CodecFallbackChain {
         if !codecs.contains(&CodecType::G711Pcmu) {
             codecs.push(CodecType::G711Pcmu);
         }
-        
+
         Self {
             codecs,
             current_index: 0,
         }
     }
-    
+
     /// Get the current codec
     pub fn current_codec(&self) -> CodecType {
         self.codecs.get(self.current_index)
             .copied()
             .unwrap_or(CodecType::G711Pcmu)
     }
-    
+
     /// Downgrade to next codec in chain
     pub fn downgrade(&mut self) -> Option<CodecType> {
         if self.current_index < self.codecs.len() - 1 {
@@ -58,7 +58,7 @@ impl CodecFallbackChain {
             None
         }
     }
-    
+
     /// Upgrade to previous codec in chain
     pub fn upgrade(&mut self) -> Option<CodecType> {
         if self.current_index > 0 {
@@ -68,7 +68,7 @@ impl CodecFallbackChain {
             None
         }
     }
-    
+
     /// Reset to highest quality codec
     pub fn reset(&mut self) {
         self.current_index = 0;
@@ -79,16 +79,16 @@ impl CodecFallbackChain {
 pub struct QualityAdaptationManager {
     /// Event emitter
     event_emitter: EventEmitter,
-    
+
     /// Codec fallback chains per call
     codec_chains: Arc<RwLock<HashMap<CallId, CodecFallbackChain>>>,
-    
+
     /// Quality settings per call
     quality_settings: Arc<RwLock<HashMap<CallId, QualitySettings>>>,
-    
+
     /// Network metrics history
     metrics_history: Arc<RwLock<Vec<NetworkMetrics>>>,
-    
+
     /// Maximum history size
     max_history_size: usize,
 }
@@ -98,16 +98,16 @@ pub struct QualityAdaptationManager {
 pub struct QualitySettings {
     /// Target bitrate in bps
     pub bitrate: u32,
-    
+
     /// Packet time in ms
     pub ptime: u32,
-    
+
     /// Enable FEC (Forward Error Correction)
     pub fec_enabled: bool,
-    
+
     /// Enable DTX (Discontinuous Transmission)
     pub dtx_enabled: bool,
-    
+
     /// Audio processing enabled
     pub audio_processing: AudioProcessingSettings,
 }
@@ -117,13 +117,13 @@ pub struct QualitySettings {
 pub struct AudioProcessingSettings {
     /// Echo cancellation enabled
     pub echo_cancellation: bool,
-    
+
     /// Noise suppression enabled
     pub noise_suppression: bool,
-    
+
     /// Automatic gain control enabled
     pub agc: bool,
-    
+
     /// Voice activity detection enabled
     pub vad: bool,
 }
@@ -156,16 +156,16 @@ impl QualityAdaptationManager {
             max_history_size: 100,
         }
     }
-    
+
     /// Initialize quality settings for a call
     pub async fn initialize_call(&self, call_id: CallId, preferred_codecs: Vec<CodecType>) {
         let mut chains = self.codec_chains.write().await;
         chains.insert(call_id, CodecFallbackChain::new(preferred_codecs));
-        
+
         let mut settings = self.quality_settings.write().await;
         settings.insert(call_id, QualitySettings::default());
     }
-    
+
     /// Update network metrics and adapt quality
     pub async fn update_metrics(&self, metrics: NetworkMetrics) -> HashMap<CallId, DegradationActions> {
         // Store metrics in history
@@ -176,24 +176,24 @@ impl QualityAdaptationManager {
                 history.remove(0);
             }
         }
-        
+
         // Analyze trends
         let trend = self.analyze_network_trend().await;
-        
+
         // Apply adaptations to all active calls
         let chains = self.codec_chains.read().await;
         let mut actions_map = HashMap::new();
-        
+
         for call_id in chains.keys() {
             let actions = self.adapt_quality_for_call(call_id, &metrics, &trend).await;
             if !actions.is_default() {
                 actions_map.insert(*call_id, actions);
             }
         }
-        
+
         actions_map
     }
-    
+
     /// Adapt quality for a specific call
     async fn adapt_quality_for_call(
         &self,
@@ -202,19 +202,19 @@ impl QualityAdaptationManager {
         trend: &NetworkTrend,
     ) -> DegradationActions {
         let mut actions = DegradationActions::default();
-        
+
         // Determine if we need to degrade or improve
         match trend {
             NetworkTrend::Degrading => {
                 info!("Network degrading for call {}, applying quality reduction", call_id);
-                
+
                 // Try codec downgrade first
                 let mut chains = self.codec_chains.write().await;
                 if let Some(chain) = chains.get_mut(call_id) {
                     if let Some(new_codec) = chain.downgrade() {
                         info!("Downgrading codec to {:?}", new_codec);
                         actions.codec_downgrade = true;
-                        
+
                         self.event_emitter.emit(SipClientEvent::CodecChanged {
                             call_id: *call_id,
                             old_codec: chain.codecs[chain.current_index - 1].to_string(),
@@ -223,7 +223,7 @@ impl QualityAdaptationManager {
                         });
                     }
                 }
-                
+
                 // Adjust quality settings
                 let mut settings = self.quality_settings.write().await;
                 if let Some(quality) = settings.get_mut(call_id) {
@@ -233,29 +233,29 @@ impl QualityAdaptationManager {
                         actions.target_bitrate = Some(quality.bitrate);
                         actions.reduce_quality = true;
                     }
-                    
+
                     // Disable audio enhancements to save CPU
                     if metrics.packet_loss_percent > 10.0 {
                         quality.audio_processing.echo_cancellation = false;
                         quality.audio_processing.noise_suppression = false;
                         actions.disable_enhancements = true;
                     }
-                    
+
                     // Enable DTX to reduce bandwidth
                     quality.dtx_enabled = true;
                 }
             }
-            
+
             NetworkTrend::Improving => {
                 debug!("Network improving for call {}, considering quality increase", call_id);
-                
+
                 // Only upgrade if metrics are consistently good
                 if metrics.packet_loss_percent < 1.0 && metrics.jitter_ms < 20.0 {
                     let mut chains = self.codec_chains.write().await;
                     if let Some(chain) = chains.get_mut(call_id) {
                         if let Some(new_codec) = chain.upgrade() {
                             info!("Upgrading codec to {:?}", new_codec);
-                            
+
                             self.event_emitter.emit(SipClientEvent::CodecChanged {
                                 call_id: *call_id,
                                 old_codec: chain.codecs[chain.current_index + 1].to_string(),
@@ -264,7 +264,7 @@ impl QualityAdaptationManager {
                             });
                         }
                     }
-                    
+
                     // Restore quality settings
                     let mut settings = self.quality_settings.write().await;
                     if let Some(quality) = settings.get_mut(call_id) {
@@ -274,28 +274,28 @@ impl QualityAdaptationManager {
                     }
                 }
             }
-            
+
             NetworkTrend::Stable => {
                 // No action needed
                 debug!("Network stable for call {}", call_id);
             }
         }
-        
+
         actions
     }
-    
+
     /// Analyze network trend from history
     async fn analyze_network_trend(&self) -> NetworkTrend {
         let history = self.metrics_history.read().await;
-        
+
         if history.len() < 3 {
             return NetworkTrend::Stable;
         }
-        
+
         // Compare recent metrics to older ones
         let recent_avg = self.calculate_average_score(&history[history.len() - 3..]);
         let older_avg = self.calculate_average_score(&history[history.len().saturating_sub(10)..history.len() - 3]);
-        
+
         if recent_avg > older_avg * 1.2 {
             NetworkTrend::Degrading
         } else if recent_avg < older_avg * 0.8 {
@@ -304,13 +304,13 @@ impl QualityAdaptationManager {
             NetworkTrend::Stable
         }
     }
-    
+
     /// Calculate network quality score (higher is worse)
     fn calculate_average_score(&self, metrics: &[NetworkMetrics]) -> f64 {
         if metrics.is_empty() {
             return 0.0;
         }
-        
+
         let sum: f64 = metrics.iter()
             .map(|m| {
                 m.packet_loss_percent * 10.0 +
@@ -319,21 +319,21 @@ impl QualityAdaptationManager {
                 m.consecutive_errors as f64 * 5.0
             })
             .sum();
-        
+
         sum / metrics.len() as f64
     }
-    
+
     /// Get current quality settings for a call
     pub async fn get_quality_settings(&self, call_id: &CallId) -> Option<QualitySettings> {
         let settings = self.quality_settings.read().await;
         settings.get(call_id).cloned()
     }
-    
+
     /// Clean up resources for a call
     pub async fn cleanup_call(&self, call_id: &CallId) {
         let mut chains = self.codec_chains.write().await;
         chains.remove(call_id);
-        
+
         let mut settings = self.quality_settings.write().await;
         settings.remove(call_id);
     }
@@ -379,35 +379,35 @@ impl DegradationActions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_codec_fallback_chain() {
         let codecs = vec![
             CodecType::G711Pcma,
             CodecType::G711Pcmu,
         ];
-        
+
         let mut chain = CodecFallbackChain::new(codecs);
-        
+
         // Initial codec should be first in list
         assert_eq!(chain.current_codec(), CodecType::G711Pcma);
-        
+
         // Downgrade should move to next codec
         assert_eq!(chain.downgrade(), Some(CodecType::G711Pcmu));
         assert_eq!(chain.current_codec(), CodecType::G711Pcmu);
-        
+
         // Can't downgrade past last codec
         assert_eq!(chain.downgrade(), None);
-        
+
         // Upgrade should move back
         assert_eq!(chain.upgrade(), Some(CodecType::G711Pcma));
         assert_eq!(chain.current_codec(), CodecType::G711Pcma);
     }
-    
+
     #[test]
     fn test_network_score_calculation() {
         let manager = QualityAdaptationManager::new(EventEmitter::default());
-        
+
         let good_metrics = vec![
             NetworkMetrics {
                 packet_loss_percent: 0.5,
@@ -417,7 +417,7 @@ mod tests {
                 consecutive_errors: 0,
             },
         ];
-        
+
         let bad_metrics = vec![
             NetworkMetrics {
                 packet_loss_percent: 10.0,
@@ -427,10 +427,10 @@ mod tests {
                 consecutive_errors: 3,
             },
         ];
-        
+
         let good_score = manager.calculate_average_score(&good_metrics);
         let bad_score = manager.calculate_average_score(&bad_metrics);
-        
+
         assert!(good_score < bad_score);
     }
 }

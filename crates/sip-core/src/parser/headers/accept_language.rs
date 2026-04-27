@@ -539,8 +539,8 @@ mod tests {
         assert_eq!(lang_multi.range, "fr");
         assert_eq!(lang_multi.q, Some(NotNan::new(0.5).unwrap()));
         assert_eq!(lang_multi.params.len(), 1);
-        assert!(matches!(&lang_multi.params[0], 
-                         Param::Other(name, Some(GenericValue::Token(val))) 
+        assert!(matches!(&lang_multi.params[0],
+                         Param::Other(name, Some(GenericValue::Token(val)))
                          if name == "custom" && val == "value"));
 
         // Language with invalid q-value should have q=None

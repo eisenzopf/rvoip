@@ -3,7 +3,7 @@ use crate::error::AudioError;
 use super::{CodecType, AudioCodecTrait, CodecConfig};
 
 /// Opus audio codec implementation
-/// 
+///
 /// This is a mock implementation for demonstration purposes.
 /// In a real implementation, this would use the `opus` crate or similar.
 pub struct OpusEncoder {
@@ -60,11 +60,11 @@ impl OpusEncoder {
         let valid_sample_rates = [8000, 12000, 16000, 24000, 48000];
         if !valid_sample_rates.contains(&config.sample_rate) {
             return Err(AudioError::invalid_configuration(
-                format!("Opus doesn't support sample rate {}, supported rates: {:?}", 
+                format!("Opus doesn't support sample rate {}, supported rates: {:?}",
                        config.sample_rate, valid_sample_rates)
             ));
         }
-        
+
         if config.channels == 0 || config.channels > 2 {
             return Err(AudioError::invalid_configuration(
                 format!("Opus supports 1-2 channels, got {}", config.channels)
@@ -146,14 +146,14 @@ impl AudioCodecTrait for OpusEncoder {
         // Ensure frame format matches codec requirements
         if frame.format.sample_rate != self.config.sample_rate {
             return Err(AudioError::invalid_format(
-                format!("Frame sample rate {} doesn't match codec sample rate {}", 
+                format!("Frame sample rate {} doesn't match codec sample rate {}",
                        frame.format.sample_rate, self.config.sample_rate)
             ));
         }
 
         if frame.format.channels != self.config.channels as u16 {
             return Err(AudioError::invalid_format(
-                format!("Frame channels {} doesn't match codec channels {}", 
+                format!("Frame channels {} doesn't match codec channels {}",
                        frame.format.channels, self.config.channels)
             ));
         }
@@ -167,7 +167,7 @@ impl AudioCodecTrait for OpusEncoder {
         // Process complete frames
         while self.encoder_state.buffer.len() >= self.encoder_state.frame_size * self.config.channels as usize {
             let frame_samples = self.encoder_state.buffer.drain(..self.encoder_state.frame_size * self.config.channels as usize).collect::<Vec<_>>();
-            
+
             // Mock Opus encoding - in reality this would use libopus
             let encoded_frame = self.encode_frame(&frame_samples)?;
             encoded_packets.extend(encoded_frame);
@@ -183,7 +183,7 @@ impl AudioCodecTrait for OpusEncoder {
 
         // Mock Opus decoding - in reality this would use libopus
         let f32_samples = self.decode_packet(data)?;
-        
+
         // Convert f32 samples back to i16
         let samples: Vec<i16> = f32_samples.iter().map(|&s| (s * 32767.0) as i16).collect();
 
@@ -223,14 +223,14 @@ impl OpusEncoder {
     fn encode_frame(&mut self, samples: &[f32]) -> Result<Vec<u8>, AudioError> {
         // This is a simplified mock encoding
         // Real Opus encoding would involve complex psychoacoustic modeling
-        
+
         // Simple compression: quantize samples and run-length encode
         let mut encoded = Vec::new();
-        
+
         // Add header with frame info
         encoded.push(0x80); // Opus packet header (mock)
         encoded.push((self.config.channels as u8) << 4 | (self.encoder_state.complexity & 0x0F));
-        
+
         // Quantize samples to 8-bit
         let quantized: Vec<u8> = samples.iter()
             .map(|&sample| {
@@ -238,18 +238,18 @@ impl OpusEncoder {
                 ((clamped + 1.0) * 127.5) as u8
             })
             .collect();
-        
+
         // Simple run-length encoding
         let mut i = 0;
         while i < quantized.len() {
             let current = quantized[i];
             let mut count = 1;
-            
+
             // Count consecutive identical values
             while i + count < quantized.len() && quantized[i + count] == current && count < 255 {
                 count += 1;
             }
-            
+
             if count > 3 {
                 // Use run-length encoding
                 encoded.push(0xFF); // RLE marker
@@ -261,10 +261,10 @@ impl OpusEncoder {
                     encoded.push(quantized[i + j]);
                 }
             }
-            
+
             i += count;
         }
-        
+
         Ok(encoded)
     }
 
@@ -277,22 +277,22 @@ impl OpusEncoder {
         // Parse mock header
         let _header = data[0];
         let _config = data[1];
-        
+
         // Decode the payload
         let mut decoded_samples = Vec::new();
         let mut i = 2;
-        
+
         while i < data.len() {
             if data[i] == 0xFF && i + 2 < data.len() {
                 // Run-length encoded
                 let count = data[i + 1] as usize;
                 let value = data[i + 2];
-                
+
                 for _ in 0..count {
                     let sample = (value as f32 / 127.5) - 1.0;
                     decoded_samples.push(sample);
                 }
-                
+
                 i += 3;
             } else {
                 // Direct value
@@ -301,10 +301,10 @@ impl OpusEncoder {
                 i += 1;
             }
         }
-        
+
         // Apply post-processing (mock)
         self.apply_postfilter(&mut decoded_samples);
-        
+
         Ok(decoded_samples)
     }
 
@@ -312,7 +312,7 @@ impl OpusEncoder {
     fn apply_postfilter(&mut self, samples: &mut [f32]) {
         // Simple high-pass filter to reduce low-frequency noise
         let alpha = 0.95;
-        
+
         for i in 1..samples.len() {
             let filtered = samples[i] - alpha * samples[i - 1];
             samples[i] = filtered;
@@ -359,7 +359,7 @@ mod tests {
             bitrate: 32000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let encoder = OpusEncoder::new(config);
         assert!(encoder.is_ok());
     }
@@ -373,7 +373,7 @@ mod tests {
             bitrate: 64000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let encoder = OpusEncoder::new(config);
         assert!(encoder.is_ok());
     }
@@ -387,7 +387,7 @@ mod tests {
             bitrate: 32000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let encoder = OpusEncoder::new(config);
         assert!(encoder.is_err());
     }
@@ -401,9 +401,9 @@ mod tests {
             bitrate: 32000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let mut encoder = OpusEncoder::new(config).unwrap();
-        
+
         // Create a full frame (320 samples for 16kHz)
         let samples = vec![0; 320];
         let frame = AudioFrame {
@@ -418,11 +418,11 @@ mod tests {
             sequence: 0,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         // Encode
         let encoded = encoder.encode(&frame).unwrap();
         assert!(!encoded.is_empty());
-        
+
         // Decode
         let decoded_frame = encoder.decode(&encoded).unwrap();
         assert!(decoded_frame.samples.len() > 0);
@@ -437,21 +437,21 @@ mod tests {
             bitrate: 32000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let mut encoder = OpusEncoder::new(config).unwrap();
-        
+
         // Test complexity setting
         assert!(encoder.set_complexity(8).is_ok());
         assert!(encoder.set_complexity(11).is_err());
-        
+
         // Test bitrate setting
         assert!(encoder.set_bitrate(24000).is_ok());
         assert!(encoder.set_bitrate(1000).is_err());
-        
+
         // Test VBR setting
         encoder.set_vbr(false);
         encoder.set_vbr(true);
-        
+
         // Test application setting
         encoder.set_application(OpusApplication::Audio);
         encoder.set_application(OpusApplication::VoIP);
@@ -466,9 +466,9 @@ mod tests {
             bitrate: 32000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let mut encoder = OpusEncoder::new(config).unwrap();
-        
+
         // Send partial frame (less than 320 samples)
         let partial_samples = vec![0; 100];
         let partial_frame = AudioFrame {
@@ -483,11 +483,11 @@ mod tests {
             sequence: 0,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         // Should not produce output yet
         let encoded = encoder.encode(&partial_frame).unwrap();
         assert!(encoded.is_empty());
-        
+
         // Send remaining samples to complete frame
         let remaining_samples = vec![0; 220];
         let remaining_frame = AudioFrame {
@@ -502,7 +502,7 @@ mod tests {
             sequence: 0,
             metadata: std::collections::HashMap::new(),
         };
-        
+
         // Should now produce output
         let encoded = encoder.encode(&remaining_frame).unwrap();
         assert!(!encoded.is_empty());
@@ -517,7 +517,7 @@ mod tests {
             bitrate: 32000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let mut encoder = OpusEncoder::new(config).unwrap();
         assert!(encoder.reset().is_ok());
     }
@@ -531,8 +531,8 @@ mod tests {
             bitrate: 32000,
             params: std::collections::HashMap::new(),
         };
-        
+
         let encoder = OpusEncoder::new(config).unwrap();
         assert_eq!(encoder.codec_type(), CodecType::Opus);
     }
-} 
+}

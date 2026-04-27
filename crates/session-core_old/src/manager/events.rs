@@ -67,20 +67,20 @@ pub enum SessionTransferStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SessionEvent {
     /// Session was created
-    SessionCreated { 
-        session_id: SessionId, 
+    SessionCreated {
+        session_id: SessionId,
         from: String,
         to: String,
         call_state: CallState,
     },
-    
+
     /// Session state changed
-    StateChanged { 
-        session_id: SessionId, 
-        old_state: CallState, 
+    StateChanged {
+        session_id: SessionId,
+        old_state: CallState,
         new_state: CallState,
     },
-    
+
     /// Enhanced state change event with metadata
     DetailedStateChange {
         session_id: SessionId,
@@ -89,31 +89,31 @@ pub enum SessionEvent {
         timestamp: chrono::DateTime<chrono::Utc>,
         reason: Option<String>,
     },
-    
+
     /// Session is terminating (Phase 1 - cleanup in progress)
     SessionTerminating {
         session_id: SessionId,
         reason: String,
     },
-    
+
     /// Session was terminated (Phase 2 - cleanup complete)
-    SessionTerminated { 
-        session_id: SessionId, 
+    SessionTerminated {
+        session_id: SessionId,
         reason: String,
     },
-    
+
     /// Cleanup confirmation from a layer
     CleanupConfirmation {
         session_id: SessionId,
         layer: String,
     },
-    
+
     /// Media event
-    MediaEvent { 
-        session_id: SessionId, 
+    MediaEvent {
+        session_id: SessionId,
         event: String,
     },
-    
+
     /// Media quality metrics event
     MediaQuality {
         session_id: SessionId,
@@ -123,7 +123,7 @@ pub enum SessionEvent {
         round_trip_ms: f32,
         alert_level: MediaQualityAlertLevel,
     },
-    
+
     /// Media flow status change
     MediaFlowChange {
         session_id: SessionId,
@@ -131,7 +131,7 @@ pub enum SessionEvent {
         active: bool,
         codec: String,
     },
-    
+
     /// Bidirectional media flow is confirmed established
     MediaFlowEstablished {
         session_id: SessionId,
@@ -139,27 +139,27 @@ pub enum SessionEvent {
         remote_addr: String,
         direction: MediaFlowDirection,
     },
-    
+
     /// First audio frame received from remote
     FirstAudioFrameReceived {
         session_id: SessionId,
         timestamp: chrono::DateTime<chrono::Utc>,
         ssrc: u32,
     },
-    
+
     /// Audio channels are ready for use
     AudioChannelsReady {
         session_id: SessionId,
         can_send: bool,
         can_receive: bool,
     },
-    
+
     /// DTMF digits received
     DtmfReceived {
         session_id: SessionId,
         digits: String,
     },
-    
+
     /// DTMF digit received (enhanced version)
     DtmfDigit {
         session_id: SessionId,
@@ -167,17 +167,17 @@ pub enum SessionEvent {
         duration_ms: u32,
         timestamp: chrono::DateTime<chrono::Utc>,
     },
-    
+
     /// Session was held
     SessionHeld {
         session_id: SessionId,
     },
-    
+
     /// Session was resumed from hold
     SessionResumed {
         session_id: SessionId,
     },
-    
+
     /// Incoming call received (forwarded from dialog coordinator)
     IncomingCall {
         session_id: SessionId,
@@ -187,7 +187,7 @@ pub enum SessionEvent {
         sdp: Option<String>,
         headers: std::collections::HashMap<String, String>,
     },
-    
+
     /// Incoming transfer request received
     IncomingTransferRequest {
         session_id: SessionId,
@@ -195,19 +195,19 @@ pub enum SessionEvent {
         referred_by: Option<String>,
         replaces: Option<String>,
     },
-    
+
     /// Transfer progress update
     TransferProgress {
         session_id: SessionId,
         status: SessionTransferStatus,
     },
-    
+
     /// Media update requested (e.g., re-INVITE with new SDP)
     MediaUpdate {
         session_id: SessionId,
         offered_sdp: Option<String>,
     },
-    
+
     /// Media negotiated successfully
     MediaNegotiated {
         session_id: SessionId,
@@ -215,13 +215,13 @@ pub enum SessionEvent {
         remote_addr: std::net::SocketAddr,
         codec: String,
     },
-    
+
     /// Media session is ready (both dialog and media established)
     MediaSessionReady {
         session_id: SessionId,
         dialog_id: Option<rvoip_dialog_core::DialogId>,
     },
-    
+
     /// SDP negotiation requested
     SdpNegotiationRequested {
         session_id: SessionId,
@@ -229,27 +229,27 @@ pub enum SessionEvent {
         local_sdp: Option<String>,
         remote_sdp: Option<String>,
     },
-    
+
     /// SDP event (offer, answer, or update)
     SdpEvent {
         session_id: SessionId,
         event_type: String, // "local_sdp_offer", "remote_sdp_answer", "sdp_update", etc.
         sdp: String,
     },
-    
+
     /// Non-fatal warning event
     Warning {
         session_id: Option<SessionId>,
         category: WarningCategory,
         message: String,
     },
-    
+
     /// Error event
-    Error { 
-        session_id: Option<SessionId>, 
+    Error {
+        session_id: Option<SessionId>,
         error: String,
     },
-    
+
     /// SIP REGISTER request received
     RegistrationRequest {
         transaction_id: String,
@@ -257,9 +257,9 @@ pub enum SessionEvent {
         contact_uri: String,
         expires: u32,
     },
-    
+
     // ========== Subscription/Presence Events ==========
-    
+
     /// Subscription created (incoming SUBSCRIBE)
     SubscriptionCreated {
         dialog_id: rvoip_dialog_core::DialogId,
@@ -268,7 +268,7 @@ pub enum SessionEvent {
         to_uri: String,
         expires: std::time::Duration,
     },
-    
+
     /// NOTIFY received for a subscription
     NotifyReceived {
         dialog_id: rvoip_dialog_core::DialogId,
@@ -276,50 +276,50 @@ pub enum SessionEvent {
         event_package: String,
         body: Option<Vec<u8>>,
     },
-    
+
     /// Subscription terminated
     SubscriptionTerminated {
         dialog_id: rvoip_dialog_core::DialogId,
         reason: Option<String>,
     },
-    
+
     /// Presence state update needed (trigger NOTIFY)
     PresenceStateUpdate {
         user_uri: String,
         state: String, // "online", "offline", "busy", etc.
         note: Option<String>,
     },
-    
+
     // ========== RTP Processing Events ==========
-    
+
     /// RTP packet processed with zero-copy optimization
     RtpPacketProcessed {
         session_id: SessionId,
         processing_type: RtpProcessingType,
         performance_metrics: RtpProcessingMetrics,
     },
-    
+
     /// RTP processing mode changed for a session
     RtpProcessingModeChanged {
         session_id: SessionId,
         old_mode: RtpProcessingMode,
         new_mode: RtpProcessingMode,
     },
-    
+
     /// RTP processing error occurred
     RtpProcessingError {
         session_id: SessionId,
         error: String,
         fallback_applied: bool,
     },
-    
+
     /// RTP buffer pool statistics update
     RtpBufferPoolUpdate {
         stats: RtpBufferPoolStats,
     },
-    
+
     // ========== AUDIO STREAMING EVENTS ==========
-    
+
     /// Decoded audio frame received (for playback)
     AudioFrameReceived {
         session_id: SessionId,
@@ -328,7 +328,7 @@ pub enum SessionEvent {
         /// Stream identifier (multiple streams per session)
         stream_id: Option<String>,
     },
-    
+
     /// Audio frame requested for capture and encoding
     AudioFrameRequested {
         session_id: SessionId,
@@ -337,7 +337,7 @@ pub enum SessionEvent {
         /// Stream identifier (multiple streams per session)
         stream_id: Option<String>,
     },
-    
+
     /// Audio stream configuration changed
     AudioStreamConfigChanged {
         session_id: SessionId,
@@ -348,7 +348,7 @@ pub enum SessionEvent {
         /// Stream identifier
         stream_id: Option<String>,
     },
-    
+
     /// Audio stream started
     AudioStreamStarted {
         session_id: SessionId,
@@ -359,7 +359,7 @@ pub enum SessionEvent {
         /// Direction (Send, Receive, Both)
         direction: MediaFlowDirection,
     },
-    
+
     /// Audio stream stopped
     AudioStreamStopped {
         session_id: SessionId,
@@ -368,33 +368,33 @@ pub enum SessionEvent {
         /// Reason for stopping
         reason: String,
     },
-    
+
     // ========== GRACEFUL SHUTDOWN EVENTS ==========
-    
+
     /// Shutdown initiated by session coordinator
     ShutdownInitiated {
         /// Optional reason for shutdown
         reason: Option<String>,
     },
-    
+
     /// Component ready for shutdown
     ShutdownReady {
         /// Component name (e.g., "DialogManager", "TransactionManager", "UdpTransport")
         component: String,
     },
-    
+
     /// Shutdown signal for a specific component
     ShutdownNow {
         /// Component name to shutdown
         component: String,
     },
-    
+
     /// Component shutdown complete
     ShutdownComplete {
         /// Component name that finished shutdown
         component: String,
     },
-    
+
     /// All systems shutdown complete
     SystemShutdownComplete,
 }
@@ -453,7 +453,7 @@ impl SessionEventProcessor {
         let (sender, _) = broadcast::channel(1000); // Buffer for 1000 events
         *self.sender.write().await = Some(sender);
         *self.is_running.write().await = true;
-        
+
         tracing::info!("Session event processor started");
         Ok(())
     }
@@ -462,7 +462,7 @@ impl SessionEventProcessor {
     pub async fn stop(&self) -> Result<()> {
         *self.sender.write().await = None;
         *self.is_running.write().await = false;
-        
+
         tracing::info!("Session event processor stopped");
         Ok(())
     }
@@ -562,7 +562,7 @@ impl SessionEventProcessor {
                 }
                 _ => {} // Other events use default logging
             }
-            
+
             match sender.send(event) {
                 Ok(_) => {}, // Event sent successfully
                 Err(broadcast::error::SendError(_)) => {
@@ -597,7 +597,7 @@ impl SessionEventProcessor {
         // Filtering can be done by the subscriber if needed
         self.subscribe().await
     }
-    
+
     /// Get a clone of the broadcast sender for compatibility with existing code
     /// This allows other components to publish events directly
     pub async fn get_sender(&self) -> Result<broadcast::Sender<SessionEvent>> {
@@ -608,13 +608,13 @@ impl SessionEventProcessor {
             Err(crate::errors::SessionError::internal("Event processor not running"))
         }
     }
-    
+
     /// Create an mpsc::Sender that forwards to the broadcast system for compatibility
     /// This enables components expecting mpsc channels to work with our broadcast system
     pub async fn create_mpsc_forwarder(&self) -> Result<tokio::sync::mpsc::Sender<SessionEvent>> {
         let broadcast_sender = self.get_sender().await?;
         let (mpsc_tx, mut mpsc_rx) = tokio::sync::mpsc::channel(1000);
-        
+
         // Spawn a task to forward mpsc messages to broadcast
         tokio::spawn(async move {
             while let Some(event) = mpsc_rx.recv().await {
@@ -623,7 +623,7 @@ impl SessionEventProcessor {
                 }
             }
         });
-        
+
         Ok(mpsc_tx)
     }
 
@@ -782,9 +782,9 @@ impl SessionEventProcessor {
         };
         self.publish_event(event).await
     }
-    
+
     // ========== AUDIO STREAMING EVENT Publishing Helper Methods ==========
-    
+
     /// Publish an audio frame received event
     pub async fn publish_audio_frame_received(
         &self,
@@ -799,7 +799,7 @@ impl SessionEventProcessor {
         };
         self.publish_event(event).await
     }
-    
+
     /// Publish an audio frame requested event
     pub async fn publish_audio_frame_requested(
         &self,
@@ -814,7 +814,7 @@ impl SessionEventProcessor {
         };
         self.publish_event(event).await
     }
-    
+
     /// Publish an audio stream configuration changed event
     pub async fn publish_audio_stream_config_changed(
         &self,
@@ -831,7 +831,7 @@ impl SessionEventProcessor {
         };
         self.publish_event(event).await
     }
-    
+
     /// Publish an audio stream started event
     pub async fn publish_audio_stream_started(
         &self,
@@ -848,7 +848,7 @@ impl SessionEventProcessor {
         };
         self.publish_event(event).await
     }
-    
+
     /// Publish an audio stream stopped event
     pub async fn publish_audio_stream_stopped(
         &self,
@@ -869,4 +869,4 @@ impl Default for SessionEventProcessor {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

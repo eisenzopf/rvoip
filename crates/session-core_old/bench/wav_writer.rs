@@ -160,7 +160,7 @@ impl WavCaptureManager {
             if capture.capture_started {
                 let path = capture.save_to_wav(&self.output_dir)?;
                 results.push((call_id.clone(), path));
-                
+
                 // Also save separate files for detailed analysis
                 let _separate_paths = capture.save_separate_wavs(&self.output_dir)?;
             }
@@ -189,13 +189,13 @@ impl WavCaptureManager {
 pub fn analyze_wav_file(path: &Path) -> Result<WavAnalysis, Box<dyn std::error::Error>> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
-    
+
     let samples: Vec<i16> = reader.samples::<i16>()
         .collect::<Result<Vec<_>, _>>()?;
-    
+
     let mut left_channel = Vec::new();
     let mut right_channel = Vec::new();
-    
+
     if spec.channels == 2 {
         // Stereo: separate channels
         for (i, &sample) in samples.iter().enumerate() {
@@ -210,7 +210,7 @@ pub fn analyze_wav_file(path: &Path) -> Result<WavAnalysis, Box<dyn std::error::
         left_channel = samples.clone();
         right_channel = samples;
     }
-    
+
     Ok(WavAnalysis {
         path: path.to_path_buf(),
         sample_rate: spec.sample_rate,

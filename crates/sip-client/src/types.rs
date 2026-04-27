@@ -145,7 +145,7 @@ impl CodecPriority {
             parameters: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Add a codec parameter
     pub fn with_parameter(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.parameters.insert(key.into(), value.into());

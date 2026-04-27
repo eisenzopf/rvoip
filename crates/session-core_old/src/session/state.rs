@@ -11,7 +11,7 @@ pub struct StateManager;
 impl StateManager {
     pub fn can_transition(from: &CallState, to: &CallState) -> bool {
         use CallState::*;
-        
+
         match (from, to) {
             (Initiating, Ringing) => true,
             (Ringing, Active) => true,
@@ -32,4 +32,4 @@ impl StateManager {
             ))
         }
     }
-} 
+}

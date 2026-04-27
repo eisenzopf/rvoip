@@ -16,7 +16,7 @@ impl Effects {
             session_id, from_state, to_state, event
         );
     }
-    
+
     /// Record metrics for monitoring
     pub fn record_metrics(
         session_id: &str,
@@ -29,7 +29,7 @@ impl Effects {
             session_id, state, duration_ms
         );
     }
-    
+
     /// Send notifications
     pub async fn notify_handlers(
         session_id: &str,

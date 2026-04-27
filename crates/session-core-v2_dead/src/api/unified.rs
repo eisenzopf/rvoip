@@ -82,11 +82,11 @@ impl UnifiedCoordinator {
         let global_coordinator = rvoip_infra_common::events::global_coordinator()
             .await
             .clone();
-        
+
         // Create core components
         let store = Arc::new(SessionStore::new());
         let registry = Arc::new(SessionRegistry::new());
-        
+
         // Create adapters
         let dialog_api = Self::create_dialog_api(&config, global_coordinator.clone()).await?;
         let dialog_adapter = Arc::new(DialogAdapter::new(
@@ -94,7 +94,7 @@ impl UnifiedCoordinator {
             store.clone(),
             global_coordinator.clone(),
         ));
-        
+
         let media_controller = Self::create_media_controller(&config, global_coordinator.clone()).await?;
         let media_adapter = Arc::new(MediaAdapter::new(
             media_controller,
@@ -103,14 +103,14 @@ impl UnifiedCoordinator {
             config.media_port_start,
             config.media_port_end,
         ));
-        
+
         // Load state table based on config
         let state_table = Arc::new(
             crate::state_table::load_state_table_with_config(
                 config.state_table_path.as_deref()
             )
         );
-        
+
         // Create state machine (without event channel - using GlobalEventCoordinator)
         let state_machine = Arc::new(StateMachine::new(
             state_table,
@@ -118,7 +118,7 @@ impl UnifiedCoordinator {
             dialog_adapter.clone(),
             media_adapter.clone(),
         ));
-        
+
         // Create helpers
         let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
 
@@ -140,10 +140,10 @@ impl UnifiedCoordinator {
             incoming_rx: Arc::new(RwLock::new(incoming_rx)),
             config,
         });
-        
+
         // Start the dialog adapter
         dialog_adapter.start().await?;
-        
+
         // Create and start the centralized event handler with incoming call channel
         let mut event_handler = crate::adapters::SessionCrossCrateEventHandler::with_incoming_call_channel(
             state_machine.clone(),
@@ -162,29 +162,29 @@ impl UnifiedCoordinator {
 
         Ok(coordinator)
     }
-    
+
     // ===== Simple Call Operations =====
-    
+
     /// Make an outgoing call
     pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
         self.helpers.make_call(from, to).await
     }
-    
+
     /// Accept an incoming call
     pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.accept_call(session_id).await
     }
-    
+
     /// Reject an incoming call
     pub async fn reject_call(&self, session_id: &SessionId, reason: &str) -> Result<()> {
         self.helpers.reject_call(session_id, reason).await
     }
-    
+
     /// Hangup a call
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.hangup(session_id).await
     }
-    
+
     /// Put a call on hold
     pub async fn hold(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.state_machine.process_event(
@@ -193,7 +193,7 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
     /// Resume a call from hold
     pub async fn resume(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.state_machine.process_event(
@@ -202,14 +202,14 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
     // ===== Conference Operations =====
-    
+
     /// Create a conference from an active call
     pub async fn create_conference(&self, session_id: &SessionId, name: &str) -> Result<()> {
         self.helpers.create_conference(session_id, name).await
     }
-    
+
     /// Add a participant to a conference
     pub async fn add_to_conference(
         &self,
@@ -218,7 +218,7 @@ impl UnifiedCoordinator {
     ) -> Result<()> {
         self.helpers.add_to_conference(host_session_id, participant_session_id).await
     }
-    
+
     /// Join an existing conference
     pub async fn join_conference(&self, session_id: &SessionId, conference_id: &str) -> Result<()> {
         self.helpers.state_machine.process_event(
@@ -227,9 +227,9 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
     // ===== Transfer Operations =====
-    
+
     /// Blind transfer - initiates REFER to current session
     /// This will trigger TransferRequested event when REFER is received
     pub async fn blind_transfer(&self, session_id: &SessionId, target: &str) -> Result<()> {
@@ -286,7 +286,7 @@ impl UnifiedCoordinator {
 
         Ok(consultation_id)
     }
-    
+
     /// Complete attended transfer
     pub async fn complete_attended_transfer(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.state_machine.process_event(
@@ -307,7 +307,7 @@ impl UnifiedCoordinator {
     }
 
     // ===== DTMF Operations =====
-    
+
     /// Send DTMF digit
     pub async fn send_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()> {
         self.helpers.state_machine.process_event(
@@ -316,9 +316,9 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
     // ===== Recording Operations =====
-    
+
     /// Start recording a call
     pub async fn start_recording(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.state_machine.process_event(
@@ -327,7 +327,7 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
     /// Stop recording a call
     pub async fn stop_recording(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.state_machine.process_event(
@@ -336,31 +336,31 @@ impl UnifiedCoordinator {
         ).await?;
         Ok(())
     }
-    
+
     // ===== Query Operations =====
-    
+
     /// Get session information
     pub async fn get_session_info(&self, session_id: &SessionId) -> Result<SessionInfo> {
         self.helpers.get_session_info(session_id).await
     }
-    
+
     /// List all active sessions
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
         self.helpers.list_sessions().await
     }
-    
+
     /// Get current state of a session
     pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
         self.helpers.get_state(session_id).await
     }
-    
+
     /// Check if session is in conference
     pub async fn is_in_conference(&self, session_id: &SessionId) -> Result<bool> {
         self.helpers.is_in_conference(session_id).await
     }
-    
+
     // ===== Audio Operations =====
-    
+
     /// Subscribe to audio frames for a session
     pub async fn subscribe_to_audio(
         &self,
@@ -368,14 +368,14 @@ impl UnifiedCoordinator {
     ) -> Result<crate::types::AudioFrameSubscriber> {
         self.media_adapter.subscribe_to_audio_frames(session_id).await
     }
-    
+
     /// Send audio frame to a session
     pub async fn send_audio(&self, session_id: &SessionId, frame: AudioFrame) -> Result<()> {
         self.media_adapter.send_audio_frame(session_id, frame).await
     }
-    
+
     // ===== Event Subscriptions =====
-    
+
     /// Subscribe to session events
     pub async fn subscribe<F>(&self, session_id: SessionId, callback: F)
     where
@@ -383,12 +383,12 @@ impl UnifiedCoordinator {
     {
         self.helpers.subscribe(session_id, callback).await
     }
-    
+
     /// Unsubscribe from session events
     pub async fn unsubscribe(&self, session_id: &SessionId) {
         self.helpers.unsubscribe(session_id).await
     }
-    
+
     // ===== Incoming Call Handling =====
 
     /// Get the next incoming call
@@ -417,12 +417,12 @@ impl UnifiedCoordinator {
     }
 
     // ===== Internal Helpers =====
-    
+
     async fn create_dialog_api(config: &Config, global_coordinator: Arc<GlobalEventCoordinator>) -> Result<Arc<rvoip_dialog_core::api::unified::UnifiedDialogApi>> {
         use rvoip_dialog_core::config::DialogManagerConfig;
         use rvoip_dialog_core::api::unified::UnifiedDialogApi;
         use rvoip_dialog_core::transaction::{TransactionManager, transport::{TransportManager, TransportManagerConfig}};
-        
+
         // Create transport manager first (dialog-core's own transport manager)
         let transport_config = TransportManagerConfig {
             enable_udp: true,
@@ -432,16 +432,16 @@ impl UnifiedCoordinator {
             bind_addresses: vec![config.bind_addr],
             ..Default::default()
         };
-        
+
         let (mut transport_manager, transport_event_rx) = TransportManager::new(transport_config)
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to create transport manager: {}", e)))?;
-        
+
         // Initialize the transport manager
         transport_manager.initialize()
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to initialize transport: {}", e)))?;
-        
+
         // Create transaction manager using transport manager
         let (transaction_manager, event_rx) = TransactionManager::with_transport_manager(
             transport_manager,
@@ -450,18 +450,18 @@ impl UnifiedCoordinator {
         )
         .await
         .map_err(|e| SessionError::InternalError(format!("Failed to create transaction manager: {}", e)))?;
-        
+
         let transaction_manager = Arc::new(transaction_manager);
-        
+
         // Create dialog config - use hybrid mode to support both incoming and outgoing calls
         let dialog_config = DialogManagerConfig::hybrid(config.bind_addr)
             .with_from_uri(&config.local_uri)
             .build();
-        
+
         // Create dialog API with global event coordination AND transaction events
         let dialog_api = Arc::new(
             UnifiedDialogApi::with_global_events_and_coordinator(
-                transaction_manager, 
+                transaction_manager,
                 event_rx,
                 dialog_config,
                 global_coordinator.clone()
@@ -469,20 +469,20 @@ impl UnifiedCoordinator {
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to create dialog API: {}", e)))?
         );
-        
+
         dialog_api.start().await
             .map_err(|e| SessionError::InternalError(format!("Failed to start dialog API: {}", e)))?;
-        
+
         Ok(dialog_api)
     }
-    
-    
+
+
     async fn create_media_controller(
         config: &Config,
         global_coordinator: Arc<GlobalEventCoordinator>
     ) -> Result<Arc<rvoip_media_core::relay::controller::MediaSessionController>> {
         use rvoip_media_core::relay::controller::MediaSessionController;
-        
+
         // Create media controller with port range
         let controller = Arc::new(
             MediaSessionController::with_port_range(
@@ -490,14 +490,14 @@ impl UnifiedCoordinator {
                 config.media_port_end
             )
         );
-        
+
         // Create and set up the event hub
         let event_hub = rvoip_media_core::events::MediaEventHub::new(
             global_coordinator,
             controller.clone(),
         ).await
         .map_err(|e| SessionError::InternalError(format!("Failed to create media event hub: {}", e)))?;
-        
+
         // Set the event hub on the media controller
         controller.set_event_hub(event_hub).await;
 

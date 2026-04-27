@@ -10,7 +10,7 @@
 //! session-core (High-level call/session logic)
 //!      ↓ SessionCoordinationEvent
 //! dialog-core (SIP protocol operations)  ← THIS MODULE
-//!      ↓ TransactionKey  
+//!      ↓ TransactionKey
 //! transaction-core (SIP reliability)
 //! ```
 //!

@@ -1,5 +1,5 @@
 //! UAS (User Agent Server) API
-//! 
+//!
 //! Provides high-level server APIs for handling incoming SIP calls with
 //! progressive disclosure of complexity.
 

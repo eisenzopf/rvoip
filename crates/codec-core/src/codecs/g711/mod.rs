@@ -6,7 +6,7 @@
 //! ## Features
 //!
 //! - ITU-T G.711 compliant implementation
-//! - Both A-law and μ-law encoding/decoding  
+//! - Both A-law and μ-law encoding/decoding
 //! - Simple single-sample functions
 //! - Lookup table optimized for performance
 //!

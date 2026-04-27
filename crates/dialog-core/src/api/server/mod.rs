@@ -63,10 +63,10 @@
 //!         .with_domain("sip.company.com")
 //!         .with_auto_options()
 //!         .with_auto_register();
-//!     
+//!
 //!     // Create and configure server
 //!     let server = DialogServer::with_dependencies(tx_mgr, config).await?;
-//!     
+//!
 //!     // Session coordination events now flow via GlobalEventCoordinator;
 //!     // the channel below is illustrative only.
 //!     let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
@@ -74,7 +74,7 @@
 //!     // Start the server
 //!     server.start().await?;
 //!     println!("✅ SIP server listening on 0.0.0.0:5060");
-//!     
+//!
 //!     // Handle incoming calls
 //!     tokio::spawn(async move {
 //!         while let Some(event) = session_rx.recv().await {
@@ -88,12 +88,12 @@
 //!             }
 //!         }
 //!     });
-//!     
+//!
 //!     // Keep server running
 //!     tokio::signal::ctrl_c().await?;
 //!     server.stop().await?;
 //!     println!("✅ Server stopped gracefully");
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -161,12 +161,12 @@
 //! // Advanced call processing with routing logic
 //! tokio::spawn(async move {
 //!     let mut active_calls = HashMap::new();
-//!     
+//!
 //!     while let Some(event) = session_rx.recv().await {
 //!         match event {
 //!             SessionCoordinationEvent::IncomingCall { dialog_id, request, .. } => {
 //!                 let to_uri = request.to().unwrap().uri().to_string();
-//!                 
+//!
 //!                 // Route based on destination
 //!                 match route_call(&to_uri).await {
 //!                     CallRoute::Accept(sdp_answer) => {
@@ -219,11 +219,11 @@
 //! async fn handle_notify(server: &DialogServer, dialog_id: &DialogId, body: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
 //!     if let Some(presence_data) = body {
 //!         println!("📍 Presence update: {}", presence_data);
-//!         
+//!
 //!         // Process presence information
 //!         let presence_status = parse_presence(&presence_data)?;
 //!         update_presence_database(&dialog_id, presence_status).await?;
-//!         
+//!
 //!         // Acknowledgment would be sent via proper transaction handling
 //!         println!("✅ Presence processed for dialog {}", dialog_id);
 //!     }
@@ -234,7 +234,7 @@
 //! async fn handle_info(server: &DialogServer, dialog_id: &DialogId, body: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
 //!     if let Some(app_data) = body {
 //!         println!("📱 Application data: {}", app_data);
-//!         
+//!
 //!         // Process application-specific information
 //!         match parse_app_data(&app_data)? {
 //!             AppData::ScreenShare { session_id } => {
@@ -311,12 +311,12 @@
 //! async fn robust_call_handler(server: &DialogServer, dialog_id: &DialogId) -> Result<(), Box<dyn std::error::Error>> {
 //!     // This example shows error handling patterns, but actual implementation would need proper request/transaction context
 //!     println!("🔄 Processing call for dialog {}", dialog_id);
-//!     
+//!
 //!     // In a real implementation, you would:
 //!     // 1. Get the original INVITE request from transaction context
 //!     // 2. Use handle_invite() with the actual request
 //!     // 3. Use proper transaction keys for responses
-//!     
+//!
 //!     match server.get_dialog_info(dialog_id).await {
 //!         Ok(dialog_info) => {
 //!             println!("✅ Dialog {} found: {} -> {}", dialog_id, dialog_info.local_uri, dialog_info.remote_uri);
@@ -422,7 +422,7 @@
 //!         match event {
 //!             rvoip_dialog_core::events::SessionCoordinationEvent::IncomingCall { dialog_id, .. } => {
 //!                 let current_calls = counter_clone.load(Ordering::Relaxed);
-//!                 
+//!
 //!                 if current_calls >= max_calls {
 //!                     // Server at capacity - redirect to another server
 //!                     println!("📊 Server at capacity, would redirect call {}", dialog_id);
@@ -459,7 +459,7 @@
 //! tokio::spawn(async move {
 //!     loop {
 //!         monitor_interval.tick().await;
-//!         
+//!
 //!         let stats = server.get_stats().await;
 //!         println!("=== Server Statistics ===");
 //!         println!("Active dialogs: {}", stats.active_dialogs);
@@ -472,7 +472,7 @@
 //!         if stats.active_dialogs > 5000 {
 //!             println!("⚠️ High dialog count - consider scaling");
 //!         }
-//!         
+//!
 //!         // List active dialogs for debugging
 //!         let active_dialogs = server.list_active_dialogs().await;
 //!         if active_dialogs.len() > 100 {
@@ -538,7 +538,7 @@
 //!
 //! - [`core`]: Core server struct, constructors, and configuration management
 //! - [`call_operations`]: Call lifecycle management (handle, accept, reject, terminate)
-//! - [`dialog_operations`]: Dialog management operations (create, query, list, terminate)  
+//! - [`dialog_operations`]: Dialog management operations (create, query, list, terminate)
 //! - [`response_builder`]: Response building and sending functionality with SIP compliance
 //! - [`sip_methods`]: Specialized SIP method handlers (BYE, REFER, NOTIFY, UPDATE, INFO)
 

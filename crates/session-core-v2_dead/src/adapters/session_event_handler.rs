@@ -64,7 +64,7 @@ impl SessionCrossCrateEventHandler {
             transfer_coordinator: None,
         }
     }
-    
+
     pub fn with_incoming_call_channel(
         state_machine: Arc<StateMachineExecutor>,
         global_coordinator: Arc<GlobalEventCoordinator>,
@@ -87,17 +87,17 @@ impl SessionCrossCrateEventHandler {
     pub fn set_transfer_coordinator(&mut self, coordinator: Arc<crate::transfer::TransferCoordinator>) {
         self.transfer_coordinator = Some(coordinator);
     }
-    
+
     /// Start event processing loops
     pub async fn start(&self) -> SessionResult<()> {
         // Start subscription to global events
         self.start_global_event_subscriptions().await?;
-        
+
         Ok(())
     }
-    
-    
-    
+
+
+
     /// Start subscriptions to global cross-crate events
     async fn start_global_event_subscriptions(&self) -> SessionResult<()> {
         // Subscribe to dialog-to-session events
@@ -105,7 +105,7 @@ impl SessionCrossCrateEventHandler {
             .subscribe("dialog_to_session")
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to subscribe to dialog events: {}", e)))?;
-            
+
         let handler = self.clone();
         tokio::spawn(async move {
             info!("🔔 [session_event_handler] Started dialog-to-session event loop");
@@ -117,13 +117,13 @@ impl SessionCrossCrateEventHandler {
             }
             warn!("🔔 [session_event_handler] Dialog-to-session event loop ended");
         });
-        
+
         // Subscribe to media-to-session events
         let mut media_sub = self.global_coordinator
             .subscribe("media_to_session")
             .await
             .map_err(|e| SessionError::InternalError(format!("Failed to subscribe to media events: {}", e)))?;
-            
+
         let handler = self.clone();
         tokio::spawn(async move {
             while let Some(event) = media_sub.recv().await {
@@ -132,7 +132,7 @@ impl SessionCrossCrateEventHandler {
                 }
             }
         });
-        
+
         Ok(())
     }
 }
@@ -141,7 +141,7 @@ impl SessionCrossCrateEventHandler {
 impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
-        
+
         // Note: Downcasting Arc<dyn CrossCrateEvent> to concrete types would require
         // additional trait bounds (like Any) and type registration. For now, we use
         // string parsing of the debug representation as a pragmatic workaround.
@@ -150,11 +150,11 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
         // 2. Debug representations are stable within our codebase
         // 3. Performance impact is minimal (events are not high-frequency)
         let event_str = format!("{:?}", event);
-        
+
         match event.event_type() {
             "dialog_to_session" => {
                 info!("Processing dialog-to-session event");
-                
+
                 // Parse the debug output to determine the specific event variant
                 if event_str.contains("DialogCreated") {
                     self.handle_dialog_created(&event_str).await?;
@@ -184,7 +184,7 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
             }
             "media_to_session" => {
                 info!("Processing media-to-session event");
-                
+
                 // Parse the debug output to determine the specific event variant
                 if event_str.contains("MediaStreamStarted") {
                     self.handle_media_stream_started(&event_str).await?;
@@ -208,13 +208,13 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
                 debug!("Unhandled event type: {}", event.event_type());
             }
         }
-        
+
         Ok(())
     }
 }
 
 impl SessionCrossCrateEventHandler {
-    
+
     /// Extract session ID from event debug string (temporary workaround)
     fn extract_session_id(&self, event_str: &str) -> Option<String> {
         // Look for session_id in the debug output
@@ -226,7 +226,7 @@ impl SessionCrossCrateEventHandler {
         }
         None
     }
-    
+
     /// Extract a field value from event debug string (temporary workaround)
     fn extract_field(&self, event_str: &str, field_prefix: &str) -> Option<String> {
         if let Some(start) = event_str.find(field_prefix) {
@@ -237,8 +237,8 @@ impl SessionCrossCrateEventHandler {
         }
         None
     }
-    
-    
+
+
     // Dialog event handlers
     async fn handle_dialog_created(&self, event_str: &str) -> Result<()> {
         // Extract dialog_id and call_id
@@ -269,7 +269,7 @@ impl SessionCrossCrateEventHandler {
 
         Ok(())
     }
-    
+
     async fn handle_incoming_call(&self, event_str: &str) -> Result<()> {
         // Extract fields from the event
         // Extract session_id from the event (dialog-core provides it)
@@ -314,7 +314,7 @@ impl SessionCrossCrateEventHandler {
             .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
         let _transaction_id = self.extract_field(event_str, "transaction_id: \"").unwrap_or_else(|| "unknown".to_string());
         let _source_addr = self.extract_field(event_str, "source_addr: \"").unwrap_or_else(|| "127.0.0.1:5060".to_string());
-        
+
         // Use the session ID provided by dialog-core
         let session_id = SessionId(session_id_str);
 
@@ -336,7 +336,7 @@ impl SessionCrossCrateEventHandler {
 
         // Parse dialog UUID for registry mapping
         let dialog_uuid = uuid::Uuid::parse_str(&dialog_id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
-        
+
         // Store mapping info for state machine to use
         self.registry.map_dialog(session_id.clone(), DialogId(dialog_uuid));
         self.registry.store_pending_incoming_call(
@@ -349,7 +349,7 @@ impl SessionCrossCrateEventHandler {
                 dialog_id: DialogId(dialog_uuid),
             }
         );
-        
+
         // Store the mapping in dialog adapter for local reference
         // Convert our DialogId to rvoip DialogId
         let our_dialog_id = DialogId(dialog_uuid);
@@ -371,7 +371,7 @@ impl SessionCrossCrateEventHandler {
 
         // Process the event - state machine will handle the rest
         let event_type = EventType::IncomingCall { from: from.clone(), sdp };
-        
+
         if let Err(e) = self.state_machine.process_event(
             &session_id,
             event_type
@@ -400,10 +400,10 @@ impl SessionCrossCrateEventHandler {
                 warn!("No incoming_call_tx channel available to send notification");
             }
         }
-        
+
         Ok(())
     }
-    
+
     async fn handle_call_established(&self, event_str: &str) -> Result<()> {
         info!("🎯 [handle_call_established] Called with event: {}", event_str);
 
@@ -446,7 +446,7 @@ impl SessionCrossCrateEventHandler {
 
         Ok(())
     }
-    
+
     async fn handle_call_state_changed(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             if event_str.contains("Ringing") {
@@ -467,7 +467,7 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_call_terminated(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             if let Err(e) = self.state_machine.process_event(
@@ -479,11 +479,11 @@ impl SessionCrossCrateEventHandler {
                 }
         Ok(())
     }
-    
+
     async fn handle_dialog_error(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let error = self.extract_field(event_str, "error: \"").unwrap_or_else(|| "Unknown error".to_string());
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::DialogError(error)
@@ -493,7 +493,7 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     // Media event handlers
     async fn handle_media_stream_started(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
@@ -506,11 +506,11 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_media_stream_stopped(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let reason = self.extract_field(event_str, "reason: \"").unwrap_or_else(|| "Unknown reason".to_string());
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::MediaError(format!("Media stream stopped: {}", reason))
@@ -520,7 +520,7 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_media_flow_established(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             if let Err(e) = self.state_machine.process_event(
@@ -532,11 +532,11 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_media_error(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let error = self.extract_field(event_str, "error: \"").unwrap_or_else(|| "Unknown error".to_string());
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::MediaError(error)
@@ -546,13 +546,13 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     // New dialog event handlers
     async fn handle_dialog_state_changed(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let old_state = self.extract_field(event_str, "old_state: \"").unwrap_or_else(|| "unknown".to_string());
             let new_state = self.extract_field(event_str, "new_state: \"").unwrap_or_else(|| "unknown".to_string());
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::DialogStateChanged { old_state, new_state }
@@ -562,12 +562,12 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_reinvite_received(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let sdp = self.extract_field(event_str, "sdp: Some(\"")
                 .map(|s| s.replace("\\r\\n", "\r\n").replace("\\n", "\n").replace("\\\"", "\""));
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::ReinviteReceived { sdp }
@@ -577,7 +577,7 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_transfer_requested(&self, event_str: &str) -> Result<()> {
         if let Some(session_id_str) = self.extract_session_id(event_str) {
             let refer_to = self.extract_field(event_str, "refer_to: \"").unwrap_or_else(|| "unknown".to_string());
@@ -691,7 +691,7 @@ impl SessionCrossCrateEventHandler {
                 .map(|f| (f * 1000.0) as u32)
                 .unwrap_or(0);
             let severity = self.extract_field(event_str, "severity: \"").unwrap_or_else(|| "unknown".to_string());
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::MediaQualityDegraded { packet_loss_percent, jitter_ms, severity }
@@ -701,7 +701,7 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_dtmf_detected(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let digit = self.extract_field(event_str, "digit: '")
@@ -710,7 +710,7 @@ impl SessionCrossCrateEventHandler {
             let duration_ms = self.extract_field(event_str, "duration_ms: ")
                 .and_then(|s| s.parse::<u32>().ok())
                 .unwrap_or(0);
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::DtmfDetected { digit, duration_ms }
@@ -720,11 +720,11 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_rtp_timeout(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let last_packet_time = self.extract_field(event_str, "last_packet_time: \"").unwrap_or_else(|| "unknown".to_string());
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::RtpTimeout { last_packet_time }
@@ -734,14 +734,14 @@ impl SessionCrossCrateEventHandler {
         }
         Ok(())
     }
-    
+
     async fn handle_packet_loss_threshold_exceeded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let loss_percentage = self.extract_field(event_str, "loss_percentage: ")
                 .and_then(|s| s.parse::<f32>().ok())
                 .map(|f| (f * 100.0) as u32)
                 .unwrap_or(0);
-            
+
             if let Err(e) = self.state_machine.process_event(
                 &SessionId(session_id),
                 EventType::PacketLossThresholdExceeded { loss_percentage }

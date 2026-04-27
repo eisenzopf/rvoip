@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use rvoip_client_core::{
-    ClientConfig, ClientEventHandler, ClientError, 
+    ClientConfig, ClientEventHandler, ClientError,
     IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
     CallAction, CallId, CallState, MediaConfig,
     client::ClientManager,
@@ -81,7 +81,7 @@ impl SimpleUacHandler {
                 None
             }
         });
-        
+
         Self {
             rtp_debug,
             active_calls: Arc::new(Mutex::new(HashSet::new())),
@@ -93,7 +93,7 @@ impl SimpleUacHandler {
             final_stats: Arc::new(DashMap::new()),
         }
     }
-    
+
     async fn set_client_manager(&self, client: Arc<ClientManager>) {
         *self.client_manager.write().await = Some(client);
     }
@@ -104,29 +104,29 @@ impl SimpleUacHandler {
         call_duration: Duration,
     ) -> Result<(), Box<dyn Error>> {
         info!("🚀 Starting UAC client - making {} concurrent calls", num_concurrent_calls);
-        
+
         // Initialize client manager
         let config = self.config.read().await.clone();
-        
+
         // Set the SIP port from the config (not 0!)
         // We need to get the port from somewhere - let's modify the signature
         // For now, we'll handle this in main instead
-        
+
         let client = ClientManager::new(config).await?;
-        
+
         // Set the event handler
         client.set_event_handler(Arc::new(self.clone())).await;
-        
+
         // Start the client
         client.start().await?;
         info!("✅ UAC client started");
-        
+
         // Store the client
         self.set_client_manager(client.clone()).await;
-        
+
         // Create multiple concurrent calls
         let mut handles = Vec::new();
-        
+
         for i in 0..num_concurrent_calls {
             let call_number = i + 1;
             let client_ref = Arc::clone(&self.client_manager);
@@ -136,7 +136,7 @@ impl SimpleUacHandler {
             let rtp_debug = self.rtp_debug;
             let last_call_ids = Arc::clone(&self.last_call_ids);
             let final_stats = Arc::clone(&self.final_stats);
-            
+
             let handle = tokio::spawn(async move {
                 match make_single_call(
                     call_number,
@@ -156,29 +156,29 @@ impl SimpleUacHandler {
                     }
                 }
             });
-            
+
             handles.push(handle);
-            
+
             // Small delay between starting calls
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        
+
         // Wait for all calls to complete
         for handle in handles {
             let _ = handle.await;
         }
-        
+
         info!("✅ All calls completed");
-        
+
         // Print final RTP statistics summary
         info!("");
         info!("📊 ========== FINAL RTP STATISTICS SUMMARY ==========");
-        
+
         let mut total_sent = 0u64;
         let mut total_received = 0u64;
         let mut total_bytes_sent = 0u64;
         let mut total_bytes_received = 0u64;
-        
+
         for i in 1..=num_concurrent_calls {
             if let Some(stats) = self.final_stats.get(&i) {
                 let (sent_pkts, sent_bytes, recv_pkts, recv_bytes) = *stats;
@@ -193,7 +193,7 @@ impl SimpleUacHandler {
                 warn!("⚠️  No statistics available for Call {}", i);
             }
         }
-        
+
         info!("──────────────────────────────────────────────────");
         info!("📈 TOTAL: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
             total_sent,
@@ -201,14 +201,14 @@ impl SimpleUacHandler {
             total_received,
             total_bytes_received
         );
-        
+
         if total_received == 0 && total_sent > 0 {
             warn!("⚠️  No RTP packets were received from the server!");
             warn!("    This may indicate a network configuration issue.");
         }
         info!("===================================================");
         info!("");
-        
+
         Ok(())
     }
 }
@@ -223,42 +223,42 @@ async fn make_single_call(
     last_call_ids: Arc<DashMap<usize, CallId>>,
 ) -> Result<(u64, u64, u64, u64), Box<dyn Error>> {
     info!("📞 Call {}: Initiating call to {}", call_number, server_addr);
-    
+
     let from_uri = format!("sip:uac{}@127.0.0.1", call_number);
     let to_uri = format!("sip:uas{}@{}", call_number, server_addr);
-    
+
     // Make the call
     let call_id = {
         let client = client_ref.read().await;
         let client = client.as_ref().ok_or("Client not initialized")?;
         client.make_call(from_uri, to_uri, None).await?
     };
-    
+
     info!("📞 Call {}: Created with ID: {}", call_number, call_id);
-    
+
     // Add to active calls
     active_calls.lock().await.insert(call_id.clone());
-    
+
     // Store the mapping for final statistics
     last_call_ids.insert(call_number, call_id.clone());
     info!("📝 Stored call mapping: Call {} -> {}", call_number, call_id);
-    
+
     // Start statistics monitoring
     let stats_handle = {
         let client_ref = Arc::clone(&client_ref);
         let call_id = call_id.clone();
         let call_num = call_number;
-        
+
         tokio::spawn(async move {
             // Wait a bit for the call to establish
             tokio::time::sleep(Duration::from_secs(2)).await;
-            
+
             // Monitor statistics every second
             loop {
                 if let Some(client) = client_ref.read().await.as_ref() {
                     // Get RTP statistics
                     if let Ok(Some(rtp_stats)) = client.get_rtp_statistics(&call_id).await {
-                        info!("📊 Call {} RTP Stats - Sent: {} packets ({} bytes), Received: {} packets ({} bytes), Lost: {}", 
+                        info!("📊 Call {} RTP Stats - Sent: {} packets ({} bytes), Received: {} packets ({} bytes), Lost: {}",
                             call_num,
                             rtp_stats.packets_sent,
                             rtp_stats.bytes_sent,
@@ -267,7 +267,7 @@ async fn make_single_call(
                             rtp_stats.packets_lost
                         );
                     }
-                    
+
                     // Get call statistics for quality metrics
                     if let Ok(Some(call_stats)) = client.get_call_statistics(&call_id).await {
                         if rtp_debug {
@@ -280,21 +280,21 @@ async fn make_single_call(
                         }
                     }
                 }
-                
+
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         })
     };
-    
+
     // Let the call run for the specified duration
     info!("📞 Call {}: Running for {:?}...", call_number, duration);
     tokio::time::sleep(duration).await;
-    
+
     // Capture final statistics before terminating
     let (packets_sent, bytes_sent, packets_received, bytes_received) = {
         let client = client_ref.read().await;
         let client = client.as_ref().ok_or("Client not initialized")?;
-        
+
         match client.get_rtp_statistics(&call_id).await {
             Ok(Some(stats)) => {
                 info!("📊 Call {} Final Stats - Sent: {} packets ({} bytes), Received: {} packets ({} bytes)",
@@ -316,7 +316,7 @@ async fn make_single_call(
             }
         }
     };
-    
+
     // Terminate the call
     info!("📞 Call {}: Terminating...", call_number);
     {
@@ -324,13 +324,13 @@ async fn make_single_call(
         let client = client.as_ref().ok_or("Client not initialized")?;
         client.hangup_call(&call_id).await?;
     }
-    
+
     // Stop statistics monitoring
     stats_handle.abort();
-    
+
     // Remove from active calls
     active_calls.lock().await.remove(&call_id);
-    
+
     info!("✅ Call {}: Completed successfully", call_number);
     Ok((packets_sent, bytes_sent, packets_received, bytes_received))
 }
@@ -346,31 +346,31 @@ impl ClientEventHandler for SimpleUacHandler {
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
         info!(
             "📞 Call {} state changed: {:?} -> {:?}",
-            status_info.call_id, 
-            status_info.previous_state, 
+            status_info.call_id,
+            status_info.previous_state,
             status_info.new_state
         );
 
         if status_info.new_state == CallState::Connected {
             let mut calls = self.active_calls.lock().await;
             calls.insert(status_info.call_id.clone());
-            
+
             info!("🎵 Call {} connected - starting RTP transmission", status_info.call_id);
-            
+
             // Get the client manager to start audio transmission
             if let Some(client) = self.client_manager.read().await.as_ref() {
                 info!("📤 Starting audio transmission for call {}", status_info.call_id);
-                
+
                 // Start the audio transmission (sends 440Hz test tone)
                 match client.start_audio_transmission(&status_info.call_id).await {
                     Ok(_) => {
                         info!("✅ Audio transmission started - sending 440Hz test tone");
-                        
+
                         // Get media info to see the negotiated parameters
                         if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
                             info!("📊 Media info - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
                                 media_info.local_rtp_port, media_info.remote_rtp_port, media_info.codec);
-                            
+
                             // The remote SDP should now be automatically populated by session-core
                             if media_info.remote_sdp.is_some() {
                                 info!("✅ Remote SDP is available - RTP endpoint configured automatically");
@@ -386,7 +386,7 @@ impl ClientEventHandler for SimpleUacHandler {
                         error!("❌ Failed to start audio transmission: {}", e);
                     }
                 }
-                
+
                 if self.wav_data.is_some() {
                     info!("💡 Note: Custom WAV playback not yet implemented");
                     info!("🎵 The media session is sending a default 440Hz test tone");
@@ -440,27 +440,27 @@ impl ClientEventHandler for SimpleUacHandler {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command line arguments
     let args = UacArgs::parse();
-    
+
     // Initialize logging
     let log_level = if args.rtp_debug {
         tracing::Level::DEBUG
     } else {
         tracing::Level::INFO
     };
-    
+
     tracing_subscriber::fmt()
         .with_max_level(log_level)
         .with_thread_ids(true)
         .with_target(false)
         .init();
-    
+
     info!("Starting UAC client example");
-    
+
     // Create client configuration
     let mut client_config = ClientConfig::default();
     client_config.local_sip_addr = format!("0.0.0.0:{}", args.port).parse().unwrap();
     client_config.user_agent = "rvoip-uac-demo/1.0".to_string();
-    
+
     // Configure media settings
     client_config.media = MediaConfig {
         rtp_port_start: args.media_port,
@@ -471,17 +471,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auto_gain_control: false,
         ..Default::default()
     };
-    
+
     // Create the UAC client
     let client = SimpleUacHandler::new(args.rtp_debug, Some(&args.wav_file), args.server.clone());
-    
+
     // Set the configuration
     *client.config.write().await = client_config;
-    
+
     // Run the client
     let call_duration = Duration::from_secs(args.duration);
     client.run(args.num_calls, call_duration).await?;
-    
+
     info!("UAC client example completed");
     Ok(())
-} 
+}

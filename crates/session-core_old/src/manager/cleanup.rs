@@ -41,10 +41,10 @@ impl CleanupManager {
         // Spawn cleanup task
         tokio::spawn(async move {
             let mut interval = interval(cleanup_interval);
-            
+
             while *is_running_clone.read().await {
                 interval.tick().await;
-                
+
                 if let Err(e) = Self::run_cleanup().await {
                     tracing::error!("Cleanup error: {}", e);
                 }
@@ -70,37 +70,37 @@ impl CleanupManager {
     /// Run cleanup operations
     async fn run_cleanup() -> Result<()> {
         tracing::debug!("Running cleanup operations");
-        
+
         // TODO: Implement actual cleanup:
         // - Remove expired sessions
         // - Clean up media resources
         // - Remove stale dialogs
         // - Clean up temporary files
-        
+
         Ok(())
     }
 
     /// Clean up a specific session
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
         tracing::debug!("Cleaning up session: {}", session_id);
-        
+
         // TODO: Implement session-specific cleanup:
         // - Release media ports
         // - Close RTP streams
         // - Clean up dialog state
-        
+
         Ok(())
     }
 
     /// Force cleanup of all resources
     pub async fn force_cleanup_all(&self) -> Result<()> {
         tracing::info!("Force cleaning up all resources");
-        
+
         // TODO: Implement force cleanup:
         // - Terminate all active sessions
         // - Release all media resources
         // - Clean up all dialogs
-        
+
         Ok(())
     }
 }
@@ -109,4 +109,4 @@ impl Default for CleanupManager {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

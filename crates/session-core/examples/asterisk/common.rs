@@ -42,7 +42,8 @@ pub struct EndpointConfig {
 impl EndpointConfig {
     pub fn registrar_uri(&self) -> String {
         format!(
-            "sip:{}:{}{}",
+            "{}:{}:{}{}",
+            self.uri_scheme(),
             self.sip_server,
             self.sip_port,
             transport_suffix(&self.transport)
@@ -50,24 +51,34 @@ impl EndpointConfig {
     }
 
     pub fn aor_uri(&self) -> String {
-        format!("sip:{}@{}", self.username, self.sip_server)
+        format!(
+            "{}:{}@{}",
+            self.uri_scheme(),
+            self.username,
+            self.sip_server
+        )
     }
 
     pub fn contact_uri(&self) -> String {
         format!(
-            "sip:{}@{}:{}{}",
+            "{}:{}@{}:{}{}",
+            self.uri_scheme(),
             self.username,
             self.advertised_ip,
-            self.local_port,
+            self.contact_port(),
             transport_suffix(&self.transport)
         )
     }
 
     pub fn call_uri(&self, target: &str) -> String {
-        if self.sip_port == 5060 {
-            format!("sip:{}@{}", target, self.sip_server)
+        let scheme = self.uri_scheme();
+        if self.sip_port == default_port_for_transport(&self.transport) {
+            format!("{}:{}@{}", scheme, target, self.sip_server)
         } else {
-            format!("sip:{}@{}:{}", target, self.sip_server, self.sip_port)
+            format!(
+                "{}:{}@{}:{}",
+                scheme, target, self.sip_server, self.sip_port
+            )
         }
     }
 
@@ -89,10 +100,48 @@ impl EndpointConfig {
         config
     }
 
+    pub fn tls_srtp_stream_config(&self) -> ExampleResult<Config> {
+        if !self.is_tls() {
+            return Err("tls_srtp_hold_resume requires SIP_TRANSPORT=TLS".into());
+        }
+
+        let mut config = self.stream_config();
+        config.tls_cert_path = Some(required_path("TLS_CERT_PATH")?);
+        config.tls_key_path = Some(required_path("TLS_KEY_PATH")?);
+        config.tls_extra_ca_path = optional_path("TLS_CA_PATH");
+        #[cfg(feature = "dev-insecure-tls")]
+        {
+            config.tls_insecure_skip_verify = env_bool("TLS_INSECURE", false)?;
+        }
+        config.offer_srtp = true;
+        config.srtp_required = env_bool("ASTERISK_TLS_SRTP_REQUIRED", true)?;
+        Ok(config)
+    }
+
     pub fn registration(&self) -> Registration {
         Registration::new(self.registrar_uri(), &self.auth_username, &self.password)
             .from_uri(self.aor_uri())
             .contact_uri(self.contact_uri())
+    }
+
+    fn is_tls(&self) -> bool {
+        self.transport.eq_ignore_ascii_case("tls")
+    }
+
+    fn uri_scheme(&self) -> &'static str {
+        if self.is_tls() {
+            "sips"
+        } else {
+            "sip"
+        }
+    }
+
+    fn contact_port(&self) -> u16 {
+        if self.is_tls() {
+            self.local_port.saturating_add(1)
+        } else {
+            self.local_port
+        }
     }
 }
 
@@ -128,8 +177,12 @@ pub fn endpoint_config(
 ) -> ExampleResult<EndpointConfig> {
     let prefix = format!("ENDPOINT_{}", username);
     let sip_server = env_string("SIP_SERVER", "192.168.1.103");
-    let sip_port = env_u16("SIP_PORT", 5060)?;
     let transport = env_string("SIP_TRANSPORT", "UDP").to_lowercase();
+    let sip_port = if transport == "tls" {
+        env_u16("SIP_TLS_PORT", 5061)?
+    } else {
+        env_u16("SIP_PORT", 5060)?
+    };
     let auth_username = env_string(&format!("{}_AUTH_USERNAME", prefix), username);
     let password = env_string("SIP_PASSWORD", "password123");
     let local_ip: IpAddr = env_string("LOCAL_IP", "0.0.0.0").parse()?;
@@ -399,9 +452,48 @@ fn env_u16(key: &str, default: u16) -> ExampleResult<u16> {
         .parse()?)
 }
 
+fn env_bool(key: &str, default: bool) -> ExampleResult<bool> {
+    let value = match std::env::var(key) {
+        Ok(value) => value,
+        Err(_) => return Ok(default),
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(format!("{} must be a boolean value", key).into()),
+    }
+}
+
+fn required_path(key: &str) -> ExampleResult<PathBuf> {
+    let value =
+        std::env::var(key).map_err(|_| format!("{} must be set for SIP_TRANSPORT=TLS", key))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(format!("{} must not be empty", key).into());
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn optional_path(key: &str) -> Option<PathBuf> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn default_port_for_transport(transport: &str) -> u16 {
+    if transport.eq_ignore_ascii_case("tls") {
+        5061
+    } else {
+        5060
+    }
+}
+
 fn transport_suffix(transport: &str) -> &'static str {
     match transport.to_lowercase().as_str() {
         "tcp" => ";transport=tcp",
+        "tls" => ";transport=tls",
         _ => "",
     }
 }

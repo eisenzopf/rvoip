@@ -183,22 +183,22 @@ impl ConferenceEventHandler for LoggingEventHandler {
                 tracing::info!("👤 Participant left: {} from {} (reason: {})", session_id, conference_id, reason);
             }
             ConferenceEvent::ParticipantStatusChanged { conference_id, session_id, old_status, new_status, .. } => {
-                tracing::info!("👤 Participant status changed: {} in {} ({:?} -> {:?})", 
+                tracing::info!("👤 Participant status changed: {} in {} ({:?} -> {:?})",
                               session_id, conference_id, old_status, new_status);
             }
             ConferenceEvent::ConferenceStateChanged { conference_id, old_state, new_state, .. } => {
-                tracing::info!("🎪 Conference state changed: {} ({:?} -> {:?})", 
+                tracing::info!("🎪 Conference state changed: {} ({:?} -> {:?})",
                               conference_id, old_state, new_state);
             }
             ConferenceEvent::ParticipantMediaEstablished { conference_id, session_id, rtp_port, .. } => {
-                tracing::info!("🎵 Media established: {} in {} (RTP port: {})", 
+                tracing::info!("🎵 Media established: {} in {} (RTP port: {})",
                               session_id, conference_id, rtp_port);
             }
             ConferenceEvent::ParticipantMediaTerminated { conference_id, session_id, .. } => {
                 tracing::info!("🎵 Media terminated: {} in {}", session_id, conference_id);
             }
             ConferenceEvent::StatsUpdated { conference_id, stats, .. } => {
-                tracing::debug!("📊 Stats updated: {} ({} participants)", 
+                tracing::debug!("📊 Stats updated: {} ({} participants)",
                                conference_id, stats.total_participants);
             }
             ConferenceEvent::ConferenceError { conference_id, error, .. } => {
@@ -209,4 +209,4 @@ impl ConferenceEventHandler for LoggingEventHandler {
             }
         }
     }
-} 
+}

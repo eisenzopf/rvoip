@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use rvoip_client_core::{
-    ClientConfig, ClientEventHandler, ClientError, 
+    ClientConfig, ClientEventHandler, ClientError,
     IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
     CallAction, CallId, CallState, MediaConfig, MediaEventType,
     client::ClientManager,
@@ -49,7 +49,7 @@ impl SimpleUasHandler {
             call_stats: Arc::new(DashMap::new()),
         }
     }
-    
+
     async fn set_client_manager(&self, client: Arc<ClientManager>) {
         *self.client_manager.write().await = Some(client);
     }
@@ -65,9 +65,9 @@ impl ClientEventHandler for SimpleUasHandler {
 
         // For this demo, we'll use deferred handling (return Ignore)
         // and answer the call in the polling loop after a delay
-        info!("⏳ Will auto-answer call {} after {} ms", 
+        info!("⏳ Will auto-answer call {} after {} ms",
             call_info.call_id, self.auto_answer_delay_ms);
-        
+
         CallAction::Ignore
     }
 
@@ -81,7 +81,7 @@ impl ClientEventHandler for SimpleUasHandler {
             CallState::Terminated => "☎️",
             _ => "❓",
         };
-        
+
         info!(
             "{} Call {} state changed: {:?} → {:?} {}",
             state_emoji,
@@ -90,12 +90,12 @@ impl ClientEventHandler for SimpleUasHandler {
             status_info.new_state,
             status_info.reason.as_deref().unwrap_or("")
         );
-        
+
         if status_info.new_state == CallState::Connected {
             let mut calls = self.active_calls.lock().await;
             calls.insert(status_info.call_id);
             info!("✅ Call {} connected - ready to receive RTP", status_info.call_id);
-            
+
             // Start audio transmission for the server side
             if let Some(client) = self.client_manager.read().await.as_ref() {
                 info!("📤 Starting audio transmission for call {}", status_info.call_id);
@@ -103,7 +103,7 @@ impl ClientEventHandler for SimpleUasHandler {
                     Ok(_) => info!("✅ Audio transmission started for call {}", status_info.call_id),
                     Err(e) => error!("❌ Failed to start audio transmission: {}", e),
                 }
-                
+
                 // Get media info to see the negotiated parameters
                 if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
                     info!("📊 Media info for call {}:", status_info.call_id);
@@ -115,7 +115,7 @@ impl ClientEventHandler for SimpleUasHandler {
                     info!("       Codec: {}", media_info.codec.as_ref().unwrap_or(&"Unknown".to_string()));
                 }
             }
-            
+
             // Start monitoring RTP statistics
             self.start_stats_monitoring(status_info.call_id).await;
         } else if status_info.new_state == CallState::Terminated {
@@ -157,7 +157,7 @@ impl ClientEventHandler for SimpleUasHandler {
         if let Some(rtp_received) = event.metadata.get("rtp_packets_received") {
             info!("📥 RTP packets received for call {}: {}", event.call_id, rtp_received);
         }
-        
+
         if let Some(rtp_stats) = event.metadata.get("rtp_stats") {
             info!("📊 RTP stats for call {}: {}", event.call_id, rtp_stats);
         }
@@ -186,11 +186,11 @@ impl SimpleUasHandler {
         let call_id = call_id.clone();
         let rtp_debug = self.rtp_debug;
         let call_stats = Arc::clone(&self.call_stats);
-        
+
         tokio::spawn(async move {
             // Wait a bit for RTP to start flowing
             tokio::time::sleep(Duration::from_secs(1)).await;
-            
+
             // Monitor statistics every second
             loop {
                 if let Some(client) = client_ref.read().await.as_ref() {
@@ -203,7 +203,7 @@ impl SimpleUasHandler {
                             rtp_stats.packets_received,
                             rtp_stats.bytes_received
                         ));
-                        
+
                         info!("📊 Server RTP Stats for {}: Sent: {} packets ({} bytes), Received: {} packets ({} bytes)",
                             call_id,
                             rtp_stats.packets_sent,
@@ -211,7 +211,7 @@ impl SimpleUasHandler {
                             rtp_stats.packets_received,
                             rtp_stats.bytes_received
                         );
-                        
+
                         if rtp_debug {
                             // Get call statistics for quality metrics
                             if let Ok(Some(call_stats)) = client.get_call_statistics(&call_id).await {
@@ -231,7 +231,7 @@ impl SimpleUasHandler {
                     error!("Client manager not available for stats monitoring");
                     break;
                 }
-                
+
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
@@ -279,10 +279,10 @@ async fn main() -> Result<()> {
 
     // Build and start server
     let client = ClientManager::new(config).await?;
-    
+
     // Set the client manager reference in the handler
     handler.set_client_manager(client.clone()).await;
-    
+
     client.set_event_handler(handler.clone()).await;
     client.start().await?;
 
@@ -294,11 +294,11 @@ async fn main() -> Result<()> {
 
     // Main loop to handle incoming calls
     let mut check_interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
-    
+
     // Set up Ctrl+C handler
     let ctrl_c = tokio::signal::ctrl_c();
     tokio::pin!(ctrl_c);
-    
+
     loop {
         tokio::select! {
             _ = &mut ctrl_c => {
@@ -320,17 +320,17 @@ async fn main() -> Result<()> {
             }
         }
     }
-    
+
     // Print final statistics before shutdown
     info!("");
     info!("📊 ========== FINAL RTP STATISTICS SUMMARY ==========");
-    
+
     let mut total_sent = 0u64;
     let mut total_received = 0u64;
     let mut total_bytes_sent = 0u64;
     let mut total_bytes_received = 0u64;
     let mut call_count = 0;
-    
+
     for entry in handler.call_stats.iter() {
         let (call_id, (sent_pkts, sent_bytes, recv_pkts, recv_bytes)) = entry.pair();
         info!("📞 Call {}: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
@@ -342,7 +342,7 @@ async fn main() -> Result<()> {
         total_bytes_received += recv_bytes;
         call_count += 1;
     }
-    
+
     if call_count > 0 {
         info!("──────────────────────────────────────────────────");
         info!("📈 TOTAL {} calls: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
@@ -352,7 +352,7 @@ async fn main() -> Result<()> {
             total_received,
             total_bytes_received
         );
-        
+
         if total_sent == 0 && total_received > 0 {
             warn!("⚠️  Server received RTP packets but didn't send any!");
             warn!("    This may indicate the server didn't start audio transmission.");
@@ -362,10 +362,10 @@ async fn main() -> Result<()> {
     }
     info!("===================================================");
     info!("");
-    
+
     // Stop the client
     client.stop().await?;
-    
+
     info!("✅ UAS server stopped");
     Ok(())
-} 
+}

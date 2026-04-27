@@ -184,6 +184,15 @@ path = "examples/asterisk/hold_resume/endpoint_1002.rs"
 [[example]]
 name = "asterisk_hold_resume_analyze"
 path = "examples/asterisk/hold_resume/analyze.rs"
+[[example]]
+name = "asterisk_tls_srtp_hold_resume_1001"
+path = "examples/asterisk/tls_srtp_hold_resume/endpoint_1001.rs"
+[[example]]
+name = "asterisk_tls_srtp_hold_resume_1002"
+path = "examples/asterisk/tls_srtp_hold_resume/endpoint_1002.rs"
+[[example]]
+name = "asterisk_tls_srtp_hold_resume_analyze"
+path = "examples/asterisk/tls_srtp_hold_resume/analyze.rs"
 
 
 [dependencies]

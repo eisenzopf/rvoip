@@ -157,7 +157,7 @@ impl InviteBuilder {
     /// # Arguments
     /// * `call_id` - The dialog's Call-ID
     /// * `from_uri` - Local URI (From header)
-    /// * `from_tag` - Local tag (From header tag)  
+    /// * `from_tag` - Local tag (From header tag)
     /// * `from_display_name` - Optional display name for From header
     /// * `to_uri` - Remote URI (To header)
     /// * `to_tag` - Remote tag (To header tag)

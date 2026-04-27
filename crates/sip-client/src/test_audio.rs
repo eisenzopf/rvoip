@@ -1,5 +1,5 @@
 //! Test audio backend for integration testing
-//! 
+//!
 //! This module provides memory-based audio devices that can be used
 //! to test two SIP clients on the same machine without requiring
 //! actual audio hardware.
@@ -8,7 +8,7 @@ use std::collections::{VecDeque, HashMap};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use rvoip_audio_core::{
-    AudioDevice, AudioDeviceInfo, AudioDirection, AudioFormat, 
+    AudioDevice, AudioDeviceInfo, AudioDirection, AudioFormat,
     AudioFrame, AudioError, AudioResult
 };
 

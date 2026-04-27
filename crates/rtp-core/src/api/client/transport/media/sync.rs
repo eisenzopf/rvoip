@@ -167,7 +167,7 @@ pub async fn convert_timestamp(
                 rtp_ts, from_ssrc, to_ssrc, result
             );
         } else {
-            debug!("Failed to convert timestamp {} from SSRC={:08x} to SSRC={:08x} - insufficient sync data", 
+            debug!("Failed to convert timestamp {} from SSRC={:08x} to SSRC={:08x} - insufficient sync data",
                    rtp_ts, from_ssrc, to_ssrc);
         }
         Ok(result)

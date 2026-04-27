@@ -477,16 +477,16 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
 /// // Progressively build a complex structure
 /// path::set_path(&mut msg, "headers.From.display_name",
 ///                SipValue::String("Alice".to_string())).unwrap();
-///                
+///
 /// path::set_path(&mut msg, "headers.From.uri.scheme",
 ///                SipValue::String("sip".to_string())).unwrap();
-///                
+///
 /// path::set_path(&mut msg, "headers.From.uri.user",
 ///                SipValue::String("alice".to_string())).unwrap();
-///                
+///
 /// path::set_path(&mut msg, "headers.From.uri.host.Domain",
 ///                SipValue::String("example.com".to_string())).unwrap();
-///                
+///
 /// path::set_path(&mut msg, "headers.From.params[0].Tag",
 ///                SipValue::String("1234".to_string())).unwrap();
 ///
@@ -513,7 +513,7 @@ pub fn get_path<'a>(root_value: &'a SipValue, path: &str) -> Option<&'a SipValue
 /// path::set_path(&mut msg, "headers.Via[0]", SipValue::Object(HashMap::new())).unwrap();
 /// path::set_path(&mut msg, "headers.Via[0].sent_by_host",
 ///                SipValue::String("proxy1.example.com".to_string())).unwrap();
-///                
+///
 /// path::set_path(&mut msg, "headers.Via[1]", SipValue::Object(HashMap::new())).unwrap();
 /// path::set_path(&mut msg, "headers.Via[1].sent_by_host",
 ///                SipValue::String("proxy2.example.com".to_string())).unwrap();
@@ -705,11 +705,11 @@ fn set_path_internal(
 /// if let Some(items_val) = path::get_path(&msg, "items") {
 ///     if let Some(items) = items_val.as_array() {
 ///         assert_eq!(items.len(), 2);
-///         
+///
 ///         if let Some(first) = path::get_path(&msg, "items[0]") {
 ///             assert_eq!(first.as_str(), Some("first"));
 ///         }
-///         
+///
 ///         if let Some(third) = path::get_path(&msg, "items[1]") {
 ///             assert_eq!(third.as_str(), Some("third"));
 ///         }

@@ -7,7 +7,7 @@
 //! ## What These Tests Do
 //!
 //! 1. **Download Real Audio**: Automatically downloads a WAV file containing real speech
-//! 2. **Process Audio**: Encodes the audio using G.711 (both A-law and μ-law)  
+//! 2. **Process Audio**: Encodes the audio using G.711 (both A-law and μ-law)
 //! 3. **Validate Quality**: Decodes the audio and measures Signal-to-Noise Ratio (SNR)
 //! 4. **Save Results**: Outputs WAV files for manual quality assessment
 //!
@@ -50,7 +50,7 @@
 //! # Run only A-law test
 //! cargo test test_g711_alaw_roundtrip_real_audio -- --nocapture
 //!
-//! # Run only μ-law test  
+//! # Run only μ-law test
 //! cargo test test_g711_ulaw_roundtrip_real_audio -- --nocapture
 //! ```
 //!

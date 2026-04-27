@@ -1,5 +1,5 @@
 /// Benchmark: 500 concurrent calls with actual audio tones
-/// 
+///
 /// This benchmark creates 500 concurrent SIP calls between two SessionManagers,
 /// with each peer sending different frequency tones (440Hz client, 880Hz server).
 /// 5 random calls are captured to WAV files for validation.
@@ -39,7 +39,7 @@ impl ClientHandler {
             coordinator: Arc::new(Mutex::new(None)),
         }
     }
-    
+
     async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
         *self.coordinator.lock().await = Some(coordinator);
     }
@@ -50,20 +50,20 @@ impl CallHandler for ClientHandler {
     async fn on_incoming_call(&self, _call: IncomingCall) -> CallDecision {
         CallDecision::Reject("Client doesn't accept incoming calls".to_string())
     }
-    
+
     async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         let call_id = call.id.0.clone();
         let session_id = call.id.clone();
-        info!("Client: Call {} established - local_sdp: {}, remote_sdp: {}, sip_call_id: {:?}", 
+        info!("Client: Call {} established - local_sdp: {}, remote_sdp: {}, sip_call_id: {:?}",
             &call_id[..8.min(call_id.len())],
             local_sdp.is_some(),
             remote_sdp.is_some(),
             call.sip_call_id
         );
-        
+
         // Store session
         self.established_calls.lock().await.push(call_id.clone());
-        
+
         // Register call for potential audio capture (UAC needs to register in on_call_established)
         let call_count = self.established_calls.lock().await.len() - 1; // 0-based index
         if self.audio_validator.should_capture_index(call_count).await {
@@ -75,22 +75,22 @@ impl CallHandler for ClientHandler {
                 info!("Client: Registered session ID {} for audio capture", &call_id[..8.min(call_id.len())]);
             }
         }
-        
+
         // Log the Call-ID for debugging
         if let Some(ref sip_call_id) = call.sip_call_id {
             info!("Client: Call {} has Call-ID: {}", &call_id[..8.min(call_id.len())], sip_call_id);
         }
-        
+
         // Check if this call is selected for audio capture using SIP Call-ID if available
         let is_selected = if let Some(ref sip_call_id) = call.sip_call_id {
             self.audio_validator.is_selected(sip_call_id).await
         } else {
             self.audio_validator.is_selected(&call_id).await
         };
-        
+
         // Get coordinator
         let coordinator_opt = self.coordinator.lock().await.clone();
-        
+
         if let Some(coordinator) = coordinator_opt {
             // Workaround: If SDP is not provided, fetch it from media info
             let mut actual_remote_sdp = remote_sdp;
@@ -110,7 +110,7 @@ impl CallHandler for ClientHandler {
                         info!("Client: Updated media with remote SDP for call {}", &call_id[..8.min(call_id.len())]);
                     }
                     Err(e) => {
-                        tracing::error!("Client: Failed to update media with SDP for call {}: {}", 
+                        tracing::error!("Client: Failed to update media with SDP for call {}: {}",
                             &call_id[..8.min(call_id.len())], e);
                         return;
                     }
@@ -118,13 +118,13 @@ impl CallHandler for ClientHandler {
             } else {
                 tracing::warn!("Client: No remote SDP provided for call {}", &call_id[..8.min(call_id.len())]);
             }
-            
+
             // Step 2: Start audio transmission (enables RTP processing)
             if let Err(e) = MediaControl::start_audio_transmission(&coordinator, &session_id).await {
                 tracing::error!("Client: Failed to start audio transmission: {}", e);
                 return;
             }
-            
+
             // Step 3: If selected for capture, subscribe to receive audio
             if is_selected {
                 info!("Client: Call {} is selected for audio capture", &call_id[..8.min(call_id.len())]);
@@ -134,21 +134,21 @@ impl CallHandler for ClientHandler {
                 let call_id_recv = call.sip_call_id.clone().unwrap_or(call_id.clone());
                 let session_id_recv = session_id.clone();
                 let coordinator_recv = coordinator.clone();
-                
+
                 tokio::spawn(async move {
                     info!("Client: Starting audio capture task for call {}", &call_id_recv[..8.min(call_id_recv.len())]);
-                    
+
                     // Wait for media to be fully established
                     let mut retries = 0;
                     while retries < 20 {
                         if let Ok(Some(info)) = MediaControl::get_media_info(&coordinator_recv, &session_id_recv).await {
-                            tracing::debug!("Client: Media info for call {} - local_sdp: {}, remote_sdp: {}", 
+                            tracing::debug!("Client: Media info for call {} - local_sdp: {}, remote_sdp: {}",
                                 &call_id_recv[..8.min(call_id_recv.len())],
                                 info.local_sdp.is_some(),
                                 info.remote_sdp.is_some()
                             );
                             if info.remote_sdp.is_some() && info.local_sdp.is_some() {
-                                info!("Client: Media ready for call {} after {} retries", 
+                                info!("Client: Media ready for call {} after {} retries",
                                     &call_id_recv[..8.min(call_id_recv.len())], retries);
                                 break;
                             }
@@ -156,22 +156,22 @@ impl CallHandler for ClientHandler {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         retries += 1;
                     }
-                    
+
                     if retries >= 20 {
-                        tracing::error!("Client: Media not ready after 2 seconds for call {}", 
+                        tracing::error!("Client: Media not ready after 2 seconds for call {}",
                             &call_id_recv[..8.min(call_id_recv.len())]);
                         return;
                     }
-                    
+
                     // Subscribe to audio frames from the session
                     match MediaControl::subscribe_to_audio_frames(&coordinator_recv, &session_id_recv).await {
                         Ok(mut subscriber) => {
                             info!("Client: Started receiving audio for call {}", &call_id_recv[..8.min(call_id_recv.len())]);
-                            
+
                             // Receive audio for up to 10 seconds
                             let start = tokio::time::Instant::now();
                             let mut frame_count = 0;
-                            
+
                             while start.elapsed() < Duration::from_secs(10) {
                                 // Try to receive audio frame with timeout
                                 match tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await {
@@ -179,15 +179,15 @@ impl CallHandler for ClientHandler {
                                         // Capture received audio (should be 880Hz from server)
                                         validator.capture_client_received(&call_id_recv, frame.samples).await;
                                         frame_count += 1;
-                                        
+
                                         if frame_count % 50 == 0 {
-                                            tracing::debug!("Client: Received {} frames for call {}", 
+                                            tracing::debug!("Client: Received {} frames for call {}",
                                                 frame_count, &call_id_recv[..8.min(call_id_recv.len())]);
                                         }
                                     }
                                     Ok(None) => {
                                         // Channel closed
-                                        tracing::debug!("Client: Audio channel closed for call {}", 
+                                        tracing::debug!("Client: Audio channel closed for call {}",
                                             &call_id_recv[..8.min(call_id_recv.len())]);
                                         break;
                                     }
@@ -196,8 +196,8 @@ impl CallHandler for ClientHandler {
                                     }
                                 }
                             }
-                            
-                            info!("Client: Stopped receiving audio for call {} ({} frames total)", 
+
+                            info!("Client: Stopped receiving audio for call {} ({} frames total)",
                                 &call_id_recv[..8.min(call_id_recv.len())], frame_count);
                         }
                         Err(e) => {
@@ -206,23 +206,23 @@ impl CallHandler for ClientHandler {
                     }
                 });
             }
-            
+
             // Step 4: Start sending 440Hz tone
             let session_id_send = session_id.clone();
             let call_id_send = call_id.clone();
             let coordinator_send = coordinator.clone();
-            
+
             tokio::spawn(async move {
                 // Wait a moment for media to be established
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                
+
                 // Generate 10 seconds of 440Hz tone at 8kHz
                 let samples = generate_tone(440.0, 8000, Duration::from_secs(10));
-                
+
                 // Send audio in 20ms chunks (160 samples at 8kHz)
                 const SAMPLES_PER_FRAME: usize = 160;
                 let mut sent_frames = 0;
-                
+
                 for chunk in samples.chunks(SAMPLES_PER_FRAME) {
                     // Create audio frame
                     let frame = AudioFrame {
@@ -232,25 +232,25 @@ impl CallHandler for ClientHandler {
                         duration: Duration::from_millis(20),
                         timestamp: (sent_frames * SAMPLES_PER_FRAME) as u32,
                     };
-                    
+
                     // Send through real media session
                     if let Err(e) = MediaControl::send_audio_frame(&coordinator_send, &session_id_send, frame).await {
                         tracing::debug!("Client: Failed to send audio frame: {}", e);
                         break;
                     }
-                    
+
                     sent_frames += 1;
-                    
+
                     // Wait 20ms before next frame
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                
-                info!("Client: Finished sending 440Hz tone for call {} ({} frames)", 
+
+                info!("Client: Finished sending 440Hz tone for call {} ({} frames)",
                     &call_id_send[..8.min(call_id_send.len())], sent_frames);
             });
         }
     }
-    
+
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         let call_id = call.id.0.clone();
         info!("Client: Call {} ended: {}", &call_id[..8.min(call_id.len())], reason);
@@ -275,7 +275,7 @@ impl ServerHandler {
             coordinator: Arc::new(Mutex::new(None)),
         }
     }
-    
+
     async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
         *self.coordinator.lock().await = Some(coordinator);
     }
@@ -285,12 +285,12 @@ impl ServerHandler {
 impl CallHandler for ServerHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         let id_str = &call.id.0;
-        
+
         // Get the call index - calls arrive in order
         let mut counter = self.call_counter.lock().await;
         let call_index = *counter;
         *counter += 1;
-        
+
         // Check if this call index should be captured
         if self.audio_validator.should_capture_index(call_index).await {
             // Register using the SIP Call-ID if available, otherwise the session ID
@@ -301,35 +301,35 @@ impl CallHandler for ServerHandler {
                 self.audio_validator.register_call_for_index(call_index, call.id.0.clone()).await;
             }
         }
-        
-        info!("Server: Accepting incoming call {} (index {}, Call-ID: {:?})", 
+
+        info!("Server: Accepting incoming call {} (index {}, Call-ID: {:?})",
             &id_str[..8.min(id_str.len())], call_index, call.sip_call_id);
         CallDecision::Accept(None)
     }
-    
+
     async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         let call_id = call.id.0.clone();
         let session_id = call.id.clone();
-        info!("Server: Call {} established - local_sdp: {}, remote_sdp: {}, sip_call_id: {:?}", 
+        info!("Server: Call {} established - local_sdp: {}, remote_sdp: {}, sip_call_id: {:?}",
             &call_id[..8.min(call_id.len())],
             local_sdp.is_some(),
             remote_sdp.is_some(),
             call.sip_call_id
         );
-        
+
         // Store session
         self.received_calls.lock().await.push(call_id.clone());
-        
+
         // Check if this call is selected for audio capture using SIP Call-ID if available
         let is_selected = if let Some(ref sip_call_id) = call.sip_call_id {
             self.audio_validator.is_selected(sip_call_id).await
         } else {
             self.audio_validator.is_selected(&call_id).await
         };
-        
+
         // Get coordinator
         let coordinator_opt = self.coordinator.lock().await.clone();
-        
+
         if let Some(coordinator) = coordinator_opt {
             // Workaround: If SDP is not provided, fetch it from media info
             let mut actual_remote_sdp = remote_sdp;
@@ -349,7 +349,7 @@ impl CallHandler for ServerHandler {
                         info!("Server: Updated media with remote SDP for call {}", &call_id[..8.min(call_id.len())]);
                     }
                     Err(e) => {
-                        tracing::error!("Server: Failed to update media with SDP for call {}: {}", 
+                        tracing::error!("Server: Failed to update media with SDP for call {}: {}",
                             &call_id[..8.min(call_id.len())], e);
                         return;
                     }
@@ -357,13 +357,13 @@ impl CallHandler for ServerHandler {
             } else {
                 tracing::warn!("Server: No remote SDP provided for call {}", &call_id[..8.min(call_id.len())]);
             }
-            
+
             // Step 2: Start audio transmission (enables RTP processing)
             if let Err(e) = MediaControl::start_audio_transmission(&coordinator, &session_id).await {
                 tracing::error!("Server: Failed to start audio transmission: {}", e);
                 return;
             }
-            
+
             // Step 3: If selected for capture, subscribe to receive audio
             if is_selected {
                 info!("Server: Call {} is selected for audio capture", &call_id[..8.min(call_id.len())]);
@@ -372,21 +372,21 @@ impl CallHandler for ServerHandler {
                 let call_id_recv = call.sip_call_id.clone().unwrap_or(call_id.clone());
                 let session_id_recv = session_id.clone();
                 let coordinator_recv = coordinator.clone();
-                
+
                 tokio::spawn(async move {
                     info!("Server: Starting audio capture task for call {}", &call_id_recv[..8.min(call_id_recv.len())]);
-                    
+
                     // Wait for media to be fully established
                     let mut retries = 0;
                     while retries < 20 {
                         if let Ok(Some(info)) = MediaControl::get_media_info(&coordinator_recv, &session_id_recv).await {
-                            tracing::debug!("Server: Media info for call {} - local_sdp: {}, remote_sdp: {}", 
+                            tracing::debug!("Server: Media info for call {} - local_sdp: {}, remote_sdp: {}",
                                 &call_id_recv[..8.min(call_id_recv.len())],
                                 info.local_sdp.is_some(),
                                 info.remote_sdp.is_some()
                             );
                             if info.remote_sdp.is_some() && info.local_sdp.is_some() {
-                                info!("Server: Media ready for call {} after {} retries", 
+                                info!("Server: Media ready for call {} after {} retries",
                                     &call_id_recv[..8.min(call_id_recv.len())], retries);
                                 break;
                             }
@@ -394,22 +394,22 @@ impl CallHandler for ServerHandler {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         retries += 1;
                     }
-                    
+
                     if retries >= 20 {
-                        tracing::error!("Server: Media not ready after 2 seconds for call {}", 
+                        tracing::error!("Server: Media not ready after 2 seconds for call {}",
                             &call_id_recv[..8.min(call_id_recv.len())]);
                         return;
                     }
-                    
+
                     // Subscribe to audio frames from the session
                     match MediaControl::subscribe_to_audio_frames(&coordinator_recv, &session_id_recv).await {
                         Ok(mut subscriber) => {
                             info!("Server: Started receiving audio for call {}", &call_id_recv[..8.min(call_id_recv.len())]);
-                            
+
                             // Receive audio for up to 10 seconds
                             let start = tokio::time::Instant::now();
                             let mut frame_count = 0;
-                            
+
                             while start.elapsed() < Duration::from_secs(10) {
                                 // Try to receive audio frame with timeout
                                 match tokio::time::timeout(Duration::from_millis(100), subscriber.recv()).await {
@@ -417,15 +417,15 @@ impl CallHandler for ServerHandler {
                                         // Capture received audio (should be 440Hz from client)
                                         validator.capture_server_received(&call_id_recv, frame.samples).await;
                                         frame_count += 1;
-                                        
+
                                         if frame_count % 50 == 0 {
-                                            tracing::debug!("Server: Received {} frames for call {}", 
+                                            tracing::debug!("Server: Received {} frames for call {}",
                                                 frame_count, &call_id_recv[..8.min(call_id_recv.len())]);
                                         }
                                     }
                                     Ok(None) => {
                                         // Channel closed
-                                        tracing::debug!("Server: Audio channel closed for call {}", 
+                                        tracing::debug!("Server: Audio channel closed for call {}",
                                             &call_id_recv[..8.min(call_id_recv.len())]);
                                         break;
                                     }
@@ -434,8 +434,8 @@ impl CallHandler for ServerHandler {
                                     }
                                 }
                             }
-                            
-                            info!("Server: Stopped receiving audio for call {} ({} frames total)", 
+
+                            info!("Server: Stopped receiving audio for call {} ({} frames total)",
                                 &call_id_recv[..8.min(call_id_recv.len())], frame_count);
                         }
                         Err(e) => {
@@ -444,23 +444,23 @@ impl CallHandler for ServerHandler {
                     }
                 });
             }
-            
+
             // Step 4: Start sending 880Hz tone
             let session_id_send = session_id.clone();
             let call_id_send = call_id.clone();
             let coordinator_send = coordinator.clone();
-            
+
             tokio::spawn(async move {
                 // Wait a moment for media to be established
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                
+
                 // Generate 10 seconds of 880Hz tone at 8kHz
                 let samples = generate_tone(880.0, 8000, Duration::from_secs(10));
-                
+
                 // Send audio in 20ms chunks (160 samples at 8kHz)
                 const SAMPLES_PER_FRAME: usize = 160;
                 let mut sent_frames = 0;
-                
+
                 for chunk in samples.chunks(SAMPLES_PER_FRAME) {
                     // Create audio frame
                     let frame = AudioFrame {
@@ -470,25 +470,25 @@ impl CallHandler for ServerHandler {
                         duration: Duration::from_millis(20),
                         timestamp: (sent_frames * SAMPLES_PER_FRAME) as u32,
                     };
-                    
+
                     // Send through real media session
                     if let Err(e) = MediaControl::send_audio_frame(&coordinator_send, &session_id_send, frame).await {
                         tracing::debug!("Server: Failed to send audio frame: {}", e);
                         break;
                     }
-                    
+
                     sent_frames += 1;
-                    
+
                     // Wait 20ms before next frame
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
-                
-                info!("Server: Finished sending 880Hz tone for call {} ({} frames)", 
+
+                info!("Server: Finished sending 880Hz tone for call {} ({} frames)",
                     &call_id_send[..8.min(call_id_send.len())], sent_frames);
             });
         }
     }
-    
+
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         let id_str = &call.id.0;
         info!("Server: Call {} ended: {}", &id_str[..8.min(id_str.len())], reason);
@@ -501,7 +501,7 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
-    
+
     println!("\n╔════════════════════════════════════════════════════════════════╗");
     println!("║      BENCHMARK: 500 Concurrent Calls with Audio Tones          ║");
     println!("║                                                                 ║");
@@ -514,12 +514,12 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
     println!("║  • Output directory: bench/samples/                            ║");
     println!("║  • Metrics collected every second                              ║");
     println!("╚════════════════════════════════════════════════════════════════╝\n");
-    
+
     let test_start = Instant::now();
-    
+
     // Create audio validator
     let audio_validator = Arc::new(AudioValidator::new());
-    
+
     // Create server handler
     let server_handler = Arc::new(ServerHandler::new(audio_validator.clone()));
     info!("Creating server SessionManager on port 5060...");
@@ -531,11 +531,11 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
         .with_handler(server_handler.clone())
         .build()
         .await?;
-    
+
     // Set coordinator in handler
     server_handler.set_coordinator(server.clone()).await;
-    
-    // Create client handler  
+
+    // Create client handler
     let client_handler = Arc::new(ClientHandler::new(audio_validator.clone()));
     info!("Creating client SessionManager on port 5061...");
     let client = SessionManagerBuilder::new()
@@ -546,14 +546,14 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
         .with_handler(client_handler.clone())
         .build()
         .await?;
-    
+
     // Set coordinator in handler
     client_handler.set_coordinator(client.clone()).await;
-    
+
     // Start both session managers
     SessionControl::start(&server).await?;
     SessionControl::start(&client).await?;
-    
+
     // Start metrics collection
     let active_calls_counter = Arc::new(Mutex::new(0usize));
     let metrics_collector = MetricsCollector::new();
@@ -561,27 +561,27 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
         Duration::from_secs(1),
         active_calls_counter.clone(),
     ).await;
-    
+
     // For testing, let's start with just 5 calls and capture all of them
     const NUM_CALLS: usize = 5;
-    
+
     // Select all 5 calls for audio capture during testing
     let selected_indices = audio_validator.select_random_indices(NUM_CALLS, NUM_CALLS).await;
-    
+
     // Create 5 concurrent calls for testing
     info!("Initiating {} concurrent calls...", NUM_CALLS);
     let mut call_tasks = Vec::new();
-    
+
     for i in 0..NUM_CALLS {
         let client_clone = client.clone();
         let counter = active_calls_counter.clone();
         let validator_clone = audio_validator.clone();
-        
+
         let task = tokio::spawn(async move {
-            
+
             let from = format!("sip:user_{}@127.0.0.1:5061", i);
             let to = format!("sip:destination_{}@127.0.0.1:5060", i);
-            
+
             // Use prepared call to ensure SDP is generated
             match SessionControl::prepare_outgoing_call(&client_clone, &from, &to).await {
                 Ok(prepared) => {
@@ -589,23 +589,23 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
                         Ok(session) => {
                             // For now, register the session ID, but the Call-ID will be used when the call is established
                             validator_clone.register_call_for_index(i, session.id.0.clone()).await;
-                            
+
                             // Increment active calls counter
                             *counter.lock().await += 1;
-                            
+
                             info!("Call {} created successfully", i);
-                            
+
                             // Hold the call for 10 seconds
                             tokio::time::sleep(Duration::from_secs(10)).await;
-                            
+
                             // Terminate the call
                             if let Err(e) = SessionControl::terminate_session(&client_clone, &session.id).await {
                                 tracing::warn!("Failed to terminate call {}: {}", i, e);
                             }
-                            
+
                             // Decrement active calls counter
                             *counter.lock().await -= 1;
-                            
+
                             Ok(session)
                         }
                         Err(e) => {
@@ -620,35 +620,35 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
                 }
             }
         });
-        
+
         call_tasks.push(task);
     }
-    
+
     info!("All 500 call tasks spawned, waiting for completion...");
-    
+
     // Wait for all calls to complete
     let mut successful_calls = 0;
     let mut failed_calls = 0;
-    
+
     for task in call_tasks {
         match task.await {
             Ok(Ok(_)) => successful_calls += 1,
             _ => failed_calls += 1,
         }
     }
-    
+
     // Wait a bit for final metrics collection and audio processing
     println!("\nProcessing audio captures and saving WAV files...");
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     // Get and print metrics
     let snapshots = metrics_collector.get_snapshots().await;
     MetricsCollector::print_metrics_table(&snapshots);
-    
+
     // Validate captured audio from WAV files
     let validation_results = audio_validator.validate_all().await;
     AudioValidator::print_validation_results(&validation_results);
-    
+
     // Print summary
     println!("\n╔════════════════════════════════════════════════════════════════╗");
     println!("║                    BENCHMARK SUMMARY                           ║");
@@ -656,17 +656,17 @@ pub async fn run_benchmark() -> std::result::Result<(), Box<dyn std::error::Erro
     println!("║  Total Calls Attempted:    {:3}                                 ║", NUM_CALLS);
     println!("║  Successful Calls:         {:3}                                ║", successful_calls);
     println!("║  Failed Calls:             {:3}                                 ║", failed_calls);
-    println!("║  Success Rate:             {:.1}%                             ║", 
+    println!("║  Success Rate:             {:.1}%                             ║",
         (successful_calls as f32 / NUM_CALLS as f32) * 100.0);
     println!("║  Total Test Time:          {:.1}s                             ║",
         test_start.elapsed().as_secs_f32());
     println!("║  WAV Files Location:       bench/samples/                      ║");
     println!("╚════════════════════════════════════════════════════════════════╝\n");
-    
+
     // Cleanup
     SessionControl::stop(&server).await?;
     SessionControl::stop(&client).await?;
-    
+
     Ok(())
 }
 

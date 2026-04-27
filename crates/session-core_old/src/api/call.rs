@@ -1,5 +1,5 @@
 //! Unified call handle for both UAC and UAS sides
-//! 
+//!
 //! This module provides a symmetric SimpleCall type that works the same
 //! whether the call was initiated (UAC) or received (UAS).
 
@@ -15,27 +15,27 @@ use crate::errors::{Result, SessionError};
 use crate::manager::events::{SessionEvent, MediaFlowDirection};
 
 /// A simple call handle with all operations
-/// 
+///
 /// This type provides a unified interface for call control, regardless of
 /// whether the call was initiated or received. Both UAC and UAS sides get
 /// the same capabilities.
-/// 
+///
 /// # Example
 /// ```
 /// use rvoip_session_core::api::call::SimpleCall;
-/// 
+///
 /// async fn handle_call(mut call: SimpleCall) -> Result<(), Box<dyn std::error::Error>> {
 ///     // Get audio channels
 ///     let (tx, rx) = call.audio_channels()?;
-///     
+///
 ///     // Control the call
 ///     call.hold().await?;
 ///     call.resume().await?;
 ///     call.send_dtmf("123").await?;
-///     
+///
 ///     // End the call
 ///     call.hangup().await?;
-///     
+///
 ///     Ok(())
 /// }
 /// ```
@@ -65,7 +65,7 @@ impl<'a> TransferBuilder<'a> {
             consult_call: None,
         }
     }
-    
+
     /// Make this an attended transfer with a consultation call
     pub fn attended(mut self, consult_call: SimpleCall) -> Self {
         self.consult_call = Some(consult_call);
@@ -103,7 +103,7 @@ impl SimpleCall {
     ) -> Result<Self> {
         // Don't set up audio channels here - wait until they're requested
         // This avoids the race condition where channels are set up before media session exists
-        
+
         Ok(Self {
             session_id: session.id.clone(),
             coordinator,
@@ -114,7 +114,7 @@ impl SimpleCall {
             state: Arc::new(RwLock::new(session.state)),
         })
     }
-    
+
     /// Create from an accepted incoming call (internal use)
     pub(crate) async fn from_incoming(
         session_id: SessionId,
@@ -123,7 +123,7 @@ impl SimpleCall {
     ) -> Result<Self> {
         // Don't set up audio channels here - wait until they're requested
         // This ensures consistent behavior between UAC and UAS
-        
+
         Ok(Self {
             session_id,
             coordinator,
@@ -134,42 +134,42 @@ impl SimpleCall {
             state: Arc::new(RwLock::new(CallState::Active)),
         })
     }
-    
+
     /// Get the audio channels (consumes them - can only be called once)
-    /// 
+    ///
     /// This method now waits for the media session to be ready before setting up channels.
-    /// 
+    ///
     /// Returns (tx, rx) where:
     /// - `tx`: Send audio frames to the remote party
     /// - `rx`: Receive audio frames from the remote party
-    /// 
+    ///
     /// # Errors
     /// Returns an error if the channels have already been taken or if media session setup fails.
     pub async fn audio_channels(&mut self) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
         tracing::info!("audio_channels() called for session {}", self.session_id);
         // Store initial state to detect if channels were previously set up
         let initially_had_channels = self.has_audio_channels_internal();
-        
+
         // If channels don't exist yet, set them up (lazy initialization)
         if self.audio_tx.is_none() || self.audio_rx.is_none() {
             // If we initially had channels and now they're None, they were already taken
             if initially_had_channels {
                 return Err(SessionError::MediaError("Audio channels already taken".to_string()));
             }
-            
+
             // Subscribe to events FIRST, before checking anything else
             // This ensures we don't miss the MediaFlowEstablished event
             let mut event_rx = self.coordinator.event_processor.subscribe()
                 .await
                 .map_err(|e| SessionError::Other(format!("Failed to subscribe to events: {}", e)))?;
-            
-            tracing::info!("🎯 SimpleCall subscribed to events for session {}", 
+
+            tracing::info!("🎯 SimpleCall subscribed to events for session {}",
                 self.session_id);
-            
+
             // Wait for media session to be ready (with timeout)
             let timeout_duration = Duration::from_secs(5);
             let start = Instant::now();
-            
+
             loop {
                 // Check if session is Active AND media session exists
                 let session_active = if let Ok(Some(session)) = self.coordinator.registry.get_session(&self.session_id).await {
@@ -177,7 +177,7 @@ impl SimpleCall {
                 } else {
                     false
                 };
-                
+
                 if session_active {
                     tracing::info!("Session {} is active, checking media info", self.session_id);
                     if let Ok(Some(media_info)) = self.coordinator.media_manager.get_media_info(&self.session_id).await {
@@ -187,20 +187,20 @@ impl SimpleCall {
                             // All conditions met: session is Active, media session exists, and remote SDP is known
                             // Wait for MediaFlowEstablished event
                             tracing::info!("Session {} active, media ready, and remote SDP known, waiting for media flow event...", self.session_id);
-                            
+
                             // Wait for MediaFlowEstablished event with short timeout
                             let event_timeout = Duration::from_secs(3);
                             let event_start = Instant::now();
                             let mut media_flow_established = false;
-                            
+
                             while event_start.elapsed() < event_timeout {
                                 let result = tokio::time::timeout(Duration::from_millis(100), event_rx.receive()).await;
-                                
+
                                 match result {
                                     Ok(Ok(event)) => {
                                         tracing::info!("🔍 SimpleCall {} received event: {:?}", self.session_id, event);
                                         if let SessionEvent::MediaFlowEstablished { session_id, direction, .. } = event {
-                                            tracing::info!("🎯 MediaFlowEstablished event: session_id={}, my_session={}, direction={:?}", 
+                                            tracing::info!("🎯 MediaFlowEstablished event: session_id={}, my_session={}, direction={:?}",
                                                 session_id, self.session_id, direction);
                                             if session_id == self.session_id && direction == MediaFlowDirection::Both {
                                                 tracing::info!("✅ Received MediaFlowEstablished event for {}", self.session_id);
@@ -219,19 +219,19 @@ impl SimpleCall {
                                     }
                                 }
                             }
-                            
+
                             if !media_flow_established {
                                 tracing::error!("MediaFlowEstablished event not received after {}ms timeout - this means bidirectional flow is NOT confirmed!", event_timeout.as_millis());
                                 // DO NOT fall back to timer - the event system must work
                                 return Err(SessionError::MediaError("Media flow not established - bidirectional audio not confirmed".to_string()));
                             }
-                            
+
                             // Now set up channels
                             let (audio_tx, audio_rx) = setup_audio_channels(
                                 &self.coordinator,
                                 &self.session_id,
                             ).await?;
-                            
+
                             self.audio_tx = Some(audio_tx);
                             self.audio_rx = Some(audio_rx);
                             break;
@@ -240,19 +240,19 @@ impl SimpleCall {
                         }
                     }
                 }
-                
+
                 // Check timeout
                 if start.elapsed() > timeout_duration {
                     return Err(SessionError::MediaError(
                         "Timeout waiting for media session to be ready".to_string()
                     ));
                 }
-                
+
                 // Wait a bit before checking again
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         }
-        
+
         // Now take and return the channels
         let tx = self.audio_tx.take()
             .ok_or(SessionError::MediaError("Audio channels unavailable".to_string()))?;
@@ -260,19 +260,19 @@ impl SimpleCall {
             .ok_or(SessionError::MediaError("Audio channels unavailable".to_string()))?;
         Ok((tx, rx))
     }
-    
+
     /// Internal check if channels exist (not yet taken)
     fn has_audio_channels_internal(&self) -> bool {
         self.audio_tx.is_some() || self.audio_rx.is_some()
     }
-    
+
     /// Check if audio channels are still available
     pub fn has_audio_channels(&self) -> bool {
         self.audio_tx.is_some() && self.audio_rx.is_some()
     }
-    
+
     /// Put the call on hold
-    /// 
+    ///
     /// This stops media transmission in both directions.
     pub async fn hold(&self) -> Result<()> {
         use crate::api::common::call_ops;
@@ -280,9 +280,9 @@ impl SimpleCall {
         *self.state.write().await = CallState::OnHold;
         Ok(())
     }
-    
+
     /// Resume from hold
-    /// 
+    ///
     /// This resumes media transmission in both directions.
     pub async fn resume(&self) -> Result<()> {
         use crate::api::common::call_ops;
@@ -290,25 +290,25 @@ impl SimpleCall {
         *self.state.write().await = CallState::Active;
         Ok(())
     }
-    
+
     /// Mute audio transmission
-    /// 
+    ///
     /// This stops sending audio to the remote party but continues receiving.
     pub async fn mute(&self) -> Result<()> {
         use crate::api::common::call_ops;
         call_ops::mute(&self.coordinator, &self.session_id).await
     }
-    
+
     /// Unmute audio transmission
-    /// 
+    ///
     /// This resumes sending audio to the remote party.
     pub async fn unmute(&self) -> Result<()> {
         use crate::api::common::call_ops;
         call_ops::unmute(&self.coordinator, &self.session_id).await
     }
-    
+
     /// Send DTMF digits
-    /// 
+    ///
     /// # Arguments
     /// * `digits` - A string of DTMF digits (0-9, *, #, A-D)
     pub async fn send_dtmf(&self, digits: &str) -> Result<()> {
@@ -327,9 +327,9 @@ impl SimpleCall {
         call_ops::send_dtmf(&self.coordinator, &self.session_id, digits).await?;
         Ok(())
     }
-    
+
     /// Create a transfer builder for blind or attended transfers
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// # #[tokio::main]
@@ -345,14 +345,14 @@ impl SimpleCall {
     pub fn transfer(&self, target: &str) -> TransferBuilder {
         TransferBuilder::new(self, target)
     }
-    
+
     /// Bridge this call with another call (3-way conference)
-    /// 
+    ///
     /// Creates a local bridge between two calls for conferencing.
-    /// 
+    ///
     /// # Arguments
     /// * `other` - The other call to bridge with
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// # #[tokio::main]
@@ -369,22 +369,22 @@ impl SimpleCall {
         use crate::api::common::call_ops;
         call_ops::bridge(&self.coordinator, &self.session_id, other.id()).await
     }
-    
+
     /// Get the session ID
     pub fn id(&self) -> &SessionId {
         &self.session_id
     }
-    
+
     /// Get the remote party URI
     pub fn remote_uri(&self) -> &str {
         &self.remote_uri
     }
-    
+
     /// Get call duration
     pub fn duration(&self) -> Duration {
         self.start_time.elapsed()
     }
-    
+
     /// Get current state
     pub async fn state(&self) -> CallState {
         // Get the current state from the coordinator's registry
@@ -395,27 +395,27 @@ impl SimpleCall {
             self.state.read().await.clone()
         }
     }
-    
+
     /// Check if the call is active
     pub async fn is_active(&self) -> bool {
         matches!(self.state().await, CallState::Active)
     }
-    
+
     /// Check if the call is on hold
     pub async fn is_on_hold(&self) -> bool {
         matches!(self.state().await, CallState::OnHold)
     }
-    
+
     /// Get packet loss rate for call quality monitoring
-    /// 
+    ///
     /// Returns a value between 0.0 and 1.0 representing the packet loss rate.
     pub async fn packet_loss_rate(&self) -> Result<f32> {
         use crate::api::common::call_ops;
         call_ops::get_packet_loss_rate(&self.coordinator, &self.session_id).await
     }
-    
+
     /// Wait for media to be ready without timers
-    /// 
+    ///
     /// This method waits for the MediaFlowEstablished event to be published,
     /// indicating that bidirectional media flow has been confirmed.
     pub async fn wait_for_media(&mut self) -> Result<()> {
@@ -423,11 +423,11 @@ impl SimpleCall {
         let mut event_rx = self.coordinator.event_processor.subscribe()
             .await
             .map_err(|e| SessionError::Other(format!("Failed to subscribe to events: {}", e)))?;
-        
+
         // Wait for MediaFlowEstablished event
         let timeout_duration = Duration::from_secs(10);
         let start = Instant::now();
-        
+
         while start.elapsed() < timeout_duration {
             match tokio::time::timeout(Duration::from_millis(100), event_rx.receive()).await {
                 Ok(Ok(event)) => {
@@ -449,42 +449,42 @@ impl SimpleCall {
                 _ => continue,
             }
         }
-        
+
         Err(SessionError::Timeout("Media setup timeout".into()))
     }
-    
+
     /// Get audio channels when ready (event-based)
-    /// 
+    ///
     /// This method waits for media to be ready before returning the audio channels,
     /// ensuring that the channels are fully established before use.
-    pub async fn audio_channels_when_ready(&mut self) 
-        -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> 
+    pub async fn audio_channels_when_ready(&mut self)
+        -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)>
     {
         // Wait for media to be ready
         self.wait_for_media().await?;
-        
+
         // Now safe to get channels
         self.audio_channels().await
     }
-    
+
     /// Wait for a specific call state
-    /// 
+    ///
     /// This method waits for the call to reach a specific state.
     pub async fn wait_for_state(&mut self, target_state: CallState) -> Result<()> {
         // Subscribe to events
         let mut event_rx = self.coordinator.event_processor.subscribe()
             .await
             .map_err(|e| SessionError::Other(format!("Failed to subscribe to events: {}", e)))?;
-        
+
         // Check if already in target state
         if self.state().await == target_state {
             return Ok(());
         }
-        
+
         // Wait for state change event
         let timeout_duration = Duration::from_secs(30);
         let start = Instant::now();
-        
+
         while start.elapsed() < timeout_duration {
             match tokio::time::timeout(Duration::from_millis(100), event_rx.receive()).await {
                 Ok(Ok(event)) => {
@@ -501,20 +501,20 @@ impl SimpleCall {
                 _ => continue,
             }
         }
-        
+
         Err(SessionError::Timeout(format!("Timeout waiting for state: {:?}", target_state)))
     }
-    
+
     /// Get call quality score (MOS - Mean Opinion Score)
-    /// 
+    ///
     /// Returns a value between 1.0 and 5.0 representing call quality.
     pub async fn quality_score(&self) -> Result<f32> {
         use crate::api::common::call_ops;
         call_ops::get_quality_score(&self.coordinator, &self.session_id).await
     }
-    
+
     /// Get call statistics
-    /// 
+    ///
     /// Returns session statistics
     pub async fn statistics(&self) -> Result<crate::api::types::SessionStats> {
         // For now, return basic stats
@@ -526,9 +526,9 @@ impl SimpleCall {
             average_duration: Some(self.duration()),
         })
     }
-    
+
     /// Play an audio file to the remote party
-    /// 
+    ///
     /// # Arguments
     /// * `file_path` - Path to the audio file to play
     pub async fn play_audio(&self, file_path: &str) -> Result<()> {
@@ -536,9 +536,9 @@ impl SimpleCall {
         tracing::warn!("play_audio not yet implemented for: {}", file_path);
         Ok(())
     }
-    
+
     /// Start recording the call
-    /// 
+    ///
     /// # Arguments
     /// * `file_path` - Path where the recording should be saved
     pub async fn start_recording(&self, file_path: &str) -> Result<()> {
@@ -546,16 +546,16 @@ impl SimpleCall {
         tracing::warn!("start_recording not yet implemented for: {}", file_path);
         Ok(())
     }
-    
+
     /// Stop recording the call
     pub async fn stop_recording(&self) -> Result<()> {
         // This would need implementation in MediaControl
         tracing::warn!("stop_recording not yet implemented");
         Ok(())
     }
-    
+
     /// Hang up the call
-    /// 
+    ///
     /// This terminates the call and consumes the SimpleCall object
     /// to prevent further operations on a terminated call.
     pub async fn hangup(self) -> Result<()> {
@@ -563,9 +563,9 @@ impl SimpleCall {
         use crate::api::control::SessionControl;
         SessionControl::terminate_session(&self.coordinator, &self.session_id).await
     }
-    
+
     /// Get reference to coordinator (for advanced operations)
-    /// 
+    ///
     /// This allows advanced users to access the underlying coordinator
     /// for operations not exposed by SimpleCall.
     pub fn coordinator(&self) -> &Arc<SessionCoordinator> {

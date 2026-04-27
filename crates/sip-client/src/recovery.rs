@@ -24,28 +24,28 @@ use tracing::{debug, error, info, warn};
 pub struct RecoveryConfig {
     /// Enable automatic reconnection
     pub auto_reconnect: bool,
-    
+
     /// Maximum number of reconnection attempts
     pub max_reconnect_attempts: u32,
-    
+
     /// Initial reconnection delay
     pub initial_reconnect_delay: Duration,
-    
+
     /// Maximum reconnection delay (for exponential backoff)
     pub max_reconnect_delay: Duration,
-    
+
     /// Backoff multiplier for reconnection delays
     pub backoff_multiplier: f64,
-    
+
     /// Enable graceful degradation
     pub enable_degradation: bool,
-    
+
     /// Timeout for operations before considering them failed
     pub operation_timeout: Duration,
-    
+
     /// Enable automatic codec fallback
     pub auto_codec_fallback: bool,
-    
+
     /// Enable quality adaptation based on network conditions
     pub adaptive_quality: bool,
 }
@@ -71,16 +71,16 @@ impl Default for RecoveryConfig {
 pub struct RecoveryState {
     /// Current number of retry attempts
     pub retry_count: u32,
-    
+
     /// Last error that occurred
     pub last_error: Option<String>,
-    
+
     /// Time of last failure
     pub last_failure: Option<Instant>,
-    
+
     /// Current backoff delay
     pub current_backoff: Duration,
-    
+
     /// Whether recovery is in progress
     pub recovering: bool,
 }
@@ -101,13 +101,13 @@ impl Default for RecoveryState {
 pub struct RecoveryManager {
     /// Recovery configuration
     config: RecoveryConfig,
-    
+
     /// Recovery states for different components
     states: Arc<RwLock<HashMap<String, RecoveryState>>>,
-    
+
     /// Event emitter for recovery events
     event_emitter: EventEmitter,
-    
+
     /// Active recovery tasks
     recovery_tasks: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
@@ -122,7 +122,7 @@ impl RecoveryManager {
             recovery_tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
-    
+
     /// Handle an error and initiate recovery if needed
     pub async fn handle_error(
         &self,
@@ -131,18 +131,18 @@ impl RecoveryManager {
         recovery_action: impl Fn() -> futures::future::BoxFuture<'static, SipClientResult<()>> + Send + Sync + 'static,
     ) -> SipClientResult<()> {
         warn!("Error in component {}: {:?}", component, error);
-        
+
         // Check and update recovery state
         let (should_recover, recovery_state) = {
             let mut states = self.states.write().await;
             let state = states.entry(component.to_string()).or_default();
-            
+
             state.last_error = Some(error.to_string());
             state.last_failure = Some(Instant::now());
-            
+
             // Check if we should attempt recovery with current state
             let can_recover = !state.recovering && state.retry_count < self.config.max_reconnect_attempts;
-            
+
             if can_recover {
                 // Update state for recovery
                 state.recovering = true;
@@ -152,21 +152,21 @@ impl RecoveryManager {
                 (false, state.clone())
             }
         };
-        
+
         if !should_recover {
-            error!("Recovery not possible for {} (recovering: {}, retry_count: {})", 
+            error!("Recovery not possible for {} (recovering: {}, retry_count: {})",
                    component, recovery_state.recovering, recovery_state.retry_count);
             return Err(SipClientError::Internal {
                 message: format!("Recovery failed for {}: {}", component, error),
             });
         }
-        
+
         let component_name = component.to_string();
         let config = self.config.clone();
         let states_arc = self.states.clone();
         let event_emitter = self.event_emitter.clone();
         let recovery_action = Arc::new(recovery_action);
-        
+
         // Spawn recovery task
         let task = tokio::spawn(async move {
             Self::perform_recovery(
@@ -178,14 +178,14 @@ impl RecoveryManager {
                 recovery_action,
             ).await;
         });
-        
+
         // Store the recovery task
         let mut tasks = self.recovery_tasks.lock().await;
         tasks.insert(component.to_string(), task);
-        
+
         Ok(())
     }
-    
+
     /// Check if recovery should be attempted
     async fn should_recover(&self, component: &str, state: &RecoveryState) -> bool {
         // Don't recover if already recovering
@@ -193,12 +193,12 @@ impl RecoveryManager {
             debug!("Recovery already in progress for {}", component);
             return false;
         }
-        
+
         // Check retry limit
         if state.retry_count >= self.config.max_reconnect_attempts {
             return false;
         }
-        
+
         // Check if enough time has passed since last failure
         if let Some(last_failure) = state.last_failure {
             let elapsed = Instant::now().duration_since(last_failure);
@@ -207,10 +207,10 @@ impl RecoveryManager {
                 return false;
             }
         }
-        
+
         true
     }
-    
+
     /// Perform the actual recovery
     async fn perform_recovery(
         component: String,
@@ -221,19 +221,19 @@ impl RecoveryManager {
         recovery_action: Arc<dyn Fn() -> futures::future::BoxFuture<'static, SipClientResult<()>> + Send + Sync>,
     ) {
         info!("Starting recovery for {} (attempt {})", component, state.retry_count);
-        
+
         // Wait for backoff period
         sleep(state.current_backoff).await;
-        
+
         // Attempt recovery
         match recovery_action().await {
             Ok(()) => {
                 info!("Recovery successful for {}", component);
-                
+
                 // Reset recovery state
                 let mut states = states.write().await;
                 states.insert(component.clone(), RecoveryState::default());
-                
+
                 // Emit recovery success event
                 event_emitter.emit(SipClientEvent::RecoverySucceeded {
                     component: component.clone(),
@@ -242,7 +242,7 @@ impl RecoveryManager {
             }
             Err(e) => {
                 warn!("Recovery attempt {} failed for {}: {}", state.retry_count, component, e);
-                
+
                 // Update backoff
                 state.current_backoff = std::cmp::min(
                     Duration::from_secs_f64(
@@ -250,12 +250,12 @@ impl RecoveryManager {
                     ),
                     config.max_reconnect_delay,
                 );
-                
+
                 // Update state
                 state.recovering = false;
                 let mut states = states.write().await;
                 states.insert(component.clone(), state.clone());
-                
+
                 // Emit recovery failure event
                 event_emitter.emit(SipClientEvent::RecoveryFailed {
                     component: component.clone(),
@@ -265,7 +265,7 @@ impl RecoveryManager {
             }
         }
     }
-    
+
     /// Stop all recovery attempts
     pub async fn stop_all_recovery(&self) {
         let mut tasks = self.recovery_tasks.lock().await;
@@ -273,12 +273,12 @@ impl RecoveryManager {
             debug!("Cancelling recovery for {}", component);
             task.abort();
         }
-        
+
         // Clear all recovery states
         let mut states = self.states.write().await;
         states.clear();
     }
-    
+
     /// Get recovery state for a component
     pub async fn get_recovery_state(&self, component: &str) -> Option<RecoveryState> {
         let states = self.states.read().await;
@@ -290,10 +290,10 @@ impl RecoveryManager {
 pub struct DegradationManager {
     /// Current degradation level (0 = normal, higher = more degraded)
     degradation_level: Arc<RwLock<u8>>,
-    
+
     /// Event emitter
     event_emitter: EventEmitter,
-    
+
     /// Configuration
     config: RecoveryConfig,
 }
@@ -307,23 +307,23 @@ impl DegradationManager {
             config,
         }
     }
-    
+
     /// Apply degradation based on current conditions
     pub async fn apply_degradation(&self, metrics: &NetworkMetrics) -> DegradationActions {
         if !self.config.enable_degradation {
             return DegradationActions::default();
         }
-        
+
         let mut actions = DegradationActions::default();
         let mut level = self.degradation_level.write().await;
-        
+
         // Determine new degradation level based on metrics
         let new_level = self.calculate_degradation_level(metrics);
-        
+
         if new_level != *level {
             info!("Changing degradation level from {} to {}", *level, new_level);
             *level = new_level;
-            
+
             // Apply degradation actions based on level
             match new_level {
                 0 => {
@@ -354,20 +354,20 @@ impl DegradationManager {
                     actions.reduce_frame_rate = true;
                 }
             }
-            
+
             self.event_emitter.emit(SipClientEvent::DegradationApplied {
                 level: new_level,
                 actions: actions.clone(),
             });
         }
-        
+
         actions
     }
-    
+
     /// Calculate degradation level based on network metrics
     fn calculate_degradation_level(&self, metrics: &NetworkMetrics) -> u8 {
         let mut score = 0;
-        
+
         // Packet loss thresholds
         if metrics.packet_loss_percent > 10.0 {
             score += 3;
@@ -376,21 +376,21 @@ impl DegradationManager {
         } else if metrics.packet_loss_percent > 2.0 {
             score += 1;
         }
-        
+
         // Jitter thresholds
         if metrics.jitter_ms > 100.0 {
             score += 2;
         } else if metrics.jitter_ms > 50.0 {
             score += 1;
         }
-        
+
         // RTT thresholds
         if metrics.rtt_ms > 300.0 {
             score += 2;
         } else if metrics.rtt_ms > 150.0 {
             score += 1;
         }
-        
+
         // Bandwidth thresholds
         if let Some(bandwidth) = metrics.available_bandwidth_bps {
             if bandwidth < 16000 {
@@ -401,7 +401,7 @@ impl DegradationManager {
                 score += 1;
             }
         }
-        
+
         // Map score to degradation level
         match score {
             0..=1 => 0,
@@ -417,16 +417,16 @@ impl DegradationManager {
 pub struct NetworkMetrics {
     /// Packet loss percentage
     pub packet_loss_percent: f64,
-    
+
     /// Jitter in milliseconds
     pub jitter_ms: f64,
-    
+
     /// Round-trip time in milliseconds
     pub rtt_ms: f64,
-    
+
     /// Available bandwidth in bits per second
     pub available_bandwidth_bps: Option<u64>,
-    
+
     /// Number of consecutive errors
     pub consecutive_errors: u32,
 }
@@ -436,19 +436,19 @@ pub struct NetworkMetrics {
 pub struct DegradationActions {
     /// Downgrade to lower quality codec
     pub codec_downgrade: bool,
-    
+
     /// Reduce audio quality settings
     pub reduce_quality: bool,
-    
+
     /// Target bitrate if quality reduction is needed
     pub target_bitrate: Option<u32>,
-    
+
     /// Disable audio enhancements (echo cancellation, noise suppression)
     pub disable_enhancements: bool,
-    
+
     /// Disable video if applicable
     pub disable_video: bool,
-    
+
     /// Reduce frame rate
     pub reduce_frame_rate: bool,
 }
@@ -457,10 +457,10 @@ pub struct DegradationActions {
 pub struct ConnectionMonitor {
     /// Event emitter
     event_emitter: EventEmitter,
-    
+
     /// Monitoring interval
     check_interval: Duration,
-    
+
     /// Health check callback
     health_check: Arc<dyn Fn() -> futures::future::BoxFuture<'static, bool> + Send + Sync>,
 }
@@ -478,18 +478,18 @@ impl ConnectionMonitor {
             health_check: Arc::new(health_check),
         }
     }
-    
+
     /// Start monitoring connection health
     pub async fn start_monitoring(self) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut interval = interval(self.check_interval);
             let mut consecutive_failures = 0;
-            
+
             loop {
                 interval.tick().await;
-                
+
                 let is_healthy = (self.health_check)().await;
-                
+
                 if is_healthy {
                     if consecutive_failures > 0 {
                         info!("Connection restored after {} failures", consecutive_failures);
@@ -499,7 +499,7 @@ impl ConnectionMonitor {
                 } else {
                     consecutive_failures += 1;
                     warn!("Connection health check failed (count: {})", consecutive_failures);
-                    
+
                     if consecutive_failures == 1 {
                         self.event_emitter.emit(SipClientEvent::ConnectionLost {
                             reason: "Health check failed".to_string(),
@@ -514,7 +514,7 @@ impl ConnectionMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_recovery_config_defaults() {
         let config = RecoveryConfig::default();
@@ -522,13 +522,13 @@ mod tests {
         assert_eq!(config.max_reconnect_attempts, 5);
         assert_eq!(config.initial_reconnect_delay, Duration::from_secs(1));
     }
-    
+
     #[tokio::test]
     async fn test_degradation_level_calculation() {
         let config = RecoveryConfig::default();
         let emitter = EventEmitter::default();
         let manager = DegradationManager::new(config, emitter);
-        
+
         // Test with good metrics
         let good_metrics = NetworkMetrics {
             packet_loss_percent: 0.5,
@@ -537,10 +537,10 @@ mod tests {
             available_bandwidth_bps: Some(128000),
             consecutive_errors: 0,
         };
-        
+
         let level = manager.calculate_degradation_level(&good_metrics);
         assert_eq!(level, 0);
-        
+
         // Test with poor metrics
         let poor_metrics = NetworkMetrics {
             packet_loss_percent: 15.0,
@@ -549,67 +549,67 @@ mod tests {
             available_bandwidth_bps: Some(8000),
             consecutive_errors: 5,
         };
-        
+
         let level = manager.calculate_degradation_level(&poor_metrics);
         assert_eq!(level, 3);
     }
-    
+
     #[tokio::test]
     async fn test_recovery_state_updates() {
         let config = RecoveryConfig::default();
         let emitter = EventEmitter::default();
         let manager = RecoveryManager::new(config, emitter);
-        
+
         // First error - should trigger recovery
         let result = manager.handle_error(
             "test_component",
             &SipClientError::Network { message: "Test error".to_string() },
             || Box::pin(async { Ok(()) }),
         ).await;
-        
+
         // handle_error returns Ok(()) when recovery is initiated
         assert!(result.is_ok());
-        
+
         // Check recovery state immediately - it should be updated synchronously
         let state = manager.get_recovery_state("test_component").await;
         assert!(state.is_some());
-        
+
         let state = state.unwrap();
         assert_eq!(state.retry_count, 1);
         assert!(state.recovering);
-        
+
         // Second error while recovering - should fail
         let result2 = manager.handle_error(
             "test_component",
             &SipClientError::Network { message: "Test error 2".to_string() },
             || Box::pin(async { Ok(()) }),
         ).await;
-        
+
         // Should fail because recovery is already in progress
         assert!(result2.is_err());
-        
+
         // Test max retries
         let mut config2 = RecoveryConfig::default();
         config2.max_reconnect_attempts = 1;
         let manager2 = RecoveryManager::new(config2, EventEmitter::default());
-        
+
         // First attempt
         let _ = manager2.handle_error(
             "test_component2",
             &SipClientError::Network { message: "Test error".to_string() },
             || Box::pin(async { Err(SipClientError::Network { message: "Still failing".to_string() }) }),
         ).await;
-        
+
         // Wait for recovery to fail
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        
+
         // Second attempt should fail because max retries reached
         let final_result = manager2.handle_error(
             "test_component2",
             &SipClientError::Network { message: "Test error 3".to_string() },
             || Box::pin(async { Ok(()) }),
         ).await;
-        
+
         assert!(final_result.is_err());
     }
 }

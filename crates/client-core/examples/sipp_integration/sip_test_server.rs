@@ -1,5 +1,5 @@
 //! SIP Test Server for SIPp Integration
-//! 
+//!
 //! This example demonstrates a full SIP call lifecycle with audio exchange.
 //! It acts as a SIP UAS (User Agent Server) that can receive calls from SIPp
 //! and perform a complete call flow including media negotiation and RTP audio.
@@ -12,7 +12,7 @@ use dashmap::DashMap;
 use std::collections::HashSet;
 
 use rvoip_client_core::{
-    ClientManager, ClientConfig, ClientEventHandler, 
+    ClientManager, ClientConfig, ClientEventHandler,
     call::{CallId, CallState},
     events::{
         CallAction, IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo,
@@ -30,7 +30,7 @@ struct TestServerEventHandler {
 
 impl TestServerEventHandler {
     fn new(auto_answer: bool) -> Self {
-        Self { 
+        Self {
             auto_answer,
             call_stats: Arc::new(DashMap::new()),
         }
@@ -41,22 +41,22 @@ impl TestServerEventHandler {
 impl ClientEventHandler for TestServerEventHandler {
     async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
         info!(
-            "📞 Incoming call from: {} (Call-ID: {})", 
+            "📞 Incoming call from: {} (Call-ID: {})",
             call_info.caller_uri,
             call_info.call_id
         );
-        
+
         // Add debug info about the call
         info!("📋 Call Info Debug:");
         info!("   - CallId: {}", call_info.call_id);
         info!("   - Caller URI: {}", call_info.caller_uri);
         info!("   - Callee URI: {}", call_info.callee_uri);
         info!("   - Display Name: {:?}", call_info.caller_display_name);
-        
+
         if let Some(subject) = &call_info.subject {
             info!("📝 Call subject: {}", subject);
         }
-        
+
         if self.auto_answer {
             info!("🔔 Auto-answer enabled, deferring for SDP generation");
             // Defer so we can accept with SDP answer
@@ -70,7 +70,7 @@ impl ClientEventHandler for TestServerEventHandler {
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
         let state_emoji = match status_info.new_state {
             CallState::Initiating => "🚀",
-            CallState::Proceeding => "⏳", 
+            CallState::Proceeding => "⏳",
             CallState::Ringing => "🔔",
             CallState::Connected => "📞",
             CallState::Terminating => "👋",
@@ -79,15 +79,15 @@ impl ClientEventHandler for TestServerEventHandler {
             CallState::Cancelled => "🚫",
             CallState::IncomingPending => "📨",
         };
-        
+
         info!(
-            "{} Call {} state changed: {:?} -> {:?}", 
+            "{} Call {} state changed: {:?} -> {:?}",
             state_emoji,
             status_info.call_id,
             status_info.previous_state.as_ref().map(|s| format!("{:?}", s)).unwrap_or_else(|| "None".to_string()),
             status_info.new_state
         );
-        
+
         if let Some(reason) = &status_info.reason {
             info!("💬 Reason: {}", reason);
         }
@@ -142,9 +142,9 @@ impl ClientEventHandler for TestServerEventHandler {
             },
             _ => "🔊",
         };
-        
+
         info!("{} Media Event for call {}: {:?}", emoji, event.call_id, event.event_type);
-        
+
         // Log any metadata
         if !event.metadata.is_empty() {
             info!("   📋 Metadata: {:?}", event.metadata);
@@ -162,7 +162,7 @@ impl ClientEventHandler for TestServerEventHandler {
     async fn on_network_event(&self, connected: bool, reason: Option<String>) {
         let status = if connected { "🌐 Connected" } else { "🔌 Disconnected" };
         info!("{} Network status changed", status);
-        
+
         if let Some(reason) = reason {
             info!("💬 Reason: {}", reason);
         }
@@ -172,7 +172,7 @@ impl ClientEventHandler for TestServerEventHandler {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 Starting RVOIP SIP Test Server (console output)");
-    
+
     // Initialize tracing
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
@@ -199,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create client configuration
     let sip_addr = format!("0.0.0.0:{}", sip_port).parse::<SocketAddr>()?;
     let media_addr = format!("0.0.0.0:{}", media_port).parse::<SocketAddr>()?;
-    
+
     let config = ClientConfig::new()
         .with_sip_addr(sip_addr)
         .with_media_addr(media_addr)
@@ -231,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create the client manager
     info!("🔧 Creating ClientManager...");
-    
+
     // Add timeout to catch hanging issues
     let client = match tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -250,7 +250,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("ClientManager creation timeout".into());
         }
     };
-    
+
     // Set up event handler
     info!("🔧 Setting up event handler...");
     let event_handler = Arc::new(TestServerEventHandler::new(auto_answer));
@@ -262,7 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("▶️  Starting SIP server...");
     client.start().await?;
     info!("✅ SIP server started successfully");
-    
+
     let stats = client.get_client_stats().await;
     info!("✅ SIP Server ready!");
     info!("   📍 Listening on SIP: {}", stats.local_sip_addr);
@@ -275,10 +275,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _shutdown = tokio::spawn(async move {
         tokio::signal::ctrl_c().await.expect("Failed to listen for Ctrl+C");
         info!("\n🛑 Received shutdown signal");
-        
+
         // Print final statistics
         print_final_statistics(&shutdown_stats).await;
-        
+
         shutdown_client.stop().await.expect("Failed to stop client");
         std::process::exit(0);
     });
@@ -286,31 +286,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Main loop - handle incoming calls
     let mut answered_calls = HashSet::new();
     let mut connected_calls = HashSet::new();
-    
+
     loop {
         sleep(Duration::from_millis(100)).await;
-        
+
         // Get current stats
         let stats = client.get_client_stats().await;
-        
+
         // Check for new calls
         let active_calls = client.get_active_calls().await;
-        
+
         // Debug: Log all active calls periodically
         if !active_calls.is_empty() && stats.total_calls % 5 == 0 {
             info!("📊 Active calls: {}", active_calls.len());
         }
-        
+
         // Auto-answer pending incoming calls if enabled
         if auto_answer {
             for call_info in &active_calls {
-                if call_info.state == CallState::IncomingPending && 
+                if call_info.state == CallState::IncomingPending &&
                    !answered_calls.contains(&call_info.call_id) {
                     info!("✅ Found pending call to answer: {}", call_info.call_id);
-                    info!("   📋 Call details: state={:?}, direction={:?}", 
+                    info!("   📋 Call details: state={:?}, direction={:?}",
                           call_info.state, call_info.direction);
                     info!("   📞 URIs: {} -> {}", call_info.remote_uri, call_info.local_uri);
-                    
+
                     match client.answer_call(&call_info.call_id).await {
                         Ok(_) => {
                             info!("📞 Successfully answered call {} with SDP", call_info.call_id);
@@ -323,20 +323,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                
+
                 // Start audio transmission for connected calls
-                if call_info.state == CallState::Connected && 
+                if call_info.state == CallState::Connected &&
                    !connected_calls.contains(&call_info.call_id) {
                     info!("🎵 Starting audio transmission for call {}", call_info.call_id);
-                    
+
                     match client.start_audio_transmission(&call_info.call_id).await {
                         Ok(_) => {
                             info!("✅ Audio transmission started for call {}", call_info.call_id);
                             connected_calls.insert(call_info.call_id.clone());
-                            
+
                             // Start statistics monitoring
                             start_stats_monitoring(
-                                client.clone(), 
+                                client.clone(),
                                 call_info.call_id.clone(),
                                 Arc::clone(&call_stats)
                             );
@@ -348,17 +348,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        
+
         // Clean up terminated calls
         let terminated_calls = client.get_calls_by_state(CallState::Terminated).await;
         for call in &terminated_calls {
             answered_calls.remove(&call.call_id);
             connected_calls.remove(&call.call_id);
         }
-        
+
         // Print periodic status if we have calls
         if stats.total_calls > 0 && stats.total_calls % 10 == 0 {
-            info!("📊 Server Stats: Total={}, Active={}, Connected={}", 
+            info!("📊 Server Stats: Total={}, Active={}, Connected={}",
                 stats.total_calls, active_calls.len(), stats.connected_calls);
         }
     }
@@ -369,20 +369,20 @@ fn start_stats_monitoring(client: Arc<ClientManager>, call_id: CallId, call_stat
     tokio::spawn(async move {
         // Wait a bit for RTP to start flowing
         tokio::time::sleep(Duration::from_secs(1)).await;
-        
+
         // Monitor statistics every second
         let mut iterations = 0;
         loop {
             // First check if the call is still active
             let active_calls = client.get_active_calls().await;
             let call_still_active = active_calls.iter().any(|c| c.call_id == call_id);
-            
+
             if !call_still_active {
                 // Call is no longer active, stop monitoring
                 info!("📊 Call {} is no longer active, stopping stats monitoring", call_id);
                 break;
             }
-            
+
             // Get RTP statistics
             match client.get_rtp_statistics(&call_id).await {
                 Ok(Some(rtp_stats)) => {
@@ -393,7 +393,7 @@ fn start_stats_monitoring(client: Arc<ClientManager>, call_id: CallId, call_stat
                         rtp_stats.packets_received,
                         rtp_stats.bytes_received
                     ));
-                    
+
                     // Log periodically (every 5 seconds)
                     if iterations % 5 == 0 {
                         info!("📊 RTP Stats for {}: Sent: {} packets ({} bytes), Received: {} packets ({} bytes)",
@@ -420,11 +420,11 @@ fn start_stats_monitoring(client: Arc<ClientManager>, call_id: CallId, call_stat
                     }
                 }
             }
-            
+
             iterations += 1;
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        
+
         // Log final stats for this call when monitoring stops
         if let Some(entry) = call_stats.get(&call_id) {
             let (sent_pkts, sent_bytes, recv_pkts, recv_bytes) = *entry;
@@ -439,13 +439,13 @@ fn start_stats_monitoring(client: Arc<ClientManager>, call_id: CallId, call_stat
 async fn print_final_statistics(call_stats: &DashMap<CallId, (u64, u64, u64, u64)>) {
     info!("");
     info!("📊 ========== FINAL RTP STATISTICS SUMMARY ==========");
-    
+
     let mut total_sent = 0u64;
     let mut total_received = 0u64;
     let mut total_bytes_sent = 0u64;
     let mut total_bytes_received = 0u64;
     let mut call_count = 0;
-    
+
     for entry in call_stats.iter() {
         let (call_id, (sent_pkts, sent_bytes, recv_pkts, recv_bytes)) = entry.pair();
         info!("📞 Call {}: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
@@ -457,7 +457,7 @@ async fn print_final_statistics(call_stats: &DashMap<CallId, (u64, u64, u64, u64
         total_bytes_received += recv_bytes;
         call_count += 1;
     }
-    
+
     if call_count > 0 {
         info!("──────────────────────────────────────────────────");
         info!("📈 TOTAL {} calls: Sent {} packets ({} bytes), Received {} packets ({} bytes)",
@@ -467,7 +467,7 @@ async fn print_final_statistics(call_stats: &DashMap<CallId, (u64, u64, u64, u64
             total_received,
             total_bytes_received
         );
-        
+
         if total_sent == 0 && total_received > 0 {
             warn!("⚠️  Server received RTP packets but didn't send any!");
             warn!("    This may indicate the server didn't start audio transmission.");
@@ -475,4 +475,4 @@ async fn print_final_statistics(call_stats: &DashMap<CallId, (u64, u64, u64, u64
     }
     info!("===================================================");
     info!("");
-} 
+}

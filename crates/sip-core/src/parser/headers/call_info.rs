@@ -295,7 +295,7 @@ mod tests {
         let (rem, info_val) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(info_val.params.len(), 1);
-        assert!(matches!(&info_val.params[0], 
+        assert!(matches!(&info_val.params[0],
             Param::Other(n, Some(GenericValue::Token(v))) if n=="purpose" && v=="icon"));
 
         // Test info with multiple parameters

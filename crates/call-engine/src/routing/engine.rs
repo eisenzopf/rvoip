@@ -31,13 +31,13 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::routing::{RoutingEngine, RoutingDecision};
-/// 
+///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let routing_engine = RoutingEngine::new();
-/// 
+///
 /// // Route an incoming support call
 /// let decision = routing_engine.route_call("support-call-info").await?;
-/// 
+///
 /// match decision {
 ///     RoutingDecision::DirectToAgent { agent_id } => {
 ///         println!("✅ Direct routing to agent: {}", agent_id);
@@ -57,15 +57,15 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::routing::RoutingEngine;
-/// 
+///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let routing_engine = RoutingEngine::new();
-/// 
+///
 /// // Route different types of calls
 /// let support_decision = routing_engine.route_call("tech-support").await?;
 /// let sales_decision = routing_engine.route_call("sales-inquiry").await?;
 /// let vip_decision = routing_engine.route_call("vip-customer").await?;
-/// 
+///
 /// // Each call type may have different routing logic
 /// println!("Support: {:?}", support_decision);
 /// println!("Sales: {:?}", sales_decision);
@@ -87,7 +87,7 @@ impl RoutingEngine {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::RoutingEngine;
-    /// 
+    ///
     /// let routing_engine = RoutingEngine::new();
     /// // Engine is ready to route calls
     /// ```
@@ -101,7 +101,7 @@ impl RoutingEngine {
     pub fn new() -> Self {
         Self {}
     }
-    
+
     /// Route an incoming call
     ///
     /// Analyzes the incoming call and determines the best routing action.
@@ -129,12 +129,12 @@ impl RoutingEngine {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::{RoutingEngine, RoutingDecision};
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let routing_engine = RoutingEngine::new();
-    /// 
+    ///
     /// let decision = routing_engine.route_call("standard-support-call").await?;
-    /// 
+    ///
     /// match decision {
     ///     RoutingDecision::DirectToAgent { agent_id } => {
     ///         println!("Connect to agent: {}", agent_id);
@@ -154,18 +154,18 @@ impl RoutingEngine {
     ///
     /// ```rust
     /// use rvoip_call_engine::routing::{RoutingEngine, RoutingDecision};
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let routing_engine = RoutingEngine::new();
-    /// 
+    ///
     /// // Different call types may route differently
     /// let call_types = vec![
     ///     "emergency-support",
-    ///     "billing-inquiry", 
+    ///     "billing-inquiry",
     ///     "sales-lead",
     ///     "customer-complaint"
     /// ];
-    /// 
+    ///
     /// for call_type in call_types {
     ///     let decision = routing_engine.route_call(call_type).await?;
     ///     println!("{}: {:?}", call_type, decision);
@@ -200,7 +200,7 @@ impl RoutingEngine {
     pub async fn route_call(&self, _call_info: &str) -> Result<RoutingDecision> {
         // TODO: Implement sophisticated routing logic
         // Current implementation: route everything to default queue
-        
+
         // Future implementation will include:
         // 1. Parse call_info to extract requirements
         // 2. Query agent registry for available agents
@@ -209,9 +209,9 @@ impl RoutingEngine {
         // 5. Consider load balancing
         // 6. Check queue capacity
         // 7. Make optimal routing decision
-        
-        Ok(RoutingDecision::Queue { 
-            queue_id: "default".to_string() 
+
+        Ok(RoutingDecision::Queue {
+            queue_id: "default".to_string()
         })
     }
 }
@@ -235,7 +235,7 @@ impl RoutingEngine {
 ///
 /// ```rust
 /// use rvoip_call_engine::routing::RoutingDecision;
-/// 
+///
 /// # fn example(decision: RoutingDecision) {
 /// match decision {
 ///     RoutingDecision::DirectToAgent { agent_id } => {
@@ -264,18 +264,18 @@ impl RoutingEngine {
 ///
 /// ```rust
 /// use rvoip_call_engine::routing::RoutingDecision;
-/// 
+///
 /// # fn example() {
 /// // Direct agent assignment
 /// let direct_routing = RoutingDecision::DirectToAgent {
 ///     agent_id: "agent-alice-001".to_string()
 /// };
-/// 
+///
 /// // Queue assignment with priority
 /// let queue_routing = RoutingDecision::Queue {
 ///     queue_id: "high-priority-support".to_string()
 /// };
-/// 
+///
 /// // Call rejection with explanation
 /// let rejection = RoutingDecision::Reject {
 ///     reason: "All agents busy, try again later".to_string()
@@ -294,11 +294,11 @@ pub enum RoutingDecision {
     ///
     /// # Fields
     /// * `agent_id` - Unique identifier of the target agent
-    DirectToAgent { 
+    DirectToAgent {
         /// Unique identifier of the agent to receive the call
-        agent_id: String 
+        agent_id: String
     },
-    
+
     /// Route call to a queue for later assignment
     ///
     /// Used when no agents are immediately available or when call requires
@@ -307,11 +307,11 @@ pub enum RoutingDecision {
     ///
     /// # Fields
     /// * `queue_id` - Identifier of the target queue
-    Queue { 
+    Queue {
         /// Identifier of the queue where the call should wait
-        queue_id: String 
+        queue_id: String
     },
-    
+
     /// Reject the call with a reason
     ///
     /// Used when the system cannot handle the call due to:
@@ -322,9 +322,9 @@ pub enum RoutingDecision {
     ///
     /// # Fields
     /// * `reason` - Human-readable explanation for the rejection
-    Reject { 
+    Reject {
         /// Explanation for why the call was rejected
-        reason: String 
+        reason: String
     },
 }
 
@@ -332,4 +332,4 @@ impl Default for RoutingEngine {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

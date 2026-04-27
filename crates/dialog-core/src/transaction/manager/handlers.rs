@@ -135,7 +135,7 @@ pub async fn handle_transport_message(
                                                         // In early dialogs, original request might not have To tag
                                                         _ => true
                                                     };
-                                                    
+
                                                     if to_matches {
                                                         debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
                                                         return Some(tx.clone());
@@ -1119,7 +1119,7 @@ impl TransactionManager {
                                     // In early dialogs, original request might not have To tag
                                     _ => true
                                 };
-                                
+
                                 if to_matches {
                                     debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
                                     return Some(tx.clone());

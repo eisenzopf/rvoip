@@ -13,7 +13,7 @@
 //!
 //! ## Dialog Identification (RFC 3261 Section 12.2)
 //!
-//! - **UAC Perspective**: Local=From tag, Remote=To tag  
+//! - **UAC Perspective**: Local=From tag, Remote=To tag
 //! - **UAS Perspective**: Local=To tag, Remote=From tag
 //! - **Bidirectional Search**: Try both perspectives for robust matching
 //!

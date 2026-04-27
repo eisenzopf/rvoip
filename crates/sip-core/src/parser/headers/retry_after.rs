@@ -99,7 +99,7 @@ mod tests {
         let (rem_gen, param_gen) = retry_param(b"reason=Temporarily").unwrap();
         assert!(rem_gen.is_empty());
         assert!(
-            matches!(param_gen, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v)))) 
+            matches!(param_gen, RetryParam::Generic(Param::Other(n, Some(GenericValue::Token(v))))
                          if n == "reason" && v == "Temporarily")
         );
 
@@ -107,7 +107,7 @@ mod tests {
             retry_param(b"reason=\"Temporarily Unavailable\"").unwrap();
         assert!(rem_quoted.is_empty());
         assert!(
-            matches!(param_quoted, RetryParam::Generic(Param::Other(n, Some(GenericValue::Quoted(v)))) 
+            matches!(param_quoted, RetryParam::Generic(Param::Other(n, Some(GenericValue::Quoted(v))))
                          if n == "reason" && v == "Temporarily Unavailable")
         );
 

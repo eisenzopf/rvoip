@@ -1,32 +1,32 @@
 //! Core API Types
 //!
 //! Defines the main types that developers interact with when using the session API.
-//! 
+//!
 //! # Key Types Overview
-//! 
+//!
 //! - **`SessionId`** - Unique identifier for each call session
 //! - **`CallSession`** - Represents an active call with state and metadata
 //! - **`IncomingCall`** - Data about an incoming call requiring a decision
 //! - **`CallState`** - Current state of a call (Ringing, Active, etc.)
 //! - **`CallDecision`** - How to handle an incoming call
 //! - **`MediaInfo`** - Information about media streams and quality
-//! 
+//!
 //! # Call Lifecycle Example
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::api::types::{SessionId, CallDecision, CallSession, CallState};
 //! use std::time::Instant;
-//! 
+//!
 //! // In real usage, IncomingCall would be provided by the framework
 //! // For this example, we'll work with the CallSession directly
-//! 
+//!
 //! // 1. Create a call session
 //! let session_id = SessionId::new();
 //! let sdp_answer = "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5006 RTP/AVP 0\r\n";
-//! 
+//!
 //! // 2. Handler makes a decision
 //! let decision = CallDecision::Accept(Some(sdp_answer.to_string()));
-//! 
+//!
 //! // 3. Call becomes active
 //! let session = CallSession {
 //!     id: session_id,
@@ -36,7 +36,7 @@
 //!     started_at: Some(Instant::now()),
 //!     sip_call_id: Some("call-123".to_string()),
 //! };
-//! 
+//!
 //! // 4. Monitor call state
 //! match session.state() {
 //!     CallState::Active => println!("Call is connected"),
@@ -45,9 +45,9 @@
 //!     _ => {}
 //! }
 //! ```
-//! 
+//!
 //! # Call States
-//! 
+//!
 //! ```text
 //! Initiating -> Ringing -> Active -> Terminated
 //!                |           |
@@ -57,12 +57,12 @@
 //!                |
 //!                +--------> Failed/Cancelled
 //! ```
-//! 
+//!
 //! # SDP Parsing
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::api::parse_sdp_connection;
-//! 
+//!
 //! fn parse_example() -> Result<(), Box<dyn std::error::Error>> {
 //!     let sdp = r#"v=0
 //! o=- 0 0 IN IP4 127.0.0.1
@@ -73,7 +73,7 @@
 //! a=rtpmap:0 PCMU/8000
 //! a=rtpmap:8 PCMA/8000
 //! a=rtpmap:101 telephone-event/8000"#;
-//!     
+//!
 //!     let info = parse_sdp_connection(sdp)?;
 //!     assert_eq!(info.ip, "192.168.1.100");
 //!     assert_eq!(info.port, 5004);
@@ -104,7 +104,7 @@ impl SessionId {
     pub fn new() -> Self {
         Self(format!("sess_{}", Uuid::new_v4()))
     }
-    
+
     /// Create a session ID from a string
     pub fn from_string(id: String) -> Self {
         Self(id)
@@ -266,9 +266,9 @@ impl IncomingCall {
             coordinator: None,
         }
     }
-    
+
     /// Accept the incoming call and get a SimpleCall handle
-    /// 
+    ///
     /// This accepts the call and returns a SimpleCall object that provides
     /// symmetric capabilities with outgoing calls.
     pub async fn accept(self) -> Result<crate::api::call::SimpleCall> {
@@ -277,7 +277,7 @@ impl IncomingCall {
             .ok_or(crate::errors::SessionError::Other(
                 "IncomingCall missing coordinator - was it created properly?".to_string()
             ))?;
-        
+
         // Generate SDP answer if we have an offer
         let sdp_answer = if let Some(offer) = &self.sdp {
             use crate::api::media::MediaControl;
@@ -289,7 +289,7 @@ impl IncomingCall {
         } else {
             None
         };
-        
+
         // Accept via SessionControl
         use crate::api::control::SessionControl;
         SessionControl::accept_incoming_call(
@@ -297,7 +297,7 @@ impl IncomingCall {
             &self,
             sdp_answer
         ).await?;
-        
+
         // Create SimpleCall
         crate::api::call::SimpleCall::from_incoming(
             self.id.clone(),
@@ -305,9 +305,9 @@ impl IncomingCall {
             self.from.clone(),
         ).await
     }
-    
+
     /// Reject the incoming call with a reason
-    /// 
+    ///
     /// This rejects the call with the specified reason.
     pub async fn reject(self, reason: &str) -> Result<()> {
         let coordinator = self.coordinator
@@ -315,7 +315,7 @@ impl IncomingCall {
             .ok_or(crate::errors::SessionError::Other(
                 "IncomingCall missing coordinator - was it created properly?".to_string()
             ))?;
-        
+
         use crate::api::control::SessionControl;
         SessionControl::reject_incoming_call(
             &coordinator,
@@ -323,9 +323,9 @@ impl IncomingCall {
             reason
         ).await
     }
-    
+
     /// Forward the incoming call to another destination
-    /// 
+    ///
     /// This sends a SIP redirect response to forward the call.
     pub async fn forward(self, target: &str) -> Result<()> {
         let coordinator = self.coordinator
@@ -333,7 +333,7 @@ impl IncomingCall {
             .ok_or(crate::errors::SessionError::Other(
                 "IncomingCall missing coordinator - was it created properly?".to_string()
             ))?;
-        
+
         // TODO: Implement forward_incoming_call in SessionControl
         // For now, reject with a forwarding message
         use crate::api::control::SessionControl;
@@ -424,17 +424,17 @@ impl CallDecision {
     pub fn reject_with_code(status_code: StatusCode, reason: Option<String>) -> Self {
         CallDecision::Reject(reason.unwrap_or_else(|| status_code.to_string()))
     }
-    
+
     /// Create an accept decision with optional SDP
     pub fn accept(sdp: Option<String>) -> Self {
         CallDecision::Accept(sdp)
     }
-    
+
     /// Create a defer decision
     pub fn defer() -> Self {
         CallDecision::Defer
     }
-    
+
     /// Create a forward decision
     pub fn forward(destination: impl Into<String>) -> Self {
         CallDecision::Forward(destination.into())
@@ -510,11 +510,11 @@ pub struct SdpInfo {
 }
 
 /// Parse SDP connection information
-/// 
+///
 /// # Example
 /// ```no_run
 /// use rvoip_session_core::api::parse_sdp_connection;
-/// 
+///
 /// let sdp = "v=0\r\nc=IN IP4 192.168.1.100\r\nm=audio 5004 RTP/AVP 0 8\r\n";
 /// if let Ok(info) = parse_sdp_connection(sdp) {
 ///     println!("Remote endpoint: {}:{}", info.ip, info.port);
@@ -524,7 +524,7 @@ pub fn parse_sdp_connection(sdp: &str) -> Result<SdpInfo> {
     let mut ip = None;
     let mut port = None;
     let mut codecs = Vec::new();
-    
+
     for line in sdp.lines() {
         if line.starts_with("c=IN IP4 ") {
             ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
@@ -552,7 +552,7 @@ pub fn parse_sdp_connection(sdp: &str) -> Result<SdpInfo> {
             }
         }
     }
-    
+
     match (ip, port) {
         (Some(ip), Some(port)) => Ok(SdpInfo { ip, port, codecs }),
         _ => Err(crate::errors::SessionError::MediaIntegration {
@@ -612,22 +612,22 @@ impl AudioStreamConfig {
             ..Default::default()
         }
     }
-    
+
     /// Get the expected frame size in samples
     pub fn frame_size_samples(&self) -> usize {
         (self.sample_rate as usize * self.frame_size_ms as usize) / 1000
     }
-    
+
     /// Get the expected frame size in bytes (for PCM)
     pub fn frame_size_bytes(&self) -> usize {
         self.frame_size_samples() * self.channels as usize * 2 // 16-bit samples
     }
-    
+
     /// Create a telephony configuration (mono, 8kHz, G.711)
     pub fn telephony() -> Self {
         Self::default()
     }
-    
+
     /// Create a wideband configuration (mono, 16kHz, Opus)
     pub fn wideband() -> Self {
         Self {
@@ -636,7 +636,7 @@ impl AudioStreamConfig {
             ..Default::default()
         }
     }
-    
+
     /// Create a high-quality configuration (stereo, 48kHz, Opus)
     pub fn high_quality() -> Self {
         Self {
@@ -649,7 +649,7 @@ impl AudioStreamConfig {
 }
 
 /// Subscriber for receiving audio frames from a session
-/// 
+///
 /// This is a handle that allows receiving decoded audio frames from a specific session.
 /// Use this to get audio data that should be played on speakers.
 #[derive(Debug)]
@@ -668,23 +668,23 @@ impl AudioFrameSubscriber {
             receiver,
         }
     }
-    
+
     /// Get the session ID this subscriber is associated with
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
     }
-    
+
     /// Receive the next audio frame (async)
-    /// 
+    ///
     /// # Returns
     /// - `Some(audio_frame)` - Audio frame ready for playback
     /// - `None` - Channel is closed or session ended
     pub async fn recv(&mut self) -> Option<AudioFrame> {
         self.receiver.recv().await
     }
-    
+
     /// Try to receive an audio frame (non-blocking)
-    /// 
+    ///
     /// # Returns
     /// - `Ok(audio_frame)` - Audio frame ready for playback
     /// - `Err(TryRecvError::Empty)` - No frame available right now
@@ -692,7 +692,7 @@ impl AudioFrameSubscriber {
     pub fn try_recv(&mut self) -> std::result::Result<AudioFrame, tokio::sync::mpsc::error::TryRecvError> {
         self.receiver.try_recv()
     }
-    
+
     /// Check if the subscriber is still connected to the session
     pub fn is_connected(&self) -> bool {
         !self.receiver.is_closed()
@@ -702,7 +702,7 @@ impl AudioFrameSubscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_session_id_creation() {
         let id1 = SessionId::new();
@@ -710,7 +710,7 @@ mod tests {
         assert_ne!(id1, id2);
         assert!(id1.0.starts_with("sess_"));
     }
-    
+
     #[test]
     fn test_call_state_display() {
         assert_eq!(CallState::Active.to_string(), "Active");
@@ -718,4 +718,3 @@ mod tests {
     }
 }
 
- 

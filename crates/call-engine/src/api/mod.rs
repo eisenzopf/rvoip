@@ -70,10 +70,10 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() -> Result<()> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), None).await?;
-//! 
+//!
 //! // Create agent structure for registration
 //! let agent = Agent {
 //!     id: "agent-001".to_string(),
@@ -85,7 +85,7 @@
 //!     department: Some("sales".to_string()),
 //!     extension: Some("1001".to_string()),
 //! };
-//! 
+//!
 //! println!("Agent configured: {}", agent.display_name);
 //! # Ok(())
 //! # }
@@ -95,16 +95,16 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() -> Result<()> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), None).await?;
-//! 
+//!
 //! // Get real-time statistics from engine
 //! let stats = engine.get_stats().await;
 //! println!("Active calls: {}", stats.active_calls);
 //! println!("Available agents: {}", stats.available_agents);
 //! println!("Queue length: {}", stats.queued_calls);
-//! 
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -113,10 +113,10 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() -> Result<()> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), None).await?;
-//! 
+//!
 //! // Configure a new queue configuration
 //! let queue_config = QueueConfig {
 //!     default_max_wait_time: 300, // 5 minutes
@@ -125,12 +125,12 @@
 //!     enable_overflow: true,
 //!     announcement_interval: 30,
 //! };
-//! 
+//!
 //! // Configure routing
 //! let mut routing_config = RoutingConfig::default();
 //! routing_config.default_strategy = RoutingStrategy::SkillBased;
 //! routing_config.enable_load_balancing = true;
-//! 
+//!
 //! println!("Configuration prepared for deployment");
 //! # Ok(())
 //! # }
@@ -142,14 +142,14 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() -> Result<()> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), None).await?;
-//! 
+//!
 //! // Example configuration and monitoring setup
 //! let config = engine.config();
 //! println!("Max concurrent calls: {}", config.general.max_concurrent_calls);
-//! 
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -158,7 +158,7 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), None).await.unwrap();
 //! // Example of getting stats for REST API
@@ -181,7 +181,7 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() {
 //! // Example error handling pattern
 //! match CallCenterError::not_found("agent-001") {
@@ -196,4 +196,4 @@ pub mod admin;
 
 pub use client::CallCenterClient;
 pub use supervisor::SupervisorApi;
-pub use admin::AdminApi; 
+pub use admin::AdminApi;

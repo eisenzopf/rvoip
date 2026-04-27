@@ -22,42 +22,42 @@ use std::error::Error;
 
 fn main() -> std::result::Result<(), Box<dyn Error>> {
     println!("Tutorial 04: SIP Requests in Depth\n");
-    
+
     // Example 1: INVITE with detailed headers
     let invite = create_detailed_invite()?;
     println!("=== Detailed INVITE Request ===");
     println!("{}\n", invite);
-    
+
     // Example 2: REGISTER with authentication
     let register = create_register_with_auth()?;
     println!("=== REGISTER Request with Authentication ===");
     println!("{}\n", register);
-    
+
     // Example 3: SUBSCRIBE for event notification
     let subscribe = create_subscribe()?;
     println!("=== SUBSCRIBE Request ===");
     println!("{}\n", subscribe);
-    
+
     // Example 4: REFER for call transfer
     let refer = create_refer()?;
     println!("=== REFER Request ===");
     println!("{}\n", refer);
-    
+
     // Example 5: MESSAGE for instant messaging
     let message = create_message()?;
     println!("=== MESSAGE Request ===");
     println!("{}\n", message);
-    
+
     // Example 6: UPDATE for session modification
     let update = create_update()?;
     println!("=== UPDATE Request ===");
     println!("{}\n", update);
-    
+
     // Example 7: OPTIONS for capability query
     let options = create_options()?;
     println!("=== OPTIONS Request ===");
     println!("{}\n", options);
-    
+
     Ok(())
 }
 
@@ -66,7 +66,7 @@ fn create_detailed_invite() -> Result<Message> {
     // Create SDP using SdpBuilder
     let sdp = SdpBuilder::new("Call with Bob")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "atlanta.example.com")
-        .connection("IN", "IP4", "atlanta.example.com") 
+        .connection("IN", "IP4", "atlanta.example.com")
         .time("0", "0")
         .media_audio(49170, "RTP/AVP")
             .formats(&["0", "8", "97"])
@@ -90,16 +90,16 @@ fn create_detailed_invite() -> Result<Message> {
         .user_agent("SIPClient/1.0")
         .accept("application/sdp", None)
         .allow_methods(vec![
-            Method::Invite, 
-            Method::Ack, 
-            Method::Cancel, 
-            Method::Bye, 
-            Method::Notify, 
-            Method::Refer, 
+            Method::Invite,
+            Method::Ack,
+            Method::Cancel,
+            Method::Bye,
+            Method::Notify,
+            Method::Refer,
             Method::Options
         ])
         .supported_tags(vec![
-            "replaces".to_string(), 
+            "replaces".to_string(),
             "100rel".to_string()
         ])
         // Session-specific headers
@@ -108,7 +108,7 @@ fn create_detailed_invite() -> Result<Message> {
         // Use the SDP we created
         .body(sdp.to_string())
         .build();
-    
+
     Ok(Message::Request(invite_request))
 }
 
@@ -138,7 +138,7 @@ fn create_register_with_auth() -> Result<Message> {
             Some("5ccc069c403ebaf9f0171e9517f40e41") // opaque
         )
         .build();
-    
+
     Ok(Message::Request(register_request))
 }
 
@@ -157,7 +157,7 @@ fn create_subscribe() -> Result<Message> {
         .accept("application/pidf+xml", Some(1.0))
         .expires_seconds(3600)
         .build();
-    
+
     Ok(Message::Request(subscribe_request))
 }
 
@@ -176,7 +176,7 @@ fn create_refer() -> Result<Message> {
         // Use ReferredByExt trait's referred_by_str method
         .referred_by_str("<sip:alice@atlanta.example.com>")?
         .build();
-    
+
     Ok(Message::Request(refer_request))
 }
 
@@ -192,7 +192,7 @@ fn create_message() -> Result<Message> {
         .content_type("text/plain")
         .body("Hello Bob, this is Alice. Can we meet at 2pm today?")
         .build();
-    
+
     Ok(Message::Request(message_request))
 }
 
@@ -201,7 +201,7 @@ fn create_update() -> Result<Message> {
     // Create SDP for the update using SdpBuilder
     let sdp = SdpBuilder::new("Call with Bob")
         .origin("alice", "2890844526", "2890844527", "IN", "IP4", "atlanta.example.com")
-        .connection("IN", "IP4", "atlanta.example.com") 
+        .connection("IN", "IP4", "atlanta.example.com")
         .time("0", "0")
         .media_audio(49170, "RTP/AVP")
             .formats(&["0"])
@@ -223,7 +223,7 @@ fn create_update() -> Result<Message> {
         .session_expires(1800, Some(Refresher::Uac))
         .body(sdp.to_string())
         .build();
-    
+
     Ok(Message::Request(update_request))
 }
 
@@ -240,6 +240,6 @@ fn create_options() -> Result<Message> {
         .accept_language("en", Some(1.0))
         .accept_encoding("identity", Some(1.0))
         .build();
-    
+
     Ok(Message::Request(options_request))
-} 
+}

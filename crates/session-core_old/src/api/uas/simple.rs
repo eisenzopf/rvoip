@@ -21,16 +21,16 @@ pub struct SimpleUasServer {
 
 impl SimpleUasServer {
     /// Create a new UAS server with custom handler
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// use rvoip_session_core::api::uas::{SimpleUasServer, UasCallHandler};
     /// use rvoip_session_core::api::types::{IncomingCall, CallDecision};
     /// use async_trait::async_trait;
-    /// 
+    ///
     /// #[derive(Clone)]
     /// struct MyHandler;
-    /// 
+    ///
     /// #[async_trait]
     /// impl UasCallHandler for MyHandler {
     ///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
@@ -38,7 +38,7 @@ impl SimpleUasServer {
     ///         CallDecision::Accept(None)
     ///     }
     /// }
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     let handler = MyHandler;
@@ -47,13 +47,13 @@ impl SimpleUasServer {
     ///         "sip:uas@127.0.0.1:5061",
     ///         handler,
     ///     ).await?;
-    ///     
+    ///
     ///     tokio::signal::ctrl_c().await?;
     ///     server.shutdown().await?;
     ///     Ok(())
     /// }
     /// ```
-    pub async fn new<H>(bind_addr: &str, identity: &str, handler: H) -> Result<Self> 
+    pub async fn new<H>(bind_addr: &str, identity: &str, handler: H) -> Result<Self>
     where
         H: UasCallHandler + Send + Sync + 'static
     {
@@ -63,11 +63,11 @@ impl SimpleUasServer {
             auto_answer: true,
             ..Default::default()
         };
-        
+
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = bind_addr.parse()
             .unwrap_or_else(|_| "0.0.0.0:5061".parse().unwrap());
-        
+
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
             sip_port: local_bind_addr.port(),
@@ -80,18 +80,18 @@ impl SimpleUasServer {
             enable_sip_client: false,
             media_config: Default::default(),
         };
-        
+
         // Wrap the UasCallHandler to implement CallHandler
         struct HandlerWrapper<H: UasCallHandler> {
             inner: H,
         }
-        
+
         impl<H: UasCallHandler> std::fmt::Debug for HandlerWrapper<H> {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.debug_struct("HandlerWrapper").finish()
             }
         }
-        
+
         #[async_trait::async_trait]
         impl<H: UasCallHandler + Send + Sync> CallHandler for HandlerWrapper<H> {
             async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
@@ -104,36 +104,36 @@ impl SimpleUasServer {
                     super::UasCallDecision::Defer => CallDecision::Accept(None), // Defer not supported yet
                 }
             }
-            
+
             async fn on_call_established(&self, call: crate::api::types::CallSession, _local_sdp: Option<String>, _remote_sdp: Option<String>) {
                 self.inner.on_call_established(call).await;
             }
-            
+
             async fn on_call_ended(&self, call: crate::api::types::CallSession, reason: &str) {
                 self.inner.on_call_ended(call, reason.to_string()).await;
             }
         }
-        
+
         let wrapper = HandlerWrapper {
             inner: handler,
         };
-        
+
         // Create coordinator with handler
         let coordinator = SessionCoordinator::new(
             manager_config,
             Some(Arc::new(wrapper)),
         ).await?;
-        
+
         // Start listening
         coordinator.start().await?;
-        
+
         Ok(Self {
             coordinator,
             config,
             calls: Arc::new(RwLock::new(HashMap::new())),
         })
     }
-    
+
     /// Get a call handle by session ID
     pub fn get_call(&self, session_id: &SessionId) -> Option<UasCallHandle> {
         // Create a new handle with coordinator reference
@@ -145,24 +145,24 @@ impl SimpleUasServer {
             self.config.identity.clone(),
         ))
     }
-    
+
     /// Create a server that always accepts incoming calls
-    /// 
+    ///
     /// # Example
     /// ```no_run
     /// use rvoip_session_core::api::uas::SimpleUasServer;
-    /// 
+    ///
     /// #[tokio::main]
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     // Create a server that accepts all calls
     ///     let server = SimpleUasServer::always_accept("0.0.0.0:5060").await?;
-    ///     
+    ///
     ///     // Server is now listening for calls
     ///     // Calls will be automatically accepted
-    ///     
+    ///
     ///     // Keep running...
     ///     tokio::signal::ctrl_c().await?;
-    ///     
+    ///
     ///     server.shutdown().await?;
     ///     Ok(())
     /// }
@@ -173,11 +173,11 @@ impl SimpleUasServer {
             auto_answer: true,
             ..Default::default()
         };
-        
+
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
             .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
-        
+
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
             sip_port: local_bind_addr.port(),
@@ -190,23 +190,23 @@ impl SimpleUasServer {
             enable_sip_client: false,
             media_config: Default::default(),
         };
-        
+
         // Create coordinator with auto-accept handler
         let coordinator = SessionCoordinator::new(
             manager_config,
             Some(Arc::new(AlwaysAcceptHandler)),
         ).await?;
-        
+
         // Start listening
         coordinator.start().await?;
-        
+
         Ok(Self {
             coordinator,
             config,
             calls: Arc::new(RwLock::new(HashMap::new())),
         })
     }
-    
+
     /// Create a server that rejects all calls (useful for maintenance mode)
     pub async fn always_reject(bind_addr: &str, reason: String) -> Result<Self> {
         let config = UasConfig {
@@ -214,25 +214,25 @@ impl SimpleUasServer {
             auto_answer: false,
             ..Default::default()
         };
-        
+
         #[derive(Debug)]
         struct RejectHandler {
             reason: String,
         }
-        
+
         #[async_trait::async_trait]
         impl CallHandler for RejectHandler {
             async fn on_incoming_call(&self, _call: IncomingCall) -> CallDecision {
                 CallDecision::Reject(self.reason.clone())
             }
-            
+
             async fn on_call_ended(&self, _call: crate::api::types::CallSession, _reason: &str) {}
         }
-        
+
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
             .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
-        
+
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
             sip_port: local_bind_addr.port(),
@@ -245,46 +245,46 @@ impl SimpleUasServer {
             enable_sip_client: false,
             media_config: Default::default(),
         };
-        
+
         let coordinator = SessionCoordinator::new(
             manager_config,
             Some(Arc::new(RejectHandler { reason })),
         ).await?;
-        
+
         coordinator.start().await?;
-        
+
         Ok(Self {
             coordinator,
             config,
             calls: Arc::new(RwLock::new(HashMap::new())),
         })
     }
-    
+
     /// Create a server that forwards all calls to another destination
     pub async fn always_forward(bind_addr: &str, forward_to: String) -> Result<Self> {
         let config = UasConfig {
             local_addr: bind_addr.to_string(),
             ..Default::default()
         };
-        
+
         #[derive(Debug)]
         struct ForwardHandler {
             target: String,
         }
-        
+
         #[async_trait::async_trait]
         impl CallHandler for ForwardHandler {
             async fn on_incoming_call(&self, _call: IncomingCall) -> CallDecision {
                 CallDecision::Forward(self.target.clone())
             }
-            
+
             async fn on_call_ended(&self, _call: crate::api::types::CallSession, _reason: &str) {}
         }
-        
+
         // Parse local address to get bind address
         let local_bind_addr: std::net::SocketAddr = config.local_addr.parse()
             .unwrap_or_else(|_| "0.0.0.0:5060".parse().unwrap());
-        
+
         // Create SessionManagerConfig
         let manager_config = SessionManagerConfig {
             sip_port: local_bind_addr.port(),
@@ -297,43 +297,43 @@ impl SimpleUasServer {
             enable_sip_client: false,
             media_config: Default::default(),
         };
-        
+
         let coordinator = SessionCoordinator::new(
             manager_config,
             Some(Arc::new(ForwardHandler { target: forward_to })),
         ).await?;
-        
+
         coordinator.start().await?;
-        
+
         Ok(Self {
             coordinator,
             config,
             calls: Arc::new(RwLock::new(HashMap::new())),
         })
     }
-    
+
     /// Get active call count
     pub async fn active_calls(&self) -> Result<usize> {
         let sessions = SessionControl::list_active_sessions(&self.coordinator).await?;
         Ok(sessions.len())
     }
-    
+
     /// Get the coordinator for advanced operations
     pub fn coordinator(&self) -> &Arc<SessionCoordinator> {
         &self.coordinator
     }
-    
+
     /// Shutdown the server
     pub async fn shutdown(&self) -> Result<()> {
         // Stop accepting new calls
         self.coordinator.stop().await?;
-        
+
         // Terminate all active sessions
         let sessions = SessionControl::list_active_sessions(&self.coordinator).await?;
         for session_id in sessions {
             let _ = SessionControl::terminate_session(&self.coordinator, &session_id).await;
         }
-        
+
         Ok(())
     }
 }

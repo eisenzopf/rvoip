@@ -2,7 +2,7 @@
 //!
 //! This test creates a real SIP server and tries to register increasing numbers
 //! of agents to find where the system breaks down.
-//! 
+//!
 //! **Resource Profiling**: Monitors CPU cores, threads, memory usage for server and per-agent
 
 use rvoip_call_engine::{CallCenterServerBuilder, CallCenterConfig};
@@ -63,7 +63,7 @@ fn get_system_info() -> SystemInfo {
         if let Ok(vm_output) = String::from_utf8(output.stdout) {
             let mut free_pages = 0u64;
             let mut inactive_pages = 0u64;
-            
+
             for line in vm_output.lines() {
                 if line.starts_with("Pages free:") {
                     if let Some(pages_str) = line.split_whitespace().nth(2) {
@@ -75,7 +75,7 @@ fn get_system_info() -> SystemInfo {
                     }
                 }
             }
-            
+
             // Each page is typically 4096 bytes on macOS
             available_memory_mb = (free_pages + inactive_pages) * 4096 / (1024 * 1024);
         }
@@ -99,14 +99,14 @@ fn get_process_usage(pid: u32) -> Option<ProcessUsage> {
 
     let ps_output = String::from_utf8(output.stdout).ok()?;
     let lines: Vec<&str> = ps_output.lines().collect();
-    
+
     if lines.len() < 2 {
         return None;
     }
 
     let data_line = lines[1];
     let fields: Vec<&str> = data_line.split_whitespace().collect();
-    
+
     if fields.len() < 4 {
         return None;
     }
@@ -137,13 +137,13 @@ fn get_process_usage(pid: u32) -> Option<ProcessUsage> {
 
 /// Enhanced agent creation with resource tracking
 async fn create_and_register_agent_with_profiling(
-    agent_id: usize, 
+    agent_id: usize,
     server_port: u16,
     agent_counter: Arc<AtomicUsize>
 ) -> std::result::Result<ProcessUsage, Box<dyn std::error::Error + Send + Sync>> {
     let username = format!("agent{:03}", agent_id);
     let local_port = 6000 + agent_id as u16; // Use unique ports starting from 6000
-    
+
     // Create client configuration (like e2e_test agent)
     let local_sip_addr = format!("0.0.0.0:{}", local_port).parse()
         .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
@@ -191,7 +191,7 @@ async fn create_and_register_agent_with_profiling(
             });
 
             agent_counter.fetch_add(1, Ordering::Relaxed);
-            
+
             // Stop the client
             let _ = client.stop().await;
             Ok(usage)
@@ -219,7 +219,7 @@ async fn create_and_register_agent(agent_id: usize, server_port: u16) -> std::re
 #[tokio::test]
 async fn test_agent_scaling_diagnostic() {
     println!("🔍 STARTING AGENT SCALING DIAGNOSTIC TEST WITH RESOURCE PROFILING");
-    
+
     // Get baseline system information
     let system_info = get_system_info();
     println!("\n🖥️  SYSTEM INFORMATION:");
@@ -227,7 +227,7 @@ async fn test_agent_scaling_diagnostic() {
     println!("  💾 Available Memory: {} MB", system_info.available_memory_mb);
     println!("  🏭 Physical CPU Cores: {}", system_info.total_cores);
     println!("  🧠 Logical CPU Cores: {}", system_info.logical_cores);
-    
+
     // Get baseline process usage
     let current_pid = std::process::id();
     let baseline_usage = get_process_usage(current_pid).unwrap_or(ProcessUsage {
@@ -237,59 +237,59 @@ async fn test_agent_scaling_diagnostic() {
         cpu_percent: 0.0,
         thread_count: 0,
     });
-    
+
     println!("\n📊 BASELINE PROCESS USAGE:");
     println!("  🆔 PID: {}", baseline_usage.pid);
     println!("  💾 Memory RSS: {} KB ({:.1} MB)", baseline_usage.memory_rss_kb, baseline_usage.memory_rss_kb as f64 / 1024.0);
     println!("  💾 Memory VSZ: {} KB ({:.1} MB)", baseline_usage.memory_vsz_kb, baseline_usage.memory_vsz_kb as f64 / 1024.0);
     println!("  🧵 Thread Count: {}", baseline_usage.thread_count);
-    
+
     // Test server creation
     println!("\nTesting server creation...");
-    
+
     let mut config = CallCenterConfig::default();
     config.general.local_signaling_addr = "0.0.0.0:5063".parse().unwrap(); // Different port
     config.general.domain = "127.0.0.1".to_string();
-    
+
     let server_result = CallCenterServerBuilder::new()
         .with_config(config)
         .with_database_path(":memory:".to_string())
         .build()
         .await;
-        
+
     match server_result {
         Ok(mut server) => {
             println!("✅ Server created successfully");
-            
+
             match server.start().await {
                 Ok(()) => {
                     println!("✅ Server started successfully");
-                    
+
                     // Get server resource usage after startup
                     let server_startup_usage = get_process_usage(current_pid).unwrap_or(baseline_usage.clone());
                     println!("\n📊 SERVER STARTUP RESOURCE USAGE:");
-                    println!("  💾 Memory RSS: {} KB ({:.1} MB) [+{:.1} MB from baseline]", 
-                             server_startup_usage.memory_rss_kb, 
+                    println!("  💾 Memory RSS: {} KB ({:.1} MB) [+{:.1} MB from baseline]",
+                             server_startup_usage.memory_rss_kb,
                              server_startup_usage.memory_rss_kb as f64 / 1024.0,
                              (server_startup_usage.memory_rss_kb.saturating_sub(baseline_usage.memory_rss_kb)) as f64 / 1024.0);
-                    println!("  🧵 Thread Count: {} [+{} from baseline]", 
-                             server_startup_usage.thread_count, 
+                    println!("  🧵 Thread Count: {} [+{} from baseline]",
+                             server_startup_usage.thread_count,
                              server_startup_usage.thread_count.saturating_sub(baseline_usage.thread_count));
-                    
+
                     // Start server task
                     let server_task = tokio::spawn(async move {
                         if let Err(e) = server.run().await {
                             eprintln!("❌ SERVER: Runtime error: {}", e);
                         }
                     });
-                    
-                    // Give server time to fully start  
+
+                    // Give server time to fully start
                     tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
                     println!("✅ Server running, testing agent creation...");
-                    
+
                     // Test different agent counts with resource profiling
                     let test_counts = vec![1, 5, 20, 50, 100, 200, 500, 1000];
-                    
+
                     // Track peak metrics across all tests
                     let mut peak_successful_agents = 0;
                     let mut peak_registration_rate = 0.0;
@@ -297,14 +297,14 @@ async fn test_agent_scaling_diagnostic() {
                     let mut peak_cpu_percent = 0.0;
                     let mut peak_threads = 0;
                     let mut total_test_time = std::time::Duration::new(0, 0);
-                    
+
                     for &num_agents in &test_counts {
                         println!("\n🧪 TESTING: {} agents", num_agents);
-                        
+
                         let test_start = std::time::Instant::now();
                         let mut agent_handles = Vec::with_capacity(num_agents);
                         let agent_counter = Arc::new(AtomicUsize::new(0));
-                        
+
                         // Create agents
                         for i in 0..num_agents {
                             let agent_id = i + (num_agents * 1000); // Unique port range per test
@@ -313,7 +313,7 @@ async fn test_agent_scaling_diagnostic() {
                                 create_and_register_agent_with_profiling(agent_id, 5063, counter_clone).await
                             });
                             agent_handles.push(handle);
-                            
+
                             // Small delay to avoid overwhelming, more frequent for larger tests
                             if i % 10 == 0 && i > 0 {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
@@ -323,16 +323,16 @@ async fn test_agent_scaling_diagnostic() {
                                 println!("  📝 Spawned {} agents...", i);
                             }
                         }
-                        
+
                         println!("⏱️  All {} agent tasks spawned, waiting for completion...", num_agents);
-                        
+
                         // Collect results and resource usage
                         let mut successful = 0;
                         let mut failed = 0;
                         let mut total_agent_memory_kb = 0u64;
                         let mut max_agent_memory_kb = 0u64;
                         let mut total_agent_threads = 0usize;
-                        
+
                         for (i, handle) in agent_handles.into_iter().enumerate() {
                             match tokio::time::timeout(std::time::Duration::from_secs(45), handle).await {
                                 Ok(Ok(Ok(usage))) => {
@@ -340,7 +340,7 @@ async fn test_agent_scaling_diagnostic() {
                                     total_agent_memory_kb += usage.memory_rss_kb;
                                     max_agent_memory_kb = max_agent_memory_kb.max(usage.memory_rss_kb);
                                     total_agent_threads += usage.thread_count;
-                                    
+
                                     // Adjust output frequency based on test size
                                     let should_print = if num_agents <= 50 {
                                         successful <= 3 || successful % 10 == 0
@@ -349,9 +349,9 @@ async fn test_agent_scaling_diagnostic() {
                                     } else {
                                         successful <= 3 || successful % 100 == 0
                                     };
-                                    
+
                                     if should_print {
-                                        println!("✅ Agent {} successful - Memory: {:.1} MB, Threads: {} (Total: {})", 
+                                        println!("✅ Agent {} successful - Memory: {:.1} MB, Threads: {} (Total: {})",
                                                  i, usage.memory_rss_kb as f64 / 1024.0, usage.thread_count, successful);
                                     }
                                 }
@@ -381,13 +381,13 @@ async fn test_agent_scaling_diagnostic() {
                                 }
                             }
                         }
-                        
+
                         let test_duration = test_start.elapsed();
                         total_test_time += test_duration;
-                        
+
                         // Get final server resource usage
                         let final_server_usage = get_process_usage(current_pid).unwrap_or(server_startup_usage.clone());
-                        
+
                         // Update peak metrics
                         if successful > peak_successful_agents {
                             peak_successful_agents = successful;
@@ -406,72 +406,72 @@ async fn test_agent_scaling_diagnostic() {
                         if final_server_usage.thread_count > peak_threads {
                             peak_threads = final_server_usage.thread_count;
                         }
-                        
+
                         println!("\n📊 RESULTS FOR {} AGENTS:", num_agents);
                         println!("  ✅ Successful: {}", successful);
                         println!("  ❌ Failed: {}", failed);
                         println!("  ⏱️  Duration: {:?}", test_duration);
                         println!("  📈 Rate: {:.2} registrations/second", registration_rate);
-                        
+
                         println!("\n🖥️  SERVER RESOURCE USAGE:");
                         println!("  💾 Total Memory RSS: {} KB ({:.1} MB)", final_server_usage.memory_rss_kb, memory_mb);
-                        println!("  💾 Memory increase from baseline: +{:.1} MB", 
+                        println!("  💾 Memory increase from baseline: +{:.1} MB",
                                  (final_server_usage.memory_rss_kb.saturating_sub(baseline_usage.memory_rss_kb)) as f64 / 1024.0);
                         println!("  🧵 Total Thread Count: {}", final_server_usage.thread_count);
-                        println!("  🧵 Thread increase from baseline: +{}", 
+                        println!("  🧵 Thread increase from baseline: +{}",
                                  final_server_usage.thread_count.saturating_sub(baseline_usage.thread_count));
                         println!("  🔥 CPU Usage: {:.1}%", final_server_usage.cpu_percent);
-                        
+
                         if successful > 0 {
                             println!("\n👥 PER-AGENT RESOURCE USAGE:");
-                            println!("  💾 Average Memory per Agent: {:.1} KB ({:.2} MB)", 
+                            println!("  💾 Average Memory per Agent: {:.1} KB ({:.2} MB)",
                                      total_agent_memory_kb as f64 / successful as f64,
                                      (total_agent_memory_kb as f64 / successful as f64) / 1024.0);
-                            println!("  💾 Peak Agent Memory: {:.1} KB ({:.2} MB)", 
+                            println!("  💾 Peak Agent Memory: {:.1} KB ({:.2} MB)",
                                      max_agent_memory_kb, max_agent_memory_kb as f64 / 1024.0);
-                            println!("  🧵 Average Threads per Agent: {:.1}", 
+                            println!("  🧵 Average Threads per Agent: {:.1}",
                                      total_agent_threads as f64 / successful as f64);
-                            
+
                             println!("\n📈 SCALING METRICS:");
-                            println!("  🏭 CPU Core Utilization: {:.1}% of {} cores", 
+                            println!("  🏭 CPU Core Utilization: {:.1}% of {} cores",
                                      (final_server_usage.cpu_percent / system_info.logical_cores as f64) * 100.0,
                                      system_info.logical_cores);
-                            println!("  💾 Memory Utilization: {:.1}% of {} MB total", 
+                            println!("  💾 Memory Utilization: {:.1}% of {} MB total",
                                      (final_server_usage.memory_rss_kb as f64 / 1024.0) / system_info.total_memory_mb as f64 * 100.0,
                                      system_info.total_memory_mb);
-                            println!("  📊 Memory per Agent/Core Ratio: {:.2} MB/agent per core", 
+                            println!("  📊 Memory per Agent/Core Ratio: {:.2} MB/agent per core",
                                      (total_agent_memory_kb as f64 / 1024.0 / successful as f64) / system_info.logical_cores as f64);
                         }
-                        
+
                         if successful == 0 && (failed > 0) {
                             println!("🚨 BREAKING POINT FOUND: {} agents failed completely", num_agents);
                             break;
                         }
-                        
+
                         // Give system time to cleanup between tests - longer for larger tests
                         let cleanup_time = if num_agents >= 500 {
                             5000 // 5 seconds for 500+ agents
                         } else if num_agents >= 100 {
-                            3000 // 3 seconds for 100+ agents  
+                            3000 // 3 seconds for 100+ agents
                         } else {
                             2000 // 2 seconds for smaller tests
                         };
-                        
+
                         println!("🧹 Cleaning up... (waiting {}ms)", cleanup_time);
                         tokio::time::sleep(tokio::time::Duration::from_millis(cleanup_time)).await;
                     }
-                    
+
                     // Print comprehensive summary
                     println!("\n");
                     println!("════════════════════════════════════════════════════════════════");
                     println!("🎯 RVOIP SIP INFRASTRUCTURE PERFORMANCE SUMMARY");
                     println!("════════════════════════════════════════════════════════════════");
-                    
+
                     println!("\n🖥️  SYSTEM CONFIGURATION:");
                     println!("  💻 Hardware: {} physical cores, {} logical cores", system_info.total_cores, system_info.logical_cores);
                     println!("  💾 Total Memory: {:.1} GB ({} MB)", system_info.total_memory_mb as f64 / 1024.0, system_info.total_memory_mb);
                     println!("  💾 Available Memory: {:.1} GB ({} MB)", system_info.available_memory_mb as f64 / 1024.0, system_info.available_memory_mb);
-                    
+
                     println!("\n🏆 PEAK PERFORMANCE METRICS:");
                     println!("  🎯 Maximum Concurrent Agents: {} agents", peak_successful_agents);
                     println!("  ⚡ Peak Registration Rate: {:.1} registrations/second", peak_registration_rate);
@@ -479,31 +479,31 @@ async fn test_agent_scaling_diagnostic() {
                     println!("  💾 Peak Memory Usage: {:.1} MB", peak_memory_mb);
                     println!("  🔥 Peak CPU Usage: {:.1}%", peak_cpu_percent);
                     println!("  🧵 Peak Thread Count: {} threads", peak_threads);
-                    
+
                     println!("\n📊 RESOURCE EFFICIENCY:");
                     println!("  💾 Memory per Agent: ~{:.1} MB/agent", peak_memory_mb / peak_successful_agents as f64);
                     println!("  🏭 CPU per Agent: ~{:.2}% per agent", peak_cpu_percent / peak_successful_agents as f64);
                     println!("  🧵 Threads per Agent: ~{:.1} threads/agent", peak_threads as f64 / peak_successful_agents as f64);
                     println!("  ⚡ Processing Rate: {:.1} agents/second peak", peak_registration_rate);
-                    
+
                     println!("\n🚀 SCALABILITY PROJECTIONS:");
                     let memory_capacity = (system_info.total_memory_mb as f64 * 0.8) / (peak_memory_mb / peak_successful_agents as f64);
                     let cpu_capacity = (system_info.logical_cores as f64 * 100.0 * 0.8) / (peak_cpu_percent / peak_successful_agents as f64);
                     let projected_capacity = memory_capacity.min(cpu_capacity) as usize;
-                    
+
                     println!("  🎯 Estimated Capacity (80% util): ~{} concurrent agents", projected_capacity);
                     println!("  💾 Memory-limited capacity: ~{} agents", memory_capacity as usize);
                     println!("  🏭 CPU-limited capacity: ~{} agents", cpu_capacity as usize);
                     println!("  📈 Current Memory Utilization: {:.2}%", (peak_memory_mb / (system_info.total_memory_mb as f64 / 1024.0)) * 100.0);
                     println!("  📈 Current CPU Utilization: {:.2}%", (peak_cpu_percent / (system_info.logical_cores as f64 * 100.0)) * 100.0);
-                    
+
                     println!("\n✅ QUALITY ASSESSMENT:");
                     let success_rate = (peak_successful_agents as f64 / 1000.0) * 100.0;
                     println!("  🎯 Success Rate: {:.1}% ({}/{} agents)", success_rate, peak_successful_agents, 1000);
                     println!("  🔧 Resource Efficiency: {}", if peak_memory_mb < 1000.0 { "EXCELLENT" } else if peak_memory_mb < 2000.0 { "GOOD" } else { "MODERATE" });
                     println!("  ⚡ Performance Rating: {}", if peak_registration_rate > 50.0 { "HIGH" } else if peak_registration_rate > 20.0 { "MEDIUM" } else { "LOW" });
                     println!("  🏭 Scalability Grade: {}", if projected_capacity > 500 { "A+" } else if projected_capacity > 200 { "A" } else if projected_capacity > 100 { "B+" } else { "B" });
-                    
+
                     println!("\n🎯 RECOMMENDATIONS:");
                     if projected_capacity > 1000 {
                         println!("  ✅ System ready for production deployment");
@@ -522,11 +522,11 @@ async fn test_agent_scaling_diagnostic() {
                         println!("  🔧 Investigate memory usage patterns");
                         println!("  🔧 Consider architectural improvements");
                     }
-                    
+
                     println!("\n════════════════════════════════════════════════════════════════");
                     println!("🔍 DIAGNOSTIC COMPLETE - RVOIP SIP STACK PERFORMANCE VERIFIED");
                     println!("════════════════════════════════════════════════════════════════\n");
-                    
+
                     // Cleanup
                     server_task.abort();
                     println!("🛑 CLEANUP: Server stopped");
@@ -538,6 +538,6 @@ async fn test_agent_scaling_diagnostic() {
             println!("❌ Server creation failed: {}", e);
         }
     }
-    
+
     println!("🔍 DIAGNOSTIC TEST COMPLETE");
-} 
+}

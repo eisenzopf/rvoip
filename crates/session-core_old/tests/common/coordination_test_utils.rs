@@ -121,19 +121,19 @@ impl ResourceTestHelper {
     pub fn stress_test_allocations(&mut self, config: &CoordinationPerfTestConfig) -> Result<(usize, Duration)> {
         let start = Instant::now();
         let mut allocated = 0;
-        
+
         while start.elapsed() < config.test_duration {
             if self.allocated_count() < config.max_sessions {
                 if self.allocate_session().is_ok() {
                     allocated += 1;
                 }
             }
-            
+
             if config.operation_delay > Duration::ZERO {
                 std::thread::sleep(config.operation_delay);
             }
         }
-        
+
         Ok((allocated, start.elapsed()))
     }
 }
@@ -197,13 +197,13 @@ impl PriorityTestHelper {
         let mut priorities: Vec<Priority> = sessions.iter()
             .map(|id| self.get_priority(id))
             .collect();
-        
+
         let sorted_priorities = {
             let mut sorted = priorities.clone();
             sorted.sort();
             sorted
         };
-        
+
         priorities.sort();
         priorities == sorted_priorities
     }
@@ -336,26 +336,26 @@ impl CoordinationIntegrationHelper {
     pub fn create_coordinated_session(&mut self, group_name: &str, priority: Priority) -> Result<SessionId> {
         // Allocate resource
         let session_id = self.resource_helper.allocate_session()?;
-        
+
         // Set priority
         self.priority_helper.set_priority(session_id.clone(), priority)?;
-        
+
         // Add to group
         self.groups_helper.add_to_group(group_name, session_id.clone())?;
-        
+
         Ok(session_id)
     }
 
     pub fn cleanup_coordinated_session(&mut self, session_id: &SessionId, group_name: &str) -> Result<()> {
         // Remove from group
         self.groups_helper.remove_from_group(group_name, session_id)?;
-        
+
         // Remove priority
         self.priority_helper.cleanup_session(session_id)?;
-        
+
         // Deallocate resource
         self.resource_helper.deallocate_session(session_id)?;
-        
+
         Ok(())
     }
 
@@ -421,17 +421,17 @@ impl CoordinationTestUtils {
     {
         let start = Instant::now();
         let mut completed = 0;
-        
+
         for _ in 0..iterations {
             if start.elapsed() >= max_duration {
                 break;
             }
-            
+
             if operation().is_ok() {
                 completed += 1;
             }
         }
-        
+
         (completed, start.elapsed())
     }
 
@@ -484,14 +484,14 @@ macro_rules! coordination_perf_test {
             let (result, duration) = CoordinationTestUtils::measure_operation_performance(|| {
                 $operation
             });
-            
+
             CoordinationTestUtils::assert_performance_acceptable(
                 duration,
                 $max_duration,
                 stringify!($name)
             );
-            
+
             assert!(result.is_ok(), "Operation failed: {:?}", result);
         }
     };
-} 
+}

@@ -204,7 +204,7 @@ use std::convert::TryFrom;
 ///         ])
 ///     )
 ///     .build();
-///     
+///
 /// // Create a challenge response for multimedia services
 /// let media_challenge = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired,
 ///                                                Some("Authentication Required"))
@@ -242,7 +242,7 @@ use std::convert::TryFrom;
 ///         StatusCode::ProxyAuthenticationRequired,
 ///         Some("Gateway Authentication Required")
 ///     );
-///     
+///
 ///     if secure_transport {
 ///         // For clients on TLS, offer both authentication options
 ///         builder
@@ -518,7 +518,7 @@ pub trait ProxyAuthenticateExt {
     /// let private_response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
     ///     .proxy_authenticate_basic("internal.proxy.corp.example.com")
     ///     .build();
-    ///     
+    ///
     /// // 2. As a fallback when a client doesn't support digest
     /// let fallback_response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
     ///     // Primary authentication method (preferred)

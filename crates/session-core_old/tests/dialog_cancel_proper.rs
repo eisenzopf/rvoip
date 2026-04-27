@@ -40,7 +40,7 @@ impl CallHandler for DelayedAcceptHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         // Delay before making decision to allow CANCEL
         tokio::time::sleep(self.delay).await;
-        
+
         if self.auto_accept {
             CallDecision::Accept(Some("SDP answer".to_string()))
         } else {
@@ -59,7 +59,7 @@ impl CallHandler for DelayedAcceptHandler {
 async fn test_cancel_before_response() {
     // Create managers - B defers response to allow CANCEL
     let (manager_a, _, _) = create_session_manager_pair().await.unwrap();
-    
+
     // Create handler that defers (never accepts)
     let handler = Arc::new(DelayedAcceptHandler::new(Duration::from_secs(5), false));
     let manager_b = SessionManagerBuilder::new()
@@ -69,10 +69,10 @@ async fn test_cancel_before_response() {
         .build()
         .await
         .unwrap();
-    
+
     // Subscribe to events before creating call
     let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
-    
+
     // Create outgoing call
     let call = manager_a.create_outgoing_call(
         "sip:alice@127.0.0.1",
@@ -80,24 +80,24 @@ async fn test_cancel_before_response() {
         Some("SDP offer".to_string()),
         None
     ).await.unwrap();
-    
+
     let session_id = call.id().clone();
-    
+
     // Verify call is in Initiating state
     verify_session_exists(&manager_a, &session_id, Some(&CallState::Initiating)).await.unwrap();
-    
+
     // Cancel before any final response (100 Trying should have been received)
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
+
     // This should send CANCEL since dialog is not established
     let terminate_result = manager_a.terminate_session(&session_id).await;
     println!("CANCEL result: {:?}", terminate_result);
     assert!(terminate_result.is_ok());
-    
+
     // Wait for state transition to Terminated
     let terminated = wait_for_terminated_state(&mut event_sub, &session_id, Duration::from_secs(2)).await;
     assert!(terminated, "Session should transition to Terminated state");
-    
+
     // Session might still exist but should be in Terminated state
     tokio::time::sleep(Duration::from_millis(100)).await;
 }
@@ -106,7 +106,7 @@ async fn test_cancel_before_response() {
 async fn test_cancel_after_provisional_response() {
     // Create managers with handler that sends provisional response
     let (manager_a, _, _) = create_session_manager_pair().await.unwrap();
-    
+
     // Create custom handler that defers (simulates provisional response state)
     #[derive(Debug)]
     struct RingingHandler;
@@ -117,10 +117,10 @@ async fn test_cancel_after_provisional_response() {
             // In a real scenario, this would send 180 Ringing
             CallDecision::Defer
         }
-        
+
         async fn on_call_ended(&self, _call: CallSession, _reason: &str) {}
     }
-    
+
     let manager_b = SessionManagerBuilder::new()
         .with_local_address("sip:test@127.0.0.1")
         .with_sip_port(6101)
@@ -128,10 +128,10 @@ async fn test_cancel_after_provisional_response() {
         .build()
         .await
         .unwrap();
-    
+
     // Subscribe to events
     let mut event_sub = manager_a.event_processor.subscribe().await.unwrap();
-    
+
     // Create outgoing call
     let call = manager_a.create_outgoing_call(
         "sip:alice@127.0.0.1",
@@ -139,21 +139,21 @@ async fn test_cancel_after_provisional_response() {
         Some("SDP offer".to_string()),
         None
     ).await.unwrap();
-    
+
     let session_id = call.id().clone();
-    
+
     // Wait for initial processing (100 Trying received)
     tokio::time::sleep(Duration::from_millis(200)).await;
-    
+
     // Cancel during early dialog
     let terminate_result = manager_a.terminate_session(&session_id).await;
     println!("CANCEL after provisional result: {:?}", terminate_result);
     assert!(terminate_result.is_ok());
-    
+
     // Wait for state transition to Terminated
     let terminated = wait_for_terminated_state(&mut event_sub, &session_id, Duration::from_secs(2)).await;
     assert!(terminated, "Session should transition to Terminated state");
-    
+
     // Session might still exist but should be in Terminated state
     tokio::time::sleep(Duration::from_millis(100)).await;
-} 
+}

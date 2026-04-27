@@ -1,5 +1,5 @@
 //! Helper methods for common state machine operations
-//! 
+//!
 //! These methods provide convenience functions that can't be done through
 //! simple message passing. They handle:
 //! - Session creation and initialization
@@ -22,10 +22,10 @@ use super::StateMachine;
 pub struct StateMachineHelpers {
     /// Core state machine
     pub state_machine: Arc<StateMachine>,
-    
+
     /// Active session tracking (for queries)
     active_sessions: Arc<RwLock<HashMap<SessionId, SessionInfo>>>,
-    
+
     /// Event subscribers
     subscribers: Arc<RwLock<HashMap<SessionId, Vec<Box<dyn Fn(SessionEvent) + Send + Sync>>>>>,
 }
@@ -48,10 +48,10 @@ impl StateMachineHelpers {
             subscribers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     // ========== Session Creation ==========
     // These can't be done through message passing alone
-    
+
     /// Create and initialize a new session
     pub async fn create_session(
         &self,
@@ -66,15 +66,15 @@ impl StateMachineHelpers {
             role,
             true, // with history
         ).await?;
-        
+
         // Set initial data
         let mut session = session;
         session.local_uri = Some(from.clone());
         session.remote_uri = Some(to.clone());
-        
+
         // Store it
         self.state_machine.store.update_session(session).await?;
-        
+
         // Track in active sessions
         let info = SessionInfo {
             session_id: session_id.clone(),
@@ -85,17 +85,17 @@ impl StateMachineHelpers {
             media_active: false,
         };
         self.active_sessions.write().await.insert(session_id, info);
-        
+
         Ok(())
     }
-    
+
     // ========== Convenience Methods ==========
     // High-level operations that coordinate multiple events
-    
+
     /// Make an outgoing call (creates session + sends MakeCall event)
     pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
         let session_id = SessionId::new();
-        
+
         // Create session
         self.create_session(
             session_id.clone(),
@@ -103,16 +103,16 @@ impl StateMachineHelpers {
             to.to_string(),
             Role::UAC,
         ).await?;
-        
+
         // Send MakeCall event
         self.state_machine.process_event(
             &session_id,
             EventType::MakeCall { target: to.to_string() },
         ).await?;
-        
+
         Ok(session_id)
     }
-    
+
     /// Accept an incoming call
     pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
         self.state_machine.process_event(
@@ -121,7 +121,7 @@ impl StateMachineHelpers {
         ).await?;
         Ok(())
     }
-    
+
     /// Reject an incoming call
     pub async fn reject_call(&self, session_id: &SessionId, reason: &str) -> Result<()> {
         self.state_machine.process_event(
@@ -130,7 +130,7 @@ impl StateMachineHelpers {
         ).await?;
         Ok(())
     }
-    
+
     /// Hangup a call
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
         self.state_machine.process_event(
@@ -139,7 +139,7 @@ impl StateMachineHelpers {
         ).await?;
         Ok(())
     }
-    
+
     /// Create a conference from an active call
     pub async fn create_conference(&self, session_id: &SessionId, name: &str) -> Result<()> {
         self.state_machine.process_event(
@@ -148,7 +148,7 @@ impl StateMachineHelpers {
         ).await?;
         Ok(())
     }
-    
+
     /// Add a participant to a conference
     pub async fn add_to_conference(
         &self,
@@ -213,7 +213,7 @@ impl StateMachineHelpers {
 
     // ========== Query Methods ==========
     // These need access to internal state
-    
+
     /// Get session information
     pub async fn get_session_info(&self, session_id: &SessionId) -> Result<SessionInfo> {
         self.active_sessions.read().await
@@ -221,7 +221,7 @@ impl StateMachineHelpers {
             .cloned()
             .ok_or_else(|| SessionError::SessionNotFound(session_id.to_string()))
     }
-    
+
     /// List all active sessions
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
         // Query the session store directly to get ALL sessions, including
@@ -237,13 +237,13 @@ impl StateMachineHelpers {
             media_active: s.media_session_id.is_some(),
         }).collect()
     }
-    
+
     /// Get current state of a session
     pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
         let session = self.state_machine.store.get_session(session_id).await?;
         Ok(session.call_state)
     }
-    
+
     /// Check if a session is in conference
     pub async fn is_in_conference(&self, session_id: &SessionId) -> Result<bool> {
         // Conference functionality is handled via bridging
@@ -251,10 +251,10 @@ impl StateMachineHelpers {
         let _ = session_id;
         Ok(false)
     }
-    
+
     // ========== Subscription Management ==========
     // Can't be done through message passing
-    
+
     /// Subscribe to events for a session
     pub async fn subscribe<F>(&self, session_id: SessionId, callback: F)
     where
@@ -265,14 +265,14 @@ impl StateMachineHelpers {
             .or_insert_with(Vec::new)
             .push(Box::new(callback));
     }
-    
+
     /// Unsubscribe from a session
     pub async fn unsubscribe(&self, session_id: &SessionId) {
         self.subscribers.write().await.remove(session_id);
     }
-    
+
     // ========== Internal Helpers ==========
-    
+
     /// Notify subscribers of an event
     #[allow(dead_code)]
     pub(crate) async fn notify_subscribers(&self, session_id: &SessionId, event: SessionEvent) {
@@ -282,7 +282,7 @@ impl StateMachineHelpers {
             }
         }
     }
-    
+
     /// Clean up terminated session
     #[allow(dead_code)]
     pub(crate) async fn cleanup_session(&self, session_id: &SessionId) {
@@ -292,7 +292,7 @@ impl StateMachineHelpers {
 }
 
 // ========== Things that CAN'T be done through message passing ==========
-// 
+//
 // 1. Session Creation - Need to allocate storage, set initial state
 // 2. State Queries - Need direct access to session store
 // 3. Listing Sessions - Need to enumerate all active sessions

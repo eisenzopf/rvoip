@@ -96,7 +96,7 @@ use crate::types::{content_length::ContentLength, TypedHeader};
 ///                 t=0 0\r\n\
 ///                 m=audio 49170 RTP/AVP 0\r\n\
 ///                 a=rtpmap:0 PCMU/8000\r\n";
-///                 
+///
 /// let invite = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
 ///     .content_type_sdp()
 ///     .body(sdp_body)  // Content-Length set automatically based on body size

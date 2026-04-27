@@ -16,7 +16,7 @@
 //! ## Key Event Types Processed
 //!
 //! - **Response Events**: 1xx, 2xx, 3xx-6xx responses that affect dialog state
-//! - **Request Events**: INVITE, BYE, CANCEL, ACK that modify dialog lifecycle  
+//! - **Request Events**: INVITE, BYE, CANCEL, ACK that modify dialog lifecycle
 //! - **Transaction Completion**: Cleanup and resource management
 //! - **Transport Errors**: Handle network failures and recovery scenarios
 //! - **Timer Events**: Process transaction timeouts and retransmissions

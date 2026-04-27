@@ -89,7 +89,7 @@ use crate::types::{max_forwards::MaxForwards, TypedHeader};
 ///     .cseq(1)
 ///     .max_forwards(69) // Decremented by 1
 ///     .build();
-///    
+///
 /// // 3. If the Max-Forwards reaches 0, a proxy would reject with 483 Too Many Hops
 /// let too_many_hops = SimpleResponseBuilder::new(StatusCode::TooManyHops, None)
 ///     .from("Alice", "sip:alice@atlanta.example.com", Some("a73kszlfl"))
@@ -123,11 +123,11 @@ use crate::types::{max_forwards::MaxForwards, TypedHeader};
 ///     } else {
 ///         // Create a new request with decremented Max-Forwards
 ///         let mut forwarded_request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap();
-///         
+///
 ///         // Decrement the Max-Forwards value (in practice, you'd copy other headers too)
 ///         let new_value = header.decrement().unwrap_or(MaxForwards::new(0));
 ///         forwarded_request = forwarded_request.max_forwards(new_value.0 as u32);
-///         
+///
 ///         // Now we can forward the request with the decremented Max-Forwards value
 ///     }
 /// }
@@ -186,10 +186,10 @@ pub trait MaxForwardsBuilderExt {
     /// let incoming = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
     ///     .max_forwards(70)
     ///     .build();
-    ///     
+    ///
     /// // Extract the current Max-Forwards value (simulated)
     /// let current_value = 70;
-    ///     
+    ///
     /// // Create a new forwarded request with decremented value
     /// let outgoing = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
     ///     .max_forwards(current_value - 1) // Decrement by 1

@@ -6,7 +6,7 @@ use crate::{
 /// Check if a guard condition is satisfied
 pub async fn check_guard(guard: &Guard, session: &SessionState) -> bool {
     use crate::types::CallState;
-    
+
     match guard {
         Guard::HasLocalSDP => session.local_sdp.is_some(),
         Guard::HasRemoteSDP => session.remote_sdp.is_some(),

@@ -97,14 +97,14 @@ pub async fn create_test_session_manager_with_config(
     } else {
         format!("sip:{}", config.from_uri_base)
     };
-    
+
     let manager = SessionManagerBuilder::new()
         .with_local_address(&from_uri)
         .with_sip_port(port)
         .with_handler(handler)
         .build()
         .await?;
-    
+
     manager.start().await?;
     Ok(manager)
 }
@@ -144,11 +144,11 @@ impl RegistryTestHelper {
         let session_id = SessionId::new();
         let call_session = create_test_call_session(session_id.clone(), from, to, state);
         let session = rvoip_session_core::session::Session::from_call_session(call_session.clone());
-        
+
         self.registry.register_session(session).await
             .expect("Failed to register test session");
         self.test_sessions.push(call_session);
-        
+
         session_id
     }
 
@@ -195,7 +195,7 @@ impl EventTestHelper {
     pub async fn new() -> Result<Self, SessionError> {
         let processor = Arc::new(SessionEventProcessor::new());
         processor.start().await?;
-        
+
         Ok(Self {
             processor,
             subscriber: None,
@@ -229,7 +229,7 @@ impl EventTestHelper {
         F: Fn(&SessionEvent) -> bool,
     {
         let start = std::time::Instant::now();
-        
+
         while start.elapsed() < timeout {
             if let Some(event) = self.wait_for_event(Duration::from_millis(100)).await {
                 if predicate(&event) {
@@ -237,7 +237,7 @@ impl EventTestHelper {
                 }
             }
         }
-        
+
         None
     }
 
@@ -295,7 +295,7 @@ impl CleanupTestHelper {
 
     pub async fn verify_resource_cleaned(&self, resource_id: &str) {
         let resources = self.test_resources.read().await;
-        assert!(!resources.get(resource_id).unwrap_or(&false), 
+        assert!(!resources.get(resource_id).unwrap_or(&false),
                "Resource {} should be cleaned up", resource_id);
     }
 
@@ -323,11 +323,11 @@ impl ManagerIntegrationHelper {
     pub async fn new_with_config(config: ManagerTestConfig) -> Result<Self, SessionError> {
         // Create a pair of managers for real dialog establishment
         let (manager_a, manager_b, call_events) = create_session_manager_pair().await?;
-        
+
         let registry_helper = RegistryTestHelper::new();
         let event_helper = EventTestHelper::new().await?;
         let cleanup_helper = CleanupTestHelper::new();
-        
+
         Ok(Self {
             manager: manager_a,
             manager_b: Some(manager_b),
@@ -397,7 +397,7 @@ pub struct PerformanceMetrics {
 impl ManagerPerformanceHelper {
     pub async fn new(manager_count: usize) -> Result<Self, SessionError> {
         let mut managers = Vec::new();
-        
+
         for i in 0..manager_count {
             let handler = TestCallHandler::new(true);
             let config = ManagerTestConfig {
@@ -407,7 +407,7 @@ impl ManagerPerformanceHelper {
             let manager = create_test_session_manager_with_config(config, Arc::new(handler)).await?;
             managers.push(manager);
         }
-        
+
         Ok(Self {
             managers,
             sessions: Vec::new(),
@@ -417,52 +417,52 @@ impl ManagerPerformanceHelper {
 
     pub async fn benchmark_session_creation(&mut self, session_count: usize) -> Duration {
         let start = std::time::Instant::now();
-        
+
         for i in 0..session_count {
             let manager_idx = i % self.managers.len();
             let manager = &self.managers[manager_idx];
-            
+
             let from = format!("sip:perf-caller-{}@localhost", i);
             let to = format!("sip:perf-callee-{}@localhost", i);
-            
+
             let session_start = std::time::Instant::now();
             let call = manager.create_outgoing_call(&from, &to, Some("perf test SDP".to_string())).await
                 .expect("Failed to create session");
             let session_time = session_start.elapsed();
-            
+
             self.sessions.push(call.id().clone());
             self.metrics.lock().await.session_creation_times.push(session_time);
         }
-        
+
         start.elapsed()
     }
 
     pub async fn benchmark_session_lookup(&self, lookup_count: usize) -> Duration {
         let start = std::time::Instant::now();
-        
+
         for i in 0..lookup_count {
             let manager_idx = i % self.managers.len();
             let session_idx = i % self.sessions.len();
-            
+
             if session_idx < self.sessions.len() {
                 let manager = &self.managers[manager_idx];
                 let session_id = &self.sessions[session_idx];
-                
+
                 let lookup_start = std::time::Instant::now();
                 let _ = manager.find_session(session_id).await;
                 let lookup_time = lookup_start.elapsed();
-                
+
                 self.metrics.lock().await.session_lookup_times.push(lookup_time);
             }
         }
-        
+
         start.elapsed()
     }
 
     pub async fn benchmark_event_publishing(&self, event_count: usize) -> Duration {
         // let event_processor = &self.managers[0].get_event_processor();
         let start = std::time::Instant::now();
-        
+
         // for i in 0..event_count {
         //     let session_id = SessionId(format!("perf-event-session-{}", i));
         //     let event = SessionEvent::SessionCreated {
@@ -471,14 +471,14 @@ impl ManagerPerformanceHelper {
         //         to: format!("to-{}", i),
         //         call_state: CallState::Initiating,
         //     };
-        //     
+        //
         //     let event_start = std::time::Instant::now();
         //     event_processor.publish_event(event).await.expect("Failed to publish event");
         //     let event_time = event_start.elapsed();
-        //     
+        //
         //     self.metrics.lock().await.event_publish_times.push(event_time);
         // }
-        
+
         start.elapsed()
     }
 
@@ -508,17 +508,17 @@ impl Clone for PerformanceMetrics {
 /// Simple test helpers for manager testing
 pub mod test_handlers {
     use super::*;
-    
+
     /// Create an accepting handler for tests
     pub fn create_accepting_handler() -> Arc<dyn CallHandler> {
         Arc::new(TestCallHandler::new(true))
     }
-    
-    /// Create a rejecting handler for tests  
+
+    /// Create a rejecting handler for tests
     pub fn create_rejecting_handler() -> Arc<dyn CallHandler> {
         Arc::new(TestCallHandler::new(false))
     }
-    
+
     /// Create a deferring handler for tests
     pub fn create_deferring_handler() -> Arc<dyn CallHandler> {
         Arc::new(TestCallHandler::new(true))
@@ -536,14 +536,14 @@ pub mod utils {
         Fut: std::future::Future<Output = bool>,
     {
         let start = std::time::Instant::now();
-        
+
         while start.elapsed() < timeout {
             if condition().await {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        
+
         false
     }
 
@@ -554,14 +554,14 @@ pub mod utils {
         prefix: &str,
     ) -> Result<Vec<SessionId>, SessionError> {
         let mut session_ids = Vec::new();
-        
+
         for i in 0..count {
             let from = format!("{}from-{}@localhost", prefix, i);
             let to = format!("{}to-{}@localhost", prefix, i);
             let call = manager.create_outgoing_call(&from, &to, Some("test SDP".to_string())).await?;
             session_ids.push(call.id().clone());
         }
-        
+
         Ok(session_ids)
     }
 
@@ -576,4 +576,4 @@ pub mod utils {
         }
         Ok(())
     }
-} 
+}

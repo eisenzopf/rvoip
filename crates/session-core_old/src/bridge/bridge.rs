@@ -54,4 +54,4 @@ impl SessionBridge {
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
-} 
+}

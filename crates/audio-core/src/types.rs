@@ -83,16 +83,16 @@ impl AudioFormat {
 
     /// Check if this format is compatible with another format
     pub fn is_compatible_with(&self, other: &AudioFormat) -> bool {
-        self.sample_rate == other.sample_rate && 
+        self.sample_rate == other.sample_rate &&
         self.channels == other.channels &&
         self.bits_per_sample == other.bits_per_sample
     }
 
     /// Get a human-readable description of the format
     pub fn description(&self) -> String {
-        format!("{}Hz, {} ch, {}-bit, {}ms frames", 
-            self.sample_rate, 
-            self.channels, 
+        format!("{}Hz, {} ch, {}-bit, {}ms frames",
+            self.sample_rate,
+            self.channels,
             self.bits_per_sample,
             self.frame_size_ms
         )
@@ -236,7 +236,7 @@ impl AudioFrame {
             .iter()
             .map(|&sample| (sample as f64).powi(2))
             .sum();
-        
+
         (sum_of_squares / self.samples.len() as f64).sqrt() as f32
     }
 
@@ -333,7 +333,7 @@ pub struct AudioQualityMetrics {
     pub packet_loss_percent: f32,
     /// Jitter in milliseconds
     pub jitter_ms: f32,
-    /// Audio level (RMS) 
+    /// Audio level (RMS)
     pub audio_level: f32,
     /// Signal-to-noise ratio in dB
     pub snr_db: f32,
@@ -366,7 +366,7 @@ impl AudioQualityMetrics {
     pub fn quality_rating(&self) -> &'static str {
         match self.mos_score {
             x if x >= 4.5 => "Excellent",
-            x if x >= 4.0 => "Good", 
+            x if x >= 4.0 => "Good",
             x if x >= 3.5 => "Fair",
             x if x >= 2.5 => "Poor",
             _ => "Bad",
@@ -451,4 +451,4 @@ mod tests {
         let best_format = device.best_voip_format();
         assert!(best_format.is_voip_suitable());
     }
-} 
+}

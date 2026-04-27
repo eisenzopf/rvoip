@@ -458,7 +458,7 @@ impl ClientNonInviteLogic {
         let is_provisional = status.is_provisional();
         let is_final = !is_provisional;
 
-        debug!(id=%tx_id, status=%status, is_provisional=%is_provisional, is_final=%is_final, state=?current_state, 
+        debug!(id=%tx_id, status=%status, is_provisional=%is_provisional, is_final=%is_final, state=?current_state,
                "🔍 DEBUG: Response classification");
 
         match current_state {
@@ -627,7 +627,7 @@ impl TransactionLogic<ClientTransactionData, ClientNonInviteTimerHandles> for Cl
     ) -> Result<Option<TransactionState>> {
         let tx_id = &data.id;
 
-        debug!(id=%tx_id, state=?current_state, "🔍 DEBUG: process_message called with message type: {}", 
+        debug!(id=%tx_id, state=?current_state, "🔍 DEBUG: process_message called with message type: {}",
                if message.is_response() { "Response" } else { "Request" });
 
         // Use the validators utility to extract and validate the response

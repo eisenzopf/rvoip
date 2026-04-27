@@ -117,7 +117,7 @@ pub fn needs_quoting(display_name: &str) -> bool {
     // Space is not part of a token, so names with spaces need quoting
     display_name.chars().any(|c| {
         // A space requires quoting
-        c == ' ' || 
+        c == ' ' ||
         // Any non-alphanumeric character that's not in the token character set requires quoting
         (!c.is_alphanumeric() && !matches!(c, '-' | '.' | '!' | '%' | '*' | '_' | '+' | '`' | '\'' | '~'))
     }) || display_name.contains('"') || display_name.contains('\\')

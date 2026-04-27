@@ -41,32 +41,32 @@ pub type MediaResult<T> = Result<T, MediaError>;
 pub enum MediaError {
     #[error("Media session not found: {session_id}")]
     SessionNotFound { session_id: String },
-    
+
     #[error("Media configuration error: {message}")]
     Configuration { message: String },
-    
+
     #[error("SDP processing error: {message}")]
     SdpProcessing { message: String },
-    
+
     #[error("Codec negotiation failed: {reason}")]
     CodecNegotiation { reason: String },
-    
+
     #[error("Media engine error: {source}")]
-    MediaEngine { 
+    MediaEngine {
         #[from]
-        source: Box<dyn std::error::Error + Send + Sync> 
+        source: Box<dyn std::error::Error + Send + Sync>
     },
-    
+
     #[error("Session coordination error: {message}")]
     Coordination { message: String },
-    
+
     // NEW: Zero-copy RTP processing errors (Phase 16.1)
     #[error("Zero-copy RTP processing error: {message}")]
     ZeroCopyProcessing { message: String },
-    
+
     #[error("RTP buffer pool error: {message}")]
     RtpBufferPool { message: String },
-    
+
     #[error("RTP processing fallback failed: {message}")]
     RtpProcessingFallback { message: String },
 }
@@ -80,8 +80,8 @@ impl MediaError {
 
 impl From<MediaError> for crate::errors::SessionError {
     fn from(err: MediaError) -> Self {
-        crate::errors::SessionError::MediaIntegration { 
-            message: err.to_string() 
+        crate::errors::SessionError::MediaIntegration {
+            message: err.to_string()
         }
     }
-} 
+}

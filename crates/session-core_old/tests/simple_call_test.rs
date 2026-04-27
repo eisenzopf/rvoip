@@ -29,11 +29,11 @@ impl CallHandler for SimpleHandler {
         println!("   {} received call from: {}", self.name, call.from);
         CallDecision::Accept(None)
     }
-    
+
     async fn on_call_established(&self, _: CallSession, _: Option<String>, _: Option<String>) {
         println!("   {} call established", self.name);
     }
-    
+
     async fn on_call_ended(&self, _: CallSession, reason: &str) {
         println!("   {} call ended: {}", self.name, reason);
     }
@@ -42,7 +42,7 @@ impl CallHandler for SimpleHandler {
 #[tokio::test]
 async fn test_simple_call() {
     println!("\n🧪 Testing simple call Alice -> Bob\n");
-    
+
     // Create Alice
     println!("Creating Alice...");
     let alice = SessionManagerBuilder::new()
@@ -52,7 +52,7 @@ async fn test_simple_call() {
         .build()
         .await
         .expect("Failed to create Alice");
-    
+
     // Create Bob
     println!("Creating Bob...");
     let bob = SessionManagerBuilder::new()
@@ -62,10 +62,10 @@ async fn test_simple_call() {
         .build()
         .await
         .expect("Failed to create Bob");
-    
+
     // Wait for initialization
     tokio::time::sleep(Duration::from_millis(500)).await;
-    
+
     // Alice calls Bob
     println!("\n📞 Alice calling Bob...");
     let call = alice.create_outgoing_call(
@@ -74,14 +74,14 @@ async fn test_simple_call() {
         None,
         None, // sip_call_id
     ).await.expect("Failed to create call");
-    
+
     println!("Call created with ID: {}", call.id);
-    
+
     // Wait for call to establish
     tokio::time::sleep(Duration::from_secs(2)).await;
-    
+
     println!("✅ Test complete");
-    
+
     alice.stop().await.ok();
     bob.stop().await.ok();
 }

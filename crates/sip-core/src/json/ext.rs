@@ -324,7 +324,7 @@ pub trait SipJsonExt {
     ///     .index(0)
     ///     .field("Tag")
     ///     .as_str();
-    ///     
+    ///
     /// // This can be more readable than a single long path string:
     /// // request.path_str("headers.From.params[0].Tag")
     /// # Some(())
@@ -387,7 +387,7 @@ pub trait SipJsonExt {
     /// let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", Some("tag12345"))
     ///     .build();
-    ///     
+    ///
     /// let json = request.to_json_string().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
     /// println!("JSON: {}", json);
     /// # Ok(())

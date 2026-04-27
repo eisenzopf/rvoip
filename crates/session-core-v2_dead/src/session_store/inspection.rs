@@ -15,22 +15,22 @@ use super::history::TransitionRecord;
 pub struct SessionInspection {
     /// Current session state
     pub current_state: Option<SessionState>,
-    
+
     /// Recent transition history
     pub recent_transitions: Vec<TransitionRecord>,
-    
+
     /// Possible next transitions
     pub possible_transitions: Vec<PossibleTransition>,
-    
+
     /// Time in current state
     pub time_in_state: Duration,
-    
+
     /// Session age
     pub session_age: Duration,
-    
+
     /// Health status
     pub health: SessionHealth,
-    
+
     /// Resource usage
     pub resources: ResourceUsage,
 }
@@ -84,7 +84,7 @@ impl SessionStore {
     /// Inspect a session in detail
     pub async fn inspect_session(&self, session_id: &SessionId) -> SessionInspection {
         let state = self.get_session(session_id).await.ok();
-        
+
         let (recent_transitions, session_age, time_in_state) = if let Some(ref s) = state {
             let history = s.history.as_ref().map(|h| h.get_recent(10)).unwrap_or_default();
             let age = s.history.as_ref()
@@ -95,16 +95,16 @@ impl SessionStore {
         } else {
             (vec![], Duration::default(), Duration::default())
         };
-        
+
         let possible_transitions = if let Some(ref s) = state {
             self.get_possible_transitions(s)
         } else {
             vec![]
         };
-        
+
         let health = self.assess_health(&state, &recent_transitions, time_in_state);
         let resources = self.calculate_resources(&state);
-        
+
         SessionInspection {
             current_state: state,
             recent_transitions,
@@ -115,21 +115,21 @@ impl SessionStore {
             resources,
         }
     }
-    
+
     /// Get all valid transitions from current state
     pub fn get_possible_transitions(&self, state: &SessionState) -> Vec<PossibleTransition> {
         let mut transitions = Vec::new();
-        
+
         // Check all possible events for this role and state
         let events = Self::all_possible_events();
-        
+
         for event in events {
             let key = StateKey {
                 role: state.role,
                 state: state.call_state,
                 event: event.clone(),
             };
-            
+
             if let Some(transition) = MASTER_TABLE.get_transition(&key) {
                 transitions.push(PossibleTransition {
                     event: event.clone(),
@@ -138,7 +138,7 @@ impl SessionStore {
                     description: Self::describe_transition(&transition),
                 });
             }
-            
+
             // Also check "Both" role
             if state.role != Role::Both {
                 let key_both = StateKey {
@@ -146,7 +146,7 @@ impl SessionStore {
                     state: state.call_state,
                     event: event.clone(),
                 };
-                
+
                 if let Some(transition) = MASTER_TABLE.get_transition(&key_both) {
                     if !transitions.iter().any(|t| std::mem::discriminant(&t.event) == std::mem::discriminant(&event)) {
                         transitions.push(PossibleTransition {
@@ -159,10 +159,10 @@ impl SessionStore {
                 }
             }
         }
-        
+
         transitions
     }
-    
+
     /// Get all sessions matching a predicate
     pub async fn find_sessions<F>(&self, predicate: F) -> Vec<SessionId>
     where
@@ -175,12 +175,12 @@ impl SessionStore {
             .map(|(id, _)| id.clone())
             .collect()
     }
-    
+
     /// Get sessions in a specific state
     pub async fn get_sessions_in_state(&self, state: CallState) -> Vec<SessionId> {
         self.find_sessions(|s| s.call_state == state).await
     }
-    
+
     /// Get stale sessions
     pub async fn get_stale_sessions(&self, max_idle: Duration) -> Vec<SessionId> {
         self.find_sessions(|s| {
@@ -189,17 +189,17 @@ impl SessionStore {
                 .unwrap_or(false)
         }).await
     }
-    
+
     /// Export all session data for debugging
     pub async fn export_debug_dump(&self) -> DebugDump {
         let sessions = self.sessions.read().await;
-        
+
         let mut sessions_by_state = HashMap::new();
         for state in sessions.values() {
             let state_name = format!("{:?}", state.call_state);
             *sessions_by_state.entry(state_name).or_insert(0) += 1;
         }
-        
+
         DebugDump {
             timestamp: Instant::now(),
             total_sessions: sessions.len(),
@@ -208,7 +208,7 @@ impl SessionStore {
             table_stats: self.get_table_stats(),
         }
     }
-    
+
     /// Export session history as JSON
     pub async fn export_session_history(&self, session_id: &SessionId) -> crate::errors::Result<String> {
         let session = self.get_session(session_id).await?;
@@ -216,7 +216,7 @@ impl SessionStore {
             .map(|h| h.export_json())
             .unwrap_or_else(|| "{}".to_string()))
     }
-    
+
     /// Export session history as CSV
     pub async fn export_session_history_csv(&self, session_id: &SessionId) -> crate::errors::Result<String> {
         let session = self.get_session(session_id).await?;
@@ -224,14 +224,14 @@ impl SessionStore {
             .map(|h| h.export_csv())
             .unwrap_or_else(|| "sequence,timestamp_ms,from_state,event,to_state,duration_ms,errors\n".to_string()))
     }
-    
+
     /// Generate Graphviz DOT for state transitions
     pub fn export_state_graph(&self, role: Role) -> String {
         let mut dot = String::from("digraph StateMachine {\n");
         dot.push_str("  rankdir=LR;\n");
         dot.push_str("  node [fontname=\"Arial\"];\n");
         dot.push_str("  edge [fontname=\"Arial\"];\n\n");
-        
+
         // Add states with styling
         for state in Self::all_states() {
             let (shape, color) = match state {
@@ -247,10 +247,10 @@ impl SessionStore {
             ));
         }
         dot.push_str("\n");
-        
+
         // Add transitions
         let mut transition_map: HashMap<(CallState, CallState), Vec<String>> = HashMap::new();
-        
+
         for state in Self::all_states() {
             for event in Self::all_possible_events() {
                 let key = StateKey { role, state, event: event.clone() };
@@ -263,7 +263,7 @@ impl SessionStore {
                             .push(event_name);
                     }
                 }
-                
+
                 // Also check "Both" role
                 if role != Role::Both {
                     let key_both = StateKey { role: Role::Both, state, event: event.clone() };
@@ -279,7 +279,7 @@ impl SessionStore {
                 }
             }
         }
-        
+
         // Write deduplicated transitions
         for ((from, to), events) in transition_map {
             let label = if events.len() <= 3 {
@@ -292,11 +292,11 @@ impl SessionStore {
                 from, to, label
             ));
         }
-        
+
         dot.push_str("}\n");
         dot
     }
-    
+
     fn assess_health(
         &self,
         state: &Option<SessionState>,
@@ -313,7 +313,7 @@ impl SessionStore {
                     };
                 }
             }
-            
+
             // Check error rate
             if !recent.is_empty() {
                 let error_count = recent.iter().filter(|t| !t.errors.is_empty()).count();
@@ -322,7 +322,7 @@ impl SessionStore {
                     return SessionHealth::ErrorProne { error_rate };
                 }
             }
-            
+
             // Check if stale
             if let Some(history) = &s.history {
                 let idle = history.idle_time();
@@ -331,17 +331,17 @@ impl SessionStore {
                 }
             }
         }
-        
+
         SessionHealth::Healthy
     }
-    
+
     fn calculate_resources(&self, state: &Option<SessionState>) -> ResourceUsage {
         if let Some(s) = state {
             let memory = std::mem::size_of_val(s);
             let history_entries = s.history.as_ref()
                 .map(|h| h.total_transitions as usize)
                 .unwrap_or(0);
-            
+
             ResourceUsage {
                 memory_bytes: memory,
                 history_entries,
@@ -357,22 +357,22 @@ impl SessionStore {
             }
         }
     }
-    
+
     fn get_table_stats(&self) -> TableStats {
         let mut total = 0;
         let mut by_role = HashMap::new();
         let mut by_state = HashMap::new();
-        
+
         // Count transitions in the master table
         // This is an approximation since we can't iterate the HashMap directly
         for role in [Role::UAC, Role::UAS, Role::Both] {
             let role_name = format!("{:?}", role);
             let mut role_count = 0;
-            
+
             for state in Self::all_states() {
                 let state_name = format!("{:?}", state);
                 let mut state_count = 0;
-                
+
                 for event in Self::all_possible_events() {
                     let key = StateKey { role, state, event };
                     if MASTER_TABLE.has_transition(&key) {
@@ -381,24 +381,24 @@ impl SessionStore {
                         state_count += 1;
                     }
                 }
-                
+
                 if state_count > 0 {
                     *by_state.entry(state_name).or_insert(0) += state_count;
                 }
             }
-            
+
             if role_count > 0 {
                 by_role.insert(role_name, role_count);
             }
         }
-        
+
         TableStats {
             total_transitions: total,
             transitions_by_role: by_role,
             transitions_by_state: by_state,
         }
     }
-    
+
     fn all_possible_events() -> Vec<EventType> {
         vec![
             EventType::MakeCall { target: String::new() },
@@ -430,7 +430,7 @@ impl SessionStore {
             EventType::TransferFailed,
         ]
     }
-    
+
     fn all_states() -> Vec<CallState> {
         vec![
             CallState::Idle,
@@ -447,7 +447,7 @@ impl SessionStore {
             CallState::Failed(FailureReason::Other),
         ]
     }
-    
+
     fn describe_transition(transition: &crate::state_table::Transition) -> String {
         format!(
             "{} guards, {} actions, next: {:?}",
@@ -456,7 +456,7 @@ impl SessionStore {
             transition.next_state
         )
     }
-    
+
     fn event_short_name(event: &EventType) -> String {
         match event {
             EventType::MakeCall { .. } => "MakeCall".to_string(),

@@ -273,7 +273,7 @@ impl HandshakeState {
             self.handshake_messages
                 .extend_from_slice(&self.server_handshake_messages);
 
-            println!("Added message to handshake buffers. Combined size: {}, Client size: {}, Server size: {}", 
+            println!("Added message to handshake buffers. Combined size: {}, Client size: {}, Server size: {}",
                     self.handshake_messages.len(),
                     self.client_handshake_messages.len(),
                     self.server_handshake_messages.len());
@@ -474,7 +474,7 @@ impl HandshakeState {
                         let client_hello = self.generate_client_hello()?;
 
                         // Print client random for debugging
-                        println!("Client sending second ClientHello with random (first 8 bytes): {:02X?}", 
+                        println!("Client sending second ClientHello with random (first 8 bytes): {:02X?}",
                                  &client_hello.random[..8]);
 
                         // Clear the handshake buffers and add the new ClientHello
@@ -741,7 +741,7 @@ impl HandshakeState {
 
                             // This is the second ClientHello with cookie that we'll use for verification
                             // Print client random again for confirmation
-                            println!("Server received ClientHello WITH COOKIE, random (first 8 bytes): {:02X?}", 
+                            println!("Server received ClientHello WITH COOKIE, random (first 8 bytes): {:02X?}",
                                      &client_hello.random[..8]);
 
                             // Generate a session ID

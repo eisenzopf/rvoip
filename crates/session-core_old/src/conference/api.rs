@@ -110,4 +110,4 @@ pub trait ConferenceApiExt: ConferenceApi {
 }
 
 /// Automatically implement the extension trait for any type that implements ConferenceApi
-impl<T: ConferenceApi> ConferenceApiExt for T {} 
+impl<T: ConferenceApi> ConferenceApiExt for T {}

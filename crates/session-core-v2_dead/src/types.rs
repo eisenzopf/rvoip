@@ -71,25 +71,25 @@ pub enum CallState {
     Terminated,
     Cancelled,
     Failed(FailureReason),
-    
+
     // Registration states
     Registering,
     Registered,
     Unregistering,
-    
+
     // Subscription/Presence states
     Subscribing,
     Subscribed,
     Publishing,
-    
-    
+
+
     // Authentication flow
     Authenticating,     // Processing authentication challenge
-    
-    
+
+
     // Messaging
     Messaging,         // Handling SIP MESSAGE requests
-    
+
 }
 
 impl CallState {
@@ -100,10 +100,10 @@ impl CallState {
 
     /// Check if the call is in progress
     pub fn is_in_progress(&self) -> bool {
-        matches!(self, 
-            CallState::Initiating | 
-            CallState::Ringing | 
-            CallState::Active | 
+        matches!(self,
+            CallState::Initiating |
+            CallState::Ringing |
+            CallState::Active |
             CallState::OnHold |
             CallState::EarlyMedia |
             CallState::Resuming |
@@ -136,17 +136,17 @@ impl fmt::Display for CallState {
             CallState::Terminated => write!(f, "Terminated"),
             CallState::Cancelled => write!(f, "Cancelled"),
             CallState::Failed(reason) => write!(f, "Failed({})", reason),
-            
+
             // Registration states
             CallState::Registering => write!(f, "Registering"),
             CallState::Registered => write!(f, "Registered"),
             CallState::Unregistering => write!(f, "Unregistering"),
-            
+
             // Subscription/Presence states
             CallState::Subscribing => write!(f, "Subscribing"),
             CallState::Subscribed => write!(f, "Subscribed"),
             CallState::Publishing => write!(f, "Publishing"),
-            
+
             // Authentication and routing states
             CallState::Authenticating => write!(f, "Authenticating"),
             CallState::Messaging => write!(f, "Messaging"),
@@ -195,12 +195,12 @@ impl AudioFrameSubscriber {
             receiver,
         }
     }
-    
+
     /// Receive the next audio frame (async)
     pub async fn recv(&mut self) -> Option<rvoip_media_core::types::AudioFrame> {
         self.receiver.recv().await
     }
-    
+
     /// Try to receive an audio frame (non-blocking)
     pub fn try_recv(&mut self) -> Result<rvoip_media_core::types::AudioFrame, tokio::sync::mpsc::error::TryRecvError> {
         self.receiver.try_recv()

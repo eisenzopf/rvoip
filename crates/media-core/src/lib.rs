@@ -35,10 +35,10 @@
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create media session controller
 //!     let controller = MediaSessionController::new();
-//!     
+//!
 //!     // RTP bridge callbacks can be added for external RTP event handling
 //!     // This enables integration with session-core for audio frame delivery
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```

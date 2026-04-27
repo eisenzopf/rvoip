@@ -63,18 +63,18 @@ use crate::queue::QueueStats;
 ///
 /// ```rust
 /// use rvoip_call_engine::monitoring::events::{CallCenterEvents, EventType};
-/// 
+///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let events = CallCenterEvents::new();
-/// 
+///
 /// // Subscribe to all call events
 /// let mut call_events = events.subscribe(EventType::Call).await?;
-/// 
+///
 /// // Listen for events
 /// tokio::spawn(async move {
 ///     while let Ok(event) = call_events.recv().await {
 ///         println!("📞 Call Event: {:?}", event);
-///         
+///
 ///         match event.event_type {
 ///             EventType::CallStarted => {
 ///                 println!("New call started: {}", event.session_id.unwrap());
@@ -94,19 +94,19 @@ use crate::queue::QueueStats;
 ///
 /// ```rust
 /// use rvoip_call_engine::monitoring::events::{CallCenterEvents, EventType, CallCenterEvent};
-/// 
+///
 /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
 /// // Subscribe to agent events
 /// let mut agent_events = events.subscribe(EventType::Agent).await?;
-/// 
+///
 /// tokio::spawn(async move {
 ///     while let Ok(event) = agent_events.recv().await {
 ///         if let EventType::AgentStatusChanged = event.event_type {
 ///             let agent_id = event.agent_id.unwrap();
 ///             let new_status = event.data.get("new_status").unwrap();
-///             
+///
 ///             println!("👤 Agent {} changed status to {}", agent_id, new_status);
-///             
+///
 ///             // Take action based on status change
 ///             if new_status == "offline" {
 ///                 println!("🚨 Agent {} went offline unexpectedly!", agent_id);
@@ -122,16 +122,16 @@ use crate::queue::QueueStats;
 ///
 /// ```rust
 /// use rvoip_call_engine::monitoring::events::{CallCenterEvents, EventType, EventSeverity};
-/// 
+///
 /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
 /// // Subscribe to quality alerts
 /// let mut quality_events = events.subscribe(EventType::QualityAlert).await?;
-/// 
+///
 /// tokio::spawn(async move {
 ///     while let Ok(event) = quality_events.recv().await {
 ///         let severity = event.data.get("severity").unwrap();
 ///         let session_id = event.session_id.unwrap();
-///         
+///
 ///         match severity.as_str() {
 ///             "critical" => {
 ///                 println!("🚨 CRITICAL: Call {} has severe quality issues", session_id);
@@ -153,7 +153,7 @@ use crate::queue::QueueStats;
 ///
 /// ```rust
 /// use rvoip_call_engine::monitoring::events::{CallCenterEvents, WebhookConfig};
-/// 
+///
 /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
 /// // Configure webhook for external CRM system
 /// let webhook_config = WebhookConfig {
@@ -162,9 +162,9 @@ use crate::queue::QueueStats;
 ///     retry_attempts: 3,
 ///     timeout_seconds: 30,
 /// };
-/// 
+///
 /// events.add_webhook("crm_integration", webhook_config).await?;
-/// 
+///
 /// // All events will now be sent to the external CRM system
 /// println!("Webhook integration configured");
 /// # Ok(())
@@ -173,16 +173,16 @@ use crate::queue::QueueStats;
 pub struct CallCenterEvents {
     /// Event broadcaster for real-time notifications
     event_broadcaster: broadcast::Sender<CallCenterEvent>,
-    
+
     /// Event history storage (ring buffer)
     event_history: Arc<RwLock<Vec<CallCenterEvent>>>,
-    
+
     /// Webhook configurations for external integrations
     webhooks: Arc<RwLock<HashMap<String, WebhookConfig>>>,
-    
+
     /// Event statistics and performance metrics
     stats: Arc<RwLock<EventStats>>,
-    
+
     /// Configuration for event system
     config: EventSystemConfig,
 }
@@ -192,31 +192,31 @@ pub struct CallCenterEvents {
 pub struct CallCenterEvent {
     /// Unique event identifier
     pub event_id: String,
-    
+
     /// Event timestamp
     pub timestamp: DateTime<Utc>,
-    
+
     /// Type of event
     pub event_type: EventType,
-    
+
     /// Session ID if event is call-related
     pub session_id: Option<String>,
-    
+
     /// Agent ID if event is agent-related
     pub agent_id: Option<String>,
-    
+
     /// Queue ID if event is queue-related
     pub queue_id: Option<String>,
-    
+
     /// Event severity level
     pub severity: EventSeverity,
-    
+
     /// Human-readable event message
     pub message: String,
-    
+
     /// Additional event data (key-value pairs)
     pub data: HashMap<String, String>,
-    
+
     /// Source of the event (component that generated it)
     pub source: String,
 }
@@ -239,7 +239,7 @@ pub enum EventType {
     CallRecording,
     /// Generic call event
     Call,
-    
+
     // Agent-related events
     /// Agent logged in
     AgentLogin,
@@ -253,7 +253,7 @@ pub enum EventType {
     ScheduleAdherence,
     /// Generic agent event
     Agent,
-    
+
     // Queue-related events
     /// Call added to queue
     CallEnqueued,
@@ -267,7 +267,7 @@ pub enum EventType {
     WaitTimeAlert,
     /// Generic queue event
     Queue,
-    
+
     // System-related events
     /// System capacity alert
     SystemCapacity,
@@ -279,7 +279,7 @@ pub enum EventType {
     Maintenance,
     /// Generic system event
     System,
-    
+
     // Custom events
     /// Application-specific custom event
     Custom(String),
@@ -303,13 +303,13 @@ pub enum EventSeverity {
 pub struct WebhookConfig {
     /// Webhook URL endpoint
     pub url: String,
-    
+
     /// Optional secret for webhook validation
     pub secret: Option<String>,
-    
+
     /// Number of retry attempts on failure
     pub retry_attempts: u32,
-    
+
     /// Timeout for webhook requests in seconds
     pub timeout_seconds: u64,
 }
@@ -319,19 +319,19 @@ pub struct WebhookConfig {
 pub struct EventStats {
     /// Total events generated
     pub total_events: u64,
-    
+
     /// Events by type
     pub events_by_type: HashMap<String, u64>,
-    
+
     /// Events by severity
     pub events_by_severity: HashMap<String, u64>,
-    
+
     /// Current subscribers count
     pub active_subscribers: u32,
-    
+
     /// Webhook delivery statistics
     pub webhook_deliveries: WebhookStats,
-    
+
     /// Event processing performance
     pub processing_stats: ProcessingStats,
 }
@@ -341,13 +341,13 @@ pub struct EventStats {
 pub struct WebhookStats {
     /// Total webhook deliveries attempted
     pub total_deliveries: u64,
-    
+
     /// Successful deliveries
     pub successful_deliveries: u64,
-    
+
     /// Failed deliveries
     pub failed_deliveries: u64,
-    
+
     /// Average delivery time in milliseconds
     pub average_delivery_time_ms: f64,
 }
@@ -357,10 +357,10 @@ pub struct WebhookStats {
 pub struct ProcessingStats {
     /// Average event processing time in microseconds
     pub average_processing_time_us: f64,
-    
+
     /// Peak events per second
     pub peak_events_per_second: f64,
-    
+
     /// Current event queue depth
     pub current_queue_depth: u32,
 }
@@ -370,13 +370,13 @@ pub struct ProcessingStats {
 struct EventSystemConfig {
     /// Maximum number of events to keep in history
     max_history_size: usize,
-    
+
     /// Event broadcast channel capacity
     broadcast_capacity: usize,
-    
+
     /// Whether to enable webhook deliveries
     enable_webhooks: bool,
-    
+
     /// Default webhook timeout
     default_webhook_timeout: u64,
 }
@@ -392,7 +392,7 @@ impl CallCenterEvents {
     ///
     /// ```rust
     /// use rvoip_call_engine::monitoring::events::CallCenterEvents;
-    /// 
+    ///
     /// let events = CallCenterEvents::new();
     /// println!("Event system initialized");
     /// ```
@@ -403,9 +403,9 @@ impl CallCenterEvents {
             enable_webhooks: true,
             default_webhook_timeout: 30,
         };
-        
+
         let (event_broadcaster, _) = broadcast::channel(config.broadcast_capacity);
-        
+
         Self {
             event_broadcaster,
             event_history: Arc::new(RwLock::new(Vec::new())),
@@ -430,7 +430,7 @@ impl CallCenterEvents {
             config,
         }
     }
-    
+
     /// Subscribe to events of a specific type
     ///
     /// Creates a subscription to receive events of the specified type.
@@ -448,33 +448,33 @@ impl CallCenterEvents {
     ///
     /// ```rust
     /// use rvoip_call_engine::monitoring::events::{CallCenterEvents, EventType};
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let events = CallCenterEvents::new();
-    /// 
+    ///
     /// // Subscribe to all call events
     /// let mut call_receiver = events.subscribe(EventType::Call).await?;
-    /// 
+    ///
     /// // Subscribe to agent status changes
     /// let mut agent_receiver = events.subscribe(EventType::AgentStatusChanged).await?;
-    /// 
+    ///
     /// println!("Subscriptions created");
     /// # Ok(())
     /// # }
     /// ```
     pub async fn subscribe(&self, event_type: EventType) -> Result<broadcast::Receiver<CallCenterEvent>> {
         let receiver = self.event_broadcaster.subscribe();
-        
+
         // Update subscriber count
         {
             let mut stats = self.stats.write().await;
             stats.active_subscribers += 1;
         }
-        
+
         debug!("📡 New subscription created for event type: {:?}", event_type);
         Ok(receiver)
     }
-    
+
     /// Publish an event to all subscribers
     ///
     /// Broadcasts an event to all current subscribers and stores it in history.
@@ -492,13 +492,13 @@ impl CallCenterEvents {
     /// ```rust
     /// use rvoip_call_engine::monitoring::events::{CallCenterEvents, EventType, EventSeverity};
     /// use std::collections::HashMap;
-    /// 
+    ///
     /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
     /// let mut data = HashMap::new();
     /// data.insert("agent_id".to_string(), "agent-001".to_string());
     /// data.insert("old_status".to_string(), "available".to_string());
     /// data.insert("new_status".to_string(), "busy".to_string());
-    /// 
+    ///
     /// events.publish(
     ///     EventType::AgentStatusChanged,
     ///     "Agent status changed from available to busy".to_string(),
@@ -527,44 +527,44 @@ impl CallCenterEvents {
             data: data.clone(),
             source: "call-center-engine".to_string(),
         };
-        
+
         // Store in history
         {
             let mut history = self.event_history.write().await;
             history.push(event.clone());
-            
+
             // Trim history if it exceeds max size
             if history.len() > self.config.max_history_size {
                 history.remove(0);
             }
         }
-        
+
         // Update statistics
         {
             let mut stats = self.stats.write().await;
             stats.total_events += 1;
-            
+
             let type_key = format!("{:?}", event_type);
             *stats.events_by_type.entry(type_key).or_insert(0) += 1;
-            
+
             let severity_key = format!("{:?}", severity);
             *stats.events_by_severity.entry(severity_key).or_insert(0) += 1;
         }
-        
+
         // Broadcast to subscribers
         if let Err(e) = self.event_broadcaster.send(event.clone()) {
             warn!("📡 Failed to broadcast event: {}", e);
         }
-        
+
         // Trigger webhook deliveries
         if self.config.enable_webhooks {
             self.deliver_webhooks(event.clone()).await;
         }
-        
+
         debug!("📡 Event published: {} - {}", event.event_id, message);
         Ok(())
     }
-    
+
     /// Add a webhook configuration for external integration
     ///
     /// Configures a webhook endpoint to receive call center events.
@@ -579,7 +579,7 @@ impl CallCenterEvents {
     ///
     /// ```rust
     /// use rvoip_call_engine::monitoring::events::{CallCenterEvents, WebhookConfig};
-    /// 
+    ///
     /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
     /// let webhook_config = WebhookConfig {
     ///     url: "https://api.external-system.com/webhooks/call-center".to_string(),
@@ -587,7 +587,7 @@ impl CallCenterEvents {
     ///     retry_attempts: 3,
     ///     timeout_seconds: 30,
     /// };
-    /// 
+    ///
     /// events.add_webhook("external_system", webhook_config).await?;
     /// println!("Webhook configured");
     /// # Ok(())
@@ -598,11 +598,11 @@ impl CallCenterEvents {
             let mut webhooks = self.webhooks.write().await;
             webhooks.insert(name.to_string(), config);
         }
-        
+
         info!("🔗 Webhook '{}' configured", name);
         Ok(())
     }
-    
+
     /// Remove a webhook configuration
     ///
     /// Removes a previously configured webhook. No further events will
@@ -616,7 +616,7 @@ impl CallCenterEvents {
     ///
     /// ```rust
     /// use rvoip_call_engine::monitoring::events::CallCenterEvents;
-    /// 
+    ///
     /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
     /// events.remove_webhook("external_system").await?;
     /// println!("Webhook removed");
@@ -628,11 +628,11 @@ impl CallCenterEvents {
             let mut webhooks = self.webhooks.write().await;
             webhooks.remove(name);
         }
-        
+
         info!("🔗 Webhook '{}' removed", name);
         Ok(())
     }
-    
+
     /// Get event history for a time period
     ///
     /// Returns all events that occurred within the specified time range.
@@ -652,14 +652,14 @@ impl CallCenterEvents {
     /// ```rust
     /// use rvoip_call_engine::monitoring::events::CallCenterEvents;
     /// use chrono::{Utc, Duration};
-    /// 
+    ///
     /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
     /// let end_time = Utc::now();
     /// let start_time = end_time - Duration::hours(1);
-    /// 
+    ///
     /// let recent_events = events.get_event_history(start_time, end_time).await;
     /// println!("Found {} events in the last hour", recent_events.len());
-    /// 
+    ///
     /// for event in recent_events {
     ///     println!("{}: {}", event.timestamp.format("%H:%M:%S"), event.message);
     /// }
@@ -672,13 +672,13 @@ impl CallCenterEvents {
         end_time: DateTime<Utc>,
     ) -> Vec<CallCenterEvent> {
         let history = self.event_history.read().await;
-        
+
         history.iter()
             .filter(|event| event.timestamp >= start_time && event.timestamp <= end_time)
             .cloned()
             .collect()
     }
-    
+
     /// Get event system statistics
     ///
     /// Returns comprehensive statistics about the event system performance,
@@ -692,15 +692,15 @@ impl CallCenterEvents {
     ///
     /// ```rust
     /// use rvoip_call_engine::monitoring::events::CallCenterEvents;
-    /// 
+    ///
     /// # async fn example(events: CallCenterEvents) -> Result<(), Box<dyn std::error::Error>> {
     /// let stats = events.get_stats().await;
-    /// 
+    ///
     /// println!("📊 Event System Statistics:");
     /// println!("  Total events: {}", stats.total_events);
     /// println!("  Active subscribers: {}", stats.active_subscribers);
-    /// println!("  Webhook success rate: {:.1}%", 
-    ///          (stats.webhook_deliveries.successful_deliveries as f64 / 
+    /// println!("  Webhook success rate: {:.1}%",
+    ///          (stats.webhook_deliveries.successful_deliveries as f64 /
     ///           stats.webhook_deliveries.total_deliveries as f64) * 100.0);
     /// # Ok(())
     /// # }
@@ -709,25 +709,25 @@ impl CallCenterEvents {
         let stats = self.stats.read().await;
         stats.clone()
     }
-    
+
     // Internal helper methods
-    
+
     async fn deliver_webhooks(&self, event: CallCenterEvent) {
         let webhooks = self.webhooks.read().await.clone();
-        
+
         for (name, config) in webhooks {
             let event_clone = event.clone();
             let name_clone = name.clone();
             let config_clone = config.clone();
             let stats = self.stats.clone();
-            
+
             // Deliver webhook asynchronously
             tokio::spawn(async move {
                 Self::deliver_single_webhook(name_clone, config_clone, event_clone, stats).await;
             });
         }
     }
-    
+
     async fn deliver_single_webhook(
         name: String,
         config: WebhookConfig,
@@ -741,16 +741,16 @@ impl CallCenterEvents {
         // 3. Add authentication/signature if configured
         // 4. Send request with timeout and retries
         // 5. Update delivery statistics
-        
+
         debug!("🔗 Delivering webhook '{}' for event {}", name, event.event_id);
-        
+
         // Update statistics (simulated)
         {
             let mut stats = stats.write().await;
             stats.webhook_deliveries.total_deliveries += 1;
             stats.webhook_deliveries.successful_deliveries += 1; // Assuming success for now
         }
-        
+
         // In a real implementation, this would make an HTTP request
         warn!("🚧 Webhook delivery not fully implemented yet");
     }
@@ -761,7 +761,7 @@ impl Clone for CallCenterEvents {
         // Note: This creates a new broadcaster, so cloned instances
         // will have separate event streams
         let (event_broadcaster, _) = broadcast::channel(self.config.broadcast_capacity);
-        
+
         Self {
             event_broadcaster,
             event_history: self.event_history.clone(),
@@ -813,4 +813,4 @@ impl std::fmt::Display for EventType {
             EventType::Custom(name) => write!(f, "CUSTOM_{}", name.to_uppercase()),
         }
     }
-} 
+}

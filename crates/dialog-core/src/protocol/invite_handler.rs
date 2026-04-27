@@ -7,7 +7,7 @@
 //! ## INVITE Types Handled
 //!
 //! - **Initial INVITE**: Creates new dialogs and establishes sessions
-//! - **Re-INVITE**: Modifies existing sessions within established dialogs  
+//! - **Re-INVITE**: Modifies existing sessions within established dialogs
 //! - **Refresh INVITE**: Refreshes session timers and state
 //!
 //! ## Dialog Creation Process

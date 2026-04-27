@@ -74,7 +74,7 @@
 //! a=rtpmap:0 PCMU/8000
 //! a=rtpmap:8 PCMA/8000
 //! a=rtpmap:101 telephone-event/8000"#;
-//!     
+//!
 //!     let info = parse_sdp_connection(sdp)?;
 //!     assert_eq!(info.ip, "192.168.1.100");
 //!     assert_eq!(info.port, 5004);

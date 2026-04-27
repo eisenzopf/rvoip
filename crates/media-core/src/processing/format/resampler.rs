@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 pub struct ResamplerConfig {
     /// Input sample rate
     pub input_rate: u32,
-    /// Output sample rate  
+    /// Output sample rate
     pub output_rate: u32,
     /// Quality level (0-10, higher = better quality)
     pub quality: u8,

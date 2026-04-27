@@ -26,7 +26,7 @@ pub struct SessionManager {
     event_processor: Arc<SessionEventProcessor>,
     cleanup_manager: Arc<CleanupManager>,
     handler: Option<Arc<dyn CallHandler>>,
-    
+
     // High-level integration managers (parallel abstraction levels)
     dialog_manager: Arc<DialogManager>,
     dialog_coordinator: Arc<SessionDialogCoordinator>,
@@ -49,7 +49,7 @@ impl std::fmt::Debug for SessionManager {
 }
 
 impl SessionManager {
-    /// Create a new SessionManager with the given configuration  
+    /// Create a new SessionManager with the given configuration
     pub async fn new(
         config: SessionManagerConfig,
         handler: Option<Arc<dyn CallHandler>>,
@@ -73,16 +73,16 @@ impl SessionManager {
 
         // Create dialog coordination channel (for dialog-core to coordinator communication)
         let (dialog_coordination_tx, dialog_coordination_rx) = mpsc::channel(1000);
-        
+
         // Create session events channel (for coordinator to event processor communication)
         let (session_events_tx, session_events_rx) = mpsc::channel(1000);
-        
+
         // Create storage for incoming SDP offers
         let incoming_sdp_offers = Arc::new(dashmap::DashMap::new());
-        
+
         // Create session-to-dialog mapping
         let session_to_dialog = Arc::new(dashmap::DashMap::new());
-        
+
         let dialog_coordinator = Arc::new(SessionDialogCoordinator::new(
             dialog_api,
             registry.clone(),
@@ -120,7 +120,7 @@ impl SessionManager {
 
     /// Initialize the session manager and all subsystems
     async fn initialize(
-        self: &Arc<Self>, 
+        self: &Arc<Self>,
         dialog_coordination_tx: mpsc::Sender<SessionCoordinationEvent>,
         dialog_coordination_rx: mpsc::Receiver<SessionCoordinationEvent>,
         session_events_rx: mpsc::Receiver<super::events::SessionEvent>,
@@ -128,14 +128,14 @@ impl SessionManager {
     ) -> Result<()> {
         // Start the event processor first so events can be published
         self.event_processor.start().await?;
-        
+
         // Initialize dialog coordination (high-level delegation)
         tracing::debug!("🔗 SETUP: Initializing dialog coordination via DialogCoordinator");
         self.dialog_coordinator
             .initialize(dialog_coordination_tx)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to initialize dialog coordinator: {}", e)))?;
-        
+
         // Start dialog event loop (delegated to coordinator)
         tracing::debug!("🎬 SPAWN: Starting dialog coordination event loop");
         let dialog_coordinator_clone = self.dialog_coordinator.clone();
@@ -181,7 +181,7 @@ impl SessionManager {
         self.dialog_manager.start()
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to start dialog manager: {}", e)))?;
-        
+
         self.event_processor.start().await?;
         self.cleanup_manager.start().await?;
         tracing::info!("SessionManager started");
@@ -194,11 +194,11 @@ impl SessionManager {
         self.dialog_manager.stop()
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to stop dialog manager: {}", e)))?;
-        
+
         // Then stop the cleanup manager and event processor
         self.cleanup_manager.stop().await?;
         self.event_processor.stop().await?;
-            
+
         tracing::info!("SessionManager stopped");
         Ok(())
     }
@@ -212,10 +212,10 @@ impl SessionManager {
         sip_call_id: Option<String>,
     ) -> Result<CallSession> {
         let session_id = SessionId::new();
-        
+
         // Generate Call-ID if not provided (UAC responsibility per RFC 3261)
         let sip_call_id = sip_call_id.or_else(|| Some(format!("call-{}", uuid::Uuid::new_v4())));
-        
+
         // Create the call session first
         let call = CallSession {
             id: session_id.clone(),
@@ -245,7 +245,7 @@ impl SessionManager {
             to: call.to.clone(),
             call_state: call.state.clone(),
         }).await?;
-        
+
         // Create SIP INVITE and dialog using DialogManager (high-level delegation)
         let _dialog_handle = self.dialog_manager
             .create_outgoing_call(session_id.clone(), from, to, sdp, sip_call_id)
@@ -259,13 +259,13 @@ impl SessionManager {
     pub async fn accept_incoming_call(&self, session_id: &SessionId) -> Result<CallSession> {
         let call = self.registry.get_session(session_id).await?
             .ok_or_else(|| crate::errors::SessionError::session_not_found(&session_id.0))?;
-        
+
         // Accept incoming call using DialogManager (high-level delegation)
         self.dialog_manager
             .accept_incoming_call(session_id, None)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to accept call via dialog manager: {}", e)))?;
-        
+
         tracing::info!("Accepted incoming call: {}", session_id);
         Ok(call)
     }
@@ -276,13 +276,13 @@ impl SessionManager {
         if self.registry.get_session(session_id).await?.is_none() {
             return Err(crate::errors::SessionError::session_not_found(&session_id.0));
         }
-        
+
         // Hold session using DialogManager (high-level delegation)
         self.dialog_manager
             .hold_session(session_id)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to hold session: {}", e)))?;
-            
+
         tracing::info!("Holding session: {}", session_id);
         Ok(())
     }
@@ -293,13 +293,13 @@ impl SessionManager {
         if self.registry.get_session(session_id).await?.is_none() {
             return Err(crate::errors::SessionError::session_not_found(&session_id.0));
         }
-        
+
         // Resume session using DialogManager (high-level delegation)
         self.dialog_manager
             .resume_session(session_id)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to resume session: {}", e)))?;
-            
+
         tracing::info!("Resuming session: {}", session_id);
         Ok(())
     }
@@ -310,13 +310,13 @@ impl SessionManager {
         if self.registry.get_session(session_id).await?.is_none() {
             return Err(crate::errors::SessionError::session_not_found(&session_id.0));
         }
-        
+
         // Transfer session using DialogManager (high-level delegation)
         self.dialog_manager
             .transfer_session(session_id, target)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to transfer session: {}", e)))?;
-            
+
         tracing::info!("Transferring session {} to {}", session_id, target);
         Ok(())
     }
@@ -327,16 +327,16 @@ impl SessionManager {
         if self.registry.get_session(session_id).await?.is_none() {
             return Err(crate::errors::SessionError::session_not_found(&session_id.0));
         }
-        
+
         // Terminate session using DialogManager (high-level delegation)
         self.dialog_manager
             .terminate_session(session_id)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to terminate session: {}", e)))?;
-            
+
         // Remove the session from registry
         self.registry.unregister_session(session_id).await?;
-        
+
         tracing::info!("Terminated session: {}", session_id);
         Ok(())
     }
@@ -347,17 +347,17 @@ impl SessionManager {
         if self.registry.get_session(session_id).await?.is_none() {
             return Err(crate::errors::SessionError::session_not_found(&session_id.0));
         }
-        
+
         // Send DTMF using DialogManager (high-level delegation)
         self.dialog_manager
             .send_dtmf(session_id, digits)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to send DTMF: {}", e)))?;
-            
+
         tracing::info!("Sending DTMF {} to session {}", digits, session_id);
         Ok(())
     }
-    
+
 
 
     /// Mute/unmute a session
@@ -373,11 +373,11 @@ impl SessionManager {
         // Verify session exists
         let _session = self.registry.get_session(session_id).await?
             .ok_or_else(|| crate::errors::SessionError::session_not_found(&session_id.0))?;
-        
+
         // Get media info from MediaManager
         if let Some(media_session_info) = self.media_manager.get_media_info(session_id).await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to get media info: {}", e)))? {
-            
+
             // Convert MediaSessionInfo to MediaInfo
             Ok(MediaInfo {
                 local_sdp: media_session_info.local_sdp,
@@ -408,13 +408,13 @@ impl SessionManager {
         if self.registry.get_session(session_id).await?.is_none() {
             return Err(crate::errors::SessionError::session_not_found(&session_id.0));
         }
-        
+
         // Update media using DialogManager (high-level delegation)
         self.dialog_manager
             .update_media(session_id, sdp)
             .await
             .map_err(|e| crate::errors::SessionError::internal(&format!("Failed to update media: {}", e)))?;
-            
+
         tracing::info!("Updating media for session {}", session_id);
         Ok(())
     }
@@ -509,4 +509,4 @@ impl Clone for SessionManager {
             media_manager: Arc::clone(&self.media_manager),
         }
     }
-} 
+}

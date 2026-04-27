@@ -68,12 +68,12 @@
 //! use rvoip_call_engine::agent::{Agent, AgentStatus};
 //! use rvoip_call_engine::CallCenterEngine;
 //! use std::sync::Arc;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Initialize admin API
 //! let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
 //! let admin = AdminApi::new(Arc::clone(&engine));
-//! 
+//!
 //! // Create a new agent
 //! let agent = Agent {
 //!     id: "agent-001".to_string(),
@@ -85,15 +85,15 @@
 //!     department: Some("Sales".to_string()),
 //!     extension: Some("101".to_string()),
 //! };
-//! 
+//!
 //! // Add agent to system
 //! admin.add_agent(agent).await?;
 //! println!("✅ Agent added successfully");
-//! 
+//!
 //! // List all agents
 //! let agents = admin.list_agents().await?;
 //! println!("📋 Total agents: {}", agents.len());
-//! 
+//!
 //! for agent in agents {
 //!     println!("  {} ({}): {:?}", agent.display_name, agent.id, agent.status);
 //! }
@@ -108,23 +108,23 @@
 //! use rvoip_call_engine::config::QueueConfig;
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # use std::sync::Arc;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
 //! let admin = AdminApi::new(Arc::clone(&engine));
-//! 
+//!
 //! // Create specialized queues
 //! let queue_configs = vec![
 //!     ("vip-support", "VIP customer support queue"),
 //!     ("technical-escalation", "Technical escalation queue"),
 //!     ("billing-inquiries", "Billing and payment inquiries"),
 //! ];
-//! 
+//!
 //! for (queue_id, description) in queue_configs {
 //!     // Create the queue
 //!     admin.create_queue(queue_id).await?;
 //!     println!("✅ Created queue: {} ({})", queue_id, description);
-//!     
+//!
 //!     // Configure queue parameters
 //!     let config = QueueConfig {
 //!         default_max_wait_time: 300,     // 5 minutes max wait
@@ -133,16 +133,16 @@
 //!         enable_overflow: true,          // Enable overflow to other queues
 //!         announcement_interval: 30,      // Announcements every 30 seconds
 //!     };
-//!     
+//!
 //!     admin.update_queue(queue_id, config).await?;
 //!     println!("🔧 Configured queue: {}", queue_id);
 //! }
-//! 
+//!
 //! // Get queue configurations
 //! let configs = admin.get_queue_configs().await;
 //! println!("📊 Queue Configurations:");
 //! for (queue_id, config) in configs {
-//!     println!("  {}: max_wait={}s, max_size={}", 
+//!     println!("  {}: max_wait={}s, max_size={}",
 //!              queue_id, config.default_max_wait_time, config.max_queue_size);
 //! }
 //! # Ok(())
@@ -155,14 +155,14 @@
 //! use rvoip_call_engine::api::admin::{AdminApi, HealthStatus};
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # use std::sync::Arc;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
 //! let admin = AdminApi::new(Arc::clone(&engine));
-//! 
+//!
 //! // Get comprehensive system health
 //! let health = admin.get_system_health().await;
-//! 
+//!
 //! println!("🏥 System Health Report:");
 //! println!("┌─────────────────────────────────────────┐");
 //! println!("│ Status: {:>28} │", match health.status {
@@ -170,14 +170,14 @@
 //!     HealthStatus::Degraded => "🟡 Degraded",
 //!     HealthStatus::Critical => "🔴 Critical",
 //! });
-//! println!("│ Database: {:>25} │", 
+//! println!("│ Database: {:>25} │",
 //!          if health.database_connected { "🟢 Connected" } else { "🔴 Disconnected" });
 //! println!("│ Active Sessions: {:>16} │", health.active_sessions);
 //! println!("│ Registered Agents: {:>14} │", health.registered_agents);
 //! println!("│ Queued Calls: {:>19} │", health.queued_calls);
 //! println!("│ Uptime: {:>25} │", format!("{}s", health.uptime_seconds));
 //! println!("└─────────────────────────────────────────┘");
-//! 
+//!
 //! // Display warnings if any
 //! if !health.warnings.is_empty() {
 //!     println!("\n⚠️ System Warnings:");
@@ -185,7 +185,7 @@
 //!         println!("  • {}", warning);
 //!     }
 //! }
-//! 
+//!
 //! // Take action based on health status
 //! match health.status {
 //!     HealthStatus::Critical => {
@@ -209,27 +209,27 @@
 //! use rvoip_call_engine::config::{RoutingConfig, CallCenterConfig, RoutingStrategy};
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # use std::sync::Arc;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
 //! let admin = AdminApi::new(Arc::clone(&engine));
-//! 
+//!
 //! // Export current configuration for backup
 //! let config_json = admin.export_config().await?;
 //! println!("📤 Configuration exported ({} bytes)", config_json.len());
-//! 
+//!
 //! // Save to file (in real application)
 //! // std::fs::write("call_center_config_backup.json", &config_json)?;
-//! 
+//!
 //! // Update routing configuration
 //! let mut new_routing = RoutingConfig::default();
 //! new_routing.default_strategy = RoutingStrategy::RoundRobin;
 //! new_routing.enable_load_balancing = true;
 //! new_routing.enable_time_based_routing = true;
-//! 
+//!
 //! admin.update_routing_config(new_routing).await?;
 //! println!("🔧 Routing configuration updated");
-//! 
+//!
 //! // Get current system configuration
 //! let current_config = admin.get_config();
 //! println!("⚙️ Current Configuration:");
@@ -247,18 +247,18 @@
 //! use rvoip_call_engine::agent::{Agent, AgentId, AgentStatus};
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # use std::sync::Arc;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
 //! let admin = AdminApi::new(Arc::clone(&engine));
-//! 
+//!
 //! // Bulk agent operations
 //! let new_agents = vec![
 //!     ("agent-sales-01", "Sales Agent 1", "Sales", vec!["sales", "english"]),
 //!     ("agent-sales-02", "Sales Agent 2", "Sales", vec!["sales", "spanish"]),
 //!     ("agent-support-01", "Support Agent 1", "Support", vec!["technical", "english"]),
 //! ];
-//! 
+//!
 //! for (id, name, dept, skills) in new_agents {
 //!     let agent = Agent {
 //!         id: id.to_string(),
@@ -270,11 +270,11 @@
 //!         department: Some(dept.to_string()),
 //!         extension: None,
 //!     };
-//!     
+//!
 //!     admin.add_agent(agent).await?;
 //!     println!("➕ Added agent: {} ({})", name, dept);
 //! }
-//! 
+//!
 //! // Update agent skills
 //! let agent_id = AgentId::from("agent-sales-01");
 //! admin.update_agent_skills(&agent_id, vec![
@@ -282,9 +282,9 @@
 //!     "english".to_string(),
 //!     "vip".to_string(), // Add VIP handling skill
 //! ]).await?;
-//! 
+//!
 //! println!("🎯 Updated agent skills");
-//! 
+//!
 //! // Get system statistics
 //! let stats = admin.get_statistics().await;
 //! println!("📈 System Statistics:");
@@ -303,39 +303,39 @@
 //! use tokio::time::{Duration, interval};
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # use std::sync::Arc;
-//! 
+//!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
 //! let admin = AdminApi::new(Arc::clone(&engine));
-//! 
+//!
 //! // Periodic maintenance routine
 //! async fn maintenance_routine(admin: &AdminApi) -> Result<(), Box<dyn std::error::Error>> {
 //!     println!("🧹 Starting maintenance routine...");
-//!     
+//!
 //!     // Check system health first
 //!     let health = admin.get_system_health().await;
 //!     if !health.database_connected {
 //!         println!("❌ Database not connected - skipping maintenance");
 //!         return Ok(());
 //!     }
-//!     
+//!
 //!     // Optimize database
 //!     admin.optimize_database().await?;
 //!     println!("✅ Database optimization completed");
-//!     
+//!
 //!     // Get updated statistics
 //!     let stats = admin.get_statistics().await;
 //!     println!("📊 Post-maintenance statistics:");
 //!     println!("  Agents: {}", stats.total_agents);
 //!     println!("  Active calls: {}", stats.active_calls);
-//!     
+//!
 //!     Ok(())
 //! }
-//! 
+//!
 //! // Run maintenance
 //! maintenance_routine(&admin).await?;
-//! 
+//!
 //! // In a real system, you might schedule this periodically:
 //! // let mut interval = interval(Duration::from_hours(24));
 //! // loop {
@@ -366,66 +366,66 @@ use crate::{
 };
 
 /// # Administrative API for Call Center Management
-/// 
+///
 /// The `AdminApi` provides comprehensive administrative capabilities for call center
 /// management, including agent operations, queue configuration, system monitoring,
 /// and maintenance tasks. This API is designed for system administrators who need
 /// complete control over call center operations and configuration.
-/// 
+///
 /// ## Core Administrative Functions
-/// 
+///
 /// ### Agent Management
 /// - **Add/Remove Agents**: Complete lifecycle management of agent profiles
 /// - **Update Agent Information**: Modify agent details, skills, and configuration
 /// - **Skills Management**: Assign and update agent capabilities and specializations
 /// - **Status Monitoring**: Track agent availability and performance
-/// 
+///
 /// ### Queue Operations
 /// - **Queue Creation**: Establish new call queues with custom configurations
 /// - **Configuration Updates**: Modify queue parameters and routing rules
 /// - **Queue Deletion**: Remove unused queues (with safety checks)
 /// - **Performance Monitoring**: Track queue metrics and utilization
-/// 
+///
 /// ### System Management
 /// - **Health Monitoring**: Comprehensive system health and status tracking
 /// - **Configuration Management**: Import/export and dynamic configuration updates
 /// - **Database Operations**: Maintenance, optimization, and integrity checks
 /// - **Statistics & Analytics**: System-wide performance metrics and reporting
-/// 
+///
 /// ## Security and Access Control
-/// 
+///
 /// The `AdminApi` provides powerful system management capabilities and should be
 /// used with appropriate security measures:
-/// 
+///
 /// - Administrative authentication required
 /// - Role-based access control recommended
 /// - Audit logging for all operations
 /// - Network access restrictions
 /// - Secure communication channels
-/// 
+///
 /// ## Thread Safety
-/// 
+///
 /// The `AdminApi` is thread-safe and can be cloned for use across multiple
 /// administrative components or tasks. All operations are asynchronous and
 /// designed for concurrent administrative access.
-/// 
+///
 /// ## Examples
-/// 
+///
 /// ### Basic Administrative Setup
-/// 
+///
 /// ```rust
 /// use rvoip_call_engine::api::AdminApi;
 /// use rvoip_call_engine::CallCenterEngine;
 /// use std::sync::Arc;
-/// 
+///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
 /// let admin = AdminApi::new(Arc::clone(&engine));
-/// 
+///
 /// // Get system health overview
 /// let health = admin.get_system_health().await;
 /// println!("System status: {:?}", health.status);
-/// 
+///
 /// // Get system statistics
 /// let stats = admin.get_statistics().await;
 /// println!("Total agents: {}", stats.total_agents);
@@ -439,26 +439,26 @@ pub struct AdminApi {
 
 impl AdminApi {
     /// Create a new admin API instance
-    /// 
+    ///
     /// Initializes a new administrative API connected to the specified call center
     /// engine. This provides access to all administrative functions and system
     /// management capabilities.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `engine` - Shared reference to the call center engine
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```rust
     /// use rvoip_call_engine::api::AdminApi;
     /// use rvoip_call_engine::CallCenterEngine;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
     /// let admin = AdminApi::new(Arc::clone(&engine));
-    /// 
+    ///
     /// println!("Administrative API ready");
     /// # Ok(())
     /// # }
@@ -466,33 +466,33 @@ impl AdminApi {
     pub fn new(engine: Arc<CallCenterEngine>) -> Self {
         Self { engine }
     }
-    
+
     /// Add a new agent
-    /// 
+    ///
     /// Registers a new agent profile with the call center system, including
     /// database storage and registry updates. This is the primary method for
     /// agent onboarding and profile creation.
-    /// 
+    ///
     /// # Arguments
-    /// 
+    ///
     /// * `agent` - Complete agent profile including identification, skills, and configuration
-    /// 
+    ///
     /// # Returns
-    /// 
+    ///
     /// `Ok(())` if agent added successfully, or error if operation fails.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```rust
     /// use rvoip_call_engine::api::AdminApi;
     /// use rvoip_call_engine::agent::{Agent, AgentStatus};
     /// # use rvoip_call_engine::CallCenterEngine;
     /// # use std::sync::Arc;
-    /// 
+    ///
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let engine = Arc::new(CallCenterEngine::new(Default::default(), None).await?);
     /// let admin = AdminApi::new(Arc::clone(&engine));
-    /// 
+    ///
     /// let new_agent = Agent {
     ///     id: "agent-005".to_string(),
     ///     sip_uri: "sip:john.doe@call-center.com".to_string(),
@@ -503,10 +503,10 @@ impl AdminApi {
     ///     department: Some("Technical Support".to_string()),
     ///     extension: Some("5005".to_string()),
     /// };
-    /// 
+    ///
     /// admin.add_agent(new_agent).await?;
     /// println!("✅ Agent added to system");
-    /// 
+    ///
     /// // Verify agent was added
     /// let agents = admin.list_agents().await?;
     /// println!("Total agents now: {}", agents.len());
@@ -517,7 +517,7 @@ impl AdminApi {
         // Register with the registry
         let mut registry = self.engine.agent_registry.lock().await;
         registry.register_agent(agent.clone()).await?;
-        
+
         // Also add to database if available
         if let Some(db) = self.engine.database_manager() {
             // Extract username from SIP URI (e.g., "alice" from "sip:alice@127.0.0.1")
@@ -526,21 +526,21 @@ impl AdminApi {
                 .split('@')
                 .next()
                 .unwrap_or(&agent.id);
-            
+
             db.upsert_agent(
                 &agent.id,
                 username,  // Use the SIP username, not display_name
                 Some(&agent.sip_uri)
             ).await.map_err(|e| CallCenterError::database(&format!("Failed to upsert agent: {}", e)))?;
-            
+
             // Update status separately
             db.update_agent_status(&agent.id, agent.status.clone())
                 .await.map_err(|e| CallCenterError::database(&format!("Failed to update status: {}", e)))?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Update an existing agent
     pub async fn update_agent(&self, agent: Agent) -> Result<(), CallCenterError> {
         // Update in database if available
@@ -551,45 +551,45 @@ impl AdminApi {
                 .split('@')
                 .next()
                 .unwrap_or(&agent.id);
-                
+
             db.upsert_agent(
                 &agent.id,
                 username,  // Use the SIP username, not display_name
                 Some(&agent.sip_uri)
             ).await.map_err(|e| CallCenterError::database(&format!("Failed to upsert agent: {}", e)))?;
-            
+
             // Update status separately
             db.update_agent_status(&agent.id, agent.status.clone())
                 .await.map_err(|e| CallCenterError::database(&format!("Failed to update status: {}", e)))?;
         } else {
             return Err(CallCenterError::internal("Database not configured"));
         }
-        
+
         Ok(())
     }
-    
+
     /// Remove an agent
     pub async fn remove_agent(&self, agent_id: &AgentId) -> Result<(), CallCenterError> {
         // Remove from registry
         let mut registry = self.engine.agent_registry.lock().await;
         registry.remove_agent_session(&agent_id.0)?;
-        
+
         // Also mark as offline in database if available
         if let Some(db) = self.engine.database_manager() {
             db.mark_agent_offline(&agent_id.0)
                 .await.map_err(|e| CallCenterError::database(&format!("Failed to mark agent offline: {}", e)))?;
         }
-        
+
         Ok(())
     }
-    
+
     /// List all agents
     pub async fn list_agents(&self) -> Result<Vec<Agent>, CallCenterError> {
         if let Some(db) = self.engine.database_manager() {
             // Get DB agents and convert to API agents
             let db_agents = db.list_agents()
                 .await.map_err(|e| CallCenterError::database(&format!("Failed to list agents: {}", e)))?;
-            
+
             // Convert DB agents to API agents
             let agents = db_agents.into_iter().map(|db_agent| {
                 Agent {
@@ -610,14 +610,14 @@ impl AdminApi {
                     extension: None,
                 }
             }).collect();
-            
+
             Ok(agents)
         } else {
             // Return empty list if no database
             Ok(Vec::new())
         }
     }
-    
+
     /// Update agent skills
     pub async fn update_agent_skills(&self, agent_id: &AgentId, skills: Vec<String>) -> Result<(), CallCenterError> {
         if let Some(_db) = self.engine.database_manager() {
@@ -629,12 +629,12 @@ impl AdminApi {
             return Err(CallCenterError::internal("Database not configured"));
         }
     }
-    
+
     /// Create a new queue
     pub async fn create_queue(&self, queue_id: &str) -> CallCenterResult<()> {
         self.engine.create_queue(queue_id).await
     }
-    
+
     /// Update queue configuration
     pub async fn update_queue(&self, queue_id: &str, config: QueueConfig) -> CallCenterResult<()> {
         // In a real implementation, this would update queue settings
@@ -642,32 +642,32 @@ impl AdminApi {
         // TODO: Implement queue configuration updates
         Ok(())
     }
-    
+
     /// Delete a queue
-    /// 
+    ///
     /// This will fail if the queue has active calls
     pub async fn delete_queue(&self, queue_id: &str) -> CallCenterResult<()> {
         let queue_manager = self.engine.queue_manager().read().await;
         let stats = queue_manager.get_queue_stats(queue_id)?;
-        
+
         if stats.total_calls > 0 {
             return Err(CallCenterError::validation(
                 "Cannot delete queue with active calls"
             ));
         }
-        
+
         drop(queue_manager);
         // TODO: Add proper queue removal method to QueueManager
         Ok(())
     }
-    
+
     /// Get current system configuration
     pub fn get_config(&self) -> &CallCenterConfig {
         self.engine.config()
     }
-    
+
     /// Update routing configuration
-    /// 
+    ///
     /// This allows dynamic updates to routing rules without restart
     pub async fn update_routing_config(&self, config: RoutingConfig) -> CallCenterResult<()> {
         // In a real implementation, this would update the routing engine
@@ -675,12 +675,12 @@ impl AdminApi {
         // TODO: Implement dynamic routing updates
         Ok(())
     }
-    
+
     /// Get system health status
     pub async fn get_system_health(&self) -> SystemHealth {
         let stats = self.engine.get_stats().await;
         let database_ok = self.check_database_health().await;
-        
+
         SystemHealth {
             status: if database_ok { HealthStatus::Healthy } else { HealthStatus::Degraded },
             database_connected: database_ok,
@@ -691,34 +691,34 @@ impl AdminApi {
             warnings: Vec::new(),
         }
     }
-    
+
     /// Perform database maintenance
     pub async fn optimize_database(&self) -> CallCenterResult<()> {
         tracing::info!("Running database optimization");
         // TODO: Implement database optimization
         Ok(())
     }
-    
+
     /// Export system configuration
     pub async fn export_config(&self) -> CallCenterResult<String> {
         let config = self.engine.config();
         serde_json::to_string_pretty(config)
             .map_err(|e| CallCenterError::internal(&format!("Failed to serialize config: {}", e)))
     }
-    
+
     /// Import system configuration
-    /// 
+    ///
     /// Note: This requires a system restart to take effect
     pub async fn import_config(&self, config_json: &str) -> CallCenterResult<CallCenterConfig> {
         serde_json::from_str(config_json)
             .map_err(|e| CallCenterError::validation(&format!("Invalid config JSON: {}", e)))
     }
-    
+
     /// Get detailed queue configuration
     pub async fn get_queue_configs(&self) -> HashMap<String, QueueConfig> {
         // In a real implementation, this would return actual queue configs
         let mut configs = HashMap::new();
-        
+
         // Add default queues with correct field names
         for queue_id in &["general", "sales", "support", "billing", "vip", "premium", "overflow"] {
             configs.insert(
@@ -732,10 +732,10 @@ impl AdminApi {
                 }
             );
         }
-        
+
         configs
     }
-    
+
     /// Check database health
     async fn check_database_health(&self) -> bool {
         if let Some(db) = self.engine.database_manager() {
@@ -760,15 +760,15 @@ impl AdminApi {
         } else {
             0
         };
-        
+
         let active_calls = if let Some(db) = self.engine.database_manager() {
             db.get_active_calls_count().await.unwrap_or(0)
         } else {
             0
         };
-        
+
         let queued_calls = 0; // TODO: get from queue manager
-        
+
         let available_agents = if let Some(db) = self.engine.database_manager() {
             match db.get_agent_stats().await {
                 Ok(stats) => stats.available_agents,
@@ -780,7 +780,7 @@ impl AdminApi {
         } else {
             0
         };
-        
+
         CallCenterStats {
             total_agents,
             available_agents: available_agents.try_into().unwrap_or(0),
@@ -829,4 +829,4 @@ pub struct CallCenterStats {
 pub struct AgentSkill {
     pub skill_name: String,
     pub skill_level: u8,
-} 
+}

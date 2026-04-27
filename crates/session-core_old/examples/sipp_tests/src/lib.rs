@@ -96,7 +96,7 @@ impl CallStats {
 pub mod utils {
     use super::*;
     use tokio::time::{sleep, timeout};
-    
+
     /// Wait for a condition to be true with timeout
     pub async fn wait_for_condition<F>(
         mut condition: F,
@@ -113,32 +113,32 @@ pub mod utils {
         })
         .await
         .context("Condition timeout")?;
-        
+
         Ok(())
     }
-    
+
     /// Generate a unique test ID
     pub fn generate_test_id() -> String {
         format!("test_{}", uuid::Uuid::new_v4().simple())
     }
-    
+
     /// Calculate statistics from response times
     pub fn calculate_response_stats(times: &[Duration]) -> (Duration, Duration, Duration) {
         if times.is_empty() {
             return (Duration::ZERO, Duration::ZERO, Duration::ZERO);
         }
-        
+
         let mut sorted_times = times.to_vec();
         sorted_times.sort();
-        
+
         let sum: Duration = sorted_times.iter().sum();
         let average = sum / sorted_times.len() as u32;
-        
+
         let median = sorted_times[sorted_times.len() / 2];
-        
+
         let p95_index = (sorted_times.len() as f64 * 0.95) as usize;
         let p95 = sorted_times[p95_index.min(sorted_times.len() - 1)];
-        
+
         (average, median, p95)
     }
 }
@@ -147,7 +147,7 @@ pub mod utils {
 pub mod report {
     use super::*;
     use std::fs;
-    
+
     /// Generate HTML test report
     pub fn generate_html_report(results: &[TestResult], output_path: &PathBuf) -> Result<()> {
         let html = format!(
@@ -187,21 +187,21 @@ pub mod report {
             },
             generate_test_table(results)
         );
-        
+
         fs::write(output_path, html).context("Failed to write HTML report")?;
         Ok(())
     }
-    
+
     fn generate_test_table(results: &[TestResult]) -> String {
         let mut table = String::from("<table><tr><th>Scenario</th><th>Duration</th><th>Calls</th><th>Success Rate</th><th>Status</th></tr>");
-        
+
         for result in results {
             let success_rate = if result.calls_attempted == 0 {
                 0.0
             } else {
                 (result.calls_successful as f64 / result.calls_attempted as f64) * 100.0
             };
-            
+
             table.push_str(&format!(
                 r#"<tr class="{}"><td>{}</td><td>{:.2}s</td><td>{}/{}</td><td>{:.1}%</td><td>{}</td></tr>"#,
                 if result.success { "success" } else { "failure" },
@@ -213,16 +213,16 @@ pub mod report {
                 if result.success { "✅ PASS" } else { "❌ FAIL" }
             ));
         }
-        
+
         table.push_str("</table>");
         table
     }
-    
+
     /// Generate JUnit XML report for CI/CD integration
     pub fn generate_junit_report(results: &[TestResult], output_path: &PathBuf) -> Result<()> {
         let total_time: f64 = results.iter().map(|r| r.duration.as_secs_f64()).sum();
         let failures = results.iter().filter(|r| !r.success).count();
-        
+
         let mut xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="SIPp Integration Tests" tests="{}" failures="{}" time="{:.3}">
@@ -231,14 +231,14 @@ pub mod report {
             failures,
             total_time
         );
-        
+
         for result in results {
             xml.push_str(&format!(
                 r#"  <testcase name="{}" time="{:.3}""#,
                 result.scenario,
                 result.duration.as_secs_f64()
             ));
-            
+
             if result.success {
                 xml.push_str(" />\n");
             } else {
@@ -252,10 +252,10 @@ pub mod report {
                 ));
             }
         }
-        
+
         xml.push_str("</testsuite>\n");
-        
+
         fs::write(output_path, xml).context("Failed to write JUnit report")?;
         Ok(())
     }
-} 
+}

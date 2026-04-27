@@ -1,3 +1,3 @@
 //! Queue store operations (sqlx-based)
 
-pub use super::DatabaseManager; 
+pub use super::DatabaseManager;

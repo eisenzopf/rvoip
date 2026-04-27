@@ -33,7 +33,7 @@ impl G711Codec {
     pub fn new(variant: G711Variant) -> Self {
         Self { variant }
     }
-    
+
     /// Get the G.711 variant
     pub fn variant(&self) -> G711Variant {
         self.variant
@@ -47,30 +47,30 @@ impl Codec for G711Codec {
             G711Variant::PCMA => "PCMA",
         }
     }
-    
+
     fn payload_type(&self) -> u8 {
         match self.variant {
             G711Variant::PCMU => 0,
             G711Variant::PCMA => 8,
         }
     }
-    
+
     fn sample_rate(&self) -> u32 {
         8000 // G.711 is always 8kHz
     }
-    
+
     fn supports_format(&self, format: AudioFormat) -> bool {
         // G.711 only supports mono 16-bit audio at 8kHz
-        format.channels == 1 && 
-        format.bit_depth == 16 && 
+        format.channels == 1 &&
+        format.bit_depth == 16 &&
         format.sample_rate == SampleRate::Rate8000
     }
-    
+
     fn frame_size(&self) -> usize {
         // G.711 typically uses 20ms frames at 8kHz = 160 samples
         160
     }
-    
+
     fn encode(&self, pcm: &AudioBuffer) -> Result<Bytes> {
         // Validate the audio format
         if !self.supports_format(pcm.format) {
@@ -81,34 +81,34 @@ impl Codec for G711Codec {
                 pcm.format.sample_rate.as_hz()
             )));
         }
-        
+
         // Each 16-bit PCM sample becomes one 8-bit G.711 sample
         let num_samples = pcm.samples();
         let mut output = BytesMut::with_capacity(num_samples);
-        
+
         // Convert the byte buffer to 16-bit PCM samples
         let mut i = 0;
         while i + 1 < pcm.data.len() {
             // Extract 16-bit sample (in little-endian order)
             let sample = ((pcm.data[i + 1] as i16) << 8) | (pcm.data[i] as i16);
-            
+
             // Encode the sample using the appropriate G.711 variant
             let encoded = match self.variant {
                 G711Variant::PCMU => encode_ulaw(sample),
                 G711Variant::PCMA => encode_alaw(sample),
             };
-            
+
             output.extend_from_slice(&[encoded]);
             i += 2; // Move to next 16-bit sample
         }
-        
+
         Ok(output.freeze())
     }
-    
+
     fn decode(&self, encoded: &[u8]) -> Result<AudioBuffer> {
         // Create a buffer for 16-bit PCM output (2 bytes per sample)
         let mut output = BytesMut::with_capacity(encoded.len() * 2);
-        
+
         // Decode each 8-bit G.711 sample to a 16-bit PCM sample
         for &byte in encoded {
             // Decode the sample using the appropriate G.711 variant
@@ -116,11 +116,11 @@ impl Codec for G711Codec {
                 G711Variant::PCMU => decode_ulaw(byte),
                 G711Variant::PCMA => decode_alaw(byte),
             };
-            
+
             // Add the 16-bit sample to the output (in little-endian order)
             output.extend_from_slice(&[(sample & 0xFF) as u8, ((sample >> 8) & 0xFF) as u8]);
         }
-        
+
         Ok(AudioBuffer::new(
             output.freeze(),
             AudioFormat::mono_16bit(SampleRate::Rate8000)
@@ -241,7 +241,7 @@ static ALAW_DECODE_TABLE: [i16; 256] = [
 ];
 
 /// Encode a 16-bit PCM sample to 8-bit μ-law
-/// 
+///
 /// This function follows the ITU-T G.711 recommendation for μ-law encoding:
 /// 1. Add bias to the sample
 /// 2. Take absolute value and apply logarithmic quantization
@@ -253,29 +253,29 @@ fn encode_ulaw(sample: Sample) -> u8 {
     } else {
         sample.abs()
     };
-    
+
     // Add bias, with clamping to 16-bit range
     let value = if value as u32 + 132 > 32767 {
         32767
     } else {
         value + 132
     };
-    
+
     // Convert to u16 for bitwise operations
     let value = value as u16;
-    
+
     // Get the sign bit
     let sign = if sample < 0 { 0x80u8 } else { 0u8 };
-    
+
     // Find the segment (exponent)
     let exponent = ULAW_ENCODE_TABLE[(value >> 7) as usize] as u8;
-    
+
     // Extract the mantissa bits
     let mantissa = ((value >> (exponent as u16 + 3)) & 0x0F) as u8;
-    
+
     // Assemble the μ-law byte and apply bit inversion
     let encoded = sign | ((exponent << 4) | mantissa) ^ 0xFF;
-    
+
     encoded
 }
 
@@ -283,7 +283,7 @@ fn encode_ulaw(sample: Sample) -> u8 {
 fn decode_ulaw(encoded: u8) -> Sample {
     // Invert all bits (μ-law uses inverted values)
     let encoded = encoded ^ 0xFF;
-    
+
     // Use lookup table for faster decoding
     ULAW_DECODE_TABLE[encoded as usize]
 }
@@ -301,20 +301,20 @@ fn encode_alaw(sample: Sample) -> u8 {
     } else {
         sample.abs()
     };
-    
+
     // Clamp to 16-bit positive range (already handled above)
     let value = value as u16;
-    
+
     // Get the sign bit
     let sign = if sample < 0 { 0x80u8 } else { 0u8 };
-    
+
     // Logarithmic quantization
     let segment = ALAW_ENCODE_TABLE[(value >> 8) as usize] as u8;
     let mantissa = ((value >> (segment as u16 + 1)) & 0x0F) as u8;
-    
+
     // Assemble A-law byte with alternate bit inversion
     let encoded = sign | ((segment << 4) | mantissa) ^ 0x55;
-    
+
     encoded
 }
 
@@ -328,78 +328,78 @@ fn decode_alaw(encoded: u8) -> Sample {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_ulaw_encode_decode_basic() {
         // Test a simple value
         let value: i16 = 1000;
         let encoded = encode_ulaw(value);
         let decoded = decode_ulaw(encoded);
-        
+
         // Just verify something reasonable is returned
         assert!(decoded != 0, "Decoded value should not be zero");
         println!("μ-law: {} encoded to {} then decoded to {}", value, encoded, decoded);
     }
-    
+
     #[test]
     fn test_alaw_encode_decode_basic() {
         // Test a simple value
         let value: i16 = 1000;
         let encoded = encode_alaw(value);
         let decoded = decode_alaw(encoded);
-        
+
         // Just verify something reasonable is returned
         assert!(decoded != 0, "Decoded value should not be zero");
         println!("A-law: {} encoded to {} then decoded to {}", value, encoded, decoded);
     }
-    
+
     #[test]
     fn test_g711_codec_basic() {
         // Test both variants (PCMU and PCMA)
         for variant in [G711Variant::PCMU, G711Variant::PCMA] {
             let codec = G711Codec::new(variant);
-            
+
             // Create a simple test audio buffer with 10 identical samples
             let num_samples = 10;
             let mut pcm_data = BytesMut::with_capacity(num_samples * 2);
-            
+
             // Use a constant sample value for simplicity
             let sample: i16 = 1000;
-            
+
             for _ in 0..num_samples {
                 // Add sample in little-endian order
                 pcm_data.extend_from_slice(&[(sample & 0xFF) as u8, ((sample >> 8) & 0xFF) as u8]);
             }
-            
+
             let pcm_buffer = AudioBuffer::new(
                 pcm_data.freeze(),
                 AudioFormat::mono_16bit(SampleRate::Rate8000)
             );
-            
+
             // Basic encoding test
             let encoded = codec.encode(&pcm_buffer).unwrap();
-            
+
             // Verify encoded size (8-bit per sample)
             assert_eq!(encoded.len(), num_samples);
-            
+
             // Basic decoding test
             let decoded = codec.decode(&encoded).unwrap();
-            
+
             // Verify format is preserved
             assert_eq!(decoded.format, pcm_buffer.format);
-            
+
             // Verify sample count is preserved
             assert_eq!(decoded.samples(), pcm_buffer.samples());
-            
+
             // Just verify we got some non-zero output
             for i in 0..num_samples {
                 let decoded_idx = i * 2;
-                let decoded_sample = ((decoded.data[decoded_idx + 1] as i16) << 8) | 
+                let decoded_sample = ((decoded.data[decoded_idx + 1] as i16) << 8) |
                                      (decoded.data[decoded_idx] as i16);
-                assert!(decoded_sample != 0, 
-                      "Decoded sample for {:?} should not be zero", 
+                assert!(decoded_sample != 0,
+                      "Decoded sample for {:?} should not be zero",
                       variant);
             }
         }
     }
-} 
+}

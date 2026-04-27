@@ -206,7 +206,7 @@ use std::convert::TryFrom;
 /// fn create_secure_registration_challenge(request_from_tag: &str) -> SimpleResponseBuilder {
 ///     // In production, use a cryptographically secure random generator for nonce
 ///     let nonce = "d5e5ff37c381c489bc858ac968a7c246a729ef76";
-///     
+///
 ///     WwwAuthenticateExt::www_authenticate_digest(
 ///         SimpleResponseBuilder::new(StatusCode::Unauthorized, Some("Authentication Required")),
 ///             "registrar.example.com",         // Consistent realm for your domain

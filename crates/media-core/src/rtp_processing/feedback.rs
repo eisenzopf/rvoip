@@ -5,10 +5,10 @@
 pub struct MediaFeedback {
     /// Feedback type
     pub feedback_type: FeedbackType,
-    
+
     /// Target session/stream
     pub session_id: String,
-    
+
     /// Feedback payload
     pub payload: Vec<u8>,
 }
@@ -18,16 +18,16 @@ pub struct MediaFeedback {
 pub enum FeedbackType {
     /// Generic NACK (Negative Acknowledgment)
     Nack,
-    
+
     /// Picture Loss Indication
     Pli,
-    
+
     /// Full Intra Request
     Fir,
-    
+
     /// Slice Loss Indication
     Sli,
-    
+
     /// Reference Picture Selection Indication
     Rpsi,
 }
@@ -42,7 +42,7 @@ impl FeedbackGenerator {
     pub fn new(session_id: String) -> Self {
         Self { session_id }
     }
-    
+
     /// Generate NACK feedback for lost packets
     pub fn generate_nack(&self, lost_sequences: &[u16]) -> MediaFeedback {
         MediaFeedback {
@@ -51,7 +51,7 @@ impl FeedbackGenerator {
             payload: lost_sequences.iter().flat_map(|s| s.to_be_bytes()).collect(),
         }
     }
-    
+
     /// Generate PLI feedback for picture loss
     pub fn generate_pli(&self) -> MediaFeedback {
         MediaFeedback {

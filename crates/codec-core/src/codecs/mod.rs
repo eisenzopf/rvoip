@@ -38,11 +38,11 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 //!
-//! ### Direct Codec Access  
+//! ### Direct Codec Access
 //! ```rust
 //! use codec_core::codecs::g711::{G711Codec, G711Variant};
 //!
-//! // Direct instantiation  
+//! // Direct instantiation
 //! let mut g711_ulaw = G711Codec::new(G711Variant::MuLaw);
 //! let mut g711_alaw = G711Codec::new(G711Variant::ALaw);
 //! # Ok::<(), Box<dyn std::error::Error>>(())

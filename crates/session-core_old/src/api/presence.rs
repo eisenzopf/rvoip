@@ -33,40 +33,40 @@ impl<'a> PresenceBuilder<'a> {
             capabilities: vec!["audio".to_string()],
         }
     }
-    
+
     /// Add a custom note to the presence
     pub fn note(mut self, note: impl Into<String>) -> Self {
         self.note = Some(note.into());
         self
     }
-    
+
     /// Set the device identifier
     pub fn device(mut self, device: impl Into<String>) -> Self {
         self.device = Some(device.into());
         self
     }
-    
+
     /// Set capabilities (e.g., ["audio", "video", "chat"])
     pub fn capabilities(mut self, caps: Vec<String>) -> Self {
         self.capabilities = caps;
         self
     }
-    
+
     /// Add a single capability
     pub fn with_capability(mut self, cap: impl Into<String>) -> Self {
         self.capabilities.push(cap.into());
         self
     }
-    
+
     /// Publish the presence status
     pub async fn publish(self) -> Result<()> {
         // Get the user's SIP URI
         let local_addr = format!("{}:{}", self.peer.local_addr, self.peer.port);
-        let entity = format!("sip:{}@{}", 
+        let entity = format!("sip:{}@{}",
             self.peer.identity,
             local_addr
         );
-        
+
         // Update presence in the coordinator
         let presence_coordinator = self.peer.coordinator.presence_coordinator.read().await;
         presence_coordinator.update_presence(
@@ -74,10 +74,10 @@ impl<'a> PresenceBuilder<'a> {
             self.status.clone(),
             self.note,
         ).await?;
-        
+
         // TODO: Send PUBLISH if connected to a presence server
         info!("Presence updated for {}: {:?}", entity, self.status);
-        
+
         Ok(())
     }
 }
@@ -96,13 +96,13 @@ impl<'a> std::future::IntoFuture for PresenceBuilder<'a> {
 pub struct PresenceWatcher {
     /// The entity being watched
     entity: String,
-    
+
     /// Channel for receiving presence updates
     rx: mpsc::Receiver<PresenceInfo>,
-    
+
     /// Subscription dialog ID (if subscribed)
     dialog_id: Option<rvoip_dialog_core::DialogId>,
-    
+
     /// Reference to coordinator for cleanup
     coordinator: Arc<crate::coordinator::SessionCoordinator>,
 }
@@ -121,24 +121,24 @@ impl PresenceWatcher {
             coordinator,
         }
     }
-    
+
     /// Set the subscription dialog ID
     pub(crate) fn with_dialog(mut self, dialog_id: rvoip_dialog_core::DialogId) -> Self {
         self.dialog_id = Some(dialog_id);
         self
     }
-    
+
     /// Receive the next presence update
     pub async fn recv(&mut self) -> Option<PresenceInfo> {
         self.rx.recv().await
     }
-    
+
     /// Get the current presence state
     pub async fn current(&self) -> Option<PresenceInfo> {
         let presence_coordinator = self.coordinator.presence_coordinator.read().await;
         presence_coordinator.get_presence(&self.entity)
     }
-    
+
     /// Stop watching (unsubscribe)
     pub async fn stop(self) -> Result<()> {
         if let Some(dialog_id) = self.dialog_id {
@@ -149,7 +149,7 @@ impl PresenceWatcher {
                 Some("Watcher stopped".to_string()),
             ).await?;
         }
-        
+
         info!("Stopped watching presence for {}", self.entity);
         Ok(())
     }
@@ -159,7 +159,7 @@ impl PresenceWatcher {
 pub struct BuddyList {
     /// List of buddies and their watchers
     buddies: Vec<(String, PresenceWatcher)>,
-    
+
     /// Reference to SimplePeer
     peer: Arc<SimplePeer>,
 }
@@ -172,14 +172,14 @@ impl BuddyList {
             peer,
         }
     }
-    
+
     /// Add a buddy to watch
     pub async fn add(&mut self, uri: &str) -> Result<()> {
         let watcher = self.peer.watch(uri).await?;
         self.buddies.push((uri.to_string(), watcher));
         Ok(())
     }
-    
+
     /// Remove a buddy
     pub async fn remove(&mut self, uri: &str) -> Result<()> {
         if let Some(pos) = self.buddies.iter().position(|(u, _)| u == uri) {
@@ -188,7 +188,7 @@ impl BuddyList {
         }
         Ok(())
     }
-    
+
     /// Get all buddy statuses
     pub async fn get_all(&self) -> Vec<(String, Option<PresenceInfo>)> {
         let mut statuses = Vec::new();
@@ -198,7 +198,7 @@ impl BuddyList {
         }
         statuses
     }
-    
+
     /// Clear all buddies
     pub async fn clear(&mut self) -> Result<()> {
         for (_, watcher) in self.buddies.drain(..) {
@@ -214,32 +214,32 @@ impl SimplePeer {
     pub fn presence(&self, status: PresenceStatus) -> PresenceBuilder {
         PresenceBuilder::new(self, status)
     }
-    
+
     /// Set status to available
     pub fn available(&self) -> PresenceBuilder {
         self.presence(PresenceStatus::Available)
     }
-    
+
     /// Set status to busy
     pub fn busy(&self) -> PresenceBuilder {
         self.presence(PresenceStatus::Busy)
     }
-    
+
     /// Set status to away
     pub fn away(&self) -> PresenceBuilder {
         self.presence(PresenceStatus::Away)
     }
-    
+
     /// Set status to do not disturb
     pub fn dnd(&self) -> PresenceBuilder {
         self.presence(PresenceStatus::DoNotDisturb)
     }
-    
+
     /// Set status to offline
     pub fn offline(&self) -> PresenceBuilder {
         self.presence(PresenceStatus::Offline)
     }
-    
+
     /// Watch another user's presence
     pub async fn watch(&self, target: &str) -> Result<PresenceWatcher> {
         // Parse target URI
@@ -248,28 +248,28 @@ impl SimplePeer {
         } else {
             format!("sip:{}", target)
         };
-        
+
         // Create a channel for presence updates
         let (tx, rx) = mpsc::channel(10);
-        
+
         // Create watcher
         let mut watcher = PresenceWatcher::new(
             target_uri.clone(),
             rx,
             self.coordinator.clone(),
         );
-        
+
         // Send SUBSCRIBE to the target
         // TODO: Implement SUBSCRIBE sending through dialog-core
         // For now, we just set up the watcher
         info!("Watching presence for {}", target_uri);
-        
+
         // In P2P mode, we might poll the target periodically
         // In B2BUA mode, we would send SUBSCRIBE to the server
-        
+
         Ok(watcher)
     }
-    
+
     /// Create a buddy list
     pub fn buddy_list(self: Arc<Self>) -> BuddyList {
         BuddyList::new(self)
@@ -279,12 +279,12 @@ impl SimplePeer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_presence_builder() {
         // This would need a full SimplePeer setup to test properly
         // For now, just test the builder pattern
-        
+
         // The actual test would look like:
         // let peer = SimplePeer::new("alice", 5060).await.unwrap();
         // peer.available()

@@ -38,4 +38,4 @@ impl PriorityManager {
         self.session_priorities.remove(session_id);
         Ok(())
     }
-} 
+}

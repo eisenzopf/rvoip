@@ -29,12 +29,12 @@ impl SessionDialogHandle {
             dialog_handle: None,
         }
     }
-    
+
     pub fn with_call_handle(mut self, handle: CallHandle) -> Self {
         self.call_handle = Some(handle);
         self
     }
-    
+
     pub fn with_dialog_handle(mut self, handle: DialogHandle) -> Self {
         self.dialog_handle = Some(handle);
         self
@@ -69,4 +69,4 @@ pub struct DialogSession {
     pub local_uri: String,
     pub remote_uri: String,
     pub created_at: std::time::Instant,
-} 
+}

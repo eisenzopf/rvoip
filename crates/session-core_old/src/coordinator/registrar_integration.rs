@@ -1,5 +1,5 @@
 //! Registrar Integration Coordinator
-//! 
+//!
 //! This module provides integration between session-core and registrar-core,
 //! handling user registration, presence management, and OAuth authentication.
 
@@ -17,7 +17,7 @@ use rvoip_sip_core::{Message as SipMessage, TypedHeader, HeaderValue, Response, 
 use chrono::{Utc, Duration};
 use rvoip_dialog_core::Dialog;
 use rvoip_registrar_core::{
-    RegistrarService, 
+    RegistrarService,
     api::ServiceMode,
     types::RegistrarConfig,
     events::{RegistrarEvent, PresenceEvent},
@@ -39,7 +39,7 @@ type SubscriptionDialogMap = Arc<DashMap<String, Arc<Dialog>>>;
 type UserSubscriptionMap = Arc<DashMap<String, Vec<String>>>;
 
 /// Registrar Integration Coordinator
-/// 
+///
 /// Manages the integration between session-core and registrar-core,
 /// handling:
 /// - User registration (REGISTER)
@@ -49,22 +49,22 @@ type UserSubscriptionMap = Arc<DashMap<String, Vec<String>>>;
 pub struct RegistrarIntegration {
     /// The registrar service from registrar-core
     registrar: Arc<RegistrarService>,
-    
+
     /// OAuth 2.0 validator for authentication
     oauth_validator: Arc<OAuth2Validator>,
-    
+
     /// Maps subscription Call-IDs to dialogs
     subscription_dialogs: SubscriptionDialogMap,
-    
+
     /// Maps user AORs to their active subscriptions
     user_subscriptions: UserSubscriptionMap,
-    
+
     /// Event system for receiving registrar events
     event_system: Arc<EventSystem>,
-    
+
     /// Configuration
     config: Arc<RegistrarConfig>,
-    
+
     /// Service mode (P2P or B2BUA)
     mode: ServiceMode,
 }
@@ -88,7 +88,7 @@ impl RegistrarIntegration {
             expiry_check_interval: 60,
         };
 
-        // Create event system  
+        // Create event system
         let event_system = Arc::new(EventSystem::new_static_fast_path(1000));
 
         // Create registrar service
@@ -96,7 +96,7 @@ impl RegistrarIntegration {
             mode.clone(),
             registrar_config.clone(),
         ).await?;
-        
+
         // Set the event bus
         registrar.set_event_bus(event_system.clone());
 
@@ -149,7 +149,7 @@ impl RegistrarIntegration {
         // Extract contact information from request
         let contact_header = request.header(&HeaderName::Contact)
             .ok_or_else(|| anyhow!("Missing Contact header"))?;
-        
+
         // Extract expires value
         let expires_header = request.header(&HeaderName::Expires);
         let expires = expires_header.and_then(|h| match h {
@@ -162,7 +162,7 @@ impl RegistrarIntegration {
             },
             _ => None,
         });
-        
+
         // Register user with registrar-core
         let contact_info = rvoip_registrar_core::types::ContactInfo {
             uri: format!("{}", contact_header),
@@ -175,9 +175,9 @@ impl RegistrarIntegration {
             path: vec![],
             methods: vec!["INVITE".to_string(), "OPTIONS".to_string(), "MESSAGE".to_string()],
         };
-        
+
         self.registrar.register_user(&from_uri, contact_info, expires).await?;
-        
+
         // Create success response
         let response = Response::new(StatusCode::Ok);
         let response: SipMessage = response.into();
@@ -224,7 +224,7 @@ impl RegistrarIntegration {
             PresenceStatus::Available,
             Some("Online".to_string())
         ).await?;
-        
+
         // Create success response
         let response = Response::new(StatusCode::Ok);
         let response: SipMessage = response.into();
@@ -266,7 +266,7 @@ impl RegistrarIntegration {
         // Extract subscription details
         let event_header = request.header(&HeaderName::Event)
             .ok_or_else(|| anyhow!("Missing Event header"))?;
-        
+
         // Only handle presence subscriptions
         let is_presence = match &event_header {
             TypedHeader::Event(event) => match &event.event_type {
@@ -308,14 +308,14 @@ impl RegistrarIntegration {
             &target_uri,
             Some(3600)
         ).await?;
-        
-        // Create success response  
+
+        // Create success response
         let response = Response::new(StatusCode::Ok);
         let response: SipMessage = response.into();
 
         // Log subscription creation
         info!("Subscription created for {} to {}", from_uri, target_uri);
-        
+
         // Generate initial NOTIFY
         self.generate_notify(&call_id, &target_uri, dialog).await?;
 
@@ -331,14 +331,14 @@ impl RegistrarIntegration {
     ) -> Result<()> {
         // Get presence state from registrar
         let presence_state = self.registrar.get_presence(target_aor).await?;
-        
+
         // Create NOTIFY request manually since we can't call methods on Arc<Dialog>
         use rvoip_sip_core::builder::SimpleRequestBuilder;
         use rvoip_sip_core::types::subscription_state::{SubscriptionState, SubState};
-        
+
         // Generate PIDF body from presence state
         let pidf_body = self.registrar.generate_pidf(target_aor).await?;
-        
+
         // Build NOTIFY with all headers and body
         let notify = SimpleRequestBuilder::new(Method::Notify, &dialog.remote_target.to_string())
             .map_err(|e| SessionError::SipError(format!("Failed to create NOTIFY: {}", e)))?
@@ -355,11 +355,11 @@ impl RegistrarIntegration {
             .content_type("application/pidf+xml")
             .body(pidf_body)
             .build();
-        
+
         // TODO: Send NOTIFY through proper transaction manager
         // This needs to be integrated with DialogManager or TransactionManager
         warn!("NOTIFY sending not yet integrated - needs DialogManager");
-        
+
         Ok(())
     }
 
@@ -391,7 +391,7 @@ impl RegistrarIntegration {
         }
         Ok(())
     }
-    
+
     /// Handle presence events
     pub async fn handle_presence_event(&self, event: PresenceEvent) -> Result<()> {
         match event {
@@ -426,7 +426,7 @@ impl RegistrarIntegration {
             // Create NOTIFY request manually
             use rvoip_sip_core::builder::SimpleRequestBuilder;
             use rvoip_sip_core::types::subscription_state::{SubscriptionState, TerminationReason};
-            
+
             // Build final NOTIFY with terminated state
             let notify = SimpleRequestBuilder::new(Method::Notify, &dialog.remote_target.to_string())
                 .map_err(|e| SessionError::SipError(format!("Failed to create NOTIFY: {}", e)))?
@@ -442,16 +442,16 @@ impl RegistrarIntegration {
                 .header(TypedHeader::SubscriptionState(SubscriptionState::terminated(TerminationReason::Timeout).to_string()))
                 .body(Vec::<u8>::new())
                 .build();
-            
+
             // TODO: Send final NOTIFY through proper transaction manager
             warn!("Final NOTIFY sending not yet integrated - needs DialogManager");
         }
-        
+
         // Remove from user subscriptions
         if let Some(mut subscriptions) = self.user_subscriptions.get_mut(aor) {
             subscriptions.retain(|id| id != call_id);
         }
-        
+
         Ok(())
     }
 
@@ -467,11 +467,11 @@ impl RegistrarIntegration {
             }
             _ => return Err(anyhow!("Invalid Authorization header type")),
         };
-        
+
         if !value.starts_with("Bearer ") {
             return Err(anyhow!("Authorization must use Bearer scheme"));
         }
-        
+
         Ok(value[7..].to_string())
     }
 
@@ -481,7 +481,7 @@ impl RegistrarIntegration {
         let uri = Uri::from_str(sip_uri)?;
         let user = uri.username()
             .ok_or_else(|| anyhow!("SIP URI missing user part"))?;
-        
+
         // Simple comparison - in production might need more sophisticated matching
         Ok(subject == user)
     }
@@ -506,19 +506,19 @@ impl RegistrarIntegration {
         };
         let response = Response::new(status_code);
         let response: SipMessage = response.into();
-        
+
         // Add WWW-Authenticate header for OAuth errors if applicable
         if code == 401 || code == 403 {
             // TODO: Add proper WWW-Authenticate header with OAuth validator
         }
-        
+
         response
     }
 
     /// Shutdown the integration
     pub async fn shutdown(&self) -> Result<()> {
         info!("Shutting down RegistrarIntegration");
-        
+
         // Clear all subscriptions
         for item in self.subscription_dialogs.iter() {
             let (call_id, dialog) = item.pair();
@@ -527,10 +527,10 @@ impl RegistrarIntegration {
                 warn!("Error terminating subscription {}: {}", call_id, e);
             }
         }
-        
+
         self.subscription_dialogs.clear();
         self.user_subscriptions.clear();
-        
+
         Ok(())
     }
 }
@@ -539,12 +539,12 @@ impl RegistrarIntegration {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_registrar_integration_creation() {
         // Test creation of RegistrarIntegration
         use crate::api::builder::SessionManagerConfig;
-        
+
         let session_config = SessionManagerConfig::default();
         let oauth_config = OAuth2Config {
             jwks_uri: None, // Don't try to fetch from a non-existent URL
@@ -556,13 +556,13 @@ mod tests {
             cache_ttl: std::time::Duration::from_secs(300),
             required_scopes: crate::auth::oauth::OAuth2Scopes::default(),
         };
-        
+
         let integration = RegistrarIntegration::new(
             &session_config,
             oauth_config,
             ServiceMode::P2P,
         ).await;
-        
+
         assert!(integration.is_ok(), "Failed to create RegistrarIntegration: {:?}", integration.err());
     }
 }

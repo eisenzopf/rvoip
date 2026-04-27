@@ -196,7 +196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         stats_check_counter = 0;
                         if let Ok(stats) = client.get_transmit_buffer_stats().await {
                             info!(
-                                "Transmit buffer stats: packets_queued={}, packets_sent={}, buffer_fullness={:.2}%", 
+                                "Transmit buffer stats: packets_queued={}, packets_sent={}, buffer_fullness={:.2}%",
                                 stats.packets_queued,
                                 stats.packets_sent,
                                 stats.buffer_fullness * 100.0
@@ -242,7 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get final stats if possible
     if let Ok(stats) = client.get_transmit_buffer_stats().await {
         info!(
-            "Final transmit buffer stats: packets_queued={}, packets_sent={}, drops={}, retransmits={}, buffer_fullness={:.2}%", 
+            "Final transmit buffer stats: packets_queued={}, packets_sent={}, drops={}, retransmits={}, buffer_fullness={:.2}%",
             stats.packets_queued,
             stats.packets_sent,
             stats.packets_dropped,

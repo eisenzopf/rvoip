@@ -124,7 +124,7 @@ use bytes::Bytes;
 ///     .content_type(format!("multipart/alternative; boundary={}", multipart.boundary).as_str())
 ///     .body(multipart.to_string())
 ///     .build();
-///     
+///
 /// // The recipient can choose to display either the plain text or XML version
 /// ```
 ///

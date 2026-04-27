@@ -23,11 +23,11 @@
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let device_manager = AudioDeviceManager::new().await?;
-//! 
+//!
 //! // List available devices
 //! let input_devices = device_manager.list_devices(AudioDirection::Input).await?;
 //! let output_devices = device_manager.list_devices(AudioDirection::Output).await?;
-//! 
+//!
 //! println!("Found {} input devices", input_devices.len());
 //! println!("Found {} output devices", output_devices.len());
 //! # Ok(())
@@ -93,7 +93,7 @@ pub mod rtp;
 // Audio signal processing
 #[cfg(any(
     feature = "processing-aec",
-    feature = "processing-agc", 
+    feature = "processing-agc",
     feature = "processing-noise",
     feature = "processing-vad"
 ))]
@@ -124,25 +124,25 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Default audio configuration constants
 pub mod defaults {
     use crate::types::AudioFormat;
-    
+
     /// Default sample rate for VoIP (8kHz narrowband)
     pub const SAMPLE_RATE_NARROWBAND: u32 = 8000;
-    
+
     /// Default sample rate for wideband VoIP (16kHz)
     pub const SAMPLE_RATE_WIDEBAND: u32 = 16000;
-    
+
     /// Default sample rate for high-quality audio (48kHz)
     pub const SAMPLE_RATE_HIFI: u32 = 48000;
-    
+
     /// Default frame size in milliseconds
     pub const FRAME_SIZE_MS: u32 = 20;
-    
+
     /// Default number of channels (mono)
     pub const CHANNELS: u16 = 1;
-    
+
     /// Default bit depth
     pub const BIT_DEPTH: u16 = 16;
-    
+
     /// Default VoIP audio format (8kHz, mono, 16-bit, 20ms frames)
     pub fn voip_format() -> AudioFormat {
         AudioFormat::new(
@@ -152,7 +152,7 @@ pub mod defaults {
             FRAME_SIZE_MS,
         )
     }
-    
+
     /// Default wideband VoIP audio format (16kHz, mono, 16-bit, 20ms frames)
     pub fn wideband_format() -> AudioFormat {
         AudioFormat::new(
@@ -162,7 +162,7 @@ pub mod defaults {
             FRAME_SIZE_MS,
         )
     }
-    
+
     /// Default high-quality audio format (48kHz, stereo, 16-bit, 20ms frames)
     pub fn hifi_format() -> AudioFormat {
         AudioFormat::new(
@@ -177,24 +177,24 @@ pub mod defaults {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_version_defined() {
         assert!(!VERSION.is_empty());
     }
-    
+
     #[test]
     fn test_default_formats() {
         let voip = defaults::voip_format();
         assert_eq!(voip.sample_rate, 8000);
         assert_eq!(voip.channels, 1);
-        
+
         let wideband = defaults::wideband_format();
         assert_eq!(wideband.sample_rate, 16000);
         assert_eq!(wideband.channels, 1);
-        
+
         let hifi = defaults::hifi_format();
         assert_eq!(hifi.sample_rate, 48000);
         assert_eq!(hifi.channels, 2);
     }
-} 
+}

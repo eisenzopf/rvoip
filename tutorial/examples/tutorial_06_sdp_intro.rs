@@ -7,29 +7,29 @@ use std::str::FromStr;
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Tutorial 06: Introduction to SDP\n");
-    
+
     // Example 1: Creating a basic audio-only SDP
     create_audio_sdp()?;
-    
+
     // Example 2: Creating an audio and video SDP
     create_audio_video_sdp()?;
-    
+
     // Example 3: Creating a more complex WebRTC-style SDP
     create_webrtc_sdp()?;
-    
+
     // Example 4: Parsing an SDP string
     parse_sdp_string()?;
-    
+
     // Example 5: Modifying an existing SDP
     modify_existing_sdp()?;
-    
+
     Ok(())
 }
 
 // Example 1: Creating a basic audio-only SDP
 fn create_audio_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 1: Basic Audio-only SDP\n");
-    
+
     let sdp = SdpBuilder::new("Audio Call")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
         .connection("IN", "IP4", "alice.example.com")
@@ -42,17 +42,17 @@ fn create_audio_sdp() -> Result<(), Box<dyn Error>> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     println!("Audio-only SDP:");
     println!("{}\n", sdp);
-    
+
     Ok(())
 }
 
 // Example 2: Creating an audio and video SDP
 fn create_audio_video_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 2: Audio and Video SDP\n");
-    
+
     let sdp = SdpBuilder::new("Audio/Video Call")
         .origin("bob", "2890844527", "2890844527", "IN", "IP4", "bob.example.com")
         .connection("IN", "IP4", "bob.example.com")
@@ -72,17 +72,17 @@ fn create_audio_video_sdp() -> Result<(), Box<dyn Error>> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     println!("Audio/Video SDP:");
     println!("{}\n", sdp);
-    
+
     Ok(())
 }
 
 // Example 3: Creating a more complex WebRTC-style SDP
 fn create_webrtc_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 3: WebRTC-style SDP\n");
-    
+
     let sdp = SdpBuilder::new("WebRTC Session")
         .origin("webrtc", "2890844527", "2", "IN", "IP4", "0.0.0.0")
         .connection("IN", "IP4", "192.168.1.100")
@@ -124,17 +124,17 @@ fn create_webrtc_sdp() -> Result<(), Box<dyn Error>> {
             .ice_candidate("2 1 UDP 1845501695 203.0.113.100 9 typ srflx raddr 192.168.1.100 rport 9")
             .done()
         .build()?;
-    
+
     println!("WebRTC SDP:");
     println!("{}\n", sdp);
-    
+
     Ok(())
 }
 
 // Example 4: Parsing an SDP string
 fn parse_sdp_string() -> Result<(), Box<dyn Error>> {
     println!("Example 4: Parsing an SDP string\n");
-    
+
     let sdp_str = "v=0\r\n\
                   o=alice 2890844526 2890844526 IN IP4 alice.example.com\r\n\
                   s=Audio Call\r\n\
@@ -145,15 +145,15 @@ fn parse_sdp_string() -> Result<(), Box<dyn Error>> {
                   a=rtpmap:8 PCMA/8000\r\n\
                   a=rtpmap:96 telephone-event/8000\r\n\
                   a=sendrecv";
-    
+
     // Parse the SDP string
     let session = SdpSession::from_str(sdp_str)?;
-    
+
     println!("Parsed SDP Session:");
     println!("Session name: {}", session.session_name);
     println!("Origin: {}", session.origin);
     println!("Number of media streams: {}", session.media_descriptions.len());
-    
+
     if !session.media_descriptions.is_empty() {
         let media = &session.media_descriptions[0];
         println!("Media type: {}", media.media);
@@ -161,17 +161,17 @@ fn parse_sdp_string() -> Result<(), Box<dyn Error>> {
         println!("Media protocol: {}", media.protocol);
         println!("Media formats: {:?}", media.formats);
     }
-    
+
     println!("\nReconstructed SDP:");
     println!("{}\n", session);
-    
+
     Ok(())
 }
 
 // Example 5: Modifying an existing SDP
 fn modify_existing_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 5: Modifying an existing SDP\n");
-    
+
     // Create a basic SDP
     let sdp = SdpBuilder::new("Original Session")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
@@ -183,10 +183,10 @@ fn modify_existing_sdp() -> Result<(), Box<dyn Error>> {
             .rtpmap("8", "PCMA/8000")
             .done()
         .build()?;
-    
+
     println!("Original SDP:");
     println!("{}\n", sdp);
-    
+
     // Modify the SDP using into_builder()
     let modified_sdp = sdp.into_builder()
         // Change the IP address
@@ -206,9 +206,9 @@ fn modify_existing_sdp() -> Result<(), Box<dyn Error>> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     println!("Modified SDP:");
     println!("{}", modified_sdp);
-    
+
     Ok(())
-} 
+}

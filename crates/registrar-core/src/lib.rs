@@ -4,7 +4,7 @@
 //!
 //! This crate provides:
 //! - User registration management (REGISTER)
-//! - Location services (contact bindings)  
+//! - Location services (contact bindings)
 //! - Presence state management (PUBLISH)
 //! - Subscription handling (SUBSCRIBE/NOTIFY)
 //! - Automatic buddy lists for registered users

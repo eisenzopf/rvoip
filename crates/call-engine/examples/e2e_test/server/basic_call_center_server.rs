@@ -59,4 +59,4 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("Server error: {}", e))?;
 
     Ok(())
-} 
+}

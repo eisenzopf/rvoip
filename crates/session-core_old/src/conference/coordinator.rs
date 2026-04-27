@@ -39,7 +39,7 @@ impl ConferenceCoordinator {
     ) -> Result<ParticipantInfo> {
         // TODO: Validate session exists in session manager
         // For now, assume session is valid
-        
+
         // Add to conference
         self.conference_manager.join_conference(conference_id, session_id).await
     }
@@ -75,7 +75,7 @@ impl ConferenceCoordinator {
     ) -> Result<String> {
         // Get conference configuration
         let config = self.conference_manager.get_conference_config(conference_id).await?;
-        
+
         // Get participant count for session naming
         let participants = self.conference_manager.list_participants(conference_id).await?;
         let participant_count = participants.len();
@@ -121,7 +121,7 @@ impl ConferenceCoordinator {
     pub async fn handle_session_termination(&self, session_id: &SessionId) -> Result<()> {
         // Find all conferences this session belongs to
         let conferences = self.conference_manager.list_conferences().await?;
-        
+
         for conference_id in conferences {
             // Check if this session is in this conference
             if let Ok(participants) = self.conference_manager.list_participants(&conference_id).await {
@@ -139,7 +139,7 @@ impl ConferenceCoordinator {
     pub async fn get_session_conferences(&self, session_id: &SessionId) -> Result<Vec<ConferenceId>> {
         let mut session_conferences = Vec::new();
         let conferences = self.conference_manager.list_conferences().await?;
-        
+
         for conference_id in conferences {
             if let Ok(participants) = self.conference_manager.list_participants(&conference_id).await {
                 if participants.iter().any(|p| &p.session_id == session_id) {

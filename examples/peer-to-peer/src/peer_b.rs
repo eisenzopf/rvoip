@@ -1,7 +1,7 @@
 use anyhow::Result;
 use rvoip::{
     client_core::{
-        ClientConfig, ClientEventHandler, ClientError, 
+        ClientConfig, ClientEventHandler, ClientError,
         IncomingCallInfo, CallStatusInfo, RegistrationStatusInfo, MediaEventInfo,
         CallAction, CallId, CallState, MediaConfig,
         client::ClientManager,
@@ -28,15 +28,15 @@ impl PeerBHandler {
             call_id: Arc::new(Mutex::new(None)),
         }
     }
-    
+
     async fn set_client_manager(&self, client: Arc<ClientManager>) {
         *self.client_manager.write().await = Some(client);
     }
-    
+
     pub async fn is_call_completed(&self) -> bool {
         *self.call_completed.lock().await
     }
-    
+
     pub async fn get_call_id(&self) -> Option<CallId> {
         self.call_id.lock().await.clone()
     }
@@ -45,16 +45,16 @@ impl PeerBHandler {
 #[async_trait::async_trait]
 impl ClientEventHandler for PeerBHandler {
     async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
-        info!("📞 [PEER B] Incoming call: {} from {} to {}", 
+        info!("📞 [PEER B] Incoming call: {} from {} to {}",
             call_info.call_id, call_info.caller_uri, call_info.callee_uri);
-        
+
         // Store the call ID
         *self.call_id.lock().await = Some(call_info.call_id.clone());
-        
+
         // Auto-answer after a short delay
         let client_ref = Arc::clone(&self.client_manager);
         let call_id = call_info.call_id.clone();
-        
+
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if let Some(client) = client_ref.read().await.as_ref() {
@@ -65,7 +65,7 @@ impl ClientEventHandler for PeerBHandler {
                 }
             }
         });
-        
+
         CallAction::Ignore // We'll handle it asynchronously
     }
 
@@ -79,20 +79,20 @@ impl ClientEventHandler for PeerBHandler {
             CallState::Terminated => "📴",
             _ => "❓",
         };
-        
-        info!("{} [PEER B] Call {} state: {:?} → {:?}", 
+
+        info!("{} [PEER B] Call {} state: {:?} → {:?}",
             state_emoji, status_info.call_id, status_info.previous_state, status_info.new_state);
-        
+
         if status_info.new_state == CallState::Connected {
             info!("🎉 [PEER B] Call connected! Starting media session...");
-            
+
             // Start audio transmission
             if let Some(client) = self.client_manager.read().await.as_ref() {
                 match client.start_audio_transmission(&status_info.call_id).await {
                     Ok(_) => info!("🎵 [PEER B] Audio transmission started"),
                     Err(e) => error!("❌ [PEER B] Failed to start audio: {}", e),
                 }
-                
+
                 // Get media info
                 if let Ok(media_info) = client.get_call_media_info(&status_info.call_id).await {
                     info!("📊 [PEER B] Media info - Local RTP: {:?}, Remote RTP: {:?}, Codec: {:?}",
@@ -130,7 +130,7 @@ impl ClientEventHandler for PeerBHandler {
 async fn main() -> Result<()> {
     // Create logs directory
     std::fs::create_dir_all("logs")?;
-    
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -162,10 +162,10 @@ async fn main() -> Result<()> {
     // Create handler and client
     let handler = Arc::new(PeerBHandler::new());
     let client = ClientManager::new(config).await?;
-    
+
     handler.set_client_manager(client.clone()).await;
     client.set_event_handler(handler.clone()).await;
-    
+
     // Start the client
     client.start().await?;
     info!("✅ [PEER B] Client started and ready to receive calls");
@@ -173,11 +173,11 @@ async fn main() -> Result<()> {
     // Wait for call to complete or timeout (30 seconds)
     info!("⏳ [PEER B] Waiting for incoming call...");
     let mut timeout_counter = 0;
-    
+
     while !handler.is_call_completed().await && timeout_counter < 60 {
         tokio::time::sleep(Duration::from_secs(1)).await;
         timeout_counter += 1;
-        
+
         // Log periodic status updates
         if timeout_counter % 10 == 0 {
             info!("⏰ [PEER B] Still waiting... ({} seconds elapsed)", timeout_counter);
@@ -188,14 +188,14 @@ async fn main() -> Result<()> {
     if let Some(call_id) = handler.get_call_id().await {
         if let Ok(Some(rtp_stats)) = client.get_rtp_statistics(&call_id).await {
             info!("📊 [PEER B] Final RTP Stats - Sent: {} packets ({} bytes), Received: {} packets ({} bytes)",
-                rtp_stats.packets_sent, rtp_stats.bytes_sent, 
+                rtp_stats.packets_sent, rtp_stats.bytes_sent,
                 rtp_stats.packets_received, rtp_stats.bytes_received);
         }
     }
 
     // Stop the client
     client.stop().await?;
-    
+
     if handler.is_call_completed().await {
         info!("✅ [PEER B] Demo completed successfully!");
     } else {
@@ -203,4 +203,4 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-} 
+}

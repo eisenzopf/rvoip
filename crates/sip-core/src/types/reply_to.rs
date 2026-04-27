@@ -765,7 +765,7 @@ mod tests {
 
         // URI parameters
         assert!(reply_to.uri().parameters.iter().any(
-            |p| matches!(p, Param::Other(k, Some(GenericValue::Token(v))) 
+            |p| matches!(p, Param::Other(k, Some(GenericValue::Token(v)))
                 if k == "priority" && v == "low")
         ));
 

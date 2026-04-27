@@ -72,7 +72,7 @@ async fn test_coordinator_initialization() {
     let mut config = SessionManagerConfig::default();
     config.sip_port = port;
     config.local_bind_addr = format!("127.0.0.1:{}", port).parse().unwrap();
-    
+
     let coordinator = SessionCoordinator::new(config.clone(), None)
         .await
         .expect("Failed to create coordinator");
@@ -99,7 +99,7 @@ async fn test_coordinator_with_custom_config() {
     println!("🧪 Testing SessionCoordinator with custom configuration...");
 
     let handler = Arc::new(TrackingHandler::new());
-    
+
     let port = common::get_test_ports().0;
     let coordinator = SessionManagerBuilder::new()
         .with_sip_port(port)
@@ -132,7 +132,7 @@ async fn test_outgoing_call_lifecycle() {
 
     // Create two coordinators that can talk to each other
     let (alice_port, bob_port) = common::get_test_ports();
-    
+
     // Create Alice (caller)
     let alice_handler = Arc::new(TrackingHandler::new());
     let alice = SessionManagerBuilder::new()
@@ -165,7 +165,7 @@ async fn test_outgoing_call_lifecycle() {
         .subscribe()
         .await
         .expect("Failed to subscribe to Alice events");
-    
+
     let mut bob_events = bob.event_processor()
         .unwrap()
         .subscribe()
@@ -180,7 +180,7 @@ async fn test_outgoing_call_lifecycle() {
     ).await.expect("Failed to create call");
 
     println!("📞 Created call: {} -> {}", call.from, call.to);
-    
+
     // Wait for Alice's call to become Active
     let active = common::wait_for_state_change(
         &mut alice_events,
@@ -195,7 +195,7 @@ async fn test_outgoing_call_lifecycle() {
         .await
         .expect("Failed to get session")
         .expect("Session not found");
-    
+
     assert_eq!(session_info.id, call.id);
     assert_eq!(session_info.from, call.from);
     assert_eq!(session_info.state(), &CallState::Active);
@@ -257,7 +257,7 @@ async fn test_outgoing_call_lifecycle() {
 
     // Give Bob's cleanup more time to complete
     tokio::time::sleep(Duration::from_millis(500)).await;
-    
+
     // Verify Bob's session is also terminated
     let bob_sessions = bob.list_active_sessions()
         .await
@@ -275,7 +275,7 @@ async fn test_multiple_concurrent_calls() {
 
     // Create two coordinators that can handle multiple calls
     let (alice_port, bob_port) = common::get_test_ports();
-    
+
     // Create Alice (caller)
     let alice = SessionManagerBuilder::new()
         .with_sip_port(alice_port)
@@ -311,31 +311,31 @@ async fn test_multiple_concurrent_calls() {
     let mut calls = vec![];
     let mut call_ids = HashSet::new();  // Use HashSet for faster lookups
     const NUM_CALLS: usize = 100;
-    
+
     // Create all calls first without waiting for them to become active
     for i in 0..NUM_CALLS {
         let alice_addr = format!("sip:alice{}@127.0.0.1:{}", i, alice_port);
         let bob_addr = format!("sip:bob@127.0.0.1:{}", bob_port);
-        
+
         let call = alice.create_outgoing_call(
             &alice_addr,
             &bob_addr,
             None,
         ).await.expect("Failed to create call");
-        
+
         if i % 10 == 0 {
             println!("Created call {}: {}", i, call.id);
         }
         call_ids.insert(call.id.clone());
         calls.push(call);
-        
+
         // Very small delay between call creation to avoid overwhelming the system
         // but still stress test concurrency
         if i % 10 == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
-    
+
     println!("Created {} calls total", NUM_CALLS);
 
     // Now collect state change events for all calls
@@ -343,7 +343,7 @@ async fn test_multiple_concurrent_calls() {
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(60);  // Increased timeout for 100 calls
     let mut last_progress = 0;
-    
+
     // Keep collecting events until all calls are active or timeout
     println!("Starting event collection loop...");
     while active_calls.len() < NUM_CALLS && start.elapsed() < timeout {
@@ -351,15 +351,15 @@ async fn test_multiple_concurrent_calls() {
             Ok(Ok(event)) => {
                 // Log all events for debugging (commented for now)
                 // println!("Received event: {:?}", event);
-                
+
                 if let SessionEvent::StateChanged { session_id, old_state, new_state } = event {
                     if call_ids.contains(&session_id) && new_state == CallState::Active {
                         active_calls.insert(session_id.clone());
-                        
+
                         // Report progress every 10 calls
                         if active_calls.len() % 10 == 0 && active_calls.len() != last_progress {
                             last_progress = active_calls.len();
-                            println!("Progress: {}/{} calls active ({:.1}s elapsed)", 
+                            println!("Progress: {}/{} calls active ({:.1}s elapsed)",
                                      active_calls.len(), NUM_CALLS, start.elapsed().as_secs_f64());
                         }
                     }
@@ -374,7 +374,7 @@ async fn test_multiple_concurrent_calls() {
             }
         }
     }
-    
+
     // Debug: show which calls became active
     println!("Active calls collected: {} out of {}", active_calls.len(), NUM_CALLS);
     if active_calls.len() < NUM_CALLS && active_calls.len() > 0 {
@@ -384,7 +384,7 @@ async fn test_multiple_concurrent_calls() {
             println!("  - {}", id);
         }
     }
-    
+
     // Verify all calls became active
     assert_eq!(active_calls.len(), NUM_CALLS, "All {} calls should become active", NUM_CALLS);
     println!("All {} calls are now active", NUM_CALLS);
@@ -434,7 +434,7 @@ async fn test_multiple_concurrent_calls() {
     // Give Bob time to process the BYE messages and terminate sessions
     // Bob needs to receive BYE, process it, and complete cleanup
     tokio::time::sleep(Duration::from_millis(500)).await;
-    
+
     // Verify Bob's sessions are also terminated
     let bob_sessions = bob.list_active_sessions()
         .await
@@ -465,7 +465,7 @@ async fn test_media_session_coordination() {
     // Create SDP using sip-core's builder
     use rvoip_sip_core::sdp::SdpBuilder;
     use rvoip_sip_core::sdp::attributes::MediaDirection;
-    
+
     let sdp = SdpBuilder::new("Media Test Session")
         .origin("-", "123456", "1", "IN", "IP4", "127.0.0.1")
         .connection("IN", "IP4", "127.0.0.1")
@@ -489,7 +489,7 @@ async fn test_media_session_coordination() {
         let old_state = session.state().clone();
         session.update_call_state(CallState::Active).unwrap();
         coordinator.registry.register_session(session).await.unwrap();
-        
+
         // Send state change event
         let _ = coordinator.event_processor.publish_event(SessionEvent::StateChanged {
             session_id: call.id.clone(),
@@ -505,7 +505,7 @@ async fn test_media_session_coordination() {
     let media_info = coordinator.get_media_info(&call.id)
         .await
         .expect("Failed to get media info");
-    
+
     // Media session should exist once call is active
     if media_info.is_some() {
         println!("✅ Media session created when call became active");
@@ -534,7 +534,7 @@ async fn test_call_state_transitions() {
 
     // Create two coordinators that can talk to each other
     let (alice_port, bob_port) = common::get_test_ports();
-    
+
     // Create Alice (caller)
     let alice_handler = Arc::new(TrackingHandler::new());
     let alice = SessionManagerBuilder::new()
@@ -564,7 +564,7 @@ async fn test_call_state_transitions() {
     // Create SDP using sip-core's builder
     use rvoip_sip_core::sdp::SdpBuilder;
     use rvoip_sip_core::sdp::attributes::MediaDirection;
-    
+
     let sdp = SdpBuilder::new("Test Session")
         .origin("-", "123456", "1", "IN", "IP4", "127.0.0.1")
         .connection("IN", "IP4", "127.0.0.1")
@@ -594,7 +594,7 @@ async fn test_call_state_transitions() {
             println!("✅ Alice's call fully established (with event) after {} retries", retries);
             break;
         }
-        
+
         // Fallback: check state if events aren't working yet
         if let Ok(Some(session)) = alice.get_session(&call.id).await {
             if session.state() == &CallState::Active && retries > 20 {
@@ -602,7 +602,7 @@ async fn test_call_state_transitions() {
                 panic!("Call is Active but no call_established event after {} retries", retries);
             }
         }
-        
+
         tokio::time::sleep(Duration::from_millis(100)).await;
         retries += 1;
         if retries > 50 {  // 5 second timeout
@@ -611,11 +611,11 @@ async fn test_call_state_transitions() {
             panic!("Call never fully established after 5 seconds");
         }
     }
-    
+
     // Verify Bob also received and established the call
     let bob_events = bob_handler.get_events().await;
     println!("Bob's events: {:?}", bob_events);
-    assert!(bob_events.iter().any(|e| e.contains("call_established")), 
+    assert!(bob_events.iter().any(|e| e.contains("call_established")),
             "Bob should have established the call");
 
     // Now test hold/resume on an established call
@@ -659,7 +659,7 @@ async fn test_dtmf_sending() {
 
     // Create two coordinators that can talk to each other
     let (alice_port, bob_port) = common::get_test_ports();
-    
+
     // Create Alice (caller)
     let alice = SessionManagerBuilder::new()
         .with_sip_port(alice_port)
@@ -686,7 +686,7 @@ async fn test_dtmf_sending() {
     // Create SDP using sip-core's builder
     use rvoip_sip_core::sdp::SdpBuilder;
     use rvoip_sip_core::sdp::attributes::MediaDirection;
-    
+
     let sdp = SdpBuilder::new("DTMF Test Session")
         .origin("-", "789012", "1", "IN", "IP4", "127.0.0.1")
         .connection("IN", "IP4", "127.0.0.1")
@@ -742,7 +742,7 @@ async fn test_error_conditions() {
 
     // Test operations on non-existent session
     let fake_id = SessionId::new();
-    
+
     // Should fail - session doesn't exist
     assert!(coordinator.terminate_session(&fake_id).await.is_err());
     assert!(coordinator.hold_session(&fake_id).await.is_err());
@@ -796,14 +796,14 @@ async fn test_event_handler_callbacks() {
         let old_state = session.state().clone();
         session.update_call_state(CallState::Active).unwrap();
         coordinator.registry.register_session(session.clone()).await.unwrap();
-        
+
         // Send state change event
         let _ = coordinator.event_processor.publish_event(SessionEvent::StateChanged {
             session_id: call.id.clone(),
             old_state,
             new_state: CallState::Active,
         }).await;
-        
+
         // Manually trigger the handler callback since we're simulating
         if let Some(hdlr) = &coordinator.handler {
             hdlr.on_call_established(session.into_call_session(), None, None).await;
@@ -824,7 +824,7 @@ async fn test_event_handler_callbacks() {
             hdlr.on_call_ended(session.into_call_session(), "Test termination").await;
         }
     }
-    
+
     coordinator.terminate_session(&call.id)
         .await
         .expect("Failed to terminate session");
@@ -924,4 +924,4 @@ mod prepared_call_tests {
         coordinator.stop().await.expect("Failed to stop");
         println!("✅ Prepare/initiate test completed");
     }
-} 
+}

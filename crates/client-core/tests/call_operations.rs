@@ -1,5 +1,5 @@
 //! Integration tests for call operations
-//! 
+//!
 //! Tests making calls, answering, hanging up, and call state management.
 
 use rvoip_client_core::{
@@ -39,7 +39,7 @@ async fn test_make_outgoing_call() {
     // Verify call exists and has correct state
     let call_info = client.get_call(&call_id).await
         .expect("Failed to get call info");
-    
+
     assert_eq!(call_info.call_id, call_id);
     assert_eq!(call_info.direction, CallDirection::Outgoing);
     assert_eq!(call_info.local_uri, "sip:alice@example.com");
@@ -54,7 +54,7 @@ async fn test_make_outgoing_call() {
     // Verify call is terminated
     let call_info = client.get_call(&call_id).await
         .expect("Failed to get call info after hangup");
-    
+
     assert_eq!(call_info.state, CallState::Terminated);
     assert!(call_info.ended_at.is_some());
 
@@ -130,7 +130,7 @@ async fn test_multiple_concurrent_calls() {
             Some(format!("Call {}", i)),
         ).await
         .expect(&format!("Failed to make call {}", i));
-        
+
         call_ids.push(call_id);
     }
 
@@ -178,13 +178,13 @@ async fn test_call_state_tracking() {
     // Start event collector
     let event_collector = tokio::spawn(async move {
         let mut state_changes = Vec::new();
-        
+
         while let Ok(event) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv()).await {
             if let Ok(ClientEvent::CallStateChanged { info, .. }) = event {
                 state_changes.push((info.call_id, info.new_state));
             }
         }
-        
+
         state_changes
     });
 
@@ -215,9 +215,9 @@ async fn test_call_state_tracking() {
 
     // Check collected state changes
     let state_changes = event_collector.await.expect("Event collector panicked");
-    
+
     // Should have at least the terminated state
-    assert!(state_changes.iter().any(|(id, state)| 
+    assert!(state_changes.iter().any(|(id, state)|
         *id == call_id && *state == CallState::Terminated
     ));
 }
@@ -353,7 +353,7 @@ async fn test_call_error_handling() {
     // Try to hang up a non-existent call
     let fake_call_id = CallId::new_v4();
     let result = client.hangup_call(&fake_call_id).await;
-    
+
     assert!(result.is_err());
     match result {
         Err(ClientError::CallNotFound { call_id }) => {
@@ -400,7 +400,7 @@ async fn test_call_with_error_context() {
     match result {
         Ok(call_id) => {
             tracing::info!("Call created: {}", call_id);
-            
+
             // Clean up with context
             let _ = client.hangup_call(&call_id).await
                 .context("Failed to clean up test call");
@@ -411,4 +411,4 @@ async fn test_call_with_error_context() {
     }
 
     client.stop().await.expect("Failed to stop client");
-} 
+}

@@ -20,7 +20,7 @@ use crate::types::{AudioFrame, PayloadType, SampleRate};
 pub struct TranscodingPath {
     /// Source codec payload type
     pub from_codec: PayloadType,
-    /// Target codec payload type  
+    /// Target codec payload type
     pub to_codec: PayloadType,
 }
 

@@ -72,21 +72,21 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::queue::{OverflowHandler, OverflowPolicy};
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut overflow = OverflowHandler::new();
-/// 
+///
 /// // Configure capacity-based overflow
 /// overflow.set_capacity_threshold(50)?; // Max 50 calls in queue
 /// overflow.set_wait_time_threshold(120)?; // Max 2 minutes wait
-/// 
+///
 /// // Configure overflow queues
 /// overflow.add_overflow_queue("queue_secondary", 1)?; // Priority 1
 /// overflow.add_overflow_queue("queue_tertiary", 2)?;  // Priority 2
-/// 
+///
 /// // Configure external overflow
 /// overflow.set_external_overflow("partner_center", "sip:overflow@partner.com")?;
-/// 
+///
 /// println!("Overflow handler configured");
 /// # Ok(())
 /// # }
@@ -96,31 +96,31 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::queue::{OverflowHandler, OverflowCondition, OverflowAction};
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut overflow = OverflowHandler::new();
-/// 
+///
 /// // VIP customer overflow policy
 /// overflow.add_conditional_policy(
 ///     "vip_overflow",
 ///     OverflowCondition::CustomerTier("vip".to_string()),
 ///     OverflowAction::RouteToQueue("vip_overflow_queue".to_string())
 /// )?;
-/// 
+///
 /// // Business hours overflow
 /// overflow.add_conditional_policy(
 ///     "business_hours",
 ///     OverflowCondition::BusinessHours,
 ///     OverflowAction::RouteToExternal("business_overflow".to_string())
 /// )?;
-/// 
+///
 /// // Emergency overflow
 /// overflow.add_conditional_policy(
 ///     "emergency",
 ///     OverflowCondition::QueueSize(100),
 ///     OverflowAction::EnableCallbacks
 /// )?;
-/// 
+///
 /// println!("Conditional overflow policies configured");
 /// # Ok(())
 /// # }
@@ -130,17 +130,17 @@ use crate::error::{CallCenterError, Result};
 ///
 /// ```rust
 /// use rvoip_call_engine::queue::OverflowHandler;
-/// 
+///
 /// # async fn example(overflow: OverflowHandler) -> Result<(), Box<dyn std::error::Error>> {
 /// // Check if overflow is currently active
 /// if overflow.is_overflow_active().await? {
 ///     let stats = overflow.get_overflow_stats().await?;
-///     
+///
 ///     println!("🚨 Overflow Active:");
 ///     println!("  Calls routed to overflow: {}", stats.overflow_calls_count);
 ///     println!("  Primary queue utilization: {:.1}%", stats.primary_queue_utilization);
 ///     println!("  Current overflow strategy: {}", stats.active_strategy);
-///     
+///
 ///     // Get recommendations for addressing overflow
 ///     let recommendations = overflow.get_overflow_recommendations().await?;
 ///     for rec in recommendations {
@@ -156,20 +156,20 @@ use crate::error::{CallCenterError, Result};
 /// ```rust
 /// use rvoip_call_engine::queue::OverflowHandler;
 /// use chrono::{Utc, Duration};
-/// 
+///
 /// # async fn example(overflow: OverflowHandler) -> Result<(), Box<dyn std::error::Error>> {
 /// // Analyze overflow patterns over time
 /// let end_time = Utc::now();
 /// let start_time = end_time - Duration::hours(24);
-/// 
+///
 /// let analysis = overflow.analyze_overflow_patterns(start_time, end_time).await?;
-/// 
+///
 /// println!("📊 24-Hour Overflow Analysis:");
 /// println!("  Total overflow events: {}", analysis.overflow_events);
 /// println!("  Peak overflow time: {}", analysis.peak_overflow_time);
 /// println!("  Most effective strategy: {}", analysis.most_effective_strategy);
 /// println!("  Average overflow duration: {}min", analysis.average_duration_minutes);
-/// 
+///
 /// // Export detailed overflow report
 /// let report = overflow.generate_overflow_report(start_time, end_time).await?;
 /// println!("Generated {} page overflow report", report.pages);
@@ -179,19 +179,19 @@ use crate::error::{CallCenterError, Result};
 pub struct OverflowHandler {
     /// Overflow detection thresholds
     thresholds: OverflowThresholds,
-    
+
     /// Configured overflow policies
     policies: Vec<OverflowPolicy>,
-    
+
     /// Available overflow queues with priorities
     overflow_queues: HashMap<String, OverflowQueue>,
-    
+
     /// External overflow destinations
     external_destinations: HashMap<String, ExternalDestination>,
-    
+
     /// Real-time overflow statistics
     stats: OverflowStats,
-    
+
     /// Configuration for overflow behavior
     config: OverflowConfig,
 }
@@ -201,16 +201,16 @@ pub struct OverflowHandler {
 pub struct OverflowThresholds {
     /// Maximum queue capacity before overflow
     pub max_queue_size: u32,
-    
+
     /// Maximum wait time in seconds before overflow
     pub max_wait_time: u64,
-    
+
     /// Minimum service level percentage threshold
     pub min_service_level: f64,
-    
+
     /// Maximum system utilization before overflow
     pub max_utilization: f64,
-    
+
     /// Minimum available agents threshold
     pub min_available_agents: u32,
 }
@@ -220,16 +220,16 @@ pub struct OverflowThresholds {
 pub struct OverflowPolicy {
     /// Policy name
     pub name: String,
-    
+
     /// Condition that triggers this policy
     pub condition: OverflowCondition,
-    
+
     /// Action to take when condition is met
     pub action: OverflowAction,
-    
+
     /// Policy priority (lower = higher priority)
     pub priority: u8,
-    
+
     /// Whether this policy is currently enabled
     pub enabled: bool,
 }
@@ -285,16 +285,16 @@ pub enum OverflowAction {
 pub struct OverflowQueue {
     /// Queue identifier
     pub queue_id: String,
-    
+
     /// Queue priority (lower = higher priority)
     pub priority: u8,
-    
+
     /// Maximum capacity for this overflow queue
     pub max_capacity: u32,
-    
+
     /// Required skills for agents in this queue
     pub required_skills: Vec<String>,
-    
+
     /// Whether this queue is currently active
     pub active: bool,
 }
@@ -304,19 +304,19 @@ pub struct OverflowQueue {
 pub struct ExternalDestination {
     /// Destination name
     pub name: String,
-    
+
     /// SIP URI or phone number for routing
     pub destination_uri: String,
-    
+
     /// Authentication credentials if required
     pub credentials: Option<String>,
-    
+
     /// Maximum concurrent calls to this destination
     pub max_concurrent: u32,
-    
+
     /// Current active calls to this destination
     pub current_calls: u32,
-    
+
     /// Whether this destination is currently available
     pub available: bool,
 }
@@ -326,22 +326,22 @@ pub struct ExternalDestination {
 pub struct OverflowStats {
     /// Whether overflow is currently active
     pub overflow_active: bool,
-    
+
     /// Number of calls currently routed to overflow
     pub overflow_calls_count: u32,
-    
+
     /// Primary queue utilization percentage
     pub primary_queue_utilization: f64,
-    
+
     /// Currently active overflow strategy
     pub active_strategy: String,
-    
+
     /// Total overflow events today
     pub overflow_events_today: u32,
-    
+
     /// Average overflow duration in minutes
     pub average_overflow_duration: f64,
-    
+
     /// Statistics timestamp
     pub timestamp: DateTime<Utc>,
 }
@@ -351,19 +351,19 @@ pub struct OverflowStats {
 pub struct OverflowAnalysis {
     /// Total number of overflow events in period
     pub overflow_events: u32,
-    
+
     /// Time when overflow was most severe
     pub peak_overflow_time: DateTime<Utc>,
-    
+
     /// Most effective overflow strategy used
     pub most_effective_strategy: String,
-    
+
     /// Average duration of overflow situations (minutes)
     pub average_duration_minutes: f64,
-    
+
     /// Percentage of calls successfully handled via overflow
     pub overflow_success_rate: f64,
-    
+
     /// Recommendations for improvement
     pub recommendations: Vec<String>,
 }
@@ -373,13 +373,13 @@ pub struct OverflowAnalysis {
 pub struct OverflowReport {
     /// Number of pages in the report
     pub pages: u32,
-    
+
     /// Report file path or data
     pub report_data: Vec<u8>,
-    
+
     /// Report format (PDF, CSV, etc.)
     pub format: String,
-    
+
     /// Report generation timestamp
     pub generated_at: DateTime<Utc>,
 }
@@ -389,13 +389,13 @@ pub struct OverflowReport {
 struct OverflowConfig {
     /// Enable automatic overflow detection
     auto_detection_enabled: bool,
-    
+
     /// Overflow check interval in seconds
     check_interval_seconds: u64,
-    
+
     /// Enable predictive overflow detection
     predictive_enabled: bool,
-    
+
     /// Historical data retention period (days)
     history_retention_days: u32,
 }
@@ -410,7 +410,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// let overflow = OverflowHandler::new();
     /// println!("Overflow handler initialized with default settings");
     /// ```
@@ -443,7 +443,7 @@ impl OverflowHandler {
             },
         }
     }
-    
+
     /// Set capacity threshold for overflow detection
     ///
     /// Configures the maximum queue size before overflow handling is triggered.
@@ -456,7 +456,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut overflow = OverflowHandler::new();
     /// overflow.set_capacity_threshold(75)?; // 75 calls max
@@ -468,7 +468,7 @@ impl OverflowHandler {
         info!("Overflow capacity threshold set to {} calls", threshold);
         Ok(())
     }
-    
+
     /// Set wait time threshold for overflow detection
     ///
     /// Configures the maximum wait time before overflow handling is triggered.
@@ -481,7 +481,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut overflow = OverflowHandler::new();
     /// overflow.set_wait_time_threshold(180)?; // 3 minutes max
@@ -493,7 +493,7 @@ impl OverflowHandler {
         info!("Overflow wait time threshold set to {} seconds", threshold_seconds);
         Ok(())
     }
-    
+
     /// Add an overflow queue
     ///
     /// Adds a secondary queue to handle overflow calls with specified priority.
@@ -507,7 +507,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut overflow = OverflowHandler::new();
     /// overflow.add_overflow_queue("secondary_queue", 1)?;
@@ -523,12 +523,12 @@ impl OverflowHandler {
             required_skills: Vec::new(),
             active: true,
         };
-        
+
         self.overflow_queues.insert(queue_id.to_string(), overflow_queue);
         info!("Added overflow queue '{}' with priority {}", queue_id, priority);
         Ok(())
     }
-    
+
     /// Set external overflow destination
     ///
     /// Configures an external destination for overflow calls.
@@ -542,7 +542,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut overflow = OverflowHandler::new();
     /// overflow.set_external_overflow("partner", "sip:overflow@partner.com")?;
@@ -558,12 +558,12 @@ impl OverflowHandler {
             current_calls: 0,
             available: true,
         };
-        
+
         self.external_destinations.insert(name.to_string(), destination);
         info!("Added external overflow destination '{}' -> {}", name, uri);
         Ok(())
     }
-    
+
     /// Add a conditional overflow policy
     ///
     /// Adds a policy that triggers specific overflow actions based on conditions.
@@ -578,7 +578,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::{OverflowHandler, OverflowCondition, OverflowAction};
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut overflow = OverflowHandler::new();
     /// overflow.add_conditional_policy(
@@ -602,12 +602,12 @@ impl OverflowHandler {
             priority: self.policies.len() as u8,
             enabled: true,
         };
-        
+
         self.policies.push(policy);
         info!("Added overflow policy '{}'", name);
         Ok(())
     }
-    
+
     /// Check if overflow is currently active
     ///
     /// Returns whether overflow handling is currently active in the system.
@@ -616,7 +616,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// # async fn example(overflow: OverflowHandler) -> Result<(), Box<dyn std::error::Error>> {
     /// if overflow.is_overflow_active().await? {
     ///     println!("⚠️ Overflow is currently active");
@@ -629,7 +629,7 @@ impl OverflowHandler {
     pub async fn is_overflow_active(&self) -> Result<bool> {
         Ok(self.stats.overflow_active)
     }
-    
+
     /// Get current overflow statistics
     ///
     /// Returns real-time statistics about overflow conditions and performance.
@@ -638,7 +638,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// # async fn example(overflow: OverflowHandler) -> Result<(), Box<dyn std::error::Error>> {
     /// let stats = overflow.get_overflow_stats().await?;
     /// println!("Overflow Stats:");
@@ -651,7 +651,7 @@ impl OverflowHandler {
     pub async fn get_overflow_stats(&self) -> Result<OverflowStats> {
         Ok(self.stats.clone())
     }
-    
+
     /// Get overflow recommendations
     ///
     /// Returns recommendations for addressing current overflow conditions.
@@ -660,7 +660,7 @@ impl OverflowHandler {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
-    /// 
+    ///
     /// # async fn example(overflow: OverflowHandler) -> Result<(), Box<dyn std::error::Error>> {
     /// let recommendations = overflow.get_overflow_recommendations().await?;
     /// for rec in recommendations {
@@ -671,16 +671,16 @@ impl OverflowHandler {
     /// ```
     pub async fn get_overflow_recommendations(&self) -> Result<Vec<String>> {
         let mut recommendations = Vec::new();
-        
+
         if self.stats.overflow_active {
             recommendations.push("Consider adding more agents to reduce queue pressure".to_string());
             recommendations.push("Review call routing efficiency".to_string());
             recommendations.push("Check if external overflow capacity can be increased".to_string());
         }
-        
+
         Ok(recommendations)
     }
-    
+
     /// Analyze overflow patterns over a time period
     ///
     /// Performs historical analysis of overflow events and patterns.
@@ -695,11 +695,11 @@ impl OverflowHandler {
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
     /// use chrono::{Utc, Duration};
-    /// 
+    ///
     /// # async fn example(overflow: OverflowHandler) -> Result<(), Box<dyn std::error::Error>> {
     /// let end = Utc::now();
     /// let start = end - Duration::days(7);
-    /// 
+    ///
     /// let analysis = overflow.analyze_overflow_patterns(start, end).await?;
     /// println!("Weekly overflow analysis completed");
     /// # Ok(())
@@ -712,7 +712,7 @@ impl OverflowHandler {
     ) -> Result<OverflowAnalysis> {
         // TODO: Implement historical overflow pattern analysis
         warn!("🚧 analyze_overflow_patterns not fully implemented yet");
-        
+
         Ok(OverflowAnalysis {
             overflow_events: 0,
             peak_overflow_time: Utc::now(),
@@ -722,7 +722,7 @@ impl OverflowHandler {
             recommendations: vec!["Analysis requires historical data".to_string()],
         })
     }
-    
+
     /// Generate detailed overflow report
     ///
     /// Creates a comprehensive report of overflow performance and recommendations.
@@ -737,11 +737,11 @@ impl OverflowHandler {
     /// ```rust
     /// use rvoip_call_engine::queue::OverflowHandler;
     /// use chrono::{Utc, Duration};
-    /// 
+    ///
     /// # async fn example(overflow: OverflowHandler) -> Result<(), Box<dyn std::error::Error>> {
     /// let end = Utc::now();
     /// let start = end - Duration::days(30);
-    /// 
+    ///
     /// let report = overflow.generate_overflow_report(start, end).await?;
     /// println!("Generated overflow report: {} bytes", report.report_data.len());
     /// # Ok(())
@@ -754,7 +754,7 @@ impl OverflowHandler {
     ) -> Result<OverflowReport> {
         // TODO: Implement overflow report generation
         warn!("🚧 generate_overflow_report not fully implemented yet");
-        
+
         Ok(OverflowReport {
             pages: 1,
             report_data: b"Overflow report placeholder".to_vec(),
@@ -768,4 +768,4 @@ impl Default for OverflowHandler {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

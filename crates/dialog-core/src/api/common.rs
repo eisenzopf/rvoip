@@ -132,11 +132,11 @@ use rvoip_sip_core::{Method, Response, StatusCode};
 /// // Check if dialog is still active
 /// if dialog.is_active().await {
 ///     println!("Dialog {} is active", dialog.id());
-///     
+///
 ///     // Get current state
 ///     let state = dialog.state().await?;
 ///     println!("State: {:?}", state);
-///     
+///
 ///     // Send a custom request
 ///     let tx_key = dialog.send_request(Method::Update, Some("new parameters".to_string())).await?;
 ///     println!("Sent UPDATE: {}", tx_key);
@@ -1058,7 +1058,7 @@ pub struct CallInfo {
 ///         DialogEvent::StateChanged { dialog_id, old_state, new_state } => {
 ///             println!("Dialog {} transitioned from {:?} to {:?}",
 ///                     dialog_id, old_state, new_state);
-///             
+///
 ///             if new_state == DialogState::Confirmed {
 ///                 println!("Dialog is now ready for operations");
 ///             }
@@ -1161,7 +1161,7 @@ pub struct CallInfo {
 ///
 ///     if event_dialog_id == call_id {
 ///         println!("Processing event for our dialog: {:?}", event);
-///         
+///
 ///         // Handle the specific event
 ///         match event {
 ///             DialogEvent::StateChanged { new_state: DialogState::Confirmed, .. } => {

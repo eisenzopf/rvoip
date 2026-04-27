@@ -19,14 +19,14 @@ const FRAME_DURATION_MS: u32 = 20;
 fn generate_tone(frequency: f32, sample_rate: u32, duration: f32) -> Vec<i16> {
     let num_samples = (sample_rate as f32 * duration) as usize;
     let mut samples = Vec::with_capacity(num_samples);
-    
+
     for i in 0..num_samples {
         let t = i as f32 / sample_rate as f32;
         let sample = (2.0 * PI * frequency * t).sin();
         let sample_i16 = (sample * 16384.0) as i16;
         samples.push(sample_i16);
     }
-    
+
     samples
 }
 
@@ -37,13 +37,13 @@ fn save_wav(path: &Path, samples: &[i16], sample_rate: u32) -> Result<(), Box<dy
         bits_per_sample: BITS_PER_SAMPLE,
         sample_format: hound::SampleFormat::Int,
     };
-    
+
     let mut writer = WavWriter::create(path, spec)?;
     for &sample in samples {
         writer.write_sample(sample)?;
     }
     writer.finalize()?;
-    
+
     Ok(())
 }
 
@@ -59,11 +59,11 @@ impl AudioCapture {
             path,
         }
     }
-    
+
     fn add_frame(&mut self, frame: &AudioFrame) {
         self.samples.extend_from_slice(&frame.samples);
     }
-    
+
     fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
         if self.samples.is_empty() {
             tracing::warn!("No audio samples captured for {}", self.path.display());
@@ -87,7 +87,7 @@ impl UasCallHandler for TestHandler {
         let _ = self.call_tx.send(call).await;
         UasCallDecision::Accept(None)
     }
-    
+
     async fn on_call_established(&self, _call: CallSession) {}
     async fn on_call_ended(&self, _call: CallSession, _reason: String) {}
     async fn on_dtmf_received(&self, _session_id: SessionId, _digit: char) {}
@@ -102,21 +102,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .add_directive(tracing::Level::INFO.into())
         )
         .init();
-    
+
     tracing::info!("🎵 UAS starting on port 5061...");
-    
+
     // Create output directory
     let output_dir = PathBuf::from("examples/api_uac_uas/uas_output");
     std::fs::create_dir_all(&output_dir)?;
-    
+
     // Generate 880Hz tone
     let tone_880 = generate_tone(880.0, SAMPLE_RATE, DURATION_SECS);
     save_wav(&output_dir.join("input.wav"), &tone_880, SAMPLE_RATE)?;
     tracing::info!("💾 Saved 880Hz input tone");
-    
+
     // Create channel for incoming calls
     let (call_tx, mut call_rx) = mpsc::channel(10);
-    
+
     // Create UAS server
     let handler = TestHandler { call_tx };
     let uas_server = SimpleUasServer::new(
@@ -124,21 +124,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "sip:uas@127.0.0.1:5061",
         handler,
     ).await?;
-    
+
     tracing::info!("✅ UAS server started");
     tracing::info!("⏳ Waiting for incoming call...");
-    
+
     // Wait for incoming call
     let incoming = timeout(Duration::from_secs(10), call_rx.recv())
         .await?
         .ok_or("No incoming call received")?;
-    
+
     tracing::info!("✅ Received incoming call: {}", incoming.id);
-    
+
     // Get the call handle
     let mut call = uas_server.get_call(&incoming.id)
         .ok_or("Call not found")?;
-    
+
     // Wait for call to be active
     loop {
         if call.state() == CallState::Active {
@@ -147,30 +147,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    
+
     // Wait for media to be ready
     sleep(Duration::from_secs(2)).await;
-    
+
     // Set up audio channels
     tracing::info!("📻 Setting up audio channels");
     let (audio_tx, mut audio_rx) = call.audio_channels().await?;
-    
+
     // Set up audio capture
     let capture = Arc::new(Mutex::new(AudioCapture::new(output_dir.join("output.wav"))));
-    
+
     // Send audio frames
     let frames_per_second = 1000 / FRAME_DURATION_MS;
     let total_frames = (frames_per_second * DURATION_SECS as u32) as usize;
     let samples_per_frame = SAMPLE_RATE as usize / frames_per_second as usize;
-    
+
     tracing::info!("🎵 Sending {} frames of 880Hz tone", total_frames);
-    
+
     // Spawn receiver task - made resilient to timeouts
     let capture_clone = capture.clone();
     let receiver = tokio::spawn(async move {
         let mut count = 0;
         let mut consecutive_timeouts = 0;
-        
+
         loop {
             match timeout(Duration::from_millis(100), audio_rx.recv()).await {
                 Ok(Some(frame)) => {
@@ -195,16 +195,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         tracing::info!("UAS received {} frames", count);
     });
-    
+
     // Send frames
     for i in 0..total_frames {
         let start = i * samples_per_frame;
         let end = std::cmp::min(start + samples_per_frame, tone_880.len());
-        
+
         if start >= tone_880.len() {
             break;
         }
-        
+
         let frame_samples = tone_880[start..end].to_vec();
         let frame = AudioFrame {
             samples: frame_samples,
@@ -213,27 +213,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             duration: Duration::from_millis(FRAME_DURATION_MS as u64),
             timestamp: (i * samples_per_frame) as u32,
         };
-        
+
         audio_tx.send(frame).await?;
         sleep(Duration::from_millis(FRAME_DURATION_MS as u64)).await;
     }
-    
+
     tracing::info!("✅ Finished sending audio");
-    
+
     // Wait a bit for remaining frames
     sleep(Duration::from_secs(1)).await;
-    
+
     // Stop receiver
     receiver.abort();
-    
+
     // Save captured audio
     capture.lock().await.save()?;
-    
+
     // Wait for call to end (UAC will terminate)
     sleep(Duration::from_secs(2)).await;
-    
+
     tracing::info!("✅ UAS done");
     tracing::info!("Check audio files in: {}", output_dir.display());
-    
+
     Ok(())
 }

@@ -24,13 +24,13 @@ impl std::fmt::Debug for UasHandlerAdapter {
 
 impl UasHandlerAdapter {
     pub fn new(handler: Arc<dyn UasCallHandler>) -> Self {
-        Self { 
+        Self {
             handler,
             active_calls: Arc::new(RwLock::new(HashMap::new())),
             coordinator: Arc::new(RwLock::new(None)),
         }
     }
-    
+
     pub fn new_with_tracking(
         handler: Arc<dyn UasCallHandler>,
         active_calls: Arc<RwLock<HashMap<SessionId, UasCallHandle>>>,
@@ -41,7 +41,7 @@ impl UasHandlerAdapter {
             coordinator: Arc::new(RwLock::new(None)),
         }
     }
-    
+
     pub async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
         *self.coordinator.write().await = Some(coordinator);
     }
@@ -51,7 +51,7 @@ impl UasHandlerAdapter {
 impl CallHandler for UasHandlerAdapter {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         let decision = self.handler.on_incoming_call(call.clone()).await;
-        
+
         match decision {
             UasCallDecision::Accept(sdp) => CallDecision::Accept(sdp),
             UasCallDecision::Reject(reason) => CallDecision::Reject(reason),
@@ -59,7 +59,7 @@ impl CallHandler for UasHandlerAdapter {
             UasCallDecision::Queue | UasCallDecision::Defer => CallDecision::Defer,
         }
     }
-    
+
     async fn on_call_established(&self, session: crate::api::types::CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         // Create and track the call handle
         if let Some(coordinator) = self.coordinator.read().await.as_ref() {
@@ -71,11 +71,11 @@ impl CallHandler for UasHandlerAdapter {
             );
             self.active_calls.write().await.insert(session.id.clone(), handle);
         }
-        
+
         // Notify the user's handler
         self.handler.on_call_established(session).await;
     }
-    
+
     async fn on_call_ended(&self, call: crate::api::types::CallSession, reason: &str) {
         self.handler.on_call_ended(call, reason.to_string()).await;
     }

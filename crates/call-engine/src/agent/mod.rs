@@ -39,10 +39,10 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() -> Result<()> {
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! let agent = Agent {
 //!     id: "agent-001".to_string(),
 //!     sip_uri: "sip:alice@call-center.local".to_string(),
@@ -53,7 +53,7 @@
 //!     department: Some("sales".to_string()),
 //!     extension: Some("1001".to_string()),
 //! };
-//! 
+//!
 //! registry.register_agent(agent).await?;
 //! # Ok(())
 //! # }
@@ -63,11 +63,11 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() -> Result<()> {
 //! let router = SkillBasedRouter::new();
 //! let mut registry = AgentRegistry::new();
-//! 
+//!
 //! // Register agents with different skills
 //! let sales_agent = Agent {
 //!     id: "sales-001".to_string(),
@@ -79,7 +79,7 @@
 //!     department: None,
 //!     extension: None,
 //! };
-//! 
+//!
 //! let support_agent = Agent {
 //!     id: "support-001".to_string(),
 //!     skills: vec!["english".to_string(), "support".to_string(), "tier2".to_string()],
@@ -90,10 +90,10 @@
 //!     department: None,
 //!     extension: None,
 //! };
-//! 
+//!
 //! registry.register_agent(sales_agent).await?;
 //! registry.register_agent(support_agent).await?;
-//! 
+//!
 //! // Route call requiring sales skills
 //! let required_skills = vec!["sales".to_string()];
 //! if let Ok(Some(agent_id)) = router.find_best_agent(&required_skills).await {
@@ -107,11 +107,11 @@
 //!
 //! ```
 //! use rvoip_call_engine::prelude::*;
-//! 
+//!
 //! # async fn example() -> Result<()> {
 //! let tracker = AvailabilityTracker::new();
 //! let agent_id = "agent-001";
-//! 
+//!
 //! // Check if agent is active (simple availability check)
 //! if tracker.is_agent_active(agent_id, 300) {
 //!     println!("Agent is active and ready for calls");
@@ -140,10 +140,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// ```
 /// use rvoip_call_engine::agent::AgentId;
-/// 
+///
 /// let agent_id = AgentId::from("agent-001");
 /// println!("Agent ID: {}", agent_id);
-/// 
+///
 /// // Convert from string references
 /// let agent_id2 = AgentId::from("agent-002");
 /// assert_ne!(agent_id, agent_id2);
@@ -178,4 +178,4 @@ impl AsRef<str> for AgentId {
 pub use registry::{AgentRegistry, Agent, AgentStatus, AgentStats};
 pub use routing::SkillBasedRouter;
 pub use availability::AvailabilityTracker;
-pub use registration::{SipRegistrar, Registration, RegistrationResponse, RegistrationStatus}; 
+pub use registration::{SipRegistrar, Registration, RegistrationResponse, RegistrationStatus};

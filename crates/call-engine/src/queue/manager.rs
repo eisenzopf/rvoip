@@ -37,14 +37,14 @@ use crate::error::{CallCenterError, Result};
 /// ```rust
 /// use rvoip_call_engine::queue::{QueueManager, QueuedCall};
 /// use rvoip_session_core::SessionId;
-/// 
+///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut queue_manager = QueueManager::new();
-/// 
+///
 /// // Create department queues
 /// queue_manager.create_queue("support".to_string(), "Technical Support".to_string(), 50)?;
 /// queue_manager.create_queue("sales".to_string(), "Sales Team".to_string(), 30)?;
-/// 
+///
 /// // Queue a high-priority call
 /// let urgent_call = QueuedCall {
 ///     session_id: SessionId::new(),
@@ -54,9 +54,9 @@ use crate::error::{CallCenterError, Result};
 ///     estimated_wait_time: Some(30),
 ///     retry_count: 0,
 /// };
-/// 
+///
 /// queue_manager.enqueue_call("support", urgent_call)?;
-/// 
+///
 /// // Get next call for an agent
 /// if let Some(call) = queue_manager.dequeue_for_agent("support")? {
 ///     println!("Assigning call to agent: {}", call.session_id);
@@ -88,7 +88,7 @@ pub struct QueueManager {
 ///
 /// ```rust
 /// use rvoip_call_engine::queue::CallQueue;
-/// 
+///
 /// # fn example() {
 /// let queue = CallQueue {
 ///     id: "support".to_string(),
@@ -97,7 +97,7 @@ pub struct QueueManager {
 ///     max_size: 50,
 ///     max_wait_time_seconds: 300, // 5 minutes
 /// };
-/// 
+///
 /// println!("Queue: {} (capacity: {})", queue.name, queue.max_size);
 /// # }
 /// ```
@@ -136,7 +136,7 @@ pub struct CallQueue {
 /// ```rust
 /// use rvoip_call_engine::queue::QueuedCall;
 /// use rvoip_session_core::SessionId;
-/// 
+///
 /// # fn example() {
 /// // VIP customer call
 /// let vip_call = QueuedCall {
@@ -147,7 +147,7 @@ pub struct CallQueue {
 ///     estimated_wait_time: Some(15), // Expedited service
 ///     retry_count: 0,
 /// };
-/// 
+///
 /// // Normal support call
 /// let normal_call = QueuedCall {
 ///     session_id: SessionId::new(),
@@ -157,7 +157,7 @@ pub struct CallQueue {
 ///     estimated_wait_time: Some(120), // 2 minutes estimated
 ///     retry_count: 0,
 /// };
-/// 
+///
 /// // Escalated call (retry)
 /// let escalated_call = QueuedCall {
 ///     session_id: SessionId::new(),
@@ -202,7 +202,7 @@ impl QueueManager {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::QueueManager;
-    /// 
+    ///
     /// let queue_manager = QueueManager::new();
     /// assert_eq!(queue_manager.total_queued_calls(), 0);
     /// ```
@@ -214,7 +214,7 @@ impl QueueManager {
             calls_being_assigned: HashSet::new(),
         }
     }
-    
+
     /// Get all queue IDs
     ///
     /// Returns a list of all queue identifiers currently managed by this
@@ -229,12 +229,12 @@ impl QueueManager {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::QueueManager;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut queue_manager = QueueManager::new();
     /// queue_manager.create_queue("support".to_string(), "Support".to_string(), 50)?;
     /// queue_manager.create_queue("sales".to_string(), "Sales".to_string(), 30)?;
-    /// 
+    ///
     /// let queue_ids = queue_manager.get_queue_ids();
     /// assert_eq!(queue_ids.len(), 2);
     /// assert!(queue_ids.contains(&"support".to_string()));
@@ -245,7 +245,7 @@ impl QueueManager {
     pub fn get_queue_ids(&self) -> Vec<String> {
         self.queues.keys().cloned().collect()
     }
-    
+
     /// Create a new queue
     ///
     /// Adds a new named queue to the queue manager with the specified
@@ -265,15 +265,15 @@ impl QueueManager {
     ///
     /// ```rust
     /// use rvoip_call_engine::queue::QueueManager;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut queue_manager = QueueManager::new();
-    /// 
+    ///
     /// // Create queues for different departments
     /// queue_manager.create_queue("support".to_string(), "Technical Support".to_string(), 50)?;
     /// queue_manager.create_queue("sales".to_string(), "Sales Team".to_string(), 30)?;
     /// queue_manager.create_queue("billing".to_string(), "Billing Department".to_string(), 20)?;
-    /// 
+    ///
     /// // Verify queues were created
     /// assert_eq!(queue_manager.get_queue_ids().len(), 3);
     /// # Ok(())
@@ -287,7 +287,7 @@ impl QueueManager {
     /// - Consider using department codes or service types as queue IDs
     pub fn create_queue(&mut self, queue_id: String, name: String, max_size: usize) -> Result<()> {
         info!("📋 Creating queue: {} ({})", name, queue_id);
-        
+
         let queue = CallQueue {
             id: queue_id.clone(),
             name,
@@ -295,11 +295,11 @@ impl QueueManager {
             max_size,
             max_wait_time_seconds: 3600, // 60 minutes for testing - effectively no timeout
         };
-        
+
         self.queues.insert(queue_id, queue);
         Ok(())
     }
-    
+
     /// Check if a call is already in the queue
     ///
     /// Determines whether a specific call (identified by session ID) is
@@ -320,16 +320,16 @@ impl QueueManager {
     /// ```rust
     /// use rvoip_call_engine::queue::{QueueManager, QueuedCall};
     /// use rvoip_session_core::SessionId;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut queue_manager = QueueManager::new();
     /// # queue_manager.create_queue("support".to_string(), "Support".to_string(), 50)?;
-    /// 
+    ///
     /// let session_id = SessionId::new();
-    /// 
+    ///
     /// // Initially not queued
     /// assert!(!queue_manager.is_call_queued("support", &session_id));
-    /// 
+    ///
     /// // Add call to queue
     /// let call = QueuedCall {
     ///     session_id: session_id.clone(),
@@ -340,7 +340,7 @@ impl QueueManager {
     ///     retry_count: 0,
     /// };
     /// queue_manager.enqueue_call("support", call)?;
-    /// 
+    ///
     /// // Now it's queued
     /// assert!(queue_manager.is_call_queued("support", &session_id));
     /// # Ok(())
@@ -353,7 +353,7 @@ impl QueueManager {
             false
         }
     }
-    
+
     /// Check if a call is being assigned
     ///
     /// Determines whether a call is currently in the process of being
@@ -373,18 +373,18 @@ impl QueueManager {
     /// ```rust
     /// use rvoip_call_engine::queue::QueueManager;
     /// use rvoip_session_core::SessionId;
-    /// 
+    ///
     /// # fn example() {
     /// let mut queue_manager = QueueManager::new();
     /// let session_id = SessionId::new();
-    /// 
+    ///
     /// // Initially not being assigned
     /// assert!(!queue_manager.is_call_being_assigned(&session_id));
-    /// 
+    ///
     /// // Mark as being assigned
     /// queue_manager.mark_as_assigned(&session_id);
     /// assert!(queue_manager.is_call_being_assigned(&session_id));
-    /// 
+    ///
     /// // Mark as no longer being assigned
     /// queue_manager.mark_as_not_assigned(&session_id);
     /// assert!(!queue_manager.is_call_being_assigned(&session_id));
@@ -393,7 +393,7 @@ impl QueueManager {
     pub fn is_call_being_assigned(&self, session_id: &SessionId) -> bool {
         self.calls_being_assigned.contains(session_id)
     }
-    
+
     /// Enqueue a call
     ///
     /// Adds a call to the specified queue with automatic priority ordering.
@@ -415,11 +415,11 @@ impl QueueManager {
     /// ```rust
     /// use rvoip_call_engine::queue::{QueueManager, QueuedCall};
     /// use rvoip_session_core::SessionId;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut queue_manager = QueueManager::new();
     /// # queue_manager.create_queue("support".to_string(), "Support".to_string(), 50)?;
-    /// 
+    ///
     /// // Add a normal priority call
     /// let normal_call = QueuedCall {
     ///     session_id: SessionId::new(),
@@ -431,7 +431,7 @@ impl QueueManager {
     /// };
     /// let position1 = queue_manager.enqueue_call("support", normal_call)?;
     /// assert_eq!(position1, 0); // First call, position 0
-    /// 
+    ///
     /// // Add a high priority call (should jump to front)
     /// let urgent_call = QueuedCall {
     ///     session_id: SessionId::new(),
@@ -464,35 +464,35 @@ impl QueueManager {
             warn!("📞 Call {} already in queue {}, not re-queuing", call.session_id, queue_id);
             return Ok(0);
         }
-        
+
         // Check if call is being assigned
         if self.is_call_being_assigned(&call.session_id) {
             warn!("📞 Call {} is being assigned, not re-queuing", call.session_id);
             return Ok(0);
         }
-        
-        info!("📞 Enqueuing call {} to queue {} (priority: {}, retry: {})", 
+
+        info!("📞 Enqueuing call {} to queue {} (priority: {}, retry: {})",
               call.session_id, queue_id, call.priority, call.retry_count);
-        
+
         if let Some(queue) = self.queues.get_mut(queue_id) {
             if queue.calls.len() >= queue.max_size {
                 return Err(CallCenterError::queue("Queue is full"));
             }
-            
+
             // Insert based on priority (higher priority = lower number = front of queue)
             let insert_position = queue.calls.iter()
                 .position(|existing| existing.priority > call.priority)
                 .unwrap_or(queue.calls.len());
-            
+
             queue.calls.insert(insert_position, call);
-            
+
             info!("📊 Queue {} size: {} calls", queue_id, queue.calls.len());
             Ok(insert_position)
         } else {
             Err(CallCenterError::not_found(format!("Queue not found: {}", queue_id)))
         }
     }
-    
+
     /// Mark a call as being assigned (to prevent duplicate processing)
     ///
     /// Marks a call as currently being assigned to an agent to prevent
@@ -508,14 +508,14 @@ impl QueueManager {
     /// ```rust
     /// use rvoip_call_engine::queue::QueueManager;
     /// use rvoip_session_core::SessionId;
-    /// 
+    ///
     /// # fn example() {
     /// let mut queue_manager = QueueManager::new();
     /// let session_id = SessionId::new();
-    /// 
+    ///
     /// // Mark call as being assigned
     /// queue_manager.mark_as_assigned(&session_id);
-    /// 
+    ///
     /// // Verify it's marked
     /// assert!(queue_manager.is_call_being_assigned(&session_id));
     /// # }
@@ -532,7 +532,7 @@ impl QueueManager {
         info!("🔒 Marking call {} as being assigned", session_id);
         self.calls_being_assigned.insert(session_id.clone());
     }
-    
+
     /// Mark a call as no longer being assigned (on failure)
     ///
     /// Removes the assignment lock on a call, allowing it to be processed
@@ -548,15 +548,15 @@ impl QueueManager {
     /// ```rust
     /// use rvoip_call_engine::queue::QueueManager;
     /// use rvoip_session_core::SessionId;
-    /// 
+    ///
     /// # fn example() {
     /// let mut queue_manager = QueueManager::new();
     /// let session_id = SessionId::new();
-    /// 
+    ///
     /// // Mark as assigned, then unmark due to failure
     /// queue_manager.mark_as_assigned(&session_id);
     /// queue_manager.mark_as_not_assigned(&session_id);
-    /// 
+    ///
     /// // Verify it's no longer marked
     /// assert!(!queue_manager.is_call_being_assigned(&session_id));
     /// # }
@@ -585,7 +585,7 @@ impl QueueManager {
         info!("🔓 Marking call {} as no longer being assigned", session_id);
         self.calls_being_assigned.remove(session_id);
     }
-    
+
     /// Dequeue the next call for an agent
     ///
     /// Removes and returns the highest priority call from the specified queue
@@ -607,11 +607,11 @@ impl QueueManager {
     /// ```rust
     /// use rvoip_call_engine::queue::{QueueManager, QueuedCall};
     /// use rvoip_session_core::SessionId;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let mut queue_manager = QueueManager::new();
     /// # queue_manager.create_queue("support".to_string(), "Support".to_string(), 50)?;
-    /// 
+    ///
     /// // Add some calls to the queue
     /// let call1 = QueuedCall {
     ///     session_id: SessionId::new(),
@@ -622,7 +622,7 @@ impl QueueManager {
     ///     retry_count: 0,
     /// };
     /// queue_manager.enqueue_call("support", call1)?;
-    /// 
+    ///
     /// let urgent_call = QueuedCall {
     ///     session_id: SessionId::new(),
     ///     caller_id: "+1-555-VIP1".to_string(),
@@ -632,12 +632,12 @@ impl QueueManager {
     ///     retry_count: 0,
     /// };
     /// queue_manager.enqueue_call("support", urgent_call)?;
-    /// 
+    ///
     /// // Dequeue - should get the high priority call first
     /// if let Some(call) = queue_manager.dequeue_for_agent("support")? {
     ///     assert_eq!(call.priority, 1); // High priority call came first
     ///     assert_eq!(call.caller_id, "+1-555-VIP1");
-    ///     
+    ///
     ///     // Call is now marked as being assigned
     ///     assert!(queue_manager.is_call_being_assigned(&call.session_id));
     /// }
@@ -655,41 +655,41 @@ impl QueueManager {
         if let Some(queue) = self.queues.get_mut(queue_id) {
             // Find the first call that isn't being assigned
             let mut index_to_remove = None;
-            
+
             for (index, call) in queue.calls.iter().enumerate() {
                 if !self.calls_being_assigned.contains(&call.session_id) {
                     index_to_remove = Some(index);
                     break;
                 }
             }
-            
+
             if let Some(index) = index_to_remove {
                 let call = queue.calls.remove(index);
                 if let Some(call) = call {
-                    info!("📤 Dequeued call {} from queue {} (remaining: {})", 
+                    info!("📤 Dequeued call {} from queue {} (remaining: {})",
                           call.session_id, queue_id, queue.calls.len());
                     // Mark as being assigned to prevent re-queuing during assignment
                     self.mark_as_assigned(&call.session_id);
                     return Ok(Some(call));
                 }
             }
-            
+
             Ok(None)
         } else {
             Err(CallCenterError::not_found(format!("Queue not found: {}", queue_id)))
         }
     }
-    
+
     /// Remove expired calls from all queues
     pub fn remove_expired_calls(&mut self) -> Vec<SessionId> {
         let mut expired_calls = Vec::new();
         let now = chrono::Utc::now();
-        
+
         for (queue_id, queue) in &mut self.queues {
             queue.calls.retain(|call| {
                 let wait_time = now.signed_duration_since(call.queued_at).num_seconds();
                 if wait_time > queue.max_wait_time_seconds as i64 {
-                    warn!("⏰ Removing expired call {} from queue {} (waited {} seconds)", 
+                    warn!("⏰ Removing expired call {} from queue {} (waited {} seconds)",
                           call.session_id, queue_id, wait_time);
                     expired_calls.push(call.session_id.clone());
                     false
@@ -698,35 +698,35 @@ impl QueueManager {
                 }
             });
         }
-        
+
         expired_calls
     }
-    
+
     /// Get total number of queued calls across all queues
     pub fn total_queued_calls(&self) -> usize {
         self.queues.values().map(|q| q.calls.len()).sum()
     }
-    
+
     /// Get queue statistics
     pub fn get_queue_stats(&self, queue_id: &str) -> Result<QueueStats> {
         if let Some(queue) = self.queues.get(queue_id) {
             let total_calls = queue.calls.len();
             let now = chrono::Utc::now();
-            
+
             let (average_wait_time, longest_wait_time) = if total_calls > 0 {
                 let wait_times: Vec<i64> = queue.calls.iter()
                     .map(|call| now.signed_duration_since(call.queued_at).num_seconds())
                     .collect();
-                
+
                 let total_wait: i64 = wait_times.iter().sum();
                 let average = total_wait / total_calls as i64;
                 let longest = wait_times.iter().max().cloned().unwrap_or(0);
-                
+
                 (average, longest)
             } else {
                 (0, 0)
             };
-            
+
             Ok(QueueStats {
                 queue_id: queue_id.to_string(),
                 total_calls,
@@ -737,21 +737,21 @@ impl QueueManager {
             Err(CallCenterError::not_found(format!("Queue not found: {}", queue_id)))
         }
     }
-    
+
     /// Clean up calls that have been stuck in "being assigned" state
     pub fn cleanup_stuck_assignments(&mut self, timeout_seconds: u64) -> Vec<SessionId> {
         // For now, we'll clear all assignments older than timeout
         // In a real implementation, we'd track timestamps
         let stuck_calls: Vec<SessionId> = self.calls_being_assigned.iter().cloned().collect();
-        
+
         if !stuck_calls.is_empty() {
             warn!("🧹 Clearing {} stuck 'being assigned' calls", stuck_calls.len());
             self.calls_being_assigned.clear();
         }
-        
+
         stuck_calls
     }
-    
+
     /// Force remove a call from being assigned state
     pub fn force_unmark_assigned(&mut self, session_id: &SessionId) -> bool {
         if self.calls_being_assigned.remove(session_id) {
@@ -776,4 +776,4 @@ pub struct QueueStats {
     pub total_calls: usize,
     pub average_wait_time_seconds: u64,
     pub longest_wait_time_seconds: u64,
-} 
+}

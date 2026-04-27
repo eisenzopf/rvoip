@@ -30,16 +30,16 @@ pub struct ProcessEventResult {
 pub struct StateMachine {
     /// The master state table (static rules)
     table: Arc<crate::state_table::MasterStateTable>,
-    
+
     /// Session state storage
     pub(crate) store: Arc<SessionStore>,
-    
+
     /// Adapter to dialog-core
     dialog_adapter: Arc<DialogAdapter>,
-    
+
     /// Adapter to media-core
     media_adapter: Arc<MediaAdapter>,
-    
+
     /// Event publisher (optional - for legacy compatibility)
     event_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
 }
@@ -85,7 +85,7 @@ impl StateMachine {
             event_tx: None, // No event channel by default
         }
     }
-    
+
     pub fn new_with_adapters(
         store: Arc<SessionStore>,
         dialog_adapter: Arc<DialogAdapter>,
@@ -100,7 +100,7 @@ impl StateMachine {
             event_tx: Some(event_tx),
         }
     }
-    
+
     pub fn new_with_custom_table(
         table: Arc<crate::state_table::MasterStateTable>,
         store: Arc<SessionStore>,
@@ -116,12 +116,12 @@ impl StateMachine {
             event_tx: Some(event_tx),
         }
     }
-    
+
     /// Check if a transition exists for the given state key
     pub fn has_transition(&self, key: &StateKey) -> bool {
         self.table.has_transition(key)
     }
-    
+
     /// Process an event for a session
     pub async fn process_event(
         &self,
@@ -130,10 +130,10 @@ impl StateMachine {
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
         use std::time::Instant;
         use crate::session_store::{TransitionRecord, GuardResult, ActionRecord};
-        
+
         debug!("Processing event {:?} for session {}", event, session_id);
         let transition_start = Instant::now();
-        
+
         // 1. Get current session state
         let mut session = match self.store.get_session(session_id).await {
             Ok(s) => s,
@@ -143,12 +143,12 @@ impl StateMachine {
             }
         };
         let old_state = session.call_state;
-        
+
         // Initialize tracking for history
         let mut guards_evaluated = Vec::new();
         let mut actions_executed_history = Vec::new();
         let mut errors = Vec::new();
-        
+
         // 1a. Store event-specific data in session state
         match &event {
             EventType::MakeCall { target } => {
@@ -176,20 +176,20 @@ impl StateMachine {
             }
             _ => {}
         }
-        
+
         // 2. Build state key for lookup
         let key = StateKey {
             role: session.role,
             state: session.call_state,
             event: event.clone(),
         };
-        
+
         // 3. Look up transition in table
         let transition = match self.table.get(&key) {
             Some(t) => t,
             None => {
                 debug!("No transition defined for {:?}", key);
-                
+
                 // Record failed transition attempt in history
                 if session.history.is_some() {
                     let now = Instant::now();
@@ -212,7 +212,7 @@ impl StateMachine {
                     session.record_transition(record);
                     self.store.update_session(session).await?;
                 }
-                
+
                 return Ok(ProcessEventResult {
                     old_state,
                     next_state: None,
@@ -222,22 +222,22 @@ impl StateMachine {
                 });
             }
         };
-        
+
         // 4. Check guards
         for guard in &transition.guards {
             let guard_start = Instant::now();
             let satisfied = guards::check_guard(guard, &session).await;
             let guard_duration = guard_start.elapsed().as_millis() as u64;
-            
+
             guards_evaluated.push(GuardResult {
                 guard: guard.clone(),
                 passed: satisfied,
                 evaluation_time_us: guard_duration * 1000,
             });
-            
+
             if !satisfied {
                 debug!("Guard {:?} not satisfied, skipping transition", guard);
-                
+
                 // Record guard failure in history
                 if session.history.is_some() {
                     let now = Instant::now();
@@ -260,7 +260,7 @@ impl StateMachine {
                     session.record_transition(record);
                     self.store.update_session(session).await?;
                 }
-                
+
                 return Ok(ProcessEventResult {
                     old_state,
                     next_state: None,
@@ -270,9 +270,9 @@ impl StateMachine {
                 });
             }
         }
-        
+
         info!("Executing transition for {:?} + {:?}", old_state, event);
-        
+
         // 5. Execute actions
         let mut actions_executed = Vec::new();
         for action in &transition.actions {
@@ -285,7 +285,7 @@ impl StateMachine {
                 &self.store,
             ).await;
             let action_duration = action_start.elapsed().as_millis() as u64;
-            
+
             let (success, error_opt, exec_error) = match result {
                 Ok(_) => {
                     actions_executed.push(action.clone());
@@ -298,14 +298,14 @@ impl StateMachine {
                     (false, Some(error_msg), Some(e))
                 }
             };
-            
+
             actions_executed_history.push(ActionRecord {
                 action: action.clone(),
                 success,
                 execution_time_us: action_duration * 1000,
                 error: error_opt,
             });
-            
+
             if !success {
                 // Record failed action in history
                 if session.history.is_some() {
@@ -329,17 +329,17 @@ impl StateMachine {
                     session.record_transition(record);
                     self.store.update_session(session).await?;
                 }
-                
+
                 return Err(exec_error.unwrap());
             }
         }
-        
+
         // 6. Update state if specified
         let next_state = transition.next_state;
         if let Some(new_state) = next_state {
             info!("State transition: {:?} -> {:?}", old_state, new_state);
         }
-        
+
         // Record successful transition in history
         if session.history.is_some() {
             let now = Instant::now();
@@ -361,19 +361,19 @@ impl StateMachine {
             };
             session.record_transition(record);
         }
-        
+
         // Apply state change after recording history
         if let Some(new_state) = transition.next_state {
             session.call_state = new_state;
             session.entered_state_at = Instant::now();
         }
-        
+
         // 7. Apply condition updates
         session.apply_condition_updates(&transition.condition_updates);
-        
+
         // 8. Save updated session state
         self.store.update_session(session.clone()).await?;
-        
+
         // 9. Publish events (if channel is available)
         if let Some(ref event_tx) = self.event_tx {
             for event_template in &transition.publish_events {
@@ -383,13 +383,13 @@ impl StateMachine {
                 }
             }
         }
-        
+
         // 10. Check if conditions trigger internal events
         if session.all_conditions_met() && !session.call_established_triggered {
             debug!("All conditions met, triggering InternalCheckReady");
             Box::pin(self.process_event(session_id, EventType::InternalCheckReady)).await?;
         }
-        
+
         Ok(ProcessEventResult {
             old_state,
             next_state: transition.next_state,
@@ -398,7 +398,7 @@ impl StateMachine {
             events_published: transition.publish_events.clone(),
         })
     }
-    
+
     /// Convert event template to concrete event
     async fn instantiate_event(
         &self,

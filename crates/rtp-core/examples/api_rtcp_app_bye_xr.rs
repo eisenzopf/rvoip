@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         events.app_received = true;
                     },
                     MediaTransportEvent::RtcpByeReceived { ssrc, reason } => {
-                        info!("Server received RTCP BYE packet: ssrc={:08x}, reason={:?}", 
+                        info!("Server received RTCP BYE packet: ssrc={:08x}, reason={:?}",
                               ssrc, reason);
                         let mut events = server_events.blocking_lock();
                         events.bye_received = true;
@@ -126,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         events.app_received = true;
                     },
                     MediaTransportEvent::RtcpByeReceived { ssrc, reason } => {
-                        info!("Client received RTCP BYE packet: ssrc={:08x}, reason={:?}", 
+                        info!("Client received RTCP BYE packet: ssrc={:08x}, reason={:?}",
                               ssrc, reason);
                         let mut events = client_events.blocking_lock();
                         events.bye_received = true;

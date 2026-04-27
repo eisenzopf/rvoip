@@ -674,7 +674,7 @@ mod tests {
         let scores = &result.detector_scores;
 
         println!("Detector scores - Energy: {:.2}, ZCR: {:.2}, Spectral: {:.2}, Pitch: {:.2}, Flux: {:.2}",
-                 scores.energy_score, scores.zcr_score, scores.spectral_score, 
+                 scores.energy_score, scores.zcr_score, scores.spectral_score,
                  scores.pitch_score, scores.flux_score);
 
         // All scores should be between 0 and 1

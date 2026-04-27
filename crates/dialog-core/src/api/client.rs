@@ -34,24 +34,24 @@
 //!     let tx_mgr = Arc::new(TransactionManager::new_sync(transport));
 //!     let config = ClientConfig::new("127.0.0.1:0".parse()?)
 //!         .with_from_uri("sip:alice@example.com");
-//!     
+//!
 //!     // Create and start the client
 //!     let client = DialogClient::with_dependencies(tx_mgr, config).await?;
 //!     client.start().await?;
-//!     
+//!
 //!     // Make a call
 //!     let call = client.make_call(
 //!         "sip:alice@example.com",
 //!         "sip:bob@example.com",
 //!         Some("v=0\r\no=- 123 456 IN IP4 192.168.1.100\r\n...".to_string())
 //!     ).await?;
-//!     
+//!
 //!     println!("Call created: {}", call.call_id());
-//!     
+//!
 //!     // Clean up
 //!     call.hangup().await?;
 //!     client.stop().await?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
@@ -470,38 +470,38 @@ use crate::manager::DialogManager;
 ///     let config = ClientConfig::new("192.168.1.100:5060".parse()?)
 ///         .with_from_uri("sip:alice@company.com")
 ///         .with_auth("alice", "secret123");
-///     
+///
 ///     // Create and start client
 ///     let client = DialogClient::with_dependencies(tx_mgr, config).await?;
 ///     client.start().await?;
-///     
+///
 ///     // Make an outgoing call
 ///     let call = client.make_call(
 ///         "sip:alice@company.com",
 ///         "sip:bob@partner.com",
 ///         Some("v=0\r\no=alice 123 456 IN IP4 192.168.1.100\r\n...".to_string())
 ///     ).await?;
-///     
+///
 ///     println!("Call initiated: {}", call.call_id());
-///     
+///
 ///     // Call operations
 ///     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 ///     call.hold(Some("SDP with hold attributes".to_string())).await?;
-///     
+///
 ///     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 ///     call.resume(Some("SDP with active media".to_string())).await?;
-///     
+///
 ///     // Transfer the call
 ///     call.transfer("sip:voicemail@company.com".to_string()).await?;
-///     
+///
 ///     // Get statistics
 ///     let stats = client.get_stats().await;
 ///     println!("Client stats: {} active dialogs, {} total",
 ///         stats.active_dialogs, stats.total_dialogs);
-///     
+///
 ///     // Clean shutdown
 ///     client.stop().await?;
-///     
+///
 ///     Ok(())
 /// }
 /// ```
@@ -726,35 +726,35 @@ impl DialogClient {
     /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ///     // Set up transport layer (your responsibility)
     ///     # let transport = unimplemented!(); // Your transport implementation
-    ///     
+    ///
     ///     // Create transaction manager
     ///     let tx_mgr = Arc::new(TransactionManager::new_sync(transport));
-    ///     
+    ///
     ///     // Set up global event channel
     ///     let (event_tx, event_rx) = mpsc::channel(1000);
-    ///     
+    ///
     ///     // Configure client
     ///     let config = ClientConfig::new("192.168.1.100:5060".parse()?)
     ///         .with_from_uri("sip:client@company.com")
     ///         .with_auth("client_user", "password123");
-    ///     
+    ///
     ///     // Create client with global events
     ///     let client = DialogClient::with_global_events(tx_mgr, event_rx, config).await?;
-    ///     
+    ///
     ///     // Start client and begin processing
     ///     client.start().await?;
-    ///     
+    ///
     ///     // Client is now ready for operations
     ///     let call = client.make_call(
     ///         "sip:client@company.com",
     ///         "sip:target@partner.com",
     ///         None
     ///     ).await?;
-    ///     
+    ///
     ///     // Clean shutdown
     ///     call.hangup().await?;
     ///     client.stop().await?;
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```
@@ -1034,7 +1034,7 @@ impl DialogClient {
     /// match call_result {
     ///     Ok(Ok(call)) => {
     ///         println!("Call successful: {}", call.call_id());
-    ///         
+    ///
     ///         // Set up call monitoring
     ///         tokio::spawn(async move {
     ///             if call.is_active().await {
@@ -1094,7 +1094,7 @@ impl DialogClient {
     ///
     /// # Arguments
     /// * `from_uri` - Local SIP URI (From header) - who the call is from
-    /// * `to_uri` - Remote SIP URI (To header) - who to call  
+    /// * `to_uri` - Remote SIP URI (To header) - who to call
     /// * `sdp_offer` - Optional SDP offer for media negotiation
     ///
     /// # Returns
@@ -1682,7 +1682,7 @@ impl DialogClient {
         status_code: StatusCode,
         body: Option<String>,
     ) -> ApiResult<Response> {
-        debug!("Building dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions", 
+        debug!("Building dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions",
                status_code, transaction_id, dialog_id);
 
         // Get original request from transaction manager
@@ -1715,7 +1715,7 @@ impl DialogClient {
             ),
         })?;
 
-        debug!("Successfully built dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions", 
+        debug!("Successfully built dialog-aware response with status {} for transaction {} in dialog {} using Phase 3 functions",
                status_code, transaction_id, dialog_id);
         Ok(response)
     }

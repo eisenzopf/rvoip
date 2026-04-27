@@ -79,7 +79,7 @@ fn is_hex_digit(c: u8) -> bool {
 // reg-name-char = unreserved / escaped / "$" / "," / ";" / ":" / "@" / "&" / "=" / "+"
 fn is_reg_name_char(c: u8) -> bool {
     // Check unreserved first (alphanum / mark)
-    c.is_ascii_alphanumeric() || 
+    c.is_ascii_alphanumeric() ||
     matches!(c, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')') ||
     // Check other allowed chars
     matches!(c, b'$' | b',' | b';' | b':' | b'@' | b'&' | b'=' | b'+')

@@ -106,10 +106,10 @@ impl SessionRegistry {
         // Acquire both locks to do atomic operation and avoid deadlock
         let mut sessions = self.sessions.write().await;
         let mut stats = self.stats.write().await;
-        
+
         // Increment failed count
         stats.failed_sessions += 1;
-        
+
         // Remove from active sessions if it exists
         if sessions.remove(session_id).is_some() {
             stats.total_terminated += 1;
@@ -117,7 +117,7 @@ impl SessionRegistry {
         } else {
             tracing::warn!("Marked unknown session as failed: {}", session_id);
         }
-        
+
         Ok(())
     }
 
@@ -141,7 +141,7 @@ impl SessionRegistry {
         let mut sessions = self.sessions.write().await;
         let count = sessions.len();
         sessions.clear();
-        
+
         tracing::info!("Cleared {} sessions from registry", count);
         Ok(())
     }
@@ -151,4 +151,4 @@ impl Default for SessionRegistry {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

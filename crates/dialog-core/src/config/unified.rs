@@ -17,7 +17,7 @@
 //! DialogManagerConfig
 //!        │
 //!        ├── Client(ClientBehavior)     ← Primarily outgoing calls
-//!        ├── Server(ServerBehavior)     ← Primarily incoming calls  
+//!        ├── Server(ServerBehavior)     ← Primarily incoming calls
 //!        └── Hybrid(HybridBehavior)     ← Both directions (most common)
 //!
 //! All modes share:
@@ -88,7 +88,7 @@ use crate::api::{Credentials, DialogConfig, RelUsage};
 /// ## Behavioral Modes
 ///
 /// - **Client**: Optimized for outgoing calls with authentication support
-/// - **Server**: Optimized for incoming calls with auto-response features  
+/// - **Server**: Optimized for incoming calls with auto-response features
 /// - **Hybrid**: Supports both incoming and outgoing calls (most flexible)
 ///
 /// ## Examples
@@ -217,7 +217,7 @@ impl DialogManagerConfig {
         }
     }
 
-    /// Check if this configuration supports incoming calls  
+    /// Check if this configuration supports incoming calls
     pub fn supports_incoming_calls(&self) -> bool {
         match self {
             DialogManagerConfig::Client(_) => false,
@@ -466,7 +466,7 @@ impl ClientConfigBuilder {
     }
 }
 
-/// Builder for server configuration  
+/// Builder for server configuration
 pub struct ServerConfigBuilder {
     behavior: ServerBehavior,
 }

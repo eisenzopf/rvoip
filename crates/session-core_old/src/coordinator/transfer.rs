@@ -67,14 +67,14 @@ impl TransferHandler {
     }
 
     /// Handle incoming REFER request for call transfer
-    /// 
+    ///
     /// This implements the transferee behavior according to RFC 3515:
     /// 1. Validate the transfer request
     /// 2. Create subscription for progress tracking
     /// 3. Initiate a new call to the transfer target
     /// 4. Send NOTIFY messages to report transfer progress
     /// 5. Terminate the original call upon successful transfer
-    /// 
+    ///
     /// Note: dialog-core handles sending the 202 Accepted response
     pub async fn handle_refer_request(
         &self,
@@ -85,17 +85,17 @@ impl TransferHandler {
         replaces: Option<String>,
     ) -> SessionResult<()> {
         info!("Handling REFER request for dialog {}", dialog_id);
-        
+
         // Extract target URI from ReferTo
         let target_uri = refer_to.uri().to_string();
         info!("Transfer target: {}", target_uri);
-        
+
         // Debug: Log all dialog-to-session mappings
         println!("📋 TRANSFER: Current dialog-to-session mappings:");
         for entry in self.dialog_to_session.iter() {
             println!("📋   Dialog {} -> Session {}", entry.key(), entry.value());
         }
-        
+
         // Validate we have an active session for this dialog
         let session_id = match self.get_session_id_for_dialog(&dialog_id).await {
             Ok(id) => {
@@ -108,7 +108,7 @@ impl TransferHandler {
                 return Err(e);
             }
         };
-        
+
         // Emit IncomingTransferRequest event
         println!("📤 TRANSFER: Publishing IncomingTransferRequest event for session {}", session_id);
         let result = self.event_processor.publish_event(SessionEvent::IncomingTransferRequest {
@@ -117,13 +117,13 @@ impl TransferHandler {
             referred_by: referred_by.clone(),
             replaces: replaces.clone(),
         }).await;
-        
+
         if result.is_ok() {
             println!("✅ TRANSFER: Successfully published IncomingTransferRequest event");
         } else {
             println!("❌ TRANSFER: Failed to publish IncomingTransferRequest event: {:?}", result);
         }
-        
+
         // Check if this is an attended transfer (has Replaces parameter)
         if let Some(replaces_value) = replaces {
             info!("Attended transfer with Replaces: {}", replaces_value);
@@ -131,13 +131,13 @@ impl TransferHandler {
             // For now, return an error that dialog-core will convert to 501
             return Err(SessionError::internal("Attended transfer not yet implemented"));
         }
-        
+
         // Create subscription for transfer progress notifications
         let event_id = self.create_refer_subscription(
             &dialog_id,
             &session_id
         ).await?;
-        
+
         // Send initial NOTIFY (transfer pending)
         // The 202 Accepted has already been sent by dialog-core before
         // forwarding the TransferRequest event to us
@@ -155,13 +155,13 @@ impl TransferHandler {
         } else {
             println!("✅ TRANSFER: Initial NOTIFY sent successfully");
         }
-        
+
         // Emit transfer progress - Trying
         let _ = self.event_processor.publish_event(SessionEvent::TransferProgress {
             session_id: session_id.clone(),
             status: SessionTransferStatus::Trying,
         }).await;
-        
+
         // Initiate new call to transfer target
         println!("🎯 TRANSFER: About to initiate transfer call from session {} to {}", session_id, target_uri);
         let transfer_result = self.initiate_transfer_call(
@@ -170,14 +170,14 @@ impl TransferHandler {
             referred_by.as_deref()
         ).await;
         println!("🎯 TRANSFER: initiate_transfer_call returned: {:?}", transfer_result.is_ok());
-        
+
         match transfer_result {
             Ok(new_session_id) => {
                 info!("Transfer call initiated successfully to {}", target_uri);
-                
+
                 // Update subscription with new session ID
                 self.update_subscription(&event_id, new_session_id.clone()).await;
-                
+
                 // Monitor new call and send progress NOTIFYs
                 self.spawn_transfer_monitor(
                     dialog_id.clone(),
@@ -188,7 +188,7 @@ impl TransferHandler {
             }
             Err(e) => {
                 error!("Failed to initiate transfer call: {}", e);
-                
+
                 // Send failure NOTIFY and terminate subscription
                 self.send_transfer_notify(
                     &dialog_id,
@@ -196,12 +196,12 @@ impl TransferHandler {
                     "SIP/2.0 503 Service Unavailable\r\n",
                     true, // terminate subscription
                 ).await?;
-                
+
                 // Clean up subscription
                 self.remove_subscription(&event_id).await;
             }
         }
-        
+
         Ok(())
     }
 
@@ -222,7 +222,7 @@ impl TransferHandler {
         session_id: &SessionId,
     ) -> SessionResult<String> {
         let event_id = format!("refer-{}", Uuid::new_v4());
-        
+
         let subscription = ReferSubscription {
             event_id: event_id.clone(),
             dialog_id: dialog_id.clone(),
@@ -230,9 +230,9 @@ impl TransferHandler {
             transfer_session_id: None,
             created_at: std::time::Instant::now(),
         };
-        
+
         self.subscriptions.write().await.insert(event_id.clone(), subscription);
-        
+
         Ok(event_id)
     }
 
@@ -261,7 +261,7 @@ impl TransferHandler {
         } else {
             "active;expires=60"
         };
-        
+
         // Build NOTIFY body with headers
         let notify_body = format!(
             "Event: refer;id={}\r\n\
@@ -271,7 +271,7 @@ impl TransferHandler {
              {}",
             event_id, subscription_state, sipfrag_body
         );
-        
+
         // Send NOTIFY through dialog API
         self.dialog_api
             .send_notify(dialog_id, "refer".to_string(), Some(notify_body))
@@ -279,7 +279,7 @@ impl TransferHandler {
             .map_err(|e| SessionError::internal(
                 &format!("Failed to send NOTIFY: {}", e)
             ))?;
-        
+
         info!("Sent transfer NOTIFY for dialog {}", dialog_id);
         Ok(())
     }
@@ -294,30 +294,30 @@ impl TransferHandler {
         println!("🔄 TRANSFER: initiate_transfer_call started");
         println!("  Original session: {}", original_session_id);
         println!("  Target URI: {}", target_uri);
-        
+
         // Get original session details for caller ID
         let original_session = self.registry
             .get_session(original_session_id)
             .await?
             .ok_or_else(|| SessionError::internal("Session not found"))?;
-        
+
         println!("  Original session from: {}", original_session.call_session.from);
         println!("  Original session to: {}", original_session.call_session.to);
-        
+
         // Create metadata for the new session
         let mut metadata = HashMap::new();
         if let Some(referrer) = referred_by {
             metadata.insert("Referred-By".to_string(), referrer.to_string());
         }
         metadata.insert("Transfer-From".to_string(), original_session_id.to_string());
-        
+
         // Create new session ID
         let new_session_id = SessionId::new();
-        
+
         // Create new call session for the transfer
         // IMPORTANT: The transferee (Bob) makes the new call, so use Bob's address as 'from'
         // Bob's address is in the 'to' field of the original session (Alice->Bob)
-        info!("Creating transfer call: transferee '{}' calling target '{}'", 
+        info!("Creating transfer call: transferee '{}' calling target '{}'",
               original_session.call_session.to, target_uri);
         let new_session = crate::api::types::CallSession {
             id: new_session_id.clone(),
@@ -327,17 +327,17 @@ impl TransferHandler {
             started_at: None,
             sip_call_id: None,
         };
-        
+
         // Register the new session
         let internal_session = crate::session::Session::from_call_session(new_session.clone());
         self.registry.register_session(internal_session).await?;
-        
+
         // Initiate the call through dialog API
         // Note: This creates a new outgoing INVITE
         println!("📞 TRANSFER: Calling dialog_api.make_call:");
         println!("    From: {}", new_session.from);
         println!("    To: {}", new_session.to);
-        
+
         let call_handle = self.dialog_api
             .make_call(&new_session.from, &new_session.to, None)
             .await
@@ -348,17 +348,17 @@ impl TransferHandler {
                     &format!("Failed to initiate transfer call: {}", e)
                 )
             })?;
-        
+
         println!("✅ TRANSFER: dialog_api.make_call succeeded, got call handle");
         info!("Transfer call initiated successfully, got call handle");
-        
+
         // Get the dialog ID from the call handle
         let dialog_id = call_handle.dialog().id().clone();
-        
+
         // Map the new dialog to the new session (bidirectional mapping)
         self.dialog_to_session.insert(dialog_id.clone(), new_session_id.clone());
         self.session_to_dialog.insert(new_session_id.clone(), dialog_id.clone());
-        
+
         // CRITICAL: Publish SessionCreated event so the coordinator knows about this session
         let _ = self.event_processor.publish_event(SessionEvent::SessionCreated {
             session_id: new_session_id.clone(),
@@ -366,9 +366,9 @@ impl TransferHandler {
             to: new_session.to.clone(),
             call_state: CallState::Initiating,
         }).await;
-        
+
         info!("Transfer call setup complete: session {} -> dialog {}", new_session_id, dialog_id);
-        
+
         Ok(new_session_id)
     }
 
@@ -383,22 +383,22 @@ impl TransferHandler {
         let registry = self.registry.clone();
         let dialog_api = self.dialog_api.clone();
         let handler = self.clone();
-        
+
         tokio::spawn(async move {
             println!("📊 TRANSFER MONITOR: Started monitoring transfer for session {}", new_session_id);
             let mut last_state = CallState::Initiating;
             let mut attempt_count = 0;
             let max_attempts = 30; // 30 seconds timeout
-            
+
             loop {
                 tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
                 attempt_count += 1;
-                
+
                 // Check new call state
                 if let Ok(Some(session)) = registry.get_session(&new_session_id).await {
                     let current_state = session.state().clone();
                     println!("📊 TRANSFER MONITOR: Session {} state: {:?} (attempt {})", new_session_id, current_state, attempt_count);
-                    
+
                     // Check if transfer is complete (regardless of whether state changed)
                     match current_state {
                         CallState::Active => {
@@ -412,31 +412,31 @@ impl TransferHandler {
                                     "SIP/2.0 200 OK\r\n",
                                     true, // terminate subscription
                                 ).await;
-                                
+
                                 // Emit transfer progress - Success
                                 let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
                                     session_id: original_session_id.clone(),
                                     status: SessionTransferStatus::Success,
                                 }).await;
-                                
+
                                 // Terminate original call properly (this will send BYE)
                                 // We need to get the dialog ID for the original session
                                 if let Some(original_dialog_id) = handler.dialog_to_session.iter()
                                     .find(|entry| entry.value() == &original_session_id)
-                                    .map(|entry| entry.key().clone()) 
+                                    .map(|entry| entry.key().clone())
                                 {
                                     // Send BYE to terminate the original call
                                     if let Err(e) = dialog_api.send_bye(&original_dialog_id).await {
                                         error!("Failed to send BYE for original call: {}", e);
                                     }
                                 }
-                                
+
                                 // Update session state to reflect termination
                                 if let Err(e) = registry.update_session_state(&original_session_id, CallState::Terminated).await {
                                     error!("Failed to update original call state: {}", e);
                                 }
                                 info!("Transfer completed successfully");
-                                
+
                                 // Clean up subscription
                                 handler.remove_subscription(&event_id).await;
                             }
@@ -454,7 +454,7 @@ impl TransferHandler {
                                     true, // terminate subscription
                                 ).await;
                                 error!("Transfer failed: {}", reason);
-                                
+
                                 // Clean up subscription
                                 handler.remove_subscription(&event_id).await;
                             }
@@ -471,7 +471,7 @@ impl TransferHandler {
                                     "SIP/2.0 487 Request Terminated\r\n",
                                     true,
                                 ).await;
-                                
+
                                 // Clean up subscription
                                 handler.remove_subscription(&event_id).await;
                             }
@@ -488,7 +488,7 @@ impl TransferHandler {
                                     "SIP/2.0 180 Ringing\r\n",
                                     false,
                                 ).await;
-                                
+
                                 // Emit transfer progress - Ringing
                                 let _ = handler.event_processor.publish_event(SessionEvent::TransferProgress {
                                     session_id: original_session_id.clone(),
@@ -500,11 +500,11 @@ impl TransferHandler {
                             // Other states - just continue monitoring
                         }
                     }
-                    
+
                     // Update last state for change detection
                     last_state = current_state;
                 }
-                
+
                 if attempt_count >= max_attempts {
                     // Timeout - send error NOTIFY
                     let _ = handler.send_transfer_notify(
@@ -514,13 +514,13 @@ impl TransferHandler {
                         true,
                     ).await;
                     error!("Transfer timed out");
-                    
+
                     // Clean up subscription
                     handler.remove_subscription(&event_id).await;
                     break;
                 }
             }
-            
+
             // Cleanup any expired subscriptions periodically
             handler.cleanup_expired_subscriptions().await;
         });
@@ -531,7 +531,7 @@ impl TransferHandler {
         let mut subs = self.subscriptions.write().await;
         let now = std::time::Instant::now();
         let expiry = std::time::Duration::from_secs(300); // 5 minutes
-        
+
         subs.retain(|_, sub| {
             now.duration_since(sub.created_at) < expiry
         });

@@ -140,7 +140,7 @@ use super::core::DialogManager;
 /// - Send in-dialog requests
 /// - Build and send responses (when needed)
 ///
-/// ### Server Mode  
+/// ### Server Mode
 /// - Handle incoming calls (via session coordination)
 /// - Auto-respond to OPTIONS/REGISTER (if configured)
 /// - Build and send responses
@@ -345,7 +345,7 @@ impl UnifiedDialogManager {
                 );
             }
             DialogManagerConfig::Hybrid(hybrid) => {
-                info!("Hybrid mode active - from_uri: {:?}, domain: {:?}, auto_auth: {}, auto_options: {}", 
+                info!("Hybrid mode active - from_uri: {:?}, domain: {:?}, auto_auth: {}, auto_options: {}",
                     hybrid.from_uri, hybrid.domain, hybrid.auto_auth, hybrid.auto_options_response);
             }
         }
@@ -1165,7 +1165,7 @@ impl UnifiedDialogManager {
                 );
             }
             _ => {
-                error!("Cannot send CANCEL for dialog {} in state {:?} - must be in Initial or Early state", 
+                error!("Cannot send CANCEL for dialog {} in state {:?} - must be in Initial or Early state",
                       dialog_id, dialog_state);
                 return Err(ApiError::Protocol {
                     message: format!("Cannot cancel dialog in state {:?}", dialog_state),

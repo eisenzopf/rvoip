@@ -1,5 +1,5 @@
 //! Integration tests for media operations
-//! 
+//!
 //! Tests media control, SDP handling, and audio operations.
 
 use rvoip_client_core::{
@@ -39,14 +39,14 @@ async fn test_basic_media_operations() {
     // Note: Media operations require call to be Connected state
     // For now, we skip these operations as they require a real connection
     // TODO: Mock connected state or use test SIP server
-    
+
     // Test microphone mute/unmute would fail in Initiating state
     // client.set_microphone_mute(&call_id, true).await
     //     .expect("Failed to mute microphone");
 
     // Get media info - in initiating state this might succeed with basic info
     let media_info_result = client.get_call_media_info(&call_id).await;
-    
+
     // The behavior depends on implementation - either succeeds with basic info or fails
     match media_info_result {
         Ok(media_info) => {
@@ -96,18 +96,18 @@ async fn test_sdp_operations() {
     // Generate SDP offer
     let sdp_offer = client.generate_sdp_offer(&call_id).await
         .expect("Failed to generate SDP offer");
-    
+
     // Verify SDP contains expected elements
     assert!(sdp_offer.contains("v=0"));
     assert!(sdp_offer.contains("m=audio"));
     assert!(sdp_offer.contains("RTP/AVP"));
-    
+
     tracing::info!("Generated SDP offer:\n{}", sdp_offer);
 
     // Note: Processing SDP answer requires an active media session
     // Skip this for now as it requires connected state
     // TODO: Mock media session or use test infrastructure
-    
+
     // Test processing SDP answer (mock answer) - would fail without media session
     // let mock_answer = r#"v=0
 // o=- 0 0 IN IP4 127.0.0.1
@@ -160,7 +160,7 @@ async fn test_media_session_lifecycle() {
     // Note: Starting media session requires Connected state
     // Skip these operations for now
     // TODO: Mock connected state or use test SIP server
-    
+
     // Start media session - would fail in Initiating state
     // client.start_media_session(&call_id).await
     //     .expect("Failed to start media session");
@@ -200,7 +200,7 @@ async fn test_audio_transmission() {
     // Note: Audio transmission requires Connected state
     // Skip these operations for now
     // TODO: Mock connected state or use test SIP server
-    
+
     // Test audio transmission control - would fail in Initiating state
     // client.start_audio_transmission(&call_id).await
     //     .expect("Failed to start audio transmission");
@@ -245,7 +245,7 @@ async fn test_establish_media_flow() {
     // Note: Establishing media requires a media session
     // Skip this operation for now
     // TODO: Mock media session or use test infrastructure
-    
+
     // Establish media flow to a mock remote address - would fail without media session
     // let remote_addr = "127.0.0.1:30000";
     // client.establish_media(&call_id, remote_addr).await
@@ -253,7 +253,7 @@ async fn test_establish_media_flow() {
 
     // Get media info - behavior depends on implementation
     let media_info_result = client.get_call_media_info(&call_id).await;
-    
+
     // The behavior depends on implementation - either succeeds with basic info or fails
     match media_info_result {
         Ok(media_info) => {
@@ -294,16 +294,16 @@ async fn test_codec_enumeration() {
 
     // Get supported audio codecs
     let codecs = client.get_supported_audio_codecs().await;
-    
+
     // Should have at least PCMU (G.711)
     assert!(!codecs.is_empty());
     assert!(codecs.iter().any(|c| c.name == "PCMU"));
-    
+
     // Verify codec properties
     for codec in &codecs {
         // payload_type is u8, so it's always >= 0
         assert!(codec.clock_rate > 0);
-        tracing::info!("Supported codec: {} (PT: {}, Rate: {})", 
+        tracing::info!("Supported codec: {} (PT: {}, Rate: {})",
                       codec.name, codec.payload_type, codec.clock_rate);
     }
 
@@ -338,7 +338,7 @@ async fn test_media_statistics() {
     // Try to get RTP statistics
     let rtp_stats = client.get_rtp_statistics(&call_id).await
         .expect("Failed to get RTP statistics");
-    
+
     // May return None or Some depending on implementation state
     match rtp_stats {
         Some(stats) => {
@@ -353,7 +353,7 @@ async fn test_media_statistics() {
     // Try to get media statistics
     let media_stats = client.get_media_statistics(&call_id).await
         .expect("Failed to get media statistics");
-    
+
     // May return None or Some depending on implementation state
     match media_stats {
         Some(stats) => {
@@ -392,7 +392,7 @@ async fn test_media_error_handling() {
 
     // Try media operations on non-existent call
     let fake_call_id = CallId::new_v4();
-    
+
     // Should fail with CallNotFound
     let result = client.set_microphone_mute(&fake_call_id, true).await;
     assert!(matches!(result, Err(ClientError::CallNotFound { .. })));
@@ -426,18 +426,18 @@ async fn test_media_capabilities() {
 
     // Get media capabilities
     let capabilities = client.get_media_capabilities().await;
-    
+
     // Verify basic capabilities
     assert!(capabilities.supported_codecs.len() > 0);
     assert!(capabilities.can_send_dtmf);  // True for basic capability
     assert!(capabilities.supports_rtp);   // RTP is supported
-    
+
     // Check codec details
     for codec in &capabilities.supported_codecs {
         assert!(!codec.name.is_empty());
     }
-    
+
     tracing::info!("Media capabilities: {:?}", capabilities);
 
     client.stop().await.expect("Failed to stop client");
-} 
+}

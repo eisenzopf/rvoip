@@ -118,8 +118,8 @@ where
     match T::from_str(&displayed) {
         Ok(parsed_back) => {
             // Compare original with parsed-back version
-            assert_eq!(item, &parsed_back, 
-                "\nDisplay->FromStr round trip failed!\n  Original: {:?}\n  Displayed: '{}'\n  Parsed Back: {:?}\n", 
+            assert_eq!(item, &parsed_back,
+                "\nDisplay->FromStr round trip failed!\n  Original: {:?}\n  Displayed: '{}'\n  Parsed Back: {:?}\n",
                 item, displayed, parsed_back);
         }
         Err(e) => panic!(

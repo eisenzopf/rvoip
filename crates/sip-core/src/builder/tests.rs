@@ -271,16 +271,16 @@ fn test_comprehensive_request_response() {
         .user_agent("SIPlib/1.0")
         .content_type("application/sdp")
         .authorization_digest(
-            "alice", 
-            "example.com", 
-            "dcd98b7102dd2f0e8b11d0f600bfb0c093", 
-            "5ccc069c403ebaf9f0171e9517f40e41", 
-            Some("0a4f113b"), 
-            Some("auth"), 
-            Some("00000001"), 
-            Some("REGISTER"), 
-            Some("sip:example.com"), 
-            Some("MD5"), 
+            "alice",
+            "example.com",
+            "dcd98b7102dd2f0e8b11d0f600bfb0c093",
+            "5ccc069c403ebaf9f0171e9517f40e41",
+            Some("0a4f113b"),
+            Some("auth"),
+            Some("00000001"),
+            Some("REGISTER"),
+            Some("sip:example.com"),
+            Some("MD5"),
             None
         )
         .body("v=0\r\no=alice 123 456 IN IP4 192.168.1.1\r\ns=SIP Call\r\nt=0 0\r\nm=audio 49170 RTP/AVP 0\r\n")

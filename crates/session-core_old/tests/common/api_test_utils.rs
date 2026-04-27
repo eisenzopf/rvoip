@@ -6,7 +6,7 @@ use async_trait::async_trait;
 
 use rvoip_session_core::{Result, SessionError};
 use rvoip_session_core::api::types::{
-    SessionId, CallSession, IncomingCall, CallState, CallDecision, 
+    SessionId, CallSession, IncomingCall, CallState, CallDecision,
     SessionStats, MediaInfo
 };
 use rvoip_session_core::api::handlers::CallHandler;
@@ -125,7 +125,7 @@ impl ApiBuilderTestHelper {
     /// Create a test SessionManagerBuilder with common test settings
     pub fn create_test_builder(&self) -> SessionManagerBuilder {
 //         let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
-        
+
         SessionManagerBuilder::new()
             .with_sip_port(0) // Use random port for testing
             .with_local_address("sip:test@127.0.0.1")
@@ -135,12 +135,12 @@ impl ApiBuilderTestHelper {
     /// Create a P2P test builder
     pub fn create_p2p_builder(&self) -> SessionManagerBuilder {
 //         let handler = Arc::new(TestCallHandler::new(CallDecision::Accept(None)));
-        
+
         SessionManagerBuilder::new()
             .with_sip_port(0)
             .with_local_address("sip:test@127.0.0.1")
             .with_media_ports(30000, 40000)
-            
+
     }
 
     /// Test different builder configurations
@@ -148,15 +148,15 @@ impl ApiBuilderTestHelper {
         vec![
             // Default configuration
             SessionManagerBuilder::new(),
-            
+
             // Custom port configuration
             SessionManagerBuilder::new()
                 .with_sip_port(5070),
-            
+
             // P2P mode configuration
             SessionManagerBuilder::new()
                 ,
-                
+
             // Full configuration
             SessionManagerBuilder::new()
                 .with_sip_port(0) // Random port for testing
@@ -501,14 +501,14 @@ impl ApiTestUtils {
         F: FnMut() -> bool,
     {
         let start = Instant::now();
-        
+
         while start.elapsed() < timeout {
             if condition() {
                 return Ok(());
             }
             tokio::time::sleep(check_interval).await;
         }
-        
+
         Err(SessionError::Other("Condition timeout".to_string()))
     }
 
@@ -546,9 +546,9 @@ impl ApiTestUtils {
 
     /// Validate SDP format
     pub fn is_valid_sdp(sdp: &str) -> bool {
-        sdp.contains("v=0") && 
-        sdp.contains("o=") && 
-        sdp.contains("s=") && 
+        sdp.contains("v=0") &&
+        sdp.contains("o=") &&
+        sdp.contains("s=") &&
         sdp.contains("m=")
     }
 
@@ -557,25 +557,25 @@ impl ApiTestUtils {
         if !uri.starts_with("sip:") && !uri.starts_with("sips:") {
             return false;
         }
-        
+
         // Must have content after the scheme
         let after_scheme = if uri.starts_with("sips:") {
             &uri[5..]
         } else {
             &uri[4..]
         };
-        
+
         // Must not be empty
         if after_scheme.is_empty() {
             return false;
         }
-        
+
         // Check for basic structure: user@host or host
         // Must not start with @ (empty user)
         if after_scheme.starts_with('@') {
             return false;
         }
-        
+
         // Must contain at least some content
         after_scheme.len() > 0
     }
@@ -645,4 +645,4 @@ impl ApiTestUtils {
 
         Ok(())
     }
-} 
+}

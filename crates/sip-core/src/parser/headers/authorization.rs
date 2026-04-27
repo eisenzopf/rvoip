@@ -131,7 +131,7 @@ mod tests {
     #[test]
     fn test_parse_authorization_with_line_folding() {
         // Test with line folding after credentials scheme
-        let input = br#"Digest 
+        let input = br#"Digest
  username="Alice", realm="atlanta.com", nonce="xyz", uri="sip:ss1.example.com", response="abc""#;
         let result = parse_authorization(input);
         assert!(result.is_ok());
@@ -145,9 +145,9 @@ mod tests {
 
         // Test with line folding between parameters
         let input = br#"Digest username="Alice",
- realm="atlanta.com", 
- nonce="xyz", 
- uri="sip:ss1.example.com", 
+ realm="atlanta.com",
+ nonce="xyz",
+ uri="sip:ss1.example.com",
  response="abc""#;
         let result = parse_authorization(input);
         assert!(result.is_ok());
@@ -200,8 +200,8 @@ mod tests {
     #[test]
     fn test_parse_authorization_full_digest_params() {
         // Test with all possible Digest parameters
-        let input = br#"Digest username="Alice", realm="atlanta.com", nonce="xyz123", 
- uri="sip:ss1.example.com", response="xyz456", algorithm=MD5, cnonce="123abc", 
+        let input = br#"Digest username="Alice", realm="atlanta.com", nonce="xyz123",
+ uri="sip:ss1.example.com", response="xyz456", algorithm=MD5, cnonce="123abc",
  opaque="someopaque", qop=auth, nc=00000001"#;
         let result = parse_authorization(input);
         assert!(result.is_ok());

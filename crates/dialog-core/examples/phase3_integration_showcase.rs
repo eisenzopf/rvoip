@@ -4,7 +4,7 @@
 //! the unified DialogManager architecture. It demonstrates:
 //!
 //! 1. Unified API configuration (Client/Server/Hybrid modes)
-//! 2. Dialog state management and transitions  
+//! 2. Dialog state management and transitions
 //! 3. In-dialog requests (INFO, UPDATE, REFER, NOTIFY)
 //! 4. Call termination with BYE
 //! 5. Proper cleanup and resource management

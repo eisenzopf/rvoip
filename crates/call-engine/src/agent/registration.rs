@@ -79,10 +79,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::registration::{SipRegistrar, RegistrationStatus};
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registrar = SipRegistrar::new();
-//! 
+//!
 //! // Process agent registration
 //! let response = registrar.process_register_simple(
 //!     "sip:alice@call-center.com",           // Address of Record
@@ -91,7 +91,7 @@
 //!     Some("SoftPhone/2.1".to_string()),     // User Agent
 //!     "192.168.1.100:5060".to_string(),      // Remote Address
 //! )?;
-//! 
+//!
 //! match response.status {
 //!     RegistrationStatus::Created => {
 //!         println!("✅ Agent registered successfully for {} seconds", response.expires);
@@ -111,17 +111,17 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::registration::{SipRegistrar, RegistrationStatus};
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registrar = SipRegistrar::new();
-//! 
+//!
 //! // Register multiple agents with different transports
 //! let agents = vec![
 //!     ("sip:alice@call-center.com", "sip:alice@192.168.1.100:5060", "UDP"),
 //!     ("sip:bob@call-center.com", "sip:bob@192.168.1.101:5060;transport=tcp", "TCP"),
 //!     ("sip:carol@call-center.com", "sips:carol@192.168.1.102:5061", "TLS"),
 //! ];
-//! 
+//!
 //! for (aor, contact, transport) in agents {
 //!     let response = registrar.process_register_simple(
 //!         aor,
@@ -130,19 +130,19 @@
 //!         Some(format!("CallCenterAgent/1.0 ({})", transport)),
 //!         "192.168.1.0/24".to_string(),
 //!     )?;
-//!     
-//!     println!("Agent {} registered via {}: {} seconds", 
+//!
+//!     println!("Agent {} registered via {}: {} seconds",
 //!              aor, transport, response.expires);
 //! }
-//! 
+//!
 //! // List all active registrations
 //! let active_registrations = registrar.list_registrations();
 //! println!("\n📋 Active Registrations ({}):", active_registrations.len());
-//! 
+//!
 //! for (aor, registration) in active_registrations {
-//!     println!("  {} -> {} ({})", 
+//!     println!("  {} -> {} ({})",
 //!              aor, registration.contact_uri, registration.transport);
-//!     
+//!
 //!     if let Some(ua) = &registration.user_agent {
 //!         println!("    User-Agent: {}", ua);
 //!     }
@@ -156,32 +156,32 @@
 //! ```rust
 //! use rvoip_call_engine::agent::registration::SipRegistrar;
 //! use std::time::Duration;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registrar = SipRegistrar::new();
-//! 
+//!
 //! // Simulate registration monitoring loop
 //! loop {
 //!     // Clean up expired registrations
 //!     let before_count = registrar.list_registrations().len();
 //!     registrar.cleanup_expired();
 //!     let after_count = registrar.list_registrations().len();
-//!     
+//!
 //!     if before_count > after_count {
-//!         println!("🧹 Cleaned up {} expired registrations", 
+//!         println!("🧹 Cleaned up {} expired registrations",
 //!                  before_count - after_count);
 //!     }
-//!     
+//!
 //!     // Check registration health
 //!     let registrations = registrar.list_registrations();
 //!     for (aor, reg) in registrations {
 //!         let remaining = reg.expires_at.saturating_duration_since(std::time::Instant::now());
-//!         
+//!
 //!         if remaining < Duration::from_secs(300) { // Less than 5 minutes
 //!             println!("⚠️ Registration for {} expires soon: {:?}", aor, remaining);
 //!         }
 //!     }
-//!     
+//!
 //!     // Wait before next check
 //!     tokio::time::sleep(Duration::from_secs(60)).await;
 //!     break; // For example purposes
@@ -194,10 +194,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::registration::SipRegistrar;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registrar = SipRegistrar::new();
-//! 
+//!
 //! // Register an agent
 //! registrar.process_register_simple(
 //!     "sip:support@call-center.com",
@@ -206,13 +206,13 @@
 //!     None,
 //!     "10.0.1.50:5060".to_string(),
 //! )?;
-//! 
+//!
 //! // Resolve contact for routing
 //! if let Some(registration) = registrar.get_registration("sip:support@call-center.com") {
 //!     println!("📍 Routing call to: {}", registration.contact_uri);
 //!     println!("   Transport: {}", registration.transport);
 //!     println!("   Remote: {}", registration.remote_addr);
-//!     
+//!
 //!     // Reverse lookup - find AOR by contact
 //!     if let Some(aor) = registrar.find_aor_by_contact(&registration.contact_uri) {
 //!         println!("   Reverse lookup: {} -> {}", registration.contact_uri, aor);
@@ -228,10 +228,10 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::agent::registration::{SipRegistrar, RegistrationStatus};
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut registrar = SipRegistrar::new();
-//! 
+//!
 //! // First register an agent
 //! registrar.process_register_simple(
 //!     "sip:temp@call-center.com",
@@ -240,9 +240,9 @@
 //!     Some("TempAgent/1.0".to_string()),
 //!     "192.168.1.200:5060".to_string(),
 //! )?;
-//! 
+//!
 //! println!("Agent registered");
-//! 
+//!
 //! // Later, agent wants to de-register
 //! let deregister_response = registrar.process_register_simple(
 //!     "sip:temp@call-center.com",
@@ -251,7 +251,7 @@
 //!     Some("TempAgent/1.0".to_string()),
 //!     "192.168.1.200:5060".to_string(),
 //! )?;
-//! 
+//!
 //! match deregister_response.status {
 //!     RegistrationStatus::Removed => {
 //!         println!("✅ Agent successfully de-registered");
@@ -260,7 +260,7 @@
 //!         println!("⚠️ Unexpected de-registration response");
 //!     }
 //! }
-//! 
+//!
 //! // Verify agent is no longer registered
 //! assert!(registrar.get_registration("sip:temp@call-center.com").is_none());
 //! # Ok(())
@@ -288,19 +288,19 @@ const MIN_EXPIRY: Duration = Duration::from_secs(60);
 pub struct Registration {
     /// Agent ID (typically derived from AOR)
     pub agent_id: String,
-    
+
     /// Contact URI where the agent can be reached (as string)
     pub contact_uri: String,
-    
+
     /// When this registration expires
     pub expires_at: Instant,
-    
+
     /// User agent string (softphone info)
     pub user_agent: Option<String>,
-    
+
     /// Transport used (UDP, TCP, TLS, WS, WSS)
     pub transport: String,
-    
+
     /// Remote IP address
     pub remote_addr: String,
 }
@@ -325,7 +325,7 @@ pub struct Registration {
 pub struct SipRegistrar {
     /// Active registrations indexed by AOR (Address of Record)
     registrations: HashMap<String, Registration>,
-    
+
     /// Reverse lookup: contact URI -> AOR
     contact_to_aor: HashMap<String, String>,
 }
@@ -341,7 +341,7 @@ impl SipRegistrar {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::registration::SipRegistrar;
-    /// 
+    ///
     /// let registrar = SipRegistrar::new();
     /// println!("SIP registrar initialized");
     /// ```
@@ -351,7 +351,7 @@ impl SipRegistrar {
             contact_to_aor: HashMap::new(),
         }
     }
-    
+
     /// Process a REGISTER request with simplified string-based interface
     ///
     /// Processes a SIP REGISTER request using simplified string parameters instead
@@ -375,10 +375,10 @@ impl SipRegistrar {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::registration::SipRegistrar;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registrar = SipRegistrar::new();
-    /// 
+    ///
     /// // Initial registration
     /// let response = registrar.process_register_simple(
     ///     "sip:alice@call-center.com",
@@ -387,9 +387,9 @@ impl SipRegistrar {
     ///     Some("MySoftphone/1.0".to_string()),
     ///     "192.168.1.100:5060".to_string(),
     /// )?;
-    /// 
+    ///
     /// println!("Registration expires in {} seconds", response.expires);
-    /// 
+    ///
     /// // Registration refresh
     /// let refresh_response = registrar.process_register_simple(
     ///     "sip:alice@call-center.com",
@@ -398,7 +398,7 @@ impl SipRegistrar {
     ///     Some("MySoftphone/1.0".to_string()),
     ///     "192.168.1.100:5060".to_string(),
     /// )?;
-    /// 
+    ///
     /// // De-registration
     /// let dereg_response = registrar.process_register_simple(
     ///     "sip:alice@call-center.com",
@@ -421,7 +421,7 @@ impl SipRegistrar {
         let expires_duration = expires
             .map(|e| Duration::from_secs(e as u64))
             .unwrap_or(DEFAULT_EXPIRY);
-        
+
         // Handle de-registration (expires=0)
         if expires_duration.is_zero() {
             info!("📤 De-registration request for {}", aor);
@@ -431,7 +431,7 @@ impl SipRegistrar {
                 expires: 0,
             });
         }
-        
+
         // Validate expiry time
         let expires_duration = if expires_duration < MIN_EXPIRY {
             warn!("Registration expiry too short, using minimum: {:?}", MIN_EXPIRY);
@@ -439,7 +439,7 @@ impl SipRegistrar {
         } else {
             expires_duration
         };
-        
+
         // Extract transport from contact URI if present (simple parsing)
         let transport = if contact_uri.contains("transport=tcp") {
             "TCP".to_string()
@@ -452,7 +452,7 @@ impl SipRegistrar {
         } else {
             "UDP".to_string()
         };
-        
+
         // Create registration entry
         let registration = Registration {
             agent_id: aor.to_string(), // Could be parsed from AOR
@@ -462,23 +462,23 @@ impl SipRegistrar {
             transport,
             remote_addr,
         };
-        
+
         // Store registration
         let is_refresh = self.registrations.contains_key(aor);
         self.registrations.insert(aor.to_string(), registration);
         self.contact_to_aor.insert(contact_uri.to_string(), aor.to_string());
-        
-        info!("✅ {} registration for {}: expires in {:?}", 
+
+        info!("✅ {} registration for {}: expires in {:?}",
               if is_refresh { "Refreshed" } else { "New" },
-              aor, 
+              aor,
               expires_duration);
-        
+
         Ok(RegistrationResponse {
             status: if is_refresh { RegistrationStatus::Refreshed } else { RegistrationStatus::Created },
             expires: expires_duration.as_secs() as u32,
         })
     }
-    
+
     /// Remove a registration
     ///
     /// Removes an active registration for the specified Address of Record.
@@ -493,18 +493,18 @@ impl SipRegistrar {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::registration::SipRegistrar;
-    /// 
+    ///
     /// let mut registrar = SipRegistrar::new();
-    /// 
+    ///
     /// // Register then remove
     /// # let _ = registrar.process_register_simple(
     /// #     "sip:test@example.com",
-    /// #     "sip:test@192.168.1.1:5060", 
+    /// #     "sip:test@192.168.1.1:5060",
     /// #     Some(600),
     /// #     None,
     /// #     "192.168.1.1:5060".to_string(),
     /// # );
-    /// 
+    ///
     /// registrar.remove_registration("sip:test@example.com");
     /// assert!(registrar.get_registration("sip:test@example.com").is_none());
     /// ```
@@ -514,7 +514,7 @@ impl SipRegistrar {
             info!("🗑️ Removed registration for {}", aor);
         }
     }
-    
+
     /// Get registration for an AOR
     ///
     /// Retrieves the active registration for the specified Address of Record.
@@ -532,10 +532,10 @@ impl SipRegistrar {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::registration::SipRegistrar;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registrar = SipRegistrar::new();
-    /// 
+    ///
     /// # registrar.process_register_simple(
     /// #     "sip:alice@example.com",
     /// #     "sip:alice@192.168.1.100:5060",
@@ -543,7 +543,7 @@ impl SipRegistrar {
     /// #     None,
     /// #     "192.168.1.100:5060".to_string(),
     /// # )?;
-    /// 
+    ///
     /// if let Some(registration) = registrar.get_registration("sip:alice@example.com") {
     ///     println!("Agent can be reached at: {}", registration.contact_uri);
     ///     println!("Using transport: {}", registration.transport);
@@ -557,7 +557,7 @@ impl SipRegistrar {
         self.registrations.get(aor)
             .filter(|reg| reg.expires_at > Instant::now())
     }
-    
+
     /// Find AOR by contact URI
     ///
     /// Performs reverse lookup to find the Address of Record associated with
@@ -576,10 +576,10 @@ impl SipRegistrar {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::SipRegistrar;
-    /// 
+    ///
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut registrar = SipRegistrar::new();
-    /// 
+    ///
     /// # registrar.process_register_simple(
     /// #     "sip:bob@example.com",
     /// #     "sip:bob@agent-pc.local:5060",
@@ -587,7 +587,7 @@ impl SipRegistrar {
     /// #     None,
     /// #     "10.0.1.50:5060".to_string(),
     /// # )?;
-    /// 
+    ///
     /// // Reverse lookup from contact to AOR
     /// if let Some(aor) = registrar.find_aor_by_contact("sip:bob@agent-pc.local:5060") {
     ///     println!("Contact belongs to AOR: {}", aor);
@@ -598,7 +598,7 @@ impl SipRegistrar {
     pub fn find_aor_by_contact(&self, contact_uri: &str) -> Option<&str> {
         self.contact_to_aor.get(contact_uri).map(|s| s.as_str())
     }
-    
+
     /// Clean up expired registrations
     ///
     /// Removes all registrations that have passed their expiration time.
@@ -609,12 +609,12 @@ impl SipRegistrar {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::SipRegistrar;
-    /// 
+    ///
     /// let mut registrar = SipRegistrar::new();
-    /// 
+    ///
     /// // In a background task or periodic cleanup
     /// registrar.cleanup_expired();
-    /// 
+    ///
     /// println!("Expired registrations cleaned up");
     /// ```
     pub fn cleanup_expired(&mut self) {
@@ -624,13 +624,13 @@ impl SipRegistrar {
             .filter(|(_, reg)| reg.expires_at <= now)
             .map(|(aor, _)| aor.clone())
             .collect();
-        
+
         for aor in expired {
             self.remove_registration(&aor);
             warn!("⏰ Expired registration removed: {}", aor);
         }
     }
-    
+
     /// Get all active registrations
     ///
     /// Returns a list of all currently active (non-expired) registrations.
@@ -644,14 +644,14 @@ impl SipRegistrar {
     ///
     /// ```rust
     /// use rvoip_call_engine::agent::SipRegistrar;
-    /// 
+    ///
     /// let registrar = SipRegistrar::new();
-    /// 
+    ///
     /// let active_registrations = registrar.list_registrations();
-    /// 
+    ///
     /// println!("Active registrations: {}", active_registrations.len());
     /// for (aor, registration) in active_registrations {
-    ///     println!("  {} -> {} ({})", 
+    ///     println!("  {} -> {} ({})",
     ///              aor, registration.contact_uri, registration.transport);
     /// }
     /// ```
@@ -693,11 +693,11 @@ pub enum RegistrationStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_basic_registration() {
         let mut registrar = SipRegistrar::new();
-        
+
         // Process registration with simplified interface
         let response = registrar.process_register_simple(
             "sip:alice@example.com",
@@ -706,12 +706,12 @@ mod tests {
             Some("MySoftphone/1.0".to_string()),
             "192.168.1.100:5060".to_string(),
         ).unwrap();
-        
+
         assert!(matches!(response.status, RegistrationStatus::Created));
         assert_eq!(response.expires, 3600);
-        
+
         // Verify registration exists
         let reg = registrar.get_registration("sip:alice@example.com").unwrap();
         assert_eq!(reg.contact_uri, "sip:alice@192.168.1.100:5060");
     }
-} 
+}

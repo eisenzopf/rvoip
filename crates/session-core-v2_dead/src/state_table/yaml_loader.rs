@@ -1,5 +1,5 @@
 //! YAML-based state table loader for session coordination
-//! 
+//!
 //! This module loads state tables from YAML files, focusing on coordination
 //! between dialog-core and media-core layers without duplicating their logic.
 
@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use tracing::{info, debug};
 
 use super::{
-    StateTable, StateTableBuilder, StateKey, Transition, 
-    Role, EventType, Guard, Action, 
+    StateTable, StateTableBuilder, StateKey, Transition,
+    Role, EventType, Guard, Action,
     ConditionUpdates, EventTemplate, Condition, SessionId
 };
 use crate::errors::{Result, SessionError};
@@ -22,19 +22,19 @@ use crate::types::{CallState, FailureReason};
 pub struct YamlStateTable {
     /// Version of the state table format
     pub version: String,
-    
+
     /// Metadata about the state table
     #[serde(default)]
     pub metadata: YamlMetadata,
-    
+
     /// List of valid states
     #[serde(default)]
     pub states: Vec<YamlStateDefinition>,
-    
+
     /// List of coordination conditions
     #[serde(default)]
     pub conditions: Vec<YamlConditionDefinition>,
-    
+
     /// List of state transitions
     pub transitions: Vec<YamlTransition>,
 }
@@ -45,11 +45,11 @@ pub struct YamlMetadata {
     /// Description of the state table's purpose
     #[serde(default)]
     pub description: String,
-    
+
     /// Author of the state table
     #[serde(default)]
     pub author: String,
-    
+
     /// Date of last modification
     #[serde(default)]
     pub date: String,
@@ -60,7 +60,7 @@ pub struct YamlMetadata {
 pub struct YamlStateDefinition {
     /// Name of the state
     pub name: String,
-    
+
     /// Description of what this state represents
     #[serde(default)]
     pub description: String,
@@ -71,11 +71,11 @@ pub struct YamlStateDefinition {
 pub struct YamlConditionDefinition {
     /// Name of the condition
     pub name: String,
-    
+
     /// Description of what this condition tracks
     #[serde(default)]
     pub description: String,
-    
+
     /// Default value
     #[serde(default)]
     pub default: bool,
@@ -86,33 +86,33 @@ pub struct YamlConditionDefinition {
 pub struct YamlTransition {
     /// Role this transition applies to (UAC, UAS, or Both)
     pub role: String,
-    
+
     /// Current state
     pub state: String,
-    
+
     /// Event that triggers this transition
     pub event: YamlEvent,
-    
+
     /// Guards that must be satisfied
     #[serde(default)]
     pub guards: Vec<YamlGuard>,
-    
+
     /// Actions to execute
     #[serde(default)]
     pub actions: Vec<YamlAction>,
-    
+
     /// Next state to transition to
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_state: Option<String>,
-    
+
     /// Condition updates to apply
     #[serde(default, skip_serializing_if = "YamlConditionUpdates::is_empty")]
     pub conditions: YamlConditionUpdates,
-    
+
     /// Events to publish
     #[serde(default)]
     pub publish: Vec<String>,
-    
+
     /// Description of this transition
     #[serde(default)]
     pub description: String,
@@ -124,12 +124,12 @@ pub struct YamlTransition {
 pub enum YamlEvent {
     /// Simple event (just a string)
     Simple(String),
-    
+
     /// Complex event with type and parameters
     Complex {
         #[serde(rename = "type")]
         event_type: String,
-        
+
         #[serde(flatten)]
         parameters: HashMap<String, serde_yaml::Value>,
     },
@@ -141,12 +141,12 @@ pub enum YamlEvent {
 pub enum YamlGuard {
     /// Simple guard (just a string)
     Simple(String),
-    
+
     /// Complex guard with parameters
     Complex {
         #[serde(rename = "type")]
         guard_type: String,
-        
+
         #[serde(flatten)]
         parameters: HashMap<String, serde_yaml::Value>,
     },
@@ -158,12 +158,12 @@ pub enum YamlGuard {
 pub enum YamlAction {
     /// Simple action (just a string)
     Simple(String),
-    
+
     /// Complex action with parameters
     Complex {
         #[serde(rename = "type")]
         action_type: String,
-        
+
         #[serde(flatten)]
         parameters: HashMap<String, serde_yaml::Value>,
     },
@@ -174,17 +174,17 @@ pub enum YamlAction {
 pub struct YamlConditionUpdates {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dialog_established: Option<bool>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub media_session_ready: Option<bool>,
-    
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sdp_negotiated: Option<bool>,
 }
 
 impl YamlConditionUpdates {
     fn is_empty(&self) -> bool {
-        self.dialog_established.is_none() 
+        self.dialog_established.is_none()
             && self.media_session_ready.is_none()
             && self.sdp_negotiated.is_none()
     }
@@ -197,7 +197,7 @@ const DEFAULT_STATE_TABLE_YAML: &str = include_str!("../../state_tables/default.
 pub struct YamlTableLoader {
     /// Builder for constructing the state table
     builder: StateTableBuilder,
-    
+
     /// Loaded YAML data
     yaml_data: Option<YamlStateTable>,
 }
@@ -210,12 +210,12 @@ impl YamlTableLoader {
             yaml_data: None,
         }
     }
-    
+
     /// Load the default embedded state table
     pub fn load_default() -> Result<StateTable> {
         Self::load_embedded_default()
     }
-    
+
     /// Load the embedded default state table (always succeeds)
     pub fn load_embedded_default() -> Result<StateTable> {
         let mut loader = Self::new();
@@ -223,93 +223,93 @@ impl YamlTableLoader {
             .expect("Embedded default state table must be valid");
         loader.build()
     }
-    
+
     /// Load state table from a file
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<StateTable> {
         let mut loader = Self::new();
-        
+
         let yaml_content = fs::read_to_string(path.as_ref())
             .map_err(|e| SessionError::InternalError(
                 format!("Failed to read YAML file: {}", e)
             ))?;
-        
+
         loader.load_from_string(&yaml_content)?;
         loader.build()
     }
-    
+
     /// Load state table from a string
     pub fn load_from_string(&mut self, yaml_content: &str) -> Result<()> {
         let yaml_data: YamlStateTable = serde_yaml::from_str(yaml_content)
             .map_err(|e| SessionError::InternalError(
                 format!("Failed to parse YAML: {}", e)
             ))?;
-        
+
         // Validate version - accept both 1.x and 2.x versions
         if !yaml_data.version.starts_with("1.") && !yaml_data.version.starts_with("2.") {
             return Err(SessionError::InternalError(
                 format!("Unsupported state table version: {} (expected 1.x or 2.x)", yaml_data.version)
             ));
         }
-        
-        info!("Loaded state table version {} with {} transitions", 
+
+        info!("Loaded state table version {} with {} transitions",
               yaml_data.version, yaml_data.transitions.len());
-        
+
         self.yaml_data = Some(yaml_data);
         Ok(())
     }
-    
+
     /// Merge another YAML file into the current table
     pub fn merge_file<P: AsRef<Path>>(&mut self, path: P) -> Result<&mut Self> {
         let yaml_content = fs::read_to_string(path.as_ref())
             .map_err(|e| SessionError::InternalError(
                 format!("Failed to read YAML file for merge: {}", e)
             ))?;
-        
+
         self.merge_string(&yaml_content)?;
         Ok(self)
     }
-    
+
     /// Merge YAML content into the current table
     pub fn merge_string(&mut self, yaml_content: &str) -> Result<()> {
         let merge_data: YamlStateTable = serde_yaml::from_str(yaml_content)
             .map_err(|e| SessionError::InternalError(
                 format!("Failed to parse YAML for merge: {}", e)
             ))?;
-        
+
         if let Some(ref mut yaml_data) = self.yaml_data {
             let num_transitions = merge_data.transitions.len();
             // Merge transitions
             yaml_data.transitions.extend(merge_data.transitions);
-            
+
             // Merge states (avoiding duplicates)
             for state in merge_data.states {
                 if !yaml_data.states.iter().any(|s| s.name == state.name) {
                     yaml_data.states.push(state);
                 }
             }
-            
+
             // Merge conditions (avoiding duplicates)
             for condition in merge_data.conditions {
                 if !yaml_data.conditions.iter().any(|c| c.name == condition.name) {
                     yaml_data.conditions.push(condition);
                 }
             }
-            
+
             info!("Merged {} transitions into state table", num_transitions);
         } else {
             self.yaml_data = Some(merge_data);
         }
-        
+
         Ok(())
     }
-    
+
     /// Build the final state table from loaded YAML
     pub fn build(mut self) -> Result<StateTable> {
         let yaml_data = self.yaml_data.take()
             .ok_or_else(|| SessionError::InternalError(
                 "No YAML data loaded".to_string()
             ))?;
-        
+
         // Process each transition
         for yaml_transition in yaml_data.transitions {
             match self.convert_transition(yaml_transition) {
@@ -337,10 +337,10 @@ impl YamlTableLoader {
                 Err(e) => return Err(e),
             }
         }
-        
+
         Ok(self.builder.build())
     }
-    
+
     /// Convert a YAML transition to internal format
     /// Returns a special error for wildcard transitions
     fn convert_transition(&self, yaml: YamlTransition) -> Result<(StateKey, Transition)> {
@@ -354,50 +354,50 @@ impl YamlTableLoader {
                 format!("Invalid role: {}", yaml.role)
             )),
         };
-        
+
         // Check if this is a wildcard state
         let is_wildcard = yaml.state == "Any" || yaml.state == "*";
-        
+
         // Convert state (use Idle as placeholder for wildcards)
         let state = if is_wildcard {
             CallState::Idle // Placeholder, won't be used
         } else {
             self.parse_call_state(&yaml.state)?
         };
-        
+
         // Convert event
         let event = self.parse_event(yaml.event)?;
-        
+
         // Create state key
         let key = StateKey { role, state, event: event.clone() };
-        
+
         // Convert guards
         let guards = yaml.guards.into_iter()
             .map(|g| self.parse_guard(g))
             .collect::<Result<Vec<_>>>()?;
-        
+
         // Convert actions
         let actions = yaml.actions.into_iter()
             .map(|a| self.parse_action(a))
             .collect::<Result<Vec<_>>>()?;
-        
+
         // Convert next state
         let next_state = yaml.next_state
             .map(|s| self.parse_call_state(&s))
             .transpose()?;
-        
+
         // Convert condition updates
         let condition_updates = ConditionUpdates {
             dialog_established: yaml.conditions.dialog_established,
             media_session_ready: yaml.conditions.media_session_ready,
             sdp_negotiated: yaml.conditions.sdp_negotiated,
         };
-        
+
         // Convert publish events
         let publish_events = yaml.publish.into_iter()
             .map(|e| self.parse_event_template(&e))
             .collect::<Result<Vec<_>>>()?;
-        
+
         // Create transition
         let transition = Transition {
             guards,
@@ -406,22 +406,22 @@ impl YamlTableLoader {
             condition_updates,
             publish_events,
         };
-        
+
         // If this is a wildcard, return a special error that includes the transition data
         if is_wildcard {
             // We'll use a special error to signal wildcard transitions
             return Err(SessionError::InternalError(
-                format!("WILDCARD_TRANSITION:{}:{}:{}", 
+                format!("WILDCARD_TRANSITION:{}:{}:{}",
                     serde_json::to_string(&role).unwrap_or_default(),
                     serde_json::to_string(&event).unwrap_or_default(),
                     serde_json::to_string(&transition).unwrap_or_default()
                 )
             ));
         }
-        
+
         Ok((key, transition))
     }
-    
+
     /// Parse a call state from string
     fn parse_call_state(&self, state: &str) -> Result<CallState> {
         match state {
@@ -441,21 +441,21 @@ impl YamlTableLoader {
             "Muted" => Ok(CallState::Muted),
             "ConsultationCall" => Ok(CallState::ConsultationCall),
             "Cancelled" => Ok(CallState::Cancelled),
-            
+
             // Registration states
             "Registering" => Ok(CallState::Registering),
             "Registered" => Ok(CallState::Registered),
             "Unregistering" => Ok(CallState::Unregistering),
-            
+
             // Subscription/Presence states
             "Subscribing" => Ok(CallState::Subscribing),
             "Subscribed" => Ok(CallState::Subscribed),
             "Publishing" => Ok(CallState::Publishing),
-            
+
             // Authentication and routing states
             "Authenticating" => Ok(CallState::Authenticating),
             "Messaging" => Ok(CallState::Messaging),
-            
+
             _ if state.starts_with("Failed") => {
                 // Parse Failed(reason) states
                 Ok(CallState::Failed(FailureReason::Other))
@@ -465,7 +465,7 @@ impl YamlTableLoader {
             )),
         }
     }
-    
+
     /// Parse an event from YAML representation
     fn parse_event(&self, event: YamlEvent) -> Result<EventType> {
         match event {
@@ -495,7 +495,7 @@ impl YamlTableLoader {
             }
         }
     }
-    
+
     /// Parse an event by name
     fn parse_event_by_name(&self, name: &str) -> Result<EventType> {
         match name {
@@ -506,36 +506,36 @@ impl YamlTableLoader {
             "HangupCall" => Ok(EventType::HangupCall),
             "HoldCall" => Ok(EventType::HoldCall),
             "ResumeCall" => Ok(EventType::ResumeCall),
-            
+
             // Dialog events (abstracted)
             "DialogProgress" | "Dialog180Ringing" => Ok(EventType::Dialog180Ringing),
             "Dialog183SessionProgress" => Ok(EventType::Dialog183SessionProgress),
             "DialogEstablished" | "Dialog200OK" => Ok(EventType::Dialog200OK),
             "DialogFailed" => Ok(EventType::Dialog4xxFailure(400)),
             "DialogTerminated" => Ok(EventType::DialogBYE),
-            
+
             // Gateway-specific BYE events
             "InboundBYE" | "OutboundBYE" => Ok(EventType::DialogBYE),
-            "IncomingCall" => Ok(EventType::IncomingCall { 
-                from: String::new(), 
-                sdp: None 
+            "IncomingCall" => Ok(EventType::IncomingCall {
+                from: String::new(),
+                sdp: None
             }),
-            
+
             // Media events
             "MediaReady" => Ok(EventType::MediaEvent("media_session_created".to_string())),
             "MediaFlowing" => Ok(EventType::MediaEvent("media_flow_established".to_string())),
             "MediaFailed" => Ok(EventType::MediaEvent("media_failed".to_string())),
             "SDPNegotiated" => Ok(EventType::MediaEvent("sdp_negotiated".to_string())),
-            
+
             // Internal coordination
             "CheckReadiness" => Ok(EventType::CheckConditions),
             "PublishEstablished" => Ok(EventType::PublishCallEstablished),
-            
+
             // Bridge events
-            "BridgeToSession" | "BridgeSessions" => Ok(EventType::BridgeSessions { 
-                other_session: SessionId::new() 
+            "BridgeToSession" | "BridgeSessions" => Ok(EventType::BridgeSessions {
+                other_session: SessionId::new()
             }),
-            
+
             // Transfer events
             "BlindTransfer" => Ok(EventType::BlindTransfer { target: String::new() }),
             "TransferRequested" => Ok(EventType::TransferRequested {
@@ -575,7 +575,7 @@ impl YamlTableLoader {
             _ => Ok(EventType::MediaEvent(name.to_string())),
         }
     }
-    
+
     /// Parse a guard from YAML representation
     fn parse_guard(&self, guard: YamlGuard) -> Result<Guard> {
         match guard {
@@ -585,7 +585,7 @@ impl YamlTableLoader {
             }
         }
     }
-    
+
     /// Parse a guard by name
     fn parse_guard_by_name(&self, name: &str) -> Result<Guard> {
         match name {
@@ -607,7 +607,7 @@ impl YamlTableLoader {
             }
         }
     }
-    
+
     /// Parse an action from YAML representation
     fn parse_action(&self, action: YamlAction) -> Result<Action> {
         match action {
@@ -632,7 +632,7 @@ impl YamlTableLoader {
                         let value = parameters.get("value")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(true);
-                        
+
                         let cond = match condition {
                             "dialog_established" => Condition::DialogEstablished,
                             "media_session_ready" => Condition::MediaSessionReady,
@@ -641,7 +641,7 @@ impl YamlTableLoader {
                                 format!("Invalid condition: {}", condition)
                             )),
                         };
-                        
+
                         Ok(Action::SetCondition(cond, value))
                     }
                     _ => self.parse_action_by_name(&action_type),
@@ -649,7 +649,7 @@ impl YamlTableLoader {
             }
         }
     }
-    
+
     /// Parse an action by name
     fn parse_action_by_name(&self, name: &str) -> Result<Action> {
         match name {
@@ -661,7 +661,7 @@ impl YamlTableLoader {
             "SendBYE" => Ok(Action::SendBYE),
             "SendCANCEL" => Ok(Action::SendCANCEL),
             "SendReINVITE" => Ok(Action::SendReINVITE),
-            
+
             // Media actions
             "CreateMediaSession" => Ok(Action::CreateMediaSession),
             "StartMediaSession" => Ok(Action::StartMediaSession),
@@ -670,16 +670,16 @@ impl YamlTableLoader {
             "NegotiateSDPAsUAS" => Ok(Action::NegotiateSDPAsUAS),
             "SuspendMedia" => Ok(Action::Custom("SuspendMedia".to_string())),
             "ResumeMedia" => Ok(Action::Custom("ResumeMedia".to_string())),
-            
+
             // State updates
             "StoreLocalSDP" => Ok(Action::StoreLocalSDP),
             "StoreRemoteSDP" => Ok(Action::StoreRemoteSDP),
             "StoreNegotiatedConfig" => Ok(Action::StoreNegotiatedConfig),
-            
+
             // Callbacks
             "TriggerCallEstablished" | "PublishEstablished" => Ok(Action::TriggerCallEstablished),
             "TriggerCallTerminated" => Ok(Action::TriggerCallTerminated),
-            
+
             // Cleanup
             "StartDialogCleanup" => Ok(Action::StartDialogCleanup),
             "StartMediaCleanup" => Ok(Action::StartMediaCleanup),
@@ -726,7 +726,7 @@ impl YamlTableLoader {
             }
         }
     }
-    
+
     /// Parse an event template for publishing
     fn parse_event_template(&self, name: &str) -> Result<EventTemplate> {
         match name {
@@ -755,7 +755,7 @@ impl Default for YamlTableLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_parse_simple_yaml() {
         let yaml = r#"
@@ -770,21 +770,21 @@ transitions:
     publish:
       - SessionCreated
 "#;
-        
+
         let mut loader = YamlTableLoader::new();
         loader.load_from_string(yaml).expect("Failed to load YAML");
         let table = loader.build().expect("Failed to build table");
-        
+
         // Verify the transition was added
         let key = StateKey {
             role: Role::UAC,
             state: CallState::Idle,
             event: EventType::MakeCall { target: String::new() },
         };
-        
+
         assert!(table.has_transition(&key));
     }
-    
+
     #[test]
     fn test_complex_event_parsing() {
         let yaml = r#"
@@ -797,12 +797,12 @@ transitions:
       target: "sip:bob@example.com"
     next_state: Initiating
 "#;
-        
+
         let mut loader = YamlTableLoader::new();
         loader.load_from_string(yaml).expect("Failed to load YAML");
         loader.build().expect("Failed to build table");
     }
-    
+
     #[test]
     fn test_condition_updates() {
         let yaml = r#"
@@ -816,17 +816,17 @@ transitions:
       media_session_ready: true
       sdp_negotiated: true
 "#;
-        
+
         let mut loader = YamlTableLoader::new();
         loader.load_from_string(yaml).expect("Failed to load YAML");
         let table = loader.build().expect("Failed to build table");
-        
+
         let key = StateKey {
             role: Role::Both,
             state: CallState::Active,
             event: EventType::CheckConditions,
         };
-        
+
         let transition = table.get_transition(&key).expect("Transition not found");
         assert!(transition.condition_updates.dialog_established.unwrap_or(false));
     }

@@ -1,5 +1,5 @@
 //! Session Registry for mapping between SessionId, DialogId, and MediaSessionId
-//! 
+//!
 //! This module provides bidirectional mappings between the different identifiers
 //! used across the session-core subsystems. It ensures that we can efficiently
 //! look up sessions by any of their associated IDs.
@@ -74,7 +74,7 @@ impl SessionRegistry {
         if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
             self.dialog_to_session.remove(&dialog_id.1);
         }
-        
+
         // Remove media mappings
         if let Some(media_id) = self.session_to_media.remove(session_id) {
             self.media_to_session.remove(&media_id.1);
@@ -83,7 +83,7 @@ impl SessionRegistry {
 
     /// Check if a session exists in the registry
     pub fn contains_session(&self, session_id: &SessionId) -> bool {
-        self.session_to_dialog.contains_key(session_id) || 
+        self.session_to_dialog.contains_key(session_id) ||
         self.session_to_media.contains_key(session_id)
     }
 
@@ -100,12 +100,12 @@ impl SessionRegistry {
         self.media_to_session.clear();
         self.pending_incoming_calls.clear();
     }
-    
+
     /// Store pending incoming call info
     pub fn store_pending_incoming_call(&self, session_id: SessionId, info: IncomingCallInfo) {
         self.pending_incoming_calls.insert(session_id, info);
     }
-    
+
     /// Get and remove pending incoming call info
     pub fn take_pending_incoming_call(&self, session_id: &SessionId) -> Option<IncomingCallInfo> {
         self.pending_incoming_calls.remove(session_id).map(|(_, info)| info)
@@ -168,12 +168,12 @@ mod tests {
     #[test]
     fn test_session_count() {
         let registry = SessionRegistry::new();
-        
+
         assert_eq!(registry.session_count(), 0);
 
         let session1 = SessionId::new();
         let session2 = SessionId::new();
-        
+
         registry.map_dialog(session1.clone(), DialogId::new());
         registry.map_dialog(session2.clone(), DialogId::new());
 
@@ -184,7 +184,7 @@ mod tests {
     fn test_clear() {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
-        
+
         registry.map_dialog(session_id.clone(), DialogId::new());
         registry.map_media(session_id.clone(), MediaSessionId(uuid::Uuid::new_v4().to_string()));
 

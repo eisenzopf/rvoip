@@ -8,32 +8,32 @@ use std::str::FromStr;
 
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Tutorial 07: Creating SDP Messages\n");
-    
+
     // Example 1: Multi-Stream SDP
     create_multi_stream_sdp()?;
-    
+
     // Example 2: SDP with Bandwidth and QoS Parameters
     create_bandwidth_sdp()?;
-    
+
     // Example 3: WebRTC-specific SDP
     create_webrtc_sdp()?;
-    
+
     // Example 4: Simulcast SDP
     create_simulcast_sdp()?;
-    
+
     // Example 5: Creating an SDP Answer from an Offer
     create_sdp_answer()?;
-    
+
     // Example 6: Error Handling in SDP Creation
     demonstrate_error_handling()?;
-    
+
     Ok(())
 }
 
 // Example 1: Creating an SDP with multiple audio and video streams
 fn create_multi_stream_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 1: Multi-Stream SDP\n");
-    
+
     let sdp = SdpBuilder::new("Multi-Stream Session")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
         .connection("IN", "IP4", "alice.example.com")
@@ -71,17 +71,17 @@ fn create_multi_stream_sdp() -> Result<(), Box<dyn Error>> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     println!("Multi-Stream SDP:");
     println!("{}\n", sdp);
-    
+
     Ok(())
 }
 
 // Example 2: Creating an SDP with bandwidth and QoS parameters
 fn create_bandwidth_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 2: SDP with Bandwidth and QoS Parameters\n");
-    
+
     let sdp = SdpBuilder::new("Session with Bandwidth")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
         .connection("IN", "IP4", "alice.example.com")
@@ -102,17 +102,17 @@ fn create_bandwidth_sdp() -> Result<(), Box<dyn Error>> {
             .bandwidth("TIAS", 896000)  // Same in Transport Independent Application Specific units
             .done()
         .build()?;
-    
+
     println!("SDP with Bandwidth Parameters:");
     println!("{}\n", sdp);
-    
+
     Ok(())
 }
 
 // Example 3: Creating a WebRTC-specific SDP with ICE, DTLS, and RTCP feedback
 fn create_webrtc_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 3: WebRTC-specific SDP\n");
-    
+
     let sdp = SdpBuilder::new("WebRTC Session")
         .origin("webrtc", "2890844527", "1", "IN", "IP4", "0.0.0.0")
         .connection("IN", "IP4", "0.0.0.0")
@@ -155,17 +155,17 @@ fn create_webrtc_sdp() -> Result<(), Box<dyn Error>> {
             .extmap(2, None::<String>, "urn:ietf:params:rtp-hdrext:toffset", None::<String>)
             .done()
         .build()?;
-    
+
     println!("WebRTC SDP:");
     println!("{}\n", sdp);
-    
+
     Ok(())
 }
 
 // Example 4: Creating an SDP with simulcast capabilities
 fn create_simulcast_sdp() -> Result<(), Box<dyn Error>> {
     println!("Example 4: Simulcast SDP\n");
-    
+
     let sdp = SdpBuilder::new("Simulcast Session")
         .origin("alice", "2890844526", "2890844526", "IN", "IP4", "alice.example.com")
         .connection("IN", "IP4", "alice.example.com")
@@ -184,17 +184,17 @@ fn create_simulcast_sdp() -> Result<(), Box<dyn Error>> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     println!("Simulcast SDP:");
     println!("{}\n", sdp);
-    
+
     Ok(())
 }
 
 // Example 5: Creating an SDP answer from an offer
 fn create_sdp_answer() -> Result<(), Box<dyn Error>> {
     println!("Example 5: Creating an SDP Answer from an Offer\n");
-    
+
     // First, let's create an offer SDP to work with
     let offer_sdp_str = "v=0\r\n\
                         o=alice 2890844526 2890844526 IN IP4 alice.example.com\r\n\
@@ -211,13 +211,13 @@ fn create_sdp_answer() -> Result<(), Box<dyn Error>> {
                         a=rtpmap:98 VP8/90000\r\n\
                         a=fmtp:97 profile-level-id=42e01f;packetization-mode=1\r\n\
                         a=sendrecv";
-    
+
     // Parse the offer
     let offer = SdpSession::from_str(offer_sdp_str)?;
-    
+
     println!("Original Offer SDP:");
     println!("{}\n", offer);
-    
+
     // Create the answer based on the offer
     let answer = SdpBuilder::new("Answer Session")
         .origin("bob", "9876543210", "1", "IN", "IP4", "bob.example.com")
@@ -237,17 +237,17 @@ fn create_sdp_answer() -> Result<(), Box<dyn Error>> {
             .direction(MediaDirection::SendRecv)
             .done()
         .build()?;
-    
+
     println!("Answer SDP:");
     println!("{}\n", answer);
-    
+
     Ok(())
 }
 
 // Example 6: Demonstrating error handling during SDP creation
 fn demonstrate_error_handling() -> Result<(), Box<dyn Error>> {
     println!("Example 6: Error Handling in SDP Creation\n");
-    
+
     // Create an invalid SDP by omitting required fields
     let invalid_sdp_result = SdpBuilder::new("Invalid Session")
         // Missing origin
@@ -257,7 +257,7 @@ fn demonstrate_error_handling() -> Result<(), Box<dyn Error>> {
             // Missing formats
             .done()
         .build();
-    
+
     match invalid_sdp_result {
         Ok(sdp) => {
             println!("Unexpectedly created valid SDP:");
@@ -266,7 +266,7 @@ fn demonstrate_error_handling() -> Result<(), Box<dyn Error>> {
         Err(e) => {
             println!("Expected error detected:");
             println!("{}\n", e);
-            
+
             // Now fix the issues and create a valid SDP
             let valid_sdp = SdpBuilder::new("Fixed Session")
                 .origin("-", "12345", "1", "IN", "IP4", "example.com")
@@ -277,11 +277,11 @@ fn demonstrate_error_handling() -> Result<(), Box<dyn Error>> {
                     .rtpmap("0", "PCMU/8000")
                     .done()
                 .build()?;
-            
+
             println!("Fixed Valid SDP:");
             println!("{}", valid_sdp);
         }
     }
-    
+
     Ok(())
-} 
+}

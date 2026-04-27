@@ -43,4 +43,4 @@ impl Default for MediaCoordinator {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

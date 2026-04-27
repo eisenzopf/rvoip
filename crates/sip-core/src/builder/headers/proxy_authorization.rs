@@ -308,7 +308,7 @@ pub trait ProxyAuthorizationExt {
     ///     .to("Alice", "sips:alice@example.com", None)
     ///     .proxy_authorization_basic("alice", "secure-password")
     ///     .build();
-    ///     
+    ///
     /// // 2. For testing or development environments
     /// let test_request = SimpleRequestBuilder::new(Method::Register, "sip:test.local").unwrap()
     ///     .from("Test", "sip:test@test.local", None)

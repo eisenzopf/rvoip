@@ -1,5 +1,5 @@
 //! Integration tests for SIP registration functionality
-//! 
+//!
 //! Tests registration, unregistration, refresh, and error handling.
 
 use rvoip_client_core::{
@@ -50,7 +50,7 @@ async fn test_basic_registration() {
     // Verify registration
     let reg_info = client.get_registration(reg_id).await
         .expect("Failed to get registration info");
-    
+
     assert_eq!(reg_info.status, RegistrationStatus::Active);
     assert_eq!(reg_info.from_uri, config.from_uri);
     assert_eq!(reg_info.server_uri, config.server_uri);
@@ -62,7 +62,7 @@ async fn test_basic_registration() {
     // Verify unregistration
     let reg_info = client.get_registration(reg_id).await
         .expect("Failed to get registration info after unregister");
-    
+
     assert_eq!(reg_info.status, RegistrationStatus::Cancelled);
 
     client.stop().await.expect("Failed to stop client");
@@ -99,9 +99,9 @@ async fn test_registration_with_retry() {
 
     // This should fail after retries
     let result = client.register(config).await;
-    
+
     assert!(result.is_err());
-    
+
     // Check that the error is categorized correctly
     if let Err(e) = result {
         // Invalid URI errors are not recoverable - they're configuration errors
@@ -149,7 +149,7 @@ async fn test_multiple_registrations() {
 
         let reg_id = client.register(config).await
             .expect(&format!("Failed to register user{}", i));
-        
+
         reg_ids.push(reg_id);
     }
 
@@ -212,7 +212,7 @@ async fn test_registration_refresh() {
     // Verify refresh time is updated
     let reg_info = client.get_registration(reg_id).await
         .expect("Failed to get registration info");
-    
+
     assert!(reg_info.refresh_time.is_some());
     assert_eq!(reg_info.status, RegistrationStatus::Active);
 
@@ -256,17 +256,17 @@ async fn test_registration_events() {
     // Start event collection task
     let event_task = tokio::spawn(async move {
         let mut events = Vec::new();
-        
+
         while let Ok(event) = tokio::time::timeout(Duration::from_secs(5), event_rx.recv()).await {
             if let Ok(event) = event {
                 tracing::info!("Received event: {:?}", event);
-                
+
                 if let ClientEvent::RegistrationStatusChanged { info, .. } = &event {
                     events.push(info.status.clone());
                 }
             }
         }
-        
+
         events
     });
 
@@ -288,7 +288,7 @@ async fn test_registration_events() {
 
     // Check collected events
     let events = event_task.await.expect("Event task panicked");
-    
+
     // Should have received at least Active status
     assert!(events.contains(&RegistrationStatus::Active));
 }
@@ -360,7 +360,7 @@ async fn test_registration_error_categorization() {
     client.start().await.expect("Failed to start client");
 
     // Test various error scenarios
-    
+
     // 1. Invalid URI error (not a network error - it's a configuration/parsing error)
     let config = RegistrationConfig {
         server_uri: "sip:1.2.3.4:99999".to_string(),
@@ -384,4 +384,4 @@ async fn test_registration_error_categorization() {
     }
 
     client.stop().await.expect("Failed to stop client");
-} 
+}

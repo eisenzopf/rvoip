@@ -645,7 +645,7 @@ impl RtpBridge {
                 confidence,
                 ..
             } => {
-                warn!("🔍 Unexpected codec detected for session {}: expected {:?}, got {:?} (confidence: {:.2})", 
+                warn!("🔍 Unexpected codec detected for session {}: expected {:?}, got {:?} (confidence: {:.2})",
                       session_id, expected_codec, detected_codec, confidence);
 
                 // Trigger fallback handling

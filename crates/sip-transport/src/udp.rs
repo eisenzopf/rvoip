@@ -43,7 +43,7 @@ impl UdpTransport {
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Create the UDP socket
         let socket = UdpSocket::bind(addr).await.map_err(|e| Error::BindFailed(addr, e))?;
-        
+
         // Get the actual bound address
         let local_addr = socket.local_addr()?;
         info!("SIP UDP transport bound to {}", local_addr);
@@ -72,8 +72,8 @@ impl UdpTransport {
     pub fn default() -> Self {
         // Create a dummy event channel
         let (events_tx, _) = mpsc::channel(1);
-        
-        // Use a more compatible approach to create a dummy socket 
+
+        // Use a more compatible approach to create a dummy socket
         let socket = match std::net::UdpSocket::bind("127.0.0.1:0") {
             Ok(std_socket) => {
                 match std_socket.set_nonblocking(true) {
@@ -81,7 +81,7 @@ impl UdpTransport {
                         // Use from_std in a way that won't panic with tokio
                         #[cfg(tokio_allow_from_blocking_fd)]
                         let socket = UdpSocket::from_std(std_socket).unwrap();
-                        
+
                         #[cfg(not(tokio_allow_from_blocking_fd))]
                         let socket = unsafe {
                             // SAFETY: This is only used for a dummy transport that won't actually be used
@@ -93,7 +93,7 @@ impl UdpTransport {
                                 UdpSocket::from_std(std_socket).expect("Failed to create tokio socket")
                             })
                         };
-                        
+
                         socket
                     },
                     Err(_) => {
@@ -111,7 +111,7 @@ impl UdpTransport {
                 UdpSocket::from_std(std_socket).expect("Failed to create tokio socket")
             }
         };
-        
+
         // Create and return the transport with closed=true so it won't be used
         UdpTransport {
             inner: Arc::new(UdpTransportInner {
@@ -128,7 +128,7 @@ impl UdpTransport {
         tokio::spawn(async move {
             let inner = &transport.inner;
             let mut buffer = vec![0u8; UDP_BUFFER_SIZE];
-            
+
             while !inner.closed.load(Ordering::Relaxed) {
                 // Receive a packet
                 let (len, src) = match inner.socket.recv_from(&mut buffer).await {
@@ -138,7 +138,7 @@ impl UdpTransport {
                         if inner.closed.load(Ordering::Relaxed) {
                             break;
                         }
-                        
+
                         error!("Error receiving UDP packet: {}", e);
                         let _ = inner.events_tx.send(TransportEvent::Error {
                             error: format!("Error receiving packet: {}", e),
@@ -146,7 +146,7 @@ impl UdpTransport {
                         continue;
                     }
                 };
-                
+
                 let local_addr = match inner.socket.local_addr() {
                     Ok(addr) => addr,
                     Err(e) => {
@@ -154,15 +154,15 @@ impl UdpTransport {
                         continue;
                     }
                 };
-                
+
                 // Create a Bytes object from the received data
                 let packet_data = bytes::Bytes::copy_from_slice(&buffer[..len]);
                 trace!("Received packet from {}: {:?}", src, packet_data);
-                
+
                 // Parse the SIP message
                 let packet_str = String::from_utf8_lossy(&packet_data);
                 debug!("Received SIP message from {}: {}", src, packet_str);
-                
+
                 match parse_message(&packet_data) {
                     Ok(message) => {
                         let event = TransportEvent::MessageReceived {
@@ -170,7 +170,7 @@ impl UdpTransport {
                             source: src,
                             destination: local_addr,
                         };
-                        
+
                         if let Err(e) = inner.events_tx.send(event).await {
                             error!("Error sending event: {}", e);
                             break;
@@ -184,7 +184,7 @@ impl UdpTransport {
                     }
                 }
             }
-            
+
             // Send closed event when the loop exits
             let _ = inner.events_tx.send(TransportEvent::Closed).await;
         });
@@ -196,25 +196,25 @@ impl Transport for UdpTransport {
     fn local_addr(&self) -> Result<SocketAddr> {
         self.inner.socket.local_addr().map_err(Error::from)
     }
-    
+
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
         use tracing::{info, debug, error};
-        
+
         // Convert message to bytes
         let bytes = message.to_bytes();
-        
+
         debug!("Sending {} byte message to {}", bytes.len(), destination);
-        info!("Sending {} message to {}", 
-            if let Message::Request(ref req) = message { 
-                format!("{}", req.method) 
-            } else { 
-                "response".to_string() 
-            }, 
+        info!("Sending {} message to {}",
+            if let Message::Request(ref req) = message {
+                format!("{}", req.method)
+            } else {
+                "response".to_string()
+            },
             destination);
-        
+
         // Log message content in debug mode
         debug!("Message content: \n{}", String::from_utf8_lossy(&bytes));
-        
+
         // Send the message
         match self.inner.socket.send_to(&bytes, destination).await {
             Ok(bytes_sent) => {
@@ -227,12 +227,12 @@ impl Transport for UdpTransport {
             }
         }
     }
-    
+
     async fn close(&self) -> Result<()> {
         self.inner.closed.store(true, Ordering::Relaxed);
         Ok(())
     }
-    
+
     fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Relaxed)
     }
@@ -246,4 +246,4 @@ impl fmt::Debug for UdpTransport {
             write!(f, "UdpTransport(<error>)")
         }
     }
-} 
+}

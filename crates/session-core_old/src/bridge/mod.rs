@@ -6,4 +6,4 @@ pub mod bridge;
 pub mod types;
 
 pub use bridge::*;
-pub use types::*; 
+pub use types::*;

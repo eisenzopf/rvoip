@@ -10,7 +10,7 @@
 //!
 //! ### Direct API Usage
 //! - `ServerSessionManager` for session lifecycle management
-//! - `IncomingCallNotification` trait for call routing decisions  
+//! - `IncomingCallNotification` trait for call routing decisions
 //! - Bridge APIs for connecting agents and customers
 //! - Event system for real-time monitoring
 //!
@@ -34,7 +34,7 @@
 //!     .build()
 //!     .await?;
 //!
-//! // Agent registration  
+//! // Agent registration
 //! let agent_session = session_coordinator.create_outgoing_session().await?;
 //!
 //! // Call bridging (assuming we have session IDs)
@@ -52,4 +52,4 @@
 //! ```
 //!
 //! Note: Previously this module contained adapter stubs, but we now use
-//! session-core APIs directly for better performance and maintainability. 
+//! session-core APIs directly for better performance and maintainability.

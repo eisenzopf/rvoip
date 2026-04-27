@@ -2,20 +2,20 @@
 //!
 //! Provides a fluent builder interface for creating and configuring
 //! the SessionManager with all necessary components.
-//! 
+//!
 //! # Overview
-//! 
+//!
 //! The `SessionManagerBuilder` provides a convenient way to configure and create
 //! a `SessionCoordinator` with all the necessary components. It uses the builder
 //! pattern to allow flexible configuration while ensuring all required settings
 //! are properly initialized.
-//! 
+//!
 //! # Basic Usage
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::api::*;
 //! use std::sync::Arc;
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
 //!     // Simple configuration
@@ -23,58 +23,58 @@
 //!         .with_sip_port(5060)
 //!         .build()
 //!         .await?;
-//!     
+//!
 //!     // Start using the coordinator
 //!     SessionControl::start(&coordinator).await?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
-//! 
+//!
 //! # Advanced Configuration
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::{SessionManagerBuilder, SessionCoordinator};
 //! use rvoip_session_core::examples::RoutingHandler;
 //! use std::sync::Arc;
-//! 
+//!
 //! async fn create_pbx_system() -> Result<Arc<SessionCoordinator>, Box<dyn std::error::Error>> {
 //!     // Create a routing handler
 //!     let mut router = RoutingHandler::new();
 //!     router.add_route("sip:support@", "sip:queue@support.local");
 //!     router.add_route("sip:sales@", "sip:queue@sales.local");
-//!     
+//!
 //!     // Configure the coordinator
 //!     let coordinator = SessionManagerBuilder::new()
 //!         // Network settings
 //!         .with_sip_port(5060)
 //!         .with_local_address("sip:pbx@company.com:5060")
-//!         
+//!
 //!         // Media settings
 //!         .with_media_ports(10000, 20000)  // RTP port range
-//!         
+//!
 //!         // NAT traversal (if needed)
 //!         .with_stun("stun.l.google.com:19302")
-//!         
+//!
 //!         // Call handling
 //!         .with_handler(Arc::new(router))
-//!         
+//!
 //!         .build()
 //!         .await?;
-//!     
+//!
 //!     Ok(coordinator)
 //! }
 //! ```
-//! 
+//!
 //! # Configuration Examples
-//! 
+//!
 //! ## Softphone Configuration
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::{SessionManagerBuilder};
 //! use rvoip_session_core::examples::AutoAnswerHandler;
 //! use std::sync::Arc;
-//! 
+//!
 //! async fn setup_softphone() -> Result<(), Box<dyn std::error::Error>> {
 //!     let coordinator = SessionManagerBuilder::new()
 //!         .with_sip_port(5060)
@@ -85,23 +85,23 @@
 //!     Ok(())
 //! }
 //! ```
-//! 
+//!
 //! ## Call Center Configuration
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::{SessionManagerBuilder};
 //! use rvoip_session_core::api::handlers::{QueueHandler, CompositeHandler, RoutingHandler};
 //! use std::sync::Arc;
-//! 
+//!
 //! async fn setup_call_center() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create queue handler
 //!     let queue = Arc::new(QueueHandler::new(100));
-//!     
+//!
 //!     // Create composite handler with multiple handlers
 //!     let composite = CompositeHandler::new()
 //!         .add_handler(queue.clone())
 //!         .add_handler(Arc::new(RoutingHandler::default()));
-//!     
+//!
 //!     let coordinator = SessionManagerBuilder::new()
 //!         .with_sip_port(5060)
 //!         .with_local_address("sip:callcenter@company.com")
@@ -112,12 +112,12 @@
 //!     Ok(())
 //! }
 //! ```
-//! 
+//!
 //! ## Behind NAT Configuration
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::{SessionManagerBuilder};
-//! 
+//!
 //! async fn setup_nat_config() -> Result<(), Box<dyn std::error::Error>> {
 //!     let coordinator = SessionManagerBuilder::new()
 //!         .with_sip_port(5060)
@@ -129,22 +129,22 @@
 //!     Ok(())
 //! }
 //! ```
-//! 
+//!
 //! # Error Handling
-//! 
+//!
 //! The builder's `build()` method can fail if:
 //! - Network ports are already in use
 //! - Invalid configuration values
 //! - System resource limitations
-//! 
+//!
 //! ```rust
 //! use rvoip_session_core::{SessionManagerBuilder};
-//! 
+//!
 //! async fn handle_builder_errors() {
 //!     match SessionManagerBuilder::new()
 //!         .with_sip_port(5060)
 //!         .build()
-//!         .await 
+//!         .await
 //!     {
 //!         Ok(coordinator) => {
 //!             println!("Coordinator created successfully");
@@ -174,28 +174,28 @@ pub use crate::media::types::MediaConfig;
 pub struct SessionManagerConfig {
     /// SIP listening port
     pub sip_port: u16,
-    
+
     /// Local SIP address (e.g., "user@domain")
     pub local_address: String,
-    
+
     /// Local bind address for media (RTP/RTCP)
     pub local_bind_addr: std::net::SocketAddr,
-    
+
     /// Media port range start
     pub media_port_start: u16,
-    
+
     /// Media port range end
     pub media_port_end: u16,
-    
+
     /// Enable STUN for NAT traversal
     pub enable_stun: bool,
-    
+
     /// STUN server address
     pub stun_server: Option<String>,
-    
+
     /// Enable SIP client features (REGISTER, MESSAGE, etc.)
     pub enable_sip_client: bool,
-    
+
     /// Media configuration preferences
     pub media_config: MediaConfig,
 }
@@ -217,19 +217,19 @@ impl Default for SessionManagerConfig {
 }
 
 /// Builder for creating a configured SessionManager
-/// 
+///
 /// This builder ensures all components are properly configured before
 /// creating the SessionCoordinator. It provides sensible defaults while
 /// allowing customization of all aspects.
-/// 
+///
 /// # Example
 /// ```rust
 /// use rvoip_session_core::{SessionManagerBuilder, CallHandler, CallDecision, IncomingCall, CallSession};
 /// use std::sync::Arc;
-/// 
+///
 /// #[derive(Debug)]
 /// struct MyCallHandler;
-/// 
+///
 /// #[async_trait::async_trait]
 /// impl CallHandler for MyCallHandler {
 ///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
@@ -237,7 +237,7 @@ impl Default for SessionManagerConfig {
 ///     }
 ///     async fn on_call_ended(&self, call: CallSession, reason: &str) {}
 /// }
-/// 
+///
 /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
 ///     let coordinator = SessionManagerBuilder::new()
 ///         .with_sip_port(5060)
@@ -256,7 +256,7 @@ pub struct SessionManagerBuilder {
 
 impl SessionManagerBuilder {
     /// Create a new builder with default configuration
-    /// 
+    ///
     /// Default values:
     /// - SIP port: 5060
     /// - Local address: "sip:user@localhost"
@@ -270,16 +270,16 @@ impl SessionManagerBuilder {
             transaction_manager: None,
         }
     }
-    
+
     /// Set the SIP listening port
-    /// 
+    ///
     /// # Arguments
     /// * `port` - The UDP port to listen on for SIP messages
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// // Use non-standard port to avoid conflicts
     /// let builder = SessionManagerBuilder::new()
     ///     .with_sip_port(5061);
@@ -290,18 +290,18 @@ impl SessionManagerBuilder {
         self.config.local_bind_addr.set_port(port);
         self
     }
-    
+
     /// Set the local SIP address
-    /// 
+    ///
     /// This should be a full SIP URI that represents this endpoint.
-    /// 
+    ///
     /// # Arguments
     /// * `address` - SIP URI (e.g., "sip:alice@192.168.1.100:5060")
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// let builder = SessionManagerBuilder::new()
     ///     .with_local_address("sip:alice@company.com:5060");
     /// ```
@@ -309,19 +309,19 @@ impl SessionManagerBuilder {
         self.config.local_address = address.into();
         self
     }
-    
+
     /// Set the local bind address for media (RTP/RTCP)
-    /// 
+    ///
     /// This is the IP address that media sessions will bind to.
     /// Use `0.0.0.0:0` to bind to all interfaces (default).
-    /// 
+    ///
     /// # Arguments
     /// * `addr` - Socket address to bind media sessions to
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// let builder = SessionManagerBuilder::new()
     ///     .with_local_bind_addr("192.168.1.100:0".parse().unwrap());
     /// ```
@@ -329,20 +329,20 @@ impl SessionManagerBuilder {
         self.config.local_bind_addr = addr;
         self
     }
-    
+
     /// Set the media port range for RTP
-    /// 
+    ///
     /// These ports are used for RTP media streams. Each call uses
     /// one port from this range.
-    /// 
+    ///
     /// # Arguments
     /// * `start` - First port in the range (inclusive)
     /// * `end` - Last port in the range (inclusive)
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// // Reserve ports 30000-31000 for RTP
     /// let builder = SessionManagerBuilder::new()
     ///     .with_media_ports(30000, 31000);
@@ -352,22 +352,22 @@ impl SessionManagerBuilder {
         self.config.media_port_end = end;
         self
     }
-    
+
     /// Enable STUN for NAT traversal
-    /// 
+    ///
     /// STUN helps discover public IP addresses when behind NAT.
-    /// 
+    ///
     /// # Arguments
     /// * `server` - STUN server address (e.g., "stun.l.google.com:19302")
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// let builder = SessionManagerBuilder::new()
     ///     .with_stun("stun.stunprotocol.org:3478");
     /// ```
-    /// 
+    ///
     /// # Popular STUN Servers
     /// - Google: "stun.l.google.com:19302"
     /// - Twilio: "global.stun.twilio.com:3478"
@@ -377,27 +377,27 @@ impl SessionManagerBuilder {
         self.config.stun_server = Some(server.into());
         self
     }
-    
+
     /// Set the call event handler
-    /// 
+    ///
     /// The handler receives callbacks for incoming calls and other events.
     /// If no handler is set, incoming calls will be automatically rejected.
-    /// 
+    ///
     /// # Arguments
     /// * `handler` - Implementation of the CallHandler trait
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::{SessionManagerBuilder, CallHandler, CallDecision, IncomingCall, CallSession};
     /// use std::sync::Arc;
-    /// 
+    ///
     /// #[derive(Debug)]
     /// struct MyCallHandler;
-    /// 
+    ///
     /// impl MyCallHandler {
     ///     fn new() -> Self { Self }
     /// }
-    /// 
+    ///
     /// #[async_trait::async_trait]
     /// impl CallHandler for MyCallHandler {
     ///     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
@@ -405,7 +405,7 @@ impl SessionManagerBuilder {
     ///     }
     ///     async fn on_call_ended(&self, call: CallSession, reason: &str) {}
     /// }
-    /// 
+    ///
     /// let handler = Arc::new(MyCallHandler::new());
     /// let builder = SessionManagerBuilder::new()
     ///     .with_handler(handler);
@@ -414,22 +414,22 @@ impl SessionManagerBuilder {
         self.handler = Some(handler);
         self
     }
-    
+
     /// Enable SIP client features
-    /// 
+    ///
     /// Enables non-session SIP operations like REGISTER, MESSAGE, and SUBSCRIBE.
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::{SessionManagerBuilder, SipClient};
-    /// 
+    ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let coordinator = SessionManagerBuilder::new()
     ///         .with_sip_port(5060)
     ///         .enable_sip_client()
     ///         .build()
     ///         .await?;
-    ///     
+    ///
     ///     // Now can use SipClient methods
     ///     let registration = coordinator.register(
     ///         "sip:registrar.example.com",
@@ -437,7 +437,7 @@ impl SessionManagerBuilder {
     ///         "sip:alice@192.168.1.100:5060",
     ///         3600
     ///     ).await?;
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```
@@ -445,19 +445,19 @@ impl SessionManagerBuilder {
         self.config.enable_sip_client = true;
         self
     }
-    
+
     /// Set music-on-hold WAV file path
-    /// 
+    ///
     /// When a call is placed on hold, this WAV file will be played to the remote party.
     /// If not set or the file cannot be loaded, silence will be sent instead.
-    /// 
+    ///
     /// # Arguments
     /// * `path` - Path to a WAV file (ideally 8kHz mono for best performance)
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// let builder = SessionManagerBuilder::new()
     ///     .with_music_on_hold_file("/usr/share/sounds/music_on_hold.wav");
     /// ```
@@ -465,15 +465,15 @@ impl SessionManagerBuilder {
         self.config.media_config.music_on_hold_path = Some(path.into());
         self
     }
-    
+
     /// Set media configuration
-    /// 
+    ///
     /// Configure media preferences including codecs, audio processing, and SDP attributes.
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::{SessionManagerBuilder, MediaConfig};
-    /// 
+    ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let media_config = MediaConfig {
     ///         preferred_codecs: vec!["opus".to_string(), "PCMU".to_string()],
@@ -481,13 +481,13 @@ impl SessionManagerBuilder {
     ///         noise_suppression: true,
     ///         ..Default::default()
     ///     };
-    ///     
+    ///
     ///     let coordinator = SessionManagerBuilder::new()
     ///         .with_sip_port(5060)
     ///         .with_media_config(media_config)
     ///         .build()
     ///         .await?;
-    ///     
+    ///
     ///     Ok(())
     /// }
     /// ```
@@ -495,18 +495,18 @@ impl SessionManagerBuilder {
         self.config.media_config = media_config;
         self
     }
-    
+
     /// Set preferred codecs
-    /// 
+    ///
     /// Convenience method to set codec preferences without creating a full MediaConfig.
-    /// 
+    ///
     /// # Arguments
     /// * `codecs` - List of codec names in priority order (e.g., ["opus", "PCMU", "PCMA"])
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let coordinator = SessionManagerBuilder::new()
     ///         .with_sip_port(5060)
@@ -516,7 +516,7 @@ impl SessionManagerBuilder {
     ///     Ok(())
     /// }
     /// ```
-    pub fn with_preferred_codecs<I, S>(mut self, codecs: I) -> Self 
+    pub fn with_preferred_codecs<I, S>(mut self, codecs: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -526,13 +526,13 @@ impl SessionManagerBuilder {
             .collect();
         self
     }
-    
+
     /// Enable or disable echo cancellation
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let coordinator = SessionManagerBuilder::new()
     ///         .with_sip_port(5060)
@@ -546,18 +546,18 @@ impl SessionManagerBuilder {
         self.config.media_config.echo_cancellation = enabled;
         self
     }
-    
+
     /// Configure audio processing options
-    /// 
+    ///
     /// Enable or disable all audio processing features at once.
-    /// 
+    ///
     /// # Arguments
     /// * `enabled` - Whether to enable echo cancellation, noise suppression, and AGC
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
-    /// 
+    ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let coordinator = SessionManagerBuilder::new()
     ///         .with_sip_port(5060)
@@ -573,32 +573,32 @@ impl SessionManagerBuilder {
         self.config.media_config.auto_gain_control = enabled;
         self
     }
-    
+
     /// Build and initialize the SessionManager
-    /// 
+    ///
     /// This method:
     /// 1. Creates all subsystems (dialog manager, media manager, etc.)
     /// 2. Binds to the configured network ports
     /// 3. Starts background tasks for processing
     /// 4. Returns the ready-to-use SessionCoordinator
-    /// 
+    ///
     /// # Errors
-    /// 
+    ///
     /// Can fail if:
     /// - Network ports are already in use
     /// - Invalid configuration
     /// - System resource limitations
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::{SessionManagerBuilder, SessionControl};
-    /// 
+    ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let coordinator = SessionManagerBuilder::new()
     ///         .with_sip_port(5060)
     ///         .build()
     ///         .await?;
-    ///         
+    ///
     ///     // Now ready to make/receive calls
     ///     SessionControl::start(&coordinator).await?;
     ///     Ok(())
@@ -610,25 +610,25 @@ impl SessionManagerBuilder {
             self.config,
             self.handler,
         ).await?;
-        
+
         // Start all subsystems
         coordinator.start().await?;
-        
+
         Ok(coordinator)
     }
-    
+
     /// Set transaction manager for server mode
-    /// 
+    ///
     /// Required when building a server-oriented session manager.
-    /// 
+    ///
     /// # Arguments
     /// * `tm` - Transaction manager instance
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// fn example() {
     ///     // let tm = Arc::new(TransactionManager::new(...));
     ///     // let builder = SessionManagerBuilder::new()
@@ -639,23 +639,23 @@ impl SessionManagerBuilder {
         self.transaction_manager = Some(tm);
         self
     }
-    
+
     /// Build with transaction manager for server applications
-    /// 
+    ///
     /// Similar to `build()` but uses an existing transaction manager
     /// instead of creating its own. This is used by call-engine.
-    /// 
+    ///
     /// # Arguments
     /// * `transaction_manager` - Pre-configured transaction manager
-    /// 
+    ///
     /// # Example
     /// ```rust
     /// use rvoip_session_core::SessionManagerBuilder;
     /// use std::sync::Arc;
-    /// 
+    ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     // let transaction_manager = Arc::new(TransactionManager::new(...));
-    ///     // 
+    ///     //
     ///     // let coordinator = SessionManagerBuilder::new()
     ///     //     .with_sip_port(5060)
     ///     //     .with_local_address("sip:server@example.com")
@@ -683,7 +683,7 @@ impl Default for SessionManagerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_builder_defaults() {
         let builder = SessionManagerBuilder::new();
@@ -691,7 +691,7 @@ mod tests {
         assert_eq!(builder.config.media_port_start, 10000);
         assert_eq!(builder.config.media_port_end, 20000);
     }
-    
+
     #[test]
     fn test_builder_configuration() {
         let builder = SessionManagerBuilder::new()
@@ -699,7 +699,7 @@ mod tests {
             .with_local_address("alice@example.com")
             .with_media_ports(30000, 40000)
             .with_stun("stun.example.com:3478");
-            
+
         assert_eq!(builder.config.sip_port, 5061);
         assert_eq!(builder.config.local_address, "alice@example.com");
         assert_eq!(builder.config.media_port_start, 30000);
@@ -707,4 +707,4 @@ mod tests {
         assert!(builder.config.enable_stun);
         assert_eq!(builder.config.stun_server, Some("stun.example.com:3478".to_string()));
     }
-} 
+}

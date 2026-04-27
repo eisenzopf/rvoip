@@ -7,7 +7,7 @@
 //! ## Error Categories
 //!
 //! - **Configuration**: Invalid configuration or setup parameters
-//! - **Network**: Network connectivity or transport issues  
+//! - **Network**: Network connectivity or transport issues
 //! - **Protocol**: SIP protocol violations or parsing errors
 //! - **Dialog**: Dialog state or lifecycle errors
 //! - **Internal**: Internal implementation errors

@@ -18,7 +18,7 @@ use rvoip_sip_core::prelude::*;
 pub struct DialogRequestTemplate {
     /// SIP method for the request
     pub method: Method,
-    /// Target URI (where to send the request)  
+    /// Target URI (where to send the request)
     pub target_uri: Uri,
     /// Call-ID for this dialog
     pub call_id: String,

@@ -31,11 +31,11 @@ pub async fn mix_audio_frames(
     if frames.is_empty() {
         return Err(MediaTransportError::InvalidInput("No frames to mix".to_string()));
     }
-    
+
     // For simplicity, just use the first frame's timestamp, sequence, and data
     // In a real implementation, this would properly mix audio samples
     let first_frame = &frames[0];
-    
+
     // Create a new frame with mixed data (in this simplified implementation, just use the first frame)
     let mixed_frame = MediaFrame {
         frame_type: MediaFrameType::Audio,
@@ -47,7 +47,7 @@ pub async fn mix_audio_frames(
         ssrc: output_ssrc,
         csrcs: frames.iter().map(|f| f.ssrc).collect(), // Use source SSRCs as CSRCs
     };
-    
+
     Ok(mixed_frame)
 }
 
@@ -56,7 +56,7 @@ pub async fn mix_audio_frames(
 /// This is useful for conference scenarios where we want to mix
 /// the N loudest speakers into a single output stream.
 pub async fn mix_active_speakers(
-    frames: Vec<(String, MediaFrame)>, 
+    frames: Vec<(String, MediaFrame)>,
     max_speakers: usize,
     output_payload_type: u8,
     output_timestamp: u32,
@@ -66,30 +66,30 @@ pub async fn mix_active_speakers(
     if frames.is_empty() {
         return Err(MediaTransportError::InvalidInput("No frames to mix".to_string()));
     }
-    
+
     // Filter for audio frames only
     let audio_frames = frames
         .into_iter()
         .filter(|(_, frame)| frame.frame_type == MediaFrameType::Audio)
         .collect::<Vec<_>>();
-    
+
     if audio_frames.is_empty() {
         return Err(MediaTransportError::InvalidInput("No audio frames to mix".to_string()));
     }
-    
+
     // In a real implementation, we would:
     // 1. Calculate audio levels for each frame
     // 2. Sort by level (loudness)
     // 3. Take the top N frames
     // 4. Mix those frames
-    
+
     // For simplicity, just take up to max_speakers frames
     let frames_to_mix = audio_frames
         .into_iter()
         .take(max_speakers)
         .map(|(_, frame)| frame)
         .collect::<Vec<_>>();
-    
+
     // Mix the selected frames
     mix_audio_frames(frames_to_mix, output_payload_type, output_timestamp, output_ssrc).await
 }
@@ -103,19 +103,19 @@ pub fn calculate_audio_level(frame: &MediaFrame) -> u8 {
     // 2. Calculate RMS power
     // 3. Convert to dB
     // 4. Map to 0-127 range
-    
+
     // For this simple implementation, we just use the average byte value
     // which is not accurate but serves as a placeholder
     if frame.data.is_empty() {
         return 0;
     }
-    
+
     let sum: u32 = frame.data.iter().map(|&b| b as u32).sum();
     let avg = sum / frame.data.len() as u32;
-    
+
     // Map average to 0-127 range
     let level = (avg * 127 / 255) as u8;
-    
+
     level
 }
 
@@ -127,9 +127,9 @@ pub fn calculate_audio_level(frame: &MediaFrame) -> u8 {
 pub fn detect_voice_activity(frame: &MediaFrame, threshold: u8) -> (bool, u8) {
     // Calculate audio level
     let level = calculate_audio_level(frame);
-    
+
     // Determine if voice is active (level above threshold)
     let voice_active = level > threshold;
-    
+
     (voice_active, level)
-} 
+}

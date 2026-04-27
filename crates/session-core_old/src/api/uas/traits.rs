@@ -10,16 +10,16 @@ use super::UasCallDecision;
 pub trait UasCallHandler: Send + Sync {
     /// Handle an incoming call
     async fn on_incoming_call(&self, call: IncomingCall) -> UasCallDecision;
-    
+
     /// Called when a call is established
     async fn on_call_established(&self, session: CallSession);
-    
+
     /// Called when a call ends
     async fn on_call_ended(&self, session: CallSession, reason: String);
-    
+
     /// Called when DTMF is received
     async fn on_dtmf_received(&self, session_id: SessionId, digit: char);
-    
+
     /// Called on media quality update
     async fn on_quality_update(&self, session_id: SessionId, mos_score: f32);
 }
@@ -29,16 +29,16 @@ pub trait UasCallHandler: Send + Sync {
 pub trait CallController: Send + Sync {
     /// Pre-process INVITE before handler sees it
     async fn pre_invite(&self, call: &mut IncomingCall) -> bool;
-    
+
     /// Post-process after handler decision
     async fn post_decision(&self, call: &IncomingCall, decision: &mut UasCallDecision);
-    
+
     /// Handle in-dialog requests (INFO, UPDATE, etc.)
     async fn on_in_dialog_request(&self, session_id: SessionId, method: String, body: Option<String>);
-    
+
     /// Hook for custom SDP manipulation
     async fn manipulate_sdp(&self, sdp: &mut String, is_offer: bool);
-    
+
     /// Hook for custom header injection
     async fn inject_headers(&self, headers: &mut Vec<(String, String)>);
 }
@@ -59,7 +59,7 @@ impl crate::api::handlers::CallHandler for AlwaysAcceptHandler {
             crate::api::types::CallDecision::Accept(None)
         }
     }
-    
+
     async fn on_call_ended(&self, _call: crate::api::types::CallSession, _reason: &str) {}
 }
 
@@ -75,7 +75,7 @@ impl UasCallHandler for AlwaysAcceptHandler {
             UasCallDecision::Accept(None)
         }
     }
-    
+
     async fn on_call_established(&self, _session: CallSession) {}
     async fn on_call_ended(&self, _session: CallSession, _reason: String) {}
     async fn on_dtmf_received(&self, _session_id: SessionId, _digit: char) {}

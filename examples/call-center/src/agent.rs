@@ -32,39 +32,39 @@ struct Args {
     /// Agent name (e.g., alice, bob)
     #[arg(short, long, default_value = "alice")]
     name: String,
-    
+
     /// Call center server address
     #[arg(short, long, default_value = "127.0.0.1:5060")]
     server: String,
-    
+
     /// Local IP address for this agent (used for SIP binding and signaling)
     #[arg(short, long, default_value = "127.0.0.1")]
     domain: String,
-    
+
     /// Local SIP port to bind to
     #[arg(short, long, default_value = "5071")]
     port: u16,
-    
+
     /// Call duration in seconds (0 for indefinite)
     #[arg(long, default_value = "0")]
     call_duration: u64,
-    
+
     /// List available audio devices and exit
     #[arg(long)]
     list_devices: bool,
-    
+
     /// Input device ID (use --list-devices to see options)
     #[arg(long)]
     input_device: Option<String>,
-    
+
     /// Output device ID (use --list-devices to see options)
     #[arg(long)]
     output_device: Option<String>,
-    
+
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
-    
+
     /// Enable audio debug logging
     #[arg(long)]
     audio_debug: bool,
@@ -92,36 +92,36 @@ impl AgentHandler {
             audio_manager: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
-    
+
     async fn set_client(&self, client: Arc<ClientManager>) {
         *self.client.write().await = Some(client);
     }
-    
+
     async fn set_audio_manager(&self, audio_manager: Arc<AudioDeviceManager>) {
         *self.audio_manager.write().await = Some(audio_manager);
     }
-    
+
     async fn initialize_audio_devices(&self) -> Result<(), anyhow::Error> {
         let audio_guard = self.audio_manager.read().await;
-        
+
         if let Some(audio_manager) = audio_guard.as_ref() {
             // Just verify audio devices are available and ready
             let input_device = audio_manager.get_default_device(AudioDirection::Input).await?;
             info!("🎤 [{}] Audio input ready: {}", self.name, input_device.info().name);
-            
+
             let output_device = audio_manager.get_default_device(AudioDirection::Output).await?;
             info!("🔊 [{}] Audio output ready: {}", self.name, output_device.info().name);
-            
+
             info!("✅ [{}] Audio devices verified and ready for calls", self.name);
         }
-        
+
         Ok(())
     }
 
     async fn setup_audio_for_call(&self, call_id: &CallId) -> Result<(), anyhow::Error> {
         let client_guard = self.client.read().await;
         let audio_guard = self.audio_manager.read().await;
-        
+
         if let (Some(client), Some(audio_manager)) = (client_guard.as_ref(), audio_guard.as_ref()) {
             // Configure high-quality audio stream
             let config = AudioStreamConfig {
@@ -133,40 +133,40 @@ impl AgentHandler {
                 enable_agc: true,   // Auto gain control
                 enable_vad: true,   // Voice activity detection
             };
-            
+
             info!("🔧 [{}] Configuring audio stream for call {}", self.name, call_id);
             info!("   Sample Rate: {}Hz", config.sample_rate);
             info!("   Channels: {}", config.channels);
             info!("   Codec: {}", config.codec);
             info!("   Frame Size: {}ms", config.frame_size_ms);
-            
+
             // Set audio stream configuration
             client.set_audio_stream_config(call_id, config).await?;
-            
+
             // Start audio streaming
             client.start_audio_stream(call_id).await?;
             info!("✅ [{}] Audio streaming started for call {}", self.name, call_id);
-            
+
             // Set up audio capture (microphone)
             let input_device = audio_manager.get_default_device(AudioDirection::Input).await?;
             info!("🎤 [{}] Using input device: {}", self.name, input_device.info().name);
             client.start_audio_capture(call_id, &input_device.info().id).await?;
-            
+
             // Set up audio playback (speaker)
             let output_device = audio_manager.get_default_device(AudioDirection::Output).await?;
             info!("🔊 [{}] Using output device: {}", self.name, output_device.info().name);
             client.start_audio_playback(call_id, &output_device.info().id).await?;
-            
+
             // Subscribe to incoming audio frames for monitoring
             let audio_subscriber = client.subscribe_to_audio_frames(call_id).await?;
             let name_clone = self.name.clone();
             let call_id_clone = call_id.clone();
             let audio_debug = self.audio_debug;
-            
+
             tokio::spawn(async move {
                 let mut _frame_count = 0;
                 let _start_time = std::time::Instant::now();
-                
+
                 // Move the subscriber into a spawn_blocking task to handle blocking recv
                 let handle = tokio::task::spawn_blocking(move || {
                     let mut frames = Vec::new();
@@ -183,7 +183,7 @@ impl AgentHandler {
                     }
                     frames
                 });
-                
+
                 // For now, just log that we would process audio frames
                 // In a real implementation, this would process the frames
                 match handle.await {
@@ -198,34 +198,34 @@ impl AgentHandler {
                     }
                 }
             });
-            
+
             info!("🎵 [{}] Real audio setup complete for call {}", self.name, call_id);
         }
-        
+
         Ok(())
     }
-    
+
     async fn cleanup_audio_for_call(&self, call_id: &CallId) {
         let client_guard = self.client.read().await;
-        
+
         if let Some(client) = client_guard.as_ref() {
             info!("🧹 [{}] Cleaning up audio for call {}", self.name, call_id);
-            
+
             // Stop audio streaming
             if let Err(e) = client.stop_audio_stream(call_id).await {
                 warn!("⚠️  [{}] Failed to stop audio stream: {}", self.name, e);
             }
-            
+
             // Stop audio capture
             if let Err(e) = client.stop_audio_capture(call_id).await {
                 warn!("⚠️  [{}] Failed to stop audio capture: {}", self.name, e);
             }
-            
+
             // Stop audio playback
             if let Err(e) = client.stop_audio_playback(call_id).await {
                 warn!("⚠️  [{}] Failed to stop audio playback: {}", self.name, e);
             }
-            
+
             info!("✅ [{}] Audio cleanup complete for call {}", self.name, call_id);
         }
     }
@@ -234,15 +234,15 @@ impl AgentHandler {
 #[async_trait]
 impl ClientEventHandler for AgentHandler {
     async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
-        info!("📞 [{}] Incoming call from {} (call_id: {})", 
+        info!("📞 [{}] Incoming call from {} (call_id: {})",
             self.name, call_info.caller_uri, call_info.call_id);
-        
+
         // Accept the call - audio will be set up when the call connects
         // The client-core should handle SDP generation automatically based on MediaConfig
         info!("✅ [{}] Accepting call {} - audio setup will happen when connected", self.name, call_info.call_id);
         CallAction::Accept
     }
-    
+
     async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
         let state_emoji = match status_info.new_state {
             CallState::IncomingPending => "🔔",
@@ -251,15 +251,15 @@ impl ClientEventHandler for AgentHandler {
             CallState::Terminated => "📴",
             _ => "🔄",
         };
-        
-        info!("{} [{}] Call {} state: {:?} → {:?}", 
-            state_emoji, self.name, status_info.call_id, 
+
+        info!("{} [{}] Call {} state: {:?} → {:?}",
+            state_emoji, self.name, status_info.call_id,
             status_info.previous_state, status_info.new_state);
-        
+
         match status_info.new_state {
             CallState::Connected => {
                 info!("🎉 [{}] Call {} connected! Activating audio for this call...", self.name, status_info.call_id);
-                
+
                 // Audio devices were initialized during registration
                 // Now activate audio streaming for this specific call
                 if let Err(e) = self.setup_audio_for_call(&status_info.call_id).await {
@@ -267,7 +267,7 @@ impl ClientEventHandler for AgentHandler {
                 } else {
                     info!("🎵 [{}] Call audio streaming active - microphone and speaker ready", self.name);
                 }
-                
+
                 // Auto-hangup after call duration if specified
                 if self.call_duration > 0 {
                     let client_guard = self.client.read().await;
@@ -276,12 +276,12 @@ impl ClientEventHandler for AgentHandler {
                         let call_id = status_info.call_id.clone();
                         let name = self.name.clone();
                         let duration = self.call_duration;
-                        
+
                         tokio::spawn(async move {
                             sleep(Duration::from_secs(duration)).await;
-                            info!("⏰ [{}] Auto-hanging up call {} after {} seconds", 
+                            info!("⏰ [{}] Auto-hanging up call {} after {} seconds",
                                   name, call_id, duration);
-                            
+
                             if let Err(e) = client_clone.hangup_call(&call_id).await {
                                 error!("❌ [{}] Failed to hang up call: {}", name, e);
                             }
@@ -300,21 +300,21 @@ impl ClientEventHandler for AgentHandler {
             _ => {}
         }
     }
-    
+
     async fn on_media_event(&self, event: MediaEventInfo) {
         if self.audio_debug {
-            info!("🎵 [{}] Media event for {}: {:?}", 
+            info!("🎵 [{}] Media event for {}: {:?}",
                 self.name, event.call_id, event.event_type);
         }
     }
-    
+
     async fn on_registration_status_changed(&self, reg_info: RegistrationStatusInfo) {
         match reg_info.status {
             RegistrationStatus::Active => {
                 info!("✅ [{}] Registration active: {}", self.name, reg_info.user_uri);
             }
             RegistrationStatus::Failed => {
-                error!("❌ [{}] Registration failed: {}", 
+                error!("❌ [{}] Registration failed: {}",
                     self.name, reg_info.reason.as_deref().unwrap_or("unknown"));
             }
             RegistrationStatus::Expired => {
@@ -325,16 +325,16 @@ impl ClientEventHandler for AgentHandler {
             }
         }
     }
-    
+
     async fn on_client_error(&self, error: ClientError, call_id: Option<CallId>) {
         error!("❌ [{}] Client error on call {:?}: {}", self.name, call_id, error);
     }
-    
+
     async fn on_network_event(&self, connected: bool, reason: Option<String>) {
         if connected {
             info!("🌐 [{}] Network connected", self.name);
         } else {
-            warn!("🔌 [{}] Network disconnected: {}", 
+            warn!("🔌 [{}] Network disconnected: {}",
                 self.name, reason.unwrap_or("unknown".to_string()));
         }
     }
@@ -343,9 +343,9 @@ impl ClientEventHandler for AgentHandler {
 async fn list_audio_devices() -> Result<(), anyhow::Error> {
     println!("🎵 Audio Device Discovery");
     println!("========================");
-    
+
     let audio_manager = AudioDeviceManager::new().await?;
-    
+
     // List input devices
     println!("\n🎤 INPUT DEVICES (Microphones):");
     println!("------------------------------");
@@ -359,7 +359,7 @@ async fn list_audio_devices() -> Result<(), anyhow::Error> {
             println!("     ID: {}", device.id);
         }
     }
-    
+
     // List output devices
     println!("\n🔊 OUTPUT DEVICES (Speakers):");
     println!("-----------------------------");
@@ -373,31 +373,31 @@ async fn list_audio_devices() -> Result<(), anyhow::Error> {
             println!("     ID: {}", device.id);
         }
     }
-    
+
     println!("\n💡 Usage: Use --input-device and --output-device with the device ID");
-    println!("   Example: --input-device {} --output-device {}", 
+    println!("   Example: --input-device {} --output-device {}",
         input_devices.first().map(|d| d.id.as_str()).unwrap_or("device-id"),
         output_devices.first().map(|d| d.id.as_str()).unwrap_or("device-id"));
-    
+
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let args = Args::parse();
-    
+
     // Handle device listing
     if args.list_devices {
         return list_audio_devices().await;
     }
-    
+
     // Create logs directory
     std::fs::create_dir_all("logs")?;
-    
+
     // Initialize logging with file output
     let file_appender = tracing_appender::rolling::never("logs", format!("{}.log", args.name));
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    
+
     let log_level = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
         .with_writer(non_blocking)
@@ -407,35 +407,35 @@ async fn main() -> Result<(), anyhow::Error> {
                 .add_directive(format!("rvoip={}", log_level).parse()?)
         )
         .init();
-    
+
     info!("🤖 Starting agent: {}", args.name);
     info!("🏢 Call center server: {}", args.server);
     info!("🌐 Local IP address: {}", args.domain);
     info!("📱 Local SIP port: {}", args.port);
     info!("⏰ Call duration: {}s", if args.call_duration > 0 { args.call_duration.to_string() } else { "indefinite".to_string() });
-    
+
     // Parse server address
     let _server_addr: SocketAddr = args.server.parse()
         .map_err(|e| anyhow::anyhow!("Invalid server address '{}': {}", args.server, e))?;
-    
+
     // Initialize audio device manager
     info!("🎵 Initializing audio devices...");
     let audio_manager = Arc::new(AudioDeviceManager::new().await?);
-    
+
     // Verify audio devices
     let input_devices = audio_manager.list_devices(AudioDirection::Input).await?;
     let output_devices = audio_manager.list_devices(AudioDirection::Output).await?;
-    
+
     if input_devices.is_empty() {
         error!("❌ No input devices (microphones) found!");
         return Err(anyhow::anyhow!("No input devices available"));
     }
-    
+
     if output_devices.is_empty() {
         error!("❌ No output devices (speakers) found!");
         return Err(anyhow::anyhow!("No output devices available"));
     }
-    
+
     let input_device = if let Some(device_id) = args.input_device {
         input_devices.iter().find(|d| d.id == device_id)
             .ok_or_else(|| anyhow::anyhow!("Input device '{}' not found", device_id))?
@@ -443,7 +443,7 @@ async fn main() -> Result<(), anyhow::Error> {
         input_devices.iter().find(|d| d.is_default)
             .unwrap_or(&input_devices[0])
     };
-    
+
     let output_device = if let Some(device_id) = args.output_device {
         output_devices.iter().find(|d| d.id == device_id)
             .ok_or_else(|| anyhow::anyhow!("Output device '{}' not found", device_id))?
@@ -451,19 +451,19 @@ async fn main() -> Result<(), anyhow::Error> {
         output_devices.iter().find(|d| d.is_default)
             .unwrap_or(&output_devices[0])
     };
-    
+
     info!("🎤 Selected input device: {}", input_device.name);
     info!("🔊 Selected output device: {}", output_device.name);
-    
+
     // Build URIs
     let agent_uri = format!("sip:{}@{}", args.name, args.domain);
     let server_uri = format!("sip:{}", args.server);
-    
+
     // Create client configuration
     // Use the domain IP as the local binding address to ensure proper SIP signaling
     let local_sip_addr = format!("{}:{}", args.domain, args.port).parse()?;
     let local_media_addr = format!("{}:{}", args.domain, args.port + 1000).parse()?;
-    
+
     let config = ClientConfig::new()
         .with_sip_addr(local_sip_addr)
         .with_media_addr(local_media_addr)
@@ -476,59 +476,59 @@ async fn main() -> Result<(), anyhow::Error> {
             auto_gain_control: true,   // Enable auto gain control
             ..Default::default()
         });
-    
+
     // Create client and handler
     let client = ClientManager::new(config).await?;
     let handler = Arc::new(AgentHandler::new(
-        args.name.clone(), 
-        args.domain.clone(), 
+        args.name.clone(),
+        args.domain.clone(),
         args.call_duration,
         args.audio_debug
     ));
-    
+
     handler.set_client(client.clone()).await;
     handler.set_audio_manager(audio_manager).await;
     client.set_event_handler(handler.clone()).await;
-    
+
     // Start the client
     client.start().await?;
     info!("✅ [{}] Client started", args.name);
-    
+
     // Register with the call center server
     info!("📝 [{}] Registering with call center server...", args.name);
-    
+
     let reg_config = RegistrationConfig::new(
         server_uri,
         agent_uri.clone(),
         agent_uri.clone(),
     ).with_expires(300); // 5 minute expiry
-    
+
     let registration_id = client.register(reg_config).await?;
     info!("✅ [{}] Successfully registered with ID: {}", args.name, registration_id);
-    
+
     // Verify audio devices are available and ready
     // Actual audio activation will happen when calls come in
     info!("🎵 [{}] Verifying audio devices are ready...", args.name);
-    
+
     if let Err(e) = handler.initialize_audio_devices().await {
         error!("❌ [{}] Audio device verification failed: {}", args.name, e);
         return Err(anyhow::anyhow!("Audio device verification failed: {}", e));
     }
-    
+
     info!("👂 [{}] Agent ready to receive calls with real audio!", args.name);
     info!("📍 [{}] Audio devices will activate when calls connect", args.name);
-    
+
     // Keep the agent running
     tokio::signal::ctrl_c().await?;
-    
+
     // Cleanup
     info!("🔚 [{}] Shutting down...", args.name);
     if let Err(e) = client.unregister(registration_id).await {
         warn!("⚠️  [{}] Failed to unregister: {}", args.name, e);
     }
-    
+
     client.stop().await?;
     info!("👋 [{}] Agent shutdown complete", args.name);
-    
+
     Ok(())
-} 
+}

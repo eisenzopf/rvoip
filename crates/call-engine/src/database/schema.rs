@@ -5,4 +5,4 @@
 
 pub use super::DatabaseManager;
 
-// Schema is automatically applied through sqlx::migrate! in DatabaseManager::new() 
+// Schema is automatically applied through sqlx::migrate! in DatabaseManager::new()

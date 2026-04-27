@@ -22,37 +22,37 @@ impl OptimizedSessionId {
         let id = format!("sess_{}", Uuid::new_v4());
         Self(id.into())
     }
-    
+
     /// Create a session ID from a string (takes ownership)
     pub fn from_string(id: String) -> Self {
         Self(id.into())
     }
-    
+
     /// Create a session ID from a str slice (clones)
     pub fn from_str(id: &str) -> Self {
         Self(id.into())
     }
-    
+
     /// Create from an existing Arc<str>
     pub fn from_arc_str(id: Arc<str>) -> Self {
         Self(id)
     }
-    
+
     /// Get as str reference (zero-cost)
     pub fn as_str(&self) -> &str {
         &self.0
     }
-    
+
     /// Get the inner Arc<str> for efficient sharing
     pub fn as_arc_str(&self) -> &Arc<str> {
         &self.0
     }
-    
+
     /// Extract the inner Arc<str>
     pub fn into_arc_str(self) -> Arc<str> {
         self.0
     }
-    
+
     /// Check if this is the same instance (not just equal content)
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -171,7 +171,7 @@ impl Serialize for OptimizedCallState {
         S: Serializer,
     {
         use serde::ser::SerializeStructVariant;
-        
+
         match self {
             Self::Initiating => serializer.serialize_unit_variant("OptimizedCallState", 0, "Initiating"),
             Self::Ringing => serializer.serialize_unit_variant("OptimizedCallState", 1, "Ringing"),
@@ -194,7 +194,7 @@ impl<'de> Deserialize<'de> for OptimizedCallState {
         D: Deserializer<'de>,
     {
         use serde::de::{self, Visitor, VariantAccess, EnumAccess};
-        
+
         #[derive(Deserialize)]
         #[serde(field_identifier, rename_all = "PascalCase")]
         enum Field {
@@ -208,16 +208,16 @@ impl<'de> Deserialize<'de> for OptimizedCallState {
             Failed,
             Cancelled,
         }
-        
+
         struct OptimizedCallStateVisitor;
-        
+
         impl<'de> Visitor<'de> for OptimizedCallStateVisitor {
             type Value = OptimizedCallState;
-            
+
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
                 formatter.write_str("enum OptimizedCallState")
             }
-            
+
             fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
             where
                 A: EnumAccess<'de>,
@@ -263,7 +263,7 @@ impl<'de> Deserialize<'de> for OptimizedCallState {
                 }
             }
         }
-        
+
         deserializer.deserialize_enum("OptimizedCallState", &["Initiating", "Ringing", "Active", "OnHold", "Transferring", "Terminating", "Terminated", "Failed", "Cancelled"], OptimizedCallStateVisitor)
     }
 }
@@ -345,42 +345,42 @@ impl Default for OptimizedQualityMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_session_id_arc_sharing() {
         let id1 = OptimizedSessionId::new();
         let id2 = id1.clone();
-        
+
         // Should share the same underlying Arc
         assert!(id1.ptr_eq(&id2));
         assert_eq!(id1, id2);
     }
-    
+
     #[test]
     fn test_session_id_compatibility() {
         // Test conversion from old to new
         let old_id = crate::api::types::SessionId::new();
         let optimized: OptimizedSessionId = old_id.clone().into();
         let back_to_old: crate::api::types::SessionId = optimized.into();
-        
+
         assert_eq!(old_id.as_str(), back_to_old.as_str());
     }
-    
+
     #[test]
     fn test_call_state_clone() {
         let state = OptimizedCallState::Active;
         let state2 = state.clone(); // Clone the state
-        
+
         assert_eq!(state, state2);
         assert_eq!(state, OptimizedCallState::Active);
     }
-    
+
     #[test]
     fn test_serialization() {
         let id = OptimizedSessionId::new();
         let serialized = serde_json::to_string(&id).unwrap();
         let deserialized: OptimizedSessionId = serde_json::from_str(&serialized).unwrap();
-        
+
         assert_eq!(id.as_str(), deserialized.as_str());
     }
 }

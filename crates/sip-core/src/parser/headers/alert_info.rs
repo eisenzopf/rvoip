@@ -331,8 +331,8 @@ mod tests {
             1,
             "Second URI should have 1 parameter"
         );
-        assert!(matches!(&infos[1].params[0], 
-                   Param::Other(name, Some(GenericValue::Token(val))) 
+        assert!(matches!(&infos[1].params[0],
+                   Param::Other(name, Some(GenericValue::Token(val)))
                    if name == "param" && val == "X"));
     }
 
@@ -418,16 +418,16 @@ mod tests {
         assert_eq!(infos[0].params.len(), 3, "Should have 3 parameters");
 
         // Check parameter types
-        assert!(matches!(&infos[0].params[0], 
-                Param::Other(name, Some(GenericValue::Token(val))) 
+        assert!(matches!(&infos[0].params[0],
+                Param::Other(name, Some(GenericValue::Token(val)))
                 if name == "param1" && val == "value1"));
 
-        assert!(matches!(&infos[0].params[1], 
-                Param::Other(name, Some(GenericValue::Token(val))) 
+        assert!(matches!(&infos[0].params[1],
+                Param::Other(name, Some(GenericValue::Token(val)))
                 if name == "param2" && val == "value2"));
 
-        assert!(matches!(&infos[0].params[2], 
-                Param::Other(name, None) 
+        assert!(matches!(&infos[0].params[2],
+                Param::Other(name, None)
                 if name == "param3"));
     }
 

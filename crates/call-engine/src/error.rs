@@ -9,12 +9,12 @@ use thiserror::Error;
 ///
 /// ```
 /// use rvoip_call_engine::{CallCenterError, Result};
-/// 
+///
 /// fn process_call() -> Result<()> {
 ///     // Simulate an agent error
 ///     Err(CallCenterError::agent("Agent not available"))
 /// }
-/// 
+///
 /// match process_call() {
 ///     Ok(_) => println!("Call processed successfully"),
 ///     Err(CallCenterError::Agent(msg)) => println!("Agent error: {}", msg),
@@ -29,7 +29,7 @@ pub enum CallCenterError {
     /// with SIP session management, call setup, or media negotiation.
     #[error("Session error: {0}")]
     Session(#[from] rvoip_session_core::api::SessionError),
-    
+
     /// Database operation errors
     ///
     /// Includes connection failures, SQL errors, transaction problems,
@@ -42,7 +42,7 @@ pub enum CallCenterError {
     /// - Database file corruption
     #[error("Database error: {0}")]
     Database(String),
-    
+
     /// Agent-related errors
     ///
     /// Covers agent registration, authentication, skill validation,
@@ -55,7 +55,7 @@ pub enum CallCenterError {
     /// - Agent unavailable for assignment
     #[error("Agent error: {0}")]
     Agent(String),
-    
+
     /// Queue-related errors
     ///
     /// Issues with call queuing, queue management, overflow handling,
@@ -68,7 +68,7 @@ pub enum CallCenterError {
     /// - Overflow policy violations
     #[error("Queue error: {0}")]
     Queue(String),
-    
+
     /// Call routing errors
     ///
     /// Problems with call routing logic, skill matching, load balancing,
@@ -81,7 +81,7 @@ pub enum CallCenterError {
     /// - Geographic routing unavailable
     #[error("Routing error: {0}")]
     Routing(String),
-    
+
     /// SIP bridge operation errors
     ///
     /// Issues with creating, managing, or tearing down SIP bridges
@@ -94,7 +94,7 @@ pub enum CallCenterError {
     /// - Bridge resource exhaustion
     #[error("Bridge error: {0}")]
     Bridge(String),
-    
+
     /// Call center orchestration errors
     ///
     /// High-level coordination problems that don't fit into specific
@@ -107,7 +107,7 @@ pub enum CallCenterError {
     /// - Inter-component communication failures
     #[error("Orchestration error: {0}")]
     Orchestration(String),
-    
+
     /// Configuration validation and parsing errors
     ///
     /// Problems with call center configuration, including invalid values,
@@ -120,7 +120,7 @@ pub enum CallCenterError {
     /// - Configuration file not found
     #[error("Configuration error: {0}")]
     Configuration(String),
-    
+
     /// Authentication failures
     ///
     /// Agent or supervisor authentication problems, including invalid
@@ -133,7 +133,7 @@ pub enum CallCenterError {
     /// - Multi-factor authentication failed
     #[error("Authentication error: {0}")]
     Authentication(String),
-    
+
     /// Authorization failures
     ///
     /// Permission and access control errors when agents or supervisors
@@ -146,7 +146,7 @@ pub enum CallCenterError {
     /// - Time-based access restrictions
     #[error("Authorization error: {0}")]
     Authorization(String),
-    
+
     /// Resource unavailable errors
     ///
     /// System resources (memory, CPU, network, disk) are temporarily
@@ -159,7 +159,7 @@ pub enum CallCenterError {
     /// - Disk space full
     #[error("Resource unavailable: {0}")]
     ResourceUnavailable(String),
-    
+
     /// Invalid input validation errors
     ///
     /// User-provided input failed validation checks, including format
@@ -172,7 +172,7 @@ pub enum CallCenterError {
     /// - Queue priority out of range
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-    
+
     /// Resource not found errors
     ///
     /// Requested agents, calls, queues, or other resources could not
@@ -185,7 +185,7 @@ pub enum CallCenterError {
     /// - Bridge ID invalid
     #[error("Not found: {0}")]
     NotFound(String),
-    
+
     /// Resource already exists errors
     ///
     /// Attempt to create a resource that already exists in the system,
@@ -198,7 +198,7 @@ pub enum CallCenterError {
     /// - Bridge already created
     #[error("Already exists: {0}")]
     AlreadyExists(String),
-    
+
     /// Operation timeout errors
     ///
     /// Operations that failed to complete within the specified time limit,
@@ -211,7 +211,7 @@ pub enum CallCenterError {
     /// - Bridge setup timeout
     #[error("Operation timed out: {0}")]
     Timeout(String),
-    
+
     /// Internal system errors
     ///
     /// Unexpected internal errors that indicate bugs or system corruption.
@@ -224,7 +224,7 @@ pub enum CallCenterError {
     /// - Unreachable code executed
     #[error("Internal error: {0}")]
     Internal(String),
-    
+
     /// Integration layer errors
     ///
     /// Problems with integrating with external systems, including
@@ -237,7 +237,7 @@ pub enum CallCenterError {
     /// - Protocol version mismatch
     #[error("Integration error: {0}")]
     Integration(String),
-    
+
     /// Data validation errors
     ///
     /// Problems with data consistency, integrity checks, and business
@@ -259,147 +259,147 @@ impl CallCenterError {
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::agent("Agent not available for assignment");
     /// println!("{}", error);  // Prints: Agent error: Agent not available for assignment
     /// ```
     pub fn agent<S: Into<String>>(msg: S) -> Self {
         Self::Agent(msg.into())
     }
-    
+
     /// Create a new Queue error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::queue("Queue full, cannot accept more calls");
     /// println!("{}", error);
     /// ```
     pub fn queue<S: Into<String>>(msg: S) -> Self {
         Self::Queue(msg.into())
     }
-    
+
     /// Create a new Routing error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::routing("No agents available with required skills");
     /// println!("{}", error);
     /// ```
     pub fn routing<S: Into<String>>(msg: S) -> Self {
         Self::Routing(msg.into())
     }
-    
+
     /// Create a new Bridge error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::bridge("Failed to create SIP bridge");
     /// println!("{}", error);
     /// ```
     pub fn bridge<S: Into<String>>(msg: S) -> Self {
         Self::Bridge(msg.into())
     }
-    
+
     /// Create a new Orchestration error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::orchestration("System overload detected");
     /// println!("{}", error);
     /// ```
     pub fn orchestration<S: Into<String>>(msg: S) -> Self {
         Self::Orchestration(msg.into())
     }
-    
+
     /// Create a new Database error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::database("Connection to database failed");
     /// println!("{}", error);
     /// ```
     pub fn database<S: Into<String>>(msg: S) -> Self {
         Self::Database(msg.into())
     }
-    
+
     /// Create a new Configuration error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::configuration("Invalid port number in config");
     /// println!("{}", error);
     /// ```
     pub fn configuration<S: Into<String>>(msg: S) -> Self {
         Self::Configuration(msg.into())
     }
-    
+
     /// Create a new NotFound error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::not_found("Agent with ID 'agent-123' not found");
     /// println!("{}", error);
     /// ```
     pub fn not_found<S: Into<String>>(msg: S) -> Self {
         Self::NotFound(msg.into())
     }
-    
+
     /// Create a new Internal error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::internal("Unexpected state in call processing");
     /// println!("{}", error);
     /// ```
     pub fn internal<S: Into<String>>(msg: S) -> Self {
         Self::Internal(msg.into())
     }
-    
+
     /// Create a new Integration error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::integration("Session-core API call failed");
     /// println!("{}", error);
     /// ```
     pub fn integration<S: Into<String>>(msg: S) -> Self {
         Self::Integration(msg.into())
     }
-    
+
     /// Create a new Validation error with the provided message
     ///
     /// # Examples
     ///
     /// ```
     /// use rvoip_call_engine::CallCenterError;
-    /// 
+    ///
     /// let error = CallCenterError::validation("Agent skills validation failed");
     /// println!("{}", error);
     /// ```
@@ -417,17 +417,17 @@ impl CallCenterError {
 ///
 /// ```
 /// use rvoip_call_engine::{Result, CallCenterError};
-/// 
+///
 /// fn register_agent(agent_id: &str) -> Result<String> {
 ///     if agent_id.is_empty() {
 ///         return Err(CallCenterError::InvalidInput("Agent ID cannot be empty".to_string()));
 ///     }
 ///     Ok(format!("session-{}", agent_id))
 /// }
-/// 
+///
 /// match register_agent("") {
 ///     Ok(session_id) => println!("Agent registered: {}", session_id),
 ///     Err(e) => eprintln!("Registration failed: {}", e),
 /// }
 /// ```
-pub type Result<T> = std::result::Result<T, CallCenterError>; 
+pub type Result<T> = std::result::Result<T, CallCenterError>;

@@ -7,7 +7,7 @@
 //!
 //! - **1xx Provisional**: Update dialog state, may create early dialogs
 //! - **2xx Success**: Confirm dialogs, complete transactions
-//! - **3xx Redirection**: Handle call forwarding and redirects  
+//! - **3xx Redirection**: Handle call forwarding and redirects
 //! - **4xx Client Error**: Handle authentication, not found, etc.
 //! - **5xx Server Error**: Handle server failures and overload
 //! - **6xx Global Failure**: Handle permanent failures

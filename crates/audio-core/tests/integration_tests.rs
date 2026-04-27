@@ -62,7 +62,7 @@ mod types_tests {
     #[test]
     fn test_audio_frame_silence_detection() {
         let format = AudioFormat::pcm_8khz_mono();
-        
+
         // Test silent frame
         let silent_frame = AudioFrame::silent(format.clone(), 1000);
         assert!(silent_frame.is_silent());
@@ -76,7 +76,7 @@ mod types_tests {
     #[test]
     fn test_audio_frame_rms_level() {
         let format = AudioFormat::pcm_8khz_mono();
-        
+
         // Test silent frame
         let silent_frame = AudioFrame::silent(format.clone(), 1000);
         assert_eq!(silent_frame.rms_level(), 0.0);
@@ -128,7 +128,7 @@ mod types_tests {
         metrics.mos_score = 4.2;
         metrics.packet_loss_percent = 1.0;
         metrics.jitter_ms = 15.0;
-        
+
         assert!(metrics.is_acceptable());
         assert_eq!(metrics.quality_rating(), "Good");
     }
@@ -168,11 +168,11 @@ mod device_tests {
     #[tokio::test]
     async fn test_device_enumeration() {
         let manager = AudioDeviceManager::new().await.unwrap();
-        
+
         // Test listing input devices
         let input_devices = manager.list_devices(AudioDirection::Input).await;
         assert!(input_devices.is_ok());
-        
+
         // Test listing output devices
         let output_devices = manager.list_devices(AudioDirection::Output).await;
         assert!(output_devices.is_ok());
@@ -181,11 +181,11 @@ mod device_tests {
     #[tokio::test]
     async fn test_default_device_access() {
         let manager = AudioDeviceManager::new().await.unwrap();
-        
+
         // Test getting default input device
         let input_device = manager.get_default_device(AudioDirection::Input).await;
         assert!(input_device.is_ok());
-        
+
         // Test getting default output device
         let output_device = manager.get_default_device(AudioDirection::Output).await;
         assert!(output_device.is_ok());
@@ -195,13 +195,13 @@ mod device_tests {
     async fn test_device_format_support() {
         let manager = AudioDeviceManager::new().await.unwrap();
         let device = manager.get_default_device(AudioDirection::Input).await.unwrap();
-        
+
         // Test device info is valid
         let info = device.info();
         assert!(!info.id.is_empty());
         assert!(!info.name.is_empty());
         assert_eq!(info.direction, AudioDirection::Input);
-        
+
         // Test format support checking (but don't assume specific format is supported)
         let format = AudioFormat::pcm_8khz_mono();
         let _supports_format = device.supports_format(&format);
@@ -241,7 +241,7 @@ mod pipeline_tests {
             .await;
 
         assert!(pipeline.is_ok());
-        
+
         let mut pipeline = pipeline.unwrap();
         let start_result = pipeline.start().await;
         assert!(start_result.is_ok());
@@ -332,16 +332,16 @@ mod integration_tests {
         // Test creating a device manager and connecting it to a pipeline
         let device_manager = AudioDeviceManager::new().await.unwrap();
         let input_device = device_manager.get_default_device(AudioDirection::Input).await.unwrap();
-        
+
         let device_format = input_device.info().best_voip_format();
-        
+
         let pipeline = AudioPipeline::builder()
             .input_format(device_format)
             .output_format(AudioFormat::pcm_8khz_mono())
             .device_manager(device_manager)
             .build()
             .await;
-        
+
         assert!(pipeline.is_ok());
     }
 
@@ -364,4 +364,4 @@ mod integration_tests {
         assert_eq!(frame3.format.channels, 2);
     }
 
-} 
+}

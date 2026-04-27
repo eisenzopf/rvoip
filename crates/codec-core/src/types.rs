@@ -533,7 +533,7 @@ pub struct G729Parameters {
     /// Use reduced complexity mode (Annex A) - DEPRECATED: use annex_a instead
     #[deprecated(since = "0.1.14", note = "use annex_a instead")]
     pub reduced_complexity: bool,
-    /// Enable Voice Activity Detection (VAD) - DEPRECATED: use annex_b instead  
+    /// Enable Voice Activity Detection (VAD) - DEPRECATED: use annex_b instead
     #[deprecated(since = "0.1.14", note = "use annex_b instead")]
     pub vad_enabled: bool,
     /// Enable Comfort Noise Generation (CNG) - DEPRECATED: use annex_b instead

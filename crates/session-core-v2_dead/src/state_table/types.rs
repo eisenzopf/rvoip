@@ -44,12 +44,12 @@ impl DialogId {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
-    
+
     /// Create from a UUID
     pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
-    
+
     /// Get the inner UUID
     pub fn as_uuid(&self) -> &uuid::Uuid {
         &self.0
@@ -69,7 +69,7 @@ impl From<rvoip_dialog_core::DialogId> for DialogId {
     }
 }
 
-// Conversion from our DialogId to rvoip_dialog_core::DialogId  
+// Conversion from our DialogId to rvoip_dialog_core::DialogId
 impl From<DialogId> for rvoip_dialog_core::DialogId {
     fn from(dialog_id: DialogId) -> Self {
         rvoip_dialog_core::DialogId(dialog_id.0)
@@ -83,7 +83,7 @@ impl From<&DialogId> for rvoip_dialog_core::DialogId {
     }
 }
 
-/// Media session ID type  
+/// Media session ID type
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MediaSessionId(pub String);
 
@@ -138,7 +138,7 @@ pub enum EventType {
     StartRecording,
     StopRecording,
     SendDTMF { digits: String },
-    
+
     // Dialog events (from dialog-core)
     DialogCreated { dialog_id: String, call_id: String },
     CallEstablished { session_id: String, sdp_answer: Option<String> },
@@ -161,7 +161,7 @@ pub enum EventType {
     DialogStateChanged { old_state: String, new_state: String },
     ReinviteReceived { sdp: Option<String> },
     TransferRequested { refer_to: String, transfer_type: String },
-    
+
     // Media events (from media-core)
     MediaSessionCreated,
     MediaSessionReady,
@@ -173,7 +173,7 @@ pub enum EventType {
     DtmfDetected { digit: char, duration_ms: u32 },
     RtpTimeout { last_packet_time: String },
     PacketLossThresholdExceeded { loss_percentage: u32 },
-    
+
     // Internal coordination events
     InternalCheckReady,
     InternalACKSent,
@@ -181,7 +181,7 @@ pub enum EventType {
     InternalCleanupComplete,
     CheckConditions,
     PublishCallEstablished,
-    
+
     // Conference events
     CreateConference { name: String },
     AddParticipant { session_id: String },
@@ -189,7 +189,7 @@ pub enum EventType {
     LeaveConference,
     MuteInConference,
     UnmuteInConference,
-    
+
     // Bridge/Transfer events
     BridgeSessions { other_session: SessionId },
     UnbridgeSessions,
@@ -201,7 +201,7 @@ pub enum EventType {
     TransferComplete,
     TransferSuccess,
     TransferFailed,
-    
+
     // Session modification
     ModifySession,
 
@@ -248,7 +248,7 @@ impl EventType {
             EventType::RejectCall { .. } => EventType::RejectCall { reason: String::new() },
             EventType::BlindTransfer { .. } => EventType::BlindTransfer { target: String::new() },
             EventType::AttendedTransfer { .. } => EventType::AttendedTransfer { target: String::new() },
-            
+
             // Media events - normalize
             EventType::PlayAudio { .. } => EventType::PlayAudio { file: String::new() },
             EventType::SendDTMF { .. } => EventType::SendDTMF { digits: String::new() },
@@ -288,16 +288,16 @@ impl EventType {
 pub struct Transition {
     /// Conditions that must be true for this transition
     pub guards: Vec<Guard>,
-    
+
     /// Actions to execute
     pub actions: Vec<Action>,
-    
+
     /// Next state (if changing)
     pub next_state: Option<CallState>,
-    
+
     /// Condition flags to update
     pub condition_updates: ConditionUpdates,
-    
+
     /// Events to publish after transition
     pub publish_events: Vec<EventTemplate>,
 }
@@ -333,7 +333,7 @@ pub enum Action {
     SendBYE,
     SendCANCEL,
     SendReINVITE,
-    
+
     // Call control actions
     HoldCall,
     ResumeCall,
@@ -341,7 +341,7 @@ pub enum Action {
     SendDTMF(char),
     StartRecording,
     StopRecording,
-    
+
     // Media actions
     StartMediaSession,
     StopMediaSession,
@@ -350,7 +350,7 @@ pub enum Action {
     PlayAudioFile(String),
     StartRecordingMedia,
     StopRecordingMedia,
-    
+
     // Conference actions
     CreateAudioMixer,
     RedirectToMixer,
@@ -363,10 +363,10 @@ pub enum Action {
     RestoreDirectMedia,
     StartRecordingMixer,
     StopRecordingMixer,
-    
+
     // Media direction actions
     UpdateMediaDirection { direction: MediaDirection },
-    
+
     // Transfer actions
     SendREFER,
     SendREFERWithReplaces,
@@ -387,30 +387,30 @@ pub enum Action {
     MuteLocalAudio,
     UnmuteLocalAudio,
     SendDTMFTone,
-    
+
     // State updates
     SetCondition(Condition, bool),
     StoreLocalSDP,
     StoreRemoteSDP,
     StoreNegotiatedConfig,
-    
+
     // Bridge/Transfer actions
     CreateBridge(SessionId),
     DestroyBridge,
     InitiateBlindTransfer(String),
     InitiateAttendedTransfer(String),
-    
+
     // Resource management
     RestoreMediaFlow,
     ReleaseAllResources,
     StartEmergencyCleanup,
     AttemptMediaRecovery,
     CleanupResources,
-    
+
     // Callbacks
     TriggerCallEstablished,
     TriggerCallTerminated,
-    
+
     // Cleanup
     StartDialogCleanup,
     StartMediaCleanup,
@@ -456,21 +456,21 @@ impl ConditionUpdates {
     pub fn none() -> Self {
         Self::default()
     }
-    
+
     pub fn set_dialog_established(established: bool) -> Self {
         Self {
             dialog_established: Some(established),
             ..Default::default()
         }
     }
-    
+
     pub fn set_media_ready(ready: bool) -> Self {
         Self {
             media_session_ready: Some(ready),
             ..Default::default()
         }
     }
-    
+
     pub fn set_sdp_negotiated(negotiated: bool) -> Self {
         Self {
             sdp_negotiated: Some(negotiated),
@@ -519,7 +519,7 @@ impl MasterStateTable {
             wildcard_transitions: HashMap::new(),
         }
     }
-    
+
     pub fn insert(&mut self, key: StateKey, transition: Transition) {
         // Always normalize the event when inserting
         let normalized_key = StateKey {
@@ -529,13 +529,13 @@ impl MasterStateTable {
         };
         self.transitions.insert(normalized_key, transition);
     }
-    
+
     /// Insert a wildcard transition that applies to any state
     pub fn insert_wildcard(&mut self, role: Role, event: EventType, transition: Transition) {
         let normalized_event = event.normalize();
         self.wildcard_transitions.insert((role, normalized_event), transition);
     }
-    
+
     pub fn get(&self, key: &StateKey) -> Option<&Transition> {
         // Normalize the event for lookup
         let normalized_key = StateKey {
@@ -565,11 +565,11 @@ impl MasterStateTable {
         let normalized_event = key.event.normalize();
         self.wildcard_transitions.get(&(key.role, normalized_event))
     }
-    
+
     pub fn get_transition(&self, key: &StateKey) -> Option<&Transition> {
         self.get(key)
     }
-    
+
     pub fn has_transition(&self, key: &StateKey) -> bool {
         // Normalize the event for lookup
         let normalized_key = StateKey {
@@ -599,15 +599,15 @@ impl MasterStateTable {
         let normalized_event = key.event.normalize();
         self.wildcard_transitions.contains_key(&(key.role, normalized_event))
     }
-    
+
     pub fn transition_count(&self) -> usize {
         self.transitions.len() + self.wildcard_transitions.len()
     }
-    
+
     /// Collect all states referenced in this state table
     pub fn collect_used_states(&self) -> HashSet<CallState> {
         let mut states = HashSet::new();
-        
+
         // Collect from regular transitions
         for (key, transition) in &self.transitions {
             states.insert(key.state);
@@ -615,34 +615,34 @@ impl MasterStateTable {
                 states.insert(*next_state);
             }
         }
-        
+
         // Collect from wildcard transitions
         for (_, transition) in &self.wildcard_transitions {
             if let Some(next_state) = &transition.next_state {
                 states.insert(*next_state);
             }
         }
-        
+
         states
     }
-    
+
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
-        
+
         // Collect states actually used in this table
         let used_states = self.collect_used_states();
-        
+
         // Check for orphan states only among used states
         for state in used_states.iter() {
             // Skip terminal states
             if matches!(state, CallState::Terminated | CallState::Cancelled | CallState::Failed(_)) {
                 continue;
             }
-            
+
             // Check if state has exit transitions
             let has_exact_exit = self.transitions.iter().any(|(k, _)| k.state == *state);
             let has_wildcard_exit = !self.wildcard_transitions.is_empty();
-            
+
             if !has_exact_exit && !has_wildcard_exit {
                 // Only error for core states, warn for others
                 if CORE_STATES_REQUIRING_EXITS.contains(state) {
@@ -652,7 +652,7 @@ impl MasterStateTable {
                 // For now, we just skip them to avoid false positives
             }
         }
-        
+
         if errors.is_empty() {
             Ok(())
         } else {

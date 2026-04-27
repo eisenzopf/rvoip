@@ -29,7 +29,7 @@ impl MediaDirection {
             MediaDirection::Inactive => "a=inactive",
         }
     }
-    
+
     /// Parse from SDP attribute line
     pub fn from_sdp_line(line: &str) -> Option<Self> {
         let line = line.trim();
@@ -51,21 +51,21 @@ impl MediaDirection {
 /// Sets all media streams to sendonly (we might send music-on-hold)
 pub fn generate_hold_sdp(current_sdp: &str) -> Result<String> {
     info!("Generating hold SDP from current SDP");
-    
+
     let mut result = Vec::new();
     let mut in_media_section = false;
     let mut media_direction_set = false;
-    
+
     for line in current_sdp.lines() {
         let trimmed = line.trim();
-        
+
         // Check if we're entering a media section
         if trimmed.starts_with("m=") {
             // If we were in a previous media section and didn't set direction, add it
             if in_media_section && !media_direction_set {
                 result.push(MediaDirection::SendOnly.to_sdp_attribute());
             }
-            
+
             in_media_section = true;
             media_direction_set = false;
             result.push(line);
@@ -84,12 +84,12 @@ pub fn generate_hold_sdp(current_sdp: &str) -> Result<String> {
             result.push(line);
         }
     }
-    
+
     // Handle case where last media section didn't have direction set
     if in_media_section && !media_direction_set {
         result.push(MediaDirection::SendOnly.to_sdp_attribute());
     }
-    
+
     let sdp = result.join("\r\n");
     debug!("Generated hold SDP with sendonly for all media streams");
     Ok(sdp)
@@ -99,21 +99,21 @@ pub fn generate_hold_sdp(current_sdp: &str) -> Result<String> {
 /// Sets all media streams to sendrecv (normal bidirectional media)
 pub fn generate_resume_sdp(current_sdp: &str) -> Result<String> {
     info!("Generating resume SDP from current SDP");
-    
+
     let mut result = Vec::new();
     let mut in_media_section = false;
     let mut media_direction_set = false;
-    
+
     for line in current_sdp.lines() {
         let trimmed = line.trim();
-        
+
         // Check if we're entering a media section
         if trimmed.starts_with("m=") {
             // If we were in a previous media section and didn't set direction, add it
             if in_media_section && !media_direction_set {
                 result.push(MediaDirection::SendRecv.to_sdp_attribute());
             }
-            
+
             in_media_section = true;
             media_direction_set = false;
             result.push(line);
@@ -132,12 +132,12 @@ pub fn generate_resume_sdp(current_sdp: &str) -> Result<String> {
             result.push(line);
         }
     }
-    
+
     // Handle case where last media section didn't have direction set
     if in_media_section && !media_direction_set {
         result.push(MediaDirection::SendRecv.to_sdp_attribute());
     }
-    
+
     let sdp = result.join("\r\n");
     debug!("Generated resume SDP with sendrecv for all media streams");
     Ok(sdp)
@@ -149,10 +149,10 @@ pub fn parse_media_directions(sdp: &str) -> Vec<(usize, MediaDirection)> {
     let mut directions = Vec::new();
     let mut current_media_index = None;
     let mut session_direction = None;
-    
+
     for line in sdp.lines() {
         let trimmed = line.trim();
-        
+
         // New media section
         if trimmed.starts_with("m=") {
             current_media_index = Some(directions.len());
@@ -179,7 +179,7 @@ pub fn parse_media_directions(sdp: &str) -> Vec<(usize, MediaDirection)> {
             }
         }
     }
-    
+
     directions
 }
 
@@ -205,7 +205,7 @@ pub fn validate_hold_response(offer_dir: MediaDirection, answer_dir: MediaDirect
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_media_direction_conversion() {
         assert_eq!(MediaDirection::SendOnly.to_sdp_attribute(), "a=sendonly");
@@ -213,7 +213,7 @@ mod tests {
         assert_eq!(MediaDirection::RecvOnly.to_sdp_attribute(), "a=recvonly");
         assert_eq!(MediaDirection::Inactive.to_sdp_attribute(), "a=inactive");
     }
-    
+
     #[test]
     fn test_media_direction_parsing() {
         assert_eq!(MediaDirection::from_sdp_line("a=sendonly"), Some(MediaDirection::SendOnly));
@@ -222,7 +222,7 @@ mod tests {
         assert_eq!(MediaDirection::from_sdp_line("a=inactive"), Some(MediaDirection::Inactive));
         assert_eq!(MediaDirection::from_sdp_line("a=rtpmap:0 PCMU/8000"), None);
     }
-    
+
     #[test]
     fn test_generate_hold_sdp() {
         let original = "v=0\r\n\
@@ -234,12 +234,12 @@ mod tests {
                        c=IN IP4 192.168.1.100\r\n\
                        a=sendrecv\r\n\
                        a=rtpmap:0 PCMU/8000";
-        
+
         let hold_sdp = generate_hold_sdp(original).unwrap();
         assert!(hold_sdp.contains("a=sendonly"));
         assert!(!hold_sdp.contains("a=sendrecv"));
     }
-    
+
     #[test]
     fn test_generate_resume_sdp() {
         let hold = "v=0\r\n\
@@ -251,29 +251,29 @@ mod tests {
                    c=IN IP4 192.168.1.100\r\n\
                    a=sendonly\r\n\
                    a=rtpmap:0 PCMU/8000";
-        
+
         let resume_sdp = generate_resume_sdp(hold).unwrap();
         assert!(resume_sdp.contains("a=sendrecv"));
         assert!(!resume_sdp.contains("a=sendonly"));
     }
-    
+
     #[test]
     fn test_validate_hold_response() {
         // Valid hold responses
         assert!(validate_hold_response(MediaDirection::SendOnly, MediaDirection::RecvOnly));
         assert!(validate_hold_response(MediaDirection::SendOnly, MediaDirection::Inactive));
-        
+
         // Invalid hold responses
         assert!(!validate_hold_response(MediaDirection::SendOnly, MediaDirection::SendOnly));
         assert!(!validate_hold_response(MediaDirection::SendOnly, MediaDirection::SendRecv));
-        
+
         // Valid resume responses (any direction is valid)
         assert!(validate_hold_response(MediaDirection::SendRecv, MediaDirection::SendRecv));
         assert!(validate_hold_response(MediaDirection::SendRecv, MediaDirection::SendOnly));
         assert!(validate_hold_response(MediaDirection::SendRecv, MediaDirection::RecvOnly));
         assert!(validate_hold_response(MediaDirection::SendRecv, MediaDirection::Inactive));
     }
-    
+
     #[test]
     fn test_parse_media_directions() {
         let sdp = "v=0\r\n\
@@ -285,7 +285,7 @@ mod tests {
                   a=sendonly\r\n\
                   m=video 5006 RTP/AVP 96\r\n\
                   a=recvonly";
-        
+
         let directions = parse_media_directions(sdp);
         assert_eq!(directions.len(), 2);
         assert_eq!(directions[0], (0, MediaDirection::SendOnly));

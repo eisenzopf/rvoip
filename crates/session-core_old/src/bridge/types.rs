@@ -30,4 +30,4 @@ impl Default for BridgeConfig {
             auto_stop_on_empty: true,
         }
     }
-} 
+}

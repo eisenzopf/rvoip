@@ -32,13 +32,13 @@ fn extract_ip_from_sdp(sdp: &str) -> Option<String> {
 // Helper function to establish media for a call
 async fn establish_media_for_call(client: &Arc<rvoip_client_core::Client>, call_id: &CallId) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("🔗 Establishing media flow for call {}", call_id);
-    
+
     // Get media info to find RTP ports
     let media_info = client.get_call_media_info(call_id).await?;
-    
-    tracing::info!("📡 Media info - Local RTP: {:?}, Remote RTP: {:?}", 
+
+    tracing::info!("📡 Media info - Local RTP: {:?}, Remote RTP: {:?}",
         media_info.local_rtp_port, media_info.remote_rtp_port);
-    
+
     if let Some(remote_rtp_port) = media_info.remote_rtp_port {
         // Extract remote IP from SDP
         let remote_ip = if let Some(ref sdp) = media_info.remote_sdp {
@@ -55,9 +55,9 @@ async fn establish_media_for_call(client: &Arc<rvoip_client_core::Client>, call_
             tracing::warn!("⚠️ No remote SDP available, falling back to localhost");
             "127.0.0.1".to_string()
         };
-        
+
         let remote_addr = format!("{}:{}", remote_ip, remote_rtp_port);
-        
+
         tracing::info!("📡 Establishing media to remote RTP address: {}", remote_addr);
         match client.establish_media(call_id, &remote_addr).await {
             Ok(_) => tracing::info!("✅ Media flow established for call {} to {}", call_id, remote_addr),
@@ -68,7 +68,7 @@ async fn establish_media_for_call(client: &Arc<rvoip_client_core::Client>, call_
         // This might happen if we're the caller and haven't received the answer yet
         // The media will be established when we receive the 200 OK with SDP answer
     }
-    
+
     Ok(())
 }
 
@@ -130,20 +130,20 @@ impl SipClient {
             sip_identity: sip_identity.into(),
             ..Default::default()
         };
-        
+
         Self::from_config(config).await
     }
-    
+
     /// Create a SIP client from configuration
     pub(crate) async fn from_config(config: SipClientConfig) -> SipClientResult<Self> {
         // Initialize components
         let client = Self::create_client(&config).await?;
         let audio_manager = Self::create_audio_manager(&config).await?;
         let codec_registry = Self::create_codec_registry(&config)?;
-        
+
         // Create event emitter
         let events = EventEmitter::default();
-        
+
         // Create recovery components
         let recovery_config = RecoveryConfig::default();
         let recovery_manager = Arc::new(RecoveryManager::new(
@@ -153,12 +153,12 @@ impl SipClient {
         let quality_adaptation_manager = Arc::new(QualityAdaptationManager::new(
             events.clone(),
         ));
-        
+
         let reconnection_handler = Arc::new(ReconnectionHandler::new(
             recovery_manager.clone(),
             events.clone(),
         ));
-        
+
         let inner = Arc::new(SipClientInner {
             config,
             client,
@@ -172,10 +172,10 @@ impl SipClient {
             reconnection_handler,
             connection_monitor: Arc::new(RwLock::new(None)),
         });
-        
+
         Ok(Self { inner })
     }
-    
+
     /// Make a call
     ///
     /// # Example
@@ -188,10 +188,10 @@ impl SipClient {
     /// ```
     pub async fn call(&self, uri: impl Into<String>) -> SipClientResult<Arc<Call>> {
         let uri = uri.into();
-        
+
         // Create SDP offer with our codec preferences
         let sdp = self.create_sdp_offer().await?;
-        
+
         // Make the call via client-core
         let call_id = self.inner.client
             .make_call(
@@ -200,7 +200,7 @@ impl SipClient {
                 Some(sdp),
             )
             .await?;
-        
+
         // Create call object
         let call = Arc::new(Call {
             id: call_id,
@@ -212,66 +212,66 @@ impl SipClient {
             codec: None,
             direction: CallDirection::Outgoing,
         });
-        
+
         // Store call
         self.inner.calls.write().insert(call_id, call.clone());
-        
+
         // Don't setup audio pipeline yet - wait until media is established
         // This will be done in the CallStateChanged event handler
-        
+
         // Initialize quality adaptation for the call
         let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
         self.inner.quality_adaptation_manager.initialize_call(call_id, codecs).await;
-        
+
         Ok(call)
     }
-    
+
     /// Answer an incoming call
     pub async fn answer(&self, call_id: &CallId) -> SipClientResult<()> {
         let call = self.get_call(call_id)?;
-        
+
         // Answer via client-core (it will generate its own SDP answer)
         self.inner.client.answer_call(call_id).await?;
-        
+
         // Update call state
         *call.state.write() = CallState::Connected;
-        
+
         // Don't setup audio pipeline yet - wait until media is established
         // This will be done in the CallStateChanged event handler
-        
+
         // Initialize quality adaptation for the call
         let codecs = vec![codec_core::CodecType::G711Pcmu, codec_core::CodecType::G711Pcma];
         self.inner.quality_adaptation_manager.initialize_call(*call_id, codecs).await;
-        
+
         Ok(())
     }
-    
+
     /// Reject an incoming call
     pub async fn reject(&self, call_id: &CallId) -> SipClientResult<()> {
         self.inner.client.reject_call(call_id).await?;
-        
+
         // Remove call
         self.inner.calls.write().remove(call_id);
-        
+
         Ok(())
     }
-    
+
     /// Hangup a call
     pub async fn hangup(&self, call_id: &CallId) -> SipClientResult<()> {
         // Terminate via client-core
         self.inner.client.hangup_call(call_id).await?;
-        
+
         // Clean up audio pipeline
         self.cleanup_audio_pipeline(call_id).await?;
-        
+
         // Clean up quality adaptation
         self.inner.quality_adaptation_manager.cleanup_call(call_id).await;
-        
+
         // Update state
         if let Some(call) = self.inner.calls.read().get(call_id) {
             *call.state.write() = CallState::Terminated;
         }
-        
+
         // Remove call after a delay
         let calls = self.inner.calls.clone();
         let call_id = *call_id;
@@ -279,29 +279,29 @@ impl SipClient {
             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             calls.write().remove(&call_id);
         });
-        
+
         Ok(())
     }
-    
+
     /// Mute/unmute microphone
     pub async fn set_mute(&self, call_id: &CallId, mute: bool) -> SipClientResult<()> {
         self.inner.client.set_microphone_mute(call_id, mute).await?;
         Ok(())
     }
-    
+
     /// Get current mute state
     pub async fn is_muted(&self, call_id: &CallId) -> SipClientResult<bool> {
         Ok(self.inner.client.get_microphone_mute_state(call_id).await?)
     }
-    
+
     /// Put call on hold
     pub async fn hold(&self, call_id: &CallId) -> SipClientResult<()> {
         self.inner.client.hold_call(call_id).await?;
-        
+
         if let Some(call) = self.inner.calls.read().get(call_id) {
             let previous_state = *call.state.read();
             *call.state.write() = CallState::OnHold;
-            
+
             // Emit state change event
             self.inner.events.emit(SipClientEvent::CallStateChanged {
                 call: call.clone(),
@@ -309,21 +309,21 @@ impl SipClient {
                 new_state: CallState::OnHold,
                 reason: Some("Call put on hold".to_string()),
             });
-            
+
             tracing::info!("⏸️ Call {} put on hold", call_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Resume a held call
     pub async fn resume(&self, call_id: &CallId) -> SipClientResult<()> {
         self.inner.client.resume_call(call_id).await?;
-        
+
         if let Some(call) = self.inner.calls.read().get(call_id) {
             let previous_state = *call.state.read();
             *call.state.write() = CallState::Connected;
-            
+
             // Emit state change event
             self.inner.events.emit(SipClientEvent::CallStateChanged {
                 call: call.clone(),
@@ -331,13 +331,13 @@ impl SipClient {
                 new_state: CallState::Connected,
                 reason: Some("Call resumed".to_string()),
             });
-            
+
             tracing::info!("▶️ Call {} resumed", call_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Send DTMF digits during a call
     ///
     /// # Example
@@ -362,7 +362,7 @@ impl SipClient {
                 }
             }
         }
-        
+
         // Check if call exists and is connected
         let call = self.get_call(call_id)?;
         let state = *call.state.read();
@@ -371,18 +371,18 @@ impl SipClient {
                 message: format!("Cannot send DTMF in call state: {:?}", state),
             });
         }
-        
+
         // Send DTMF via client-core
         match self.inner.client.send_dtmf(call_id, digits).await {
             Ok(_) => {
                 tracing::info!("📞 Sent DTMF digits '{}' on call {}", digits, call_id);
-                
+
                 // Emit DTMF sent event
                 self.inner.events.emit(SipClientEvent::DtmfSent {
                     call: call.clone(),
                     digits: digits.to_string(),
                 });
-                
+
                 Ok(())
             }
             Err(e) => {
@@ -393,7 +393,7 @@ impl SipClient {
             }
         }
     }
-    
+
     /// Transfer a call to another party
     ///
     /// # Example
@@ -414,21 +414,21 @@ impl SipClient {
                 message: format!("Cannot transfer call in state: {:?}", state),
             });
         }
-        
+
         // Perform transfer via client-core
         match self.inner.client.transfer_call(call_id, target_uri).await {
             Ok(_) => {
                 tracing::info!("📞 Transferring call {} to {}", call_id, target_uri);
-                
+
                 // Update call state
                 *call.state.write() = CallState::Transferring;
-                
+
                 // Emit transfer event
                 self.inner.events.emit(SipClientEvent::CallTransferred {
                     call: call.clone(),
                     target: target_uri.to_string(),
                 });
-                
+
                 Ok(())
             }
             Err(e) => {
@@ -439,22 +439,22 @@ impl SipClient {
             }
         }
     }
-    
+
     /// Subscribe to events (requires StreamExt)
     pub fn events(&self) -> EventStream {
         self.inner.events.subscribe()
     }
-    
+
     /// Subscribe to events with simple iterator (no StreamExt needed)
     pub fn event_iter(&self) -> crate::events::EventIterator {
         self.inner.events.subscribe_simple()
     }
-    
+
     /// Get active calls
     pub fn active_calls(&self) -> Vec<Arc<Call>> {
         self.inner.calls.read().values().cloned().collect()
     }
-    
+
     /// List available audio devices
     pub async fn list_audio_devices(&self, direction: rvoip_audio_core::AudioDirection) -> SipClientResult<Vec<rvoip_audio_core::AudioDeviceInfo>> {
         tracing::debug!("🔍 Listing audio devices for direction: {:?}", direction);
@@ -465,31 +465,31 @@ impl SipClient {
         }
         Ok(devices)
     }
-    
+
     /// Get current audio device
     pub async fn get_audio_device(&self, direction: rvoip_audio_core::AudioDirection) -> SipClientResult<rvoip_audio_core::AudioDeviceInfo> {
         let device = self.inner.audio_manager.get_default_device(direction).await?;
         Ok(device.info().clone())
     }
-    
+
     /// Set audio device
     pub async fn set_audio_device(&self, direction: rvoip_audio_core::AudioDirection, device_id: &str) -> SipClientResult<()> {
         // Get current device for comparison
         let old_device = self.get_audio_device(direction).await.ok();
-        
+
         // TODO: Actually change the device in audio_manager
         // For now, just emit the event
-        
+
         // Emit device change event
         self.inner.events.emit(SipClientEvent::AudioDeviceChanged {
             direction,
             old_device: old_device.map(|d| d.name),
             new_device: Some(device_id.to_string()),
         });
-        
+
         Ok(())
     }
-    
+
     /// Start the SIP client
     ///
     /// This initializes all subsystems and begins listening for calls.
@@ -505,13 +505,13 @@ impl SipClient {
     /// ```
     pub async fn start(&self) -> SipClientResult<()> {
         // Client-core should already be started from create_client
-        
+
         // Start event forwarding from client-core
         self.start_event_forwarding().await?;
-        
+
         // Register reconnection callbacks
         self.register_reconnection_callbacks().await?;
-        
+
         // Start connection monitoring with quality adaptation
         let inner = self.inner.clone();
         let quality_manager = self.inner.quality_adaptation_manager.clone();
@@ -531,10 +531,10 @@ impl SipClient {
                         available_bandwidth_bps: Some(128000),
                         consecutive_errors: 0,
                     };
-                    
+
                     // Update quality adaptation based on metrics
                     let degradation_actions = quality_manager.update_metrics(metrics).await;
-                    
+
                     // Apply degradation actions if needed
                     for (call_id, actions) in degradation_actions {
                         if actions.codec_downgrade {
@@ -544,22 +544,22 @@ impl SipClient {
                             tracing::info!("Reduced quality for call {} to {} bps", call_id, actions.target_bitrate.unwrap_or(0));
                         }
                     }
-                    
+
                     // Simple health check - return true if connection is healthy
                     true
                 })
             },
         );
-        
+
         let monitor_handle = monitor.start_monitoring().await;
         *self.inner.connection_monitor.write() = Some(monitor_handle);
-        
+
         // Emit started event
         self.inner.events.emit(SipClientEvent::Started);
-        
+
         Ok(())
     }
-    
+
     /// Stop the SIP client
     ///
     /// This gracefully shuts down all subsystems and cleans up resources.
@@ -575,27 +575,27 @@ impl SipClient {
     pub async fn stop(&self) -> SipClientResult<()> {
         // Stop event forwarding
         self.stop_event_forwarding().await?;
-        
+
         // Clean up all active calls
         let call_ids: Vec<CallId> = {
             self.inner.calls.read().keys().cloned().collect()
         };
-        
+
         for call_id in call_ids {
             if let Err(e) = self.hangup(&call_id).await {
                 tracing::warn!("Failed to hangup call {} during shutdown: {}", call_id, e);
             }
         }
-        
+
         // Stop client-core
         self.inner.client.stop().await?;
-        
+
         // Emit stopped event
         self.inner.events.emit(SipClientEvent::Stopped);
-        
+
         Ok(())
     }
-    
+
     /// Get a specific call
     pub fn get_call(&self, call_id: &CallId) -> SipClientResult<Arc<Call>> {
         self.inner.calls.read()
@@ -605,7 +605,7 @@ impl SipClient {
                 call_id: call_id.to_string(),
             })
     }
-    
+
     /// Get the currently active call (if any)
     pub fn active_call(&self) -> Option<Arc<Call>> {
         // Return the first connected call
@@ -614,45 +614,45 @@ impl SipClient {
             .find(|call| matches!(*call.state.read(), CallState::Connected))
             .cloned()
     }
-    
+
     /// Check if there's an active call
     pub fn has_active_call(&self) -> bool {
         self.active_call().is_some()
     }
-    
+
     /// Wait for the next event (convenience method)
     pub async fn next_event(&mut self) -> Option<SipClientEvent> {
         // This would require making events() return a mutable stream
         // For now, users still need to use events() + StreamExt
         None
     }
-    
+
     // Helper methods
-    
+
     async fn create_client(config: &SipClientConfig) -> SipClientResult<Arc<rvoip_client_core::Client>> {
         let mut builder = rvoip_client_core::ClientBuilder::new()
             .local_address(config.local_address)
             .user_agent(&config.user_agent);
-        
+
         // Add music-on-hold file if configured
         if let Some(ref path) = config.music_on_hold_path {
             builder = builder.with_music_on_hold_file(path);
         }
-        
+
         let client = builder.build().await?;
-        
+
         client.start().await?;
-        
+
         Ok(client)
     }
-    
+
     async fn create_audio_manager(config: &SipClientConfig) -> SipClientResult<Arc<rvoip_audio_core::AudioDeviceManager>> {
         #[cfg(feature = "test-audio")]
         {
             // Check if test audio buffers are configured
             if let Some(test_buffers) = &config.test_audio_buffers {
                 tracing::info!("🧪 Creating AudioDeviceManager with test audio provider");
-                
+
                 // Create test audio provider with buffers for this client
                 // Each client gets its own input/output buffers that simulate hardware:
                 // - Input buffer: Where WAV feeder puts audio (simulates microphone)
@@ -668,29 +668,29 @@ impl SipClient {
                         output_buffer: test_buffers.b_output.clone(), // B's speaker buffer
                     }
                 };
-                
+
                 let provider = rvoip_audio_core::device::test_audio::TestAudioProvider::new(
                     test_buffers_for_audio,
                     config.sip_identity.clone(),
                 );
-                
+
                 let manager = rvoip_audio_core::AudioDeviceManager::with_test_provider(provider).await
                     .map_err(|e| SipClientError::AudioCore(e))?;
-                
+
                 return Ok(Arc::new(manager));
             }
         }
-        
+
         // Use standard audio manager
         let manager = rvoip_audio_core::AudioDeviceManager::new().await
             .map_err(|e| SipClientError::AudioCore(e))?;
         Ok(Arc::new(manager))
     }
-    
-    
+
+
     fn create_codec_registry(config: &SipClientConfig) -> SipClientResult<Arc<codec_core::CodecRegistry>> {
         let mut registry = codec_core::CodecRegistry::new();
-        
+
         // Register codecs based on configuration
         for codec_priority in &config.codecs.priorities {
             match codec_priority.name.as_str() {
@@ -719,17 +719,17 @@ impl SipClient {
                 }
             }
         }
-        
+
         Ok(Arc::new(registry))
     }
-    
+
     async fn create_sdp_offer(&self) -> SipClientResult<String> {
         // Get local IP from the configured address
         let local_ip = self.inner.config.local_address.ip();
-        
+
         // Use a proper RTP port (different from SIP port)
         let rtp_port = self.inner.config.local_address.port() + 4000; // e.g., 5060 -> 9060
-        
+
         let sdp = format!(
             "v=0\r\n\
              o=- 0 0 IN IP4 {}\r\n\
@@ -741,24 +741,24 @@ impl SipClient {
              a=rtpmap:8 PCMA/8000\r\n",
             local_ip, local_ip, rtp_port
         );
-        
+
         tracing::info!("📋 Created SDP offer with IP {} and RTP port {}", local_ip, rtp_port);
         Ok(sdp)
     }
-    
-    
+
+
     async fn setup_audio_pipeline(&self, call: &Arc<Call>) -> SipClientResult<()> {
         use rvoip_audio_core::pipeline::AudioPipeline;
         use rvoip_audio_core::types::{AudioFormat, AudioStreamConfig};
-        
+
         tracing::info!("🎵 Setting up audio pipeline for call {}", call.id);
-        
+
         // First check available audio devices
         let input_devices = self.inner.audio_manager.list_devices(rvoip_audio_core::AudioDirection::Input).await?;
         let output_devices = self.inner.audio_manager.list_devices(rvoip_audio_core::AudioDirection::Output).await?;
         tracing::info!("🎤 Available input devices: {} devices", input_devices.len());
         tracing::info!("🔊 Available output devices: {} devices", output_devices.len());
-        
+
         if input_devices.is_empty() {
             tracing::error!("❌ No input devices available!");
             return Err(crate::error::SipClientError::audio_device("No input devices available"));
@@ -767,15 +767,15 @@ impl SipClient {
             tracing::error!("❌ No output devices available!");
             return Err(crate::error::SipClientError::audio_device("No output devices available"));
         }
-        
+
         // Create audio pipeline configuration
         let mut config = AudioStreamConfig::voip_basic();
-        
+
         // Configure based on negotiated codec (default to G.711 μ-law 8kHz)
         let codec_type = call.codec.as_ref()
             .cloned()
             .unwrap_or(codec_core::CodecType::G711Pcmu);
-            
+
         // Set codec name and format based on codec type
         let (codec_name, audio_format) = match codec_type {
             codec_core::CodecType::G711Pcmu => ("PCMU", AudioFormat::pcm_8khz_mono()),
@@ -785,11 +785,11 @@ impl SipClient {
                 ("PCMU", AudioFormat::pcm_8khz_mono())
             }
         };
-        
+
         config.codec_name = codec_name.to_string();
         config.input_format = audio_format.clone();
         config.output_format = audio_format;
-        
+
         // Create audio pipeline for capture
         let mut capture_pipeline = AudioPipeline::builder()
             .input_format(config.input_format.clone())
@@ -803,7 +803,7 @@ impl SipClient {
                 operation: "create_capture".to_string(),
                 details: e.to_string(),
             })?;
-        
+
         // Start the capture pipeline
         tracing::info!("🎤 Starting audio capture pipeline");
         capture_pipeline.start().await
@@ -811,7 +811,7 @@ impl SipClient {
                 operation: "start_capture".to_string(),
                 details: e.to_string(),
             })?;
-        
+
         // Spawn task to capture audio and send to RTP
         let client = self.inner.client.clone();
         let call_id = call.id;
@@ -820,33 +820,33 @@ impl SipClient {
             let mut pipeline = capture_pipeline;
             let mut frame_count = 0u64;
             tracing::info!("🎤 Audio capture task started for call {}", call_id);
-            
+
             // Log first few frames to verify capture is working
             let mut logged_frames = 0;
-            
+
             loop {
                 tracing::trace!("📡 Attempting to capture audio frame #{}", frame_count);
                 match pipeline.capture_frame().await {
                     Ok(audio_frame) => {
                         frame_count += 1;
-                        
+
                         // Log first few frames
                         if logged_frames < 5 {
                             logged_frames += 1;
-                            tracing::info!("✅ Captured audio frame #{}: {} samples, RMS: {:.3}", 
-                                frame_count, 
+                            tracing::info!("✅ Captured audio frame #{}: {} samples, RMS: {:.3}",
+                                frame_count,
                                 audio_frame.samples.len(),
                                 audio_frame.rms_level() / i16::MAX as f32
                             );
                         }
-                        
+
                         // Emit audio level event periodically
                         if frame_count % 50 == 0 {
                             let level = audio_frame.rms_level();
                             let peak = audio_frame.samples.iter()
                                 .map(|&s| s.abs() as f32 / i16::MAX as f32)
                                 .fold(0.0f32, |max, val| if val > max { val } else { max });
-                            
+
                             events.emit(SipClientEvent::AudioLevelChanged {
                                 call_id: Some(call_id),
                                 direction: rvoip_audio_core::AudioDirection::Input,
@@ -854,7 +854,7 @@ impl SipClient {
                                 peak,
                             });
                         }
-                        
+
                         // Convert to client-core AudioFrame type
                         let session_frame = rvoip_client_core::AudioFrame {
                             samples: audio_frame.samples.clone(),
@@ -863,7 +863,7 @@ impl SipClient {
                             timestamp: audio_frame.timestamp,
                             duration: std::time::Duration::from_millis(20), // 20ms frame
                         };
-                        
+
                         // Send to RTP via client-core
                         if let Err(e) = client.send_audio_frame(&call_id, session_frame).await {
                             tracing::error!("Failed to send audio frame: {}", e);
@@ -881,10 +881,10 @@ impl SipClient {
                 }
             }
         });
-        
+
         // Get the incoming call info to extract remote SDP
         tracing::info!("📋 Getting call info to extract remote SDP");
-        
+
         // Subscribe to incoming audio frames from RTP
         tracing::info!("📻 Subscribing to incoming audio frames from RTP");
         let mut audio_subscriber = self.inner.client
@@ -894,7 +894,7 @@ impl SipClient {
                 operation: "subscribe".to_string(),
                 details: e.to_string(),
             })?;
-        
+
         // Create audio pipeline for playback
         let mut playback_pipeline = AudioPipeline::builder()
             .input_format(config.input_format.clone())
@@ -908,14 +908,14 @@ impl SipClient {
                 operation: "create_playback".to_string(),
                 details: e.to_string(),
             })?;
-        
+
         tracing::info!("🔊 Starting audio playback pipeline");
         playback_pipeline.start().await
             .map_err(|e| SipClientError::AudioPipelineError {
                 operation: "start_playback".to_string(),
                 details: e.to_string(),
             })?;
-        
+
         // Spawn task to receive audio from RTP and play
         let events_playback = self.inner.events.clone();
         let call_id_playback = call.id;
@@ -923,11 +923,11 @@ impl SipClient {
             let mut pipeline = playback_pipeline;
             let mut frame_count = 0u64;
             tracing::info!("🎧 Playback task started for call {}", call_id_playback);
-            
+
             while let Some(session_frame) = audio_subscriber.recv().await {
                 frame_count += 1;
                 if frame_count <= 5 || frame_count % 50 == 0 {
-                    tracing::info!("🔊 Received audio frame #{} from RTP: {} samples", 
+                    tracing::info!("🔊 Received audio frame #{} from RTP: {} samples",
                         frame_count, session_frame.samples.len());
                 }
                 // Convert from session-core AudioFrame to audio-core AudioFrame
@@ -942,7 +942,7 @@ impl SipClient {
                     format,
                     session_frame.timestamp,
                 );
-                
+
                 // Emit audio level event periodically
                 frame_count += 1;
                 if frame_count % 50 == 0 {
@@ -950,7 +950,7 @@ impl SipClient {
                     let peak = audio_frame.samples.iter()
                         .map(|&s| s.abs() as f32 / i16::MAX as f32)
                         .fold(0.0f32, |max, val| if val > max { val } else { max });
-                    
+
                     events_playback.emit(SipClientEvent::AudioLevelChanged {
                         call_id: Some(call_id_playback),
                         direction: rvoip_audio_core::AudioDirection::Output,
@@ -958,7 +958,7 @@ impl SipClient {
                         peak,
                     });
                 }
-                
+
                 // Send to audio pipeline for playback
                 if let Err(e) = pipeline.playback_frame(audio_frame).await {
                     tracing::error!("Failed to playback audio frame: {}", e);
@@ -970,20 +970,20 @@ impl SipClient {
                 }
             }
         });
-        
+
         // Store task handles for cleanup
         let audio_tasks = AudioPipelineTasks {
             capture_task: capture_handle,
             playback_task: playback_handle,
             rtp_monitor_task: None,
         };
-        
+
         self.inner.audio_tasks.write().insert(call.id, audio_tasks);
-        
+
         tracing::info!("✅ Audio pipeline setup complete for call {}", call.id);
         Ok(())
     }
-    
+
     async fn cleanup_audio_pipeline(&self, call_id: &CallId) -> SipClientResult<()> {
         // Remove and stop audio tasks
         if let Some(tasks) = self.inner.audio_tasks.write().remove(call_id) {
@@ -993,18 +993,18 @@ impl SipClient {
             if let Some(monitor_task) = tasks.rtp_monitor_task {
                 monitor_task.abort();
             }
-            
+
             // Wait for tasks to finish (with timeout)
             let timeout = tokio::time::Duration::from_secs(1);
             let _ = tokio::time::timeout(timeout, tasks.capture_task).await;
             let _ = tokio::time::timeout(timeout, tasks.playback_task).await;
-            
+
             tracing::debug!("Cleaned up audio pipeline for call {}", call_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Start event forwarding from client-core to sip-client events
     async fn start_event_forwarding(&self) -> SipClientResult<()> {
         // Create and register the event handler with client-core
@@ -1012,24 +1012,24 @@ impl SipClient {
             inner: self.inner.clone(),
         });
         self.inner.client.set_event_handler(handler.clone()).await;
-        
+
         // We don't need a separate subscription task since we've already
         // registered the event handler above. The handler will be called
         // directly by client-core for all events.
-        
+
         Ok(())
     }
-    
+
     /// Stop event forwarding
     async fn stop_event_forwarding(&self) -> SipClientResult<()> {
         // Event handler will be cleaned up when client-core stops
         Ok(())
     }
-    
+
     /// Register reconnection callbacks for various connection types
     async fn register_reconnection_callbacks(&self) -> SipClientResult<()> {
         use crate::reconnect::ConnectionType;
-        
+
         // Registration reconnection
         let client = self.inner.client.clone();
         let config = self.inner.config.clone();
@@ -1043,13 +1043,13 @@ impl SipClient {
                     let reg_config = rvoip_client_core::registration::RegistrationConfig::new(
                         config.sip_registrar.clone().unwrap_or_else(|| "sip:localhost:5060".to_string()),
                         config.sip_identity.clone(),
-                        format!("sip:{}@{}:{}", 
+                        format!("sip:{}@{}:{}",
                             config.sip_identity.split('@').next().unwrap_or("user"),
                             config.local_address.ip(),
                             config.local_address.port()
                         ),
                     ).with_expires(config.registration_ttl);
-                    
+
                     // Re-register with SIP server
                     client.register(reg_config).await
                         .map_err(|e| SipClientError::RegistrationFailed {
@@ -1059,7 +1059,7 @@ impl SipClient {
                 })
             },
         ).await;
-        
+
         // Audio device reconnection
         let audio_manager = self.inner.audio_manager.clone();
         self.inner.reconnection_handler.register_callback(
@@ -1075,18 +1075,18 @@ impl SipClient {
                         .map_err(|e| SipClientError::AudioDevice {
                             message: format!("Failed to list input devices: {}", e),
                         })?;
-                        
+
                     if input_devices.is_empty() {
                         return Err(SipClientError::AudioDevice {
                             message: "No input devices available".to_string(),
                         });
                     }
-                    
+
                     Ok(())
                 })
             },
         ).await;
-        
+
         Ok(())
     }
 }
@@ -1101,7 +1101,7 @@ impl SipClientEventHandler {
     /// Handle a client-core event and forward it as a sip-client event
     async fn handle_client_event(&self, event: rvoip_client_core::events::ClientEvent) {
         use rvoip_client_core::events::ClientEvent;
-        
+
         match event {
             ClientEvent::IncomingCall { info, .. } => {
                 let action = self.on_incoming_call(info).await;
@@ -1138,14 +1138,14 @@ impl SipClientEventHandler {
                 // Convert and emit transfer progress
                 use crate::events::TransferStatus as SipTransferStatus;
                 use rvoip_client_core::events::TransferStatus as ClientTransferStatus;
-                
+
                 let sip_status = match status {
                     ClientTransferStatus::Accepted => SipTransferStatus::Accepted,
                     ClientTransferStatus::Ringing => SipTransferStatus::Ringing,
                     ClientTransferStatus::Completed => SipTransferStatus::Completed,
                     ClientTransferStatus::Failed(reason) => SipTransferStatus::Failed(reason),
                 };
-                
+
                 self.inner.events.emit(SipClientEvent::TransferProgress {
                     call_id,
                     status: sip_status,
@@ -1170,21 +1170,21 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             codec: None,
             direction: CallDirection::Incoming,
         });
-        
+
         // Store call
         self.inner.calls.write().insert(call_info.call_id, call.clone());
-        
+
         // Emit incoming call event
         self.inner.events.emit(SipClientEvent::IncomingCall {
             call: call.clone(),
             from: call_info.caller_uri,
             display_name: call_info.caller_display_name,
         });
-        
+
         // Ignore the call to let the application decide when to answer
         rvoip_client_core::events::CallAction::Ignore
     }
-    
+
     async fn on_call_state_changed(&self, status_info: rvoip_client_core::events::CallStatusInfo) {
         // Update call state
         if let Some(call) = self.inner.calls.read().get(&status_info.call_id) {
@@ -1200,16 +1200,16 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                 rvoip_client_core::call::CallState::Cancelled => CallState::Terminated,
                 rvoip_client_core::call::CallState::IncomingPending => CallState::IncomingRinging,
             };
-            
+
             let old_state = *call.state.read();
             *call.state.write() = new_state;
-            
+
             // Update connect time if transitioning to connected
             if new_state == CallState::Connected && old_state != CallState::Connected {
                 // We can't mutate the Call struct directly since it's behind an Arc
                 // This would need to be refactored to store connect_time separately
                 // For now, we'll skip updating connect_time
-                
+
                 // Establish media flow and setup audio pipeline when call connects
                 let client = self.inner.client.clone();
                 let call_id = status_info.call_id;
@@ -1221,10 +1221,10 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                         tracing::error!("Failed to establish media for call {}: {}", call_id, e);
                         return;
                     }
-                    
+
                     // Give media paths a moment to stabilize
                     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    
+
                     // Now setup audio pipeline
                     let temp_client = SipClient { inner: sip_client };
                     if let Err(e) = temp_client.setup_audio_pipeline(&call_clone).await {
@@ -1232,7 +1232,7 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                     }
                 });
             }
-            
+
             // Emit state change event
             self.inner.events.emit(SipClientEvent::CallStateChanged {
                 call: call.clone(),
@@ -1240,14 +1240,14 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                 new_state,
                 reason: status_info.reason.clone(),
             });
-            
+
             // Emit CallEnded event when transitioning to terminated state
             if new_state == CallState::Terminated && old_state != CallState::Terminated {
                 tracing::info!("📞 Call {} ended - emitting CallEnded event", status_info.call_id);
                 self.inner.events.emit(SipClientEvent::CallEnded {
                     call: call.clone(),
                 });
-                
+
                 // Clean up audio pipelines if they exist
                 if let Some(audio_tasks) = self.inner.audio_tasks.write().remove(&status_info.call_id) {
                     // Abort any running audio tasks
@@ -1258,7 +1258,7 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                     }
                     tracing::debug!("🧹 Cleaned up audio pipelines for call {}", status_info.call_id);
                 }
-                
+
                 // Remove call from active calls after a short delay to allow final events to process
                 let calls = self.inner.calls.clone();
                 let call_id = status_info.call_id;
@@ -1270,7 +1270,7 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             }
         }
     }
-    
+
     async fn on_registration_status_changed(&self, status_info: rvoip_client_core::events::RegistrationStatusInfo) {
         // Map registration status
         let status = match status_info.status {
@@ -1280,7 +1280,7 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             rvoip_client_core::registration::RegistrationStatus::Expired => "expired",
             _ => "unknown",
         };
-        
+
         // Emit registration event
         self.inner.events.emit(SipClientEvent::RegistrationStatusChanged {
             uri: status_info.user_uri,
@@ -1288,10 +1288,10 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             reason: status_info.reason,
         });
     }
-    
+
     async fn on_media_event(&self, media_info: rvoip_client_core::events::MediaEventInfo) {
         use rvoip_client_core::events::MediaEventType;
-        
+
         // Get call for the media event
         if let Some(call) = self.inner.calls.read().get(&media_info.call_id) {
             match &media_info.event_type {
@@ -1345,11 +1345,11 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             }
         }
     }
-    
+
     async fn on_client_error(&self, error: rvoip_client_core::ClientError, call_id: Option<CallId>) {
         // Find associated call if any
         let call = call_id.and_then(|id| self.inner.calls.read().get(&id).cloned());
-        
+
         // Determine error category and trigger recovery if needed
         let category = match &error {
             rvoip_client_core::ClientError::NetworkError { .. } => crate::events::ErrorCategory::Network,
@@ -1358,8 +1358,8 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             rvoip_client_core::ClientError::InvalidConfiguration { .. } => crate::events::ErrorCategory::Configuration,
             _ => crate::events::ErrorCategory::Internal,
         };
-        
-        // Convert to SipClientError for recovery handling  
+
+        // Convert to SipClientError for recovery handling
         let sip_error = match &error {
             rvoip_client_core::ClientError::NetworkError { reason } => SipClientError::Network {
                 message: reason.clone(),
@@ -1371,7 +1371,7 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                 message: error.to_string(),
             },
         };
-        
+
         // Trigger reconnection based on error type
         match category {
             crate::events::ErrorCategory::Network => {
@@ -1381,19 +1381,19 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
                     SipClientError::RegistrationFailed { reason } => SipClientError::RegistrationFailed { reason: reason.clone() },
                     _ => SipClientError::Internal { message: error.to_string() },
                 };
-                
+
                 let _ = self.inner.reconnection_handler.trigger_reconnection(
                     crate::reconnect::ConnectionType::Registration,
                     reg_error,
                 ).await;
-                
+
                 // If there's a call, try to recover it
                 if let Some(call_id) = call_id {
                     let call_error = match &sip_error {
                         SipClientError::Network { message } => SipClientError::Network { message: message.clone() },
                         _ => SipClientError::Internal { message: error.to_string() },
                     };
-                    
+
                     let _ = self.inner.reconnection_handler.trigger_reconnection(
                         crate::reconnect::ConnectionType::Call(call_id),
                         call_error,
@@ -1402,22 +1402,22 @@ impl rvoip_client_core::events::ClientEventHandler for SipClientEventHandler {
             }
             _ => {}
         }
-        
+
         // Emit error event with enhanced message
         let enhanced_message = sip_error.user_message();
-        
+
         self.inner.events.emit(SipClientEvent::Error {
             call,
             message: enhanced_message,
             category,
         });
     }
-    
+
     async fn on_network_event(&self, connected: bool, reason: Option<String>) {
         if connected {
             self.inner.events.emit(SipClientEvent::NetworkConnected { reason });
         } else {
-            self.inner.events.emit(SipClientEvent::NetworkDisconnected { 
+            self.inner.events.emit(SipClientEvent::NetworkDisconnected {
                 reason: reason.unwrap_or_else(|| "Unknown".to_string()),
             });
         }
@@ -1441,7 +1441,7 @@ impl Call {
             }
         }
     }
-    
+
     /// Hangup this call
     pub async fn hangup(&self) -> SipClientResult<()> {
         // This would need a reference back to the client
@@ -1457,19 +1457,19 @@ mod tests {
     use super::*;
     use mockall::mock;
     use tokio_test::assert_ok;
-    
+
     #[tokio::test]
     async fn test_create_client() {
         let config = SipClientConfig {
             sip_identity: "sip:test@example.com".to_string(),
             ..Default::default()
         };
-        
+
         // This will fail unless we have mock implementations
         // For now, just verify the structure compiles
         // let client = SipClient::from_config(config).await;
     }
-    
+
     #[tokio::test]
     async fn test_call_state_transitions() {
         let call = Call {
@@ -1482,20 +1482,20 @@ mod tests {
             codec: None,
             direction: CallDirection::Outgoing,
         };
-        
+
         // Test state transitions
         assert_eq!(*call.state.read(), CallState::Initiating);
-        
+
         *call.state.write() = CallState::Ringing;
         assert_eq!(*call.state.read(), CallState::Ringing);
-        
+
         *call.state.write() = CallState::Connected;
         assert_eq!(*call.state.read(), CallState::Connected);
-        
+
         *call.state.write() = CallState::Terminated;
         assert_eq!(*call.state.read(), CallState::Terminated);
     }
-    
+
     #[tokio::test]
     async fn test_wait_for_answer() {
         let call = Arc::new(Call {
@@ -1508,20 +1508,20 @@ mod tests {
             codec: None,
             direction: CallDirection::Outgoing,
         });
-        
+
         // Spawn task to change state after delay
         let call_clone = call.clone();
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             *call_clone.state.write() = CallState::Connected;
         });
-        
+
         // Wait for answer should succeed
         let result = call.wait_for_answer().await;
         assert!(result.is_ok());
         assert_eq!(*call.state.read(), CallState::Connected);
     }
-    
+
     #[tokio::test]
     async fn test_wait_for_answer_terminated() {
         let call = Arc::new(Call {
@@ -1534,39 +1534,39 @@ mod tests {
             codec: None,
             direction: CallDirection::Outgoing,
         });
-        
+
         // Spawn task to terminate call
         let call_clone = call.clone();
         tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
             *call_clone.state.write() = CallState::Terminated;
         });
-        
+
         // Wait for answer should fail
         let result = call.wait_for_answer().await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), SipClientError::InvalidState { .. }));
     }
-    
+
     #[test]
     fn test_codec_registry_creation() {
         let config = SipClientConfig::default();
         let registry = SipClient::create_codec_registry(&config).unwrap();
-        
+
         // Should have registered default codecs
         let codecs = registry.list_codecs();
         assert!(codecs.iter().any(|c| c.as_str() == "PCMU"));
         assert!(codecs.iter().any(|c| c.as_str() == "PCMA"));
     }
-    
+
     #[test]
     fn test_event_emitter() {
         let emitter = EventEmitter::default();
         let mut stream = emitter.subscribe();
-        
+
         // Emit an event
         emitter.emit(SipClientEvent::Started);
-        
+
         // Should receive the event
         // Note: This would need async handling in a real test
     }

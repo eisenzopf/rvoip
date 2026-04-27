@@ -36,7 +36,7 @@ async fn test_multiple_clients_automatic_ports() {
     // Create 5 clients with automatic media port allocation
     for i in 0..5 {
         let sip_port = base_sip_port.fetch_add(1, Ordering::SeqCst);
-        
+
         let sip_addr: SocketAddr = format!("127.0.0.1:{}", sip_port).parse().unwrap();
         let media_addr: SocketAddr = "127.0.0.1:0".parse().unwrap(); // Automatic allocation
 
@@ -57,7 +57,7 @@ async fn test_multiple_clients_automatic_ports() {
         assert_eq!(media_addr.port(), 0); // Media port still 0 until actual media session
         sip_ports.push(sip_addr.port());
     }
-    
+
     // Check that all SIP ports are unique
     sip_ports.sort();
     sip_ports.dedup();
@@ -91,7 +91,7 @@ async fn test_bind_address_with_automatic_ports() {
             // If successful, verify the IP addresses are preserved
             assert_eq!(sip_addr.ip().to_string(), bind_ip);
             assert_eq!(media_addr.ip().to_string(), bind_ip);
-            
+
             client.stop().await.expect("Failed to stop client");
         }
         Err(e) => {
@@ -111,7 +111,7 @@ async fn test_media_port_inheritance() {
     // The media address should have the same IP as SIP but port 0
     assert_eq!(media_addr.ip(), sip_addr.ip());
     assert_eq!(media_addr.port(), 0);
-    
+
     // Try to build (might fail if IP is not available)
     match ClientBuilder::new()
         .local_address(sip_addr)
@@ -127,4 +127,4 @@ async fn test_media_port_inheritance() {
             println!("Client creation failed as expected for unavailable IP: {}", e);
         }
     }
-} 
+}

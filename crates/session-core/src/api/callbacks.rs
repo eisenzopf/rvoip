@@ -77,7 +77,7 @@ pub enum CallbackResult {
 // ===== Callback Registry =====
 
 /// Registry that holds all registered callbacks
-/// 
+///
 /// This uses Option<T> for each callback type, allowing developers to register
 /// only the callbacks they need. Unregistered callbacks use default behavior.
 #[derive(Default)]
@@ -97,7 +97,7 @@ impl CallbackRegistry {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Check if any callbacks are registered
     pub fn has_callbacks(&self) -> bool {
         self.on_refer.is_some()
@@ -105,7 +105,7 @@ impl CallbackRegistry {
             || self.on_call_terminated.is_some()
             || self.on_call_answered.is_some()
     }
-    
+
     /// Clear all registered callbacks
     pub fn clear(&mut self) {
         self.on_refer = None;
@@ -122,22 +122,22 @@ impl CallbackResult {
     pub fn accept() -> Self {
         CallbackResult::Accept
     }
-    
+
     /// Create a Reject result with common codes
     pub fn reject_busy() -> Self {
         CallbackResult::Reject(486, "Busy Here".to_string())
     }
-    
+
     /// Create a Reject result for not implemented
     pub fn reject_not_implemented() -> Self {
         CallbackResult::Reject(501, "Not Implemented".to_string())
     }
-    
+
     /// Create a Reject result for decline
     pub fn reject_decline() -> Self {
         CallbackResult::Reject(603, "Decline".to_string())
     }
-    
+
     /// Create a Handle result
     pub fn handle() -> Self {
         CallbackResult::Handle

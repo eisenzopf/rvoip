@@ -16,13 +16,13 @@ use super::federated_bus::RvoipFederatedBus;
 pub struct EventAdapterConfig {
     /// Use the new infra-common system for publishing
     pub use_new_publisher: bool,
-    
-    /// Use the new infra-common system for subscribing  
+
+    /// Use the new infra-common system for subscribing
     pub use_new_subscriber: bool,
-    
+
     /// Bridge events between old and new systems
     pub enable_bridge: bool,
-    
+
     /// Capacity for the bridge channel
     pub bridge_capacity: usize,
 }
@@ -41,14 +41,14 @@ impl Default for EventAdapterConfig {
 /// Adapter that can use either old or new event system based on configuration
 pub struct EventAdapter {
     config: EventAdapterConfig,
-    
+
     // Old system (tokio::broadcast)
     old_processor: Option<Arc<SessionEventProcessor>>,
-    
+
     // New system (infra-common)
     new_system: Option<Arc<InfraSessionEventSystem>>,
     federated_bus: Option<Arc<RvoipFederatedBus>>,
-    
+
     // Bridge between systems
     bridge_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -58,7 +58,7 @@ impl EventAdapter {
     pub fn new() -> Self {
         Self::with_config(EventAdapterConfig::default())
     }
-    
+
     /// Create adapter with custom configuration
     pub fn with_config(config: EventAdapterConfig) -> Self {
         Self {
@@ -69,7 +69,7 @@ impl EventAdapter {
             bridge_handle: None,
         }
     }
-    
+
     /// Initialize the adapter with both old and new systems
     pub async fn initialize(&mut self) -> Result<()> {
         // Initialize old system if needed
@@ -78,27 +78,27 @@ impl EventAdapter {
             old_processor.start().await?;
             self.old_processor = Some(old_processor);
         }
-        
+
         // Initialize new system if needed
         if self.config.use_new_publisher || self.config.use_new_subscriber {
             let new_system = Arc::new(InfraSessionEventSystem::new());
             new_system.start().await?;
             self.new_system = Some(new_system);
-            
+
             // Also initialize federated bus
             let federated_bus = Arc::new(RvoipFederatedBus::new());
             federated_bus.start().await?;
             self.federated_bus = Some(federated_bus);
         }
-        
+
         // Set up bridge if enabled
         if self.config.enable_bridge {
             self.setup_bridge().await?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Publish an event using the configured publisher
     pub async fn publish_event(&self, event: SessionEvent) -> Result<()> {
         if self.config.use_new_publisher {
@@ -118,10 +118,10 @@ impl EventAdapter {
                 return Err(SessionError::internal("Old system not initialized"));
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Subscribe to events using the configured subscriber
     pub async fn subscribe(&self) -> Result<Box<dyn EventSubscriberTrait>> {
         if self.config.use_new_subscriber {
@@ -145,13 +145,13 @@ impl EventAdapter {
             }
         }
     }
-    
+
     /// Setup bridge between old and new systems
     async fn setup_bridge(&mut self) -> Result<()> {
         if let (Some(old_processor), Some(federated_bus)) = (&self.old_processor, &self.federated_bus) {
             let mut old_subscriber = old_processor.subscribe().await?;
             let federated_bus_clone = federated_bus.clone();
-            
+
             // Spawn bridge task
             let handle = tokio::spawn(async move {
                 loop {
@@ -169,20 +169,20 @@ impl EventAdapter {
                     }
                 }
             });
-            
+
             self.bridge_handle = Some(handle);
         }
-        
+
         Ok(())
     }
-    
+
     /// Shutdown the adapter
     pub async fn shutdown(&mut self) -> Result<()> {
         // Stop bridge
         if let Some(handle) = self.bridge_handle.take() {
             handle.abort();
         }
-        
+
         // Shutdown new systems
         if let Some(federated_bus) = &self.federated_bus {
             federated_bus.shutdown().await?;
@@ -190,12 +190,12 @@ impl EventAdapter {
         if let Some(new_system) = &self.new_system {
             new_system.shutdown().await?;
         }
-        
+
         // Shutdown old system
         if let Some(old_processor) = &self.old_processor {
             old_processor.stop().await?;
         }
-        
+
         Ok(())
     }
 }
@@ -217,7 +217,7 @@ impl EventSubscriberTrait for OldEventSubscriber {
     async fn receive(&mut self) -> Result<SessionEvent> {
         self.inner.receive().await
     }
-    
+
     fn try_receive(&mut self) -> Result<Option<SessionEvent>> {
         self.inner.try_receive()
     }
@@ -233,14 +233,14 @@ impl EventSubscriberTrait for NewEventSubscriber {
     async fn receive(&mut self) -> Result<SessionEvent> {
         let event_arc = self.inner.receive().await
             .map_err(|e| SessionError::internal(&format!("New subscriber receive failed: {}", e)))?;
-            
+
         // Extract from Arc
         match Arc::try_unwrap(event_arc) {
             Ok(event) => Ok(event),
             Err(arc) => Ok((*arc).clone()),
         }
     }
-    
+
     fn try_receive(&mut self) -> Result<Option<SessionEvent>> {
         match self.inner.try_receive() {
             Ok(Some(event_arc)) => {
@@ -265,7 +265,7 @@ impl Default for EventAdapter {
 mod tests {
     use super::*;
     use crate::api::types::*;
-    
+
     #[tokio::test]
     async fn test_adapter_with_new_system() {
         let config = EventAdapterConfig {
@@ -274,10 +274,10 @@ mod tests {
             enable_bridge: false,
             bridge_capacity: 1000,
         };
-        
+
         let mut adapter = EventAdapter::with_config(config);
         adapter.initialize().await.unwrap();
-        
+
         // Test publishing
         let event = SessionEvent::SessionCreated {
             session_id: SessionId::new(),
@@ -285,12 +285,12 @@ mod tests {
             to: "user@example.com".to_string(),
             call_state: CallState::Initiating,
         };
-        
+
         adapter.publish_event(event).await.unwrap();
-        
+
         adapter.shutdown().await.unwrap();
     }
-    
+
     #[tokio::test]
     async fn test_adapter_with_old_system() {
         let config = EventAdapterConfig {
@@ -299,10 +299,10 @@ mod tests {
             enable_bridge: false,
             bridge_capacity: 1000,
         };
-        
+
         let mut adapter = EventAdapter::with_config(config);
         adapter.initialize().await.unwrap();
-        
+
         // Test publishing
         let event = SessionEvent::SessionCreated {
             session_id: SessionId::new(),
@@ -310,9 +310,9 @@ mod tests {
             to: "user@example.com".to_string(),
             call_state: CallState::Initiating,
         };
-        
+
         adapter.publish_event(event).await.unwrap();
-        
+
         adapter.shutdown().await.unwrap();
     }
 }

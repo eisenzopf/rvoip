@@ -747,7 +747,7 @@ impl IntoResponse for AppError {
                 (StatusCode::BAD_REQUEST, "BAD_REQUEST", msg, None)
             },
             AppError::AccountLocked(seconds) => {
-                (StatusCode::TOO_MANY_REQUESTS, "ACCOUNT_LOCKED", 
+                (StatusCode::TOO_MANY_REQUESTS, "ACCOUNT_LOCKED",
                  format!("Account temporarily locked due to too many failed login attempts. Try again in {} seconds.", seconds),
                  Some(seconds))
             },

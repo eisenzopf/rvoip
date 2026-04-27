@@ -10,31 +10,31 @@ use crate::errors::Result;
 pub struct UasConfig {
     /// Local bind address (e.g., "0.0.0.0:5060")
     pub local_addr: String,
-    
+
     /// Server identity (e.g., "sip:server@example.com")
     pub identity: String,
-    
+
     /// User agent string
     pub user_agent: String,
-    
+
     /// Maximum concurrent calls (0 = unlimited)
     pub max_concurrent_calls: usize,
-    
+
     /// Auto-reject when at capacity
     pub auto_reject_on_busy: bool,
-    
+
     /// Enable authentication
     pub require_authentication: bool,
-    
+
     /// Authentication realm
     pub auth_realm: Option<String>,
-    
+
     /// Call timeout in seconds
     pub call_timeout: u32,
-    
+
     /// Enable auto-answer (for testing)
     pub auto_answer: bool,
-    
+
     /// Enable call recording
     pub enable_recording: bool,
 }
@@ -96,7 +96,7 @@ impl UasCall {
             started_at: std::time::Instant::now(),
         }
     }
-    
+
     pub fn duration(&self) -> std::time::Duration {
         self.started_at.elapsed()
     }

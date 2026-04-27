@@ -381,7 +381,7 @@ mod tests {
 
         // Check the first parameter (name1=value1) - now parsed as a token
         assert!(
-            matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v))) 
+            matches!(&params[0], Param::Other(n, Some(GenericValue::Token(v)))
             if n == "name1" && v == "value1")
         );
 
@@ -390,7 +390,7 @@ mod tests {
 
         // Check the third parameter (name3="value3")
         assert!(
-            matches!(&params[2], Param::Other(n, Some(GenericValue::Quoted(v))) 
+            matches!(&params[2], Param::Other(n, Some(GenericValue::Quoted(v)))
             if n == "name3" && v == "value3")
         );
 
@@ -426,7 +426,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(params.len(), 1);
         assert!(
-            matches!(&params[0], Param::Other(n, Some(GenericValue::Quoted(v))) 
+            matches!(&params[0], Param::Other(n, Some(GenericValue::Quoted(v)))
             if n == "param" && v == ";value;with;semicolons;")
         );
 
@@ -436,7 +436,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(params.len(), 1);
         assert!(
-            matches!(&params[0], Param::Other(n, Some(GenericValue::Quoted(v))) 
+            matches!(&params[0], Param::Other(n, Some(GenericValue::Quoted(v)))
             if n == "param" && v == "\"\\")
         );
 
@@ -467,7 +467,7 @@ mod tests {
 
         assert!(matches!(&params[1], Param::Other(n, None) if n == "param2"));
         assert!(
-            matches!(&params[2], Param::Other(n, Some(GenericValue::Quoted(v))) 
+            matches!(&params[2], Param::Other(n, Some(GenericValue::Quoted(v)))
             if n == "param3" && v == "quoted")
         );
     }

@@ -32,36 +32,36 @@ pub struct SessionState {
     // Identity
     pub session_id: SessionId,
     pub role: Role,
-    
+
     // Current state
     pub call_state: CallState,
     pub entered_state_at: Instant,
-    
+
     // Readiness conditions (the 3 flags)
     pub dialog_established: bool,
     pub media_session_ready: bool,
     pub sdp_negotiated: bool,
-    
+
     // Track if call established was triggered
     pub call_established_triggered: bool,
-    
+
     // SDP data
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub negotiated_config: Option<NegotiatedConfig>,
-    
+
     // Related IDs
     pub dialog_id: Option<DialogId>,
     pub media_session_id: Option<MediaSessionId>,
     pub call_id: Option<CallId>,
-    
+
     // SIP URIs
     pub local_uri: Option<String>,  // From URI for UAC, To URI for UAS
     pub remote_uri: Option<String>, // To URI for UAC, From URI for UAS
-    
+
     // Store last 200 OK response for ACK
     pub last_200_ok: Option<Vec<u8>>, // Serialized response
-    
+
     // Bridging information (for peer-to-peer conferencing)
     pub bridged_to: Option<SessionId>, // Session this is bridged to
 
@@ -83,7 +83,7 @@ pub struct SessionState {
 
     // Timestamps
     pub created_at: Instant,
-    
+
     // Optional history tracking
     pub history: Option<SessionHistory>,
 }
@@ -125,21 +125,21 @@ impl SessionState {
             history: None,
         }
     }
-    
+
     /// Create with history tracking enabled
     pub fn with_history(session_id: SessionId, role: Role, config: HistoryConfig) -> Self {
         let mut state = Self::new(session_id, role);
         state.history = Some(SessionHistory::new(config));
         state
     }
-    
+
     /// Record a transition in history
     pub fn record_transition(&mut self, record: TransitionRecord) {
         if let Some(ref mut history) = self.history {
             history.record_transition(record);
         }
     }
-    
+
     /// Transition to a new state
     pub fn transition_to(&mut self, new_state: CallState) {
         if let Some(ref mut history) = self.history {
@@ -167,7 +167,7 @@ impl SessionState {
         self.call_state = new_state;
         self.entered_state_at = Instant::now();
     }
-    
+
     /// Apply condition updates from a transition
     pub fn apply_condition_updates(&mut self, updates: &ConditionUpdates) {
         if let Some(value) = updates.dialog_established {
@@ -180,17 +180,17 @@ impl SessionState {
             self.sdp_negotiated = value;
         }
     }
-    
+
     /// Check if all readiness conditions are met
     pub fn all_conditions_met(&self) -> bool {
         self.dialog_established && self.media_session_ready && self.sdp_negotiated
     }
-    
+
     /// Get time spent in current state
     pub fn time_in_state(&self) -> std::time::Duration {
         Instant::now() - self.entered_state_at
     }
-    
+
     /// Get total session duration
     pub fn session_duration(&self) -> std::time::Duration {
         Instant::now() - self.created_at

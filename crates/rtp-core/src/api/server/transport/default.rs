@@ -393,8 +393,8 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                             match packet_result {
                                 Ok(packet) => {
                                     // Successfully parsed the packet, use its header information
-                                    debug!("Successfully parsed RTP packet with SSRC={:08x}, seq={}, ts={}, PT={}", 
-                                           packet.header.ssrc, packet.header.sequence_number, 
+                                    debug!("Successfully parsed RTP packet with SSRC={:08x}, seq={}, ts={}, PT={}",
+                                           packet.header.ssrc, packet.header.sequence_number,
                                            packet.header.timestamp, packet.header.payload_type);
 
                                     let frame = crate::api::common::frame::MediaFrame {
@@ -477,7 +477,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         // This ensures frames are available immediately via the receive_frame method
                         match sender_clone.send((client_id.clone(), frame)) {
                             Ok(receivers) => {
-                                debug!("Directly forwarded frame to {} receivers for client {} (SSRC={:08x})", 
+                                debug!("Directly forwarded frame to {} receivers for client {} (SSRC={:08x})",
                                         receivers, client_id, final_ssrc);
                             }
                             Err(e) => {

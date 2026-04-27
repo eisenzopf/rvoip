@@ -1,5 +1,5 @@
 //! Integration tests for client lifecycle operations
-//! 
+//!
 //! Tests basic client creation, starting, stopping, and configuration.
 
 use rvoip_client_core::{ClientBuilder};
@@ -31,7 +31,7 @@ async fn test_client_creation_and_lifecycle() {
 
     // Start the client
     client.start().await.expect("Failed to start client");
-    
+
     // Verify client is running
     assert!(client.is_running().await);
 
@@ -43,7 +43,7 @@ async fn test_client_creation_and_lifecycle() {
 
     // Stop the client
     client.stop().await.expect("Failed to stop client");
-    
+
     // Verify client is stopped
     assert!(!client.is_running().await);
 }
@@ -120,7 +120,7 @@ async fn test_multiple_client_instances() {
 #[tokio::test]
 #[serial]
 async fn test_client_event_subscription() {
-    
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip_client_core=debug")
         .with_test_writer()
@@ -186,16 +186,16 @@ async fn test_rapid_start_stop_cycles() {
     // Perform multiple start/stop cycles
     for i in 0..5 {
         tracing::info!("Start/stop cycle {}", i + 1);
-        
+
         client.start().await.expect("Failed to start client");
         assert!(client.is_running().await);
-        
+
         // Small delay to let things settle
         tokio::time::sleep(Duration::from_millis(50)).await;
-        
+
         client.stop().await.expect("Failed to stop client");
         assert!(!client.is_running().await);
-        
+
         // Small delay between cycles
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -226,7 +226,7 @@ async fn test_error_handling() {
 
     // Should fail because client is not started
     assert!(call_result.is_err());
-    
+
     // The error should be appropriate
     match call_result {
         Err(e) => {
@@ -257,7 +257,7 @@ async fn test_resource_cleanup() {
 
         client.start().await.expect("Failed to start client");
         assert!(client.is_running().await);
-        
+
         // Explicitly stop the client before dropping
         client.stop().await.expect("Failed to stop client");
         // Client will be dropped here
@@ -277,4 +277,4 @@ async fn test_resource_cleanup() {
     // Should be able to start successfully
     client2.start().await.expect("Failed to start second client");
     client2.stop().await.expect("Failed to stop second client");
-} 
+}

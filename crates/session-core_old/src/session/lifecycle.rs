@@ -29,4 +29,4 @@ impl Default for LifecycleManager {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

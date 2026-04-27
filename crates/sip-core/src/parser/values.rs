@@ -201,7 +201,7 @@ pub fn ttl_value(input: &[u8]) -> ParseResult<u8> {
     }
 
     map_res(
-        map_res(digit1, |s: &[u8]| 
+        map_res(digit1, |s: &[u8]|
             // Convert bytes to str, then parse u8
             str::from_utf8(s).map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
                 // Use ErrorKind::Digit for parse errors

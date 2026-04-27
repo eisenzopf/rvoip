@@ -529,7 +529,7 @@ impl UnifiedDialogApi {
     ///
     /// # Arguments
     /// * `from_uri` - The calling party's SIP URI
-    /// * `to_uri` - The called party's SIP URI  
+    /// * `to_uri` - The called party's SIP URI
     /// * `sdp_offer` - Optional SDP offer for media negotiation
     /// * `call_id` - Optional Call-ID to use (will be generated if None)
     ///

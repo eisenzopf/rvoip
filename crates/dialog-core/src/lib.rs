@@ -13,7 +13,7 @@
 //! session-core (Session Coordination)
 //!      ↓
 //! dialog-core (SIP Protocol)  ← THIS CRATE
-//!      ↓  
+//!      ↓
 //! [transaction layer - now internal] (Reliability)
 //!      ↓
 //! sip-transport (Network)
@@ -44,12 +44,12 @@
 //!         bind_addresses: vec!["0.0.0.0:5060".parse()?],
 //!         ..Default::default()
 //!     };
-//!     
+//!
 //!     let (transport, transport_rx) = TransportManager::new(config).await?;
 //!     let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
 //!         transport, transport_rx, Some(100)
 //!     ).await?;
-//!     
+//!
 //!     // Create server using recommended global events pattern
 //!     let server_config = rvoip_dialog_core::api::config::ServerConfig::default();
 //!     let server = DialogServer::with_global_events(
@@ -57,19 +57,19 @@
 //!         global_rx,
 //!         server_config
 //!     ).await?;
-//!     
+//!
 //!     // Session coordination events now flow via GlobalEventCoordinator
 //!     // (wired up by `with_global_events(...)` above); no per-server
 //!     // channel setup is required here.
 //!
 //!     // Start processing
 //!     server.start().await?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```
 //!
-//! ## Quick Start - Client  
+//! ## Quick Start - Client
 //!
 //! ```rust,no_run
 //! use rvoip_dialog_core::api::{DialogClient, DialogApi};
@@ -85,7 +85,7 @@
 //!     let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
 //!         transport, transport_rx, Some(100)
 //!     ).await?;
-//!     
+//!
 //!     // Create client using recommended global events pattern
 //!     let client_config = rvoip_dialog_core::api::config::ClientConfig::default();
 //!     let client = DialogClient::with_global_events(
@@ -93,20 +93,20 @@
 //!         global_rx,
 //!         client_config
 //!     ).await?;
-//!     
+//!
 //!     // Start the client
 //!     client.start().await?;
-//!     
+//!
 //!     // Create an outgoing dialog and make a call
 //!     let local_uri = "sip:alice@example.com";
 //!     let remote_uri = "sip:bob@example.com";
 //!     let dialog = client.create_dialog(local_uri, remote_uri).await?;
 //!     let dialog_id = dialog.id().clone();
-//!     
+//!
 //!     // Send in-dialog requests using Phase 3 one-liner functions
 //!     let _info_tx = client.send_info(&dialog_id, "Application data".to_string()).await?;
 //!     let _bye_tx = client.send_bye(&dialog_id).await?;
-//!     
+//!
 //!     Ok(())
 //! }
 //! ```

@@ -366,9 +366,9 @@ impl PasswordError {
                 "Your password needs to be at least {} characters long. Try using a passphrase!",
                 min
             ),
-            Self::CommonPassword => 
+            Self::CommonPassword =>
                 "This password is too common and easily guessed. Try adding more words or numbers.".to_string(),
-            Self::TooWeak => 
+            Self::TooWeak =>
                 "Your password needs to be stronger. Try making it longer or adding different types of characters.".to_string(),
             _ => self.to_string(),
         }

@@ -203,24 +203,24 @@ impl TestConfig {
     pub fn load_from_file(path: &PathBuf) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {:?}", path))?;
-        
+
         let config: TestConfig = serde_yaml::from_str(&content)
             .with_context(|| "Failed to parse YAML configuration")?;
-        
+
         Ok(config)
     }
-    
+
     /// Save configuration to file
     pub fn save_to_file(&self, path: &PathBuf) -> Result<()> {
         let content = serde_yaml::to_string(self)
             .context("Failed to serialize configuration")?;
-        
+
         std::fs::write(path, content)
             .with_context(|| format!("Failed to write config file: {:?}", path))?;
-        
+
         Ok(())
     }
-    
+
     /// Create default configuration file
     pub fn create_default_config(path: &PathBuf) -> Result<()> {
         let config = TestConfig::default();
@@ -232,14 +232,14 @@ impl TestConfig {
 mod duration_serde {
     use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
-    
+
     pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
         serializer.serialize_u64(duration.as_secs())
     }
-    
+
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
     where
         D: Deserializer<'de>,
@@ -253,7 +253,7 @@ mod duration_serde {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
-    
+
     #[test]
     fn test_default_config() {
         let config = TestConfig::default();
@@ -261,27 +261,27 @@ mod tests {
         assert_eq!(config.sipp.default_rate, 1);
         assert!(config.capture.enabled);
     }
-    
+
     #[test]
     fn test_config_serialization() {
         let config = TestConfig::default();
         let yaml = serde_yaml::to_string(&config).expect("Failed to serialize");
         let deserialized: TestConfig = serde_yaml::from_str(&yaml).expect("Failed to deserialize");
-        
+
         assert_eq!(config.session_core.server.sip_port, deserialized.session_core.server.sip_port);
     }
-    
+
     #[test]
     fn test_config_file_operations() {
         let temp_file = NamedTempFile::new().expect("Failed to create temp file");
         let path = temp_file.path().to_path_buf();
-        
+
         // Create and save default config
         TestConfig::create_default_config(&path).expect("Failed to create config");
-        
+
         // Load config back
         let loaded_config = TestConfig::load_from_file(&path).expect("Failed to load config");
-        
+
         assert_eq!(loaded_config.session_core.server.sip_port, 5062);
     }
-} 
+}

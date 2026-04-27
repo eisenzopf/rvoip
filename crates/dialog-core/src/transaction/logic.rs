@@ -9,7 +9,7 @@
 /// RFC 3261 defines four different transaction types, each with its own state machine:
 ///
 /// 1. **INVITE Client Transaction** (Section 17.1.1)
-/// 2. **Non-INVITE Client Transaction** (Section 17.1.2)  
+/// 2. **Non-INVITE Client Transaction** (Section 17.1.2)
 /// 3. **INVITE Server Transaction** (Section 17.2.1)
 /// 4. **Non-INVITE Server Transaction** (Section 17.2.2)
 ///

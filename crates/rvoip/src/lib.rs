@@ -23,7 +23,7 @@
 //! ```rust
 //! use rvoip::client_core::*;
 //! use rvoip::session_core::*;
-//! 
+//!
 //! // Your VoIP application code here
 //! ```
 //!
@@ -87,7 +87,7 @@ pub mod prelude {
     //! - [`crate::dialog_core`] - Dialog state management
     //! - [`crate::transaction_core`] - Transaction management
     //! - [`crate::sip_transport`] - SIP transport layer
-    
+
     // Note: We don't re-export specific types to avoid naming conflicts.
     // Users should import from the specific crates they need.
 }
@@ -96,4 +96,4 @@ pub mod prelude {
 /// The version of the rvoip library
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The description of the rvoip library
-pub const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION"); 
+pub const DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");

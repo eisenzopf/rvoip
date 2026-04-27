@@ -1,5 +1,5 @@
 //! Proper test for 500 concurrent calls between 2 SessionManagers with real media
-//! 
+//!
 //! Architecture:
 //! - Server SessionManager on port 5060 (receives calls)
 //! - Client SessionManager on port 5061 (makes calls)
@@ -39,16 +39,16 @@ impl CallHandler for ServerHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
         let count = self.calls_received.fetch_add(1, Ordering::Relaxed) + 1;
         debug!("Server received call #{}: {} -> {}", count, call.from, call.to);
-        
+
         // Let the SessionManager handle SDP negotiation automatically
         // It will allocate RTP ports from the configured range
         CallDecision::Accept(None)
     }
-    
+
     async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         let count = self.calls_established.fetch_add(1, Ordering::Relaxed) + 1;
         debug!("Server established call #{}: {}", count, call.id());
-        
+
         // Log the negotiated media ports for verification
         if let (Some(local), Some(remote)) = (local_sdp, remote_sdp) {
             // Parse ports from SDP m= lines
@@ -66,7 +66,7 @@ impl CallHandler for ServerHandler {
             }
         }
     }
-    
+
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         debug!("Server call ended: {} - {}", call.id(), reason);
         if reason.contains("fail") || reason.contains("error") {
@@ -97,11 +97,11 @@ impl CallHandler for ClientHandler {
         // Client doesn't receive calls in this test
         CallDecision::Reject("Client only makes outgoing calls".to_string())
     }
-    
+
     async fn on_call_established(&self, call: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         let count = self.calls_established.fetch_add(1, Ordering::Relaxed) + 1;
         debug!("Client established call #{}: {}", count, call.id());
-        
+
         // Verify media ports
         if let (Some(local), Some(remote)) = (local_sdp, remote_sdp) {
             for line in local.lines() {
@@ -118,7 +118,7 @@ impl CallHandler for ClientHandler {
             }
         }
     }
-    
+
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         debug!("Client call ended: {} - {}", call.id(), reason);
         if reason.contains("fail") || reason.contains("error") {
@@ -134,16 +134,16 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
         .with_max_level(tracing::Level::INFO)
         .with_env_filter("info,rvoip_session_core=debug")
         .try_init();
-    
+
     info!("=== Testing 500 Concurrent Calls Between 2 SessionManagers ===");
     let test_start = Instant::now();
-    
+
     // Create server SessionManager
     // GlobalPortAllocator on macOS uses range 20000-30000 (10000 ports total)
     // With RTCP muxing, we need 1 port per call side
     // For 500 calls: 500 ports for server, 500 ports for client
     let server_handler = Arc::new(ServerHandler::new());
-    
+
     info!("Creating server SessionManager on port 5060...");
     let server = SessionManagerBuilder::new()
         .with_sip_port(5060)
@@ -152,13 +152,13 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
         .with_handler(server_handler.clone())
         .build()
         .await?;
-    
+
     info!("✅ Server created with RTP ports 20000-25000");
-    
+
     // Create client SessionManager
     // Needs to make 500 outgoing calls
     let client_handler = Arc::new(ClientHandler::new());
-    
+
     info!("Creating client SessionManager on port 5061...");
     let client = SessionManagerBuilder::new()
         .with_sip_port(5061)
@@ -167,30 +167,30 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
         .with_handler(client_handler.clone())
         .build()
         .await?;
-    
+
     info!("✅ Client created with RTP ports 25000-30000");
-    
+
     // Start both managers
     server.start().await?;
     client.start().await?;
     info!("Both SessionManagers started");
-    
+
     // Allow initialization
     tokio::time::sleep(Duration::from_millis(1000)).await;
-    
+
     // Make 500 concurrent calls
     info!("Initiating 500 concurrent calls...");
     let mut call_tasks = Vec::new();
     let calls_to_make = 500;
-    
+
     for i in 0..calls_to_make {
         let client_clone = client.clone();
-        
+
         let task = tokio::spawn(async move {
             // Each call has a unique From URI but shares the client's SIP port
             let from = format!("sip:user_{}@127.0.0.1:5061", i);
             let to = format!("sip:destination_{}@127.0.0.1:5060", i);
-            
+
             // Create call with NO custom SDP - let SessionManager handle everything
             // It will:
             // 1. Generate SDP offer with allocated RTP ports
@@ -208,27 +208,27 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
                 }
             }
         });
-        
+
         call_tasks.push(task);
-        
+
         // Stagger call creation to avoid overwhelming the system
         if i > 0 && i % 50 == 0 {
             info!("Created {} calls so far...", i);
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    
-    info!("All {} call tasks spawned in {:.1}s", 
+
+    info!("All {} call tasks spawned in {:.1}s",
           calls_to_make, test_start.elapsed().as_secs_f64());
-    
+
     // Wait for calls to establish
     info!("Waiting for calls to establish...");
     tokio::time::sleep(Duration::from_secs(5)).await;
-    
+
     // Collect results
     let mut successful_calls = 0;
     let mut failed_calls = 0;
-    
+
     for task in call_tasks {
         match task.await {
             Ok(Ok(_)) => successful_calls += 1,
@@ -236,15 +236,15 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
             Err(_) => failed_calls += 1,  // Task panic
         }
     }
-    
+
     // Get final metrics
     let server_received = server_handler.calls_received.load(Ordering::Relaxed);
     let server_established = server_handler.calls_established.load(Ordering::Relaxed);
     let server_failed = server_handler.calls_failed.load(Ordering::Relaxed);
-    
+
     let client_established = client_handler.calls_established.load(Ordering::Relaxed);
     let client_failed = client_handler.calls_failed.load(Ordering::Relaxed);
-    
+
     info!("\n╔══════════════════════════════════════════════════════════════╗");
     info!("║              RESULTS FOR 500 CONCURRENT CALLS               ║");
     info!("╠══════════════════════════════════════════════════════════════╣");
@@ -263,12 +263,12 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
     info!("║   Total Test Time:        {:>6.1}s                          ║", test_start.elapsed().as_secs_f64());
     info!("║   Success Rate:           {:>5.1}%                           ║", (successful_calls as f64 / calls_to_make as f64) * 100.0);
     info!("╚══════════════════════════════════════════════════════════════╝");
-    
+
     // Let media flow for a while
     info!("\nLetting media flow for 10 seconds...");
     info!("(In a real implementation, RTP packets would be flowing between endpoints)");
     tokio::time::sleep(Duration::from_secs(10)).await;
-    
+
     // Thread analysis
     info!("\n╔══════════════════════════════════════════════════════════════╗");
     info!("║                    THREAD ANALYSIS                          ║");
@@ -280,15 +280,15 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
     info!("║                                                              ║");
     info!("║ Traditional Architecture:                                   ║");
     info!("║   Would Need:             {:>6} threads                    ║", successful_calls * 2 * 2 + 4);
-    info!("║   Thread Reduction:       {:>5.1}%                           ║", 
+    info!("║   Thread Reduction:       {:>5.1}%                           ║",
           ((successful_calls * 2 * 2 + 4 - 20) as f64 / (successful_calls * 2 * 2 + 4) as f64) * 100.0);
     info!("╚══════════════════════════════════════════════════════════════╝");
-    
+
     // Clean shutdown
     info!("\nStopping SessionManagers...");
     client.stop().await?;
     server.stop().await?;
-    
+
     // Verify success
     let success_rate = (successful_calls as f64 / calls_to_make as f64) * 100.0;
     if success_rate >= 90.0 {
@@ -298,11 +298,11 @@ async fn test_500_concurrent_calls_with_media() -> std::result::Result<(), Box<d
     } else {
         info!("❌ TEST FAILED: Only {:.1}% success rate", success_rate);
     }
-    
-    assert!(successful_calls >= 450, 
+
+    assert!(successful_calls >= 450,
             "Expected at least 450/500 successful calls, got {}", successful_calls);
-    
+
     info!("\n=== Test completed in {:.1}s ===", test_start.elapsed().as_secs_f64());
-    
+
     Ok(())
 }

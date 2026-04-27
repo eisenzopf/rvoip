@@ -79,7 +79,7 @@ impl PayloadType {
             _ => Self::Dynamic(value),
         }
     }
-    
+
     /// Get the default clock rate for this payload type
     pub fn default_clock_rate(&self) -> u32 {
         match self {
@@ -101,7 +101,7 @@ impl PayloadType {
             Self::Dynamic(_) => 8000, // Default to 8kHz for dynamic types
         }
     }
-    
+
     /// Get a human-readable name for this payload type
     pub fn name(&self) -> &'static str {
         match self {
@@ -123,7 +123,7 @@ impl PayloadType {
             Self::Dynamic(_) => "Dynamic",
         }
     }
-    
+
     /// Convert to a u8
     pub fn to_u8(&self) -> u8 {
         match self {
@@ -149,11 +149,11 @@ impl PayloadType {
 
 /// Create a payload format handler for the given payload type
 pub fn create_payload_format(
-    payload_type: PayloadType, 
+    payload_type: PayloadType,
     channels: Option<u32>,
 ) -> Option<Box<dyn PayloadFormat>> {
     let clock_rate = payload_type.default_clock_rate();
-    
+
     match payload_type {
         PayloadType::PCMU => Some(Box::new(G711UPayloadFormat::new(clock_rate))),
         PayloadType::PCMA => Some(Box::new(G711APayloadFormat::new(clock_rate))),
@@ -183,4 +183,4 @@ pub fn create_payload_format(
         // Add other payload formats as they are implemented
         _ => None,
     }
-} 
+}

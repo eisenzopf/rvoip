@@ -2,7 +2,7 @@
 //!
 //! This module is organized into focused sub-modules for better maintainability:
 //! - `dialog_utils` - Dialog-related utilities and templates
-//! - `message_extractors` - Functions for extracting data from SIP messages  
+//! - `message_extractors` - Functions for extracting data from SIP messages
 //! - `response_builders` - SIP response creation utilities
 //! - `transaction_helpers` - Transaction-related utilities
 //! - `request_builders` - SIP request creation utilities

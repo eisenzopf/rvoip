@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             match packet {
                                 RtcpPacket::Goodbye(bye) => {
                                     if !bye.sources.is_empty() {
-                                        info!("Receiver got direct BYE packet from SSRC={:08x}, reason: {:?}", 
+                                        info!("Receiver got direct BYE packet from SSRC={:08x}, reason: {:?}",
                                               bye.sources[0], bye.reason);
                                         return true; // Signal that we got a BYE packet
                                     }

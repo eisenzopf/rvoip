@@ -1,5 +1,5 @@
 //! SIP Conference Server - Multi-party conferencing simulation
-//! 
+//!
 //! This is a simplified conference server that accepts multiple concurrent calls
 //! to simulate conference behavior. In a real implementation, you would use
 //! the media-core conference functionality.
@@ -36,15 +36,15 @@ struct Args {
     /// Port to listen on
     #[arg(short, long, default_value = "5064")]
     port: u16,
-    
+
     /// Maximum number of conference participants
     #[arg(short, long, default_value = "10")]
     max_participants: usize,
-    
+
     /// Conference timeout in seconds (0 = no timeout)
     #[arg(short, long, default_value = "0")]
     timeout: u64,
-    
+
     /// Verbose logging
     #[arg(short, long)]
     verbose: bool,
@@ -69,7 +69,7 @@ pub struct SipConferenceHandler {
 impl SipConferenceHandler {
     pub fn new(max_participants: usize, stats: Arc<Mutex<CallStats>>) -> Self {
         info!("🎪 Creating Simplified SIP Conference Handler (max participants: {})", max_participants);
-        
+
         Self {
             rooms: Arc::new(Mutex::new(HashMap::new())),
             stats,
@@ -77,7 +77,7 @@ impl SipConferenceHandler {
             name: "SIPp-Conference-Simple".to_string(),
         }
     }
-    
+
     /// Extract conference ID from SIP To header
     fn extract_conference_id(&self, to_uri: &str) -> String {
         to_uri.split('@').next()
@@ -85,7 +85,7 @@ impl SipConferenceHandler {
             .unwrap_or("default")
             .to_string()
     }
-    
+
     /// Extract participant ID from SIP From header
     fn extract_participant_id(&self, from_uri: &str) -> String {
         from_uri.split('@').next()
@@ -98,24 +98,24 @@ impl SipConferenceHandler {
 #[async_trait::async_trait]
 impl CallHandler for SipConferenceHandler {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallDecision {
-        info!("🎪 [{}] Conference INVITE from {} to {}", 
+        info!("🎪 [{}] Conference INVITE from {} to {}",
               self.name, call.from, call.to);
         info!("🎪 [{}] Call ID: {}", self.name, call.id);
-        
+
         // Update stats
         {
             let mut stats = self.stats.lock().await;
             stats.total_calls += 1;
             stats.active_calls += 1;
         }
-        
+
         // Extract conference and participant IDs
         let conference_id = self.extract_conference_id(&call.to);
         let participant_id = self.extract_participant_id(&call.from);
-        
-        info!("🎪 Participant {} wants to join conference {}", 
+
+        info!("🎪 Participant {} wants to join conference {}",
               participant_id, conference_id);
-        
+
         // Check/create conference room
         let mut rooms = self.rooms.lock().await;
         let room = rooms.entry(conference_id.clone()).or_insert_with(|| {
@@ -125,20 +125,20 @@ impl CallHandler for SipConferenceHandler {
                 _created_at: Instant::now(),
             }
         });
-        
+
         // Check capacity
         if room.participants.len() >= self.max_participants {
-            warn!("❌ Conference {} is full ({}/{})", 
+            warn!("❌ Conference {} is full ({}/{})",
                   conference_id, room.participants.len(), self.max_participants);
             return CallDecision::Reject("Conference room full".to_string());
         }
-        
+
         // Add participant
         room.participants.insert(participant_id.clone(), call.id.clone());
-        
-        info!("✅ Participant {} joined conference {} ({}/{} participants)", 
+
+        info!("✅ Participant {} joined conference {} ({}/{} participants)",
               participant_id, conference_id, room.participants.len(), self.max_participants);
-        
+
         // Generate simple SDP answer
         let sdp_answer = if let Some(ref _sdp_offer) = call.sdp {
             info!("🔍 Generating conference SDP answer for participant {}", participant_id);
@@ -158,28 +158,28 @@ impl CallHandler for SipConferenceHandler {
         } else {
             None
         };
-        
+
         CallDecision::Accept(sdp_answer)
     }
 
     async fn on_call_ended(&self, call: CallSession, reason: &str) {
         info!("🚪 [{}] Conference call {} ended: {}", self.name, call.id(), reason);
-        
+
         let session_id = call.id().to_string();
-        
+
         // Find and remove participant from conference
         let mut rooms = self.rooms.lock().await;
         let mut empty_rooms = Vec::new();
-        
+
         for (room_id, room) in rooms.iter_mut() {
             // Remove participant if found in this room
             if room.participants.values().any(|id| id.as_str() == session_id) {
                 // Find and remove the participant
                 room.participants.retain(|_, id| id.as_str() != session_id);
-                
-                info!("📉 Participant left conference {} ({} participants remaining)", 
+
+                info!("📉 Participant left conference {} ({} participants remaining)",
                       room_id, room.participants.len());
-                
+
                 // Mark room for removal if empty
                 if room.participants.is_empty() {
                     empty_rooms.push(room_id.clone());
@@ -187,13 +187,13 @@ impl CallHandler for SipConferenceHandler {
                 break;
             }
         }
-        
+
         // Remove empty rooms
         for room_id in empty_rooms {
             rooms.remove(&room_id);
             info!("🗑️ Removed empty conference room: {}", room_id);
         }
-        
+
         // Update stats
         {
             let mut stats = self.stats.lock().await;
@@ -217,12 +217,12 @@ impl SipConferenceServer {
     pub async fn new(port: u16, max_participants: usize) -> Result<Self> {
         info!("🎪 Starting SIP Conference Server (simplified)");
         info!("📡 Port: {}, Max participants: {}", port, max_participants);
-        
+
         let stats = Arc::new(Mutex::new(CallStats::default()));
         let handler = Arc::new(
             SipConferenceHandler::new(max_participants, Arc::clone(&stats))
         );
-        
+
         // Create session coordinator with session-core
         let session_coordinator = SessionManagerBuilder::new()
             .with_sip_port(port)
@@ -231,7 +231,7 @@ impl SipConferenceServer {
             .with_handler(handler.clone())
             .build()
             .await?;
-        
+
         let server = Self {
             session_coordinator,
             stats,
@@ -239,31 +239,31 @@ impl SipConferenceServer {
             port,
             max_participants,
         };
-        
+
         Ok(server)
     }
-    
+
     /// Start the server and handle events
     pub async fn run(&self) -> Result<()> {
         info!("🎪 Starting SIP Conference Server session coordinator...");
-        
+
         // Start the session coordinator - this actually binds to the SIP port!
         self.session_coordinator.start().await?;
-        
+
         info!("✅ SIP Conference Server ready and listening on port {}", self.port);
         info!("👥 Max participants per conference: {}", self.max_participants);
         info!("🎯 Ready to handle multi-party conference calls");
         info!("📡 Real SIP conference server now active - SIPp can connect!");
-        
+
         // Wait for shutdown signal
         self.wait_for_shutdown().await?;
-        
+
         info!("🛑 SIP Conference Server shutting down");
         self.print_final_stats().await;
-        
+
         Ok(())
     }
-    
+
     /// Wait for shutdown signal
     async fn wait_for_shutdown(&self) -> Result<()> {
         // Handle Ctrl+C
@@ -271,7 +271,7 @@ impl SipConferenceServer {
             signal::ctrl_c().await.expect("Failed to install Ctrl+C handler");
             info!("📡 Received Ctrl+C signal");
         };
-        
+
         // Handle SIGTERM
         #[cfg(unix)]
         let terminate = async {
@@ -281,23 +281,23 @@ impl SipConferenceServer {
                 .await;
             info!("📡 Received SIGTERM signal");
         };
-        
+
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
-        
+
         tokio::select! {
             _ = ctrl_c => {},
             _ = terminate => {},
         }
-        
+
         Ok(())
     }
-    
+
     /// Print final statistics
     async fn print_final_stats(&self) {
         let stats = self.stats.lock().await;
         let uptime = self.start_time.elapsed();
-        
+
         info!("📊 Final Conference Statistics:");
         info!("  ⏱️  Uptime: {:.2} seconds", uptime.as_secs_f64());
         info!("  🎪 Total conference participants: {}", stats.total_calls);
@@ -305,7 +305,7 @@ impl SipConferenceServer {
         info!("  ❌ Failed participants: {}", stats.failed_calls);
         info!("  🔄 Active participants: {}", stats.active_calls);
         info!("  📈 Success rate: {:.1}%", stats.success_rate());
-        
+
         if stats.total_calls > 0 {
             let participants_per_second = stats.total_calls as f64 / uptime.as_secs_f64();
             info!("  🚀 Average participant rate: {:.2} participants/second", participants_per_second);
@@ -316,7 +316,7 @@ impl SipConferenceServer {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    
+
     // Initialize logging
     let log_level = if args.verbose { "debug" } else { "info" };
     tracing_subscriber::fmt()
@@ -326,23 +326,23 @@ async fn main() -> Result<()> {
         .with_file(false)
         .with_line_number(false)
         .init();
-    
+
     info!("🎪 Starting SIP Conference Server (simplified)");
     info!("📡 Listening on port: {}", args.port);
     info!("👥 Max participants per conference: {}", args.max_participants);
-    
+
     if args.timeout > 0 {
         info!("⏰ Conference timeout: {}s", args.timeout);
     } else {
         info!("⏰ No conference timeout (manual control)");
     }
-    
+
     // Create conference server
     let conference_server = SipConferenceServer::new(
-        args.port, 
+        args.port,
         args.max_participants
     ).await?;
-    
+
     // Run with timeout if specified
     if args.timeout > 0 {
         info!("⏰ Running with timeout: {} seconds", args.timeout);
@@ -354,7 +354,7 @@ async fn main() -> Result<()> {
         info!("🔄 Running indefinitely (script-controlled)");
         conference_server.run().await?;
     }
-    
+
     info!("🛑 SIP Conference Server shutdown complete");
     Ok(())
 }

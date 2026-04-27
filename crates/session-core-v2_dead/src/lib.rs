@@ -1,13 +1,13 @@
 //! Session-core v2 with state table architecture
-//! 
+//!
 //! This is a refactored version of session-core that uses a master state table
 //! to coordinate between dialog-core and media-core. The key benefits are:
-//! 
+//!
 //! 1. Deterministic state transitions
 //! 2. Simplified event handling
 //! 3. Easier testing and verification
 //! 4. Reduced complexity
-//! 
+//!
 //! The architecture consists of:
 //! - State Table: Defines all valid transitions
 //! - State Machine: Executes transitions

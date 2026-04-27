@@ -102,35 +102,35 @@ pub struct CodecInfo {
 pub struct MediaConfig {
     /// Preferred codecs in priority order
     pub preferred_codecs: Vec<String>,
-    
+
     /// RTP port range for media sessions
     pub port_range: Option<(RtpPort, RtpPort)>,
-    
+
     /// Enable quality monitoring and metrics collection
     pub quality_monitoring: bool,
-    
+
     /// Enable DTMF support
     pub dtmf_support: bool,
-    
+
     /// Enable echo cancellation
     pub echo_cancellation: bool,
-    
+
     /// Enable noise suppression
     pub noise_suppression: bool,
-    
+
     /// Enable automatic gain control
     pub auto_gain_control: bool,
-    
+
     /// Path to music-on-hold WAV file
     /// If None, silence will be sent during hold
     pub music_on_hold_path: Option<std::path::PathBuf>,
-    
+
     /// Maximum bandwidth in kbps
     pub max_bandwidth_kbps: Option<u32>,
-    
+
     /// Preferred packetization time
     pub preferred_ptime: Option<u8>,
-    
+
     /// Custom SDP attributes for advanced use cases
     pub custom_sdp_attributes: std::collections::HashMap<String, String>,
 }
@@ -161,52 +161,52 @@ pub enum MediaEvent {
         session_id: MediaSessionId,
         info: MediaSessionInfo,
     },
-    
+
     /// Media session terminated
     SessionTerminated {
         session_id: MediaSessionId,
     },
-    
+
     /// Quality metrics updated
     QualityUpdate {
         session_id: MediaSessionId,
         metrics: QualityMetrics,
     },
-    
+
     /// DTMF tone detected
     DtmfDetected {
         session_id: MediaSessionId,
         tone: char,
         duration: u32,
     },
-    
+
     /// Media error occurred
     Error {
         session_id: MediaSessionId,
         error: String,
     },
-    
+
     /// RTP packet processed with zero-copy
     RtpPacketProcessed {
         session_id: MediaSessionId,
         processing_type: RtpProcessingType,
         performance_metrics: RtpProcessingMetrics,
     },
-    
+
     /// Rtp processing mode changed
     RtpProcessingModeChanged {
         session_id: MediaSessionId,
         old_mode: RtpProcessingMode,
         new_mode: RtpProcessingMode,
     },
-    
+
     /// Rtp processing error
     RtpProcessingError {
         session_id: MediaSessionId,
         error: String,
         fallback_applied: bool,
     },
-    
+
     /// Rtp buffer pool statistics update
     RtpBufferPoolUpdate {
         stats: RtpBufferPoolStats,
@@ -341,4 +341,4 @@ pub fn convert_to_media_core_config(
         preferred_codec: config.preferred_codecs.first().cloned(),
         parameters: HashMap::new(),
     }
-} 
+}

@@ -51,7 +51,7 @@ impl PresenceStatus {
             _ => BasicStatus::Closed,
         }
     }
-    
+
     /// Get a human-readable note for this status
     pub fn to_note(&self) -> Option<String> {
         match self {
@@ -98,13 +98,13 @@ impl PresenceInfo {
             entity,
         }
     }
-    
+
     /// Set the note for this presence
     pub fn with_note(mut self, note: Option<String>) -> Self {
         self.note = note;
         self
     }
-    
+
     /// Convert to PIDF format
     pub fn to_pidf(&self) -> Presence {
         // Create a tuple for this presence state
@@ -113,27 +113,27 @@ impl PresenceInfo {
             tuple_id.to_string(),
             Status::new(self.status.to_basic_status()),
         );
-        
+
         // Set contact if we have device info
         if let Some(device) = &self.device {
-            tuple.contact = Some(format!("sip:{}@{}", 
+            tuple.contact = Some(format!("sip:{}@{}",
                 self.entity.split('@').next().unwrap_or("unknown"),
                 device
             ));
         }
-        
+
         tuple.timestamp = Some(self.last_updated);
-        
+
         // Build the presence document using the builder pattern
         let mut presence = Presence::new(self.entity.clone())
             .add_tuple(tuple);
-        
+
         // Add note if present
         let note = self.note.clone().or_else(|| self.status.to_note());
         if let Some(n) = note {
             presence = presence.add_note(n);
         }
-        
+
         presence
     }
 }
@@ -172,16 +172,16 @@ pub enum SubscriptionState {
 pub struct PresenceCoordinator {
     /// Presence states by entity URI
     presence_states: Arc<DashMap<String, PresenceInfo>>,
-    
+
     /// Active subscriptions by dialog ID
     subscriptions: Arc<DashMap<DialogId, SubscriptionInfo>>,
-    
+
     /// Watcher lists: presentity URI -> list of dialog IDs
     watchers: Arc<DashMap<String, Vec<DialogId>>>,
-    
+
     /// Dialog manager for sending NOTIFY
     dialog_manager: Option<Arc<DialogManager>>,
-    
+
     /// Default subscription duration
     default_expires: Duration,
 }
@@ -197,12 +197,12 @@ impl PresenceCoordinator {
             default_expires: Duration::from_secs(3600),
         }
     }
-    
+
     /// Set the dialog manager for NOTIFY sending
     pub fn set_dialog_manager(&mut self, dialog_manager: Arc<DialogManager>) {
         self.dialog_manager = Some(dialog_manager);
     }
-    
+
     /// Update presence for an entity
     pub async fn update_presence(
         &self,
@@ -211,21 +211,21 @@ impl PresenceCoordinator {
         note: Option<String>,
     ) -> Result<()> {
         info!("Updating presence for {}: {:?}", entity, status);
-        
+
         // Update or create presence info
         let mut presence = self.presence_states.entry(entity.clone())
             .or_insert_with(|| PresenceInfo::new(entity.clone(), status.clone()));
-        
+
         presence.status = status;
         presence.note = note;
         presence.last_updated = Utc::now();
-        
+
         // Notify all watchers
         self.notify_watchers(&entity).await?;
-        
+
         Ok(())
     }
-    
+
     /// Handle new subscription
     pub async fn handle_subscription(
         &self,
@@ -236,7 +236,7 @@ impl PresenceCoordinator {
         expires: Duration,
     ) -> Result<()> {
         info!("New subscription: {} watching {}", watcher, presentity);
-        
+
         // Create subscription info
         let subscription = SubscriptionInfo {
             dialog_id: dialog_id.clone(),
@@ -246,44 +246,44 @@ impl PresenceCoordinator {
             expires_at: Utc::now() + chrono::Duration::from_std(expires).unwrap(),
             state: SubscriptionState::Pending,
         };
-        
+
         // Store subscription
         self.subscriptions.insert(dialog_id.clone(), subscription);
-        
+
         // Add to watcher list
         self.watchers.entry(presentity.clone())
             .or_insert_with(Vec::new)
             .push(dialog_id.clone());
-        
+
         // Send initial NOTIFY
         self.send_initial_notify(dialog_id).await?;
-        
+
         Ok(())
     }
-    
+
     /// Send initial NOTIFY for a subscription
     async fn send_initial_notify(&self, dialog_id: DialogId) -> Result<()> {
         let subscription = self.subscriptions.get(&dialog_id)
             .ok_or_else(|| SessionError::SessionNotFound("Subscription not found".to_string()))?;
-        
+
         // Get current presence state
         let presence = self.presence_states.get(&subscription.presentity)
             .map(|p| p.clone())
             .unwrap_or_else(|| {
                 PresenceInfo::new(subscription.presentity.clone(), PresenceStatus::Offline)
             });
-        
+
         // Send NOTIFY with current state
         self.send_notify(dialog_id.clone(), presence, false).await?;
-        
+
         // Mark subscription as active
         if let Some(mut sub) = self.subscriptions.get_mut(&dialog_id) {
             sub.state = SubscriptionState::Active;
         }
-        
+
         Ok(())
     }
-    
+
     /// Notify all watchers of a presentity
     async fn notify_watchers(&self, presentity: &str) -> Result<()> {
         if let Some(watchers) = self.watchers.get(presentity) {
@@ -292,17 +292,17 @@ impl PresenceCoordinator {
                 .unwrap_or_else(|| {
                     PresenceInfo::new(presentity.to_string(), PresenceStatus::Offline)
                 });
-            
+
             for dialog_id in watchers.iter() {
                 if let Err(e) = self.send_notify(dialog_id.clone(), presence.clone(), false).await {
                     warn!("Failed to notify watcher {}: {}", dialog_id, e);
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Send NOTIFY message
     async fn send_notify(
         &self,
@@ -311,15 +311,15 @@ impl PresenceCoordinator {
         is_terminating: bool,
     ) -> Result<()> {
         debug!("Sending NOTIFY for dialog {} (terminating: {})", dialog_id, is_terminating);
-        
+
         // We need the dialog manager to send NOTIFY
         let dialog_manager = self.dialog_manager.as_ref()
             .ok_or_else(|| SessionError::ConfigError("Dialog manager not set".to_string()))?;
-        
+
         // Generate PIDF body
         let pidf = presence.to_pidf();
         let body = pidf.to_xml();
-        
+
         // Build subscription state
         let subscription_state = if is_terminating {
             "terminated".to_string()
@@ -332,7 +332,7 @@ impl PresenceCoordinator {
                 "active".to_string()
             }
         };
-        
+
         // Send NOTIFY through dialog manager
         dialog_manager.send_notify(
             &dialog_id,
@@ -340,12 +340,12 @@ impl PresenceCoordinator {
             subscription_state,
             Some(body),
         ).await?;
-        
+
         info!("Sent NOTIFY for dialog {} (terminating: {})", dialog_id, is_terminating);
-        
+
         Ok(())
     }
-    
+
     /// Terminate a subscription
     pub async fn terminate_subscription(
         &self,
@@ -353,7 +353,7 @@ impl PresenceCoordinator {
         reason: Option<String>,
     ) -> Result<()> {
         info!("Terminating subscription {}: {:?}", dialog_id, reason);
-        
+
         if let Some(subscription) = self.subscriptions.get(&dialog_id) {
             // Get presence for final NOTIFY
             let presence = self.presence_states.get(&subscription.presentity)
@@ -361,41 +361,41 @@ impl PresenceCoordinator {
                 .unwrap_or_else(|| {
                     PresenceInfo::new(subscription.presentity.clone(), PresenceStatus::Offline)
                 });
-            
+
             // Send terminating NOTIFY
             self.send_notify(dialog_id.clone(), presence, true).await?;
-            
+
             // Remove from watcher list
             if let Some(mut watchers) = self.watchers.get_mut(&subscription.presentity) {
                 watchers.retain(|id| id != &dialog_id);
             }
-            
+
             // Remove subscription
             self.subscriptions.remove(&dialog_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Get current presence for an entity
     pub fn get_presence(&self, entity: &str) -> Option<PresenceInfo> {
         self.presence_states.get(entity).map(|p| p.clone())
     }
-    
+
     /// Get all active subscriptions
     pub fn get_subscriptions(&self) -> Vec<SubscriptionInfo> {
         self.subscriptions.iter()
             .map(|entry| entry.value().clone())
             .collect()
     }
-    
+
     /// Get all presence states
     pub fn get_all_presence(&self) -> Vec<PresenceInfo> {
         self.presence_states.iter()
             .map(|entry| entry.value().clone())
             .collect()
     }
-    
+
     /// Clean up expired subscriptions
     pub async fn cleanup_expired_subscriptions(&self) -> Result<()> {
         let now = Utc::now();
@@ -403,11 +403,11 @@ impl PresenceCoordinator {
             .filter(|entry| entry.expires_at < now)
             .map(|entry| entry.key().clone())
             .collect();
-        
+
         for dialog_id in expired {
             self.terminate_subscription(dialog_id, Some("Subscription expired".to_string())).await?;
         }
-        
+
         Ok(())
     }
 }

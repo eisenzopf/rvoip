@@ -74,16 +74,16 @@
 //! ```rust
 //! use rvoip_call_engine::queue::{QueueManager, QueuedCall};
 //! use rvoip_session_core::SessionId;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create queue manager
 //! let mut queue_manager = QueueManager::new();
-//! 
+//!
 //! // Create queues for different departments
 //! queue_manager.create_queue("support".to_string(), "Technical Support".to_string(), 50)?;
 //! queue_manager.create_queue("sales".to_string(), "Sales Team".to_string(), 30)?;
 //! queue_manager.create_queue("billing".to_string(), "Billing Department".to_string(), 20)?;
-//! 
+//!
 //! println!("Call queues configured successfully");
 //! # Ok(())
 //! # }
@@ -94,11 +94,11 @@
 //! ```rust
 //! use rvoip_call_engine::queue::{QueueManager, QueuedCall};
 //! use rvoip_session_core::SessionId;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let mut queue_manager = QueueManager::new();
 //! # queue_manager.create_queue("support".to_string(), "Support".to_string(), 50)?;
-//! 
+//!
 //! // Create a high-priority call
 //! let urgent_call = QueuedCall {
 //!     session_id: SessionId::new(),
@@ -108,11 +108,11 @@
 //!     estimated_wait_time: Some(30), // 30 seconds
 //!     retry_count: 0,
 //! };
-//! 
+//!
 //! // Queue the call
 //! let position = queue_manager.enqueue_call("support", urgent_call)?;
 //! println!("Call queued at position: {}", position);
-//! 
+//!
 //! // Create a normal priority call
 //! let normal_call = QueuedCall {
 //!     session_id: SessionId::new(),
@@ -122,7 +122,7 @@
 //!     estimated_wait_time: Some(120), // 2 minutes
 //!     retry_count: 0,
 //! };
-//! 
+//!
 //! queue_manager.enqueue_call("support", normal_call)?;
 //! # Ok(())
 //! # }
@@ -132,16 +132,16 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::queue::QueueManager;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let mut queue_manager = QueueManager::new();
 //! # queue_manager.create_queue("support".to_string(), "Support".to_string(), 50)?;
-//! 
+//!
 //! // Agent becomes available - get next call
 //! if let Some(call) = queue_manager.dequeue_for_agent("support")? {
 //!     println!("Assigning call {} to agent", call.session_id);
 //!     println!("Caller: {}, Priority: {}", call.caller_id, call.priority);
-//!     
+//!
 //!     // Process call assignment...
 //!     // On success: call remains dequeued
 //!     // On failure: call can be re-queued
@@ -156,17 +156,17 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::queue::QueueManager;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let queue_manager = QueueManager::new();
-//! 
+//!
 //! // Get detailed queue statistics
 //! let stats = queue_manager.get_queue_stats("support")?;
 //! println!("Queue Statistics:");
 //! println!("  Total calls: {}", stats.total_calls);
 //! println!("  Average wait: {} seconds", stats.average_wait_time_seconds);
 //! println!("  Longest wait: {} seconds", stats.longest_wait_time_seconds);
-//! 
+//!
 //! // Get overall queue metrics
 //! let total_calls = queue_manager.total_queued_calls();
 //! println!("Total calls across all queues: {}", total_calls);
@@ -188,7 +188,7 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::queue::QueuedCall;
-//! 
+//!
 //! # fn example() {
 //! // VIP customer call
 //! let vip_call = QueuedCall {
@@ -200,7 +200,7 @@
 //! #   estimated_wait_time: None,
 //! #   retry_count: 0,
 //! };
-//! 
+//!
 //! // Escalated support call
 //! let escalated_call = QueuedCall {
 //!     priority: 1,  // High priority
@@ -211,7 +211,7 @@
 //! #   estimated_wait_time: None,
 //! #   retry_count: 1,
 //! };
-//! 
+//!
 //! // Normal customer call
 //! let normal_call = QueuedCall {
 //!     priority: 5,  // Normal priority
@@ -252,10 +252,10 @@
 //! ```rust
 //! use rvoip_call_engine::queue::QueueManager;
 //! use rvoip_call_engine::error::CallCenterError;
-//! 
+//!
 //! # fn example() {
 //! let mut queue_manager = QueueManager::new();
-//! 
+//!
 //! match queue_manager.get_queue_stats("nonexistent-queue") {
 //!     Ok(stats) => println!("Queue stats: {:?}", stats),
 //!     Err(CallCenterError::NotFound(msg)) => println!("Queue not found: {}", msg),
@@ -297,4 +297,4 @@ pub use policies::{
     TimeBasedRule, BusinessHours, AssignmentRule, AssignmentCondition,
     ServiceLevelTarget, QueueLimit
 };
-pub use overflow::{OverflowHandler, OverflowPolicy, OverflowCondition, OverflowAction}; 
+pub use overflow::{OverflowHandler, OverflowPolicy, OverflowCondition, OverflowAction};

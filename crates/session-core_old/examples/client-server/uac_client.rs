@@ -1,5 +1,5 @@
 //! UAC Client Example
-//! 
+//!
 //! This example demonstrates a simple SIP User Agent Client (UAC)
 //! that makes calls to a UAS server.
 
@@ -20,23 +20,23 @@ pub struct Args {
     /// SIP listening port for the client
     #[arg(short, long, default_value = "5061")]
     pub port: u16,
-    
+
     /// Target SIP server address (IP:port)
     #[arg(short, long, default_value = "127.0.0.1:5062")]
     pub target: String,
-    
+
     /// Number of calls to make
     #[arg(short, long, default_value = "1")]
     pub calls: usize,
-    
+
     /// Duration of each call in seconds
     #[arg(short, long, default_value = "30")]
     pub duration: u64,
-    
+
     /// Delay between calls in seconds
     #[arg(short = 'w', long, default_value = "2")]
     pub delay: u64,
-    
+
     /// Log level (trace, debug, info, warn, error)
     #[arg(short, long, default_value = "info")]
     pub log_level: String,
@@ -60,12 +60,12 @@ struct UacHandler {
 
 impl UacHandler {
     fn new(stats: Arc<Mutex<UacStats>>) -> Self {
-        Self { 
+        Self {
             stats,
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
-    
+
     async fn set_coordinator(&self, coordinator: Arc<SessionCoordinator>) {
         let mut coord = self.session_coordinator.write().await;
         *coord = Some(coordinator);
@@ -78,21 +78,21 @@ impl CallHandler for UacHandler {
         warn!("UAC received unexpected incoming call from {}", call.from);
         CallDecision::Reject("UAC does not accept incoming calls".to_string())
     }
-    
+
     async fn on_call_established(&self, session: CallSession, local_sdp: Option<String>, remote_sdp: Option<String>) {
         info!("Call {} established", session.id);
         info!("Local SDP: {:?}", local_sdp.as_ref().map(|s| s.len()));
         info!("Remote SDP: {:?}", remote_sdp.as_ref().map(|s| s.len()));
-        
+
         // Extract remote RTP address from SDP if available
         let coordinator_guard = self.session_coordinator.read().await;
         if let (Some(coordinator), Some(remote_sdp)) = (coordinator_guard.as_ref(), remote_sdp) {
             info!("Have coordinator and remote SDP, parsing...");
-            
+
             // Simple SDP parsing to get IP and port
             let mut remote_ip = None;
             let mut remote_port = None;
-            
+
             for line in remote_sdp.lines() {
                 if line.starts_with("c=IN IP4 ") {
                     remote_ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
@@ -105,11 +105,11 @@ impl CallHandler for UacHandler {
                     }
                 }
             }
-            
+
             if let (Some(ip), Some(port)) = (remote_ip, remote_port) {
                 let remote_addr = format!("{}:{}", ip, port);
                 info!("Establishing media flow to {}", remote_addr);
-                
+
                 // Establish media flow (this also starts audio transmission)
                 match coordinator.establish_media_flow(&session.id, &remote_addr).await {
                     Ok(_) => {
@@ -124,45 +124,45 @@ impl CallHandler for UacHandler {
         } else {
             warn!("No coordinator or remote SDP available");
         }
-        
+
         let mut stats = self.stats.lock().await;
         stats.calls_connected += 1;
-        
+
         // Start statistics monitoring
         let stats_session_id = session.id.clone();
         let stats_coordinator = self.session_coordinator.read().await.as_ref().cloned().unwrap();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(5));
-            
+
             loop {
                 interval.tick().await;
-                
+
                 if let Ok(Some(stats)) = stats_coordinator.get_call_statistics(&stats_session_id).await {
                     let rtp = &stats.rtp;
                     info!("📊 RTP Statistics - Sent: {} pkts, Recv: {} pkts, Lost: {} pkts, Jitter: {:.1}ms",
                           rtp.packets_sent, rtp.packets_received, rtp.packets_lost, rtp.jitter_buffer_ms);
-                    
+
                     let quality = &stats.quality;
                     info!("📈 Quality Metrics - Loss: {:.1}%, MOS: {:.1}, Effectiveness: {:.1}%",
-                          quality.packet_loss_rate, 
+                          quality.packet_loss_rate,
                           quality.mos_score,
                           quality.network_effectiveness * 100.0);
                 }
             }
         });
-        
+
         // Keep the call active for the specified duration
         info!("📞 Call {} established and active", session.id);
     }
-    
+
     async fn on_call_ended(&self, session: CallSession, reason: &str) {
         info!("Call {} ended: {}", session.id, reason);
-        
+
         let mut stats = self.stats.lock().await;
         if let Some(started_at) = session.started_at {
             stats.total_duration += started_at.elapsed();
         }
-        
+
         // Check if audio was transmitted
         let coordinator_guard = self.session_coordinator.read().await;
         if let Some(coordinator) = coordinator_guard.as_ref() {
@@ -190,34 +190,34 @@ async fn make_test_calls(
     stats: Arc<Mutex<UacStats>>,
 ) -> Result<()> {
     info!("Starting {} test calls to {}", num_calls, target);
-    
+
     for i in 0..num_calls {
         info!("Making call {} of {}", i + 1, num_calls);
-        
+
         // Update stats
         {
             let mut s = stats.lock().await;
             s.calls_initiated += 1;
         }
-        
+
         // Prepare the call (allocates media port and generates SDP)
         let from_uri = "sip:uac@127.0.0.1";
         let to_uri = format!("sip:uas@{}", target);
-        
+
         match session_coordinator.prepare_outgoing_call(from_uri, &to_uri).await {
             Ok(prepared_call) => {
-                info!("Prepared call with session {} on RTP port {}", 
+                info!("Prepared call with session {} on RTP port {}",
                     prepared_call.session_id, prepared_call.local_rtp_port);
-                
+
                 // Now initiate the call with the prepared SDP
                 match session_coordinator.initiate_prepared_call(&prepared_call).await {
                     Ok(session) => {
                         info!("Call {} initiated successfully", session.id);
-                        
+
                         // Wait for call duration
                         info!("Call active for {} seconds...", call_duration.as_secs());
                         tokio::time::sleep(call_duration).await;
-                        
+
                         // Terminate the call
                         info!("Terminating call {}", session.id);
                         if let Err(e) = session_coordinator.terminate_session(&session.id).await {
@@ -237,14 +237,14 @@ async fn make_test_calls(
                 s.calls_failed += 1;
             }
         }
-        
+
         // Delay between calls
         if i < num_calls - 1 {
             info!("Waiting {} seconds before next call...", call_delay.as_secs());
             tokio::time::sleep(call_delay).await;
         }
     }
-    
+
     Ok(())
 }
 
@@ -252,7 +252,7 @@ async fn make_test_calls(
 async fn main() -> Result<()> {
     // Parse command line arguments first
     let args = Args::parse();
-    
+
     // Initialize logging with the specified level
     let log_level = match args.log_level.to_lowercase().as_str() {
         "trace" => tracing::Level::TRACE,
@@ -262,20 +262,20 @@ async fn main() -> Result<()> {
         "error" => tracing::Level::ERROR,
         _ => tracing::Level::INFO,
     };
-    
+
     tracing_subscriber::fmt()
         .with_max_level(log_level)
         .with_target(false)
         .init();
-    
+
     info!("Starting UAC client on port {}", args.port);
-    
+
     // Create stats tracker
     let stats = Arc::new(Mutex::new(UacStats::default()));
-    
+
     // Create handler
     let handler = Arc::new(UacHandler::new(stats.clone()));
-    
+
     // Create session manager with dynamic port allocation
     let session_coordinator = SessionManagerBuilder::new()
         .with_sip_port(args.port)
@@ -284,16 +284,16 @@ async fn main() -> Result<()> {
         .with_handler(handler.clone())
         .build()
         .await?;
-    
+
     // Set the coordinator in the handler
     handler.set_coordinator(session_coordinator.clone()).await;
-    
+
     // Start the session manager
     session_coordinator.start().await?;
-    
+
     // Give it a moment to bind
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
+
     // Make test calls
     let calls_handle = tokio::spawn(make_test_calls(
         session_coordinator.clone(),
@@ -303,7 +303,7 @@ async fn main() -> Result<()> {
         Duration::from_secs(args.delay),
         stats.clone(),
     ));
-    
+
     // Wait for calls to complete OR Ctrl+C
     tokio::select! {
         result = calls_handle => {
@@ -317,13 +317,13 @@ async fn main() -> Result<()> {
             info!("Received Ctrl+C, shutting down...");
         }
     }
-    
+
     // Give a moment for any pending operations
     tokio::time::sleep(Duration::from_millis(500)).await;
-    
+
     // Stop the session manager
     session_coordinator.stop().await?;
-    
+
     // Print final statistics
     let final_stats = stats.lock().await;
     info!("=== Final Statistics ===");
@@ -331,8 +331,8 @@ async fn main() -> Result<()> {
     info!("Calls connected: {}", final_stats.calls_connected);
     info!("Calls failed: {}", final_stats.calls_failed);
     info!("Total call duration: {:?}", final_stats.total_duration);
-    
+
     info!("UAC client shutdown complete");
-    
+
     Ok(())
-} 
+}

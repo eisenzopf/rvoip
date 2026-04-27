@@ -65,7 +65,7 @@ fn load_samples_16bit(filename: &str) -> Vec<i16> {
 ///
 /// Based on shiftbit.c and g711demo.c analysis:
 /// - ITU-T reference uses 16-bit arrays for compressed data
-/// - Extract 8-bit G.711 values from upper 8 bits of 16-bit containers  
+/// - Extract 8-bit G.711 values from upper 8 bits of 16-bit containers
 /// - No extra A-law bit inversion needed (test files use default settings)
 fn load_samples_8bit(filename: &str) -> Vec<u8> {
     let bytes = load_test_data(filename);

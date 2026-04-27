@@ -4,4 +4,4 @@
 
 pub mod groups;
 pub mod priority;
-pub mod resources; 
+pub mod resources;

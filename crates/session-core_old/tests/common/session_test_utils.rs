@@ -82,7 +82,7 @@ impl SessionImplTestHelper {
     pub async fn create_test_session(&self) -> SessionId {
         let session_id = SessionId::new();
         let session = SessionImpl::new(session_id.clone());
-        
+
         self.sessions.write().await.insert(session_id.clone(), session);
         session_id
     }
@@ -110,7 +110,7 @@ impl SessionImplTestHelper {
     pub async fn verify_session_state(&self, session_id: &SessionId, expected_state: CallState) {
         let session = self.get_session(session_id).await
             .expect(&format!("Session {} should exist", session_id));
-        assert_eq!(*session.state(), expected_state, 
+        assert_eq!(*session.state(), expected_state,
                   "Session {} state mismatch", session_id);
     }
 
@@ -139,10 +139,10 @@ impl StateManagerTestHelper {
 
     pub async fn test_transition(&self, from: CallState, to: CallState) -> bool {
         let result = StateManager::can_transition(&from, &to);
-        
+
         // Record transition attempt
         self.transition_history.lock().await.push((from, to, result));
-        
+
         result
     }
 
@@ -395,7 +395,7 @@ impl MediaCoordinatorTestHelper {
             quality_metrics: None,
         rtp_stats: None,
         };
-        
+
         self.media_sessions.write().await.insert(session_id.clone(), media_info.clone());
         Ok(media_info)
     }
@@ -420,11 +420,11 @@ impl MediaCoordinatorTestHelper {
     pub async fn verify_media_setup(&self, session_id: &SessionId, expected_codec: Option<&str>) {
         let media_info = self.get_media_info(session_id).await
             .expect(&format!("Media info should exist for session {}", session_id));
-        
+
         assert!(media_info.local_sdp.is_some(), "Local SDP should be set");
-        
+
         if let Some(expected_codec) = expected_codec {
-            assert_eq!(media_info.codec.as_deref(), Some(expected_codec), 
+            assert_eq!(media_info.codec.as_deref(), Some(expected_codec),
                       "Codec mismatch for session {}", session_id);
         }
     }
@@ -468,18 +468,18 @@ impl SessionIntegrationHelper {
     pub async fn create_complete_session(&self, initial_state: CallState, sdp: &str) -> Result<SessionId> {
         // Create session
         let session_id = self.session_helper.create_test_session().await;
-        
+
         // Trigger lifecycle event
         self.lifecycle_helper.trigger_session_created(&session_id.to_string()).await?;
-        
+
         // Setup media (simplified for testing)
         self.media_helper.setup_media(&session_id.to_string(), sdp).await?;
-        
+
         // Set initial state
         if initial_state != CallState::Initiating {
             self.session_helper.update_session_state(&session_id, initial_state).await?;
         }
-        
+
         Ok(session_id)
     }
 
@@ -487,13 +487,13 @@ impl SessionIntegrationHelper {
     pub async fn transition_session_state(&self, session_id: &SessionId, new_state: CallState) -> Result<()> {
         let current_session = self.session_helper.get_session(session_id).await
             .ok_or_else(|| SessionError::session_not_found(&session_id.to_string()))?;
-        
+
         // Validate transition
         self.state_helper.validate_transition(current_session.state().clone(), new_state.clone()).await?;
-        
+
         // Perform transition
         self.session_helper.update_session_state(session_id, new_state).await?;
-        
+
         Ok(())
     }
 
@@ -501,23 +501,23 @@ impl SessionIntegrationHelper {
     pub async fn terminate_session(&self, session_id: &SessionId, reason: &str) -> Result<()> {
         // Transition to terminated state
         self.transition_session_state(session_id, CallState::Terminated).await?;
-        
+
         // Trigger lifecycle event
         self.lifecycle_helper.trigger_session_terminated(&session_id.to_string()).await?;
-        
+
         // Cleanup media
         self.media_helper.cleanup_media(&session_id.to_string()).await?;
-        
+
         Ok(())
     }
 
     pub async fn verify_complete_session(&self, session_id: &SessionId, expected_state: CallState) {
         // Verify session exists and has correct state
         self.session_helper.verify_session_state(session_id, expected_state).await;
-        
+
         // Verify lifecycle event was recorded
         self.lifecycle_helper.verify_session_created_event(&session_id.to_string()).await;
-        
+
         // Verify media setup (simplified for testing)
         // Additional verification can be added as needed
     }
@@ -534,7 +534,7 @@ impl SessionIntegrationHelper {
     pub async fn create_session(&self, session_id: &str, initial_state: CallState) -> Result<()> {
         // Track the session state
         self.session_states.lock().await.insert(session_id.to_string(), initial_state.clone());
-        
+
         self.lifecycle_helper.trigger_session_created(session_id).await?;
         Ok(())
     }
@@ -544,10 +544,10 @@ impl SessionIntegrationHelper {
         let current_state = self.session_states.lock().await.get(session_id)
             .cloned()
             .unwrap_or(CallState::Initiating);
-        
+
         // Update the tracked state
         self.session_states.lock().await.insert(session_id.to_string(), new_state.clone());
-        
+
         self.lifecycle_helper.trigger_session_state_change(session_id, current_state, new_state).await?;
         Ok(())
     }
@@ -652,17 +652,17 @@ impl SessionPerformanceHelper {
 
     pub async fn benchmark_session_creation(&self, session_count: usize) -> Duration {
         let start = Instant::now();
-        
+
         for i in 0..session_count {
             let creation_start = Instant::now();
             let sdp = format!("v=0\r\no=test {} 0 IN IP4 127.0.0.1\r\n", i);
             let _session_id = self.integration_helper.create_complete_session(CallState::Initiating, &sdp).await
                 .expect("Failed to create session");
             let creation_time = creation_start.elapsed();
-            
+
             self.metrics.lock().await.session_creation_times.push(creation_time);
         }
-        
+
         let total_time = start.elapsed();
         self.metrics.lock().await.total_operations += session_count;
         total_time
@@ -671,22 +671,22 @@ impl SessionPerformanceHelper {
     pub async fn benchmark_state_transitions(&self, transition_count: usize) -> Duration {
         let session_id = self.integration_helper.create_complete_session(CallState::Initiating, "test SDP").await
             .expect("Failed to create test session");
-        
+
         let start = Instant::now();
-        
+
         for _ in 0..transition_count {
             let transition_start = Instant::now();
-            
+
             // Cycle through states
             self.integration_helper.transition_session_state(&session_id, CallState::Ringing).await.unwrap();
             self.integration_helper.transition_session_state(&session_id, CallState::Active).await.unwrap();
             self.integration_helper.transition_session_state(&session_id, CallState::OnHold).await.unwrap();
             self.integration_helper.transition_session_state(&session_id, CallState::Active).await.unwrap();
-            
+
             let transition_time = transition_start.elapsed();
             self.metrics.lock().await.state_transition_times.push(transition_time);
         }
-        
+
         start.elapsed()
     }
 
@@ -738,14 +738,14 @@ pub mod session_test_utils {
         Fut: std::future::Future<Output = bool>,
     {
         let start = Instant::now();
-        
+
         while start.elapsed() < timeout {
             if condition().await {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        
+
         false
     }
 
@@ -753,14 +753,14 @@ pub mod session_test_utils {
     pub async fn verify_all_state_transitions() -> Vec<(CallState, CallState, bool)> {
         let states = StateManagerTestHelper::get_all_states();
         let mut results = Vec::new();
-        
+
         for from_state in &states {
             for to_state in &states {
                 let is_valid = StateManager::can_transition(from_state, to_state);
                 results.push((from_state.clone(), to_state.clone(), is_valid));
             }
         }
-        
+
         results
     }
-} 
+}

@@ -1,20 +1,20 @@
 //! Type definitions for the client-core library
-//! 
+//!
 //! This module contains all data structures and types used throughout
 //! the client-core library, providing a comprehensive set of types for
 //! VoIP client operations including calls, media, capabilities, and statistics.
-//! 
+//!
 //! # Type Categories
-//! 
+//!
 //! - **Core Client Types** - Basic client information and statistics
 //! - **Media Types** - Audio, codecs, quality metrics, and capabilities
 //! - **Call Types** - Call-specific information and capabilities
 //! - **Session Types** - Media session and negotiation parameters
-//! 
+//!
 //! # Usage Examples
-//! 
+//!
 //! ## Getting Client Statistics
-//! 
+//!
 //! ```rust
 //! # use rvoip_client_core::{Client, ClientStats};
 //! # use std::sync::Arc;
@@ -24,9 +24,9 @@
 //! # Ok(())
 //! # }
 //! ```
-//! 
+//!
 //! ## Working with Media Information
-//! 
+//!
 //! ```rust,no_run
 //! # use rvoip_client_core::{Client, CallId, CallMediaInfo};
 //! # use std::sync::Arc;
@@ -38,9 +38,9 @@
 //! # Ok(())
 //! # }
 //! ```
-//! 
+//!
 //! ## Checking Media Capabilities
-//! 
+//!
 //! ```rust,no_run
 //! # use rvoip_client_core::{Client, MediaCapabilities};
 //! # use std::sync::Arc;
@@ -60,7 +60,7 @@ use crate::call::CallId;
 // ===== CORE CLIENT TYPES =====
 
 /// Statistics about the client's current state and activity
-/// 
+///
 /// Provides a comprehensive view of the client's operational status,
 /// including network configuration and active session counts.
 #[derive(Debug, Clone)]
@@ -84,7 +84,7 @@ pub struct ClientStats {
 // ===== MEDIA-RELATED TYPES =====
 
 /// Media information for a specific call
-/// 
+///
 /// Contains all media-related details for an active call including
 /// SDP information, RTP ports, codec selection, and quality metrics.
 #[derive(Debug, Clone)]
@@ -112,7 +112,7 @@ pub struct CallMediaInfo {
 }
 
 /// Information about an audio codec
-/// 
+///
 /// Describes a specific audio codec including its technical parameters
 /// and subjective quality rating for user selection.
 #[derive(Debug, Clone)]
@@ -132,7 +132,7 @@ pub struct AudioCodecInfo {
 }
 
 /// Audio direction for a call
-/// 
+///
 /// Defines the permitted audio flow directions between endpoints
 /// according to SDP specifications (RFC 4566).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,7 +148,7 @@ pub enum AudioDirection {
 }
 
 /// Real-time audio quality metrics
-/// 
+///
 /// Provides quantitative measurements of call quality that can be used
 /// for monitoring, debugging, and user experience optimization.
 #[derive(Debug, Clone)]
@@ -166,7 +166,7 @@ pub struct AudioQualityMetrics {
 }
 
 /// Comprehensive media capabilities of the client
-/// 
+///
 /// Describes what media operations and features are supported
 /// by the current client configuration and underlying system.
 #[derive(Debug, Clone)]
@@ -196,7 +196,7 @@ pub struct MediaCapabilities {
 }
 
 /// Capabilities available for a specific call in its current state
-/// 
+///
 /// Unlike MediaCapabilities which describes global client capabilities,
 /// this represents what operations are currently possible for a specific call.
 #[derive(Debug, Clone)]
@@ -229,7 +229,7 @@ impl Default for CallCapabilities {
 }
 
 /// Information about an active media session
-/// 
+///
 /// Represents the current state of media transmission for a call,
 /// including session identifiers, ports, and quality information.
 #[derive(Debug, Clone)]
@@ -257,7 +257,7 @@ pub struct MediaSessionInfo {
 }
 
 /// Parameters negotiated between call endpoints
-/// 
+///
 /// Contains the final agreed-upon media parameters after SDP negotiation,
 /// representing the actual configuration being used for the call.
 #[derive(Debug, Clone)]
@@ -289,7 +289,7 @@ pub struct NegotiatedMediaParams {
 }
 
 /// Enhanced media capabilities including advanced features
-/// 
+///
 /// Extends basic MediaCapabilities with advanced session management
 /// and coordination features for sophisticated VoIP applications.
 #[derive(Debug, Clone)]

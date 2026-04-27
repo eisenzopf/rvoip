@@ -13,7 +13,7 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
                 .add_directive(tracing::Level::INFO.into()))
             .init();
-        
+
         tracing::info!("Logging enabled");
     }
 
@@ -60,35 +60,35 @@ Content-Length: {}\r\n\
             return Ok(());
         }
     };
-    
+
     // Check if it's a request (it should be!)
     if let Message::Request(request) = message {
         println!("Successfully parsed INVITE request using JSON path accessors:");
-        
+
         // Using path_str_or() for direct string access with defaults
         println!("  Method: {}", request.path_str_or("method", "(unknown)"));
-        println!("  URI: sip:{}@{}", 
+        println!("  URI: sip:{}@{}",
             request.path_str_or("uri.user", "(unknown)"),
             request.path_str_or("uri.host.Domain", "(unknown)"));
         println!("  Version: {}", request.path_str_or("version", "(unknown)"));
-        
+
         // Access headers using path accessors
         println!("\nHeader information:");
-        println!("  From: {} <{}>; tag={}", 
+        println!("  From: {} <{}>; tag={}",
             request.path_str_or("headers.From.display_name", "(unknown)"),
             request.path_str_or("headers.From.uri", "(unknown)"),
             request.path_str_or("headers.From.params[0].Tag", "(none)"));
-            
-        println!("  To: {}", 
+
+        println!("  To: {}",
             request.path_str_or("headers.To.display_name", "(unknown)"));
-            
-        println!("  Via: SIP/2.0/{} {}; branch={}", 
+
+        println!("  Via: SIP/2.0/{} {}; branch={}",
             request.path_str_or("headers.Via.sent_protocol.transport", "UDP"),
             request.path_str_or("headers.Via.sent_by_host.Domain", "unknown"),
             request.path_str_or("headers.Via.params.Branch", "unknown"));
-            
+
         println!("  Call-ID: {}", request.path_str_or("headers.CallId", "(none)"));
-        
+
         // For CSeq, we want to handle the numeric value properly
         let cseq_num = match request.path("headers.CSeq.seq") {
             Some(val) => val.as_i64().unwrap_or(0).to_string(),
@@ -128,10 +128,10 @@ a=rtpmap:0 PCMU/8000"#)
 
     // Example 3: SIP URI anatomy
     println!("Example 3: SIP URI Anatomy\n");
-    
+
     // Create and examine a SIP URI
     let uri = Uri::from_str("sip:alice@example.com:5060;transport=udp;ttl=15?subject=Meeting&priority=urgent")?;
-    
+
     println!("Full URI: {}", uri);
     println!("Scheme: {}", uri.scheme);
     println!("User: {}", uri.user.unwrap_or_default());
@@ -139,7 +139,7 @@ a=rtpmap:0 PCMU/8000"#)
     if let Some(port) = uri.port {
         println!("Port: {}", port);
     }
-    
+
     println!("URI Parameters:");
     for param in &uri.parameters {
         match param {
@@ -148,17 +148,17 @@ a=rtpmap:0 PCMU/8000"#)
             _ => println!("  - {:?}", param),
         }
     }
-    
+
     println!("Header Parameters:");
     for (name, value) in &uri.headers {
         println!("  - {}: {}", name, value);
     }
-    
+
     println!("\n------------------------------------\n");
 
     // Example 4: Basic SIP methods
     println!("Example 4: SIP Methods\n");
-    
+
     println!("Common SIP methods:");
     let methods = vec![
         Method::Invite,
@@ -172,7 +172,7 @@ a=rtpmap:0 PCMU/8000"#)
         Method::Refer,
         Method::Message,
     ];
-    
+
     for method in methods {
         println!("  - {}", method);
     }
@@ -181,7 +181,7 @@ a=rtpmap:0 PCMU/8000"#)
 
     // Example 5: Response Status Codes
     println!("Example 5: SIP Response Status Codes\n");
-    
+
     println!("Response categories:");
     println!("  - 1xx Provisional: {}", StatusCode::Trying);
     println!("  - 2xx Success: {}", StatusCode::Ok);
@@ -189,12 +189,12 @@ a=rtpmap:0 PCMU/8000"#)
     println!("  - 4xx Client Error: {}", StatusCode::BadRequest);
     println!("  - 5xx Server Error: {}", StatusCode::ServerInternalError);
     println!("  - 6xx Global Failure: {}", StatusCode::Decline);
-    
+
     println!("\n------------------------------------\n");
-    
+
     // Example 6: Creating SDP with the Builder Pattern
     println!("Example 6: Creating SDP with the Builder Pattern\n");
-    
+
     // Create an SDP offer using the SdpBuilder
     let sdp_result = SdpBuilder::new("Audio Call")
         .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
@@ -207,7 +207,7 @@ a=rtpmap:0 PCMU/8000"#)
             .direction(MediaDirection::SendRecv)
             .done()
         .build();
-    
+
     match sdp_result {
         Ok(sdp) => {
             println!("Successfully created SDP offer:");
@@ -215,7 +215,7 @@ a=rtpmap:0 PCMU/8000"#)
         },
         Err(e) => println!("Failed to create SDP: {}", e),
     }
-    
+
     // Create a WebRTC SDP offer
     let webrtc_sdp_result = SdpBuilder::new("WebRTC Session")
         .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
@@ -238,7 +238,7 @@ a=rtpmap:0 PCMU/8000"#)
             .ice_pwd("x9cml/YzichV2+XlhiMu8g")
             .done()
         .build();
-    
+
     match webrtc_sdp_result {
         Ok(sdp) => {
             println!("\nWebRTC SDP offer (truncated for brevity):");
@@ -251,6 +251,6 @@ a=rtpmap:0 PCMU/8000"#)
         },
         Err(e) => println!("Failed to create WebRTC SDP: {}", e),
     }
-    
+
     Ok(())
-} 
+}

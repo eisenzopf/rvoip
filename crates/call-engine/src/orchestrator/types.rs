@@ -42,7 +42,7 @@
 //! use rvoip_call_engine::agent::AgentId;
 //! use rvoip_session_core::SessionId;
 //! use chrono::Utc;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create comprehensive call information
 //! let call_info = CallInfo {
@@ -73,7 +73,7 @@
 //!     agent_dialog_id: None,
 //!     related_session_id: None,
 //! };
-//! 
+//!
 //! println!("📞 Call Information:");
 //! println!("  Session: {}", call_info.session_id.0);
 //! println!("  Customer: {} ({:?})", call_info.caller_id, call_info.customer_type);
@@ -81,7 +81,7 @@
 //! println!("  Agent: {}", call_info.agent_id.as_ref().map(|a| &a.0).unwrap_or(&"Unassigned".to_string()));
 //! println!("  Priority: {}/255", call_info.priority);
 //! println!("  Wait Time: {}s", call_info.wait_time_seconds);
-//! 
+//!
 //! // Call information provides comprehensive call context
 //! // for routing decisions, monitoring, and reporting
 //! # Ok(())
@@ -95,7 +95,7 @@
 //! use rvoip_call_engine::agent::{AgentId, AgentStatus};
 //! use rvoip_session_core::SessionId;
 //! use chrono::Utc;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create detailed agent information
 //! let agent_info = AgentInfo {
@@ -114,7 +114,7 @@
 //!     last_call_end: Some(Utc::now()),
 //!     performance_score: 0.94, // 0.0-1.0 scale
 //! };
-//! 
+//!
 //! println!("👥 Agent Information:");
 //! println!("  Agent ID: {}", agent_info.agent_id.0);
 //! println!("  Session: {}", agent_info.session_id.0);
@@ -124,7 +124,7 @@
 //! println!("  Skills: {}", agent_info.skills.join(", "));
 //! println!("  Load: {}/{} calls", agent_info.current_calls, agent_info.max_calls);
 //! println!("  Performance: {:.2}/1.0", agent_info.performance_score);
-//! 
+//!
 //! // Agent availability information
 //! println!("\n📊 Agent Status:");
 //! if let Some(last_call) = agent_info.last_call_end {
@@ -132,15 +132,15 @@
 //! } else {
 //!     println!("  Last Call Ended: Never");
 //! }
-//! 
+//!
 //! // Check agent availability for routing
-//! let can_take_call = agent_info.status == AgentStatus::Available 
+//! let can_take_call = agent_info.status == AgentStatus::Available
 //!     && agent_info.current_calls < agent_info.max_calls;
-//! 
+//!
 //! if can_take_call {
 //!     println!("✅ Agent available for new calls");
 //! } else {
-//!     println!("❌ Agent not available (status: {:?}, load: {}/{})", 
+//!     println!("❌ Agent not available (status: {:?}, load: {}/{})",
 //!              agent_info.status, agent_info.current_calls, agent_info.max_calls);
 //! }
 //! # Ok(())
@@ -156,14 +156,14 @@
 //! use rvoip_call_engine::agent::AgentId;
 //! use rvoip_session_core::SessionId;
 //! use chrono::Utc;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create routing decision with comprehensive information
 //! let routing_decision = RoutingDecision::DirectToAgent {
 //!     agent_id: AgentId("agent-bob-002".to_string()),
 //!     reason: "Skill match: billing_support".to_string(),
 //! };
-//! 
+//!
 //! println!("🎯 Routing Decision:");
 //! match &routing_decision {
 //!     RoutingDecision::DirectToAgent { agent_id, reason } => {
@@ -186,7 +186,7 @@
 //!         println!("  Reason: {}", reason);
 //!     }
 //! }
-//! 
+//!
 //! // Routing statistics for system monitoring
 //! let routing_stats = RoutingStats {
 //!     calls_routed_directly: 847,
@@ -195,7 +195,7 @@
 //!     average_routing_time_ms: 15,
 //!     skill_match_success_rate: 0.94,
 //! };
-//! 
+//!
 //! println!("\n📊 Routing Statistics:");
 //! println!("  Direct Routing: {}", routing_stats.calls_routed_directly);
 //! println!("  Queued Calls: {}", routing_stats.calls_queued);
@@ -213,7 +213,7 @@
 //!     OrchestratorStats, RoutingStats
 //! };
 //! use chrono::Utc;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Comprehensive system statistics
 //! let orchestrator_stats = OrchestratorStats {
@@ -231,24 +231,24 @@
 //!         skill_match_success_rate: 0.94,
 //!     },
 //! };
-//! 
+//!
 //! println!("📊 Call Center System Statistics:");
 //! println!("  Total Calls: {}", orchestrator_stats.total_calls_handled);
-//! 
+//!
 //! println!("\n📞 Current Call Status:");
 //! println!("  Active: {}", orchestrator_stats.active_calls);
 //! println!("  Queued: {}", orchestrator_stats.queued_calls);
 //! println!("  Active Bridges: {}", orchestrator_stats.active_bridges);
-//! 
+//!
 //! println!("\n👥 Agent Status:");
 //! let total_agents = orchestrator_stats.available_agents + orchestrator_stats.busy_agents;
-//! println!("  Available: {} ({:.1}%)", 
+//! println!("  Available: {} ({:.1}%)",
 //!          orchestrator_stats.available_agents,
 //!          (orchestrator_stats.available_agents as f64 / total_agents as f64) * 100.0);
-//! println!("  Busy: {} ({:.1}%)", 
+//! println!("  Busy: {} ({:.1}%)",
 //!          orchestrator_stats.busy_agents,
 //!          (orchestrator_stats.busy_agents as f64 / total_agents as f64) * 100.0);
-//! 
+//!
 //! // Routing statistics
 //! let routing = &orchestrator_stats.routing_stats;
 //! println!("\n🎯 Routing Performance:");
@@ -257,11 +257,11 @@
 //! println!("  Rejected: {}", routing.calls_rejected);
 //! println!("  Avg Routing Time: {}ms", routing.average_routing_time_ms);
 //! println!("  Skill Match Rate: {:.1}%", routing.skill_match_success_rate * 100.0);
-//! 
+//!
 //! // Agent utilization calculation
 //! let utilization = orchestrator_stats.agent_utilization();
 //! println!("\n📈 Agent Utilization: {:.1}%", utilization * 100.0);
-//! 
+//!
 //! // Alert conditions
 //! if orchestrator_stats.queued_calls > 20 {
 //!     println!("🚨 Alert: High queue volume");
@@ -277,7 +277,7 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::orchestrator::types::CustomerType;
-//! 
+//!
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Different customer types available
 //! let customers = vec![
@@ -286,12 +286,12 @@
 //!     ("VIP Client", CustomerType::VIP),
 //!     ("Trial User", CustomerType::Trial),
 //! ];
-//! 
+//!
 //! println!("🏷️ Customer Types:");
-//! 
+//!
 //! for (description, customer_type) in customers {
 //!     println!("\n  {} ({:?}):", description, customer_type);
-//!     
+//!
 //!     // Show different handling for each type
 //!     match customer_type {
 //!         CustomerType::VIP => {
@@ -312,7 +312,7 @@
 //!         }
 //!     }
 //! }
-//! 
+//!
 //! // Priority-based queue ordering
 //! println!("\n📋 Priority Queue Ordering:");
 //! println!("  1. VIP (Highest Priority)");
@@ -332,34 +332,34 @@
 //! ```rust
 //! # use rvoip_call_engine::orchestrator::types::{CallInfo, AgentInfo, RoutingDecision};
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! // Type validation examples:
 //! println!("🛡️ Type Safety and Validation:");
-//! 
+//!
 //! println!("  📞 Call Information Validation:");
 //! println!("    ↳ Session ID format validation");
 //! println!("    ↳ Phone number format checking");
 //! println!("    ↳ Priority range validation (1-10)");
 //! println!("    ↳ Timestamp consistency checks");
-//! 
+//!
 //! println!("  👥 Agent Information Validation:");
 //! println!("    ↳ SIP URI format validation");
 //! println!("    ↳ Performance rating bounds (0.0-5.0)");
 //! println!("    ↳ Concurrent call limits");
 //! println!("    ↳ Skill set non-empty validation");
-//! 
+//!
 //! println!("  🎯 Routing Decision Validation:");
 //! println!("    ↳ Agent assignment consistency");
 //! println!("    ↳ Confidence score bounds (0.0-1.0)");
 //! println!("    ↳ Decision time reasonableness");
 //! println!("    ↳ Algorithm-reason compatibility");
-//! 
+//!
 //! println!("  📊 Statistics Validation:");
 //! println!("    ↳ Non-negative counters");
 //! println!("    ↳ Percentage bounds (0.0-1.0)");
 //! println!("    ↳ Timestamp chronological order");
 //! println!("    ↳ Aggregate consistency checks");
-//! 
+//!
 //! // Validation helps prevent:
 //! // - Invalid state transitions
 //! // - Data corruption
@@ -380,28 +380,28 @@
 //! # use rvoip_session_core::SessionId;
 //! # use chrono::Utc;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! // Example of serialization capabilities:
 //! println!("💾 Serialization and Storage:");
-//! 
+//!
 //! println!("  📄 JSON Serialization:");
 //! println!("    ↳ Compact representation for database storage");
 //! println!("    ↳ Human-readable format for debugging");
 //! println!("    ↳ API-friendly for external integrations");
 //! println!("    ↳ Preserves type information and relationships");
-//! 
+//!
 //! println!("  🗃️ Database Storage:");
 //! println!("    ↳ PostgreSQL JSONB column support");
 //! println!("    ↳ Efficient indexing on key fields");
 //! println!("    ↳ Query optimization for analytics");
 //! println!("    ↳ Schema evolution compatibility");
-//! 
+//!
 //! println!("  🔄 API Integration:");
 //! println!("    ↳ REST API request/response bodies");
 //! println!("    ↳ WebSocket real-time updates");
 //! println!("    ↳ External system data exchange");
 //! println!("    ↳ Backup and restore operations");
-//! 
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -445,25 +445,25 @@ pub struct CallInfo {
     pub ended_at: Option<DateTime<Utc>>,
     /// The SDP offer from the customer
     pub customer_sdp: Option<String>,
-    
+
     // Call timing metrics
     pub duration_seconds: u64,        // Total call duration (end - start)
     pub wait_time_seconds: u64,       // Time waiting for agent (answered - created)
     pub talk_time_seconds: u64,       // Time talking with agent (ended - answered)
     pub hold_time_seconds: u64,       // Time spent on hold
     pub queue_time_seconds: u64,      // Time spent in queue (if queued)
-    
+
     // Additional metrics
     pub transfer_count: u32,          // Number of times call was transferred
     pub hold_count: u32,              // Number of times call was put on hold
-    
+
     // PHASE 17.1: Add dialog ID tracking for B2BUA
     /// Customer's dialog ID (from dialog-core)
     pub customer_dialog_id: Option<String>,
-    
-    /// Agent's dialog ID (from dialog-core)  
+
+    /// Agent's dialog ID (from dialog-core)
     pub agent_dialog_id: Option<String>,
-    
+
     // B2BUA tracking
     /// The related session ID (customer session for agent leg, agent session for customer leg)
     pub related_session_id: Option<SessionId>,
@@ -507,7 +507,7 @@ pub enum CallStatus {
     Failed,
 }
 
-/// Routing decision enumeration  
+/// Routing decision enumeration
 #[derive(Debug, Clone)]
 pub enum RoutingDecision {
     DirectToAgent { agent_id: AgentId, reason: String },
@@ -575,7 +575,7 @@ impl OrchestratorStats {
 impl AgentInfo {
     /// Create AgentInfo from database agent
     pub fn from_db_agent(
-        db_agent: &crate::database::DbAgent, 
+        db_agent: &crate::database::DbAgent,
         contact_uri: String,
         config: &crate::config::GeneralConfig,
     ) -> Self {
@@ -587,7 +587,7 @@ impl AgentInfo {
             "RESERVED" => crate::agent::AgentStatus::Available, // Treat reserved as available
             _ => crate::agent::AgentStatus::Offline, // Default for unknown statuses
         };
-        
+
         Self {
             agent_id: crate::agent::AgentId::from(db_agent.agent_id.clone()),
             session_id: SessionId(format!("agent-{}-session", db_agent.agent_id)),
@@ -601,4 +601,4 @@ impl AgentInfo {
             last_call_end: None,
         }
     }
-} 
+}

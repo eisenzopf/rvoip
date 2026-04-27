@@ -31,7 +31,7 @@ pub enum AudioError {
         /// The device identifier that was disconnected
         device_id: String,
     },
-    
+
     /// General audio device error
     #[error("Audio device error for {device}: {operation} failed: {reason}")]
     DeviceError {
@@ -268,7 +268,7 @@ impl AudioError {
             Self::Timeout { .. } => true,
             Self::IoError { .. } => true,
             Self::ResourceExhausted { .. } => true,
-            
+
             // Non-recoverable errors - fundamental issues
             Self::DeviceNotFound { .. } => false,
             Self::FormatNotSupported { .. } => false,
@@ -276,7 +276,7 @@ impl AudioError {
             Self::InvalidData { .. } => false,
             Self::FeatureNotAvailable { .. } => false,
             Self::Internal { .. } => false,
-            
+
             // Conditionally recoverable
             Self::DeviceDisconnected { .. } => true, // Device might reconnect
             Self::DeviceError { .. } => true, // Device operation might succeed on retry
@@ -341,4 +341,4 @@ mod tests {
         assert!(msg.contains("not available"));
         assert!(msg.contains("speakers"));
     }
-} 
+}

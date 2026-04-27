@@ -37,9 +37,9 @@ fn create_test_participant(session_id: SessionId) -> ConferenceParticipant {
 async fn test_room_creation() {
     let conference_id = ConferenceId::new();
     let config = create_test_config();
-    
+
     let room = ConferenceRoom::new(conference_id.clone(), config.clone());
-    
+
     assert_eq!(room.id, conference_id);
     assert_eq!(room.config.max_participants, config.max_participants);
     assert_eq!(room.state, ConferenceState::Creating);
@@ -51,19 +51,19 @@ async fn test_add_remove_participants() {
     let conference_id = ConferenceId::new();
     let config = create_test_config();
     let mut room = ConferenceRoom::new(conference_id, config);
-    
+
     let session_id = SessionId::new();
     let participant = create_test_participant(session_id.clone());
-    
+
     // Add participant
     room.add_participant(participant).unwrap();
     assert_eq!(room.participants.len(), 1);
-    
+
     // Verify participant exists
     let retrieved = room.get_participant(&session_id);
     assert!(retrieved.is_some());
     assert_eq!(retrieved.unwrap().session_id, session_id);
-    
+
     // Remove participant
     let removed = room.remove_participant(&session_id);
     assert!(removed.is_some());
@@ -75,15 +75,15 @@ async fn test_capacity_limits() {
     let conference_id = ConferenceId::new();
     let mut config = create_test_config();
     config.max_participants = 2; // Small limit for testing
-    
+
     let mut room = ConferenceRoom::new(conference_id, config);
-    
+
     // Add participants up to limit
     let session1 = SessionId::new();
     let session2 = SessionId::new();
     room.add_participant(create_test_participant(session1)).unwrap();
     room.add_participant(create_test_participant(session2)).unwrap();
-    
+
     // Try to add one more - should fail
     let session3 = SessionId::new();
     let result = room.add_participant(create_test_participant(session3));
@@ -95,19 +95,19 @@ async fn test_state_transitions() {
     let conference_id = ConferenceId::new();
     let config = create_test_config();
     let mut room = ConferenceRoom::new(conference_id, config);
-    
+
     // Valid transitions
     assert_eq!(room.state, ConferenceState::Creating);
-    
+
     room.set_state(ConferenceState::Active).unwrap();
     assert_eq!(room.state, ConferenceState::Active);
-    
+
     room.set_state(ConferenceState::Locked).unwrap();
     assert_eq!(room.state, ConferenceState::Locked);
-    
+
     room.set_state(ConferenceState::Terminating).unwrap();
     assert_eq!(room.state, ConferenceState::Terminating);
-    
+
     room.set_state(ConferenceState::Terminated).unwrap();
     assert_eq!(room.state, ConferenceState::Terminated);
-} 
+}

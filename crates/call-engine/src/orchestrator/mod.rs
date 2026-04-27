@@ -60,22 +60,22 @@
 //! ```rust
 //! use rvoip_call_engine::{CallCenterConfig, orchestrator::{CallCenterEngine, CallCenterCallHandler}};
 //! use std::sync::Arc;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create and configure call center engine
 //! let engine = Arc::new(CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?);
-//! 
+//!
 //! // Create call handler for session-core integration
 //! let call_handler = CallCenterCallHandler {
 //!     engine: Arc::downgrade(&engine),
 //! };
-//! 
+//!
 //! println!("🎛️ Call center orchestrator initialized");
 //! println!("📞 Ready to handle incoming calls");
 //! println!("👥 Agent management active");
 //! println!("📋 Queue processing enabled");
 //! println!("🌉 Bridge operations available");
-//! 
+//!
 //! // The orchestrator is now ready for full call center operations
 //! # Ok(())
 //! # }
@@ -89,10 +89,10 @@
 //!     orchestrator::types::{AgentInfo, CallInfo},
 //!     agent::{Agent, AgentId, AgentStatus}
 //! };
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Register agents
 //! let agent = Agent {
 //!     id: "agent-001".to_string(),
@@ -105,19 +105,19 @@
 //!     extension: Some("1001".to_string()),
 //!     // Note: performance_rating field does not exist in Agent struct
 //! };
-//! 
+//!
 //! let session_id = engine.register_agent(&agent).await?;
 //! println!("✅ Agent registered with session: {}", session_id);
-//! 
+//!
 //! // Update agent status for availability
 //! let agent_id = AgentId("agent-001".to_string());
 //! engine.update_agent_status(&agent_id, AgentStatus::Available).await?;
 //! println!("🟢 Agent marked as available");
-//! 
+//!
 //! // Get queue statistics
 //! let queue_stats = engine.get_queue_stats().await?;
 //! println!("📊 Monitoring {} queues", queue_stats.len());
-//! 
+//!
 //! // The orchestrator coordinates all these operations seamlessly
 //! # Ok(())
 //! # }
@@ -132,14 +132,14 @@
 //! };
 //! use rvoip_session_core::{IncomingCall, SessionId, CallHandler};
 //! use std::{sync::Arc, collections::HashMap};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = Arc::new(CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?);
-//! 
+//!
 //! let call_handler = CallCenterCallHandler {
 //!     engine: Arc::downgrade(&engine),
 //! };
-//! 
+//!
 //! // Simulate incoming call processing
 //! let incoming_call = IncomingCall {
 //!     id: SessionId("customer-call".to_string()),
@@ -149,11 +149,11 @@
 //!     headers: HashMap::new(),
 //!     received_at: std::time::Instant::now(),
 //! };
-//! 
+//!
 //! // Process through orchestrator
 //! let decision = call_handler.on_incoming_call(incoming_call).await;
 //! println!("📞 Call processed with decision: {:?}", decision);
-//! 
+//!
 //! // The orchestrator handles:
 //! // 1. Call analysis and customer classification
 //! // 2. Routing decision based on availability and skills
@@ -169,28 +169,28 @@
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
 //! use rvoip_session_core::SessionId;
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Create conference bridge
 //! let participants = vec![
 //!     SessionId("agent-001".to_string()),
 //!     SessionId("customer-123".to_string()),
 //!     SessionId("supervisor-456".to_string()),
 //! ];
-//! 
+//!
 //! let bridge_id = engine.create_conference(&participants).await?;
 //! println!("🎤 Conference created: {}", bridge_id);
-//! 
+//!
 //! // Get bridge information
 //! let bridge_info = engine.get_bridge_info(&bridge_id).await?;
 //! println!("📊 Bridge participants: {}", bridge_info.participant_count);
-//! 
+//!
 //! // List all active bridges
 //! let active_bridges = engine.list_active_bridges().await;
 //! println!("🌉 Total active bridges: {}", active_bridges.len());
-//! 
+//!
 //! // The orchestrator manages bridge lifecycle automatically
 //! # Ok(())
 //! # }
@@ -200,33 +200,33 @@
 //!
 //! ```rust
 //! use rvoip_call_engine::{CallCenterEngine, CallCenterConfig};
-//! 
+//!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let engine = CallCenterEngine::new(CallCenterConfig::default(), Some(":memory:".to_string())).await?;
-//! 
+//!
 //! // Get comprehensive system status
 //! println!("📊 Call Center System Status:");
-//! 
+//!
 //! // Agent status overview
 //! let agents = engine.list_agents().await;
 //! let available_agents = agents.iter()
 //!     .filter(|a| matches!(a.status, rvoip_call_engine::agent::AgentStatus::Available))
 //!     .count();
-//! 
+//!
 //! println!("👥 Agents: {} total, {} available", agents.len(), available_agents);
-//! 
+//!
 //! // Queue status overview
 //! let queue_stats = engine.get_queue_stats().await?;
 //! let total_queued: usize = queue_stats.iter()
 //!     .map(|(_, stats)| stats.total_calls)
 //!     .sum();
-//! 
+//!
 //! println!("📋 Queues: {} active, {} calls waiting", queue_stats.len(), total_queued);
-//! 
+//!
 //! // Bridge status overview
 //! let active_bridges = engine.list_active_bridges().await;
 //! println!("🌉 Bridges: {} active conferences", active_bridges.len());
-//! 
+//!
 //! // System health indicators
 //! if available_agents == 0 && total_queued > 0 {
 //!     println!("🚨 Alert: No agents available with calls waiting");
@@ -248,10 +248,10 @@
 //! ```rust
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! // Integration architecture:
 //! println!("🔗 Session-Core Integration Architecture:");
-//! 
+//!
 //! println!("  📡 Event Flow:");
 //! println!("     Session-Core SIP Stack");
 //! println!("     ↓ (SIP events)");
@@ -260,14 +260,14 @@
 //! println!("     CallCenterEngine");
 //! println!("     ↓ (business logic)");
 //! println!("     Database & Queue Management");
-//! 
+//!
 //! println!("  🔄 Response Flow:");
 //! println!("     CallCenterEngine");
 //! println!("     ↓ (API calls)");
 //! println!("     Session-Core APIs");
 //! println!("     ↓ (SIP messages)");
 //! println!("     Network/Agents");
-//! 
+//!
 //! // This integration enables complete SIP call center functionality
 //! # Ok(())
 //! # }
@@ -280,28 +280,28 @@
 //! ```rust
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! // Database integration patterns:
 //! println!("💾 Database Integration:");
-//! 
+//!
 //! println!("  🔄 Real-time Synchronization:");
 //! println!("     ↳ Agent status changes → Database updates");
 //! println!("     ↳ Call state changes → Call records");
 //! println!("     ↳ Queue operations → Queue persistence");
 //! println!("     ↳ Metrics collection → Performance data");
-//! 
+//!
 //! println!("  🛡️ Consistency Guarantees:");
 //! println!("     ↳ Atomic operations for critical updates");
 //! println!("     ↳ Transaction support for complex operations");
 //! println!("     ↳ Rollback capability for failed operations");
 //! println!("     ↳ Eventual consistency for non-critical data");
-//! 
+//!
 //! println!("  📊 Performance Optimization:");
 //! println!("     ↳ Connection pooling for scalability");
 //! println!("     ↳ Async operations for non-blocking access");
 //! println!("     ↳ Batch operations for efficiency");
 //! println!("     ↳ Caching for frequently accessed data");
-//! 
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -315,27 +315,27 @@
 //! ```rust
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! println!("⚡ Performance Characteristics:");
-//! 
+//!
 //! println!("  🚀 Concurrency:");
 //! println!("     ↳ Async/await throughout for non-blocking operations");
 //! println!("     ↳ Concurrent call processing");
 //! println!("     ↳ Parallel agent assignment");
 //! println!("     ↳ Independent queue processing");
-//! 
+//!
 //! println!("  💾 Memory Efficiency:");
 //! println!("     ↳ Efficient data structures (DashMap, Arc)");
 //! println!("     ↳ Minimal allocations per operation");
 //! println!("     ↳ Lazy initialization of resources");
 //! println!("     ↳ Automatic cleanup of completed operations");
-//! 
+//!
 //! println!("  📊 Scalability:");
 //! println!("     ↳ Linear scaling with call volume");
 //! println!("     ↳ Horizontal scaling support");
 //! println!("     ↳ Load balancing across instances");
 //! println!("     ↳ Resource-aware operation limits");
-//! 
+//!
 //! // The orchestrator supports enterprise-scale deployments
 //! # Ok(())
 //! # }
@@ -348,27 +348,27 @@
 //! ```rust
 //! # use rvoip_call_engine::CallCenterEngine;
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! 
+//!
 //! println!("🛡️ Error Handling Strategy:");
-//! 
+//!
 //! println!("  🔧 Recovery Mechanisms:");
 //! println!("     ↳ Automatic retry with exponential backoff");
 //! println!("     ↳ Graceful degradation on component failures");
 //! println!("     ↳ Rollback capability for failed operations");
 //! println!("     ↳ Circuit breaker for external dependencies");
-//! 
+//!
 //! println!("  📊 Monitoring and Alerting:");
 //! println!("     ↳ Comprehensive error logging");
 //! println!("     ↳ Metrics collection for error rates");
 //! println!("     ↳ Alerting for critical failures");
 //! println!("     ↳ Health checks for system components");
-//! 
+//!
 //! println!("  🔄 Operational Continuity:");
 //! println!("     ↳ Continue operation with partial failures");
 //! println!("     ↳ Fallback to simplified operations");
 //! println!("     ↳ Automatic recovery when possible");
 //! println!("     ↳ Manual intervention alerts when needed");
-//! 
+//!
 //! # Ok(())
 //! # }
 //! ```
@@ -389,7 +389,7 @@ pub use core::CallCenterEngine;
 
 // Export types
 pub use types::{
-    CallInfo, AgentInfo, CustomerType, CallStatus, 
+    CallInfo, AgentInfo, CustomerType, CallStatus,
     RoutingDecision, RoutingStats, OrchestratorStats
 };
 
@@ -401,4 +401,4 @@ pub use bridge::BridgeManager;
 pub use lifecycle::CallLifecycleManager;
 
 // Export URI builder
-pub use uri_builder::SipUriBuilder; 
+pub use uri_builder::SipUriBuilder;
