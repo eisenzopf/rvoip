@@ -44,7 +44,58 @@ fn sdp_origin_session_id(raw_id: &str) -> String {
         hash ^= byte as u64;
         hash = hash.wrapping_mul(1_099_511_628_211);
     }
-    hash.to_string()
+    hash.max(1).to_string()
+}
+
+fn direction_attribute(direction: crate::types::MediaDirection) -> &'static str {
+    match direction {
+        crate::types::MediaDirection::SendRecv => "sendrecv",
+        crate::types::MediaDirection::SendOnly => "sendonly",
+        crate::types::MediaDirection::RecvOnly => "recvonly",
+        crate::types::MediaDirection::Inactive => "inactive",
+    }
+}
+
+fn audio_direction(session: &SdpSession) -> Option<rvoip_sip_core::MediaDirection> {
+    session
+        .media_descriptions
+        .iter()
+        .find(|m| m.media == "audio")
+        .and_then(|m| m.direction)
+        .or(session.direction)
+}
+
+fn sip_direction_to_session(
+    direction: rvoip_sip_core::MediaDirection,
+) -> crate::types::MediaDirection {
+    match direction {
+        rvoip_sip_core::MediaDirection::SendRecv => crate::types::MediaDirection::SendRecv,
+        rvoip_sip_core::MediaDirection::SendOnly => crate::types::MediaDirection::SendOnly,
+        rvoip_sip_core::MediaDirection::RecvOnly => crate::types::MediaDirection::RecvOnly,
+        rvoip_sip_core::MediaDirection::Inactive => crate::types::MediaDirection::Inactive,
+    }
+}
+
+fn answer_direction_for_offer(
+    offer_direction: &Option<rvoip_sip_core::MediaDirection>,
+) -> crate::types::MediaDirection {
+    match offer_direction.unwrap_or(rvoip_sip_core::MediaDirection::SendRecv) {
+        rvoip_sip_core::MediaDirection::SendRecv => crate::types::MediaDirection::SendRecv,
+        rvoip_sip_core::MediaDirection::SendOnly => crate::types::MediaDirection::RecvOnly,
+        rvoip_sip_core::MediaDirection::RecvOnly => crate::types::MediaDirection::SendOnly,
+        rvoip_sip_core::MediaDirection::Inactive => crate::types::MediaDirection::Inactive,
+    }
+}
+
+fn local_direction_from_remote_answer(
+    answer_direction: &Option<rvoip_sip_core::MediaDirection>,
+) -> crate::types::MediaDirection {
+    match answer_direction.unwrap_or(rvoip_sip_core::MediaDirection::SendRecv) {
+        rvoip_sip_core::MediaDirection::SendRecv => crate::types::MediaDirection::SendRecv,
+        rvoip_sip_core::MediaDirection::SendOnly => crate::types::MediaDirection::RecvOnly,
+        rvoip_sip_core::MediaDirection::RecvOnly => crate::types::MediaDirection::SendOnly,
+        rvoip_sip_core::MediaDirection::Inactive => crate::types::MediaDirection::Inactive,
+    }
 }
 
 /// Audio format for recording
@@ -106,6 +157,8 @@ pub struct NegotiatedConfig {
     pub remote_addr: SocketAddr,
     pub codec: String,
     pub payload_type: u8,
+    pub local_direction: crate::types::MediaDirection,
+    pub remote_direction: crate::types::MediaDirection,
 }
 
 /// Minimal media adapter - just translates between media-core and state machine
@@ -441,11 +494,17 @@ impl MediaAdapter {
             );
         }
 
+        let parsed_answer = SdpSession::from_str(remote_sdp).ok();
+        let answer_direction = parsed_answer.as_ref().and_then(audio_direction);
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, self.get_local_port(session_id)?),
             remote_addr: SocketAddr::new(remote_ip, remote_port),
             codec: "PCMU".to_string(),
             payload_type: 0,
+            local_direction: local_direction_from_remote_answer(&answer_direction),
+            remote_direction: answer_direction
+                .map(sip_direction_to_session)
+                .unwrap_or(crate::types::MediaDirection::SendRecv),
         };
 
         // Event publishing will be handled by SessionCrossCrateEventHandler
@@ -564,7 +623,8 @@ impl MediaAdapter {
         // (`Config::strict_codec_matching = false`) preserves the
         // pre-Sprint-3.5 "always answer with full set" behaviour
         // for deployments that depend on it.
-        let sess_id = generate_session_id().to_string();
+        let (origin_session_id, origin_version) = self.next_sdp_origin(session_id).await?;
+        let origin_version = origin_version.to_string();
         // Sprint 3 A6 — same public-address override as the offer
         // path, so answers carry the discovered/configured public
         // mapping when one is set.
@@ -588,10 +648,19 @@ impl MediaAdapter {
             self.offer_srtp,
             self.srtp_required,
         )?;
+        let offered_direction = audio_direction(&parsed_offer);
+        let answer_direction = answer_direction_for_offer(&offered_direction);
 
         let formats_str: Vec<&str> = formats.iter().map(|s| s.as_str()).collect();
         let mut media_builder = SdpBuilder::new("Session")
-            .origin("-", &sess_id, "0", "IN", "IP4", &local_ip_str)
+            .origin(
+                "-",
+                &origin_session_id,
+                &origin_version,
+                "IN",
+                "IP4",
+                &local_ip_str,
+            )
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(advertised_port, answer_transport)
@@ -622,7 +691,7 @@ impl MediaAdapter {
             media_builder = media_builder.crypto_attribute(attr);
         }
         let session = media_builder
-            .attribute("sendrecv", None::<String>)
+            .attribute(direction_attribute(answer_direction), None::<String>)
             .done()
             .build()
             .map_err(|e| {
@@ -638,6 +707,10 @@ impl MediaAdapter {
             remote_addr: SocketAddr::new(remote_ip, remote_port),
             codec: "PCMU".to_string(),
             payload_type: 0,
+            local_direction: answer_direction,
+            remote_direction: offered_direction
+                .map(sip_direction_to_session)
+                .unwrap_or(crate::types::MediaDirection::SendRecv),
         };
 
         // Event publishing will be handled by SessionCrossCrateEventHandler
@@ -1008,6 +1081,16 @@ impl MediaAdapter {
     /// `offer_advertises_telephone_event_on_plaintext` in the test
     /// module locks this in.
     pub async fn generate_local_sdp(&self, session_id: &SessionId) -> Result<String> {
+        self.generate_local_sdp_offer(session_id, crate::types::MediaDirection::SendRecv)
+            .await
+    }
+
+    /// Generate a local SDP offer for the requested media direction.
+    pub async fn generate_local_sdp_offer(
+        &self,
+        session_id: &SessionId,
+        direction: crate::types::MediaDirection,
+    ) -> Result<String> {
         // Resolve dialog id and prime the cached session info. Both
         // the SRTP and plaintext paths used to do this; doing it once
         // up front lets the rest of the body share one shape.
@@ -1046,8 +1129,8 @@ impl MediaAdapter {
             .filter(|sa| sa.port() != 0)
             .map(|sa| sa.port())
             .unwrap_or_else(|| info.rtp_port.unwrap_or(info.config.local_addr.port()));
-        let elapsed_secs = info.created_at.elapsed().as_secs().to_string();
-        let origin_session_id = sdp_origin_session_id(info.dialog_id.as_str());
+        let (origin_session_id, origin_version) = self.next_sdp_origin(session_id).await?;
+        let origin_version = origin_version.to_string();
         let advertised_ip = public.map(|sa| sa.ip()).unwrap_or(self.local_ip);
         let local_ip_str = advertised_ip.to_string();
 
@@ -1077,7 +1160,7 @@ impl MediaAdapter {
             .origin(
                 "-",
                 &origin_session_id,
-                &elapsed_secs,
+                &origin_version,
                 "IN",
                 "IP4",
                 &local_ip_str,
@@ -1098,7 +1181,7 @@ impl MediaAdapter {
             media_builder = media_builder.crypto_attribute(attr);
         }
         let session = media_builder
-            .attribute("sendrecv", None::<String>)
+            .attribute(direction_attribute(direction), None::<String>)
             .done()
             .build()
             .map_err(|e| {
@@ -1110,9 +1193,10 @@ impl MediaAdapter {
 
         let sdp = session.to_string();
         tracing::info!(
-            "✅ Generated SDP for session {} with local port {}",
+            "✅ Generated SDP for session {} with local port {} direction {}",
             session_id.0,
-            port
+            port,
+            direction_attribute(direction)
         );
         Ok(sdp)
     }
@@ -1267,45 +1351,113 @@ impl MediaAdapter {
     /// Set media direction (for hold/resume)
     pub async fn set_media_direction(
         &self,
-        _media_id: crate::types::MediaSessionId,
-        _direction: crate::types::MediaDirection,
+        media_id: crate::types::MediaSessionId,
+        direction: crate::types::MediaDirection,
     ) -> Result<()> {
-        // TODO: Implement actual media direction control
-        Ok(())
+        let media_direction = match direction {
+            crate::types::MediaDirection::SendRecv => {
+                rvoip_media_core::types::MediaDirection::SendRecv
+            }
+            crate::types::MediaDirection::SendOnly => {
+                rvoip_media_core::types::MediaDirection::SendOnly
+            }
+            crate::types::MediaDirection::RecvOnly => {
+                rvoip_media_core::types::MediaDirection::RecvOnly
+            }
+            crate::types::MediaDirection::Inactive => {
+                rvoip_media_core::types::MediaDirection::Inactive
+            }
+        };
+        self.controller
+            .set_media_direction(&media_id, media_direction)
+            .await
+            .map_err(|e| SessionError::MediaError(format!("Failed to set media direction: {}", e)))
     }
 
-    /// Create hold SDP
+    /// Create hold SDP for an established session.
+    pub async fn create_hold_sdp_for_session(&self, session_id: &SessionId) -> Result<String> {
+        self.generate_local_sdp_offer(session_id, crate::types::MediaDirection::SendOnly)
+            .await
+    }
+
+    /// Create active SDP for an established session.
+    pub async fn create_active_sdp_for_session(&self, session_id: &SessionId) -> Result<String> {
+        self.generate_local_sdp_offer(session_id, crate::types::MediaDirection::SendRecv)
+            .await
+    }
+
+    /// Create hold SDP without a session context.
+    ///
+    /// Prefer [`Self::create_hold_sdp_for_session`]. This fallback exists for
+    /// older internal call sites and tests; it advertises the configured media
+    /// start port rather than disabling the m-line.
     pub async fn create_hold_sdp(&self) -> Result<String> {
-        // Create SDP with sendonly attribute
-        let sdp = format!(
-            "v=0\r\n\
-             o=- 0 0 IN IP4 {}\r\n\
-             s=-\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio 0 RTP/AVP 0\r\n\
-             a=sendonly\r\n",
-            self.local_ip, self.local_ip
-        );
-        Ok(sdp)
+        self.create_directional_fallback_sdp(crate::types::MediaDirection::SendOnly)
     }
 
-    /// Create active SDP
+    /// Create active SDP without a session context.
+    ///
+    /// Prefer [`Self::create_active_sdp_for_session`].
     pub async fn create_active_sdp(&self) -> Result<String> {
-        // Create SDP with sendrecv attribute
-        let port = self.media_port_start; // TODO: Allocate actual port
-        let sdp = format!(
-            "v=0\r\n\
-             o=- 0 0 IN IP4 {}\r\n\
-             s=-\r\n\
-             c=IN IP4 {}\r\n\
-             t=0 0\r\n\
-             m=audio {} RTP/AVP 0\r\n\
-             a=rtpmap:0 PCMU/8000\r\n\
-             a=sendrecv\r\n",
-            self.local_ip, self.local_ip, port
+        self.create_directional_fallback_sdp(crate::types::MediaDirection::SendRecv)
+    }
+
+    fn create_directional_fallback_sdp(
+        &self,
+        direction: crate::types::MediaDirection,
+    ) -> Result<String> {
+        let local_ip = self.local_ip.to_string();
+        let formats: &[&str] = if self.comfort_noise_enabled {
+            &["0", "8", "13", "101"]
+        } else {
+            &["0", "8", "101"]
+        };
+        let mut media_builder = SdpBuilder::new("Session")
+            .origin("-", "0", "0", "IN", "IP4", &local_ip)
+            .connection("IN", "IP4", &local_ip)
+            .time("0", "0")
+            .media_audio(self.media_port_start, "RTP/AVP")
+            .formats(formats)
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000");
+        if self.comfort_noise_enabled {
+            media_builder = media_builder.rtpmap("13", "CN/8000");
+        }
+        let session = media_builder
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute(direction_attribute(direction), None::<String>)
+            .done()
+            .build()
+            .map_err(|e| {
+                SessionError::SDPNegotiationFailed(format!(
+                    "SdpBuilder failed to build {} SDP: {}",
+                    direction_attribute(direction),
+                    e
+                ))
+            })?;
+        Ok(session.to_string())
+    }
+
+    async fn next_sdp_origin(&self, session_id: &SessionId) -> Result<(String, u64)> {
+        let mut session = self.store.get_session(session_id).await.map_err(|e| {
+            SessionError::SessionNotFound(format!(
+                "No session state for SDP origin {}: {}",
+                session_id.0, e
+            ))
+        })?;
+        if session.sdp_origin_session_id.is_empty() {
+            session.sdp_origin_session_id = sdp_origin_session_id(&session.session_id.0);
+        }
+        session.sdp_origin_version = session.sdp_origin_version.saturating_add(1);
+        let out = (
+            session.sdp_origin_session_id.clone(),
+            session.sdp_origin_version,
         );
-        Ok(sdp)
+        self.store.update_session(session).await.map_err(|e| {
+            SessionError::MediaError(format!("Failed to persist SDP origin version: {}", e))
+        })?;
+        Ok(out)
     }
 
     /// Send DTMF digit (legacy `media_id` signature used by the state
@@ -1755,12 +1907,6 @@ impl Clone for MediaAdapter {
     }
 }
 
-/// Generate a random session ID for SDP
-fn generate_session_id() -> u64 {
-    use rand::Rng;
-    rand::thread_rng().gen()
-}
-
 /// Sprint 3.5 — compute the answer's `m=audio` format list from the
 /// offer + our policy flags. Pure (no `MediaAdapter` state) so unit
 /// tests can exercise the strict-vs-permissive logic without standing
@@ -1828,6 +1974,78 @@ mod sdp_format_tests {
     //! second fixture for that case.
 
     use super::*;
+
+    #[test]
+    fn offer_direction_maps_to_correct_answer_direction() {
+        use rvoip_sip_core::MediaDirection as SipDirection;
+
+        assert_eq!(
+            answer_direction_for_offer(&Some(SipDirection::SendRecv)),
+            crate::types::MediaDirection::SendRecv
+        );
+        assert_eq!(
+            answer_direction_for_offer(&Some(SipDirection::SendOnly)),
+            crate::types::MediaDirection::RecvOnly
+        );
+        assert_eq!(
+            answer_direction_for_offer(&Some(SipDirection::RecvOnly)),
+            crate::types::MediaDirection::SendOnly
+        );
+        assert_eq!(
+            answer_direction_for_offer(&Some(SipDirection::Inactive)),
+            crate::types::MediaDirection::Inactive
+        );
+        assert_eq!(
+            answer_direction_for_offer(&None),
+            crate::types::MediaDirection::SendRecv
+        );
+    }
+
+    #[test]
+    fn remote_answer_direction_maps_to_local_direction() {
+        use rvoip_sip_core::MediaDirection as SipDirection;
+
+        assert_eq!(
+            local_direction_from_remote_answer(&Some(SipDirection::SendRecv)),
+            crate::types::MediaDirection::SendRecv
+        );
+        assert_eq!(
+            local_direction_from_remote_answer(&Some(SipDirection::SendOnly)),
+            crate::types::MediaDirection::RecvOnly
+        );
+        assert_eq!(
+            local_direction_from_remote_answer(&Some(SipDirection::RecvOnly)),
+            crate::types::MediaDirection::SendOnly
+        );
+        assert_eq!(
+            local_direction_from_remote_answer(&Some(SipDirection::Inactive)),
+            crate::types::MediaDirection::Inactive
+        );
+        assert_eq!(
+            local_direction_from_remote_answer(&None),
+            crate::types::MediaDirection::SendRecv
+        );
+    }
+
+    #[test]
+    fn audio_direction_prefers_media_level_direction() {
+        use rvoip_sip_core::MediaDirection as SipDirection;
+
+        let sdp = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .direction(SipDirection::SendRecv)
+            .media_audio(16000, "RTP/AVP")
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000")
+            .direction(SipDirection::SendOnly)
+            .done()
+            .build()
+            .expect("offer builds");
+
+        assert_eq!(audio_direction(&sdp), Some(SipDirection::SendOnly));
+    }
 
     /// Build the offer the same way `generate_local_sdp` does, but with
     /// fixed inputs so the output is deterministic. Mirrors the

@@ -344,7 +344,7 @@ pub enum TransferStatus {
 }
 
 /// Media direction for hold/resume
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaDirection {
     /// Send and receive media
     SendRecv,

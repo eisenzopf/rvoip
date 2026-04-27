@@ -428,6 +428,7 @@ transitions:
     actions:
       - type: "SendACK"
       - type: "SuspendMedia"
+      - type: "ClearPendingReinvite"
     publish:
       - "CallOnHold"
     description: "Hold confirmed by 2xx — commit OnHold and suspend media"
@@ -438,6 +439,8 @@ transitions:
     event:
       type: "Dialog4xxFailure"
     next_state: "Active"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Hold re-INVITE rejected — session parameters unchanged (RFC 3261 §14.1)"
 
   - role: "Both"
@@ -445,6 +448,8 @@ transitions:
     event:
       type: "Dialog5xxFailure"
     next_state: "Active"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Hold re-INVITE 5xx — session unchanged (RFC 3261 §14.1)"
 
   - role: "Both"
@@ -452,6 +457,8 @@ transitions:
     event:
       type: "Dialog6xxFailure"
     next_state: "Active"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Hold re-INVITE 6xx — session unchanged (RFC 3261 §14.1)"
 
   - role: "Both"
@@ -459,6 +466,8 @@ transitions:
     event:
       type: "DialogTimeout"
     next_state: "Active"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Hold re-INVITE Timer B expired — session unchanged (RFC 3261 §14.1)"
 
   # Resume from hold — enter intermediate `Resuming` state; commit Active
@@ -481,6 +490,7 @@ transitions:
     actions:
       - type: "SendACK"
       - type: "ResumeMedia"
+      - type: "ClearPendingReinvite"
     publish:
       - "CallResumed"
     description: "Resume confirmed by 2xx — commit Active and resume media"
@@ -491,6 +501,8 @@ transitions:
     event:
       type: "Dialog4xxFailure"
     next_state: "OnHold"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Resume re-INVITE rejected — stay held (RFC 3261 §14.1)"
 
   - role: "Both"
@@ -498,6 +510,8 @@ transitions:
     event:
       type: "Dialog5xxFailure"
     next_state: "OnHold"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Resume re-INVITE 5xx — stay held (RFC 3261 §14.1)"
 
   - role: "Both"
@@ -505,6 +519,8 @@ transitions:
     event:
       type: "Dialog6xxFailure"
     next_state: "OnHold"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Resume re-INVITE 6xx — stay held (RFC 3261 §14.1)"
 
   - role: "Both"
@@ -512,6 +528,8 @@ transitions:
     event:
       type: "DialogTimeout"
     next_state: "OnHold"
+    actions:
+      - type: "ClearPendingReinvite"
     description: "Resume re-INVITE Timer B expired — stay held (RFC 3261 §14.1)"
 
   # Bridge two calls

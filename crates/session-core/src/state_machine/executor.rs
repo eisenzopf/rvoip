@@ -466,6 +466,10 @@ impl StateMachine {
                 session.call_state = current.call_state;
                 session.entered_state_at = current.entered_state_at;
             }
+            if current.sdp_origin_version > session.sdp_origin_version {
+                session.sdp_origin_session_id = current.sdp_origin_session_id;
+                session.sdp_origin_version = current.sdp_origin_version;
+            }
         }
 
         // 8. Save updated session state

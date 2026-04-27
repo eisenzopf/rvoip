@@ -552,12 +552,17 @@ impl UnifiedCoordinator {
             config.state_table_path.as_deref(),
         ));
 
-        // Create state machine without event channel (original constructor)
-        let state_machine = Arc::new(StateMachine::new(
+        // Bridge state-table publish events into the public API event bus.
+        let (state_event_tx, state_event_rx) =
+            mpsc::channel::<crate::state_machine::executor::SessionEvent>(100);
+        spawn_state_machine_api_event_bridge(state_event_rx, global_coordinator.clone());
+
+        let state_machine = Arc::new(StateMachine::new_with_custom_table(
             state_table,
             store.clone(),
             dialog_adapter.clone(),
             media_adapter.clone(),
+            state_event_tx,
         ));
 
         // Wire the state machine into the dialog adapter (for REGISTER
@@ -1641,6 +1646,37 @@ impl Registration {
         self.contact_uri = Some(uri.into());
         self
     }
+}
+
+fn spawn_state_machine_api_event_bridge(
+    mut rx: mpsc::Receiver<crate::state_machine::executor::SessionEvent>,
+    global_coordinator: Arc<GlobalEventCoordinator>,
+) {
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            let api_event = match event {
+                crate::state_machine::executor::SessionEvent::Custom { session_id, event } => {
+                    match event.as_str() {
+                        "CallOnHold" => Some(crate::api::events::Event::CallOnHold {
+                            call_id: session_id,
+                        }),
+                        "CallResumed" => Some(crate::api::events::Event::CallResumed {
+                            call_id: session_id,
+                        }),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+
+            if let Some(api_event) = api_event {
+                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+                if let Err(e) = global_coordinator.publish(wrapped).await {
+                    tracing::warn!("Failed to publish state-machine API event: {}", e);
+                }
+            }
+        }
+    });
 }
 
 /// Sprint 3 A6 — best-effort STUN probe for the RTP-side public

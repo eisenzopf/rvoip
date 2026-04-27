@@ -220,11 +220,17 @@ pub enum Event {
     },
 
     // ===== Call State Events =====
-    /// Call was put on hold (re-INVITE with inactive SDP received)
+    /// Local hold was accepted by the remote peer.
     CallOnHold { call_id: CallId },
 
-    /// Call was resumed from hold
+    /// Local resume was accepted by the remote peer.
     CallResumed { call_id: CallId },
+
+    /// The remote peer placed this call on hold with a mid-call offer.
+    RemoteCallOnHold { call_id: CallId },
+
+    /// The remote peer resumed this call with a mid-call offer.
+    RemoteCallResumed { call_id: CallId },
 
     /// Call was muted locally
     CallMuted { call_id: CallId },
@@ -293,6 +299,8 @@ impl Event {
             | Event::TransferProgress { call_id, .. }
             | Event::CallOnHold { call_id, .. }
             | Event::CallResumed { call_id, .. }
+            | Event::RemoteCallOnHold { call_id, .. }
+            | Event::RemoteCallResumed { call_id, .. }
             | Event::CallMuted { call_id, .. }
             | Event::CallUnmuted { call_id, .. }
             | Event::DtmfReceived { call_id, .. }
@@ -318,6 +326,10 @@ impl Event {
                 | Event::CallEnded { .. }
                 | Event::CallFailed { .. }
                 | Event::CallCancelled { .. }
+                | Event::CallOnHold { .. }
+                | Event::CallResumed { .. }
+                | Event::RemoteCallOnHold { .. }
+                | Event::RemoteCallResumed { .. }
         )
     }
 

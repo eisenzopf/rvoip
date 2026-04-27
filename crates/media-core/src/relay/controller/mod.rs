@@ -50,7 +50,7 @@ use crate::types::conference::{
     ConferenceMixingStats, ConferenceResult, MixingQuality, ParticipantId,
 };
 use crate::types::SampleRate;
-use crate::types::{payload_types, AudioFrame, DialogId, MediaSessionId};
+use crate::types::{payload_types, AudioFrame, DialogId, MediaDirection, MediaSessionId};
 use codec_core::codecs::g711::G711Variant;
 
 use rvoip_rtp_core as rtp_core;
@@ -190,6 +190,10 @@ pub struct MediaSessionController {
     /// `session-core::Config::comfort_noise_enabled` via
     /// [`Self::set_comfort_noise_enabled`].
     pub(super) comfort_noise_enabled: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Per-dialog RTP/audio direction. This is the media-core enforcement
+    /// point for SIP hold/resume and remote direction changes.
+    pub(super) media_directions: Arc<DashMap<DialogId, MediaDirection>>,
 }
 
 impl MediaSessionController {
@@ -276,6 +280,7 @@ impl MediaSessionController {
             bridge_partners: Arc::new(DashMap::new()),
             cn_gate_state: Arc::new(DashMap::new()),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            media_directions: Arc::new(DashMap::new()),
         }
     }
 
@@ -466,6 +471,7 @@ impl MediaSessionController {
             bridge_partners: Arc::new(DashMap::new()),
             cn_gate_state: Arc::new(DashMap::new()),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            media_directions: Arc::new(DashMap::new()),
         })
     }
 
@@ -545,6 +551,8 @@ impl MediaSessionController {
             transmission_enabled: true, // Enable transmission by default
             is_muted: false,
         };
+        self.media_directions
+            .insert(dialog_id.clone(), MediaDirection::SendRecv);
 
         // Create media session info
         let session_info = MediaSessionInfo {
@@ -577,12 +585,14 @@ impl MediaSessionController {
         // Spawn task to handle RTP events for this session
         self.spawn_rtp_event_handler(dialog_id.clone(), rtp_events, payload_type);
 
-        info!("✅ Created media session with REAL RTP session: {} (port: {}, codec: {}, PT: {}, clock: {}Hz)", 
-              dialog_id, 
-              rtp_port, 
-              config.preferred_codec.as_deref().unwrap_or("PCMU"), 
-              payload_type, 
-              clock_rate);
+        info!(
+            "✅ Created media session with REAL RTP session: {} (port: {}, codec: {}, PT: {}, clock: {}Hz)",
+            dialog_id,
+            rtp_port,
+            config.preferred_codec.as_deref().unwrap_or("PCMU"),
+            payload_type,
+            clock_rate
+        );
         Ok(())
     }
 
@@ -654,6 +664,7 @@ impl MediaSessionController {
                 info!("✅ Stopped RTP session for dialog: {}", dialog_id);
             }
         }
+        self.media_directions.remove(dialog_id);
 
         // Release port via the appropriate allocator
         if session_info.rtp_port.is_some() {
@@ -937,6 +948,7 @@ impl MediaSessionController {
         let audio_frame_callbacks = self.audio_frame_callbacks.clone();
         let dtmf_callbacks = self.dtmf_callbacks.clone();
         let codec_mapper = self.codec_mapper.clone();
+        let media_directions = self.media_directions.clone();
 
         // RFC 4733 §2.5.1.3 retransmit dedup formerly lived here as a
         // `(ssrc, rtp_timestamp)` seen-set. Sprint 2.5 P4 moved it
@@ -977,9 +989,15 @@ impl MediaSessionController {
                                     || rtp_count == 101
                                     || rtp_count > 100 && rtp_count < 110
                                 {
-                                    info!("📦 Received RTP packet #{} for dialog {}: PT={}, seq={}, ts={}, payload_size={}", 
-                                        rtp_count, dialog_id, packet.header.payload_type, 
-                                        packet.header.sequence_number, packet.header.timestamp, packet.payload.len());
+                                    info!(
+                                        "📦 Received RTP packet #{} for dialog {}: PT={}, seq={}, ts={}, payload_size={}",
+                                        rtp_count,
+                                        dialog_id,
+                                        packet.header.payload_type,
+                                        packet.header.sequence_number,
+                                        packet.header.timestamp,
+                                        packet.payload.len()
+                                    );
                                 }
 
                                 // Decode based on payload type
@@ -1018,6 +1036,23 @@ impl MediaSessionController {
                                         continue;
                                     }
                                 };
+
+                                let receive_enabled = media_directions
+                                    .get(&dialog_id)
+                                    .map(|direction| {
+                                        matches!(
+                                            *direction,
+                                            MediaDirection::SendRecv | MediaDirection::RecvOnly
+                                        )
+                                    })
+                                    .unwrap_or(true);
+                                if !receive_enabled {
+                                    debug!(
+                                        "Dropping received RTP audio for dialog {} due to media direction",
+                                        dialog_id
+                                    );
+                                    continue;
+                                }
 
                                 // Check for callback each time (it might be registered later)
                                 let callbacks = audio_frame_callbacks.read().await;

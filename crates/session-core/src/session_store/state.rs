@@ -6,7 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::history::{HistoryConfig, SessionHistory, TransitionRecord};
 use crate::state_table::{ConditionUpdates, Role};
-use crate::types::CallState;
+use crate::types::{CallState, MediaDirection};
 
 /// Negotiated media configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +60,16 @@ pub struct SessionState {
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub negotiated_config: Option<NegotiatedConfig>,
+    /// Stable numeric SDP origin session id used in the `o=` line for
+    /// every local offer/answer on this session.
+    pub sdp_origin_session_id: String,
+    /// Monotonic SDP origin version. Incremented for each locally generated
+    /// SDP body that can be placed on the wire.
+    pub sdp_origin_version: u64,
+    /// Current local media direction from our perspective.
+    pub local_media_direction: MediaDirection,
+    /// Current remote offer direction from the peer's perspective.
+    pub remote_media_direction: MediaDirection,
 
     // Related IDs
     pub dialog_id: Option<DialogId>,
@@ -180,6 +190,7 @@ impl SessionState {
     /// Create a new session state
     pub fn new(session_id: SessionId, role: Role) -> Self {
         let now = Instant::now();
+        let sdp_origin_session_id = stable_sdp_origin_session_id(&session_id.0);
         Self {
             session_id,
             role,
@@ -192,6 +203,10 @@ impl SessionState {
             local_sdp: None,
             remote_sdp: None,
             negotiated_config: None,
+            sdp_origin_session_id,
+            sdp_origin_version: 0,
+            local_media_direction: MediaDirection::SendRecv,
+            remote_media_direction: MediaDirection::SendRecv,
             dialog_id: None,
             media_session_id: None,
             call_id: None,
@@ -307,6 +322,30 @@ impl SessionState {
     pub fn session_duration(&self) -> std::time::Duration {
         Instant::now() - self.created_at
     }
+}
+
+fn stable_sdp_origin_session_id(raw_id: &str) -> String {
+    let candidate = raw_id
+        .strip_prefix("session-")
+        .or_else(|| raw_id.strip_prefix("media-session-"))
+        .unwrap_or(raw_id);
+
+    if !candidate.is_empty() && candidate.bytes().all(|b| b.is_ascii_digit()) {
+        return candidate.to_string();
+    }
+
+    if let Ok(uuid) = uuid::Uuid::parse_str(candidate) {
+        let bytes = uuid.as_u128().to_be_bytes();
+        let low = u64::from_be_bytes(bytes[8..16].try_into().expect("uuid low bytes"));
+        return low.max(1).to_string();
+    }
+
+    let mut hash = 14_695_981_039_346_656_037u64;
+    for byte in raw_id.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    hash.max(1).to_string()
 }
 
 #[cfg(test)]

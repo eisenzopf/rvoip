@@ -1697,11 +1697,19 @@ impl SessionCrossCrateEventHandler {
             if !self.is_our_session(&sid).await {
                 return Ok(());
             }
+            let previous_remote_direction = self
+                .state_machine
+                .store
+                .get_session(&sid)
+                .await
+                .ok()
+                .map(|session| session.remote_media_direction);
             let sdp = self.extract_field(event_str, "sdp: Some(\"").map(|s| {
                 s.replace("\\r\\n", "\r\n")
                     .replace("\\n", "\n")
                     .replace("\\\"", "\"")
             });
+            let has_sdp = sdp.is_some();
             // `method` is an uppercase SIP method string emitted by
             // dialog-core's cross-crate conversion ("INVITE" or "UPDATE").
             // Default to re-INVITE for backward compat if the field is
@@ -1719,9 +1727,55 @@ impl SessionCrossCrateEventHandler {
                     "Failed to process {} (method {}): {}",
                     "ReinviteReceived/UpdateReceived", method, e
                 );
+            } else if method.eq_ignore_ascii_case("INVITE") && has_sdp {
+                self.apply_inbound_reinvite_media_direction(&sid, previous_remote_direction)
+                    .await;
             }
         }
         Ok(())
+    }
+
+    async fn apply_inbound_reinvite_media_direction(
+        &self,
+        sid: &SessionId,
+        previous_remote_direction: Option<crate::types::MediaDirection>,
+    ) {
+        let Ok(session) = self.state_machine.store.get_session(sid).await else {
+            return;
+        };
+
+        if let Some(media_id) = &session.media_session_id {
+            if let Err(e) = self
+                .media_adapter
+                .set_media_direction(media_id.clone(), session.local_media_direction)
+                .await
+            {
+                error!(
+                    "Failed to apply inbound re-INVITE media direction for session {}: {}",
+                    sid, e
+                );
+            }
+        }
+
+        let Some(previous_remote_direction) = previous_remote_direction else {
+            return;
+        };
+        let was_remote_held = remote_direction_is_hold(previous_remote_direction);
+        let is_remote_held = remote_direction_is_hold(session.remote_media_direction);
+
+        let api_event = match (was_remote_held, is_remote_held) {
+            (false, true) => Some(crate::api::events::Event::RemoteCallOnHold {
+                call_id: sid.clone(),
+            }),
+            (true, false) => Some(crate::api::events::Event::RemoteCallResumed {
+                call_id: sid.clone(),
+            }),
+            _ => None,
+        };
+
+        if let Some(api_event) = api_event {
+            publish_api_event(&self.global_coordinator, api_event);
+        }
     }
 
     async fn handle_transfer_requested(&self, event_str: &str) -> Result<()> {
@@ -2129,6 +2183,13 @@ fn publish_api_event(
             tracing::warn!("Failed to publish app-level event: {}", e);
         }
     });
+}
+
+fn remote_direction_is_hold(direction: crate::types::MediaDirection) -> bool {
+    matches!(
+        direction,
+        crate::types::MediaDirection::SendOnly | crate::types::MediaDirection::Inactive
+    )
 }
 
 /// Parse an RFC 3515 §2.4.5 sipfrag status line of the form

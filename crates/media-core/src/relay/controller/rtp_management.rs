@@ -24,7 +24,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::codec::audio::common::AudioCodec;
 use crate::error::{CodecError, Error, Result};
-use crate::types::DialogId;
+use crate::types::{DialogId, MediaDirection};
 use rvoip_rtp_core::RtpSession;
 
 use super::{
@@ -33,6 +33,46 @@ use super::{
 };
 
 impl MediaSessionController {
+    /// Apply RTP/audio direction for SIP offer/answer changes.
+    pub async fn set_media_direction(
+        &self,
+        dialog_id: &DialogId,
+        direction: MediaDirection,
+    ) -> Result<()> {
+        {
+            let mut rtp_sessions = self.rtp_sessions.write().await;
+            let wrapper = rtp_sessions
+                .get_mut(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+
+            wrapper.transmission_enabled = matches!(
+                direction,
+                MediaDirection::SendRecv | MediaDirection::SendOnly
+            );
+
+            if !wrapper.transmission_enabled {
+                if let Some(transmitter) = &wrapper.audio_transmitter {
+                    transmitter.stop().await;
+                }
+            } else if let Some(transmitter) = &wrapper.audio_transmitter {
+                if !transmitter.is_active().await {
+                    let config = AudioTransmitterConfig::default();
+                    let mut replacement =
+                        AudioTransmitter::new_with_config(wrapper.session.clone(), config);
+                    replacement.start().await;
+                    wrapper.audio_transmitter = Some(replacement);
+                }
+            }
+        }
+
+        self.media_directions.insert(dialog_id.clone(), direction);
+        info!(
+            "🎚️ Applied media direction for dialog {}: {}",
+            dialog_id, direction
+        );
+        Ok(())
+    }
+
     /// Get RTP session for a dialog (for packet transmission)
     pub async fn get_rtp_session(
         &self,

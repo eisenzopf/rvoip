@@ -260,11 +260,11 @@ pub async fn execute_action(
 
             let sdp = match kind {
                 PendingReinvite::Hold => media_adapter
-                    .create_hold_sdp()
+                    .create_hold_sdp_for_session(&session.session_id)
                     .await
                     .map_err(|e| format!("create_hold_sdp failed: {}", e))?,
                 PendingReinvite::Resume => media_adapter
-                    .create_active_sdp()
+                    .create_active_sdp_for_session(&session.session_id)
                     .await
                     .map_err(|e| format!("create_active_sdp failed: {}", e))?,
                 PendingReinvite::SdpUpdate(sdp) => sdp,
@@ -343,24 +343,27 @@ pub async fn execute_action(
         Action::HoldCall => {
             // Send re-INVITE with sendonly SDP. Record that this is a Hold so
             // RFC 3261 §14.1 glare (491) retry can reissue the correct kind.
-            if let Some(hold_sdp) = media_adapter.create_hold_sdp().await.ok() {
-                session.local_sdp = Some(hold_sdp.clone());
-                session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Hold);
-                dialog_adapter
-                    .send_reinvite_session(&session.session_id, hold_sdp)
-                    .await?;
-            }
+            let hold_sdp = media_adapter
+                .create_hold_sdp_for_session(&session.session_id)
+                .await
+                .map_err(|e| format!("create_hold_sdp failed: {}", e))?;
+            session.local_sdp = Some(hold_sdp.clone());
+            session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Hold);
+            dialog_adapter
+                .send_reinvite_session(&session.session_id, hold_sdp)
+                .await?;
         }
         Action::ResumeCall => {
             // Send re-INVITE with sendrecv SDP.
-            if let Some(active_sdp) = media_adapter.create_active_sdp().await.ok() {
-                session.local_sdp = Some(active_sdp.clone());
-                session.pending_reinvite =
-                    Some(crate::session_store::state::PendingReinvite::Resume);
-                dialog_adapter
-                    .send_reinvite_session(&session.session_id, active_sdp)
-                    .await?;
-            }
+            let active_sdp = media_adapter
+                .create_active_sdp_for_session(&session.session_id)
+                .await
+                .map_err(|e| format!("create_active_sdp failed: {}", e))?;
+            session.local_sdp = Some(active_sdp.clone());
+            session.pending_reinvite = Some(crate::session_store::state::PendingReinvite::Resume);
+            dialog_adapter
+                .send_reinvite_session(&session.session_id, active_sdp)
+                .await?;
         }
         Action::TransferCall(target) => {
             // Send REFER for blind transfer
@@ -429,6 +432,8 @@ pub async fn execute_action(
                     channels: 1,
                 };
                 session.negotiated_config = Some(session_config);
+                session.local_media_direction = config.local_direction;
+                session.remote_media_direction = config.remote_direction;
                 session.sdp_negotiated = true;
                 info!("SDP negotiated as UAC for session {}", session.session_id);
             }
@@ -457,6 +462,8 @@ pub async fn execute_action(
                 };
                 session.local_sdp = Some(local_sdp);
                 session.negotiated_config = Some(session_config);
+                session.local_media_direction = config.local_direction;
+                session.remote_media_direction = config.remote_direction;
                 session.sdp_negotiated = true;
                 info!("SDP negotiated as UAS for session {}", session.session_id);
             }
@@ -482,6 +489,8 @@ pub async fn execute_action(
                 };
                 session.local_sdp = Some(local_sdp);
                 session.negotiated_config = Some(session_config);
+                session.local_media_direction = config.local_direction;
+                session.remote_media_direction = config.remote_direction;
                 session.sdp_negotiated = true;
                 info!(
                     "PrepareEarlyMediaSDP: auto-negotiated SDP answer for session {}",
@@ -583,12 +592,12 @@ pub async fn execute_action(
 
             let sdp = if hold_direction {
                 media_adapter
-                    .create_hold_sdp()
+                    .create_hold_sdp_for_session(&session.session_id)
                     .await
                     .map_err(|e| format!("create_hold_sdp failed: {}", e))?
             } else {
                 media_adapter
-                    .create_active_sdp()
+                    .create_active_sdp_for_session(&session.session_id)
                     .await
                     .map_err(|e| format!("create_active_sdp failed: {}", e))?
             };
@@ -824,6 +833,24 @@ pub async fn execute_action(
                             .await?;
                     }
                 }
+                "SuspendMedia" => {
+                    if let Some(media_id) = &session.media_session_id {
+                        let direction = crate::types::MediaDirection::SendOnly;
+                        media_adapter
+                            .set_media_direction(media_id.clone(), direction)
+                            .await?;
+                        session.local_media_direction = direction;
+                    }
+                }
+                "ResumeMedia" => {
+                    if let Some(media_id) = &session.media_session_id {
+                        let direction = crate::types::MediaDirection::SendRecv;
+                        media_adapter
+                            .set_media_direction(media_id.clone(), direction)
+                            .await?;
+                        session.local_media_direction = direction;
+                    }
+                }
                 _ => {
                     // Other custom actions
                 }
@@ -849,12 +876,14 @@ pub async fn execute_action(
             }
 
             // Send re-INVITE with sendrecv
-            if let Some(active_sdp) = media_adapter.create_active_sdp().await.ok() {
-                session.local_sdp = Some(active_sdp.clone());
-                dialog_adapter
-                    .send_reinvite_session(&session.session_id, active_sdp)
-                    .await?;
-            }
+            let active_sdp = media_adapter
+                .create_active_sdp_for_session(&session.session_id)
+                .await
+                .map_err(|e| format!("create_active_sdp failed: {}", e))?;
+            session.local_sdp = Some(active_sdp.clone());
+            dialog_adapter
+                .send_reinvite_session(&session.session_id, active_sdp)
+                .await?;
             info!("Media flow restored for session {}", session.session_id);
         }
 
@@ -869,12 +898,14 @@ pub async fn execute_action(
             }
 
             // Send re-INVITE with sendrecv
-            if let Some(active_sdp) = media_adapter.create_active_sdp().await.ok() {
-                session.local_sdp = Some(active_sdp.clone());
-                dialog_adapter
-                    .send_reinvite_session(&session.session_id, active_sdp)
-                    .await?;
-            }
+            let active_sdp = media_adapter
+                .create_active_sdp_for_session(&session.session_id)
+                .await
+                .map_err(|e| format!("create_active_sdp failed: {}", e))?;
+            session.local_sdp = Some(active_sdp.clone());
+            dialog_adapter
+                .send_reinvite_session(&session.session_id, active_sdp)
+                .await?;
             info!("Media flow restored for session {}", session.session_id);
         }
 
@@ -891,12 +922,14 @@ pub async fn execute_action(
             }
 
             // Send re-INVITE with sendonly SDP
-            if let Some(hold_sdp) = media_adapter.create_hold_sdp().await.ok() {
-                session.local_sdp = Some(hold_sdp.clone());
-                dialog_adapter
-                    .send_reinvite_session(&session.session_id, hold_sdp)
-                    .await?;
-            }
+            let hold_sdp = media_adapter
+                .create_hold_sdp_for_session(&session.session_id)
+                .await
+                .map_err(|e| format!("create_hold_sdp failed: {}", e))?;
+            session.local_sdp = Some(hold_sdp.clone());
+            dialog_adapter
+                .send_reinvite_session(&session.session_id, hold_sdp)
+                .await?;
 
             info!("Call {} put on hold", session.session_id);
         }

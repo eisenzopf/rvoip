@@ -50,6 +50,16 @@ Use `CallbackPeer` for servers, proxies, and IVR systems. Implement the `CallHan
 | `./examples/advanced/concurrent_calls/run.sh` | 5 concurrent callers + 1 answerer |
 | `cargo run --example advanced_registrar_server` | Standalone registrar server (pair with `streampeer_registration_client`) |
 
+## Asterisk
+
+Remote Asterisk examples use `examples/asterisk/.env` for PBX address,
+credentials, local bind address, and media ports.
+
+| Script | Description |
+|--------|-------------|
+| `./examples/asterisk/run.sh` | Register two endpoints through Asterisk and verify bidirectional audio |
+| `./examples/asterisk/hold_resume/run.sh` | Register two endpoints, exercise hold/resume through Asterisk, and verify pre/post-resume audio |
+
 ## Running peers individually
 
 Each peer is also a separate `cargo` example binary, so you can run them in separate terminals for debugging. For example, for `callbackpeer/auto_answer`:
