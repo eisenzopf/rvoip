@@ -40,14 +40,14 @@
 //! body.add_part(part);
 //! ```
 
-use bytes::Bytes;
-use crate::types::header::{Header, HeaderName, HeaderValue};
-use crate::types::content_type::ContentType;
 use crate::error::{Error, Result};
 use crate::parser;
+use crate::types::content_type::ContentType;
+use crate::types::header::{Header, HeaderName, HeaderValue};
 use crate::SdpSession;
-use std::fmt;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Represents a parsed MIME part.
 ///
@@ -143,11 +143,12 @@ impl MimePart {
     /// assert_eq!(part.content_type(), Some("application/sdp".to_string()));
     /// ```
     pub fn content_type(&self) -> Option<String> {
-        self.headers.iter()
+        self.headers
+            .iter()
             .find(|h| h.name == HeaderName::ContentType)
             .map(|h| match &h.value {
                 HeaderValue::Raw(bytes) => std::str::from_utf8(bytes)
-            .map(|s| s.to_string())
+                    .map(|s| s.to_string())
                     .unwrap_or_default(),
                 HeaderValue::ContentType(ct) => ct.to_string(),
                 _ => String::new(),
@@ -195,13 +196,13 @@ impl Default for MimePart {
 /// let parsed_other = ParsedBody::Other(raw_bytes);
 ///
 /// // Note: In a real application, you would create an SDP instance like:
-/// // let origin = Origin { 
+/// // let origin = Origin {
 /// //     username: "-".to_string(),
 /// //     sess_id: "123456".to_string(),
 /// //     sess_version: "1".to_string(),
 /// //     net_type: "IN".to_string(),
 /// //     addr_type: "IP4".to_string(),
-/// //     unicast_address: "127.0.0.1".to_string() 
+/// //     unicast_address: "127.0.0.1".to_string()
 /// // };
 /// // let sdp_session = SdpSession::new(origin, "Example Session");
 /// // let parsed_sdp = ParsedBody::Sdp(sdp_session);
@@ -347,4 +348,4 @@ impl MultipartBody {
     }
 }
 
-// TODO: Add methods for serialization if needed. 
+// TODO: Add methods for serialization if needed.

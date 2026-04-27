@@ -1,10 +1,7 @@
-use std::str::FromStr;
-use crate::error::{Error, Result};
-use crate::types::{
-    service_route::ServiceRoute,
-    uri::Uri,
-};
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::types::{service_route::ServiceRoute, uri::Uri};
+use std::str::FromStr;
 
 /// Service-Route header builder (RFC 3608).
 ///
@@ -47,7 +44,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, StatusCode, headers::HeaderName, TypedHeader};
+    use crate::types::{headers::HeaderName, method::Method, StatusCode, TypedHeader};
     use crate::{RequestBuilder, ResponseBuilder};
 
     #[test]
@@ -68,10 +65,7 @@ mod tests {
     #[test]
     fn test_response_service_route_multiple() {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
-            .service_route_uris(vec![
-                "sip:p1.example.com;lr",
-                "sip:p2.example.com;lr",
-            ])
+            .service_route_uris(vec!["sip:p1.example.com;lr", "sip:p2.example.com;lr"])
             .unwrap()
             .build();
 

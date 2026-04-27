@@ -793,4 +793,4 @@ impl FromStr for StatusCode {
         let code = s.parse::<u16>().map_err(|_| Error::InvalidStatusCode(0))?;
         StatusCode::from_u16(code)
     }
-} 
+}

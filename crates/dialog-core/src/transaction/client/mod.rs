@@ -1,8 +1,9 @@
+pub mod builders;
 /// # Client Transaction Module
 ///
-/// This module implements the client-side transaction state machines according to 
+/// This module implements the client-side transaction state machines according to
 /// [RFC 3261 Section 17.1](https://datatracker.ietf.org/doc/html/rfc3261#section-17.1).
-/// 
+///
 /// ## SIP Client Transactions
 ///
 /// Client transactions are initiated by the Transaction User (TU) when it wants to send a request.
@@ -37,26 +38,24 @@
 ///
 /// Client transactions are typically created and managed by the `TransactionManager`, which routes
 /// incoming messages to the appropriate transaction and exposes a clean API for the TU.
-
 mod common;
+mod data;
 mod invite;
 mod non_invite;
-mod data;
-pub mod builders;
 
 pub use common::*;
+pub use data::{ClientTransactionData, CommandReceiver, CommandSender, CommonClientTransaction};
 pub use invite::ClientInviteTransaction;
 pub use non_invite::ClientNonInviteTransaction;
-pub use data::{ClientTransactionData, CommandSender, CommandReceiver, CommonClientTransaction};
 
 use async_trait::async_trait;
-use std::net::SocketAddr;
-use std::sync::Arc;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use crate::transaction::error::Result;
-use crate::transaction::{Transaction, TransactionState, TransactionKey, TransactionAsync};
+use crate::transaction::{Transaction, TransactionAsync, TransactionKey, TransactionState};
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::Request;
 
@@ -72,7 +71,7 @@ pub trait ClientTransaction: Transaction + CommonClientTransaction + Send + Sync
     /// For non-INVITE transactions, this starts Timers E/F and moves the transaction to the Trying state.
     ///
     /// # Returns
-    /// 
+    ///
     /// A Future that resolves to Ok(()) if the transaction was initiated successfully,
     /// or an Error if there was a problem.
     fn initiate(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
@@ -90,15 +89,19 @@ pub trait ClientTransaction: Transaction + CommonClientTransaction + Send + Sync
     ///
     /// A Future that resolves to Ok(()) if the response was processed successfully,
     /// or an Error if there was a problem.
-    fn process_response(&self, response: Response) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn process_response(
+        &self,
+        response: Response,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
 
     /// Returns the original request that initiated this transaction.
     ///
     /// # Returns
     ///
     /// A Future that resolves to the original SIP request, or None if it's not available.
-    fn original_request<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>>;
-    
+    fn original_request<'a>(&'a self)
+        -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>>;
+
     /// Returns the last response received by this transaction.
     ///
     /// # Returns
@@ -126,26 +129,31 @@ pub trait TransactionExt {
 impl<T: Transaction + ?Sized> TransactionExt for T {
     fn as_client_transaction(&self) -> Option<&dyn ClientTransaction> {
         use crate::transaction::TransactionKind;
-        
+
         match self.kind() {
             TransactionKind::InviteClient | TransactionKind::NonInviteClient => {
                 // Get the Any representation and try downcasting
-                self.as_any().downcast_ref::<Box<dyn ClientTransaction>>()
+                self.as_any()
+                    .downcast_ref::<Box<dyn ClientTransaction>>()
                     .map(|boxed| boxed.as_ref())
                     .or_else(|| {
                         // Try with specific implementations
-                        use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
-                        
+                        use crate::transaction::client::{
+                            ClientInviteTransaction, ClientNonInviteTransaction,
+                        };
+
                         if let Some(tx) = self.as_any().downcast_ref::<ClientInviteTransaction>() {
                             Some(tx as &dyn ClientTransaction)
-                        } else if let Some(tx) = self.as_any().downcast_ref::<ClientNonInviteTransaction>() {
+                        } else if let Some(tx) =
+                            self.as_any().downcast_ref::<ClientNonInviteTransaction>()
+                        {
                             Some(tx as &dyn ClientTransaction)
                         } else {
                             None
                         }
                     })
-            },
+            }
             _ => None,
         }
     }
-} 
+}

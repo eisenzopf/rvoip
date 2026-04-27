@@ -1,11 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
-    expires::Expires,
-    headers::HeaderName,
+    expires::Expires, headers::header_access::HeaderAccess, headers::HeaderName,
     headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 use std::time::Duration;
 
 /// Expires header builder
@@ -132,7 +130,7 @@ pub trait ExpiresBuilderExt {
     /// // The registration will expire in one hour (3600 seconds)
     /// ```
     fn expires_seconds(self, seconds: u32) -> Self;
-    
+
     /// Add an Expires header with a specified Duration
     ///
     /// This method adds an Expires header with expiration time specified as a std::time::Duration.
@@ -163,7 +161,7 @@ pub trait ExpiresBuilderExt {
     /// // The subscription will expire in 15 minutes (900 seconds)
     /// ```
     fn expires_duration(self, duration: Duration) -> Self;
-    
+
     /// Add an Expires header with zero value for immediate expiration
     ///
     /// This convenience method adds an Expires header with a value of 0, which
@@ -191,7 +189,7 @@ pub trait ExpiresBuilderExt {
     /// // The registration will be removed immediately
     /// ```
     fn expires_zero(self) -> Self;
-    
+
     /// Add an Expires header with a standard one-hour expiration
     ///
     /// This convenience method adds an Expires header with a value of 3600 seconds (1 hour),
@@ -217,7 +215,7 @@ pub trait ExpiresBuilderExt {
     /// // The registration will expire in one hour (3600 seconds)
     /// ```
     fn expires_one_hour(self) -> Self;
-    
+
     /// Add an Expires header with a standard one-day expiration
     ///
     /// This convenience method adds an Expires header with a value of 86400 seconds (24 hours),
@@ -245,29 +243,29 @@ pub trait ExpiresBuilderExt {
     fn expires_one_day(self) -> Self;
 }
 
-impl<T> ExpiresBuilderExt for T 
-where 
+impl<T> ExpiresBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn expires_seconds(self, seconds: u32) -> Self {
         let expires = Expires::new(seconds);
         self.set_header(expires)
     }
-    
+
     fn expires_duration(self, duration: Duration) -> Self {
         // Convert Duration to seconds, capping at u32::MAX if necessary
         let seconds = duration.as_secs().min(u32::MAX as u64) as u32;
         self.expires_seconds(seconds)
     }
-    
+
     fn expires_zero(self) -> Self {
         self.expires_seconds(0)
     }
-    
+
     fn expires_one_hour(self) -> Self {
         self.expires_seconds(3600)
     }
-    
+
     fn expires_one_day(self) -> Self {
         self.expires_seconds(86400)
     }
@@ -286,24 +284,25 @@ impl<T: HeaderSetter> ExpiresExt for T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder::request::SimpleRequestBuilder;
+    use crate::types::expires::Expires;
+    use crate::types::headers::header_access::HeaderAccess;
+    use crate::types::headers::HeaderName;
     use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;
     use std::time::Duration;
-    use crate::builder::request::SimpleRequestBuilder;
-    use crate::types::expires::Expires;
-    use crate::types::headers::HeaderName;
-    use crate::types::headers::header_access::HeaderAccess;
 
     #[test]
     fn test_request_expires_seconds() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .expires_seconds(3600)
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 3600);
         } else {
@@ -316,10 +315,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .expires_seconds(1800)
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Expires(expires)) = response.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 1800);
         } else {
@@ -330,22 +329,24 @@ mod tests {
     #[test]
     fn test_expires_duration() {
         // Test with a duration of 30 minutes
-        let request = RequestBuilder::new(Method::Subscribe, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:bob@example.com")
+            .unwrap()
             .expires_duration(Duration::from_secs(30 * 60))
             .build();
-            
+
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 1800); // 30 minutes in seconds
         } else {
             panic!("Expires header not found or has wrong type");
         }
-        
+
         // Test with a very large duration (should cap at u32::MAX)
         let large_duration = Duration::from_secs(u64::MAX);
-        let request = RequestBuilder::new(Method::Subscribe, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:bob@example.com")
+            .unwrap()
             .expires_duration(large_duration)
             .build();
-            
+
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.0, u32::MAX);
         } else {
@@ -356,52 +357,56 @@ mod tests {
     #[test]
     fn test_expires_convenience_methods() {
         // Test expires_zero
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .expires_zero()
             .build();
-            
+
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 0);
         } else {
             panic!("Expires header not found or has wrong type");
         }
-        
+
         // Test expires_one_hour
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .expires_one_hour()
             .build();
-            
+
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 3600);
         } else {
             panic!("Expires header not found or has wrong type");
         }
-        
+
         // Test expires_one_day
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .expires_one_day()
             .build();
-            
+
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 86400);
         } else {
             panic!("Expires header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_expires_display() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .expires_seconds(7200)
             .build();
-            
+
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.to_string(), "7200");
         } else {
             panic!("Expires header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_multiple_expires() {
         let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@biloxi.com")
@@ -412,6 +417,10 @@ mod tests {
 
         let header = request.typed_header::<Expires>();
         assert!(header.is_some(), "Expires header should be present");
-        assert_eq!(header.unwrap().0, 0, "Expires header should be 0 after second set");
+        assert_eq!(
+            header.unwrap().0,
+            0,
+            "Expires header should be 0 after second set"
+        );
     }
-} 
+}

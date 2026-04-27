@@ -4,7 +4,7 @@
 //! [RFC 3327](https://datatracker.ietf.org/doc/html/rfc3327).
 //!
 //! The Path header field is used in SIP registrations to indicate a path that future
-//! requests to the user agent should traverse. This is particularly useful in 
+//! requests to the user agent should traverse. This is particularly useful in
 //! environments using edge proxies, NAT traversal, and complex routing topologies.
 //!
 //! ## Purpose
@@ -46,20 +46,20 @@
 //! let path = Path::from_str("<sip:p1.example.com;lr>, <sip:p2.example.com;lr>").unwrap();
 //! ```
 
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
-use std::ops::Deref;
-use nom::combinator::all_consuming;
-use crate::types::Address;
-use crate::parser::headers::route::RouteEntry as PathEntry;  // Reuse RouteEntry for Path
-use serde::{Deserialize, Serialize};
-use crate::types::uri::Uri;
+use crate::error::{Error, Result};
+use crate::parser::headers::route::RouteEntry as PathEntry; // Reuse RouteEntry for Path
 use crate::types::header::Header;
+use crate::types::uri::Uri;
+use crate::types::Address;
 use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 /// Represents the Path header field (RFC 3327).
-/// 
+///
 /// The Path header field is used in SIP REGISTER requests and responses to enable
 /// requests to traverse intermediary proxies between the registrar and the user agent.
 /// Each proxy that needs to stay on the path adds a URI identifying itself to the Path header.
@@ -112,10 +112,10 @@ impl Path {
     /// let uri2 = Uri::from_str("sip:p2.example.com;lr").unwrap();
     /// let addr1 = Address::new(uri1);
     /// let addr2 = Address::new(uri2);
-    /// 
+    ///
     /// // Use path entry type (which is the same as RouteEntry)
     /// let entries = vec![
-    ///     PathEntry(addr1), 
+    ///     PathEntry(addr1),
     ///     PathEntry(addr2)
     /// ];
     ///
@@ -126,7 +126,7 @@ impl Path {
     pub fn new(list: Vec<PathEntry>) -> Self {
         Self(list)
     }
-    
+
     /// Creates a new empty Path header.
     ///
     /// Initializes a Path header with no path entries.
@@ -148,7 +148,7 @@ impl Path {
     pub fn empty() -> Self {
         Self(Vec::new())
     }
-    
+
     /// Creates a new Path header with a single address.
     ///
     /// Initializes a Path header with a single entry representing the given address.
@@ -180,7 +180,7 @@ impl Path {
     pub fn with_address(address: Address) -> Self {
         Self(vec![PathEntry(address)])
     }
-    
+
     /// Creates a new Path header with a single URI.
     ///
     /// Initializes a Path header with a single entry representing the given URI.
@@ -212,7 +212,7 @@ impl Path {
         let address = Address::new(uri);
         Self::with_address(address)
     }
-    
+
     /// Checks if the Path header has no entries.
     ///
     /// # Returns
@@ -235,7 +235,7 @@ impl Path {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    
+
     /// Returns the number of path entries.
     ///
     /// # Returns
@@ -260,7 +260,7 @@ impl Path {
     pub fn len(&self) -> usize {
         self.0.len()
     }
-    
+
     /// Returns the first path entry, if any.
     ///
     /// The first entry in the list is the closest proxy to the registrar.
@@ -285,7 +285,7 @@ impl Path {
     pub fn first(&self) -> Option<&PathEntry> {
         self.0.first()
     }
-    
+
     /// Returns the last path entry, if any.
     ///
     /// The last entry in the list is the closest proxy to the user agent.
@@ -312,7 +312,7 @@ impl Path {
     pub fn last(&self) -> Option<&PathEntry> {
         self.0.last()
     }
-    
+
     /// Adds a path entry to the end of the list.
     ///
     /// Adds a raw path entry (which is the same type as a RouteEntry).
@@ -343,7 +343,7 @@ impl Path {
         self.0.push(entry);
         self
     }
-    
+
     /// Adds an address as a path entry.
     ///
     /// This is a convenience method that creates a path entry from an address.
@@ -374,7 +374,7 @@ impl Path {
         self.0.push(PathEntry(address));
         self
     }
-    
+
     /// Adds a URI as a path entry.
     ///
     /// This is a convenience method that creates a path entry from a URI without a display name.
@@ -404,7 +404,7 @@ impl Path {
         let address = Address::new(uri);
         self.add_address(address)
     }
-    
+
     /// Returns an iterator over the path entries.
     ///
     /// # Returns
@@ -445,7 +445,7 @@ impl fmt::Display for Path {
     /// A string representation of the Path header
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
-        
+
         for entry in &self.0 {
             if !first {
                 write!(f, ", ")?;
@@ -453,7 +453,7 @@ impl fmt::Display for Path {
             write!(f, "{}", entry.0)?;
             first = false;
         }
-        
+
         Ok(())
     }
 }
@@ -474,14 +474,17 @@ impl FromStr for Path {
         if s.is_empty() {
             return Ok(Path::empty());
         }
-        
+
         // Use the Route parser for Path since they have the same format
         let input_bytes = s.as_bytes();
         let parse_result = all_consuming(crate::parser::headers::parse_route)(input_bytes);
-        
+
         match parse_result {
             Ok((_, route)) => Ok(Path(route.0)),
-            Err(_) => Err(Error::ParseError(format!("Failed to parse Path header: {}", s)))
+            Err(_) => Err(Error::ParseError(format!(
+                "Failed to parse Path header: {}",
+                s
+            ))),
         }
     }
 }
@@ -594,9 +597,11 @@ impl TypedHeaderTrait for Path {
     /// A Result containing the parsed Path header if successful, or an error otherwise
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -604,18 +609,18 @@ impl TypedHeaderTrait for Path {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Path::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             // Reuse Route header processing since they have the same format
-            HeaderValue::Route(entries) => {
-                Ok(Path(entries.clone()))
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            HeaderValue::Route(entries) => Ok(Path(entries.clone())),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -636,7 +641,7 @@ mod tests {
     fn test_path_with_uri() {
         let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
         let path = Path::with_uri(uri);
-        
+
         assert_eq!(path.len(), 1);
         assert_eq!(path.to_string(), "<sip:proxy.example.com;lr>");
     }
@@ -646,33 +651,36 @@ mod tests {
         let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
         let address = Address::new_with_display_name("Edge Proxy", uri);
         let path = Path::with_address(address);
-        
+
         assert_eq!(path.len(), 1);
-        assert_eq!(path.to_string(), "\"Edge Proxy\" <sip:proxy.example.com;lr>");
+        assert_eq!(
+            path.to_string(),
+            "\"Edge Proxy\" <sip:proxy.example.com;lr>"
+        );
     }
 
     #[test]
     fn test_path_add_methods() {
         let mut path = Path::empty();
-        
+
         // Test add_uri
         let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
         path.add_uri(uri1);
         assert_eq!(path.len(), 1);
-        
+
         // Test add_address
         let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
         let address = Address::new_with_display_name("Second Proxy", uri2);
         path.add_address(address);
         assert_eq!(path.len(), 2);
-        
+
         // Test add (with raw PathEntry)
         let uri3 = Uri::from_str("sip:proxy3.example.com;lr").unwrap();
         let address3 = Address::new(uri3);
         let entry = PathEntry(address3);
         path.add(entry);
         assert_eq!(path.len(), 3);
-        
+
         // Check string representation
         let path_str = path.to_string();
         assert!(path_str.contains("proxy1.example.com"));
@@ -688,22 +696,22 @@ mod tests {
         let addr1 = Address::new(uri1);
         let addr2 = Address::new(uri2);
         let entries = vec![PathEntry(addr1), PathEntry(addr2)];
-        
+
         let path = Path::from(entries);
         assert_eq!(path.len(), 2);
-        
+
         // Test From<PathEntry>
         let uri3 = Uri::from_str("sip:proxy3.example.com;lr").unwrap();
         let addr3 = Address::new(uri3);
         let entry = PathEntry(addr3);
-        
+
         let path = Path::from(entry);
         assert_eq!(path.len(), 1);
-        
+
         // Test From<Address>
         let uri4 = Uri::from_str("sip:proxy4.example.com;lr").unwrap();
         let addr4 = Address::new(uri4);
-        
+
         let path = Path::from(addr4);
         assert_eq!(path.len(), 1);
     }
@@ -713,11 +721,11 @@ mod tests {
         // Test parsing a simple path header
         let path_str = "<sip:proxy1.example.com;lr>, <sip:proxy2.example.com;lr>";
         let path = Path::from_str(path_str).unwrap();
-        
+
         assert_eq!(path.len(), 2);
         assert_eq!(path[0].0.uri.to_string(), "sip:proxy1.example.com;lr");
         assert_eq!(path[1].0.uri.to_string(), "sip:proxy2.example.com;lr");
-        
+
         // Test round-trip (format back to string)
         assert_eq!(path.to_string(), path_str);
     }
@@ -726,20 +734,20 @@ mod tests {
     fn test_path_typed_header_trait() {
         // Test header_name
         assert_eq!(Path::header_name(), HeaderName::Path);
-        
+
         // Test to_header and from_header
         let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
         let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
         let mut path = Path::empty();
         path.add_uri(uri1);
         path.add_uri(uri2);
-        
+
         let header = path.to_header();
         assert_eq!(header.name, HeaderName::Path);
-        
+
         let path2 = Path::from_header(&header).unwrap();
         assert_eq!(path2.len(), 2);
         assert_eq!(path2[0].0.uri.to_string(), "sip:proxy1.example.com;lr");
         assert_eq!(path2[1].0.uri.to_string(), "sip:proxy2.example.com;lr");
     }
-} 
+}

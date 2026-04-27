@@ -19,9 +19,9 @@ use dashmap::DashMap;
 use tokio::task::AbortHandle;
 use tracing::{debug, warn};
 
-use rvoip_sip_core::Response;
 use crate::dialog::DialogId;
 use crate::transaction::{TransactionKey, TransactionManager};
+use rvoip_sip_core::Response;
 
 /// RFC 3261 T1 base interval — 500 ms.
 pub const T1: Duration = Duration::from_millis(500);

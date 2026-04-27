@@ -72,11 +72,7 @@ impl DtmfTransmitter {
     /// Returns immediately with a `JoinHandle` — the caller can drop
     /// it for fire-and-forget semantics or await it to know when the
     /// tone has fully drained onto the wire.
-    pub fn send_digit(
-        &self,
-        digit: char,
-        duration_ms: u32,
-    ) -> tokio::task::JoinHandle<Result<()>> {
+    pub fn send_digit(&self, digit: char, duration_ms: u32) -> tokio::task::JoinHandle<Result<()>> {
         let rtp_session = self.rtp_session.clone();
         tokio::spawn(async move { run_schedule(rtp_session, digit, duration_ms).await })
     }
@@ -173,7 +169,12 @@ async fn send_packet(
     let wire = tele.encode();
     let mut session = rtp_session.lock().await;
     session
-        .send_packet_with_pt(timestamp, Bytes::copy_from_slice(&wire), marker, /*PT*/ 101)
+        .send_packet_with_pt(
+            timestamp,
+            Bytes::copy_from_slice(&wire),
+            marker,
+            /*PT*/ 101,
+        )
         .await
         .map_err(|e| {
             warn!("DTMF send failed: {}", e);
@@ -333,7 +334,15 @@ mod tests {
         let evs = drain_dtmf(&mut rx, Duration::from_millis(150)).await;
         let end_events: Vec<&RtpEvent> = evs
             .iter()
-            .filter(|ev| matches!(ev, RtpEvent::DtmfEvent { end_of_event: true, .. }))
+            .filter(|ev| {
+                matches!(
+                    ev,
+                    RtpEvent::DtmfEvent {
+                        end_of_event: true,
+                        ..
+                    }
+                )
+            })
             .collect();
         assert_eq!(
             end_events.len(),

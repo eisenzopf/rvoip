@@ -113,7 +113,10 @@ async fn stun_client_times_out_when_server_silent() {
 
     let result = client.discover().await;
     assert!(
-        matches!(result, Err(rvoip_rtp_core::network::stun::StunError::ProbeTimeout { .. })),
+        matches!(
+            result,
+            Err(rvoip_rtp_core::network::stun::StunError::ProbeTimeout { .. })
+        ),
         "expected ProbeTimeout, got {:?}",
         result
     );

@@ -4,10 +4,10 @@
 //! and SDP media handling functionality moved from rtp-core as part
 //! of the Transport/Media plane separation.
 
-pub mod registry;
 pub mod negotiation;
+pub mod registry;
 pub mod sdp;
 
-pub use registry::*;
 pub use negotiation::*;
+pub use registry::*;
 pub use sdp::*;

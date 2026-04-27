@@ -7,17 +7,20 @@
 //! This is a core-level example showing direct packet manipulation and algorithm usage.
 
 use rvoip_rtp_core::{
-    Result, RtpSsrc,
-    feedback::{
-        FeedbackContext, FeedbackConfig, FeedbackDecision, FeedbackPriority,
-        QualityDegradation, CongestionState, FeedbackGenerator, FeedbackGeneratorFactory
-    },
-    feedback::packets::{FeedbackPacket, PliPacket, FirPacket, RembPacket},
-    feedback::algorithms::{GoogleCongestionControl, SimpleBandwidthEstimator, QualityAssessment, QualityMetrics, PacketFeedback},
     api::common::stats::StreamStats,
+    feedback::algorithms::{
+        GoogleCongestionControl, PacketFeedback, QualityAssessment, QualityMetrics,
+        SimpleBandwidthEstimator,
+    },
+    feedback::packets::{FeedbackPacket, FirPacket, PliPacket, RembPacket},
+    feedback::{
+        CongestionState, FeedbackConfig, FeedbackContext, FeedbackDecision, FeedbackGenerator,
+        FeedbackGeneratorFactory, FeedbackPriority, QualityDegradation,
+    },
+    Result, RtpSsrc,
 };
-use std::time::{Instant, Duration};
-use tracing::{info, debug, warn};
+use std::time::{Duration, Instant};
+use tracing::{debug, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,11 +60,13 @@ async fn demonstrate_feedback_packets() -> Result<()> {
     let pli = PliPacket::new(sender_ssrc, media_ssrc);
     let pli_bytes = pli.serialize()?;
     info!("✅ PLI packet created: {} bytes", pli_bytes.len());
-    
+
     // Parse it back to verify
     if let Ok(FeedbackPacket::Pli(parsed_pli)) = FeedbackPacket::parse_from_rtcp(&pli_bytes) {
-        debug!("PLI round-trip successful: sender={:08x}, media={:08x}", 
-               parsed_pli.sender_ssrc, parsed_pli.media_ssrc);
+        debug!(
+            "PLI round-trip successful: sender={:08x}, media={:08x}",
+            parsed_pli.sender_ssrc, parsed_pli.media_ssrc
+        );
     } else {
         warn!("PLI round-trip failed");
     }
@@ -70,18 +75,26 @@ async fn demonstrate_feedback_packets() -> Result<()> {
     info!("Creating FIR packet...");
     let fir = FirPacket::new(sender_ssrc, media_ssrc, 42);
     let fir_bytes = fir.serialize()?;
-    info!("✅ FIR packet created: {} bytes, sequence: 42", fir_bytes.len());
+    info!(
+        "✅ FIR packet created: {} bytes, sequence: 42",
+        fir_bytes.len()
+    );
 
     // 3. Receiver Estimated Max Bitrate (REMB)
     info!("Creating REMB packet...");
     let remb = RembPacket::new(sender_ssrc, 2_000_000, vec![media_ssrc]); // 2 Mbps
     let remb_bytes = remb.serialize()?;
-    info!("✅ REMB packet created: {} bytes, bitrate: 2 Mbps", remb_bytes.len());
-    
+    info!(
+        "✅ REMB packet created: {} bytes, bitrate: 2 Mbps",
+        remb_bytes.len()
+    );
+
     // Parse REMB back to verify bitrate encoding
     if let Ok(FeedbackPacket::Remb(parsed_remb)) = FeedbackPacket::parse_from_rtcp(&remb_bytes) {
-        debug!("REMB round-trip successful: bitrate={} bps, SSRCs: {:?}", 
-               parsed_remb.bitrate_bps, parsed_remb.ssrcs);
+        debug!(
+            "REMB round-trip successful: bitrate={} bps, SSRCs: {:?}",
+            parsed_remb.bitrate_bps, parsed_remb.ssrcs
+        );
     } else {
         warn!("REMB round-trip failed");
     }
@@ -102,16 +115,37 @@ async fn demonstrate_feedback_generators() -> Result<()> {
     let config = FeedbackConfig::default();
 
     info!("Feedback configuration:");
-    info!("  PLI enabled: {}, interval: {}ms", config.enable_pli, config.pli_interval_ms);
-    info!("  FIR enabled: {}, interval: {}ms", config.enable_fir, config.fir_interval_ms);
-    info!("  REMB enabled: {}, max rate: {} pps", config.enable_remb, config.max_feedback_rate);
+    info!(
+        "  PLI enabled: {}, interval: {}ms",
+        config.enable_pli, config.pli_interval_ms
+    );
+    info!(
+        "  FIR enabled: {}, interval: {}ms",
+        config.enable_fir, config.fir_interval_ms
+    );
+    info!(
+        "  REMB enabled: {}, max rate: {} pps",
+        config.enable_remb, config.max_feedback_rate
+    );
 
     // Test different generators
     let generators = [
-        ("Loss Generator", FeedbackGeneratorFactory::create_loss_generator()),
-        ("Congestion Generator", FeedbackGeneratorFactory::create_congestion_generator()),
-        ("Quality Generator", FeedbackGeneratorFactory::create_quality_generator()),
-        ("Comprehensive Generator", FeedbackGeneratorFactory::create_comprehensive_generator()),
+        (
+            "Loss Generator",
+            FeedbackGeneratorFactory::create_loss_generator(),
+        ),
+        (
+            "Congestion Generator",
+            FeedbackGeneratorFactory::create_congestion_generator(),
+        ),
+        (
+            "Quality Generator",
+            FeedbackGeneratorFactory::create_quality_generator(),
+        ),
+        (
+            "Comprehensive Generator",
+            FeedbackGeneratorFactory::create_comprehensive_generator(),
+        ),
     ];
 
     for (name, mut generator) in generators {
@@ -132,26 +166,43 @@ async fn demonstrate_feedback_generators() -> Result<()> {
 
             // Generate feedback
             let decision = generator.generate_feedback(&context, &config)?;
-            
+
             match decision {
                 FeedbackDecision::None => {
                     debug!("  Scenario {}: No feedback needed", scenario);
                 }
                 FeedbackDecision::Pli { priority, reason } => {
-                    info!("  Scenario {}: PLI recommended (priority: {:?}, reason: {:?})", 
-                          scenario, priority, reason);
+                    info!(
+                        "  Scenario {}: PLI recommended (priority: {:?}, reason: {:?})",
+                        scenario, priority, reason
+                    );
                 }
-                FeedbackDecision::Fir { priority, sequence_number } => {
-                    info!("  Scenario {}: FIR recommended (priority: {:?}, seq: {})", 
-                          scenario, priority, sequence_number);
+                FeedbackDecision::Fir {
+                    priority,
+                    sequence_number,
+                } => {
+                    info!(
+                        "  Scenario {}: FIR recommended (priority: {:?}, seq: {})",
+                        scenario, priority, sequence_number
+                    );
                 }
-                FeedbackDecision::Remb { bitrate_bps, confidence } => {
-                    info!("  Scenario {}: REMB recommended ({:.1} Mbps, confidence: {:.1}%)", 
-                          scenario, bitrate_bps as f32 / 1_000_000.0, confidence * 100.0);
+                FeedbackDecision::Remb {
+                    bitrate_bps,
+                    confidence,
+                } => {
+                    info!(
+                        "  Scenario {}: REMB recommended ({:.1} Mbps, confidence: {:.1}%)",
+                        scenario,
+                        bitrate_bps as f32 / 1_000_000.0,
+                        confidence * 100.0
+                    );
                 }
                 FeedbackDecision::Multiple(decisions) => {
-                    info!("  Scenario {}: Multiple feedback recommended ({} types)", 
-                          scenario, decisions.len());
+                    info!(
+                        "  Scenario {}: Multiple feedback recommended ({} types)",
+                        scenario,
+                        decisions.len()
+                    );
                 }
             }
 
@@ -176,8 +227,12 @@ async fn demonstrate_bandwidth_estimation() -> Result<()> {
     let feedback_packets = create_transport_feedback();
     for (i, batch) in feedback_packets.chunks(5).enumerate() {
         let estimated_bandwidth = gcc.update_with_feedback(batch);
-        info!("  Batch {}: Estimated bandwidth: {:.1} Mbps (state: {:?})", 
-              i + 1, estimated_bandwidth as f32 / 1_000_000.0, gcc.state());
+        info!(
+            "  Batch {}: Estimated bandwidth: {:.1} Mbps (state: {:?})",
+            i + 1,
+            estimated_bandwidth as f32 / 1_000_000.0,
+            gcc.state()
+        );
     }
 
     // Test 2: Simple Bandwidth Estimator
@@ -186,22 +241,24 @@ async fn demonstrate_bandwidth_estimation() -> Result<()> {
 
     for scenario in 1..=5 {
         let (bytes, window_ms, rtt_ms, loss_rate) = match scenario {
-            1 => (125_000, 1000, 50, 0.0),    // Good conditions: 1 Mbps
-            2 => (100_000, 1000, 100, 0.01),  // Light congestion
-            3 => (75_000, 1000, 200, 0.03),   // Moderate congestion
-            4 => (50_000, 1000, 400, 0.08),   // Heavy congestion
-            5 => (150_000, 1000, 30, 0.0),    // Recovery
+            1 => (125_000, 1000, 50, 0.0),   // Good conditions: 1 Mbps
+            2 => (100_000, 1000, 100, 0.01), // Light congestion
+            3 => (75_000, 1000, 200, 0.03),  // Moderate congestion
+            4 => (50_000, 1000, 400, 0.08),  // Heavy congestion
+            5 => (150_000, 1000, 30, 0.0),   // Recovery
             _ => unreachable!(),
         };
 
         simple.update(bytes, window_ms, rtt_ms, loss_rate);
-        
-        info!("  Scenario {}: Est: {:.1} Mbps, Confidence: {:.1}% (RTT: {}ms, Loss: {:.1}%)",
-              scenario, 
-              simple.current_estimate() as f32 / 1_000_000.0,
-              simple.confidence() * 100.0,
-              rtt_ms,
-              loss_rate * 100.0);
+
+        info!(
+            "  Scenario {}: Est: {:.1} Mbps, Confidence: {:.1}% (RTT: {}ms, Loss: {:.1}%)",
+            scenario,
+            simple.current_estimate() as f32 / 1_000_000.0,
+            simple.confidence() * 100.0,
+            rtt_ms,
+            loss_rate * 100.0
+        );
     }
 
     info!("📊 Bandwidth estimation tests completed");
@@ -215,11 +272,51 @@ async fn demonstrate_quality_assessment() -> Result<()> {
     let qa = QualityAssessment::default();
 
     let test_scenarios = [
-        ("Excellent", QualityMetrics { loss_rate: 0.0, jitter_ms: 5.0, rtt_ms: 20.0, bandwidth_utilization: 0.8 }),
-        ("Good", QualityMetrics { loss_rate: 0.005, jitter_ms: 15.0, rtt_ms: 50.0, bandwidth_utilization: 0.9 }),
-        ("Fair", QualityMetrics { loss_rate: 0.02, jitter_ms: 30.0, rtt_ms: 100.0, bandwidth_utilization: 0.95 }),
-        ("Poor", QualityMetrics { loss_rate: 0.05, jitter_ms: 60.0, rtt_ms: 200.0, bandwidth_utilization: 1.0 }),
-        ("Critical", QualityMetrics { loss_rate: 0.15, jitter_ms: 120.0, rtt_ms: 500.0, bandwidth_utilization: 1.0 }),
+        (
+            "Excellent",
+            QualityMetrics {
+                loss_rate: 0.0,
+                jitter_ms: 5.0,
+                rtt_ms: 20.0,
+                bandwidth_utilization: 0.8,
+            },
+        ),
+        (
+            "Good",
+            QualityMetrics {
+                loss_rate: 0.005,
+                jitter_ms: 15.0,
+                rtt_ms: 50.0,
+                bandwidth_utilization: 0.9,
+            },
+        ),
+        (
+            "Fair",
+            QualityMetrics {
+                loss_rate: 0.02,
+                jitter_ms: 30.0,
+                rtt_ms: 100.0,
+                bandwidth_utilization: 0.95,
+            },
+        ),
+        (
+            "Poor",
+            QualityMetrics {
+                loss_rate: 0.05,
+                jitter_ms: 60.0,
+                rtt_ms: 200.0,
+                bandwidth_utilization: 1.0,
+            },
+        ),
+        (
+            "Critical",
+            QualityMetrics {
+                loss_rate: 0.15,
+                jitter_ms: 120.0,
+                rtt_ms: 500.0,
+                bandwidth_utilization: 1.0,
+            },
+        ),
     ];
 
     for (label, metrics) in &test_scenarios {
@@ -227,12 +324,18 @@ async fn demonstrate_quality_assessment() -> Result<()> {
         let mos_score = qa.quality_to_mos(quality_score);
         let needs_feedback = qa.requires_feedback(quality_score, 0.6);
 
-        info!("  {}: Quality={:.2}, MOS={:.1}, Feedback needed: {}", 
-              label, quality_score, mos_score, needs_feedback);
-        
-        debug!("    Metrics: Loss={:.1}%, Jitter={:.1}ms, RTT={:.1}ms, BW Util={:.1}%",
-               metrics.loss_rate * 100.0, metrics.jitter_ms, metrics.rtt_ms, 
-               metrics.bandwidth_utilization * 100.0);
+        info!(
+            "  {}: Quality={:.2}, MOS={:.1}, Feedback needed: {}",
+            label, quality_score, mos_score, needs_feedback
+        );
+
+        debug!(
+            "    Metrics: Loss={:.1}%, Jitter={:.1}ms, RTT={:.1}ms, BW Util={:.1}%",
+            metrics.loss_rate * 100.0,
+            metrics.jitter_ms,
+            metrics.rtt_ms,
+            metrics.bandwidth_utilization * 100.0
+        );
     }
 
     info!("🎯 Quality assessment tests completed");
@@ -241,13 +344,13 @@ async fn demonstrate_quality_assessment() -> Result<()> {
 
 /// Create test statistics for different network scenarios
 fn create_test_statistics(scenario: u32) -> StreamStats {
-    use rvoip_rtp_core::api::common::stats::Direction;
     use rvoip_rtp_core::api::common::frame::MediaFrameType;
+    use rvoip_rtp_core::api::common::stats::Direction;
     use rvoip_rtp_core::api::common::stats::QualityLevel;
     use std::net::SocketAddr;
-    
+
     let remote_addr = "127.0.0.1:5000".parse::<SocketAddr>().unwrap();
-    
+
     match scenario {
         1 => StreamStats {
             direction: Direction::Inbound,
@@ -272,7 +375,7 @@ fn create_test_statistics(scenario: u32) -> StreamStats {
             media_type: MediaFrameType::Video,
             packet_count: 1000,
             byte_count: 1_200_000,
-            packets_lost: 10,  // 1% loss
+            packets_lost: 10, // 1% loss
             fraction_lost: 0.01,
             jitter_ms: 25.0,
             rtt_ms: Some(100.0),
@@ -289,7 +392,7 @@ fn create_test_statistics(scenario: u32) -> StreamStats {
             media_type: MediaFrameType::Video,
             packet_count: 1000,
             byte_count: 1_200_000,
-            packets_lost: 50,  // 5% loss
+            packets_lost: 50, // 5% loss
             fraction_lost: 0.05,
             jitter_ms: 60.0,
             rtt_ms: Some(200.0),
@@ -341,18 +444,18 @@ fn create_test_statistics(scenario: u32) -> StreamStats {
 fn create_transport_feedback() -> Vec<PacketFeedback> {
     let mut feedback = Vec::new();
     let base_time = 1000i64;
-    
+
     // Simulate 20 packets with varying delays
     for i in 0..20 {
         let send_time = base_time + (i * 20); // 20ms intervals
         let arrival_delay = match i {
-            0..=5 => 0,      // Good network
-            6..=10 => i * 2, // Increasing delay
-            11..=15 => 20,   // High but stable delay
+            0..=5 => 0,             // Good network
+            6..=10 => i * 2,        // Increasing delay
+            11..=15 => 20,          // High but stable delay
             _ => 20 - (i - 15) * 5, // Improving conditions
         };
         let arrival_time = send_time + arrival_delay;
-        
+
         feedback.push(PacketFeedback {
             sequence_number: i as u16,
             send_time_ms: send_time,
@@ -360,6 +463,6 @@ fn create_transport_feedback() -> Vec<PacketFeedback> {
             size_bytes: 1200, // Typical RTP packet size
         });
     }
-    
+
     feedback
-} 
+}

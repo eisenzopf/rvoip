@@ -3,12 +3,14 @@
 //! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_closure_server
 //! Or with client:  ./examples/callbackpeer/closure/run.sh
 
-use rvoip_session_core::{CallbackPeer, CallHandlerDecision, Config};
+use rvoip_session_core::{CallHandlerDecision, CallbackPeer, Config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let peer = CallbackPeer::from_fn(Config::local("gatekeeper", 5060), |call| {

@@ -1,5 +1,5 @@
 //! Message extraction utilities for transaction-core
-//! 
+//!
 //! This module provides functions for extracting various pieces of information
 //! from SIP messages such as branch parameters, Call-IDs, CSeq values, etc.
 
@@ -14,22 +14,31 @@ pub fn extract_branch(message: &Message) -> Option<String> {
 
 /// Extract the Call-ID value from a message
 pub fn extract_call_id(message: &Message) -> Option<String> {
-    message
-        .header(&HeaderName::CallId)
-        .and_then(|h| if let TypedHeader::CallId(cid) = h { Some(cid.to_string()) } else { None })
+    message.header(&HeaderName::CallId).and_then(|h| {
+        if let TypedHeader::CallId(cid) = h {
+            Some(cid.to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Extract the CSeq sequence number and method from a message
 pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
-    message
-        .header(&HeaderName::CSeq)
-        .and_then(|h| if let TypedHeader::CSeq(cseq) = h { Some((cseq.sequence(), cseq.method().clone())) } else { None })
+    message.header(&HeaderName::CSeq).and_then(|h| {
+        if let TypedHeader::CSeq(cseq) = h {
+            Some((cseq.sequence(), cseq.method().clone()))
+        } else {
+            None
+        }
+    })
 }
 
 /// Extract a potential client transaction ID branch from a response.
 /// Used by the manager to find the matching client transaction.
 pub fn extract_client_branch_from_response(response: &Response) -> Option<String> {
-    response.first_via()
+    response
+        .first_via()
         .and_then(|via| via.branch().map(|b| b.to_string()))
 }
 
@@ -49,4 +58,4 @@ pub fn extract_destination(_transaction_id: &str) -> Option<std::net::SocketAddr
     tracing::debug!("WARNING: Using placeholder extract_destination. This function is deprecated and returns None.");
     None
     // Some(std::net::SocketAddr::from(([127, 0, 0, 1], 5071)))
-} 
+}

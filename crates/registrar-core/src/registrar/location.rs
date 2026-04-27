@@ -1,9 +1,9 @@
 //! Location service for mapping users to contact addresses
 
+use crate::error::{RegistrarError, Result};
+use crate::types::ContactInfo;
 use dashmap::DashMap;
 use std::sync::Arc;
-use crate::types::ContactInfo;
-use crate::error::{RegistrarError, Result};
 
 /// Location service for finding where users can be reached
 pub struct LocationService {
@@ -17,7 +17,7 @@ impl LocationService {
             locations: Arc::new(DashMap::new()),
         }
     }
-    
+
     /// Add a binding between user and contact
     pub async fn add_binding(&self, user_id: &str, contact: ContactInfo) -> Result<()> {
         self.locations
@@ -28,10 +28,10 @@ impl LocationService {
                 contacts.push(contact.clone());
             })
             .or_insert(vec![contact]);
-        
+
         Ok(())
     }
-    
+
     /// Remove a binding
     pub async fn remove_binding(&self, user_id: &str, contact_uri: &str) -> Result<()> {
         if let Some(mut entry) = self.locations.get_mut(user_id) {
@@ -45,7 +45,7 @@ impl LocationService {
             Err(RegistrarError::UserNotFound(user_id.to_string()))
         }
     }
-    
+
     /// Find all contacts for a user
     pub async fn find_contacts(&self, user_id: &str) -> Result<Vec<ContactInfo>> {
         self.locations
@@ -53,7 +53,7 @@ impl LocationService {
             .map(|entry| entry.clone())
             .ok_or_else(|| RegistrarError::UserNotFound(user_id.to_string()))
     }
-    
+
     /// Reverse lookup - find user by contact URI
     pub async fn find_user(&self, contact_uri: &str) -> Option<String> {
         for entry in self.locations.iter() {
@@ -63,7 +63,7 @@ impl LocationService {
         }
         None
     }
-    
+
     /// Clear all locations for a user
     pub async fn clear_user(&self, user_id: &str) -> Result<()> {
         self.locations.remove(user_id);

@@ -4,28 +4,27 @@
 //! It coordinates codec management, session management, audio processing,
 //! and integration with other crates.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
-use crate::error::{Result, Error};
+use super::config::{AudioCodecCapability, EngineCapabilities, MediaEngineConfig};
+use super::lifecycle::{EngineState, LifecycleManager};
+use crate::error::{Error, Result};
 use crate::types::{DialogId, MediaSessionId, PayloadType, SampleRate};
-use super::config::{MediaEngineConfig, EngineCapabilities, AudioCodecCapability};
-use super::lifecycle::{LifecycleManager, EngineState};
 
 // NEW: Performance library imports
 use crate::performance::{
-    pool::{AudioFramePool, PoolConfig},
     metrics::PerformanceMetrics,
+    pool::{AudioFramePool, PoolConfig},
 };
 
 // NEW: Audio processing imports
 use crate::processing::audio::{
-    AudioProcessor, AudioProcessingConfig,
-    AdvancedVoiceActivityDetector, AdvancedVadConfig,
-    AdvancedAutomaticGainControl, AdvancedAgcConfig,
-    AdvancedAcousticEchoCanceller, AdvancedAecConfig,
+    AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAgcConfig,
+    AdvancedAutomaticGainControl, AdvancedVadConfig, AdvancedVoiceActivityDetector,
+    AudioProcessingConfig, AudioProcessor,
 };
 
 /// Performance optimization level for media sessions
@@ -54,7 +53,7 @@ pub struct MediaSessionParams {
     pub enable_processing: bool,
     /// Custom session configuration
     pub custom_config: Option<serde_json::Value>,
-    
+
     // NEW: Advanced processing configuration
     /// Audio processing configuration for this session
     pub audio_processing_config: AudioProcessingConfig,
@@ -83,50 +82,50 @@ impl MediaSessionParams {
             performance_optimization_level: PerformanceLevel::default(),
         }
     }
-    
+
     /// Set preferred codec
     pub fn with_preferred_codec(mut self, payload_type: PayloadType) -> Self {
         self.preferred_codec = Some(payload_type);
         self
     }
-    
+
     /// Enable/disable audio processing
     pub fn with_processing_enabled(mut self, enabled: bool) -> Self {
         self.enable_processing = enabled;
         self
     }
-    
+
     /// Configure advanced audio processing
     pub fn with_advanced_processing(mut self, config: AudioProcessingConfig) -> Self {
         self.audio_processing_config = config;
         self
     }
-    
+
     /// Enable advanced echo cancellation
     pub fn with_advanced_aec(mut self, enabled: bool) -> Self {
         self.enable_advanced_echo_cancellation = enabled;
         self.audio_processing_config.use_advanced_aec = enabled;
         self
     }
-    
+
     /// Enable multi-band AGC
     pub fn with_multi_band_agc(mut self, enabled: bool) -> Self {
         self.enable_multi_band_agc = enabled;
         self.audio_processing_config.use_advanced_agc = enabled;
         self
     }
-    
+
     /// Enable spectral VAD
     pub fn with_spectral_vad(mut self, enabled: bool) -> Self {
         self.enable_spectral_vad = enabled;
         self.audio_processing_config.use_advanced_vad = enabled;
         self
     }
-    
+
     /// Set performance optimization level
     pub fn with_performance_level(mut self, level: PerformanceLevel) -> Self {
         self.performance_optimization_level = level;
-        
+
         // Update audio processing config based on performance level
         match level {
             PerformanceLevel::Basic => {
@@ -148,7 +147,7 @@ impl MediaSessionParams {
                 self.audio_processing_config.frame_pool_size = 32;
             }
         }
-        
+
         self
     }
 }
@@ -170,7 +169,7 @@ impl AdvancedProcessorFactory {
             advanced_config: None,
         }
     }
-    
+
     /// Create a new processor factory with advanced configuration
     pub fn new_with_config(config: super::config::AdvancedProcessingConfig) -> Self {
         Self {
@@ -178,7 +177,7 @@ impl AdvancedProcessorFactory {
             advanced_config: Some(config),
         }
     }
-    
+
     /// Create a processor set for a session
     pub async fn create_processor_set(
         &self,
@@ -194,16 +193,20 @@ impl AdvancedProcessorFactory {
 
         if !use_advanced {
             // Return empty processor set if advanced processing is disabled
-            return Ok(AdvancedProcessorSet { vad: None, agc: None, aec: None });
+            return Ok(AdvancedProcessorSet {
+                vad: None,
+                agc: None,
+                aec: None,
+            });
         }
-        
+
         let vad = if config.use_advanced_vad && config.enable_vad {
             let vad_config = if let Some(factory_config) = &self.advanced_config {
                 factory_config.advanced_vad_config.clone()
             } else {
                 config.advanced_vad_config.clone()
             };
-            
+
             match AdvancedVoiceActivityDetector::new(vad_config, sample_rate) {
                 Ok(detector) => Some(Arc::new(RwLock::new(detector))),
                 Err(e) => {
@@ -222,14 +225,14 @@ impl AdvancedProcessorFactory {
         } else {
             None
         };
-        
+
         let agc = if config.use_advanced_agc && config.enable_agc {
             let agc_config = if let Some(factory_config) = &self.advanced_config {
                 factory_config.advanced_agc_config.clone()
             } else {
                 config.advanced_agc_config.clone()
             };
-            
+
             match AdvancedAutomaticGainControl::new(agc_config, sample_rate) {
                 Ok(processor) => Some(Arc::new(RwLock::new(processor))),
                 Err(e) => {
@@ -248,14 +251,14 @@ impl AdvancedProcessorFactory {
         } else {
             None
         };
-        
+
         let aec = if config.use_advanced_aec && config.enable_aec {
             let aec_config = if let Some(factory_config) = &self.advanced_config {
                 factory_config.advanced_aec_config.clone()
             } else {
                 config.advanced_aec_config.clone()
             };
-            
+
             match AdvancedAcousticEchoCanceller::new(aec_config) {
                 Ok(processor) => Some(Arc::new(RwLock::new(processor))),
                 Err(e) => {
@@ -274,10 +277,10 @@ impl AdvancedProcessorFactory {
         } else {
             None
         };
-        
+
         Ok(AdvancedProcessorSet { vad, agc, aec })
     }
-    
+
     /// Get the advanced processing configuration
     pub fn get_advanced_config(&self) -> Option<&super::config::AdvancedProcessingConfig> {
         self.advanced_config.as_ref()
@@ -307,14 +310,14 @@ pub struct MediaSessionHandle {
 impl MediaSessionHandle {
     /// Create a new session handle
     fn new(session_id: MediaSessionId, engine: Arc<MediaEngine>) -> Self {
-        Self { 
-            session_id, 
+        Self {
+            session_id,
             engine,
             audio_processor: None,
             performance_metrics: None,
         }
     }
-    
+
     /// Create a new session handle with advanced processing
     fn new_with_advanced_processing(
         session_id: MediaSessionId,
@@ -329,25 +332,25 @@ impl MediaSessionHandle {
             performance_metrics: Some(performance_metrics),
         }
     }
-    
+
     /// Get the session ID
     pub fn id(&self) -> &MediaSessionId {
         &self.session_id
     }
-    
+
     /// Get session statistics with performance metrics
     pub async fn get_stats(&self) -> Result<serde_json::Value> {
         let mut stats = serde_json::json!({
             "session_id": self.session_id.as_str(),
             "status": "active"
         });
-        
+
         // Add audio processor stats if available
         if let Some(processor) = &self.audio_processor {
             let audio_stats = processor.get_stats().await;
             let performance_metrics = processor.get_performance_metrics().await;
             let pool_stats = processor.get_pool_stats();
-            
+
             stats["audio_processing"] = serde_json::json!({
                 "frames_processed": audio_stats.frames_processed,
                 "total_processing_time_us": audio_stats.total_processing_time_us,
@@ -369,15 +372,15 @@ impl MediaSessionHandle {
                 "advanced_processors_enabled": processor.are_advanced_processors_enabled(),
             });
         }
-        
+
         Ok(stats)
     }
-    
+
     /// Get audio processor for this session
     pub fn audio_processor(&self) -> Option<&Arc<AudioProcessor>> {
         self.audio_processor.as_ref()
     }
-    
+
     /// Get performance metrics for this session
     pub async fn get_performance_metrics(&self) -> Option<PerformanceMetrics> {
         if let Some(metrics) = &self.performance_metrics {
@@ -393,16 +396,16 @@ impl MediaSessionHandle {
 pub struct MediaEngine {
     /// Engine configuration
     config: MediaEngineConfig,
-    
+
     /// Lifecycle manager
     lifecycle: Arc<LifecycleManager>,
-    
+
     /// Active media sessions
     sessions: RwLock<HashMap<MediaSessionId, MediaSessionHandle>>,
-    
+
     /// Engine capabilities
     capabilities: EngineCapabilities,
-    
+
     // NEW: Performance infrastructure
     /// Global frame pool for all sessions
     global_frame_pool: Arc<AudioFramePool>,
@@ -412,7 +415,6 @@ pub struct MediaEngine {
     session_pools: RwLock<HashMap<MediaSessionId, Arc<AudioFramePool>>>,
     /// Factory for creating advanced processors
     advanced_processor_factory: Arc<AdvancedProcessorFactory>,
-    
     // TODO: Add component managers when implemented
     // codec_manager: Arc<CodecManager>,
     // session_manager: Arc<SessionManager>,
@@ -423,15 +425,15 @@ impl MediaEngine {
     /// Create a new MediaEngine with the given configuration
     pub async fn new(config: MediaEngineConfig) -> Result<Arc<Self>> {
         info!("Creating new MediaEngine with enhanced configuration");
-        
+
         // Create engine capabilities based on config
         let capabilities = Self::build_capabilities(&config);
-        
+
         // Initialize global frame pool based on performance config
         let global_pool_config = PoolConfig {
-            initial_size: if config.performance.enable_frame_pooling { 
-                config.performance.frame_pool_size 
-            } else { 
+            initial_size: if config.performance.enable_frame_pooling {
+                config.performance.frame_pool_size
+            } else {
                 8 // Minimal pool if pooling disabled
             },
             max_size: if config.performance.enable_frame_pooling {
@@ -454,20 +456,20 @@ impl MediaEngine {
             },
         };
         let global_frame_pool = AudioFramePool::new(global_pool_config);
-        
+
         // Initialize performance infrastructure based on config
         let performance_metrics = Arc::new(RwLock::new(
             if config.performance.enable_performance_metrics {
                 PerformanceMetrics::new()
             } else {
                 PerformanceMetrics::disabled() // Create disabled metrics collector
-            }
+            },
         ));
         let session_pools = RwLock::new(HashMap::new());
         let advanced_processor_factory = Arc::new(AdvancedProcessorFactory::new_with_config(
-            config.advanced_processing.clone()
+            config.advanced_processing.clone(),
         ));
-        
+
         let engine = Arc::new(Self {
             config,
             lifecycle: Arc::new(LifecycleManager::new()),
@@ -479,16 +481,16 @@ impl MediaEngine {
             session_pools,
             advanced_processor_factory,
         });
-        
+
         debug!("MediaEngine created with performance optimizations: zero_copy={}, simd={}, pooling={}, advanced_processors={}",
                engine.config.performance.enable_zero_copy,
                engine.config.performance.enable_simd_optimizations,
                engine.config.performance.enable_frame_pooling,
                engine.config.advanced_processing.use_advanced_processors);
-        
+
         Ok(engine)
     }
-    
+
     /// Start the MediaEngine
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         info!("Starting MediaEngine");
@@ -496,30 +498,30 @@ impl MediaEngine {
         info!("MediaEngine started and ready");
         Ok(())
     }
-    
+
     /// Stop the MediaEngine
     pub async fn stop(&self) -> Result<()> {
         info!("Stopping MediaEngine");
-        
+
         // Close all active sessions first
         self.close_all_sessions().await?;
-        
+
         // Then stop the engine
         self.lifecycle.stop().await?;
         info!("MediaEngine stopped");
         Ok(())
     }
-    
+
     /// Get the current engine state
     pub async fn state(&self) -> EngineState {
         self.lifecycle.state().await
     }
-    
+
     /// Check if the engine is running
     pub async fn is_running(&self) -> bool {
         self.lifecycle.is_running().await
     }
-    
+
     /// Create a new media session for a SIP dialog (legacy method)
     pub async fn create_media_session(
         self: &Arc<Self>,
@@ -530,9 +532,9 @@ impl MediaEngine {
         if !self.is_running().await {
             return Err(Error::config("MediaEngine is not running"));
         }
-        
+
         let session_id = MediaSessionId::from_dialog(&dialog_id);
-        
+
         // Check if session already exists
         {
             let sessions = self.sessions.read().await;
@@ -540,23 +542,23 @@ impl MediaEngine {
                 return Err(Error::session_not_found(session_id.as_str()));
             }
         }
-        
+
         info!("Creating media session for dialog: {}", dialog_id);
-        
+
         // TODO: Create actual MediaSession with components
         // For now, create a placeholder handle
         let handle = MediaSessionHandle::new(session_id.clone(), self.clone());
-        
+
         // Store the session
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(session_id.clone(), handle.clone());
         }
-        
+
         debug!("Media session created: {}", session_id);
         Ok(handle)
     }
-    
+
     /// Create a new media session with advanced v2 processors and performance optimizations
     pub async fn create_media_session_v2(
         self: &Arc<Self>,
@@ -567,9 +569,9 @@ impl MediaEngine {
         if !self.is_running().await {
             return Err(Error::config("MediaEngine is not running"));
         }
-        
+
         let session_id = MediaSessionId::from_dialog(&dialog_id);
-        
+
         // Check if session already exists
         {
             let sessions = self.sessions.read().await;
@@ -577,20 +579,22 @@ impl MediaEngine {
                 return Err(Error::session_not_found(session_id.as_str()));
             }
         }
-        
-        info!("Creating advanced media session for dialog: {} with performance level: {:?}", 
-              dialog_id, params.performance_optimization_level);
-        
+
+        info!(
+            "Creating advanced media session for dialog: {} with performance level: {:?}",
+            dialog_id, params.performance_optimization_level
+        );
+
         // 1. Create session-specific performance pool
         let session_pool = self.create_session_pool(&session_id, &params).await?;
-        
+
         // 2. Create audio processor with advanced configuration
         let audio_processor = AudioProcessor::new(params.audio_processing_config.clone())?;
         let audio_processor = Arc::new(audio_processor);
-        
+
         // 3. Set up performance monitoring for the session
         let session_metrics = Arc::new(RwLock::new(PerformanceMetrics::new()));
-        
+
         // 4. Create session handle with advanced capabilities
         let handle = MediaSessionHandle::new_with_advanced_processing(
             session_id.clone(),
@@ -598,21 +602,30 @@ impl MediaEngine {
             audio_processor,
             session_metrics,
         );
-        
+
         // Store the session
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(session_id.clone(), handle.clone());
         }
-        
-        debug!("Advanced media session created: {} with advanced processors: VAD={}, AGC={}, AEC={}",
-               session_id, params.enable_spectral_vad, params.enable_multi_band_agc, params.enable_advanced_echo_cancellation);
-        
+
+        debug!(
+            "Advanced media session created: {} with advanced processors: VAD={}, AGC={}, AEC={}",
+            session_id,
+            params.enable_spectral_vad,
+            params.enable_multi_band_agc,
+            params.enable_advanced_echo_cancellation
+        );
+
         Ok(handle)
     }
-    
+
     /// Create session-specific performance pool
-    async fn create_session_pool(&self, session_id: &MediaSessionId, params: &MediaSessionParams) -> Result<Arc<AudioFramePool>> {
+    async fn create_session_pool(
+        &self,
+        session_id: &MediaSessionId,
+        params: &MediaSessionParams,
+    ) -> Result<Arc<AudioFramePool>> {
         let pool_config = match params.performance_optimization_level {
             PerformanceLevel::Basic => PoolConfig {
                 initial_size: 8,
@@ -636,35 +649,35 @@ impl MediaEngine {
                 samples_per_frame: 160,
             },
         };
-        
+
         let session_pool = AudioFramePool::new(pool_config);
-        
+
         // Store the pool for later cleanup
         {
             let mut pools = self.session_pools.write().await;
             pools.insert(session_id.clone(), session_pool.clone());
         }
-        
+
         Ok(session_pool)
     }
-    
+
     /// Destroy a media session
     pub async fn destroy_media_session(&self, dialog_id: DialogId) -> Result<()> {
         let session_id = MediaSessionId::from_dialog(&dialog_id);
-        
+
         info!("Destroying media session for dialog: {}", dialog_id);
-        
+
         // Remove from active sessions
         let session_handle = {
             let mut sessions = self.sessions.write().await;
             sessions.remove(&session_id)
         };
-        
+
         if session_handle.is_none() {
             warn!("Attempted to destroy non-existent session: {}", session_id);
             return Err(Error::session_not_found(session_id.as_str()));
         }
-        
+
         // Clean up session-specific resources
         {
             let mut pools = self.session_pools.write().await;
@@ -674,51 +687,57 @@ impl MediaEngine {
                 debug!("Session pool cleared for: {}", session_id);
             }
         }
-        
-        debug!("Media session destroyed with resource cleanup: {}", session_id);
+
+        debug!(
+            "Media session destroyed with resource cleanup: {}",
+            session_id
+        );
         Ok(())
     }
-    
+
     /// Get supported codec capabilities
     pub fn get_supported_codecs(&self) -> Vec<AudioCodecCapability> {
         self.capabilities.audio_codecs.clone()
     }
-    
+
     /// Get complete engine capabilities
     pub fn get_media_capabilities(&self) -> &EngineCapabilities {
         &self.capabilities
     }
-    
+
     /// Get number of active sessions
     pub async fn session_count(&self) -> usize {
         self.sessions.read().await.len()
     }
-    
+
     /// Get global performance metrics
     pub async fn get_global_performance_metrics(&self) -> PerformanceMetrics {
         self.performance_metrics.read().await.clone()
     }
-    
+
     /// Get global frame pool statistics
     pub fn get_global_pool_stats(&self) -> crate::performance::pool::PoolStats {
         self.global_frame_pool.get_stats()
     }
-    
+
     /// Get session pool statistics
-    pub async fn get_session_pool_stats(&self) -> HashMap<MediaSessionId, crate::performance::pool::PoolStats> {
+    pub async fn get_session_pool_stats(
+        &self,
+    ) -> HashMap<MediaSessionId, crate::performance::pool::PoolStats> {
         let pools = self.session_pools.read().await;
-        pools.iter()
+        pools
+            .iter()
             .map(|(id, pool)| (id.clone(), pool.get_stats()))
             .collect()
     }
-    
+
     /// Get comprehensive engine performance report
     pub async fn get_performance_report(&self) -> serde_json::Value {
         let global_metrics = self.get_global_performance_metrics().await;
         let global_pool_stats = self.get_global_pool_stats();
         let session_pool_stats = self.get_session_pool_stats().await;
         let session_count = self.session_count().await;
-        
+
         serde_json::json!({
             "engine": {
                 "session_count": session_count,
@@ -748,34 +767,37 @@ impl MediaEngine {
             }
         })
     }
-    
+
     /// Close all active sessions
     async fn close_all_sessions(&self) -> Result<()> {
         let session_ids: Vec<MediaSessionId> = {
             let sessions = self.sessions.read().await;
             sessions.keys().cloned().collect()
         };
-        
+
         for session_id in session_ids {
             // TODO: Gracefully close each session
             debug!("Closing session: {}", session_id);
         }
-        
+
         // Clear all sessions
         {
             let mut sessions = self.sessions.write().await;
             sessions.clear();
         }
-        
+
         info!("All media sessions closed");
         Ok(())
     }
-    
+
     /// Build engine capabilities from configuration
     fn build_capabilities(config: &MediaEngineConfig) -> EngineCapabilities {
-        use crate::types::{SampleRate, payload_types};
-        
-        let mut audio_codecs: Vec<AudioCodecCapability> = config.codecs.enabled_payload_types.iter()
+        use crate::types::{payload_types, SampleRate};
+
+        let mut audio_codecs: Vec<AudioCodecCapability> = config
+            .codecs
+            .enabled_payload_types
+            .iter()
             .filter_map(|&pt| {
                 match pt {
                     payload_types::PCMU => Some(AudioCodecCapability {
@@ -798,9 +820,9 @@ impl MediaEngine {
                 }
             })
             .collect();
-        
+
         // Add dynamic codec capabilities that are always supported
-        
+
         // Add Opus capability (dynamic payload type - will be set during SDP negotiation)
         audio_codecs.push(AudioCodecCapability {
             payload_type: 0, // Placeholder - will be set during SDP negotiation
@@ -813,7 +835,7 @@ impl MediaEngine {
             channels: 1, // Mono for now
             clock_rate: 48000,
         });
-        
+
         EngineCapabilities {
             audio_codecs,
             audio_processing: Default::default(),
@@ -825,4 +847,4 @@ impl MediaEngine {
             max_sessions: config.performance.max_sessions,
         }
     }
-} 
+}

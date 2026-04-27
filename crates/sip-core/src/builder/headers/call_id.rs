@@ -1,9 +1,6 @@
-use crate::types::{
-    call_id::CallId,
-    TypedHeader,
-};
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::types::{call_id::CallId, TypedHeader};
 
 /// Call-ID header builder
 ///
@@ -122,7 +119,7 @@ use crate::builder::headers::HeaderSetter;
 pub trait CallIdBuilderExt {
     /// Add a Call-ID header with a specific value
     ///
-    /// Creates and adds a Call-ID header with the specified value. The Call-ID 
+    /// Creates and adds a Call-ID header with the specified value. The Call-ID
     /// uniquely identifies a particular invitation or registration and is used
     /// to correlate all messages within a dialog.
     ///
@@ -217,11 +214,11 @@ impl CallIdBuilderExt for SimpleRequestBuilder {
     fn call_id(self, call_id: &str) -> Self {
         self.header(TypedHeader::CallId(CallId::new(call_id)))
     }
-    
+
     fn random_call_id(self) -> Self {
         self.header(TypedHeader::CallId(CallId::random()))
     }
-    
+
     fn random_call_id_with_host(self, host: &str) -> Self {
         self.header(TypedHeader::CallId(CallId::random_with_host(host)))
     }
@@ -231,11 +228,11 @@ impl CallIdBuilderExt for SimpleResponseBuilder {
     fn call_id(self, call_id: &str) -> Self {
         self.header(TypedHeader::CallId(CallId::new(call_id)))
     }
-    
+
     fn random_call_id(self) -> Self {
         self.header(TypedHeader::CallId(CallId::random()))
     }
-    
+
     fn random_call_id_with_host(self, host: &str) -> Self {
         self.header(TypedHeader::CallId(CallId::random_with_host(host)))
     }
@@ -244,55 +241,81 @@ impl CallIdBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
-    use crate::types::headers::HeaderAccess;
     use crate::builder::headers::cseq::CSeqBuilderExt;
+    use crate::types::headers::HeaderAccess;
+    use crate::types::{Method, StatusCode};
 
     #[test]
     fn test_request_call_id_header() {
         let call_id_value = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@host.example.com";
-        
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .call_id(call_id_value)
             .build();
-            
-        let call_id_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::CallId(c) = h { Some(c) } else { None })
+
+        let call_id_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::CallId(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(call_id_headers.len(), 1);
         assert_eq!(call_id_headers[0].value(), call_id_value);
     }
-    
+
     #[test]
     fn test_response_call_id_header() {
         let call_id_value = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@host.example.com";
-        
+
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
             .to("Bob", "sip:bob@example.com", Some("tag5678"))
             .call_id(call_id_value)
             .cseq_with_method(101, Method::Invite)
             .build();
-            
-        let call_id_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::CallId(c) = h { Some(c) } else { None })
+
+        let call_id_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::CallId(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(call_id_headers.len(), 1);
         assert_eq!(call_id_headers[0].value(), call_id_value);
     }
-    
+
     #[test]
     fn test_request_with_random_call_id() {
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .random_call_id()
             .build();
-            
-        let call_id_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::CallId(c) = h { Some(c) } else { None })
+
+        let call_id_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::CallId(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(call_id_headers.len(), 1);
         // Check it's not empty and is a valid UUID
         let value = call_id_headers[0].value();
@@ -302,14 +325,23 @@ mod tests {
 
     #[test]
     fn test_request_with_random_call_id_with_host() {
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .random_call_id_with_host("example.com")
             .build();
-            
-        let call_id_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::CallId(c) = h { Some(c) } else { None })
+
+        let call_id_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::CallId(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(call_id_headers.len(), 1);
         let value = call_id_headers[0].value();
         let parts: Vec<&str> = value.split('@').collect();
@@ -318,4 +350,4 @@ mod tests {
         // Check the first part is a valid UUID
         assert!(uuid::Uuid::parse_str(parts[0]).is_ok());
     }
-} 
+}

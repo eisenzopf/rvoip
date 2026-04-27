@@ -145,11 +145,11 @@ pub enum ApiError {
     ///
     /// ## Example Response
     /// Review and correct the configuration parameters.
-    Configuration { 
+    Configuration {
         /// Human-readable error message
-        message: String 
+        message: String,
     },
-    
+
     /// Network error
     ///
     /// Indicates connectivity or transport-related issues.
@@ -163,11 +163,11 @@ pub enum ApiError {
     ///
     /// ## Example Response
     /// Check network connectivity and retry the operation.
-    Network { 
+    Network {
         /// Human-readable error message
-        message: String 
+        message: String,
     },
-    
+
     /// SIP protocol error
     ///
     /// Indicates violations of the SIP protocol or parsing errors.
@@ -181,11 +181,11 @@ pub enum ApiError {
     ///
     /// ## Example Response
     /// Review SIP message formatting and protocol compliance.
-    Protocol { 
+    Protocol {
         /// Human-readable error message
-        message: String 
+        message: String,
     },
-    
+
     /// Dialog error
     ///
     /// Indicates issues with dialog state, lifecycle, or operations.
@@ -199,11 +199,11 @@ pub enum ApiError {
     ///
     /// ## Example Response
     /// Check dialog state and ensure proper lifecycle management.
-    Dialog { 
+    Dialog {
         /// Human-readable error message
-        message: String 
+        message: String,
     },
-    
+
     /// Internal error
     ///
     /// Indicates unexpected internal errors or system issues.
@@ -217,9 +217,9 @@ pub enum ApiError {
     ///
     /// ## Example Response
     /// These errors should be reported as potential bugs.
-    Internal { 
+    Internal {
         /// Human-readable error message
-        message: String 
+        message: String,
     },
 }
 
@@ -228,19 +228,19 @@ impl fmt::Display for ApiError {
         match self {
             ApiError::Configuration { message } => {
                 write!(f, "Configuration error: {}", message)
-            },
+            }
             ApiError::Network { message } => {
                 write!(f, "Network error: {}", message)
-            },
+            }
             ApiError::Protocol { message } => {
                 write!(f, "SIP protocol error: {}", message)
-            },
+            }
             ApiError::Dialog { message } => {
                 write!(f, "Dialog error: {}", message)
-            },
+            }
             ApiError::Internal { message } => {
                 write!(f, "Internal error: {}", message)
-            },
+            }
         }
     }
 }
@@ -250,27 +250,37 @@ impl std::error::Error for ApiError {}
 impl ApiError {
     /// Create a configuration error
     pub fn configuration(message: impl Into<String>) -> Self {
-        Self::Configuration { message: message.into() }
+        Self::Configuration {
+            message: message.into(),
+        }
     }
-    
+
     /// Create a network error
     pub fn network(message: impl Into<String>) -> Self {
-        Self::Network { message: message.into() }
+        Self::Network {
+            message: message.into(),
+        }
     }
-    
+
     /// Create a protocol error
     pub fn protocol(message: impl Into<String>) -> Self {
-        Self::Protocol { message: message.into() }
+        Self::Protocol {
+            message: message.into(),
+        }
     }
-    
+
     /// Create a dialog error
     pub fn dialog(message: impl Into<String>) -> Self {
-        Self::Dialog { message: message.into() }
+        Self::Dialog {
+            message: message.into(),
+        }
     }
-    
+
     /// Create an internal error
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::Internal { message: message.into() }
+        Self::Internal {
+            message: message.into(),
+        }
     }
 }
 
@@ -282,60 +292,43 @@ impl From<DialogError> for ApiError {
     fn from(error: DialogError) -> Self {
         match error {
             // Configuration-related errors
-            DialogError::ConfigError { message, .. } => {
-                ApiError::Configuration { message }
-            },
-            
+            DialogError::ConfigError { message, .. } => ApiError::Configuration { message },
+
             // Network and transport errors
-            DialogError::NetworkError { message, .. } => {
-                ApiError::Network { message }
-            },
-            
+            DialogError::NetworkError { message, .. } => ApiError::Network { message },
+
             // SIP protocol errors
-            DialogError::ProtocolError { message, .. } => {
-                ApiError::Protocol { message }
-            },
-            DialogError::RoutingError { message, .. } => {
-                ApiError::Protocol { message }
-            },
-            
+            DialogError::ProtocolError { message, .. } => ApiError::Protocol { message },
+            DialogError::RoutingError { message, .. } => ApiError::Protocol { message },
+
             // Dialog-specific errors
-            DialogError::DialogNotFound { id, .. } => {
-                ApiError::Dialog { 
-                    message: format!("Dialog not found: {}", id) 
-                }
+            DialogError::DialogNotFound { id, .. } => ApiError::Dialog {
+                message: format!("Dialog not found: {}", id),
             },
-            DialogError::InvalidState { expected, actual, .. } => {
-                ApiError::Dialog { 
-                    message: format!("Invalid dialog state: expected {}, got {}", expected, actual) 
-                }
+            DialogError::InvalidState {
+                expected, actual, ..
+            } => ApiError::Dialog {
+                message: format!(
+                    "Invalid dialog state: expected {}, got {}",
+                    expected, actual
+                ),
             },
-            DialogError::DialogAlreadyExists { id, .. } => {
-                ApiError::Dialog { 
-                    message: format!("Dialog already exists: {}", id) 
-                }
+            DialogError::DialogAlreadyExists { id, .. } => ApiError::Dialog {
+                message: format!("Dialog already exists: {}", id),
             },
-            
+
             // Transaction errors (map to internal for simplicity)
-            DialogError::TransactionError { message, .. } => {
-                ApiError::Internal { 
-                    message: format!("Transaction error: {}", message) 
-                }
+            DialogError::TransactionError { message, .. } => ApiError::Internal {
+                message: format!("Transaction error: {}", message),
             },
-            
+
             // SDP and other internal errors
-            DialogError::SdpError { message, .. } => {
-                ApiError::Internal { 
-                    message: format!("SDP error: {}", message) 
-                }
+            DialogError::SdpError { message, .. } => ApiError::Internal {
+                message: format!("SDP error: {}", message),
             },
-            DialogError::InternalError { message, .. } => {
-                ApiError::Internal { message }
-            },
-            DialogError::TimeoutError { operation, .. } => {
-                ApiError::Internal { 
-                    message: format!("Timeout error: {}", operation) 
-                }
+            DialogError::InternalError { message, .. } => ApiError::Internal { message },
+            DialogError::TimeoutError { operation, .. } => ApiError::Internal {
+                message: format!("Timeout error: {}", operation),
             },
         }
     }
@@ -344,8 +337,8 @@ impl From<DialogError> for ApiError {
 /// Convert from standard io::Error to ApiError
 impl From<std::io::Error> for ApiError {
     fn from(error: std::io::Error) -> Self {
-        ApiError::Network { 
-            message: format!("I/O error: {}", error) 
+        ApiError::Network {
+            message: format!("I/O error: {}", error),
         }
     }
 }
@@ -353,8 +346,8 @@ impl From<std::io::Error> for ApiError {
 /// Convert from serialization errors to ApiError
 impl From<serde_json::Error> for ApiError {
     fn from(error: serde_json::Error) -> Self {
-        ApiError::Configuration { 
-            message: format!("Serialization error: {}", error) 
+        ApiError::Configuration {
+            message: format!("Serialization error: {}", error),
         }
     }
 }
@@ -362,8 +355,8 @@ impl From<serde_json::Error> for ApiError {
 /// Convert from address parsing errors to ApiError
 impl From<std::net::AddrParseError> for ApiError {
     fn from(error: std::net::AddrParseError) -> Self {
-        ApiError::Configuration { 
-            message: format!("Invalid address: {}", error) 
+        ApiError::Configuration {
+            message: format!("Invalid address: {}", error),
         }
     }
 }
@@ -371,8 +364,8 @@ impl From<std::net::AddrParseError> for ApiError {
 /// Convert from URI parsing errors to ApiError
 impl From<http::uri::InvalidUri> for ApiError {
     fn from(error: http::uri::InvalidUri) -> Self {
-        ApiError::Configuration { 
-            message: format!("Invalid URI: {}", error) 
+        ApiError::Configuration {
+            message: format!("Invalid URI: {}", error),
         }
     }
 }
@@ -380,20 +373,26 @@ impl From<http::uri::InvalidUri> for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_error_display() {
-        let config_error = ApiError::Configuration { 
-            message: "Invalid config".to_string() 
+        let config_error = ApiError::Configuration {
+            message: "Invalid config".to_string(),
         };
-        assert_eq!(format!("{}", config_error), "Configuration error: Invalid config");
-        
-        let network_error = ApiError::Network { 
-            message: "Connection failed".to_string() 
+        assert_eq!(
+            format!("{}", config_error),
+            "Configuration error: Invalid config"
+        );
+
+        let network_error = ApiError::Network {
+            message: "Connection failed".to_string(),
         };
-        assert_eq!(format!("{}", network_error), "Network error: Connection failed");
+        assert_eq!(
+            format!("{}", network_error),
+            "Network error: Connection failed"
+        );
     }
-    
+
     #[test]
     fn test_error_constructors() {
         let error = ApiError::configuration("test config error");
@@ -401,33 +400,36 @@ mod tests {
             ApiError::Configuration { message } => assert_eq!(message, "test config error"),
             _ => panic!("Expected configuration error"),
         }
-        
+
         let error = ApiError::network("test network error");
         match error {
             ApiError::Network { message } => assert_eq!(message, "test network error"),
             _ => panic!("Expected network error"),
         }
     }
-    
+
     #[test]
     fn test_io_error_conversion() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
+        let io_error =
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
         let api_error: ApiError = io_error.into();
-        
+
         match api_error {
             ApiError::Network { message } => assert!(message.contains("connection refused")),
             _ => panic!("Expected network error"),
         }
     }
-    
+
     #[test]
     fn test_addr_parse_error_conversion() {
-        let parse_error: std::net::AddrParseError = "invalid:address".parse::<std::net::SocketAddr>().unwrap_err();
+        let parse_error: std::net::AddrParseError = "invalid:address"
+            .parse::<std::net::SocketAddr>()
+            .unwrap_err();
         let api_error: ApiError = parse_error.into();
-        
+
         match api_error {
             ApiError::Configuration { message } => assert!(message.contains("Invalid address")),
             _ => panic!("Expected configuration error"),
         }
     }
-} 
+}

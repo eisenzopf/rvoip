@@ -134,9 +134,7 @@ impl TlsTransport {
         let listener = TcpListener::bind(local_addr)
             .await
             .map_err(|e| Error::BindFailed(local_addr, e))?;
-        let actual_addr = listener
-            .local_addr()
-            .map_err(Error::LocalAddrFailed)?;
+        let actual_addr = listener.local_addr().map_err(Error::LocalAddrFailed)?;
         info!("TLS transport listening on {}", actual_addr);
 
         let transport = Self {
@@ -359,7 +357,10 @@ impl TlsTransport {
                 ))
             })?;
         tx.send(data).await.map_err(|_| {
-            Error::Other(format!("Failed to push bytes to TLS write channel for {}", addr))
+            Error::Other(format!(
+                "Failed to push bytes to TLS write channel for {}",
+                addr
+            ))
         })
     }
 
@@ -371,7 +372,8 @@ impl TlsTransport {
     /// [`TlsTransport::connect_with_server_name`].
     pub async fn connect(&self, remote_addr: SocketAddr) -> Result<()> {
         let server_name = ip_to_server_name(remote_addr);
-        self.connect_with_server_name(remote_addr, server_name).await
+        self.connect_with_server_name(remote_addr, server_name)
+            .await
     }
 
     /// Connect to a remote address with an explicit SNI server name.
@@ -389,7 +391,10 @@ impl TlsTransport {
         // Already connected? — short-circuit.
         {
             let connections_guard = self.connections.lock().await;
-            if connections_guard.iter().any(|(addr, _)| *addr == remote_addr) {
+            if connections_guard
+                .iter()
+                .any(|(addr, _)| *addr == remote_addr)
+            {
                 return Ok(());
             }
         }
@@ -404,7 +409,9 @@ impl TlsTransport {
             .connector
             .connect(server_name, tcp_stream)
             .await
-            .map_err(|e| Error::TlsHandshakeFailed(format!("TLS handshake to {}: {}", remote_addr, e)))?;
+            .map_err(|e| {
+                Error::TlsHandshakeFailed(format!("TLS handshake to {}: {}", remote_addr, e))
+            })?;
 
         info!("TLS handshake to {} succeeded", remote_addr);
 
@@ -430,7 +437,10 @@ impl TlsTransport {
         for _ in 0..50 {
             {
                 let connections_guard = self.connections.lock().await;
-                if connections_guard.iter().any(|(addr, _)| *addr == remote_addr) {
+                if connections_guard
+                    .iter()
+                    .any(|(addr, _)| *addr == remote_addr)
+                {
                     return Ok(());
                 }
             }
@@ -438,7 +448,10 @@ impl TlsTransport {
         }
         // Even if the timing race lost, the registration will land
         // shortly; subsequent sends will succeed.
-        trace!("TLS connect to {} returned before reader task registered", remote_addr);
+        trace!(
+            "TLS connect to {} returned before reader task registered",
+            remote_addr
+        );
         Ok(())
     }
 }
@@ -496,8 +509,7 @@ impl Transport for TlsTransport {
         // A fresh dial would defeat the purpose — the flow we'd keep
         // alive is already gone.
         let connections_guard = self.connections.lock().await;
-        let Some((_, tx)) = connections_guard.iter().find(|(a, _)| *a == destination)
-        else {
+        let Some((_, tx)) = connections_guard.iter().find(|(a, _)| *a == destination) else {
             return Err(Error::InvalidState(format!(
                 "No active TLS connection to {} for send_raw",
                 destination
@@ -690,8 +702,8 @@ fn try_parse_one(buffer: &mut BytesMut) -> Option<rvoip_sip_core::Message> {
     }
 
     // End-of-headers = double CRLF.
-    let header_end = (0..buffer.len().saturating_sub(3))
-        .find(|&i| &buffer[i..i + 4] == b"\r\n\r\n")?;
+    let header_end =
+        (0..buffer.len().saturating_sub(3)).find(|&i| &buffer[i..i + 4] == b"\r\n\r\n")?;
     let body_start = header_end + 4;
 
     // Pull Content-Length from the header section. SIP allows the

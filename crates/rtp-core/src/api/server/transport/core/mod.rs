@@ -8,4 +8,4 @@ mod frame;
 
 pub use connection::*;
 pub use events::*;
-pub use frame::*; 
+pub use frame::*;

@@ -86,15 +86,14 @@ impl FromStr for RAck {
                 s
             )));
         }
-        let rseq = parts[0].parse::<u32>().map_err(|_| {
-            Error::ParseError(format!("Invalid RAck rseq number: {:?}", parts[0]))
-        })?;
-        let cseq = parts[1].parse::<u32>().map_err(|_| {
-            Error::ParseError(format!("Invalid RAck cseq number: {:?}", parts[1]))
-        })?;
-        let method = Method::from_str(parts[2]).map_err(|_| {
-            Error::ParseError(format!("Invalid RAck method: {:?}", parts[2]))
-        })?;
+        let rseq = parts[0]
+            .parse::<u32>()
+            .map_err(|_| Error::ParseError(format!("Invalid RAck rseq number: {:?}", parts[0])))?;
+        let cseq = parts[1]
+            .parse::<u32>()
+            .map_err(|_| Error::ParseError(format!("Invalid RAck cseq number: {:?}", parts[1])))?;
+        let method = Method::from_str(parts[2])
+            .map_err(|_| Error::ParseError(format!("Invalid RAck method: {:?}", parts[2])))?;
         Ok(RAck { rseq, cseq, method })
     }
 }
@@ -107,7 +106,10 @@ impl TypedHeaderTrait for RAck {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
@@ -184,10 +186,7 @@ mod tests {
 
     #[test]
     fn from_header_rejects_wrong_name() {
-        let other = Header::new(
-            HeaderName::CSeq,
-            HeaderValue::Raw(b"1 101 INVITE".to_vec()),
-        );
+        let other = Header::new(HeaderName::CSeq, HeaderValue::Raw(b"1 101 INVITE".to_vec()));
         assert!(RAck::from_header(&other).is_err());
     }
 }

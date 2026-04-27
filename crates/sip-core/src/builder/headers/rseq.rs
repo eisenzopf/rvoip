@@ -1,11 +1,8 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
-    rseq::RSeq,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader, rseq::RSeq,
 };
-use super::HeaderSetter;
 
 /// RSeq header builder
 ///
@@ -72,7 +69,7 @@ use super::HeaderSetter;
 /// use rvoip_sip_core::builder::{SimpleResponseBuilder, headers::{RSeqBuilderExt, RequireBuilderExt}};
 ///
 /// // Scenario: Sequence of reliable provisional responses
-/// 
+///
 /// // First provisional response (183 Session Progress)
 /// let progress = SimpleResponseBuilder::new(StatusCode::SessionProgress, Some("Session Progress"))
 ///     .from("Bob", "sip:bob@example.com", Some("to-tag"))
@@ -161,7 +158,7 @@ pub trait RSeqBuilderExt {
     /// // The response now contains an RSeq: 1 header
     /// ```
     fn rseq(self, seq: u32) -> Self;
-    
+
     /// Add an RSeq header with a sequence number incremented from a previous value
     ///
     /// This method adds an RSeq header with a sequence number that is one greater than
@@ -198,15 +195,15 @@ pub trait RSeqBuilderExt {
     fn rseq_next(self, previous_seq: u32) -> Self;
 }
 
-impl<T> RSeqBuilderExt for T 
-where 
+impl<T> RSeqBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn rseq(self, seq: u32) -> Self {
         let rseq = RSeq::new(seq);
         self.set_header(rseq)
     }
-    
+
     fn rseq_next(self, previous_seq: u32) -> Self {
         let rseq = RSeq::new(previous_seq + 1);
         self.set_header(rseq)
@@ -225,10 +222,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ringing, None)
             .rseq(42)
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::RSeq(rseq)) = response.header(&HeaderName::RSeq) {
             assert_eq!(rseq.value, 42);
         } else {
@@ -242,10 +239,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::SessionProgress, None)
             .rseq_next(previous_seq)
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::RSeq(rseq)) = response.header(&HeaderName::RSeq) {
             assert_eq!(rseq.value, 100); // 99 + 1
         } else {
@@ -259,15 +256,15 @@ mod tests {
         let first_response = ResponseBuilder::new(StatusCode::SessionProgress, None)
             .rseq(1)
             .build();
-            
+
         if let Some(TypedHeader::RSeq(rseq1)) = first_response.header(&HeaderName::RSeq) {
             assert_eq!(rseq1.value, 1);
-            
+
             // Second response with incremented RSeq
             let second_response = ResponseBuilder::new(StatusCode::Ringing, None)
                 .rseq_next(rseq1.value)
                 .build();
-                
+
             if let Some(TypedHeader::RSeq(rseq2)) = second_response.header(&HeaderName::RSeq) {
                 assert_eq!(rseq2.value, 2);
             } else {
@@ -277,4 +274,4 @@ mod tests {
             panic!("RSeq header not found in first response");
         }
     }
-} 
+}

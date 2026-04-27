@@ -25,4 +25,4 @@
 //! Currently SDP processing is handled at the session layer.
 //! This module will contain dialog-specific SDP operations when implemented.
 
-// TODO: Implement SDP offer/answer processing for dialog-core 
+// TODO: Implement SDP offer/answer processing for dialog-core

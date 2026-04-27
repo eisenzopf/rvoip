@@ -48,18 +48,18 @@
 //! let record_route = RecordRoute::new(entries);
 //! ```
 
+use crate::error::{Error, Result};
 use crate::parser::headers::parse_record_route;
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
-use std::ops::Deref;
-use nom::combinator::all_consuming;
-use crate::types::Address;
-use crate::types::uri::Uri;
-use serde::{Deserialize, Serialize};
 use crate::types::header::Header;
-use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 use crate::types::param::Param;
+use crate::types::uri::Uri;
+use crate::types::Address;
+use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 /// Represents a single record-route entry (name-addr with optional parameters)
 /// According to RFC 3261 Section 20.31, a rec-route is a name-addr with optional parameters
@@ -204,32 +204,32 @@ impl RecordRoute {
     pub fn first(&self) -> Option<&RecordRouteEntry> {
         self.0.first()
     }
-    
+
     /// Returns the last record-route entry, if any
     pub fn last(&self) -> Option<&RecordRouteEntry> {
         self.0.last()
     }
-    
+
     /// Returns true if there are no record-route entries
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    
+
     /// Returns the number of record-route entries
     pub fn len(&self) -> usize {
         self.0.len()
     }
-    
+
     /// Get iterator over entries
     pub fn iter(&self) -> impl Iterator<Item = &RecordRouteEntry> {
         self.0.iter()
     }
-    
+
     /// Adds a new record-route entry to the end of the list
     pub fn add(&mut self, entry: RecordRouteEntry) {
         self.0.push(entry);
     }
-    
+
     /// Gets entries in reverse order (useful for response routing)
     pub fn reversed(&self) -> Vec<&RecordRouteEntry> {
         self.0.iter().rev().collect()
@@ -261,7 +261,15 @@ impl fmt::Display for RecordRoute {
     /// assert!(formatted.starts_with("Record-Route: <sip:"));
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.iter().map(|rr| rr.to_string()).collect::<Vec<String>>().join(", "))
+        write!(
+            f,
+            "{}",
+            self.0
+                .iter()
+                .map(|rr| rr.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        )
     }
 }
 
@@ -308,9 +316,10 @@ impl FromStr for RecordRoute {
     fn from_str(s: &str) -> Result<Self> {
         match all_consuming(parse_record_route)(s.as_bytes()) {
             Ok((_, rr_header)) => Ok(rr_header),
-            Err(e) => Err(Error::ParseError( 
-                format!("Failed to parse Record-Route header: {:?}", e)
-            ))
+            Err(e) => Err(Error::ParseError(format!(
+                "Failed to parse Record-Route header: {:?}",
+                e
+            ))),
         }
     }
 }
@@ -400,24 +409,31 @@ impl TypedHeaderTrait for RecordRoute {
     /// A Result containing the parsed RecordRoute header if successful, or an error otherwise
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::RecordRoute {
-            return Err(Error::InvalidHeader(format!("Expected RecordRoute header, got {}", header.name)));
+            return Err(Error::InvalidHeader(format!(
+                "Expected RecordRoute header, got {}",
+                header.name
+            )));
         }
-        
+
         // Use the parser to convert the header value into a RecordRoute
         use crate::parser::headers::parse_record_route;
         use nom::combinator::all_consuming;
-        
+
         // Get the raw bytes from the header value
         let bytes = match &header.value {
             crate::types::headers::HeaderValue::Raw(bytes) => bytes,
-            _ => return Err(Error::InvalidHeader("Expected raw header value".to_string())),
+            _ => {
+                return Err(Error::InvalidHeader(
+                    "Expected raw header value".to_string(),
+                ))
+            }
         };
-        
+
         // Parse the header value
         let record_route = all_consuming(parse_record_route)(bytes)
             .map_err(Error::from)
             .map(|(_, v)| v)?;
-            
+
         Ok(record_route)
     }
 }
@@ -425,9 +441,9 @@ impl TypedHeaderTrait for RecordRoute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::Uri;
     use crate::types::address::Address;
     use crate::types::param::Param;
+    use crate::types::uri::Uri;
     use std::str::FromStr;
 
     #[test]
@@ -435,15 +451,15 @@ mod tests {
         // Create URIs with 'lr' param inside the URI, not as an address param
         let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
         let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
-        
+
         // Create addresses with these URIs - with params in the URI, not the address
         let address1 = Address::new(uri1);
         let address2 = Address::new(uri2);
-        
+
         // Create the record route entries
         let entry1 = RecordRouteEntry::new(address1);
         let entry2 = RecordRouteEntry::new(address2);
-        
+
         // Create the record route header with these entries
         let record_route = RecordRoute::new(vec![entry1, entry2]);
 
@@ -453,14 +469,14 @@ mod tests {
         // Test to_header()
         let header = record_route.to_header();
         assert_eq!(header.name, HeaderName::RecordRoute);
-        
+
         // Test string representation - this is what will be used as the header value
         let header_value = record_route.to_string();
-        
+
         // Verify we can parse back the same string
         let parsed_record_route = RecordRoute::from_str(&header_value).unwrap();
         assert_eq!(parsed_record_route.len(), record_route.len());
     }
 }
 
-// TODO: Implement helper methods (e.g., first(), is_empty()) 
+// TODO: Implement helper methods (e.g., first(), is_empty())

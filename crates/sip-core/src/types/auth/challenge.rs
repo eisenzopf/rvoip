@@ -2,9 +2,9 @@
 //!
 //! This module defines the Challenge type used in WWW-Authenticate and Proxy-Authenticate headers.
 
-use std::fmt;
-use serde::{Deserialize, Serialize};
 use crate::types::auth::params::{AuthParam, DigestParam};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Represents a challenge (WWW-Authenticate, Proxy-Authenticate)
 ///
@@ -18,7 +18,7 @@ pub enum Challenge {
     /// Basic authentication challenge (typically just realm)
     Basic { params: Vec<AuthParam> }, // Typically just realm
     /// Bearer authentication challenge (RFC 8898)
-    Bearer { 
+    Bearer {
         /// The authentication realm
         realm: String,
         /// Optional scope requirement
@@ -29,7 +29,10 @@ pub enum Challenge {
         error_description: Option<String>,
     },
     /// Other authentication scheme challenges
-    Other { scheme: String, params: Vec<AuthParam> },
+    Other {
+        scheme: String,
+        params: Vec<AuthParam>,
+    },
 }
 
 impl fmt::Display for Challenge {
@@ -37,15 +40,28 @@ impl fmt::Display for Challenge {
         match self {
             Challenge::Digest { params } => {
                 write!(f, "Digest ")?;
-                let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                let params_str = params
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(f, "{}", params_str)
-            },
+            }
             Challenge::Basic { params } => {
-                 write!(f, "Basic ")?;
-                 let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
-                 write!(f, "{}", params_str)
-            },
-            Challenge::Bearer { realm, scope, error, error_description } => {
+                write!(f, "Basic ")?;
+                let params_str = params
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "{}", params_str)
+            }
+            Challenge::Bearer {
+                realm,
+                scope,
+                error,
+                error_description,
+            } => {
                 write!(f, "Bearer realm=\"{}\"", realm)?;
                 if let Some(scope) = scope {
                     write!(f, ", scope=\"{}\"", scope)?;
@@ -57,12 +73,16 @@ impl fmt::Display for Challenge {
                     write!(f, ", error_description=\"{}\"", error_desc)?;
                 }
                 Ok(())
-            },
+            }
             Challenge::Other { scheme, params } => {
                 write!(f, "{} ", scheme)?;
-                let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                let params_str = params
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(f, "{}", params_str)
             }
         }
     }
-} 
+}

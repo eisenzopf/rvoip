@@ -1,12 +1,12 @@
-use crate::types::session_expires::{Refresher, SessionExpires};
-use crate::types::param::Param; // Using Param::new which uses GenericValue internally
-use crate::error::{Error, Result};
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::types::param::Param; // Using Param::new which uses GenericValue internally
+use crate::types::session_expires::{Refresher, SessionExpires};
 
 /// # SIP Session-Expires Header Extension
 ///
 /// This module provides extension traits for easily adding Session-Expires headers
-/// to SIP requests and responses. The Session-Expires header is defined in 
+/// to SIP requests and responses. The Session-Expires header is defined in
 /// [RFC 4028](https://datatracker.ietf.org/doc/html/rfc4028) and is used
 /// for session timer functionality in SIP.
 ///
@@ -28,7 +28,7 @@ use super::HeaderSetter;
 ///
 /// ## Relationship with other headers
 ///
-/// - **Session-Expires vs. Min-SE**: `Session-Expires` specifies the negotiated session interval, 
+/// - **Session-Expires vs. Min-SE**: `Session-Expires` specifies the negotiated session interval,
 ///   while `Min-SE` (Minimum Session Expires) in a request indicates the minimum interval the sender
 ///   is willing to accept. A 422 (Session Interval Too Small) response may include Min-SE.
 /// - **Session-Expires vs. Expires**: `Session-Expires` applies to the entire SIP session (dialog)
@@ -58,7 +58,7 @@ pub trait SessionExpiresExt {
     /// # Arguments
     ///
     /// * `delta_seconds`: The session interval in seconds (e.g., 1800 for 30 minutes).
-    /// * `refresher`: An `Option<Refresher>`. 
+    /// * `refresher`: An `Option<Refresher>`.
     ///   - `Some(Refresher::Uac)`: UAC is responsible for refreshes.
     ///   - `Some(Refresher::Uas)`: UAS is responsible for refreshes.
     ///   - `None`: No refresher parameter is added; the default (UAC) applies as per RFC 4028.
@@ -108,7 +108,12 @@ pub trait SessionExpiresExt {
     ///     .build();
     /// // Header might be: "Session-Expires: 1200;refresher=uac;x-custom-se-flag;x-info=timer-A"
     /// ```
-    fn session_expires_with_params(self, delta_seconds: u32, refresher: Option<Refresher>, params: Vec<Param>) -> Self;
+    fn session_expires_with_params(
+        self,
+        delta_seconds: u32,
+        refresher: Option<Refresher>,
+        params: Vec<Param>,
+    ) -> Self;
 
     /// Convenience method to set Session-Expires with UAC (User Agent Client) as the refresher.
     ///
@@ -158,7 +163,12 @@ where
         self.set_header(se_header)
     }
 
-    fn session_expires_with_params(self, delta_seconds: u32, refresher: Option<Refresher>, params: Vec<Param>) -> Self {
+    fn session_expires_with_params(
+        self,
+        delta_seconds: u32,
+        refresher: Option<Refresher>,
+        params: Vec<Param>,
+    ) -> Self {
         let se_header = SessionExpires::new_with_params(delta_seconds, refresher, params);
         self.set_header(se_header)
     }
@@ -247,11 +257,15 @@ impl SessionExpiresBuilder {
     ///
     /// * `key`: The parameter name.
     /// * `value`: An optional parameter value. If `None`, the parameter is a flag.
-    pub fn generic_param(mut self, key: impl Into<String>, value: Option<impl Into<String>>) -> Self {
+    pub fn generic_param(
+        mut self,
+        key: impl Into<String>,
+        value: Option<impl Into<String>>,
+    ) -> Self {
         self.params.push(Param::new(key, value));
         self
     }
-    
+
     /// Sets multiple generic parameters, replacing any existing ones.
     ///
     /// # Arguments
@@ -283,7 +297,7 @@ impl SessionExpiresBuilder {
 
         Ok(SessionExpires::new_with_params(
             delta_seconds,
-            self.refresher, // Option<Refresher> is fine here
+            self.refresher,      // Option<Refresher> is fine here
             self.params.clone(), // Clone the params vector
         ))
     }
@@ -292,21 +306,18 @@ impl SessionExpiresBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::RequestBuilder; // Assuming this path is correct for tests
-    use crate::types::{
-        Method,
-        headers::HeaderName,
-        headers::TypedHeader,
-    };
-    use crate::types::session_expires::Refresher;
     use crate::types::param::Param;
+    use crate::types::session_expires::Refresher;
+    use crate::types::{headers::HeaderName, headers::TypedHeader, Method};
+    use crate::RequestBuilder; // Assuming this path is correct for tests
 
     #[test]
     fn test_session_expires_set() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .session_expires(1800, Some(Refresher::Uac))
             .build();
-        
+
         match request.header(&HeaderName::SessionExpires) {
             Some(TypedHeader::SessionExpires(se)) => {
                 assert_eq!(se.delta_seconds(), 1800);
@@ -320,7 +331,8 @@ mod tests {
     #[test]
     fn test_session_expires_with_params_set() {
         let params = vec![Param::new("custom", Some("value"))];
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .session_expires_with_params(3600, None, params.clone())
             .build();
 
@@ -338,7 +350,8 @@ mod tests {
 
     #[test]
     fn test_session_expires_uac_convenience() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .session_expires_uac(900)
             .build();
 
@@ -353,7 +366,8 @@ mod tests {
 
     #[test]
     fn test_session_expires_uas_convenience() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .session_expires_uas(7200)
             .build();
 
@@ -368,7 +382,8 @@ mod tests {
 
     #[test]
     fn test_override_session_expires() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .session_expires_uac(100)
             .session_expires_uas(200) // This should override the previous one
             .build();
@@ -381,4 +396,4 @@ mod tests {
             _ => panic!("Session-Expires header not found or incorrect type"),
         }
     }
-} 
+}

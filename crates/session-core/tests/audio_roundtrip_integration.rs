@@ -173,7 +173,11 @@ fn audio_roundtrip_delivers_peer_tone() {
         }
     };
     let bob_status = bob_status.expect("Bob did not finish within 10s of Alice");
-    assert!(bob_status.success(), "Bob exited with {:?}", bob_status.code());
+    assert!(
+        bob_status.success(),
+        "Bob exited with {:?}",
+        bob_status.code()
+    );
 
     let alice_wav = tmp.path().join("alice_received.wav");
     let bob_wav = tmp.path().join("bob_received.wav");

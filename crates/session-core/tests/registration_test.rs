@@ -10,10 +10,7 @@
 //!
 //! Tests are self-contained and start their own registrar server.
 
-use rvoip_session_core::{
-    UnifiedCoordinator,
-    api::unified::Config,
-};
+use rvoip_session_core::{api::unified::Config, UnifiedCoordinator};
 use std::sync::Arc;
 use tracing::info;
 
@@ -30,7 +27,9 @@ async fn create_test_coordinator(port: u16) -> Arc<UnifiedCoordinator> {
     config.media_port_start = 16000 + port;
     config.media_port_end = 17000 + port;
 
-    UnifiedCoordinator::new(config).await.expect("Failed to create coordinator")
+    UnifiedCoordinator::new(config)
+        .await
+        .expect("Failed to create coordinator")
 }
 
 // Integration test removed - use example applications for manual testing:
@@ -52,11 +51,9 @@ async fn test_registration_api_creation() {
     // This test just verifies coordinator creation works
 }
 
-
-
 #[tokio::test]
 async fn test_digest_auth_computation() {
-    use rvoip_auth_core::{DigestClient, DigestChallenge, DigestAlgorithm};
+    use rvoip_auth_core::{DigestAlgorithm, DigestChallenge, DigestClient};
 
     // Test basic digest computation using shared auth-core module
     let challenge = DigestChallenge {
@@ -72,8 +69,9 @@ async fn test_digest_auth_computation() {
         "password123",
         &challenge,
         "REGISTER",
-        "sip:registrar.example.com"
-    ).expect("Failed to compute response");
+        "sip:registrar.example.com",
+    )
+    .expect("Failed to compute response");
 
     // Should produce a 32-character hex string (MD5)
     assert_eq!(response.len(), 32);
@@ -85,7 +83,8 @@ async fn test_challenge_parsing() {
     use rvoip_auth_core::DigestAuthenticator;
 
     let header = r#"Digest realm="testrealm", nonce="nonce123", algorithm=MD5, qop="auth""#;
-    let challenge = DigestAuthenticator::parse_challenge(header).expect("Failed to parse challenge");
+    let challenge =
+        DigestAuthenticator::parse_challenge(header).expect("Failed to parse challenge");
 
     assert_eq!(challenge.realm, "testrealm");
     assert_eq!(challenge.nonce, "nonce123");
@@ -95,7 +94,7 @@ async fn test_challenge_parsing() {
 
 #[tokio::test]
 async fn test_authorization_formatting() {
-    use rvoip_auth_core::{DigestClient, DigestChallenge, DigestAlgorithm};
+    use rvoip_auth_core::{DigestAlgorithm, DigestChallenge, DigestClient};
 
     let challenge = DigestChallenge {
         realm: "example.com".to_string(),

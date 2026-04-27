@@ -1,11 +1,7 @@
-use crate::error::{Error, Result};
-use crate::types::{
-    TypedHeader,
-    header::TypedHeaderTrait,
-    headers::header_access::HeaderAccess,
-};
-use crate::types::content_encoding::ContentEncoding;
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::types::content_encoding::ContentEncoding;
+use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
 
 /// Content-Encoding Header Builder for SIP Messages
 ///
@@ -15,7 +11,7 @@ use super::HeaderSetter;
 /// ## SIP Content-Encoding Header Overview
 ///
 /// The Content-Encoding header is defined in [RFC 3261 Section 20.12](https://datatracker.ietf.org/doc/html/rfc3261#section-20.12)
-/// as part of the core SIP protocol. It follows the syntax and semantics defined in 
+/// as part of the core SIP protocol. It follows the syntax and semantics defined in
 /// [RFC 2616 Section 14.11](https://datatracker.ietf.org/doc/html/rfc2616#section-14.11) for HTTP.
 /// The header indicates what encoding transformations have been applied to the message body.
 ///
@@ -198,7 +194,7 @@ pub trait ContentEncodingExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentEncodingExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a MESSAGE with gzip-compressed content
     /// let request = SimpleRequestBuilder::new(Method::Message, "sip:user@example.com").unwrap()
     ///     .from("Sender", "sip:sender@example.com", Some("tag1234"))
@@ -211,7 +207,7 @@ pub trait ContentEncodingExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 3261 Section 20.12](https://datatracker.ietf.org/doc/html/rfc3261#section-20.12),
     /// the Content-Encoding header field is used to indicate any additional content codings
     /// that have been applied to the message body.
@@ -236,7 +232,7 @@ pub trait ContentEncodingExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentEncodingExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a MESSAGE with multiple encodings
     /// // First the content was compressed with gzip, then base64 encoded
     /// let request = SimpleRequestBuilder::new(Method::Message, "sip:user@example.com").unwrap()
@@ -251,7 +247,7 @@ pub trait ContentEncodingExt {
     ///
     /// # Multiple Encodings Explained
     ///
-    /// When multiple encodings are specified, they are applied in the order listed. 
+    /// When multiple encodings are specified, they are applied in the order listed.
     /// For example, if the header is `Content-Encoding: gzip, base64`, this means:
     /// 1. The original content was first compressed with gzip
     /// 2. Then the compressed result was encoded with base64
@@ -262,8 +258,8 @@ pub trait ContentEncodingExt {
     fn content_encodings<T: AsRef<str>>(self, encodings: &[T]) -> Self;
 }
 
-impl<T> ContentEncodingExt for T 
-where 
+impl<T> ContentEncodingExt for T
+where
     T: HeaderSetter,
 {
     fn content_encoding(self, encoding: &str) -> Self {
@@ -283,47 +279,58 @@ mod tests {
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
     use crate::types::ContentEncoding; // Import the actual type
-    
+
     #[test]
     fn test_content_encoding_single() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_encoding("gzip")
             .build();
-            
+
         // Check if Content-Encoding header exists with the correct value
         let header = request.header(&HeaderName::ContentEncoding);
         assert!(header.is_some(), "Content-Encoding header not found");
-        
+
         if let Some(TypedHeader::ContentEncoding(content_encoding)) = header {
             // Check if the content encoding includes "gzip"
-            assert!(content_encoding.has_encoding("gzip"), "gzip encoding not found");
+            assert!(
+                content_encoding.has_encoding("gzip"),
+                "gzip encoding not found"
+            );
             assert_eq!(content_encoding.encodings().len(), 1);
         } else {
             panic!("Expected Content-Encoding header");
         }
     }
-    
+
     #[test]
     fn test_content_encodings_multiple() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_encodings(&["gzip", "deflate"])
             .build();
-            
+
         // Check if Content-Encoding header exists with the correct values
         let header = request.header(&HeaderName::ContentEncoding);
         assert!(header.is_some(), "Content-Encoding header not found");
-        
+
         if let Some(TypedHeader::ContentEncoding(content_encoding)) = header {
             // Check if the content encoding includes both "gzip" and "deflate"
-            assert!(content_encoding.has_encoding("gzip"), "gzip encoding not found");
-            assert!(content_encoding.has_encoding("deflate"), "deflate encoding not found");
+            assert!(
+                content_encoding.has_encoding("gzip"),
+                "gzip encoding not found"
+            );
+            assert!(
+                content_encoding.has_encoding("deflate"),
+                "deflate encoding not found"
+            );
             assert_eq!(content_encoding.encodings().len(), 2);
         } else {
             panic!("Expected Content-Encoding header");
         }
     }
-} 
+}

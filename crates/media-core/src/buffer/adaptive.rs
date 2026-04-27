@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use tokio::sync::RwLock;
 use tracing::{debug, trace};
 
-use crate::error::{Result, BufferError};
+use crate::error::{BufferError, Result};
 
 /// Configuration for adaptive buffer
 #[derive(Debug, Clone)]
@@ -74,7 +74,7 @@ impl<T> AdaptiveBuffer<T> {
     /// Create a new adaptive buffer
     pub fn new(config: AdaptiveConfig) -> Self {
         let initial_capacity = config.initial_capacity;
-        
+
         Self {
             config,
             buffer: RwLock::new(VecDeque::with_capacity(initial_capacity)),
@@ -85,50 +85,50 @@ impl<T> AdaptiveBuffer<T> {
             }),
         }
     }
-    
+
     /// Add an item to the buffer
     pub async fn push(&self, item: T) -> Result<()> {
         let should_expand = {
             let buffer = self.buffer.read().await;
             let capacity = *self.capacity.read().await;
-            
+
             // Check if we need to expand
             let usage_ratio = buffer.len() as f32 / capacity as f32;
             usage_ratio >= self.config.expand_threshold
         };
-        
+
         if should_expand {
             self.expand().await?;
         }
-        
+
         // Add the item
         {
             let mut buffer = self.buffer.write().await;
             buffer.push_back(item);
         }
-        
+
         // Update statistics
         {
             let mut stats = self.stats.write().await;
             stats.items_added += 1;
-            
+
             let buffer = self.buffer.read().await;
             stats.current_size = buffer.len();
             if stats.current_size > stats.peak_size {
                 stats.peak_size = stats.current_size;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Remove an item from the buffer
     pub async fn pop(&self) -> Option<T> {
         let item = {
             let mut buffer = self.buffer.write().await;
             buffer.pop_front()
         };
-        
+
         if item.is_some() {
             // Update statistics
             {
@@ -136,59 +136,59 @@ impl<T> AdaptiveBuffer<T> {
                 stats.items_removed += 1;
                 stats.current_size = stats.current_size.saturating_sub(1);
             }
-            
+
             // Check if we should shrink
             let should_shrink = {
                 let buffer = self.buffer.read().await;
                 let capacity = *self.capacity.read().await;
-                
+
                 let usage_ratio = buffer.len() as f32 / capacity as f32;
                 usage_ratio <= self.config.shrink_threshold && capacity > self.config.min_capacity
             };
-            
+
             if should_shrink {
                 if let Err(e) = self.shrink().await {
                     debug!("Failed to shrink buffer: {}", e);
                 }
             }
         }
-        
+
         item
     }
-    
+
     /// Peek at the front item without removing it
-    pub async fn peek(&self) -> Option<T> 
-    where 
+    pub async fn peek(&self) -> Option<T>
+    where
         T: Clone,
     {
         let buffer = self.buffer.read().await;
         buffer.front().cloned()
     }
-    
+
     /// Get the current size of the buffer
     pub async fn len(&self) -> usize {
         self.buffer.read().await.len()
     }
-    
+
     /// Check if the buffer is empty
     pub async fn is_empty(&self) -> bool {
         self.buffer.read().await.is_empty()
     }
-    
+
     /// Get the current capacity
     pub async fn capacity(&self) -> usize {
         *self.capacity.read().await
     }
-    
+
     /// Clear all items from the buffer
     pub async fn clear(&self) {
         let mut buffer = self.buffer.write().await;
         buffer.clear();
-        
+
         let mut stats = self.stats.write().await;
         stats.current_size = 0;
     }
-    
+
     /// Expand the buffer capacity
     async fn expand(&self) -> Result<()> {
         let new_capacity = {
@@ -196,7 +196,7 @@ impl<T> AdaptiveBuffer<T> {
             let new_cap = ((current_capacity as f32) * self.config.growth_factor) as usize;
             new_cap.min(self.config.max_capacity)
         };
-        
+
         let current_capacity = *self.capacity.read().await;
         if new_capacity > current_capacity {
             // Reserve additional space
@@ -204,24 +204,28 @@ impl<T> AdaptiveBuffer<T> {
                 let mut buffer = self.buffer.write().await;
                 buffer.reserve(new_capacity - current_capacity);
             }
-            
+
             {
                 let mut capacity = self.capacity.write().await;
                 *capacity = new_capacity;
             }
-            
+
             {
                 let mut stats = self.stats.write().await;
                 stats.expansions += 1;
                 stats.current_capacity = new_capacity;
             }
-            
-            trace!("Expanded adaptive buffer: {} -> {}", current_capacity, new_capacity);
+
+            trace!(
+                "Expanded adaptive buffer: {} -> {}",
+                current_capacity,
+                new_capacity
+            );
         }
-        
+
         Ok(())
     }
-    
+
     /// Shrink the buffer capacity
     async fn shrink(&self) -> Result<()> {
         let new_capacity = {
@@ -229,7 +233,7 @@ impl<T> AdaptiveBuffer<T> {
             let new_cap = ((current_capacity as f32) / self.config.growth_factor) as usize;
             new_cap.max(self.config.min_capacity)
         };
-        
+
         let current_capacity = *self.capacity.read().await;
         if new_capacity < current_capacity {
             // Note: VecDeque doesn't have a shrink_to method, so we recreate it
@@ -239,24 +243,28 @@ impl<T> AdaptiveBuffer<T> {
                 *buffer = VecDeque::with_capacity(new_capacity);
                 buffer.extend(items);
             }
-            
+
             {
                 let mut capacity = self.capacity.write().await;
                 *capacity = new_capacity;
             }
-            
+
             {
                 let mut stats = self.stats.write().await;
                 stats.shrinks += 1;
                 stats.current_capacity = new_capacity;
             }
-            
-            trace!("Shrunk adaptive buffer: {} -> {}", current_capacity, new_capacity);
+
+            trace!(
+                "Shrunk adaptive buffer: {} -> {}",
+                current_capacity,
+                new_capacity
+            );
         }
-        
+
         Ok(())
     }
-    
+
     /// Get buffer statistics
     pub async fn get_statistics(&self) -> AdaptiveStats {
         let mut stats = self.stats.read().await.clone();
@@ -269,37 +277,37 @@ impl<T> AdaptiveBuffer<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_adaptive_buffer_creation() {
         let config = AdaptiveConfig::default();
         let buffer: AdaptiveBuffer<i32> = AdaptiveBuffer::new(config);
-        
+
         assert_eq!(buffer.len().await, 0);
         assert!(buffer.is_empty().await);
         assert_eq!(buffer.capacity().await, 100);
     }
-    
+
     #[tokio::test]
     async fn test_push_and_pop() {
         let buffer: AdaptiveBuffer<i32> = AdaptiveBuffer::new(AdaptiveConfig::default());
-        
+
         // Add items
         buffer.push(1).await.unwrap();
         buffer.push(2).await.unwrap();
         buffer.push(3).await.unwrap();
-        
+
         assert_eq!(buffer.len().await, 3);
-        
+
         // Remove items
         assert_eq!(buffer.pop().await, Some(1));
         assert_eq!(buffer.pop().await, Some(2));
         assert_eq!(buffer.pop().await, Some(3));
         assert_eq!(buffer.pop().await, None);
-        
+
         assert!(buffer.is_empty().await);
     }
-    
+
     #[tokio::test]
     async fn test_buffer_expansion() {
         let config = AdaptiveConfig {
@@ -309,14 +317,14 @@ mod tests {
             ..Default::default()
         };
         let buffer: AdaptiveBuffer<i32> = AdaptiveBuffer::new(config);
-        
+
         // Fill buffer to trigger expansion
         for i in 0..5 {
             buffer.push(i).await.unwrap();
         }
-        
+
         let stats = buffer.get_statistics().await;
         assert!(stats.expansions > 0);
         assert!(buffer.capacity().await > 5);
     }
-} 
+}

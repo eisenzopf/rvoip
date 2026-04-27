@@ -31,11 +31,11 @@
 //! assert!(proxy_require.has_option("bar"));
 //! ```
 
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Proxy-Require header field (RFC 3261 Section 20.29).
 ///
@@ -163,9 +163,7 @@ impl ProxyRequire {
     /// assert!(proxy_require.has_option("bar"));
     /// ```
     pub fn from_strings(strings: Vec<String>) -> Self {
-        ProxyRequire {
-            options: strings,
-        }
+        ProxyRequire { options: strings }
     }
 
     /// Adds an option tag to the list.
@@ -295,25 +293,27 @@ impl FromStr for ProxyRequire {
             // Strip the "Proxy-Require:" prefix
             let parts: Vec<&str> = s.splitn(2, ':').collect();
             if parts.len() != 2 {
-                return Err(Error::ParseError("Invalid Proxy-Require header format".to_string()));
+                return Err(Error::ParseError(
+                    "Invalid Proxy-Require header format".to_string(),
+                ));
             }
             parts[1].trim()
         } else {
             s.trim()
         };
-        
+
         // Empty string is a valid Proxy-Require (means no required proxies)
         if value_str.is_empty() {
             return Ok(ProxyRequire::new());
         }
-        
+
         // Split the string by commas and collect option tags
         let options = value_str
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-            
+
         Ok(ProxyRequire { options })
     }
 }
@@ -327,14 +327,19 @@ impl TypedHeaderTrait for ProxyRequire {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -342,23 +347,23 @@ impl TypedHeaderTrait for ProxyRequire {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ProxyRequire::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::ProxyRequire(tokens) => {
                 let options = tokens
                     .iter()
-                    .filter_map(|token| {
-                        std::str::from_utf8(token).ok().map(|s| s.to_string())
-                    })
+                    .filter_map(|token| std::str::from_utf8(token).ok().map(|s| s.to_string()))
                     .collect();
                 Ok(ProxyRequire { options })
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -373,7 +378,7 @@ mod tests {
         assert!(proxy_require.is_empty());
         assert_eq!(proxy_require.to_string(), "");
     }
-    
+
     #[test]
     fn test_single() {
         let proxy_require = ProxyRequire::single("foo");
@@ -381,7 +386,7 @@ mod tests {
         assert_eq!(proxy_require.options()[0], "foo");
         assert_eq!(proxy_require.to_string(), "foo");
     }
-    
+
     #[test]
     fn test_with_options() {
         let proxy_require = ProxyRequire::with_options(&["foo", "bar"]);
@@ -390,84 +395,87 @@ mod tests {
         assert_eq!(proxy_require.options()[1], "bar");
         assert_eq!(proxy_require.to_string(), "foo, bar");
     }
-    
+
     #[test]
     fn test_add_remove_option() {
         let mut proxy_require = ProxyRequire::new();
-        
+
         // Add options
         proxy_require.add_option("foo");
         proxy_require.add_option("bar");
-        
+
         assert_eq!(proxy_require.options().len(), 2);
         assert!(proxy_require.has_option("foo"));
         assert!(proxy_require.has_option("bar"));
-        
+
         // Remove an option
         proxy_require.remove_option("foo");
-        
+
         assert_eq!(proxy_require.options().len(), 1);
         assert!(!proxy_require.has_option("foo"));
         assert!(proxy_require.has_option("bar"));
     }
-    
+
     #[test]
     fn test_has_option() {
         let proxy_require = ProxyRequire::with_options(&["foo", "bar"]);
-        
+
         // Check case-insensitive matching
         assert!(proxy_require.has_option("foo"));
         assert!(proxy_require.has_option("FOO"));
         assert!(proxy_require.has_option("bar"));
-        
+
         // Check non-existent option
         assert!(!proxy_require.has_option("baz"));
     }
-    
+
     #[test]
     fn test_from_str() {
         // Simple case
         let proxy_require: ProxyRequire = "foo".parse().unwrap();
         assert_eq!(proxy_require.options().len(), 1);
         assert_eq!(proxy_require.options()[0], "foo");
-        
+
         // Multiple options
         let proxy_require: ProxyRequire = "foo, bar".parse().unwrap();
         assert_eq!(proxy_require.options().len(), 2);
         assert_eq!(proxy_require.options()[0], "foo");
         assert_eq!(proxy_require.options()[1], "bar");
-        
+
         // With header name
         let proxy_require: ProxyRequire = "Proxy-Require: foo, bar".parse().unwrap();
         assert_eq!(proxy_require.options().len(), 2);
         assert_eq!(proxy_require.options()[0], "foo");
         assert_eq!(proxy_require.options()[1], "bar");
-        
+
         // Empty
         let proxy_require: ProxyRequire = "".parse().unwrap();
         assert!(proxy_require.is_empty());
-        
+
         // Empty with header name
         let proxy_require: ProxyRequire = "Proxy-Require:".parse().unwrap();
         assert!(proxy_require.is_empty());
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         // Create a header
         let proxy_require = ProxyRequire::with_options(&["foo", "bar"]);
         let header = proxy_require.to_header();
-        
+
         assert_eq!(header.name, HeaderName::ProxyRequire);
-        
+
         // Convert back from Header
         let proxy_require2 = ProxyRequire::from_header(&header).unwrap();
-        assert_eq!(proxy_require.options().len(), proxy_require2.options().len());
+        assert_eq!(
+            proxy_require.options().len(),
+            proxy_require2.options().len()
+        );
         assert_eq!(proxy_require.options()[0], proxy_require2.options()[0]);
         assert_eq!(proxy_require.options()[1], proxy_require2.options()[1]);
-        
+
         // Test invalid header name
         let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
         assert!(ProxyRequire::from_header(&wrong_header).is_err());
     }
-} 
+}

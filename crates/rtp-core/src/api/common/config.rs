@@ -2,27 +2,27 @@
 //!
 //! This module defines configuration types shared between client and server APIs.
 
-use std::net::SocketAddr;
 use crate::api::common::frame::MediaFrameType;
+use std::net::SocketAddr;
 
 /// Security mode for transport
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityMode {
     /// No security (plain RTP)
     None,
-    
+
     /// SRTP with pre-shared keys
     Srtp,
-    
+
     /// DTLS-SRTP (keys negotiated via DTLS)
     DtlsSrtp,
-    
+
     /// SDES-SRTP (keys exchanged via SDP Security Descriptions)
     SdesSrtp,
-    
+
     /// MIKEY-SRTP (keys negotiated via MIKEY protocol)
     MikeySrtp,
-    
+
     /// ZRTP-SRTP (keys negotiated via ZRTP in-media protocol)
     ZrtpSrtp,
 }
@@ -66,36 +66,36 @@ impl KeyExchangeMethod {
             KeyExchangeMethod::PreSharedKey => SecurityMode::Srtp,
         }
     }
-    
+
     /// Check if this method requires network-based key exchange
     pub fn requires_network_exchange(&self) -> bool {
         match self {
-            KeyExchangeMethod::DtlsSrtp 
-            | KeyExchangeMethod::Sdes 
-            | KeyExchangeMethod::Mikey 
+            KeyExchangeMethod::DtlsSrtp
+            | KeyExchangeMethod::Sdes
+            | KeyExchangeMethod::Mikey
             | KeyExchangeMethod::Zrtp => true,
             KeyExchangeMethod::PreSharedKey => false,
         }
     }
-    
+
     /// Check if this method exchanges keys via signaling (SDP)
     pub fn uses_signaling_exchange(&self) -> bool {
         match self {
             KeyExchangeMethod::Sdes => true,
-            KeyExchangeMethod::DtlsSrtp 
-            | KeyExchangeMethod::Mikey 
-            | KeyExchangeMethod::Zrtp 
+            KeyExchangeMethod::DtlsSrtp
+            | KeyExchangeMethod::Mikey
+            | KeyExchangeMethod::Zrtp
             | KeyExchangeMethod::PreSharedKey => false,
         }
     }
-    
+
     /// Check if this method exchanges keys via media path
     pub fn uses_media_exchange(&self) -> bool {
         match self {
             KeyExchangeMethod::Zrtp => true,
-            KeyExchangeMethod::DtlsSrtp 
-            | KeyExchangeMethod::Sdes 
-            | KeyExchangeMethod::Mikey 
+            KeyExchangeMethod::DtlsSrtp
+            | KeyExchangeMethod::Sdes
+            | KeyExchangeMethod::Mikey
             | KeyExchangeMethod::PreSharedKey => false,
         }
     }
@@ -109,19 +109,19 @@ impl SecurityMode {
             _ => true,
         }
     }
-    
+
     /// Check if this mode requires SRTP
     pub fn requires_srtp(&self) -> bool {
         match self {
             SecurityMode::None => false,
-            SecurityMode::Srtp 
-            | SecurityMode::DtlsSrtp 
-            | SecurityMode::SdesSrtp 
-            | SecurityMode::MikeySrtp 
+            SecurityMode::Srtp
+            | SecurityMode::DtlsSrtp
+            | SecurityMode::SdesSrtp
+            | SecurityMode::MikeySrtp
             | SecurityMode::ZrtpSrtp => true,
         }
     }
-    
+
     /// Get the key exchange method for this security mode
     pub fn key_exchange_method(&self) -> Option<KeyExchangeMethod> {
         (*self).into()
@@ -165,13 +165,13 @@ pub enum SrtpProfile {
 pub enum NetworkPreset {
     /// Minimal latency, good for LAN
     LowLatency,
-    
+
     /// Balanced preset, good for stable broadband
     Balanced,
-    
+
     /// Resilient preset, good for mobile or unstable networks
     Resilient,
-    
+
     /// Maximum protection, for very unstable networks
     HighProtection,
 }
@@ -194,19 +194,19 @@ pub struct BaseTransportConfig {
 pub struct SecurityInfo {
     /// Security mode (None, Srtp, DtlsSrtp)
     pub mode: SecurityMode,
-    
+
     /// DTLS fingerprint (for DtlsSrtp)
     pub fingerprint: Option<String>,
-    
+
     /// Fingerprint algorithm (for DtlsSrtp)
     pub fingerprint_algorithm: Option<String>,
-    
+
     /// Crypto suites in order of preference
     pub crypto_suites: Vec<String>,
-    
+
     /// Key parameters (for Srtp)
     pub key_params: Option<String>,
-    
+
     /// Selected SRTP profile
     pub srtp_profile: Option<String>,
 }
@@ -229,28 +229,28 @@ impl Default for SecurityInfo {
 pub enum SecurityProfile {
     /// No security - plain RTP
     Unsecured,
-    
+
     /// Basic SRTP with pre-shared key (for simple deployments)
     SrtpBasic,
-    
+
     /// DTLS-SRTP with self-signed certificates (common for WebRTC)
     DtlsSrtpSelfSigned,
-    
+
     /// DTLS-SRTP with provided certificates (enterprise/production)
     DtlsSrtpCertificate,
-    
+
     /// SDES-SRTP for SIP/SDP key exchange (telephony systems)
     SdesSrtp,
-    
+
     /// MIKEY-SRTP for enterprise key management (pre-shared keys)
     MikeyPsk,
-    
+
     /// MIKEY-SRTP for enterprise key management (public key exchange)
     MikeyPke,
-    
+
     /// ZRTP for peer-to-peer secure calling (no PKI required)
     ZrtpP2P,
-    
+
     /// Custom configuration (use the detailed SecurityConfig)
     Custom,
 }
@@ -269,43 +269,43 @@ impl Default for SecurityProfile {
 pub struct SecurityConfig {
     /// Security profile (for common configurations)
     pub profile: SecurityProfile,
-    
+
     /// Security mode (None, SRTP, DTLS-SRTP)
     pub mode: SecurityMode,
-    
+
     /// Whether security is required (fail if not available)
     pub required: bool,
-    
+
     /// SRTP profiles in order of preference
     pub srtp_profiles: Vec<SrtpProfile>,
-    
+
     /// Certificate file path (PEM format)
     pub certificate_path: Option<String>,
-    
+
     /// Private key file path (PEM format)
     pub private_key_path: Option<String>,
-    
+
     /// Fingerprint algorithm for DTLS
     pub fingerprint_algorithm: String,
-    
+
     /// Pre-shared key for SRTP (used when mode is Srtp)
     pub srtp_key: Option<Vec<u8>>,
-    
-    /// Require client certificate validation 
+
+    /// Require client certificate validation
     pub require_client_certificate: bool,
-    
+
     /// Remote fingerprint (if known, e.g. from SDP)
     pub remote_fingerprint: Option<String>,
-    
+
     /// Remote fingerprint algorithm
     pub remote_fingerprint_algorithm: Option<String>,
-    
+
     /// Certificate data in DER format (for MIKEY-PKE)
     pub certificate_data: Option<Vec<u8>>,
-    
+
     /// Private key data in PKCS#8 DER format (for MIKEY-PKE)
     pub private_key_data: Option<Vec<u8>>,
-    
+
     /// Peer certificate data in DER format (for MIKEY-PKE)
     pub peer_certificate_data: Option<Vec<u8>>,
 }
@@ -314,12 +314,9 @@ impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             profile: SecurityProfile::default(),
-            mode: SecurityMode::DtlsSrtp, 
+            mode: SecurityMode::DtlsSrtp,
             required: true,
-            srtp_profiles: vec![
-                SrtpProfile::AesCm128HmacSha1_80,
-                SrtpProfile::AesGcm128,
-            ],
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
             certificate_path: None,
             private_key_path: None,
             fingerprint_algorithm: "sha-256".to_string(),
@@ -338,25 +335,23 @@ impl SecurityConfig {
     /// Create a security configuration from a predefined profile
     pub fn from_profile(profile: SecurityProfile) -> Self {
         match profile {
-            SecurityProfile::Unsecured => {
-                Self {
-                    profile,
-                    mode: SecurityMode::None,
-                    required: false,
-                    srtp_profiles: vec![],
-                    certificate_path: None,
-                    private_key_path: None,
-                    fingerprint_algorithm: "sha-256".to_string(),
-                    srtp_key: None,
-                    require_client_certificate: false,
-                    remote_fingerprint: None,
-                    remote_fingerprint_algorithm: None,
-                    certificate_data: None,
-                    private_key_data: None,
-                    peer_certificate_data: None,
-                }
+            SecurityProfile::Unsecured => Self {
+                profile,
+                mode: SecurityMode::None,
+                required: false,
+                srtp_profiles: vec![],
+                certificate_path: None,
+                private_key_path: None,
+                fingerprint_algorithm: "sha-256".to_string(),
+                srtp_key: None,
+                require_client_certificate: false,
+                remote_fingerprint: None,
+                remote_fingerprint_algorithm: None,
+                certificate_data: None,
+                private_key_data: None,
+                peer_certificate_data: None,
             },
-            
+
             SecurityProfile::SrtpBasic => {
                 Self {
                     profile,
@@ -375,17 +370,14 @@ impl SecurityConfig {
                     private_key_data: None,
                     peer_certificate_data: None,
                 }
-            },
-            
+            }
+
             SecurityProfile::DtlsSrtpSelfSigned => {
                 Self {
                     profile,
                     mode: SecurityMode::DtlsSrtp,
                     required: true,
-                    srtp_profiles: vec![
-                        SrtpProfile::AesCm128HmacSha1_80,
-                        SrtpProfile::AesGcm128,
-                    ],
+                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
                     certificate_path: None, // Will use self-signed
                     private_key_path: None, // Will use self-signed
                     fingerprint_algorithm: "sha-256".to_string(),
@@ -397,22 +389,19 @@ impl SecurityConfig {
                     private_key_data: None,
                     peer_certificate_data: None,
                 }
-            },
-            
+            }
+
             SecurityProfile::DtlsSrtpCertificate => {
                 Self {
                     profile,
                     mode: SecurityMode::DtlsSrtp,
                     required: true,
-                    srtp_profiles: vec![
-                        SrtpProfile::AesCm128HmacSha1_80,
-                        SrtpProfile::AesGcm128,
-                    ],
+                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
                     // Paths need to be set by user
-                    certificate_path: None, 
+                    certificate_path: None,
                     private_key_path: None,
                     fingerprint_algorithm: "sha-256".to_string(),
-                    srtp_key: None, // Not needed for DTLS-SRTP
+                    srtp_key: None,                    // Not needed for DTLS-SRTP
                     require_client_certificate: false, // Optional in most deployments
                     remote_fingerprint: None,
                     remote_fingerprint_algorithm: None,
@@ -420,108 +409,100 @@ impl SecurityConfig {
                     private_key_data: None,
                     peer_certificate_data: None,
                 }
+            }
+
+            SecurityProfile::SdesSrtp => Self {
+                profile,
+                mode: SecurityMode::SdesSrtp,
+                required: true,
+                srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+                certificate_path: None,
+                private_key_path: None,
+                fingerprint_algorithm: "sha-256".to_string(),
+                srtp_key: None,
+                require_client_certificate: false,
+                remote_fingerprint: None,
+                remote_fingerprint_algorithm: None,
+                certificate_data: None,
+                private_key_data: None,
+                peer_certificate_data: None,
             },
-            
-            SecurityProfile::SdesSrtp => {
-                Self {
-                    profile,
-                    mode: SecurityMode::SdesSrtp,
-                    required: true,
-                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
-                    certificate_path: None,
-                    private_key_path: None,
-                    fingerprint_algorithm: "sha-256".to_string(),
-                    srtp_key: None,
-                    require_client_certificate: false,
-                    remote_fingerprint: None,
-                    remote_fingerprint_algorithm: None,
-                    certificate_data: None,
-                    private_key_data: None,
-                    peer_certificate_data: None,
-                }
+
+            SecurityProfile::MikeyPsk => Self {
+                profile,
+                mode: SecurityMode::MikeySrtp,
+                required: true,
+                srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+                certificate_path: None,
+                private_key_path: None,
+                fingerprint_algorithm: "sha-256".to_string(),
+                srtp_key: None,
+                require_client_certificate: false,
+                remote_fingerprint: None,
+                remote_fingerprint_algorithm: None,
+                certificate_data: None,
+                private_key_data: None,
+                peer_certificate_data: None,
             },
-            
-            SecurityProfile::MikeyPsk => {
-                Self {
-                    profile,
-                    mode: SecurityMode::MikeySrtp,
-                    required: true,
-                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
-                    certificate_path: None,
-                    private_key_path: None,
-                    fingerprint_algorithm: "sha-256".to_string(),
-                    srtp_key: None,
-                    require_client_certificate: false,
-                    remote_fingerprint: None,
-                    remote_fingerprint_algorithm: None,
-                    certificate_data: None,
-                    private_key_data: None,
-                    peer_certificate_data: None,
-                }
+
+            SecurityProfile::MikeyPke => Self {
+                profile,
+                mode: SecurityMode::MikeySrtp,
+                required: true,
+                srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+                certificate_path: None,
+                private_key_path: None,
+                fingerprint_algorithm: "sha-256".to_string(),
+                srtp_key: None,
+                require_client_certificate: false,
+                remote_fingerprint: None,
+                remote_fingerprint_algorithm: None,
+                certificate_data: None,
+                private_key_data: None,
+                peer_certificate_data: None,
             },
-            
-            SecurityProfile::MikeyPke => {
-                Self {
-                    profile,
-                    mode: SecurityMode::MikeySrtp,
-                    required: true,
-                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
-                    certificate_path: None,
-                    private_key_path: None,
-                    fingerprint_algorithm: "sha-256".to_string(),
-                    srtp_key: None,
-                    require_client_certificate: false,
-                    remote_fingerprint: None,
-                    remote_fingerprint_algorithm: None,
-                    certificate_data: None,
-                    private_key_data: None,
-                    peer_certificate_data: None,
-                }
+
+            SecurityProfile::ZrtpP2P => Self {
+                profile,
+                mode: SecurityMode::ZrtpSrtp,
+                required: true,
+                srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
+                certificate_path: None,
+                private_key_path: None,
+                fingerprint_algorithm: "sha-256".to_string(),
+                srtp_key: None,
+                require_client_certificate: false,
+                remote_fingerprint: None,
+                remote_fingerprint_algorithm: None,
+                certificate_data: None,
+                private_key_data: None,
+                peer_certificate_data: None,
             },
-            
-            SecurityProfile::ZrtpP2P => {
-                Self {
-                    profile,
-                    mode: SecurityMode::ZrtpSrtp,
-                    required: true,
-                    srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
-                    certificate_path: None,
-                    private_key_path: None,
-                    fingerprint_algorithm: "sha-256".to_string(),
-                    srtp_key: None,
-                    require_client_certificate: false,
-                    remote_fingerprint: None,
-                    remote_fingerprint_algorithm: None,
-                    certificate_data: None,
-                    private_key_data: None,
-                    peer_certificate_data: None,
-                }
-            },
-            
+
             SecurityProfile::Custom => {
                 // Use all defaults for custom profile
                 Self::default()
             }
         }
     }
-    
+
     /// Create an unsecured configuration (plain RTP)
     pub fn unsecured() -> Self {
         Self::from_profile(SecurityProfile::Unsecured)
     }
-    
+
     /// Create a basic SRTP configuration with a pre-shared key
     pub fn srtp_with_key(key: Vec<u8>) -> Self {
         let mut config = Self::from_profile(SecurityProfile::SrtpBasic);
         config.srtp_key = Some(key);
         config
     }
-    
+
     /// Create a WebRTC-compatible DTLS-SRTP configuration with self-signed certificates
     pub fn webrtc_compatible() -> Self {
         Self::from_profile(SecurityProfile::DtlsSrtpSelfSigned)
     }
-    
+
     /// Create a DTLS-SRTP configuration with provided certificate files
     pub fn dtls_with_certificate(cert_path: String, key_path: String) -> Self {
         let mut config = Self::from_profile(SecurityProfile::DtlsSrtpCertificate);
@@ -529,92 +510,100 @@ impl SecurityConfig {
         config.private_key_path = Some(key_path);
         config
     }
-    
+
     /// Create an SDES-SRTP configuration for SIP/SDP key exchange
     pub fn sdes_srtp() -> Self {
         Self::from_profile(SecurityProfile::SdesSrtp)
     }
-    
+
     /// Create a MIKEY-SRTP configuration with pre-shared key
     pub fn mikey_psk() -> Self {
         Self::from_profile(SecurityProfile::MikeyPsk)
     }
-    
+
     /// Create a MIKEY-SRTP configuration with public key exchange
     pub fn mikey_pke() -> Self {
         Self::from_profile(SecurityProfile::MikeyPke)
     }
-    
+
     /// Create a ZRTP configuration for peer-to-peer secure calling
     pub fn zrtp_p2p() -> Self {
         Self::from_profile(SecurityProfile::ZrtpP2P)
     }
-    
+
     /// Create a configuration that supports multiple key exchange methods with fallback
     pub fn multi_method(methods: Vec<KeyExchangeMethod>) -> Self {
-        let primary_method = methods.first().copied().unwrap_or(KeyExchangeMethod::DtlsSrtp);
+        let primary_method = methods
+            .first()
+            .copied()
+            .unwrap_or(KeyExchangeMethod::DtlsSrtp);
         let mut config = Self::from_profile(SecurityProfile::Custom);
         config.mode = primary_method.to_security_mode();
         config
     }
-    
+
     // Predefined profile combinations for common SIP scenarios
-    
+
     /// SIP enterprise configuration (MIKEY with PSK)
     pub fn sip_enterprise() -> Self {
         Self::mikey_psk()
     }
-    
+
     /// SIP operator configuration (SDES with operator keys)
     pub fn sip_operator() -> Self {
         Self::sdes_srtp()
     }
-    
+
     /// SIP peer-to-peer configuration (ZRTP for P2P calls)
     pub fn sip_peer_to_peer() -> Self {
         Self::zrtp_p2p()
     }
-    
+
     /// SIP<->WebRTC bridge configuration (support both SDES and DTLS-SRTP)
     pub fn sip_webrtc_bridge() -> Self {
         // Start with SDES as primary, but this could be extended to support multiple methods
         Self::multi_method(vec![KeyExchangeMethod::Sdes, KeyExchangeMethod::DtlsSrtp])
     }
-    
+
     /// Set the remote party's fingerprint (e.g. from SDP)
-    pub fn with_remote_fingerprint(mut self, fingerprint: String, algorithm: Option<String>) -> Self {
+    pub fn with_remote_fingerprint(
+        mut self,
+        fingerprint: String,
+        algorithm: Option<String>,
+    ) -> Self {
         self.remote_fingerprint = Some(fingerprint);
-        self.remote_fingerprint_algorithm = algorithm.or_else(|| Some(self.fingerprint_algorithm.clone()));
+        self.remote_fingerprint_algorithm =
+            algorithm.or_else(|| Some(self.fingerprint_algorithm.clone()));
         self
     }
-    
+
     /// Make security optional (don't fail if unavailable)
     pub fn with_optional_security(mut self) -> Self {
         self.required = false;
         self
     }
-    
+
     /// Set certificate data for PKE mode (DER format)
     pub fn with_certificate_data(mut self, cert_data: Vec<u8>, private_key_data: Vec<u8>) -> Self {
         self.certificate_data = Some(cert_data);
         self.private_key_data = Some(private_key_data);
         self
     }
-    
+
     /// Set peer certificate data for PKE mode (DER format)
     pub fn with_peer_certificate_data(mut self, peer_cert_data: Vec<u8>) -> Self {
         self.peer_certificate_data = Some(peer_cert_data);
         self
     }
-    
+
     /// Create a MIKEY-PKE configuration with certificate data
     pub fn mikey_pke_with_certificates(
-        cert_data: Vec<u8>, 
-        private_key_data: Vec<u8>, 
-        peer_cert_data: Vec<u8>
+        cert_data: Vec<u8>,
+        private_key_data: Vec<u8>,
+        peer_cert_data: Vec<u8>,
     ) -> Self {
         Self::mikey_pke()
             .with_certificate_data(cert_data, private_key_data)
             .with_peer_certificate_data(peer_cert_data)
     }
-} 
+}

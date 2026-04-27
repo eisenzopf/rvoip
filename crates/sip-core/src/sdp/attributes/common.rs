@@ -4,6 +4,7 @@
 //! among multiple attribute parsers.
 
 use crate::error::{Error, Result};
+use crate::parser::token::is_token_char;
 use crate::types::sdp::ParsedAttribute;
 use nom::{
     branch::alt,
@@ -14,7 +15,6 @@ use nom::{
     sequence::{delimited, pair, separated_pair, tuple},
     IResult,
 };
-use crate::parser::token::is_token_char;
 
 /// Parses a token (as defined in RFC 7230)
 /// A token consists of one or more characters from the token character set,
@@ -53,23 +53,26 @@ pub fn is_valid_hostname(hostname: &str) -> bool {
     // - Should only contain letters, numbers, dots and hyphens
     // - Should not start or end with dot or hyphen
     // - Should not have consecutive dots
-    
+
     if hostname.is_empty() {
         return false;
     }
-    
-    if hostname.starts_with('.') || hostname.ends_with('.') || 
-       hostname.starts_with('-') || hostname.ends_with('-') {
+
+    if hostname.starts_with('.')
+        || hostname.ends_with('.')
+        || hostname.starts_with('-')
+        || hostname.ends_with('-')
+    {
         return false;
     }
-    
+
     if hostname.contains("..") {
         return false;
     }
-    
-    hostname.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '.' || c == '-'
-    })
+
+    hostname
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 /// Parses key-value pair separated by equals sign
@@ -77,7 +80,7 @@ pub fn key_value_pair(input: &str) -> IResult<&str, (&str, &str)> {
     separated_pair(
         token,
         char('='),
-        take_till1(|c: char| c.is_ascii_whitespace() || c == ';')
+        take_till1(|c: char| c.is_ascii_whitespace() || c == ';'),
     )(input)
 }
 
@@ -98,22 +101,22 @@ pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
     let mut bundle_mids: Vec<String> = Vec::new();
     let mut rids: Vec<String> = Vec::new();
     let mut simulcast_rids: Vec<String> = Vec::new();
-    
+
     // First pass - collect values
     for attr in attributes {
         match attr {
             ParsedAttribute::Mid(mid) => {
                 mids.push(mid.clone());
-            },
+            }
             ParsedAttribute::Group(semantics, group_mids) => {
                 if semantics.to_uppercase() == "BUNDLE" {
                     has_bundle = true;
                     bundle_mids = group_mids.clone();
                 }
-            },
+            }
             ParsedAttribute::Rid(rid) => {
                 rids.push(rid.id.clone());
-            },
+            }
             ParsedAttribute::Simulcast(send_list, recv_list) => {
                 // Extract RIDs from simulcast lists (removing any paused indicators)
                 for list in [send_list, recv_list] {
@@ -125,11 +128,11 @@ pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
                         }
                     }
                 }
-            },
+            }
             _ => {}
         }
     }
-    
+
     // Second pass - validate references
     for attr in attributes {
         match attr {
@@ -138,33 +141,35 @@ pub fn validate_attributes(attributes: &[ParsedAttribute]) -> Result<()> {
                     // Verify all mids in BUNDLE exist
                     for mid in group_mids {
                         if !mids.contains(mid) {
-                            return Err(Error::SdpParsingError(
-                                format!("BUNDLE references non-existent mid: {}", mid)
-                            ));
+                            return Err(Error::SdpParsingError(format!(
+                                "BUNDLE references non-existent mid: {}",
+                                mid
+                            )));
                         }
                     }
                 }
-            },
+            }
             ParsedAttribute::Simulcast(_, _) => {
                 // Verify all RIDs referenced in simulcast exist
                 for rid in &simulcast_rids {
                     // The rid could have alternative formats in simulcast syntax
                     let clean_rid = rid.trim_start_matches('~');
                     if !clean_rid.is_empty() && !rids.contains(&clean_rid.to_string()) {
-                        return Err(Error::SdpParsingError(
-                            format!("Simulcast references non-existent rid: {}", clean_rid)
-                        ));
+                        return Err(Error::SdpParsingError(format!(
+                            "Simulcast references non-existent rid: {}",
+                            clean_rid
+                        )));
                     }
                 }
-            },
+            }
             _ => {}
         }
     }
-    
+
     Ok(())
 }
 
 /// Validates that a token string is valid according to RFC 7230
 pub fn is_valid_token(token: &str) -> bool {
     !token.is_empty() && token.chars().all(|c| is_token_char(c as u8))
-} 
+}

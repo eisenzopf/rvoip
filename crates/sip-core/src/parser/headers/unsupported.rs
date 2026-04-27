@@ -4,21 +4,21 @@
 
 use nom::{
     bytes::complete::tag_no_case,
+    combinator::{all_consuming, verify},
+    error::{make_error, ErrorKind, ParseError},
     multi::separated_list1, // Unsupported needs at least one tag
     sequence::{preceded, terminated},
-    IResult,
-    combinator::{all_consuming, verify},
-    error::{ParseError, ErrorKind, make_error},
     Err as NomErr,
+    IResult,
 };
 use std::str;
 
 // Import shared parser
 use super::token_list::token_string; // Need underlying token parser
 use crate::parser::common::{comma_separated_list1, verify_no_empty_elements};
-use crate::parser::ParseResult;
 use crate::parser::separators::hcolon;
 use crate::parser::utils::unfold_lws;
+use crate::parser::ParseResult;
 
 // Helper to ensure there are no spaces in the input
 fn no_spaces(input: &[u8]) -> bool {
@@ -29,37 +29,40 @@ fn no_spaces(input: &[u8]) -> bool {
 // Note: HCOLON handled elsewhere.
 pub fn parse_unsupported(input: &[u8]) -> ParseResult<Vec<String>> {
     // Check for line folding first (CRLF or LF followed by whitespace)
-    let has_line_folding = input.windows(3).any(|w| 
-        (w[0] == b'\r' && w[1] == b'\n' && (w[2] == b' ' || w[2] == b'\t')) ||
-        (w[0] == b'\n' && (w[1] == b' ' || w[1] == b'\t'))
-    );
-    
+    let has_line_folding = input.windows(3).any(|w| {
+        (w[0] == b'\r' && w[1] == b'\n' && (w[2] == b' ' || w[2] == b'\t'))
+            || (w[0] == b'\n' && (w[1] == b' ' || w[1] == b'\t'))
+    });
+
     // Only process line folding if it exists, otherwise use input directly
     let input_for_parsing = if has_line_folding {
         unfold_lws(input)
     } else {
         input.to_vec()
     };
-    
+
     // First check if the input contains spaces within tokens (not just between tokens)
-    if input_for_parsing.contains(&b' ') && 
-       !input_for_parsing.starts_with(&[b' ']) && 
-       !input_for_parsing.ends_with(&[b' ']) {
+    if input_for_parsing.contains(&b' ')
+        && !input_for_parsing.starts_with(&[b' '])
+        && !input_for_parsing.ends_with(&[b' '])
+    {
         let parts: Vec<&[u8]> = input_for_parsing.split(|&b| b == b',').collect();
         for part in parts {
-            let trimmed = part.iter().skip_while(|&&b| b == b' ')
-                             .take_while(|&&b| b != b' ')
-                             .count();
+            let trimmed = part
+                .iter()
+                .skip_while(|&&b| b == b' ')
+                .take_while(|&&b| b != b' ')
+                .count();
             // If we find a space in the middle of a token, reject
             if trimmed < part.iter().filter(|&&b| b != b' ').count() {
                 return Err(NomErr::Error(make_error(input, ErrorKind::Verify)));
             }
         }
     }
-    
+
     // Use a separate variable to store the result before modifying remaining
     let parsing_result = comma_separated_list1(token_string)(&input_for_parsing);
-    
+
     // Now handle the result, mapping any errors to the original input
     match parsing_result {
         Ok((remaining, tags)) => {
@@ -67,24 +70,24 @@ pub fn parse_unsupported(input: &[u8]) -> ParseResult<Vec<String>> {
             if !remaining.is_empty() && remaining[0] == b',' {
                 return Err(NomErr::Error(make_error(input, ErrorKind::TakeWhile1)));
             }
-            
+
             // Verify that there are no empty elements like "tag1,,tag2"
             if !verify_no_empty_elements(&tags) {
                 return Err(NomErr::Error(make_error(input, ErrorKind::Verify)));
             }
-            
+
             // Map the remaining back to the original input position
             // The simplest way is to just return an empty slice from the original input
             // This is a bit of a hack but it should work for our use case
             let consumed_len = input.len() - remaining.len().min(input.len());
             Ok((&input[consumed_len..], tags))
-        },
+        }
         Err(e) => Err(e.map_input(|_| input)),
     }
 }
 
 /// Parse a complete Unsupported header, including the header name
-/// 
+///
 /// Format: "Unsupported" HCOLON option-tag *(COMMA option-tag)
 ///
 /// # Examples
@@ -97,11 +100,8 @@ pub fn parse_unsupported(input: &[u8]) -> ParseResult<Vec<String>> {
 /// ```
 pub fn unsupported_header(input: &[u8]) -> IResult<&[u8], Vec<String>> {
     preceded(
-        terminated(
-            tag_no_case(b"Unsupported"),
-            hcolon
-        ),
-        parse_unsupported
+        terminated(tag_no_case(b"Unsupported"), hcolon),
+        parse_unsupported,
     )(input)
 }
 
@@ -131,9 +131,16 @@ mod tests {
     #[test]
     fn test_parse_unsupported_whitespace() {
         let (_, result) = parse_unsupported(b"timer , path ,  100rel").unwrap();
-        assert_eq!(result, vec!["timer".to_string(), "path".to_string(), "100rel".to_string()]);
+        assert_eq!(
+            result,
+            vec![
+                "timer".to_string(),
+                "path".to_string(),
+                "100rel".to_string()
+            ]
+        );
     }
-    
+
     #[test]
     fn test_parse_unsupported_special_chars() {
         // RFC 3261 defines token as 1*(alphanum / "-" / "." / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~" )
@@ -144,7 +151,10 @@ mod tests {
     #[test]
     fn test_parse_unsupported_special_chars_multiple() {
         let (_, result) = parse_unsupported(b"timer-v2.1, path!_%*+`'~").unwrap();
-        assert_eq!(result, vec!["timer-v2.1".to_string(), "path!_%*+`'~".to_string()]);
+        assert_eq!(
+            result,
+            vec!["timer-v2.1".to_string(), "path!_%*+`'~".to_string()]
+        );
     }
 
     #[test]
@@ -173,7 +183,7 @@ mod tests {
         // Option tags are case-sensitive according to RFC 3261
         let (_, result) = parse_unsupported(b"Timer, PATH").unwrap();
         assert_eq!(result, vec!["Timer".to_string(), "PATH".to_string()]);
-        
+
         // These should not match "timer" and "path" in case-sensitive comparison
         assert_ne!(result, vec!["timer".to_string(), "path".to_string()]);
     }
@@ -182,7 +192,7 @@ mod tests {
     fn test_parse_unsupported_header_whitespace() {
         let (_, result) = unsupported_header(b"Unsupported: timer, path").unwrap();
         assert_eq!(result, vec!["timer".to_string(), "path".to_string()]);
-        
+
         // Test with extra whitespace
         let (_, result) = unsupported_header(b"Unsupported:  timer , path ").unwrap();
         assert_eq!(result, vec!["timer".to_string(), "path".to_string()]);
@@ -193,7 +203,7 @@ mod tests {
         // Header name should be case-insensitive
         let (_, result) = unsupported_header(b"UNSUPPORTED: timer, path").unwrap();
         assert_eq!(result, vec!["timer".to_string(), "path".to_string()]);
-        
+
         let (_, result) = unsupported_header(b"unsupported: timer, path").unwrap();
         assert_eq!(result, vec!["timer".to_string(), "path".to_string()]);
     }
@@ -211,4 +221,4 @@ mod tests {
         let result = all_consuming(parse_unsupported)(b"timer, path extra");
         assert!(result.is_err());
     }
-} 
+}

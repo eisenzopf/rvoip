@@ -1,13 +1,13 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
     address::Address,
-    record_route::{RecordRoute, RecordRouteEntry},
-    uri::Uri,
+    headers::header_access::HeaderAccess,
     headers::HeaderName,
     headers::TypedHeader,
-    headers::header_access::HeaderAccess,
+    record_route::{RecordRoute, RecordRouteEntry},
+    uri::Uri,
 };
-use super::HeaderSetter;
 
 /// RecordRoute header builder
 ///
@@ -57,7 +57,7 @@ use super::HeaderSetter;
 ///
 /// // A proxy server receiving a request would add its address to Record-Route
 /// // before forwarding, to stay in the path for future requests
-/// 
+///
 /// // 1. Create proxy address with loose routing parameter
 /// let mut proxy_uri = Uri::from_str("sip:proxy1.example.com").unwrap();
 /// proxy_uri = proxy_uri.with_parameter(Param::Lr);
@@ -99,7 +99,7 @@ use super::HeaderSetter;
 /// // The entry order in Record-Route is important:
 /// // - First proxy to handle request is placed last in the list
 /// // - Most recent proxy is placed first
-/// 
+///
 /// // Create response with Record-Route headers
 /// // The order reflects the reverse of the request path: lb_proxy → app_proxy → edge_proxy
 /// let response = SimpleResponseBuilder::new(StatusCode::Ok, None)
@@ -110,7 +110,7 @@ use super::HeaderSetter;
 ///     // Add Record-Route entries in the order they were added in the request
 ///     // (lb_proxy was the last to process, so it comes first)
 ///     .record_route_uri(lb_proxy)      // Added last to request, first in response
-///     .record_route_uri(app_proxy)     // Added second to request 
+///     .record_route_uri(app_proxy)     // Added second to request
 ///     .record_route_uri(edge_proxy)    // Added first to request, last in response
 ///     .build();
 ///
@@ -125,7 +125,7 @@ use super::HeaderSetter;
 pub trait RecordRouteBuilderExt {
     /// Add a Record-Route header with URI
     ///
-    /// This method adds a Record-Route header with a single URI. The URI typically 
+    /// This method adds a Record-Route header with a single URI. The URI typically
     /// identifies a proxy server that should remain in the signaling path for all future
     /// requests in the dialog.
     ///
@@ -179,7 +179,7 @@ pub trait RecordRouteBuilderExt {
     /// // Create an Address with display name and URI
     /// let mut uri = Uri::from_str("sip:edge.example.com").unwrap();
     /// uri = uri.with_parameter(Param::Lr);
-    /// 
+    ///
     /// let mut address = Address::new(uri);
     /// address.display_name = Some("Edge Proxy".to_string());
     ///
@@ -193,7 +193,7 @@ pub trait RecordRouteBuilderExt {
     /// Add a Record-Route header with a raw entry
     ///
     /// This method adds a Record-Route header with a single RecordRouteEntry, which is the
-    /// internal representation of a Record-Route element. This is typically used for more 
+    /// internal representation of a Record-Route element. This is typically used for more
     /// advanced scenarios when you have a pre-constructed RecordRouteEntry.
     ///
     /// # Parameters
@@ -294,22 +294,27 @@ mod tests {
     #[test]
     fn test_request_record_route_uri() {
         let uri = Uri::from_str("sip:proxy.example.com").unwrap();
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .record_route_uri(uri.clone())
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         // Find the RecordRoute header
-        let record_route = headers.iter()
+        let record_route = headers
+            .iter()
             .filter_map(|h| match h {
                 TypedHeader::RecordRoute(r) => Some(r),
-                _ => None
+                _ => None,
             })
             .next();
-        
-        assert!(record_route.is_some(), "Record-Route header not found or has wrong type");
+
+        assert!(
+            record_route.is_some(),
+            "Record-Route header not found or has wrong type"
+        );
         let record_route = record_route.unwrap();
         assert_eq!(record_route.0.len(), 1);
         let entry_uri = record_route.0[0].uri();
@@ -320,23 +325,27 @@ mod tests {
     fn test_response_record_route_address() {
         let uri = Uri::from_str("sip:proxy.example.com").unwrap();
         let address = Address::new(uri.clone());
-        
+
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .record_route_address(address.clone())
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         // Find the RecordRoute header
-        let record_route = headers.iter()
+        let record_route = headers
+            .iter()
             .filter_map(|h| match h {
                 TypedHeader::RecordRoute(r) => Some(r),
-                _ => None
+                _ => None,
             })
             .next();
-        
-        assert!(record_route.is_some(), "Record-Route header not found or has wrong type");
+
+        assert!(
+            record_route.is_some(),
+            "Record-Route header not found or has wrong type"
+        );
         let record_route = record_route.unwrap();
         assert_eq!(record_route.0.len(), 1);
         let entry_uri = record_route.0[0].uri();
@@ -347,25 +356,30 @@ mod tests {
     fn test_record_route_entries() {
         let uri1 = Uri::from_str("sip:proxy1.example.com").unwrap();
         let uri2 = Uri::from_str("sip:proxy2.example.com").unwrap();
-        
+
         let entry1 = RecordRouteEntry::new(Address::new(uri1.clone()));
         let entry2 = RecordRouteEntry::new(Address::new(uri2.clone()));
-        
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .record_route_entries(vec![entry1, entry2])
             .build();
-        
+
         let headers = &request.headers;
-        
+
         // Find the RecordRoute header
-        let record_route = headers.iter()
+        let record_route = headers
+            .iter()
             .filter_map(|h| match h {
                 TypedHeader::RecordRoute(r) => Some(r),
-                _ => None
+                _ => None,
             })
             .next();
-        
-        assert!(record_route.is_some(), "Record-Route header not found or has wrong type");
+
+        assert!(
+            record_route.is_some(),
+            "Record-Route header not found or has wrong type"
+        );
         let record_route = record_route.unwrap();
         assert_eq!(record_route.0.len(), 2);
         let entry1_uri = record_route.0[0].uri();
@@ -373,4 +387,4 @@ mod tests {
         assert_eq!(entry1_uri.to_string(), uri1.to_string());
         assert_eq!(entry2_uri.to_string(), uri2.to_string());
     }
-} 
+}

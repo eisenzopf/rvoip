@@ -12,12 +12,13 @@ pub fn unfold_lws(input: &[u8]) -> Vec<u8> {
 
     while i < len {
         // Check for CRLF
-        if input[i] == b'\r' && i + 1 < len && input[i+1] == b'\n' {
+        if input[i] == b'\r' && i + 1 < len && input[i + 1] == b'\n' {
             // Check if followed by WSP
-            if i + 2 < len && (input[i+2] == b' ' || input[i+2] == b'\t') {
+            if i + 2 < len && (input[i + 2] == b' ' || input[i + 2] == b'\t') {
                 // It's folding LWS: skip CRLF, process subsequent WSP as a single SP
                 i += 2; // Skip CR LF
-                if !last_was_wsp { // Only add SP if not already preceded by WSP
+                if !last_was_wsp {
+                    // Only add SP if not already preceded by WSP
                     unfolded.push(b' ');
                     last_was_wsp = true;
                 }
@@ -29,30 +30,30 @@ pub fn unfold_lws(input: &[u8]) -> Vec<u8> {
                 // Not folding LWS, treat CRLF as normal characters (e.g., part of quoted string content)
                 // Or potentially an error depending on context, but unfold just passes them through.
                 unfolded.push(input[i]);
-                unfolded.push(input[i+1]);
+                unfolded.push(input[i + 1]);
                 i += 2;
                 last_was_wsp = false;
             }
-        } 
+        }
         // Check for standalone LF (more lenient)
         else if input[i] == b'\n' {
-             // Check if followed by WSP
-             if i + 1 < len && (input[i+1] == b' ' || input[i+1] == b'\t') {
-                 // Folding LWS
-                 i += 1; // Skip LF
-                 if !last_was_wsp {
-                     unfolded.push(b' ');
-                     last_was_wsp = true;
-                 }
-                 while i < len && (input[i] == b' ' || input[i] == b'\t') {
-                     i += 1;
-                 }
-             } else {
-                 // Normal LF
-                 unfolded.push(input[i]);
-                 i += 1;
-                 last_was_wsp = false;
-             }
+            // Check if followed by WSP
+            if i + 1 < len && (input[i + 1] == b' ' || input[i + 1] == b'\t') {
+                // Folding LWS
+                i += 1; // Skip LF
+                if !last_was_wsp {
+                    unfolded.push(b' ');
+                    last_was_wsp = true;
+                }
+                while i < len && (input[i] == b' ' || input[i] == b'\t') {
+                    i += 1;
+                }
+            } else {
+                // Normal LF
+                unfolded.push(input[i]);
+                i += 1;
+                last_was_wsp = false;
+            }
         }
         // Check for WSP (SP or HTAB)
         else if input[i] == b' ' || input[i] == b'\t' {
@@ -65,7 +66,7 @@ pub fn unfold_lws(input: &[u8]) -> Vec<u8> {
             while i < len && (input[i] == b' ' || input[i] == b'\t') {
                 i += 1;
             }
-        } 
+        }
         // Other character
         else {
             unfolded.push(input[i]);
@@ -94,14 +95,15 @@ pub fn unescape_uri_component(input: &[u8]) -> crate::error::Result<String> {
                         i += 3;
                     } else {
                         // Invalid hex digits after %
-                        return Err(crate::error::Error::ParseError(
-                            format!("Invalid hex sequence: %{}{}", h1 as char, h2 as char)
-                        ));
+                        return Err(crate::error::Error::ParseError(format!(
+                            "Invalid hex sequence: %{}{}",
+                            h1 as char, h2 as char
+                        )));
                     }
                 } else {
                     // Incomplete escape sequence
                     return Err(crate::error::Error::ParseError(
-                        "Incomplete escape sequence at end of input".to_string()
+                        "Incomplete escape sequence at end of input".to_string(),
                     ));
                 }
             }
@@ -112,9 +114,9 @@ pub fn unescape_uri_component(input: &[u8]) -> crate::error::Result<String> {
         }
     }
 
-    String::from_utf8(unescaped).map_err(|e| crate::error::Error::ParseError(
-        format!("UTF-8 error after URI unescaping: {}", e)
-    ))
+    String::from_utf8(unescaped).map_err(|e| {
+        crate::error::Error::ParseError(format!("UTF-8 error after URI unescaping: {}", e))
+    })
 }
 
 // Helper to convert a hex character (byte) to its value (0-15)
@@ -150,11 +152,17 @@ mod tests {
 
     #[test]
     fn test_unfold_lws_mixed() {
-        assert_eq!(unfold_lws(b"Folded\r\n  Here and   also \t here."), b"Folded Here and also here.");
-        assert_eq!(unfold_lws(b" Leading\r\n space\r\n\tand trailing \t"), b" Leading space and trailing ");
+        assert_eq!(
+            unfold_lws(b"Folded\r\n  Here and   also \t here."),
+            b"Folded Here and also here."
+        );
+        assert_eq!(
+            unfold_lws(b" Leading\r\n space\r\n\tand trailing \t"),
+            b" Leading space and trailing "
+        );
     }
-    
-     #[test]
+
+    #[test]
     fn test_unfold_lenient_lf() {
         assert_eq!(unfold_lws(b"Line 1\n Line 2"), b"Line 1 Line 2");
         assert_eq!(unfold_lws(b"Line 1\n\tLine 2"), b"Line 1 Line 2");
@@ -178,7 +186,7 @@ mod tests {
         assert!(unescape_uri_component(b"%G0").is_err()); // Invalid hex
         assert!(unescape_uri_component(b"%2G").is_err()); // Invalid hex
         assert!(unescape_uri_component(b"%AF%").is_err()); // Incomplete at end
-        // Test invalid UTF-8 after decoding (e.g., %C0%80)
-        assert!(unescape_uri_component(b"%C0%80").is_err()); 
+                                                           // Test invalid UTF-8 after decoding (e.g., %C0%80)
+        assert!(unescape_uri_component(b"%C0%80").is_err());
     }
-} 
+}

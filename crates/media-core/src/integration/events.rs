@@ -3,8 +3,8 @@
 //! This module defines events for cross-crate communication between media-core
 //! and other components like session-core and rtp-core.
 
-use crate::types::{MediaSessionId, DialogId};
 use crate::quality::metrics::QualityMetrics;
+use crate::types::{DialogId, MediaSessionId};
 use std::time::Instant;
 
 /// Integration event types for cross-crate communication
@@ -15,48 +15,44 @@ pub enum IntegrationEventType {
         session_id: MediaSessionId,
         capabilities: MediaCapabilities,
     },
-    
+
     /// Media session was destroyed
-    MediaSessionDestroyed {
-        session_id: MediaSessionId,
-    },
-    
+    MediaSessionDestroyed { session_id: MediaSessionId },
+
     /// Quality metrics update
     QualityUpdate {
         session_id: MediaSessionId,
         metrics: QualityMetrics,
     },
-    
+
     /// Codec negotiation request from session-core
     CodecNegotiationRequest {
         dialog_id: DialogId,
         offered_codecs: Vec<String>,
     },
-    
+
     /// Codec negotiation response to session-core
     CodecNegotiationResponse {
         dialog_id: DialogId,
         selected_codec: String,
         parameters: CodecParameters,
     },
-    
+
     /// RTP session registration request
     RtpSessionRegister {
         session_id: MediaSessionId,
         rtp_params: RtpParameters,
     },
-    
+
     /// RTP session unregistration request
-    RtpSessionUnregister {
-        session_id: MediaSessionId,
-    },
-    
+    RtpSessionUnregister { session_id: MediaSessionId },
+
     /// Media packet received from RTP
     MediaPacketReceived {
         session_id: MediaSessionId,
         packet_info: PacketInfo,
     },
-    
+
     /// Media packet ready to send via RTP
     MediaPacketSend {
         session_id: MediaSessionId,
@@ -183,38 +179,41 @@ impl IntegrationEvent {
             target: target.into(),
         }
     }
-    
+
     /// Create a media session ready event
     pub fn media_session_ready(
         session_id: MediaSessionId,
         capabilities: MediaCapabilities,
     ) -> Self {
         Self::new(
-            IntegrationEventType::MediaSessionReady { session_id, capabilities },
+            IntegrationEventType::MediaSessionReady {
+                session_id,
+                capabilities,
+            },
             "media-core",
             "session-core",
         )
     }
-    
+
     /// Create a codec negotiation request event
-    pub fn codec_negotiation_request(
-        dialog_id: DialogId,
-        offered_codecs: Vec<String>,
-    ) -> Self {
+    pub fn codec_negotiation_request(dialog_id: DialogId, offered_codecs: Vec<String>) -> Self {
         Self::new(
-            IntegrationEventType::CodecNegotiationRequest { dialog_id, offered_codecs },
+            IntegrationEventType::CodecNegotiationRequest {
+                dialog_id,
+                offered_codecs,
+            },
             "session-core",
             "media-core",
         )
     }
-    
+
     /// Create an RTP session register event
-    pub fn rtp_session_register(
-        session_id: MediaSessionId,
-        rtp_params: RtpParameters,
-    ) -> Self {
+    pub fn rtp_session_register(session_id: MediaSessionId, rtp_params: RtpParameters) -> Self {
         Self::new(
-            IntegrationEventType::RtpSessionRegister { session_id, rtp_params },
+            IntegrationEventType::RtpSessionRegister {
+                session_id,
+                rtp_params,
+            },
             "media-core",
             "rtp-core",
         )
@@ -249,4 +248,4 @@ impl Default for MediaCapabilities {
             },
         }
     }
-} 
+}

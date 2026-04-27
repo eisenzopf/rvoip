@@ -1,11 +1,7 @@
-use crate::error::{Error, Result};
-use crate::types::{
-    TypedHeader,
-    header::TypedHeaderTrait,
-    headers::header_access::HeaderAccess,
-};
-use crate::types::content_language::ContentLanguage;
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::types::content_language::ContentLanguage;
+use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
 
 /// Content-Language Header Builder for SIP Messages
 ///
@@ -15,7 +11,7 @@ use super::HeaderSetter;
 /// ## SIP Content-Language Header Overview
 ///
 /// The Content-Language header is defined in [RFC 3261 Section 20.13](https://datatracker.ietf.org/doc/html/rfc3261#section-20.13)
-/// as part of the core SIP protocol. It follows the syntax and semantics defined in 
+/// as part of the core SIP protocol. It follows the syntax and semantics defined in
 /// [RFC 2616 Section 14.12](https://datatracker.ietf.org/doc/html/rfc2616#section-14.12) for HTTP
 /// and [RFC 5646](https://datatracker.ietf.org/doc/html/rfc5646) for language tags.
 ///
@@ -183,7 +179,7 @@ pub trait ContentLanguageExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentLanguageExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a MESSAGE with Italian content
     /// let request = SimpleRequestBuilder::new(Method::Message, "sip:recipient@example.com").unwrap()
     ///     .from("Sender", "sip:sender@example.com", Some("tag1234"))
@@ -195,7 +191,7 @@ pub trait ContentLanguageExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 3261 Section 20.13](https://datatracker.ietf.org/doc/html/rfc3261#section-20.13),
     /// the Content-Language header field is used to specify the language of the message body.
     /// Language tags follow the format defined in [RFC 5646](https://datatracker.ietf.org/doc/html/rfc5646).
@@ -220,7 +216,7 @@ pub trait ContentLanguageExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentLanguageExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a notification message with content in multiple languages
     /// let request = SimpleRequestBuilder::new(Method::Message, "sip:user@example.com").unwrap()
     ///     .from("Multilingual Service", "sip:service@example.com", Some("tag5678"))
@@ -236,15 +232,15 @@ pub trait ContentLanguageExt {
     /// When a message body contains text in multiple languages, all languages should be listed
     /// in the Content-Language header. This helps the recipient properly handle the content,
     /// for example:
-    /// 
+    ///
     /// - A multilingual SIP client might choose which portions of the text to display
     /// - A text-to-speech system could select the appropriate voice for each section
     /// - Automated translation services can identify parts that don't need translation
     fn content_languages<T: AsRef<str>>(self, languages: &[T]) -> Self;
 }
 
-impl<T> ContentLanguageExt for T 
-where 
+impl<T> ContentLanguageExt for T
+where
     T: HeaderSetter,
 {
     fn content_language(self, language: &str) -> Self {
@@ -264,47 +260,58 @@ mod tests {
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
     use crate::types::ContentLanguage; // Import the actual type
-    
+
     #[test]
     fn test_content_language_single() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_language("en-US")
             .build();
-            
+
         // Check if Content-Language header exists with the correct value
         let header = request.header(&HeaderName::ContentLanguage);
         assert!(header.is_some(), "Content-Language header not found");
-        
+
         if let Some(TypedHeader::ContentLanguage(content_language)) = header {
             // Check if the content language includes "en-US"
-            assert!(content_language.has_language("en-US"), "en-US language not found");
+            assert!(
+                content_language.has_language("en-US"),
+                "en-US language not found"
+            );
             assert_eq!(content_language.languages().len(), 1);
         } else {
             panic!("Expected Content-Language header");
         }
     }
-    
+
     #[test]
     fn test_content_languages_multiple() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_languages(&["en-US", "fr-CA"])
             .build();
-            
+
         // Check if Content-Language header exists with the correct values
         let header = request.header(&HeaderName::ContentLanguage);
         assert!(header.is_some(), "Content-Language header not found");
-        
+
         if let Some(TypedHeader::ContentLanguage(content_language)) = header {
             // Check if the content language includes both "en-US" and "fr-CA"
-            assert!(content_language.has_language("en-US"), "en-US language not found");
-            assert!(content_language.has_language("fr-CA"), "fr-CA language not found");
+            assert!(
+                content_language.has_language("en-US"),
+                "en-US language not found"
+            );
+            assert!(
+                content_language.has_language("fr-CA"),
+                "fr-CA language not found"
+            );
             assert_eq!(content_language.languages().len(), 2);
         } else {
             panic!("Expected Content-Language header");
         }
     }
-} 
+}

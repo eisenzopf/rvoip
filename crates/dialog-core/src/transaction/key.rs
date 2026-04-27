@@ -28,7 +28,6 @@
 ///
 /// The module also provides methods to create transaction keys from SIP requests and
 /// responses, implementing the matching rules specified in RFC 3261.
-
 use std::fmt;
 // use std::net::SocketAddr; // This import seems unused in this file. Commenting out.
 use std::hash::{Hash, Hasher};
@@ -38,21 +37,22 @@ use rvoip_sip_core::prelude::*;
 // Removed: use rvoip_sip_core::common::Branch;
 
 use rvoip_sip_core::{
-    Method,
-    Request, Response, // Added Response
-    StatusCode, // Added StatusCode
     types::{
-        uri::Uri,
-        param::Param,
-        via::Via, // Added Via
-        cseq::CSeq,
-        call_id::CallId,
-        from::From,
-        to::To,
         address::Address,
+        call_id::CallId,
+        cseq::CSeq,
+        from::From,
         headers::header_name::HeaderName, // Ensure this is the only HeaderName import
+        param::Param,
+        to::To,
+        uri::Uri,
+        via::Via, // Added Via
     },
-    Version, // Added Version
+    Method,
+    Request,
+    Response,   // Added Response
+    StatusCode, // Added StatusCode
+    Version,    // Added Version
 };
 
 /// Uniquely identifies a SIP transaction.
@@ -92,7 +92,7 @@ pub struct TransactionKey {
     /// The value of the `branch` parameter from the top-most `Via` header.
     /// This is a critical part of the transaction identifier.
     pub branch: String,
-    
+
     /// The SIP method of the request that initiated or is part of the transaction (e.g., INVITE, ACK, BYE).
     /// This is important because a request with the same branch but different method
     /// (e.g., an INVITE and a CANCEL for that INVITE) can belong to different transactions
@@ -179,14 +179,18 @@ impl TransactionKey {
                         return None;
                     }
                     if let Some(cseq_header) = response.typed_header::<CSeq>() {
-                        return Some(Self::new(branch_param.to_string(), cseq_header.method.clone(), false));
+                        return Some(Self::new(
+                            branch_param.to_string(),
+                            cseq_header.method.clone(),
+                            false,
+                        ));
                     }
                 }
             }
         }
         None
     }
-    
+
     /// Returns the branch parameter of the transaction key.
     pub fn branch(&self) -> &str {
         &self.branch
@@ -243,9 +247,9 @@ impl fmt::Display for TransactionKey {
 /// Two keys are equal if their `branch`, `method`, and `is_server` fields are all equal.
 impl PartialEq for TransactionKey {
     fn eq(&self, other: &Self) -> bool {
-        self.branch == other.branch && 
-        self.method == other.method && 
-        self.is_server == other.is_server
+        self.branch == other.branch
+            && self.method == other.method
+            && self.is_server == other.is_server
     }
 }
 
@@ -284,32 +288,36 @@ impl FromStr for TransactionKey {
         // Handle both Display format "Key(branch:METHOD:side)" and Debug format "branch:METHOD:side"
         let parts_str = if s.starts_with("Key(") && s.ends_with(")") {
             // Display format - extract content between "Key(" and ")"
-            &s[4..s.len()-1]
+            &s[4..s.len() - 1]
         } else {
             // Debug format or already stripped
             s
         };
-        
+
         // Remove any potential :INVITE_LIKE or :NON_INVITE_LIKE suffix
-        let parts_str = if parts_str.ends_with(":INVITE_LIKE") || parts_str.ends_with(":NON_INVITE_LIKE") {
-            // Find the last colon before the suffix
-            if let Some(idx) = parts_str.rfind(':') {
-                if let Some(prev_idx) = parts_str[..idx].rfind(':') {
-                    &parts_str[..prev_idx+idx-prev_idx]
+        let parts_str =
+            if parts_str.ends_with(":INVITE_LIKE") || parts_str.ends_with(":NON_INVITE_LIKE") {
+                // Find the last colon before the suffix
+                if let Some(idx) = parts_str.rfind(':') {
+                    if let Some(prev_idx) = parts_str[..idx].rfind(':') {
+                        &parts_str[..prev_idx + idx - prev_idx]
+                    } else {
+                        parts_str
+                    }
                 } else {
                     parts_str
                 }
             } else {
                 parts_str
-            }
-        } else {
-            parts_str
-        };
+            };
 
         // Split by colons
         let parts: Vec<&str> = parts_str.split(':').collect();
         if parts.len() != 3 {
-            return Err(format!("Invalid transaction key format: {}, expected branch:METHOD:side", s));
+            return Err(format!(
+                "Invalid transaction key format: {}, expected branch:METHOD:side",
+                s
+            ));
         }
 
         let branch = parts[0].to_string();
@@ -320,7 +328,12 @@ impl FromStr for TransactionKey {
         let is_server = match parts[2] {
             "server" => true,
             "client" => false,
-            _ => return Err(format!("Invalid side: {}, expected 'server' or 'client'", parts[2])),
+            _ => {
+                return Err(format!(
+                    "Invalid side: {}, expected 'server' or 'client'",
+                    parts[2]
+                ))
+            }
         };
 
         Ok(Self::new(branch, method, is_server))
@@ -330,19 +343,19 @@ impl FromStr for TransactionKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_sip_core::types::uri::Uri;
+    use rvoip_sip_core::types::address::Address;
+    use rvoip_sip_core::types::call_id::CallId;
+    use rvoip_sip_core::types::cseq::CSeq;
+    use rvoip_sip_core::types::from::From;
     use rvoip_sip_core::types::headers::header_name::HeaderName;
     use rvoip_sip_core::types::param::Param;
-    use rvoip_sip_core::types::cseq::CSeq;
-    use rvoip_sip_core::types::address::Address;
-    use rvoip_sip_core::types::via::Via;
-    use rvoip_sip_core::types::call_id::CallId;
-    use rvoip_sip_core::types::from::From;
     use rvoip_sip_core::types::to::To;
-    use rvoip_sip_core::StatusCode;
+    use rvoip_sip_core::types::uri::Uri;
+    use rvoip_sip_core::types::via::Via;
     use rvoip_sip_core::Method;
     use rvoip_sip_core::Request;
     use rvoip_sip_core::Response;
+    use rvoip_sip_core::StatusCode;
     use rvoip_sip_core::TypedHeader;
     use std::collections::HashSet;
     use std::str::FromStr;
@@ -363,9 +376,16 @@ mod tests {
             let via_header_val = Via::new("SIP", "2.0", "UDP", via_host, None, via_params).unwrap();
             req.headers.push(TypedHeader::Via(via_header_val));
         }
-        req.headers.push(TypedHeader::From(From::new(Address::new(Uri::sip("alice@localhost")))));
-        req.headers.push(TypedHeader::To(To::new(Address::new(Uri::sip("bob@localhost")))));
-        req.headers.push(TypedHeader::CallId(CallId::new("callid-test-key")));
+        req.headers
+            .push(TypedHeader::From(From::new(Address::new(Uri::sip(
+                "alice@localhost",
+            )))));
+        req.headers
+            .push(TypedHeader::To(To::new(Address::new(Uri::sip(
+                "bob@localhost",
+            )))));
+        req.headers
+            .push(TypedHeader::CallId(CallId::new("callid-test-key")));
         req.headers.push(TypedHeader::CSeq(CSeq::new(1, method)));
         req
     }
@@ -387,11 +407,19 @@ mod tests {
             res.headers.push(TypedHeader::Via(via_header_val));
         }
         if add_cseq {
-            res.headers.push(TypedHeader::CSeq(CSeq::new(1, method_for_cseq)));
+            res.headers
+                .push(TypedHeader::CSeq(CSeq::new(1, method_for_cseq)));
         }
-        res.headers.push(TypedHeader::From(From::new(Address::new(Uri::sip("alice@localhost")))));
-        res.headers.push(TypedHeader::To(To::new(Address::new(Uri::sip("bob@localhost")))));
-        res.headers.push(TypedHeader::CallId(CallId::new("callid-test-key")));
+        res.headers
+            .push(TypedHeader::From(From::new(Address::new(Uri::sip(
+                "alice@localhost",
+            )))));
+        res.headers
+            .push(TypedHeader::To(To::new(Address::new(Uri::sip(
+                "bob@localhost",
+            )))));
+        res.headers
+            .push(TypedHeader::CallId(CallId::new("callid-test-key")));
         res
     }
 
@@ -450,7 +478,7 @@ mod tests {
         let res = create_test_response_custom(Method::Invite, Some(""), true, true);
         assert!(TransactionKey::from_response(&res).is_none());
     }
-    
+
     #[test]
     fn test_from_response_via_empty_branch() {
         let res = create_test_response_custom(Method::Invite, Some(""), true, true);
@@ -500,7 +528,7 @@ mod tests {
 
         assert_eq!(format!("{}", key_client), "Key(z9hG4bKbeta:MESSAGE:client)");
         assert_eq!(format!("{:?}", key_client), "z9hG4bKbeta:MESSAGE:client");
-        
+
         // Test ACK for INVITE_LIKE in Debug
         let key_ack = TransactionKey::new("z9hG4bKgamma".to_string(), Method::Ack, true); // ACK for server
         assert_eq!(format!("{:?}", key_ack), "z9hG4bKgamma:ACK:server");
@@ -521,21 +549,21 @@ mod tests {
         assert_eq!(key1.branch(), "z9hG4bKalpha");
         assert_eq!(*key1.method(), Method::Invite);
         assert!(key1.is_server());
-        
+
         // Test parsing from Display format
         let display_str = "Key(z9hG4bKbeta:MESSAGE:client)";
         let key2 = TransactionKey::from_str(display_str).unwrap();
         assert_eq!(key2.branch(), "z9hG4bKbeta");
         assert_eq!(*key2.method(), Method::Message);
         assert!(!key2.is_server());
-        
+
         // Test that the old debug format with INVITE_LIKE suffix is handled
         let old_debug_str = "z9hG4bKgamma:INVITE:server:INVITE_LIKE";
         let key3 = TransactionKey::from_str(old_debug_str).unwrap();
         assert_eq!(key3.branch(), "z9hG4bKgamma");
         assert_eq!(*key3.method(), Method::Invite);
         assert!(key3.is_server());
-        
+
         // Test with non-INVITE_LIKE suffix
         let old_debug_str2 = "z9hG4bKdelta:MESSAGE:client:NON_INVITE_LIKE";
         let key4 = TransactionKey::from_str(old_debug_str2).unwrap();
@@ -543,19 +571,19 @@ mod tests {
         assert_eq!(*key4.method(), Method::Message);
         assert!(!key4.is_server());
     }
-    
+
     #[test]
     fn test_transaction_key_from_str_error() {
         // Invalid format - not enough parts
         let invalid_str = "z9hG4bKalpha:INVITE";
         assert!(TransactionKey::from_str(invalid_str).is_err());
-        
+
         // Empty method - actually invalid
         let empty_method = "z9hG4bKalpha::server";
         assert!(TransactionKey::from_str(empty_method).is_err());
-        
+
         // Invalid side
         let invalid_side = "z9hG4bKalpha:INVITE:invalid";
         assert!(TransactionKey::from_str(invalid_side).is_err());
     }
-} 
+}

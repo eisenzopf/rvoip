@@ -9,17 +9,16 @@ use nom::{
 };
 
 // Import from new modules
-use crate::parser::separators::{hcolon, comma};
 use super::call_id::callid; // Reuse callid parser logic
 use crate::parser::common::comma_separated_list1;
+use crate::parser::separators::{comma, hcolon};
 use crate::parser::ParseResult;
-
 
 // Return Vec<String> - each string is a call-id
 pub fn parse_in_reply_to(input: &[u8]) -> ParseResult<Vec<String>> {
     preceded(
         pair(tag_no_case(b"In-Reply-To"), hcolon),
-        comma_separated_list1(callid) // Use the callid parser
+        comma_separated_list1(callid), // Use the callid parser
     )(input)
 }
 
@@ -53,9 +52,9 @@ mod tests {
     fn test_parse_in_reply_to_empty_fail() {
         assert!(parse_in_reply_to(b"").is_err());
     }
-    
+
     // Additional RFC compliance tests
-    
+
     #[test]
     fn test_parse_in_reply_to_case_insensitive() {
         // Test for case insensitivity in header name (RFC 3261 Section 7.3.1)
@@ -67,7 +66,7 @@ mod tests {
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "abc123@example.com");
     }
-    
+
     #[test]
     fn test_parse_in_reply_to_whitespace() {
         // Test for whitespace handling around commas (RFC 3261 Section 7.3.1)
@@ -81,7 +80,7 @@ mod tests {
         assert_eq!(ids[1], "id2@domain.com");
         assert_eq!(ids[2], "id3@domain.com");
     }
-    
+
     #[test]
     fn test_parse_in_reply_to_special_chars() {
         // Test for Call-ID with special characters (RFC 3261 Section 25)
@@ -93,7 +92,7 @@ mod tests {
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "abc123.!%*+-_`'~@example.com");
     }
-    
+
     #[test]
     fn test_parse_in_reply_to_uuid_style() {
         // Test with UUID-style Call-IDs commonly used in SIP
@@ -105,7 +104,7 @@ mod tests {
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "f81d4fae-7dec-11d0-a765-00a0c91e6bf6@example.com");
     }
-    
+
     #[test]
     fn test_parse_in_reply_to_multiple_complex() {
         // Test with multiple Call-IDs of varying complexity
@@ -119,7 +118,7 @@ mod tests {
         assert_eq!(ids[1], "complex.id-with_special!chars@domain.com");
         assert_eq!(ids[2], "f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
     }
-    
+
     #[test]
     fn test_parse_in_reply_to_malformed() {
         // Test with malformed input - should fail
@@ -128,7 +127,7 @@ mod tests {
         assert!(parse_in_reply_to(b"In-Reply-To").is_err()); // No colon
         assert!(parse_in_reply_to(b"Wrong-Header: id@domain").is_err()); // Wrong header name
     }
-    
+
     #[test]
     fn test_parse_in_reply_to_trailing_content() {
         // Test with trailing content
@@ -140,4 +139,4 @@ mod tests {
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], "id@domain.com");
     }
-} 
+}

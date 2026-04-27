@@ -1,12 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
-    allow::Allow,
+    allow::Allow, headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
     method::Method,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 /// Allow header builder
 ///
 /// This module provides builder methods for the Allow header in SIP messages.
@@ -145,7 +142,7 @@ pub trait AllowBuilderExt {
     ///     .build();
     /// ```
     fn allow_method(self, method: Method) -> Self;
-    
+
     /// Add an Allow header with multiple methods
     ///
     /// This method adds an Allow header containing multiple SIP methods to the message.
@@ -180,9 +177,9 @@ pub trait AllowBuilderExt {
     ///     .build();
     /// ```
     fn allow_methods(self, methods: Vec<Method>) -> Self;
-    
+
     /// Add an Allow header with standard methods for UA (User Agent) operations
-    /// 
+    ///
     /// This method adds an Allow header with the five core SIP methods that all
     /// compliant user agents must support according to RFC 3261:
     /// INVITE, ACK, CANCEL, BYE, and OPTIONS.
@@ -206,12 +203,12 @@ pub trait AllowBuilderExt {
     ///     .build();
     /// ```
     fn allow_standard_methods(self) -> Self;
-    
+
     /// Add an Allow header with all common SIP methods
-    /// 
+    ///
     /// This method adds an Allow header with a comprehensive set of SIP methods,
     /// including both core methods and common extensions. This includes:
-    /// INVITE, ACK, CANCEL, BYE, OPTIONS, REGISTER, INFO, MESSAGE, 
+    /// INVITE, ACK, CANCEL, BYE, OPTIONS, REGISTER, INFO, MESSAGE,
     /// SUBSCRIBE, NOTIFY, REFER, PUBLISH, and UPDATE.
     ///
     /// This is typically used by full-featured SIP user agents or servers
@@ -241,8 +238,8 @@ pub trait AllowBuilderExt {
     fn allow_all_methods(self) -> Self;
 }
 
-impl<T> AllowBuilderExt for T 
-where 
+impl<T> AllowBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn allow_method(self, method: Method) -> Self {
@@ -250,7 +247,7 @@ where
         allow.add_method(method);
         self.set_header(allow)
     }
-    
+
     fn allow_methods(self, methods: Vec<Method>) -> Self {
         let mut allow = Allow::new();
         for method in methods {
@@ -258,7 +255,7 @@ where
         }
         self.set_header(allow)
     }
-    
+
     fn allow_standard_methods(self) -> Self {
         self.allow_methods(vec![
             Method::Invite,
@@ -268,7 +265,7 @@ where
             Method::Options,
         ])
     }
-    
+
     fn allow_all_methods(self) -> Self {
         self.allow_methods(vec![
             Method::Invite,
@@ -297,13 +294,14 @@ mod tests {
 
     #[test]
     fn test_request_allow_method() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .allow_method(Method::Invite)
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Allow(allow)) = request.header(&HeaderName::Allow) {
             assert_eq!(allow.0.len(), 1);
             assert!(allow.allows(&Method::Invite));
@@ -317,10 +315,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .allow_methods(vec![Method::Invite, Method::Bye])
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Allow(allow)) = response.header(&HeaderName::Allow) {
             assert_eq!(allow.0.len(), 2);
             assert!(allow.allows(&Method::Invite));
@@ -333,10 +331,11 @@ mod tests {
 
     #[test]
     fn test_allow_standard_methods() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .allow_standard_methods()
             .build();
-            
+
         if let Some(TypedHeader::Allow(allow)) = request.header(&HeaderName::Allow) {
             assert_eq!(allow.0.len(), 5);
             assert!(allow.allows(&Method::Invite));
@@ -352,10 +351,11 @@ mod tests {
 
     #[test]
     fn test_allow_all_methods() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .allow_all_methods()
             .build();
-            
+
         if let Some(TypedHeader::Allow(allow)) = request.header(&HeaderName::Allow) {
             assert_eq!(allow.0.len(), 13);
             // Check a few methods
@@ -367,4 +367,4 @@ mod tests {
             panic!("Allow header not found or has wrong type");
         }
     }
-} 
+}

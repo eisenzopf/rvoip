@@ -253,7 +253,10 @@ impl QueueHandler {
     ///
     /// `buffer` controls the channel capacity.
     /// `defer_timeout` sets how long calls ring before auto-rejecting if not resolved.
-    pub fn new(buffer: usize, defer_timeout: Duration) -> (Self, mpsc::Receiver<IncomingCallGuard>) {
+    pub fn new(
+        buffer: usize,
+        defer_timeout: Duration,
+    ) -> (Self, mpsc::Receiver<IncomingCallGuard>) {
         let (tx, rx) = mpsc::channel(buffer);
         (Self { tx, defer_timeout }, rx)
     }

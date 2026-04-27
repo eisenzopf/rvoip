@@ -10,7 +10,6 @@ pub mod client_security;
 
 // Re-export important types and functions
 pub use client_security::{
-    initialize_security, is_secure, get_security_info,
-    start_handshake, wait_for_handshake, is_handshake_complete,
-    set_remote_fingerprint, close_security
-}; 
+    close_security, get_security_info, initialize_security, is_handshake_complete, is_secure,
+    set_remote_fingerprint, start_handshake, wait_for_handshake,
+};

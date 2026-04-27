@@ -39,16 +39,16 @@
 //! assert_eq!(disposition.params.get("handling"), Some(&"optional".to_string()));
 //! ```
 
-use std::collections::HashMap;
+use crate::error::{Error, Result};
 use crate::parser::headers::parse_content_disposition;
-use crate::error::{Result, Error};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::param::GenericValue;
+use crate::types::param::Param;
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use nom::combinator::all_consuming;
-use crate::types::param::Param;
-use serde::{Serialize, Deserialize};
-use crate::types::param::GenericValue;
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the 'handling' parameter values for Content-Disposition
 ///
@@ -107,7 +107,7 @@ pub enum Handling {
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DispositionParam {
-    /// The 'handling' parameter indicates whether understanding 
+    /// The 'handling' parameter indicates whether understanding
     /// the body part is optional or required
     Handling(Handling),
     /// Any other parameter represented as key-value pairs
@@ -306,7 +306,24 @@ impl fmt::Display for ContentDisposition {
         write!(f, "{}", self.disposition_type)?;
         for (key, value) in &self.params {
             // Remove internal quote escaping for now
-            if value.chars().any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '!' | '#' | '$' | '%' | '&' | '\'' | '^' | '_' | '`' | '{' | '}' | '~' | '-')) {
+            if value.chars().any(|c| {
+                !c.is_ascii_alphanumeric()
+                    && !matches!(
+                        c,
+                        '!' | '#'
+                            | '$'
+                            | '%'
+                            | '&'
+                            | '\''
+                            | '^'
+                            | '_'
+                            | '`'
+                            | '{'
+                            | '}'
+                            | '~'
+                            | '-'
+                    )
+            }) {
                 write!(f, ";{}=\"{}\"", key, value)?;
             } else {
                 write!(f, ";{}={}", key, value)?;
@@ -369,7 +386,7 @@ impl FromStr for ContentDisposition {
                     "alert" => DispositionType::Alert,
                     _ => DispositionType::Other(dtype_bytes),
                 };
-                
+
                 // Convert params to HashMap
                 let mut params = HashMap::new();
                 for param in params_vec {
@@ -382,20 +399,20 @@ impl FromStr for ContentDisposition {
                                 Handling::Other(s) => s,
                             };
                             params.insert("handling".to_string(), value);
-                        },
+                        }
                         DispositionParam::Generic(generic_param) => {
                             // Extract key and value from generic parameter
                             match generic_param {
                                 Param::Other(name, Some(GenericValue::Token(value))) => {
                                     params.insert(name, value);
-                                },
+                                }
                                 Param::Other(name, Some(GenericValue::Quoted(value))) => {
                                     params.insert(name, value);
-                                },
+                                }
                                 Param::Other(name, None) => {
                                     // Flag parameter without value
                                     params.insert(name, "".to_string());
-                                },
+                                }
                                 _ => {
                                     // Skip other parameter types for now
                                 }
@@ -403,8 +420,11 @@ impl FromStr for ContentDisposition {
                         }
                     }
                 }
-                
-                Ok(ContentDisposition { disposition_type: disp_type, params })
+
+                Ok(ContentDisposition {
+                    disposition_type: disp_type,
+                    params,
+                })
             })
     }
 }
@@ -420,29 +440,34 @@ impl TypedHeaderTrait for ContentDisposition {
     fn to_header(&self) -> Header {
         // Format the disposition type and parameters as they would appear in a SIP header
         let disp_type_str = self.disposition_type.to_string();
-        
+
         // Convert the HashMap of parameters to a list of Param structs
         let mut params = Vec::new();
         for (name, value) in &self.params {
             if value.is_empty() {
                 params.push(Param::Other(name.clone(), None));
             } else {
-                params.push(Param::Other(name.clone(), Some(GenericValue::Token(value.clone()))));
+                params.push(Param::Other(
+                    name.clone(),
+                    Some(GenericValue::Token(value.clone())),
+                ));
             }
         }
-        
+
         // Create the ContentDisposition header value
         Header::new(
-            Self::header_name(), 
-            HeaderValue::ContentDisposition((disp_type_str.into_bytes(), params))
+            Self::header_name(),
+            HeaderValue::ContentDisposition((disp_type_str.into_bytes(), params)),
         )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -450,16 +475,21 @@ impl TypedHeaderTrait for ContentDisposition {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ContentDisposition::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::ContentDisposition((dtype_bytes, params_vec)) => {
                 // Convert bytes to string
-                let dtype_str = std::str::from_utf8(dtype_bytes)
-                    .map_err(|_| Error::InvalidHeader(format!("Invalid disposition type in {} header", Self::header_name())))?;
-                
+                let dtype_str = std::str::from_utf8(dtype_bytes).map_err(|_| {
+                    Error::InvalidHeader(format!(
+                        "Invalid disposition type in {} header",
+                        Self::header_name()
+                    ))
+                })?;
+
                 // Parse disposition type
                 let disposition_type = match dtype_str.to_lowercase().as_str() {
                     "session" => DispositionType::Session,
@@ -468,35 +498,36 @@ impl TypedHeaderTrait for ContentDisposition {
                     "alert" => DispositionType::Alert,
                     _ => DispositionType::Other(dtype_str.to_string()),
                 };
-                
+
                 // Convert params to HashMap
                 let mut params_map = HashMap::new();
                 for param in params_vec {
                     match param {
                         Param::Other(name, Some(GenericValue::Token(value))) => {
                             params_map.insert(name.clone(), value.clone());
-                        },
+                        }
                         Param::Other(name, Some(GenericValue::Quoted(value))) => {
                             params_map.insert(name.clone(), value.clone());
-                        },
+                        }
                         Param::Other(name, None) => {
                             // Flag parameter without value
                             params_map.insert(name.clone(), "".to_string());
-                        },
+                        }
                         _ => {} // Skip other parameter types
                     }
                 }
-                
+
                 Ok(ContentDisposition {
                     disposition_type,
                     params: params_map,
                 })
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
 
-// TODO: Implement methods, FromStr, Display 
+// TODO: Implement methods, FromStr, Display

@@ -13,8 +13,8 @@
 //! - **B2BUA leg**: `on_call_established` bridges the accepted session to a second
 //!   outgoing leg managed in the higher-layer b2bua crate.
 
-use std::sync::Arc;
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::api::events::Event;
 use crate::api::handle::{CallId, SessionHandle};
@@ -85,7 +85,9 @@ impl From<String> for EndReason {
     fn from(s: String) -> Self {
         match s.to_lowercase().as_str() {
             r if r.contains("timeout") => EndReason::Timeout,
-            r if r.contains("reject") || r.contains("decline") || r.contains("busy") => EndReason::Rejected,
+            r if r.contains("reject") || r.contains("decline") || r.contains("busy") => {
+                EndReason::Rejected
+            }
             r if r.contains("network") || r.contains("transport") => EndReason::NetworkError,
             _ => EndReason::Other(s),
         }
@@ -276,10 +278,7 @@ impl<H: CallHandler> CallbackPeer<H> {
     }
 
     /// Unregister (sends REGISTER with `Expires: 0`).
-    pub async fn unregister(
-        &self,
-        handle: &crate::api::unified::RegistrationHandle,
-    ) -> Result<()> {
+    pub async fn unregister(&self, handle: &crate::api::unified::RegistrationHandle) -> Result<()> {
         self.coordinator.unregister(handle).await
     }
 
@@ -373,7 +372,10 @@ impl<H: CallHandler> CallbackPeer<H> {
         while let Some(join_result) = handlers.join_next().await {
             if let Err(e) = join_result {
                 if !e.is_cancelled() {
-                    tracing::warn!("[CallbackPeer] Handler task panicked or errored on drain: {}", e);
+                    tracing::warn!(
+                        "[CallbackPeer] Handler task panicked or errored on drain: {}",
+                        e
+                    );
                 }
             }
         }
@@ -390,12 +392,18 @@ impl<H: CallHandler> CallbackPeer<H> {
         let coordinator = self.coordinator.clone();
 
         match event {
-            Event::IncomingCall { call_id, from, to, sdp } => {
+            Event::IncomingCall {
+                call_id,
+                from,
+                to,
+                sdp,
+            } => {
                 // The handler may resolve the call itself (accept/reject/defer)
                 // by consuming IncomingCall. If it only returns a decision
                 // without consuming the call, the dispatch applies it via the
                 // coordinator below. Handler Drop still acts as a safety net.
-                let incoming = IncomingCall::new(call_id.clone(), from, to, sdp, coordinator.clone());
+                let incoming =
+                    IncomingCall::new(call_id.clone(), from, to, sdp, coordinator.clone());
                 let coord = coordinator.clone();
                 let cid = call_id;
                 handlers.spawn(async move {
@@ -444,14 +452,20 @@ impl<H: CallHandler> CallbackPeer<H> {
                 });
             }
 
-            Event::ReferReceived { call_id, refer_to, .. } => {
+            Event::ReferReceived {
+                call_id, refer_to, ..
+            } => {
                 let handle = SessionHandle::new(call_id, coordinator);
                 handlers.spawn(async move {
                     handler.on_transfer_request(handle, refer_to).await;
                 });
             }
 
-            Event::CallAuthRetrying { call_id, status_code, realm } => {
+            Event::CallAuthRetrying {
+                call_id,
+                status_code,
+                realm,
+            } => {
                 handlers.spawn(async move {
                     handler.on_auth_retrying(call_id, status_code, realm).await;
                 });
@@ -542,7 +556,13 @@ impl CallbackPeer<ClosureHandler> {
         config: Config,
         handler: impl Fn(&IncomingCall) -> CallHandlerDecision + Send + Sync + 'static,
     ) -> Result<Self> {
-        Self::new(ClosureHandler { f: Box::new(handler) }, config).await
+        Self::new(
+            ClosureHandler {
+                f: Box::new(handler),
+            },
+            config,
+        )
+        .await
     }
 }
 
@@ -553,7 +573,11 @@ impl CallbackPeer<RejectAllHandler> {
     }
 
     /// Create a peer that rejects all calls with a custom status and reason.
-    pub async fn with_reject(config: Config, status: u16, reason: impl Into<String>) -> Result<Self> {
+    pub async fn with_reject(
+        config: Config,
+        status: u16,
+        reason: impl Into<String>,
+    ) -> Result<Self> {
         Self::new(RejectAllHandler::new(status, reason), config).await
     }
 }

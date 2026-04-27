@@ -18,7 +18,7 @@ mod tests {
     fn test_alaw_encoding_basic() {
         // Test simple A-law encoding with known values
         let test_values = vec![0i16, 128, 256, 512, 1024, -128, -256, -512, -1024];
-        
+
         for &sample in &test_values {
             let encoded = alaw_compress(sample);
             // Should produce valid 8-bit encoded values
@@ -30,7 +30,7 @@ mod tests {
     fn test_mulaw_encoding_basic() {
         // Test simple μ-law encoding with known values
         let test_values = vec![0i16, 128, 256, 512, 1024, -128, -256, -512, -1024];
-        
+
         for &sample in &test_values {
             let encoded = ulaw_compress(sample);
             // Should produce valid 8-bit encoded values
@@ -42,25 +42,27 @@ mod tests {
     fn test_encoding_boundary_values() {
         // Test boundary values
         let boundary_samples = vec![
-            i16::MIN,    // -32768
-            -16384,      // -1/2 range
-            -1000,       // Small negative
-            0,           // Zero
-            1000,        // Small positive
-            16384,       // +1/2 range
-            i16::MAX,    // +32767
+            i16::MIN, // -32768
+            -16384,   // -1/2 range
+            -1000,    // Small negative
+            0,        // Zero
+            1000,     // Small positive
+            16384,    // +1/2 range
+            i16::MAX, // +32767
         ];
 
         for &sample in &boundary_samples {
             let alaw_encoded = alaw_compress(sample);
             let mulaw_encoded = ulaw_compress(sample);
-            
+
             // G.711 encoded values are always in 0-255 range
             assert!(alaw_encoded <= 255);
             assert!(mulaw_encoded <= 255);
-            
-            println!("Sample {}: A-law=0x{:02x}, μ-law=0x{:02x}", 
-                     sample, alaw_encoded, mulaw_encoded);
+
+            println!(
+                "Sample {}: A-law=0x{:02x}, μ-law=0x{:02x}",
+                sample, alaw_encoded, mulaw_encoded
+            );
         }
     }
 
@@ -74,12 +76,16 @@ mod tests {
             let neg_alaw = alaw_compress(-val);
             let pos_mulaw = ulaw_compress(val);
             let neg_mulaw = ulaw_compress(-val);
-            
+
             // Positive and negative values should encode differently
-            assert_ne!(pos_alaw, neg_alaw, 
-                      "A-law: Positive and negative values should encode differently");
-            assert_ne!(pos_mulaw, neg_mulaw,
-                      "μ-law: Positive and negative values should encode differently");
+            assert_ne!(
+                pos_alaw, neg_alaw,
+                "A-law: Positive and negative values should encode differently"
+            );
+            assert_ne!(
+                pos_mulaw, neg_mulaw,
+                "μ-law: Positive and negative values should encode differently"
+            );
         }
     }
 
@@ -93,17 +99,21 @@ mod tests {
 
         let alaw_encoded: Vec<u8> = samples.iter().map(|&s| alaw_compress(s)).collect();
         let mulaw_encoded: Vec<u8> = samples.iter().map(|&s| ulaw_compress(s)).collect();
-        
+
         // Should have fewer unique encoded values than input values
         // due to quantization
         let unique_alaw: std::collections::HashSet<_> = alaw_encoded.iter().collect();
         let unique_mulaw: std::collections::HashSet<_> = mulaw_encoded.iter().collect();
         let unique_input: std::collections::HashSet<_> = samples.iter().collect();
-        
-        assert!(unique_alaw.len() < unique_input.len(), 
-               "A-law quantization should reduce unique values");
-        assert!(unique_mulaw.len() < unique_input.len(),
-               "μ-law quantization should reduce unique values");
+
+        assert!(
+            unique_alaw.len() < unique_input.len(),
+            "A-law quantization should reduce unique values"
+        );
+        assert!(
+            unique_mulaw.len() < unique_input.len(),
+            "μ-law quantization should reduce unique values"
+        );
     }
 
     #[test]
@@ -113,11 +123,11 @@ mod tests {
             .with_channels(1);
 
         let mut codec_mu = G711Codec::new_pcmu(config_mu).unwrap();
-        
+
         let config_a = CodecConfig::new(CodecType::G711Pcma)
             .with_sample_rate(SampleRate::Rate8000)
             .with_channels(1);
-            
+
         let mut codec_a = G711Codec::new_pcma(config_a).unwrap();
 
         let samples = vec![1000i16; 160];
@@ -127,13 +137,11 @@ mod tests {
 
         // μ-law and A-law should produce different encoded data
         assert_ne!(encoded_mu, encoded_a);
-        
+
         // But both should be same length
         assert_eq!(encoded_mu.len(), encoded_a.len());
         assert_eq!(encoded_mu.len(), 160);
     }
-
-
 
     #[test]
     fn test_encoding_repeatability() {
@@ -158,7 +166,7 @@ mod tests {
 
         // A-law and μ-law should produce different encoded data
         assert_ne!(encoded_a, encoded_mu);
-        
+
         // But both should be same length
         assert_eq!(encoded_a.len(), encoded_mu.len());
     }
@@ -167,7 +175,7 @@ mod tests {
     fn test_encoding_performance_characteristics() {
         // Test with larger data sets to check performance
         let samples = vec![1000i16; 160];
-        
+
         let start = std::time::Instant::now();
         for _ in 0..1000 {
             let _encoded: Vec<u8> = samples.iter().map(|&s| alaw_compress(s)).collect();
@@ -175,25 +183,31 @@ mod tests {
         let duration = start.elapsed();
 
         // Should be very fast (less than 10ms for 1000 encodes)
-        assert!(duration.as_millis() < 100, 
-               "Encoding should be fast: {:?}", duration);
+        assert!(
+            duration.as_millis() < 100,
+            "Encoding should be fast: {:?}",
+            duration
+        );
     }
 
     #[test]
     fn test_encoding_zero_value() {
         // Test encoding of zero specifically
         let zero_sample = 0i16;
-        
+
         let alaw_zero = alaw_compress(zero_sample);
         let mulaw_zero = ulaw_compress(zero_sample);
-        
+
         // Zero should encode to known values
-        println!("Zero encodes to: A-law=0x{:02x}, μ-law=0x{:02x}", alaw_zero, mulaw_zero);
-        
+        println!(
+            "Zero encodes to: A-law=0x{:02x}, μ-law=0x{:02x}",
+            alaw_zero, mulaw_zero
+        );
+
         // Verify round-trip
         let alaw_decoded = alaw_expand(alaw_zero);
         let mulaw_decoded = ulaw_expand(mulaw_zero);
-        
+
         // Should be close to zero (within quantization error)
         assert!(alaw_decoded.abs() < 100, "A-law zero round-trip error");
         assert!(mulaw_decoded.abs() < 100, "μ-law zero round-trip error");
@@ -210,23 +224,35 @@ mod tests {
             (8192i16, "large positive"),
             (-8192i16, "large negative"),
         ];
-        
+
         for (sample, description) in test_cases {
             let alaw_encoded = alaw_compress(sample);
             let mulaw_encoded = ulaw_compress(sample);
-            
-            println!("{} ({}): A-law=0x{:02x}, μ-law=0x{:02x}", 
-                     sample, description, alaw_encoded, mulaw_encoded);
-            
+
+            println!(
+                "{} ({}): A-law=0x{:02x}, μ-law=0x{:02x}",
+                sample, description, alaw_encoded, mulaw_encoded
+            );
+
             // Verify round-trip quality
             let alaw_decoded = alaw_expand(alaw_encoded);
             let mulaw_decoded = ulaw_expand(mulaw_encoded);
-            
+
             let alaw_error = (alaw_decoded - sample).abs();
             let mulaw_error = (mulaw_decoded - sample).abs();
-            
-            assert!(alaw_error < 2000, "A-law error too large for {}: {}", sample, alaw_error);
-            assert!(mulaw_error < 2000, "μ-law error too large for {}: {}", sample, mulaw_error);
+
+            assert!(
+                alaw_error < 2000,
+                "A-law error too large for {}: {}",
+                sample,
+                alaw_error
+            );
+            assert!(
+                mulaw_error < 2000,
+                "μ-law error too large for {}: {}",
+                sample,
+                mulaw_error
+            );
         }
     }
 
@@ -234,15 +260,15 @@ mod tests {
     fn test_encoding_saturation() {
         // Test that extreme values don't cause overflow
         let extreme_values = vec![i16::MIN, i16::MIN + 1, i16::MAX - 1, i16::MAX];
-        
+
         for &sample in &extreme_values {
             let alaw_encoded = alaw_compress(sample);
             let mulaw_encoded = ulaw_compress(sample);
-            
+
             // Should always produce valid 8-bit values
             assert!(alaw_encoded <= 255);
             assert!(mulaw_encoded <= 255);
-            
+
             // Verify we can decode without panic
             let _alaw_decoded = alaw_expand(alaw_encoded);
             let _mulaw_decoded = ulaw_expand(mulaw_encoded);
@@ -254,22 +280,26 @@ mod tests {
         // Test that larger positive values generally produce larger encoded values
         // (within quantization segments)
         let test_values = vec![0i16, 100, 200, 500, 1000, 2000, 4000, 8000];
-        
+
         for window in test_values.windows(2) {
             let smaller = window[0];
             let larger = window[1];
-            
+
             let alaw_smaller = alaw_compress(smaller);
             let alaw_larger = alaw_compress(larger);
             let mulaw_smaller = ulaw_compress(smaller);
             let mulaw_larger = ulaw_compress(larger);
-            
+
             // Note: Due to companding law characteristics, we can't guarantee
             // strict monotonicity, but we can check that encoding is reasonable
-            println!("Values {} -> 0x{:02x}, {} -> 0x{:02x} (A-law)", 
-                     smaller, alaw_smaller, larger, alaw_larger);
-            println!("Values {} -> 0x{:02x}, {} -> 0x{:02x} (μ-law)", 
-                     smaller, mulaw_smaller, larger, mulaw_larger);
+            println!(
+                "Values {} -> 0x{:02x}, {} -> 0x{:02x} (A-law)",
+                smaller, alaw_smaller, larger, alaw_larger
+            );
+            println!(
+                "Values {} -> 0x{:02x}, {} -> 0x{:02x} (μ-law)",
+                smaller, mulaw_smaller, larger, mulaw_larger
+            );
         }
     }
-} 
+}

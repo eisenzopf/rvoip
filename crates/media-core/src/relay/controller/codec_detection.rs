@@ -111,7 +111,7 @@ impl DetectionState {
     /// Get detection summary
     pub fn get_summary(&self) -> String {
         format!(
-            "Expected PT: {}, Detected PT: {:?}, Confidence: {:.2}, Packets: {}/{}/{}", 
+            "Expected PT: {}, Detected PT: {:?}, Confidence: {:.2}, Packets: {}/{}/{}",
             self.expected_payload_type,
             self.detected_payload_type,
             self.confidence,
@@ -126,13 +126,13 @@ impl DetectionState {
 #[derive(Debug, Clone)]
 pub enum CodecDetectionResult {
     /// Packets match expected codec
-    Expected { 
-        payload_type: u8, 
+    Expected {
+        payload_type: u8,
         codec: Option<String>,
         confidence: f32,
     },
     /// Unexpected codec detected
-    UnexpectedCodec { 
+    UnexpectedCodec {
         expected_payload_type: u8,
         detected_payload_type: u8,
         expected_codec: Option<String>,
@@ -140,9 +140,7 @@ pub enum CodecDetectionResult {
         confidence: f32,
     },
     /// Not enough data to make a determination
-    InsufficientData {
-        packets_analyzed: u64,
-    },
+    InsufficientData { packets_analyzed: u64 },
 }
 
 /// Configuration for codec detection
@@ -206,21 +204,27 @@ impl CodecDetector {
             .unwrap_or(0); // Default to PCMU
 
         let state = DetectionState::new(expected_payload_type, expected_codec.clone());
-        
-        debug!("🔍 Initialized codec detection for dialog {}: expected codec={:?}, PT={}", 
-               dialog_id, expected_codec, expected_payload_type);
+
+        debug!(
+            "🔍 Initialized codec detection for dialog {}: expected codec={:?}, PT={}",
+            dialog_id, expected_codec, expected_payload_type
+        );
 
         let mut cache = self.detection_cache.write().await;
         cache.insert(dialog_id, state);
     }
 
     /// Process an RTP packet for codec detection
-    pub async fn process_packet(&self, dialog_id: &DialogId, payload_type: u8) -> Option<CodecDetectionResult> {
+    pub async fn process_packet(
+        &self,
+        dialog_id: &DialogId,
+        payload_type: u8,
+    ) -> Option<CodecDetectionResult> {
         let mut cache = self.detection_cache.write().await;
-        
+
         if let Some(state) = cache.get_mut(dialog_id) {
             state.update_with_packet(payload_type);
-            
+
             // Check if we have enough data for a decision
             if state.packets_analyzed >= self.config.min_packets_for_detection {
                 return Some(self.analyze_detection_state(state));
@@ -240,11 +244,11 @@ impl CodecDetector {
 
         // Check if we detected an unexpected codec
         if let Some(detected_payload_type) = state.detected_payload_type {
-            if detected_payload_type != state.expected_payload_type && 
-               state.packets_unexpected > state.packets_matching {
-                
+            if detected_payload_type != state.expected_payload_type
+                && state.packets_unexpected > state.packets_matching
+            {
                 let detected_codec = self.mapper.payload_to_codec(detected_payload_type);
-                
+
                 return CodecDetectionResult::UnexpectedCodec {
                     expected_payload_type: state.expected_payload_type,
                     detected_payload_type,
@@ -266,7 +270,7 @@ impl CodecDetector {
     /// Get detection result for a dialog
     pub async fn get_detection_result(&self, dialog_id: &DialogId) -> Option<CodecDetectionResult> {
         let cache = self.detection_cache.read().await;
-        
+
         if let Some(state) = cache.get(dialog_id) {
             if state.packets_analyzed >= self.config.min_packets_for_detection {
                 return Some(self.analyze_detection_state(state));
@@ -286,7 +290,11 @@ impl CodecDetector {
     pub async fn cleanup_detection(&self, dialog_id: &DialogId) -> bool {
         let mut cache = self.detection_cache.write().await;
         if let Some(state) = cache.remove(dialog_id) {
-            debug!("🧹 Cleaned up codec detection for dialog {}: {}", dialog_id, state.get_summary());
+            debug!(
+                "🧹 Cleaned up codec detection for dialog {}: {}",
+                dialog_id,
+                state.get_summary()
+            );
             true
         } else {
             false
@@ -311,12 +319,19 @@ impl CodecDetector {
         let removed_count = to_remove.len();
         for dialog_id in to_remove {
             if let Some(state) = cache.remove(&dialog_id) {
-                debug!("🧹 Cleaned up stale codec detection for dialog {}: {}", dialog_id, state.get_summary());
+                debug!(
+                    "🧹 Cleaned up stale codec detection for dialog {}: {}",
+                    dialog_id,
+                    state.get_summary()
+                );
             }
         }
 
         if removed_count > 0 {
-            info!("🧹 Cleaned up {} stale codec detection states", removed_count);
+            info!(
+                "🧹 Cleaned up {} stale codec detection states",
+                removed_count
+            );
         }
 
         removed_count
@@ -326,9 +341,9 @@ impl CodecDetector {
     pub async fn get_cache_stats(&self) -> HashMap<String, u64> {
         let cache = self.detection_cache.read().await;
         let mut stats = HashMap::new();
-        
+
         stats.insert("total_states".to_string(), cache.len() as u64);
-        
+
         let mut active_states = 0;
         let mut stale_states = 0;
         let mut total_packets = 0;
@@ -385,7 +400,7 @@ mod tests {
     async fn test_codec_detector_creation() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let stats = detector.get_cache_stats().await;
         assert_eq!(stats.get("total_states"), Some(&0));
     }
@@ -394,10 +409,12 @@ mod tests {
     async fn test_detection_initialization() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_some());
         let state = state.unwrap();
@@ -409,24 +426,30 @@ mod tests {
     async fn test_expected_codec_detection() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         // Send packets with expected payload type
         for _ in 0..10 {
             detector.process_packet(&dialog_id, 0).await; // PCMU
         }
-        
+
         let result = detector.get_detection_result(&dialog_id).await;
         assert!(result.is_some());
-        
+
         match result.unwrap() {
-            CodecDetectionResult::Expected { payload_type, codec, confidence } => {
+            CodecDetectionResult::Expected {
+                payload_type,
+                codec,
+                confidence,
+            } => {
                 assert_eq!(payload_type, 0);
                 assert_eq!(codec, Some("PCMU".to_string()));
                 assert!(confidence > 0.7);
-            },
+            }
             other => panic!("Expected Expected result, got {:?}", other),
         }
     }
@@ -437,15 +460,17 @@ mod tests {
     async fn test_insufficient_data() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         // Send only a few packets
         for _ in 0..3 {
             detector.process_packet(&dialog_id, 0).await;
         }
-        
+
         let result = detector.get_detection_result(&dialog_id).await;
         assert!(result.is_none()); // Not enough packets for detection
     }
@@ -454,10 +479,12 @@ mod tests {
     async fn test_mixed_codec_detection() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         // Send mixed packets - mostly unexpected
         for _ in 0..8 {
             detector.process_packet(&dialog_id, 111).await; // Opus
@@ -465,14 +492,17 @@ mod tests {
         for _ in 0..2 {
             detector.process_packet(&dialog_id, 0).await; // PCMU
         }
-        
+
         let result = detector.get_detection_result(&dialog_id).await;
         assert!(result.is_some());
-        
+
         match result.unwrap() {
-            CodecDetectionResult::UnexpectedCodec { detected_payload_type, .. } => {
+            CodecDetectionResult::UnexpectedCodec {
+                detected_payload_type,
+                ..
+            } => {
                 assert_eq!(detected_payload_type, 111); // Should detect Opus as primary
-            },
+            }
             other => panic!("Expected UnexpectedCodec result, got {:?}", other),
         }
     }
@@ -481,18 +511,20 @@ mod tests {
     async fn test_detection_cleanup() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         // Verify state exists
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_some());
-        
+
         // Clean up
         let cleaned = detector.cleanup_detection(&dialog_id).await;
         assert!(cleaned);
-        
+
         // Verify state is gone
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_none());
@@ -506,17 +538,19 @@ mod tests {
             ..Default::default()
         };
         let detector = CodecDetector::with_config(mapper.clone(), config);
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         // Wait for state to become stale
         sleep(Duration::from_millis(100)).await;
-        
+
         // Clean up stale states
         let cleaned = detector.cleanup_stale_states().await;
         assert_eq!(cleaned, 1);
-        
+
         // Verify state is gone
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_none());
@@ -526,32 +560,34 @@ mod tests {
     async fn test_pause_resume_detection() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         // Pause detection
         let paused = detector.pause_detection(&dialog_id).await;
         assert!(paused);
-        
+
         // Send packets while paused - should not be analyzed
         for _ in 0..10 {
             detector.process_packet(&dialog_id, 111).await;
         }
-        
+
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_some());
         assert_eq!(state.unwrap().packets_analyzed, 0); // No packets analyzed while paused
-        
+
         // Resume detection
         let resumed = detector.resume_detection(&dialog_id).await;
         assert!(resumed);
-        
+
         // Send packets while resumed - should be analyzed
         for _ in 0..10 {
             detector.process_packet(&dialog_id, 111).await;
         }
-        
+
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_some());
         assert_eq!(state.unwrap().packets_analyzed, 10); // Packets analyzed after resume
@@ -570,34 +606,38 @@ mod tests {
     async fn test_confidence_calculation() {
         let mapper = Arc::new(CodecMapper::new());
         let detector = CodecDetector::new(mapper.clone());
-        
+
         let dialog_id = DialogId::new("test_dialog");
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         // Send consistent expected packets
         for _ in 0..20 {
             detector.process_packet(&dialog_id, 0).await; // PCMU
         }
-        
+
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_some());
         let state = state.unwrap();
         assert!(state.confidence > 0.9); // High confidence for consistent packets
-        
+
         // Reset and send mixed packets
         detector.cleanup_detection(&dialog_id).await;
-        detector.initialize_detection(dialog_id.clone(), Some("PCMU".to_string())).await;
-        
+        detector
+            .initialize_detection(dialog_id.clone(), Some("PCMU".to_string()))
+            .await;
+
         for _ in 0..5 {
             detector.process_packet(&dialog_id, 0).await; // PCMU
         }
         for _ in 0..5 {
             detector.process_packet(&dialog_id, 111).await; // Opus
         }
-        
+
         let state = detector.get_detection_state(&dialog_id).await;
         assert!(state.is_some());
         let state = state.unwrap();
         assert!(state.confidence < 0.9); // Lower confidence for mixed packets
     }
-} 
+}

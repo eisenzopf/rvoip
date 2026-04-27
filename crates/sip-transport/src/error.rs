@@ -135,15 +135,15 @@ pub enum Error {
     /// Not implemented
     #[error("Not implemented: {0}")]
     NotImplemented(String),
-    
+
     /// Channel closed
     #[error("Channel closed")]
     ChannelClosed,
-    
+
     /// Bind error
     #[error("Bind error: {0}")]
     BindError(String),
-    
+
     /// Other error
     #[error("Other error: {0}")]
     Other(String),
@@ -225,40 +225,45 @@ impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_error_categorization() {
         let closed_err = Error::TransportClosed;
         assert!(closed_err.is_connection_closed());
         assert!(!closed_err.is_timeout());
-        
+
         let timeout_err = Error::Timeout;
         assert!(timeout_err.is_timeout());
         assert!(!timeout_err.is_dns_error());
-        
+
         let dns_err = Error::DnsResolutionFailed("lookup failed".to_string());
         assert!(dns_err.is_dns_error());
         assert!(!dns_err.is_tls_error());
-        
+
         let tls_err = Error::TlsHandshakeFailed("handshake failed".to_string());
         assert!(tls_err.is_tls_error());
         assert!(!tls_err.is_websocket_error());
-        
+
         let ws_err = Error::WebSocketProtocolError("invalid frame".to_string());
         assert!(ws_err.is_websocket_error());
         assert!(!ws_err.is_connection_closed());
     }
-    
+
     #[test]
     fn test_recoverable_errors() {
         // Recoverable errors
         assert!(Error::Timeout.is_recoverable());
-        assert!(Error::ConnectionTimeout(SocketAddr::from(([127, 0, 0, 1], 5060))).is_recoverable());
-        assert!(Error::IoError(io::Error::new(io::ErrorKind::ConnectionReset, "reset")).is_recoverable());
-        
+        assert!(
+            Error::ConnectionTimeout(SocketAddr::from(([127, 0, 0, 1], 5060))).is_recoverable()
+        );
+        assert!(
+            Error::IoError(io::Error::new(io::ErrorKind::ConnectionReset, "reset"))
+                .is_recoverable()
+        );
+
         // Non-recoverable errors
         assert!(!Error::UnsupportedTransport("xyz".to_string()).is_recoverable());
         assert!(!Error::InvalidUri("bad:uri".to_string()).is_recoverable());
         assert!(!Error::MessageTooLarge(100000).is_recoverable());
     }
-} 
+}

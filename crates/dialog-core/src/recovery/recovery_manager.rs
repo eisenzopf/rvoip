@@ -26,4 +26,4 @@
 //! - Coordinates with transaction layer for retry logic
 //! - Provides recovery status to session layer
 
-// TODO: Implement recovery manager logic 
+// TODO: Implement recovery manager logic

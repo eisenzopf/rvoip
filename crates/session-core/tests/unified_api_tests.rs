@@ -2,7 +2,7 @@
 //!
 //! These tests demonstrate the unified coordinator API usage
 
-use rvoip_session_core::api::unified::{UnifiedCoordinator, Config};
+use rvoip_session_core::api::unified::{Config, UnifiedCoordinator};
 use rvoip_session_core::state_table::types::SessionId;
 use rvoip_session_core::types::CallState;
 use std::time::Duration;
@@ -31,10 +31,9 @@ async fn test_create_coordinator() {
 async fn test_make_call() {
     let coordinator = UnifiedCoordinator::new(test_config(15201)).await.unwrap();
 
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15202"
-    ).await;
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15202")
+        .await;
 
     assert!(session_id.is_ok());
     let session_id = session_id.unwrap();
@@ -50,10 +49,10 @@ async fn test_make_call() {
 async fn test_hold_resume() {
     let coordinator = UnifiedCoordinator::new(test_config(15203)).await.unwrap();
 
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15204"
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15204")
+        .await
+        .unwrap();
 
     // Hold
     let hold_result = coordinator.hold(&session_id).await;
@@ -69,20 +68,22 @@ async fn test_conference_operations() {
     let coordinator = UnifiedCoordinator::new(test_config(15205)).await.unwrap();
 
     // Create first call
-    let session1 = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15206"
-    ).await.unwrap();
+    let session1 = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15206")
+        .await
+        .unwrap();
 
     // Create conference from first call
-    let conf_result = coordinator.create_conference(&session1, "Board Meeting").await;
+    let conf_result = coordinator
+        .create_conference(&session1, "Board Meeting")
+        .await;
     assert!(conf_result.is_ok());
 
     // Create second call
-    let session2 = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:charlie@localhost:15207"
-    ).await.unwrap();
+    let session2 = coordinator
+        .make_call("sip:alice@localhost", "sip:charlie@localhost:15207")
+        .await
+        .unwrap();
 
     // Add to conference
     let add_result = coordinator.add_to_conference(&session1, &session2).await;
@@ -110,10 +111,10 @@ async fn test_attended_transfer() {
 async fn test_dtmf_operations() {
     let coordinator = UnifiedCoordinator::new(test_config(15214)).await.unwrap();
 
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15215"
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15215")
+        .await
+        .unwrap();
 
     // Send DTMF digits
     for digit in "1234567890*#".chars() {
@@ -126,10 +127,10 @@ async fn test_dtmf_operations() {
 async fn test_recording_operations() {
     let coordinator = UnifiedCoordinator::new(test_config(15216)).await.unwrap();
 
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15217"
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15217")
+        .await
+        .unwrap();
 
     // Start recording
     let start_result = coordinator.start_recording(&session_id).await;
@@ -149,10 +150,10 @@ async fn test_session_queries() {
     assert_eq!(sessions.len(), 0);
 
     // Make a call
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15219"
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15219")
+        .await
+        .unwrap();
 
     // List sessions (should have one)
     let sessions = coordinator.list_sessions().await;
@@ -171,16 +172,18 @@ async fn test_session_queries() {
 async fn test_event_subscription() {
     let coordinator = UnifiedCoordinator::new(test_config(15220)).await.unwrap();
 
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15221"
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15221")
+        .await
+        .unwrap();
 
     // Subscribe to events
     let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-    coordinator.subscribe(session_id.clone(), move |event| {
-        let _ = tx.try_send(event);
-    }).await;
+    coordinator
+        .subscribe(session_id.clone(), move |event| {
+            let _ = tx.try_send(event);
+        })
+        .await;
 
     // Hangup to generate an event
     let _ = coordinator.hangup(&session_id).await;
@@ -214,20 +217,20 @@ async fn test_multiple_calls() {
     let coordinator = UnifiedCoordinator::new(test_config(15223)).await.unwrap();
 
     // Make multiple calls
-    let session1 = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15224"
-    ).await.unwrap();
+    let session1 = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15224")
+        .await
+        .unwrap();
 
-    let session2 = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:charlie@localhost:15225"
-    ).await.unwrap();
+    let session2 = coordinator
+        .make_call("sip:alice@localhost", "sip:charlie@localhost:15225")
+        .await
+        .unwrap();
 
-    let session3 = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:david@localhost:15226"
-    ).await.unwrap();
+    let session3 = coordinator
+        .make_call("sip:alice@localhost", "sip:david@localhost:15226")
+        .await
+        .unwrap();
 
     // List all sessions
     let sessions = coordinator.list_sessions().await;

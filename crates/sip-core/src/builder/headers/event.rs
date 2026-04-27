@@ -1,10 +1,10 @@
+use crate::builder::headers::expires::ExpiresExt;
+use crate::builder::headers::HeaderSetter;
 use crate::types::{
-    event::{Event, EventType, Params, ParamValue},
+    event::{Event, EventType, ParamValue, Params},
     headers::TypedHeader,
 };
-use crate::builder::headers::HeaderSetter;
 use std::collections::BTreeMap;
-use crate::builder::headers::expires::ExpiresExt;
 
 /// # SIP Event Header Builder
 ///
@@ -271,7 +271,7 @@ pub trait EventBuilderExt {
     /// # Parameters
     /// - `id`: An optional `id` for the conference subscription/notification.
     fn event_conference(self, id: Option<impl Into<String>>) -> Self;
-    
+
     /// Convenience method to set a "dialog" event.
     ///
     /// # Parameters
@@ -334,13 +334,13 @@ where
 
     fn event_conference(self, id: Option<impl Into<String>>) -> Self {
         let event = Event::new(EventType::Package("conference".to_string()));
-         if let Some(id_val) = id {
+        if let Some(id_val) = id {
             self.set_header(event.with_id(id_val))
         } else {
             self.set_header(event)
         }
     }
-    
+
     fn event_dialog(self, id: Option<impl Into<String>>) -> Self {
         let event = Event::new(EventType::Token("dialog".to_string()));
         if let Some(id_val) = id {
@@ -363,7 +363,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::headers::{HeaderName, header_access::HeaderAccess};
+    use crate::types::headers::{header_access::HeaderAccess, HeaderName};
     use crate::types::method::Method;
     use crate::types::uri::Uri;
     use crate::types::StatusCode;
@@ -372,10 +372,11 @@ mod tests {
 
     #[test]
     fn test_set_full_event_object() {
-        let custom_event = Event::new(EventType::Token("custom-event".to_string()))
-            .with_id("custom-id-001");
+        let custom_event =
+            Event::new(EventType::Token("custom-event".to_string())).with_id("custom-id-001");
 
-        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event("custom-event") // Use string-based method
             .build();
 
@@ -389,7 +390,8 @@ mod tests {
 
     #[test]
     fn test_event_type_only() {
-        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event_type(EventType::Token("keep-alive".to_string()))
             .build();
 
@@ -404,19 +406,23 @@ mod tests {
 
     #[test]
     fn test_event_type_as_package() {
-        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event_type(EventType::Package("conference-info".to_string()))
             .build();
 
         if let Some(TypedHeader::Event(h)) = request.header(&HeaderName::Event) {
-            assert_eq!(h.event_type, EventType::Package("conference-info".to_string()));
+            assert_eq!(
+                h.event_type,
+                EventType::Package("conference-info".to_string())
+            );
             assert!(h.id.is_none());
             assert!(h.params.is_empty());
         } else {
             panic!("Event header not found or of wrong type");
         }
     }
-    
+
     #[test]
     fn test_event_id_token_type() {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
@@ -454,7 +460,8 @@ mod tests {
             ("flag".to_string(), None),
             ("p2".to_string(), Some("v2".to_string())),
         ];
-        let request = RequestBuilder::new(Method::Notify, "sip:user@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Notify, "sip:user@example.com")
+            .unwrap()
             .event_full(
                 EventType::Token("custom".to_string()),
                 Some("id-789"),
@@ -466,9 +473,15 @@ mod tests {
             assert_eq!(h.event_type, EventType::Token("custom".to_string()));
             assert_eq!(h.id, Some("id-789".to_string()));
             assert_eq!(h.params.len(), 3);
-            assert_eq!(h.params.get("p1"), Some(&ParamValue::Value("v1".to_string())));
+            assert_eq!(
+                h.params.get("p1"),
+                Some(&ParamValue::Value("v1".to_string()))
+            );
             assert_eq!(h.params.get("flag"), Some(&ParamValue::None));
-            assert_eq!(h.params.get("p2"), Some(&ParamValue::Value("v2".to_string())));
+            assert_eq!(
+                h.params.get("p2"),
+                Some(&ParamValue::Value("v2".to_string()))
+            );
         } else {
             panic!("Event header not found or of wrong type");
         }
@@ -476,10 +489,9 @@ mod tests {
 
     #[test]
     fn test_event_full_no_id_with_params() {
-         let params_to_add = vec![
-            ("app-data".to_string(), Some("payload".to_string())),
-        ];
-        let request = RequestBuilder::new(Method::Notify, "sip:user@example.com").unwrap()
+        let params_to_add = vec![("app-data".to_string(), Some("payload".to_string()))];
+        let request = RequestBuilder::new(Method::Notify, "sip:user@example.com")
+            .unwrap()
             .event_full(
                 EventType::Token("generic-event".to_string()),
                 None::<String>, // No ID - Explicitly typed
@@ -491,15 +503,19 @@ mod tests {
             assert_eq!(h.event_type, EventType::Token("generic-event".to_string()));
             assert!(h.id.is_none());
             assert_eq!(h.params.len(), 1);
-            assert_eq!(h.params.get("app-data"), Some(&ParamValue::Value("payload".to_string())));
+            assert_eq!(
+                h.params.get("app-data"),
+                Some(&ParamValue::Value("payload".to_string()))
+            );
         } else {
             panic!("Event header not found or of wrong type");
         }
     }
-    
+
     #[test]
     fn test_event_full_no_params() {
-        let request = RequestBuilder::new(Method::Notify, "sip:user@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Notify, "sip:user@example.com")
+            .unwrap()
             .event_full(
                 EventType::Token("another-event".to_string()),
                 Some("id-abc"),
@@ -518,53 +534,71 @@ mod tests {
 
     #[test]
     fn test_convenience_presence() {
-        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event_presence(Some("pres-001"))
             .build();
         if let Some(TypedHeader::Event(h)) = request.header(&HeaderName::Event) {
             assert_eq!(h.event_type, EventType::Token("presence".to_string()));
             assert_eq!(h.id, Some("pres-001".to_string()));
-        } else { panic!("Event header not found"); }
+        } else {
+            panic!("Event header not found");
+        }
 
-        let request_no_id = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request_no_id = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event_presence(None::<String>) // Explicitly typed None
             .build();
         if let Some(TypedHeader::Event(h)) = request_no_id.header(&HeaderName::Event) {
             assert_eq!(h.event_type, EventType::Token("presence".to_string()));
             assert!(h.id.is_none());
-        } else { panic!("Event header not found"); }
+        } else {
+            panic!("Event header not found");
+        }
     }
 
     #[test]
     fn test_convenience_conference() {
-        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event_conference(Some("conf-xyz"))
             .build();
         if let Some(TypedHeader::Event(h)) = request.header(&HeaderName::Event) {
             assert_eq!(h.event_type, EventType::Package("conference".to_string()));
             assert_eq!(h.id, Some("conf-xyz".to_string()));
-        } else { panic!("Event header not found"); }
+        } else {
+            panic!("Event header not found");
+        }
     }
 
     #[test]
     fn test_convenience_dialog() {
-        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event_dialog(Some("dlg-777"))
             .build();
         if let Some(TypedHeader::Event(h)) = request.header(&HeaderName::Event) {
             assert_eq!(h.event_type, EventType::Token("dialog".to_string()));
             assert_eq!(h.id, Some("dlg-777".to_string()));
-        } else { panic!("Event header not found"); }
+        } else {
+            panic!("Event header not found");
+        }
     }
 
     #[test]
     fn test_convenience_message_summary() {
-        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Subscribe, "sip:test@example.com")
+            .unwrap()
             .event_message_summary(None::<String>) // Explicitly typed None
             .build();
         if let Some(TypedHeader::Event(h)) = request.header(&HeaderName::Event) {
-            assert_eq!(h.event_type, EventType::Token("message-summary".to_string()));
+            assert_eq!(
+                h.event_type,
+                EventType::Token("message-summary".to_string())
+            );
             assert!(h.id.is_none());
-        } else { panic!("Event header not found"); }
+        } else {
+            panic!("Event header not found");
+        }
     }
-} 
+}

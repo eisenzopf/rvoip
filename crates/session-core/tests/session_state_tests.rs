@@ -3,13 +3,8 @@
 //! Tests the core SessionState methods: construction, condition tracking,
 //! state transitions, and history recording.
 
-use rvoip_session_core::internals::{
-    SessionId, Role,
-    SessionState,
-};
-use rvoip_session_core::session_store::{
-    HistoryConfig, TransferState,
-};
+use rvoip_session_core::internals::{Role, SessionId, SessionState};
+use rvoip_session_core::session_store::{HistoryConfig, TransferState};
 use rvoip_session_core::state_table::ConditionUpdates;
 use rvoip_session_core::types::CallState;
 
@@ -51,11 +46,7 @@ fn test_new_session_uas_role() {
 
 #[test]
 fn test_with_history_creates_history() {
-    let s = SessionState::with_history(
-        SessionId::new(),
-        Role::UAC,
-        HistoryConfig::default(),
-    );
+    let s = SessionState::with_history(SessionId::new(), Role::UAC, HistoryConfig::default());
     assert!(s.history.is_some());
 }
 
@@ -183,11 +174,7 @@ fn test_transition_to_resets_entered_state_at() {
 
 #[test]
 fn test_transition_to_records_history() {
-    let mut s = SessionState::with_history(
-        SessionId::new(),
-        Role::UAC,
-        HistoryConfig::default(),
-    );
+    let mut s = SessionState::with_history(SessionId::new(), Role::UAC, HistoryConfig::default());
     s.transition_to(CallState::Active);
     let history = s.history.as_ref().unwrap();
     assert!(history.total_transitions > 0);

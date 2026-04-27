@@ -14,12 +14,12 @@
 //! ```rust
 //! use rvoip_sip_core::types::Date;
 //! use chrono::{TimeZone, Utc};
-//! 
+//!
 //! // Create a date with a specific timestamp to see the format
 //! let timestamp = Utc.with_ymd_and_hms(2023, 11, 15, 8, 12, 31).unwrap();
 //! let date = Date::new(timestamp);
 //! let formatted = date.to_string();
-//! 
+//!
 //! // Format is: "Day, DD Mon YYYY HH:MM:SS GMT"
 //! // Example: "Wed, 15 Nov 2023 08:12:31 GMT"
 //! assert!(formatted.contains("15 Nov 2023 08:12:31 GMT"));
@@ -48,12 +48,12 @@
 //! assert_eq!(parsed_date.timestamp().date_naive().year(), 2023);
 //! ```
 
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use chrono::{DateTime, Datelike, FixedOffset, TimeZone, Timelike, Utc};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use chrono::{DateTime, FixedOffset, Utc, TimeZone, Datelike, Timelike};
-use serde::{Serialize, Deserialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Date header field (RFC 3261 Section 20.17).
 ///
@@ -112,7 +112,7 @@ impl Date {
     /// ```
     pub fn new<Tz: TimeZone>(timestamp: DateTime<Tz>) -> Self
     where
-        DateTime<Tz>: Into<DateTime<FixedOffset>>
+        DateTime<Tz>: Into<DateTime<FixedOffset>>,
     {
         Date {
             timestamp: timestamp.into(),
@@ -156,7 +156,7 @@ impl Date {
     ///
     /// let timestamp = Utc.with_ymd_and_hms(2023, 11, 15, 8, 12, 31).unwrap();
     /// let date = Date::new(timestamp);
-    /// 
+    ///
     /// let ts = date.timestamp();
     /// assert_eq!(ts.date_naive().year(), 2023);
     /// assert_eq!(ts.date_naive().month(), 11);
@@ -186,7 +186,7 @@ impl FromStr for Date {
             if parts.len() != 2 {
                 return Err(Error::ParseError("Invalid Date header format".to_string()));
             }
-            
+
             let header_name = parts[0].trim();
             if header_name.eq_ignore_ascii_case("date") {
                 // This looks like a Date header, so parse just the value part
@@ -199,14 +199,14 @@ impl FromStr for Date {
             // No header name, parse the whole string
             s.trim()
         };
-        
+
         // Try different date format variations
         // RFC 2822 format: "Tue, 15 Nov 2023 08:12:31 GMT"
         let timestamp = chrono::DateTime::parse_from_rfc2822(value_str)
             .or_else(|_| chrono::DateTime::parse_from_str(value_str, "%a, %d %b %Y %H:%M:%S GMT"))
             .or_else(|_| chrono::DateTime::parse_from_str(value_str, "%a, %d %b %Y %H:%M:%S %z"))
             .map_err(|e| Error::ParseError(format!("Invalid date format: {}", e)))?;
-            
+
         Ok(Date { timestamp })
     }
 }
@@ -220,14 +220,19 @@ impl TypedHeaderTrait for Date {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -235,24 +240,27 @@ impl TypedHeaderTrait for Date {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Date::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::Date(bytes) => {
                 // Try to convert the raw bytes to a string and parse it
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Date::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -266,7 +274,7 @@ mod tests {
     fn test_new() {
         let timestamp = Utc.with_ymd_and_hms(2023, 11, 15, 8, 12, 31).unwrap();
         let date = Date::new(timestamp);
-        
+
         assert_eq!(date.timestamp().date_naive().year(), 2023);
         assert_eq!(date.timestamp().date_naive().month(), 11);
         assert_eq!(date.timestamp().date_naive().day(), 15);
@@ -274,27 +282,27 @@ mod tests {
         assert_eq!(date.timestamp().minute(), 12);
         assert_eq!(date.timestamp().second(), 31);
     }
-    
+
     #[test]
     fn test_now() {
         let date = Date::now();
         let now = Utc::now();
-        
+
         // The timestamps should be very close (within seconds)
         let diff = (now.timestamp() - date.timestamp().timestamp()).abs();
         assert!(diff < 5, "Timestamps should be close");
     }
-    
+
     #[test]
     fn test_display() {
         let timestamp = Utc.with_ymd_and_hms(2023, 11, 15, 8, 12, 31).unwrap();
         let date = Date::new(timestamp);
-        
+
         // Use the %a format to get actual day name rather than hardcoding
         let expected = format!("{}", timestamp.format("%a, %d %b %Y %H:%M:%S GMT"));
         assert_eq!(date.to_string(), expected);
     }
-    
+
     #[test]
     fn test_from_str() {
         // Standard format
@@ -305,31 +313,31 @@ mod tests {
         assert_eq!(date.timestamp().hour(), 8);
         assert_eq!(date.timestamp().minute(), 12);
         assert_eq!(date.timestamp().second(), 31);
-        
+
         // With header name
         let date: Date = "Date: Wed, 15 Nov 2023 08:12:31 GMT".parse().unwrap();
         assert_eq!(date.timestamp().year(), 2023);
-        
+
         // With different timezone
         let date: Date = "Wed, 15 Nov 2023 08:12:31 +0000".parse().unwrap();
         assert_eq!(date.timestamp().year(), 2023);
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         // Create a header
         let timestamp = Utc.with_ymd_and_hms(2023, 11, 15, 8, 12, 31).unwrap();
         let date = Date::new(timestamp);
         let header = date.to_header();
-        
+
         assert_eq!(header.name, HeaderName::Date);
-        
+
         // Convert back from Header
         let date2 = Date::from_header(&header).unwrap();
         assert_eq!(date.timestamp(), date2.timestamp());
-        
+
         // Test invalid header name
         let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
         assert!(Date::from_header(&wrong_header).is_err());
     }
-} 
+}

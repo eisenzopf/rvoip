@@ -5,15 +5,15 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
-use tracing::{debug, warn, error, info};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info, warn};
 
-use crate::error::{Result, IntegrationError};
-use crate::types::{MediaSessionId, MediaPacket, DialogId};
+use super::events::{IntegrationEvent, IntegrationEventType, PacketInfo, RtpParameters};
 use crate::codec::mapping::CodecMapper;
-use crate::relay::controller::codec_detection::{CodecDetector, CodecDetectionResult};
+use crate::error::{IntegrationError, Result};
+use crate::relay::controller::codec_detection::{CodecDetectionResult, CodecDetector};
 use crate::relay::controller::codec_fallback::{CodecFallbackManager, FallbackMode};
-use super::events::{IntegrationEvent, IntegrationEventType, RtpParameters, PacketInfo};
+use crate::types::{DialogId, MediaPacket, MediaSessionId};
 
 /// RTP event types for external subscribers (e.g., session-core MediaManager)
 #[derive(Debug, Clone)]
@@ -123,27 +123,27 @@ impl RtpValidationState {
             packets_processed: 0,
             expected_payload_type,
             detection_confidence: 0.0,
-            sampling_rate: 1, // Start with every packet
+            sampling_rate: 1,     // Start with every packet
             intensive_mode: true, // Start in intensive mode
             intensive_packets_left: 50,
             validation_stats: ValidationStats::default(),
         }
     }
-    
+
     /// Check if current packet should be validated
     pub fn should_validate_packet(&mut self, config: &RtpBridgeConfig) -> bool {
         // Always increment packets processed to track packet flow
         self.packets_processed += 1;
-        
+
         if !config.enable_adaptive_validation {
             return false;
         }
-        
+
         // Always validate first N packets
         if self.packets_processed <= config.initial_validation_packets {
             return true;
         }
-        
+
         // Intensive mode after events
         if self.intensive_mode {
             if self.intensive_packets_left > 0 {
@@ -154,11 +154,11 @@ impl RtpValidationState {
                 self.update_sampling_rate(config);
             }
         }
-        
+
         // Normal sampling based on confidence
         self.packets_processed % self.sampling_rate == 0
     }
-    
+
     /// Update sampling rate based on detection confidence
     fn update_sampling_rate(&mut self, config: &RtpBridgeConfig) {
         if self.detection_confidence > 0.8 {
@@ -169,38 +169,42 @@ impl RtpValidationState {
             self.sampling_rate = config.intensive_sampling_rate; // Every 10th packet
         }
     }
-    
+
     /// Trigger intensive validation mode
     pub fn trigger_intensive_mode(&mut self, config: &RtpBridgeConfig) {
         self.intensive_mode = true;
         self.intensive_packets_left = config.intensive_mode_packets;
-        info!("🔍 Triggered intensive validation mode for {} packets", self.intensive_packets_left);
+        info!(
+            "🔍 Triggered intensive validation mode for {} packets",
+            self.intensive_packets_left
+        );
     }
-    
+
     /// Update validation stats
     pub fn update_validation_stats(&mut self, payload_type: u8, expected: bool) {
         self.validation_stats.packets_validated += 1;
         self.validation_stats.last_validation = std::time::Instant::now();
-        
+
         if expected {
             self.validation_stats.packets_expected += 1;
         } else {
             self.validation_stats.packets_unexpected += 1;
         }
     }
-    
+
     /// Update detection confidence
     pub fn update_detection_confidence(&mut self, confidence: f32) {
         self.detection_confidence = confidence;
     }
-    
+
     /// Get validation efficiency (expected/total)
     pub fn get_validation_efficiency(&self) -> f32 {
         if self.validation_stats.packets_validated == 0 {
             return 1.0;
         }
-        
-        self.validation_stats.packets_expected as f32 / self.validation_stats.packets_validated as f32
+
+        self.validation_stats.packets_expected as f32
+            / self.validation_stats.packets_validated as f32
     }
 }
 
@@ -255,7 +259,7 @@ impl RtpBridge {
         fallback_manager: Arc<CodecFallbackManager>,
     ) -> Self {
         debug!("Creating RtpBridge with config: {:?}", config);
-        
+
         Self {
             config,
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -268,14 +272,17 @@ impl RtpBridge {
             rtp_event_callbacks: Arc::new(RwLock::new(Vec::new())),
         }
     }
-    
+
     /// Add an RTP event callback
     pub async fn add_rtp_event_callback(&self, callback: RtpEventCallback) {
         let mut callbacks = self.rtp_event_callbacks.write().await;
         callbacks.push(callback);
-        debug!("Added RTP event callback, total callbacks: {}", callbacks.len());
+        debug!(
+            "Added RTP event callback, total callbacks: {}",
+            callbacks.len()
+        );
     }
-    
+
     /// Remove all RTP event callbacks (useful for cleanup)
     pub async fn clear_rtp_event_callbacks(&self) {
         let mut callbacks = self.rtp_event_callbacks.write().await;
@@ -294,15 +301,15 @@ impl RtpBridge {
             let mut incoming = self.incoming_packet_rx.write().await;
             *incoming = Some(incoming_rx);
         }
-        
+
         {
             let mut outgoing = self.outgoing_packet_tx.write().await;
             *outgoing = Some(outgoing_tx);
         }
-        
+
         debug!("RtpBridge channels configured");
     }
-    
+
     /// Register an RTP session
     pub async fn register_session(
         &self,
@@ -310,7 +317,7 @@ impl RtpBridge {
         params: RtpParameters,
     ) -> Result<()> {
         let validation_state = RtpValidationState::new(Some(params.payload_type));
-        
+
         let session_info = RtpSessionInfo {
             params: params.clone(),
             packets_sent: 0,
@@ -320,47 +327,59 @@ impl RtpBridge {
             last_activity: std::time::Instant::now(),
             validation_state,
         };
-        
+
         {
             let mut sessions = self.sessions.write().await;
             sessions.insert(session_id.clone(), session_info);
         }
-        
+
         // Initialize codec detection for this session
         let dialog_id = DialogId::new(format!("rtp-{}", session_id));
         let expected_codec = self.codec_mapper.payload_to_codec(params.payload_type);
-        self.codec_detector.initialize_detection(dialog_id, expected_codec.clone()).await;
-        
-        info!("🔍 Initialized RTP validation for session {}: expected PT={}, codec={:?}", 
-              session_id, params.payload_type, expected_codec);
-        
+        self.codec_detector
+            .initialize_detection(dialog_id, expected_codec.clone())
+            .await;
+
+        info!(
+            "🔍 Initialized RTP validation for session {}: expected PT={}, codec={:?}",
+            session_id, params.payload_type, expected_codec
+        );
+
         // Send integration event
         let event = IntegrationEvent::rtp_session_register(session_id.clone(), params);
         if let Err(e) = self.event_tx.send(event) {
             warn!("Failed to send RTP session register event: {}", e);
         }
-        
-        debug!("RTP session {} registered with payload validation", session_id);
+
+        debug!(
+            "RTP session {} registered with payload validation",
+            session_id
+        );
         Ok(())
     }
-    
+
     /// Unregister an RTP session
     pub async fn unregister_session(&self, session_id: &MediaSessionId) -> Result<()> {
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session_info) = sessions.remove(session_id) {
-                info!("🧹 Cleaned up RTP session {}: {} packets validated, efficiency: {:.1}%",
-                      session_id, 
-                      session_info.validation_state.validation_stats.packets_validated,
-                      session_info.validation_state.get_validation_efficiency() * 100.0);
+                info!(
+                    "🧹 Cleaned up RTP session {}: {} packets validated, efficiency: {:.1}%",
+                    session_id,
+                    session_info
+                        .validation_state
+                        .validation_stats
+                        .packets_validated,
+                    session_info.validation_state.get_validation_efficiency() * 100.0
+                );
             }
         }
-        
+
         // Cleanup codec detection
         let dialog_id = DialogId::new(format!("rtp-{}", session_id));
         self.codec_detector.cleanup_detection(&dialog_id).await;
         self.fallback_manager.cleanup_fallback(&dialog_id).await;
-        
+
         // Send integration event
         let event = IntegrationEvent::new(
             IntegrationEventType::RtpSessionUnregister {
@@ -372,11 +391,11 @@ impl RtpBridge {
         if let Err(e) = self.event_tx.send(event) {
             warn!("Failed to send RTP session unregister event: {}", e);
         }
-        
+
         debug!("RTP session {} unregistered", session_id);
         Ok(())
     }
-    
+
     /// Send media packet via RTP
     pub async fn send_media_packet(
         &self,
@@ -389,13 +408,14 @@ impl RtpBridge {
             let sessions = self.sessions.read().await;
             sessions.contains_key(session_id)
         };
-        
+
         if !is_registered {
             return Err(IntegrationError::RtpCore {
                 details: format!("RTP session {} not registered", session_id),
-            }.into());
+            }
+            .into());
         }
-        
+
         // Send packet via outgoing channel
         {
             let outgoing = self.outgoing_packet_tx.read().await;
@@ -404,15 +424,17 @@ impl RtpBridge {
                     error!("Failed to send packet to rtp-core: {}", e);
                     return Err(IntegrationError::RtpCore {
                         details: "Failed to send packet to rtp-core".to_string(),
-                    }.into());
+                    }
+                    .into());
                 }
             } else {
                 return Err(IntegrationError::RtpCore {
                     details: "Outgoing packet channel not configured".to_string(),
-                }.into());
+                }
+                .into());
             }
         }
-        
+
         // Update statistics
         {
             let mut sessions = self.sessions.write().await;
@@ -422,7 +444,7 @@ impl RtpBridge {
                 session_info.last_activity = std::time::Instant::now();
             }
         }
-        
+
         // Send integration event
         let event = IntegrationEvent::new(
             IntegrationEventType::MediaPacketSend {
@@ -436,10 +458,10 @@ impl RtpBridge {
         if let Err(e) = self.event_tx.send(event) {
             warn!("Failed to send media packet send event: {}", e);
         }
-        
+
         Ok(())
     }
-    
+
     /// Process incoming media packet from RTP with adaptive validation
     pub async fn process_incoming_packet(
         &self,
@@ -453,20 +475,22 @@ impl RtpBridge {
                 session_info.packets_received += 1;
                 session_info.bytes_received += packet.payload.len() as u64;
                 session_info.last_activity = std::time::Instant::now();
-                
+
                 // Always call validation check to increment packet counter
-                session_info.validation_state.should_validate_packet(&self.config)
+                session_info
+                    .validation_state
+                    .should_validate_packet(&self.config)
             } else {
                 warn!("Received packet for unknown session: {}", session_id);
                 return Ok(());
             }
         };
-        
+
         // Perform validation if sampling indicates we should
         if should_validate {
             self.validate_packet_payload(session_id, &packet).await?;
         }
-        
+
         // Send integration event
         let packet_info = PacketInfo {
             payload_type: packet.payload_type,
@@ -475,7 +499,7 @@ impl RtpBridge {
             ssrc: packet.ssrc,
             size: packet.payload.len(),
         };
-        
+
         let event = IntegrationEvent::new(
             IntegrationEventType::MediaPacketReceived {
                 session_id: session_id.clone(),
@@ -487,7 +511,7 @@ impl RtpBridge {
         if let Err(e) = self.event_tx.send(event) {
             warn!("Failed to send media packet received event: {}", e);
         }
-        
+
         // Send RTP event to external subscribers (e.g., session-core MediaManager)
         let rtp_event = RtpEvent::MediaReceived {
             payload_type: packet.payload_type,
@@ -496,19 +520,23 @@ impl RtpBridge {
             sequence_number: packet.sequence_number,
             ssrc: packet.ssrc,
         };
-        
+
         let callbacks = self.rtp_event_callbacks.read().await;
         for callback in callbacks.iter() {
             callback(session_id.clone(), rtp_event.clone());
         }
-        
+
         if !callbacks.is_empty() {
-            debug!("Sent RTP event to {} callbacks for session {}", callbacks.len(), session_id);
+            debug!(
+                "Sent RTP event to {} callbacks for session {}",
+                callbacks.len(),
+                session_id
+            );
         }
-        
+
         Ok(())
     }
-    
+
     /// Validate packet payload type and handle fallback
     async fn validate_packet_payload(
         &self,
@@ -516,51 +544,71 @@ impl RtpBridge {
         packet: &MediaPacket,
     ) -> Result<()> {
         let dialog_id = DialogId::new(format!("rtp-{}", session_id));
-        
+
         // Get expected payload type
         let expected_payload_type = {
             let sessions = self.sessions.read().await;
-            sessions.get(session_id)
+            sessions
+                .get(session_id)
                 .and_then(|s| s.validation_state.expected_payload_type)
         };
-        
+
         let expected_payload_type = match expected_payload_type {
             Some(pt) => pt,
             None => {
-                debug!("No expected payload type for session {}, skipping validation", session_id);
+                debug!(
+                    "No expected payload type for session {}, skipping validation",
+                    session_id
+                );
                 return Ok(());
             }
         };
-        
+
         let is_expected = packet.payload_type == expected_payload_type;
-        
+
         // Update validation statistics
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info.validation_state.update_validation_stats(packet.payload_type, is_expected);
+                session_info
+                    .validation_state
+                    .update_validation_stats(packet.payload_type, is_expected);
             }
         }
-        
+
         // Feed to codec detection system
-        if let Some(detection_result) = self.codec_detector.process_packet(&dialog_id, packet.payload_type).await {
-            self.handle_codec_detection_result(session_id, &dialog_id, detection_result).await?;
+        if let Some(detection_result) = self
+            .codec_detector
+            .process_packet(&dialog_id, packet.payload_type)
+            .await
+        {
+            self.handle_codec_detection_result(session_id, &dialog_id, detection_result)
+                .await?;
         }
-        
+
         // Log validation results
         if is_expected {
-            debug!("✅ Packet validation passed for session {}: PT={}", session_id, packet.payload_type);
+            debug!(
+                "✅ Packet validation passed for session {}: PT={}",
+                session_id, packet.payload_type
+            );
         } else {
             let expected_codec = self.codec_mapper.payload_to_codec(expected_payload_type);
             let actual_codec = self.codec_mapper.payload_to_codec(packet.payload_type);
-            
-            warn!("⚠️ Payload type mismatch for session {}: expected {}({:?}) got {}({:?})", 
-                  session_id, expected_payload_type, expected_codec, packet.payload_type, actual_codec);
+
+            warn!(
+                "⚠️ Payload type mismatch for session {}: expected {}({:?}) got {}({:?})",
+                session_id,
+                expected_payload_type,
+                expected_codec,
+                packet.payload_type,
+                actual_codec
+            );
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle codec detection results and trigger fallback if needed
     async fn handle_codec_detection_result(
         &self,
@@ -574,47 +622,57 @@ impl RtpBridge {
             CodecDetectionResult::UnexpectedCodec { confidence, .. } => *confidence,
             CodecDetectionResult::InsufficientData { .. } => 0.0,
         };
-        
+
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info.validation_state.update_detection_confidence(confidence);
+                session_info
+                    .validation_state
+                    .update_detection_confidence(confidence);
             }
         }
-        
+
         match result {
             CodecDetectionResult::Expected { codec, .. } => {
-                debug!("✅ Codec detection confirmed expected codec for session {}: {:?}", session_id, codec);
-            },
-            CodecDetectionResult::UnexpectedCodec { 
-                expected_codec, 
-                detected_codec, 
+                debug!(
+                    "✅ Codec detection confirmed expected codec for session {}: {:?}",
+                    session_id, codec
+                );
+            }
+            CodecDetectionResult::UnexpectedCodec {
+                expected_codec,
+                detected_codec,
                 confidence,
-                .. 
+                ..
             } => {
                 warn!("🔍 Unexpected codec detected for session {}: expected {:?}, got {:?} (confidence: {:.2})", 
                       session_id, expected_codec, detected_codec, confidence);
-                
+
                 // Trigger fallback handling
-                self.handle_codec_fallback(session_id, dialog_id, expected_codec, detected_codec).await?;
-                
+                self.handle_codec_fallback(session_id, dialog_id, expected_codec, detected_codec)
+                    .await?;
+
                 // Trigger intensive validation mode
                 {
                     let mut sessions = self.sessions.write().await;
                     if let Some(session_info) = sessions.get_mut(session_id) {
-                        session_info.validation_state.trigger_intensive_mode(&self.config);
+                        session_info
+                            .validation_state
+                            .trigger_intensive_mode(&self.config);
                     }
                 }
-            },
+            }
             CodecDetectionResult::InsufficientData { packets_analyzed } => {
-                debug!("🔍 Insufficient data for codec detection on session {}: {} packets analyzed", 
-                       session_id, packets_analyzed);
-            },
+                debug!(
+                    "🔍 Insufficient data for codec detection on session {}: {} packets analyzed",
+                    session_id, packets_analyzed
+                );
+            }
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle codec fallback when mismatches are detected
     async fn handle_codec_fallback(
         &self,
@@ -627,59 +685,88 @@ impl RtpBridge {
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info.validation_state.validation_stats.fallback_activations += 1;
+                session_info
+                    .validation_state
+                    .validation_stats
+                    .fallback_activations += 1;
             }
         }
-        
+
         // Initialize fallback if not already done
         if let (Some(expected), Some(detected)) = (expected_codec, detected_codec) {
-            if let Err(e) = self.fallback_manager.initialize_fallback(dialog_id.clone(), Some(expected.clone())).await {
-                warn!("Failed to initialize fallback for session {}: {}", session_id, e);
+            if let Err(e) = self
+                .fallback_manager
+                .initialize_fallback(dialog_id.clone(), Some(expected.clone()))
+                .await
+            {
+                warn!(
+                    "Failed to initialize fallback for session {}: {}",
+                    session_id, e
+                );
                 return Ok(());
             }
-            
+
             // Get fallback stats
             if let Some(stats) = self.fallback_manager.get_stats(dialog_id).await {
                 match &stats.current_mode {
-                    FallbackMode::Transcoding { from_codec, to_codec, .. } => {
-                        info!("🔄 Activated transcoding fallback for session {}: {} → {}", 
-                              session_id, from_codec, to_codec);
-                    },
+                    FallbackMode::Transcoding {
+                        from_codec,
+                        to_codec,
+                        ..
+                    } => {
+                        info!(
+                            "🔄 Activated transcoding fallback for session {}: {} → {}",
+                            session_id, from_codec, to_codec
+                        );
+                    }
                     FallbackMode::Passthrough { detected_codec, .. } => {
-                        info!("🔄 Activated passthrough fallback for session {}: {}", 
-                              session_id, detected_codec);
-                    },
+                        info!(
+                            "🔄 Activated passthrough fallback for session {}: {}",
+                            session_id, detected_codec
+                        );
+                    }
                     FallbackMode::None => {
                         debug!("No fallback needed for session {}", session_id);
-                    },
+                    }
                 }
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle codec change events (from re-INVITE, etc.)
-    pub async fn handle_codec_change_event(&self, session_id: &MediaSessionId, new_payload_type: u8) -> Result<()> {
-        info!("🔄 Codec change event for session {}: new PT={}", session_id, new_payload_type);
-        
+    pub async fn handle_codec_change_event(
+        &self,
+        session_id: &MediaSessionId,
+        new_payload_type: u8,
+    ) -> Result<()> {
+        info!(
+            "🔄 Codec change event for session {}: new PT={}",
+            session_id, new_payload_type
+        );
+
         // Update expected payload type
         {
             let mut sessions = self.sessions.write().await;
             if let Some(session_info) = sessions.get_mut(session_id) {
                 session_info.validation_state.expected_payload_type = Some(new_payload_type);
-                session_info.validation_state.trigger_intensive_mode(&self.config);
+                session_info
+                    .validation_state
+                    .trigger_intensive_mode(&self.config);
             }
         }
-        
+
         // Reinitialize codec detection
         let dialog_id = DialogId::new(format!("rtp-{}", session_id));
         let expected_codec = self.codec_mapper.payload_to_codec(new_payload_type);
-        self.codec_detector.initialize_detection(dialog_id, expected_codec).await;
-        
+        self.codec_detector
+            .initialize_detection(dialog_id, expected_codec)
+            .await;
+
         Ok(())
     }
-    
+
     /// Get session statistics
     pub async fn get_session_stats(&self, session_id: &MediaSessionId) -> Option<RtpSessionStats> {
         let sessions = self.sessions.read().await;
@@ -692,9 +779,12 @@ impl RtpBridge {
             validation_stats: info.validation_state.validation_stats.clone(),
         })
     }
-    
+
     /// Get validation statistics for a session
-    pub async fn get_validation_stats(&self, session_id: &MediaSessionId) -> Option<RtpValidationStats> {
+    pub async fn get_validation_stats(
+        &self,
+        session_id: &MediaSessionId,
+    ) -> Option<RtpValidationStats> {
         let sessions = self.sessions.read().await;
         sessions.get(session_id).map(|info| {
             let validation_state = &info.validation_state;
@@ -711,18 +801,18 @@ impl RtpBridge {
             }
         })
     }
-    
+
     /// Get all active sessions
     pub async fn get_active_sessions(&self) -> Vec<MediaSessionId> {
         let sessions = self.sessions.read().await;
         sessions.keys().cloned().collect()
     }
-    
+
     /// Clean up expired sessions
     pub async fn cleanup_expired_sessions(&self) -> Result<()> {
         let now = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(self.config.session_timeout_secs);
-        
+
         let expired_sessions: Vec<MediaSessionId> = {
             let sessions = self.sessions.read().await;
             sessions
@@ -731,12 +821,12 @@ impl RtpBridge {
                 .map(|(id, _)| id.clone())
                 .collect()
         };
-        
+
         for session_id in expired_sessions {
             warn!("Cleaning up expired RTP session: {}", session_id);
             self.unregister_session(&session_id).await?;
         }
-        
+
         Ok(())
     }
 }
@@ -784,20 +874,23 @@ pub struct RtpValidationStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
-    use std::sync::Arc;
-    use std::time::Instant;
-    use bytes::Bytes;
     use crate::codec::mapping::CodecMapper;
     use crate::relay::controller::codec_detection::CodecDetector;
     use crate::relay::controller::codec_fallback::CodecFallbackManager;
-    
+    use bytes::Bytes;
+    use std::sync::Arc;
+    use std::time::Instant;
+    use tokio::sync::mpsc;
+
     fn create_test_bridge() -> (RtpBridge, mpsc::UnboundedReceiver<IntegrationEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let codec_mapper = Arc::new(CodecMapper::new());
         let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
-        let fallback_manager = Arc::new(CodecFallbackManager::new(codec_detector.clone(), codec_mapper.clone()));
-        
+        let fallback_manager = Arc::new(CodecFallbackManager::new(
+            codec_detector.clone(),
+            codec_mapper.clone(),
+        ));
+
         let bridge = RtpBridge::new(
             RtpBridgeConfig::default(),
             event_tx,
@@ -805,22 +898,22 @@ mod tests {
             codec_detector,
             fallback_manager,
         );
-        
+
         (bridge, event_rx)
     }
-    
+
     #[tokio::test]
     async fn test_rtp_bridge_creation() {
         let (bridge, _event_rx) = create_test_bridge();
-        
+
         let sessions = bridge.get_active_sessions().await;
         assert!(sessions.is_empty());
     }
-    
+
     #[tokio::test]
     async fn test_session_registration() {
         let (bridge, _event_rx) = create_test_bridge();
-        
+
         let session_id = MediaSessionId::new("test-session");
         let params = RtpParameters {
             local_port: 5004,
@@ -829,13 +922,16 @@ mod tests {
             payload_type: 0, // PCMU
             ssrc: 12345,
         };
-        
-        bridge.register_session(session_id.clone(), params).await.unwrap();
-        
+
+        bridge
+            .register_session(session_id.clone(), params)
+            .await
+            .unwrap();
+
         let active_sessions = bridge.get_active_sessions().await;
         assert_eq!(active_sessions.len(), 1);
         assert_eq!(active_sessions[0], session_id);
-        
+
         // Test validation state is initialized
         let validation_stats = bridge.get_validation_stats(&session_id).await;
         assert!(validation_stats.is_some());
@@ -843,17 +939,17 @@ mod tests {
         assert_eq!(stats.packets_processed, 0);
         assert_eq!(stats.packets_validated, 0);
         assert!(stats.intensive_mode_active);
-        
+
         bridge.unregister_session(&session_id).await.unwrap();
-        
+
         let active_sessions = bridge.get_active_sessions().await;
         assert!(active_sessions.is_empty());
     }
-    
+
     #[tokio::test]
     async fn test_adaptive_validation_initial_phase() {
         let (bridge, _event_rx) = create_test_bridge();
-        
+
         let session_id = MediaSessionId::new("test-session");
         let params = RtpParameters {
             local_port: 5004,
@@ -862,9 +958,12 @@ mod tests {
             payload_type: 0, // PCMU
             ssrc: 12345,
         };
-        
-        bridge.register_session(session_id.clone(), params).await.unwrap();
-        
+
+        bridge
+            .register_session(session_id.clone(), params)
+            .await
+            .unwrap();
+
         // Send packets in initial phase - should validate every packet
         for i in 0..10 {
             let packet = MediaPacket {
@@ -875,10 +974,13 @@ mod tests {
                 payload: Bytes::from(vec![0; 160]),
                 received_at: Instant::now(),
             };
-            
-            bridge.process_incoming_packet(&session_id, packet).await.unwrap();
+
+            bridge
+                .process_incoming_packet(&session_id, packet)
+                .await
+                .unwrap();
         }
-        
+
         let validation_stats = bridge.get_validation_stats(&session_id).await.unwrap();
         assert_eq!(validation_stats.packets_processed, 10);
         assert_eq!(validation_stats.packets_validated, 10); // All packets validated in initial phase
@@ -886,11 +988,11 @@ mod tests {
         assert_eq!(validation_stats.packets_unexpected, 0);
         assert_eq!(validation_stats.validation_efficiency, 1.0);
     }
-    
+
     #[tokio::test]
     async fn test_adaptive_validation_unexpected_codec() {
         let (bridge, _event_rx) = create_test_bridge();
-        
+
         let session_id = MediaSessionId::new("test-session");
         let params = RtpParameters {
             local_port: 5004,
@@ -899,9 +1001,12 @@ mod tests {
             payload_type: 0, // Expected PCMU
             ssrc: 12345,
         };
-        
-        bridge.register_session(session_id.clone(), params).await.unwrap();
-        
+
+        bridge
+            .register_session(session_id.clone(), params)
+            .await
+            .unwrap();
+
         // Send packets with unexpected payload type (Opus instead of PCMU)
         for i in 0..15 {
             let packet = MediaPacket {
@@ -912,21 +1017,24 @@ mod tests {
                 payload: Bytes::from(vec![0; 160]),
                 received_at: Instant::now(),
             };
-            
-            bridge.process_incoming_packet(&session_id, packet).await.unwrap();
+
+            bridge
+                .process_incoming_packet(&session_id, packet)
+                .await
+                .unwrap();
         }
-        
+
         let validation_stats = bridge.get_validation_stats(&session_id).await.unwrap();
         assert_eq!(validation_stats.packets_processed, 15);
         assert_eq!(validation_stats.packets_validated, 15); // All packets validated in initial phase
         assert_eq!(validation_stats.packets_expected, 0);
         assert_eq!(validation_stats.packets_unexpected, 15);
         assert_eq!(validation_stats.validation_efficiency, 0.0);
-        
+
         // Should trigger intensive mode due to unexpected codec
         assert!(validation_stats.intensive_mode_active);
     }
-    
+
     #[tokio::test]
     async fn test_adaptive_validation_sampling_transition() {
         let config = RtpBridgeConfig {
@@ -935,12 +1043,15 @@ mod tests {
             intensive_sampling_rate: 2,
             ..Default::default()
         };
-        
+
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let codec_mapper = Arc::new(CodecMapper::new());
         let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
-        let fallback_manager = Arc::new(CodecFallbackManager::new(codec_detector.clone(), codec_mapper.clone()));
-        
+        let fallback_manager = Arc::new(CodecFallbackManager::new(
+            codec_detector.clone(),
+            codec_mapper.clone(),
+        ));
+
         let bridge = RtpBridge::new(
             config,
             event_tx,
@@ -948,7 +1059,7 @@ mod tests {
             codec_detector,
             fallback_manager,
         );
-        
+
         let session_id = MediaSessionId::new("test-session");
         let params = RtpParameters {
             local_port: 5004,
@@ -957,9 +1068,12 @@ mod tests {
             payload_type: 0, // PCMU
             ssrc: 12345,
         };
-        
-        bridge.register_session(session_id.clone(), params).await.unwrap();
-        
+
+        bridge
+            .register_session(session_id.clone(), params)
+            .await
+            .unwrap();
+
         // Send packets beyond initial phase
         for i in 0..20 {
             let packet = MediaPacket {
@@ -970,23 +1084,26 @@ mod tests {
                 payload: Bytes::from(vec![0; 160]),
                 received_at: Instant::now(),
             };
-            
-            bridge.process_incoming_packet(&session_id, packet).await.unwrap();
+
+            bridge
+                .process_incoming_packet(&session_id, packet)
+                .await
+                .unwrap();
         }
-        
+
         let validation_stats = bridge.get_validation_stats(&session_id).await.unwrap();
         assert_eq!(validation_stats.packets_processed, 20);
-        
+
         // Should have transitioned to sampling after initial phase
         assert!(validation_stats.packets_validated < 20);
         assert!(validation_stats.packets_validated >= 5); // At least initial packets
         assert_eq!(validation_stats.validation_efficiency, 1.0); // All validated packets were expected
     }
-    
+
     #[tokio::test]
     async fn test_codec_change_event_handling() {
         let (bridge, _event_rx) = create_test_bridge();
-        
+
         let session_id = MediaSessionId::new("test-session");
         let params = RtpParameters {
             local_port: 5004,
@@ -995,17 +1112,23 @@ mod tests {
             payload_type: 0, // PCMU
             ssrc: 12345,
         };
-        
-        bridge.register_session(session_id.clone(), params).await.unwrap();
-        
+
+        bridge
+            .register_session(session_id.clone(), params)
+            .await
+            .unwrap();
+
         // Simulate codec change event (e.g., from re-INVITE)
-        bridge.handle_codec_change_event(&session_id, 111).await.unwrap(); // Change to Opus
-        
+        bridge
+            .handle_codec_change_event(&session_id, 111)
+            .await
+            .unwrap(); // Change to Opus
+
         let validation_stats = bridge.get_validation_stats(&session_id).await.unwrap();
-        
+
         // Should trigger intensive mode
         assert!(validation_stats.intensive_mode_active);
-        
+
         // Send packets with new codec
         for i in 0..10 {
             let packet = MediaPacket {
@@ -1016,20 +1139,23 @@ mod tests {
                 payload: Bytes::from(vec![0; 160]),
                 received_at: Instant::now(),
             };
-            
-            bridge.process_incoming_packet(&session_id, packet).await.unwrap();
+
+            bridge
+                .process_incoming_packet(&session_id, packet)
+                .await
+                .unwrap();
         }
-        
+
         let validation_stats = bridge.get_validation_stats(&session_id).await.unwrap();
         assert_eq!(validation_stats.packets_expected, 10);
         assert_eq!(validation_stats.packets_unexpected, 0);
         assert_eq!(validation_stats.validation_efficiency, 1.0);
     }
-    
+
     #[tokio::test]
     async fn test_validation_statistics_tracking() {
         let (bridge, _event_rx) = create_test_bridge();
-        
+
         let session_id = MediaSessionId::new("test-session");
         let params = RtpParameters {
             local_port: 5004,
@@ -1038,9 +1164,12 @@ mod tests {
             payload_type: 0, // PCMU
             ssrc: 12345,
         };
-        
-        bridge.register_session(session_id.clone(), params).await.unwrap();
-        
+
+        bridge
+            .register_session(session_id.clone(), params)
+            .await
+            .unwrap();
+
         // Send mix of expected and unexpected packets - more packets for better detection
         for i in 0..50 {
             let payload_type = if i % 5 == 0 { 111 } else { 0 }; // 20% unexpected
@@ -1052,39 +1181,54 @@ mod tests {
                 payload: Bytes::from(vec![0; 160]),
                 received_at: Instant::now(),
             };
-            
-            bridge.process_incoming_packet(&session_id, packet).await.unwrap();
+
+            bridge
+                .process_incoming_packet(&session_id, packet)
+                .await
+                .unwrap();
         }
-        
+
         let validation_stats = bridge.get_validation_stats(&session_id).await.unwrap();
         assert_eq!(validation_stats.packets_processed, 50);
         assert!(validation_stats.packets_unexpected > 0);
         assert!(validation_stats.packets_expected > 0);
         assert!(validation_stats.validation_efficiency < 1.0);
-        
+
         // Should have some fallback activations due to unexpected codecs
         // If not, this test shows that the codec detection might need more packets
         // to reach the confidence threshold for detection
-        println!("Fallback activations: {}", validation_stats.fallback_activations);
-        println!("Detection confidence: {:.2}", validation_stats.detection_confidence);
-        println!("Unexpected packets: {}", validation_stats.packets_unexpected);
-        
+        println!(
+            "Fallback activations: {}",
+            validation_stats.fallback_activations
+        );
+        println!(
+            "Detection confidence: {:.2}",
+            validation_stats.detection_confidence
+        );
+        println!(
+            "Unexpected packets: {}",
+            validation_stats.packets_unexpected
+        );
+
         // The fallback activation depends on the codec detection reaching its confidence threshold
         // This is expected behavior - fallback only activates when detection is confident enough
     }
-    
+
     #[tokio::test]
     async fn test_validation_disabled() {
         let config = RtpBridgeConfig {
             enable_adaptive_validation: false,
             ..Default::default()
         };
-        
+
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let codec_mapper = Arc::new(CodecMapper::new());
         let codec_detector = Arc::new(CodecDetector::new(codec_mapper.clone()));
-        let fallback_manager = Arc::new(CodecFallbackManager::new(codec_detector.clone(), codec_mapper.clone()));
-        
+        let fallback_manager = Arc::new(CodecFallbackManager::new(
+            codec_detector.clone(),
+            codec_mapper.clone(),
+        ));
+
         let bridge = RtpBridge::new(
             config,
             event_tx,
@@ -1092,7 +1236,7 @@ mod tests {
             codec_detector,
             fallback_manager,
         );
-        
+
         let session_id = MediaSessionId::new("test-session");
         let params = RtpParameters {
             local_port: 5004,
@@ -1101,9 +1245,12 @@ mod tests {
             payload_type: 0, // PCMU
             ssrc: 12345,
         };
-        
-        bridge.register_session(session_id.clone(), params).await.unwrap();
-        
+
+        bridge
+            .register_session(session_id.clone(), params)
+            .await
+            .unwrap();
+
         // Send packets with unexpected payload type
         for i in 0..10 {
             let packet = MediaPacket {
@@ -1114,10 +1261,13 @@ mod tests {
                 payload: Bytes::from(vec![0; 160]),
                 received_at: Instant::now(),
             };
-            
-            bridge.process_incoming_packet(&session_id, packet).await.unwrap();
+
+            bridge
+                .process_incoming_packet(&session_id, packet)
+                .await
+                .unwrap();
         }
-        
+
         let validation_stats = bridge.get_validation_stats(&session_id).await.unwrap();
         assert_eq!(validation_stats.packets_processed, 10);
         assert_eq!(validation_stats.packets_validated, 0); // No validation when disabled
@@ -1125,4 +1275,4 @@ mod tests {
         assert_eq!(validation_stats.packets_unexpected, 0);
         assert_eq!(validation_stats.fallback_activations, 0);
     }
-} 
+}

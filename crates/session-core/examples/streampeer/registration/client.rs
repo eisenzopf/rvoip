@@ -9,14 +9,20 @@ use tokio::time::{sleep, Duration};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let coordinator = UnifiedCoordinator::new(Config::local("alice", 5061)).await?;
     println!("Registering alice with sip:127.0.0.1:5060...");
 
     let handle = coordinator
-        .register_with(Registration::new("sip:127.0.0.1:5060", "alice", "password123"))
+        .register_with(Registration::new(
+            "sip:127.0.0.1:5060",
+            "alice",
+            "password123",
+        ))
         .await?;
 
     sleep(Duration::from_secs(3)).await;

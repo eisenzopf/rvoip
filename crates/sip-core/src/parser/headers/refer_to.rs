@@ -3,35 +3,34 @@
 // refer-param = generic-param
 
 use nom::{
+    branch::alt,
     bytes::complete::{tag, tag_no_case},
     combinator::{map, map_res},
+    multi::many0,
     sequence::{pair, preceded},
     IResult,
-    multi::many0,
-    branch::alt,
 };
 
 // Import from base parser modules
-use crate::parser::separators::{hcolon, semi};
 use crate::parser::address::name_addr_or_addr_spec;
 use crate::parser::common_params::{generic_param, semicolon_separated_params0};
-use crate::parser::ParseResult;
+use crate::parser::separators::{hcolon, semi};
 use crate::parser::token::token;
+use crate::parser::ParseResult;
 
-use crate::types::param::Param;
-use crate::types::uri::Uri;
 use crate::types::address::Address;
+use crate::types::param::Param;
 use crate::types::refer_to::ReferTo as ReferToHeader;
-use serde::{Serialize, Deserialize};
+use crate::types::uri::Uri;
+use serde::{Deserialize, Serialize};
 use std::str::{self, FromStr};
 
 // Method parameter parser for Refer-To header
 // method-param = "method=" Method (Method token)
 fn method_param(input: &[u8]) -> ParseResult<Param> {
-    map_res(
-        preceded(tag_no_case(b"method="), token),
-        |method_bytes| str::from_utf8(method_bytes).map(|s| Param::Method(s.to_string()))
-    )(input)
+    map_res(preceded(tag_no_case(b"method="), token), |method_bytes| {
+        str::from_utf8(method_bytes).map(|s| Param::Method(s.to_string()))
+    })(input)
 }
 
 // refer-param parser that handles specific params before falling back to generic
@@ -43,7 +42,7 @@ fn refer_param(input: &[u8]) -> ParseResult<Param> {
 }
 
 /// Parse a Refer-To header value according to RFC 3515
-/// 
+///
 /// Syntax:
 /// Refer-To = "Refer-To" HCOLON (name-addr / addr-spec) *( SEMI refer-param )
 /// refer-param = generic-param
@@ -53,12 +52,12 @@ fn refer_to_spec(input: &[u8]) -> ParseResult<Address> {
     map(
         pair(
             name_addr_or_addr_spec, // Parse the address part (with or without display name)
-            many0(preceded(semi, refer_param)) // Parse any parameters that follow
+            many0(preceded(semi, refer_param)), // Parse any parameters that follow
         ),
         |(mut addr, params_vec)| {
             addr.params = params_vec; // Assign parsed parameters
             addr
-        }
+        },
     )(input)
 }
 
@@ -77,8 +76,8 @@ pub fn parse_refer_to_public(input: &[u8]) -> ParseResult<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::{Scheme, Host};
-    use crate::types::param::{Param, GenericValue};
+    use crate::types::param::{GenericValue, Param};
+    use crate::types::uri::{Host, Scheme};
 
     #[test]
     fn test_parse_refer_to_simple() {
@@ -92,7 +91,7 @@ mod tests {
         assert_eq!(address.uri.scheme, Scheme::Sip);
         assert!(address.params.is_empty());
     }
-    
+
     #[test]
     fn test_parse_refer_to_with_display_name() {
         // name-addr format with display name
@@ -105,7 +104,7 @@ mod tests {
         assert_eq!(address.uri.scheme, Scheme::Sip);
         assert!(address.params.is_empty());
     }
-    
+
     #[test]
     fn test_parse_refer_to_addr_spec() {
         // addr-spec format (no angle brackets)
@@ -118,7 +117,7 @@ mod tests {
         assert_eq!(address.uri.scheme, Scheme::Sip);
         assert!(address.params.is_empty());
     }
-    
+
     #[test]
     fn test_parse_refer_to_with_params() {
         // Refer-To with parameters
@@ -129,25 +128,26 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(address.uri.scheme, Scheme::Sip);
         assert_eq!(address.params.len(), 2);
-        
+
         // Check for method parameter
-        assert!(address.params.iter().any(|p| 
-            matches!(p, Param::Method(m) if m == "INVITE")
-        ));
-        
+        assert!(address
+            .params
+            .iter()
+            .any(|p| matches!(p, Param::Method(m) if m == "INVITE")));
+
         // Dump the params for debugging
         println!("Params: {:?}", address.params);
-        
+
         // Check for replaces parameter - using starts_with instead of exact match due to potential URL decoding differences
-        assert!(address.params.iter().any(|p| 
+        assert!(address.params.iter().any(|p| {
             if let Param::Other(n, Some(GenericValue::Token(v))) = p {
                 n == "replaces" && (v == "abcdef@example.com" || v.starts_with("abcdef"))
             } else {
                 false
             }
-        ));
+        }));
     }
-    
+
     #[test]
     fn test_parse_refer_to_with_display_name_and_params() {
         // Full example with display name and parameters
@@ -159,18 +159,20 @@ mod tests {
         assert_eq!(address.display_name, Some("Alice".to_string()));
         assert_eq!(address.uri.scheme, Scheme::Sip);
         assert_eq!(address.params.len(), 2);
-        
+
         // Check for method parameter
-        assert!(address.params.iter().any(|p| 
-            matches!(p, Param::Method(m) if m == "INVITE")
-        ));
-        
+        assert!(address
+            .params
+            .iter()
+            .any(|p| matches!(p, Param::Method(m) if m == "INVITE")));
+
         // Check for flag parameter (no value)
-        assert!(address.params.iter().any(|p| 
-            matches!(p, Param::Other(n, None) if n == "early-only")
-        ));
+        assert!(address
+            .params
+            .iter()
+            .any(|p| matches!(p, Param::Other(n, None) if n == "early-only")));
     }
-    
+
     #[test]
     fn test_parse_refer_to_sips_uri() {
         // SIPS URI
@@ -181,7 +183,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(address.uri.scheme, Scheme::Sips);
     }
-    
+
     #[test]
     fn test_parse_refer_to_uri_with_params() {
         // URI with parameters inside angle brackets
@@ -191,12 +193,15 @@ mod tests {
         let (rem, address) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(address.uri.scheme, Scheme::Sip);
-        
+
         // URI parameters should be in the uri.parameters field, not address.params
         assert!(address.params.is_empty());
-        assert!(address.uri.parameters.contains(&Param::Transport("tcp".to_string())));
+        assert!(address
+            .uri
+            .parameters
+            .contains(&Param::Transport("tcp".to_string())));
     }
-    
+
     #[test]
     fn test_parse_refer_to_complex() {
         // Complex example with multiple parameters
@@ -208,32 +213,37 @@ mod tests {
         assert_eq!(address.display_name, Some("Conference".to_string()));
         assert_eq!(address.uri.scheme, Scheme::Sip);
         assert_eq!(address.params.len(), 3);
-        assert!(address.uri.parameters.contains(&Param::Transport("udp".to_string())));
-        
+        assert!(address
+            .uri
+            .parameters
+            .contains(&Param::Transport("udp".to_string())));
+
         // Check parameters
-        assert!(address.params.iter().any(|p| 
-            matches!(p, Param::Method(m) if m == "REFER")
-        ));
-        assert!(address.params.iter().any(|p| 
-            matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+        assert!(address
+            .params
+            .iter()
+            .any(|p| matches!(p, Param::Method(m) if m == "REFER")));
+        assert!(address.params.iter().any(
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
                 if n == "audio" && v == "on")
         ));
-        assert!(address.params.iter().any(|p| 
-            matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
+        assert!(address.params.iter().any(
+            |p| matches!(p, Param::Other(n, Some(GenericValue::Token(v))) 
                 if n == "video" && v == "off")
         ));
     }
-    
+
     #[test]
     fn test_parse_refer_to_replaces() {
         // RFC 3891 Replaces header in Refer-To
         // Using URL encoding for the required characters
-        let input = b"<sip:user@example.com?Replaces=12345%40192.168.0.1%3Bto-tag%3Dabc%3Bfrom-tag%3Dxyz>";
+        let input =
+            b"<sip:user@example.com?Replaces=12345%40192.168.0.1%3Bto-tag%3Dabc%3Bfrom-tag%3Dxyz>";
         let result = parse_refer_to_public(input);
         assert!(result.is_ok());
         let (rem, address) = result.unwrap();
         assert!(rem.is_empty());
-        
+
         // URI headers should be in the uri.headers field
         assert!(address.uri.headers.contains_key("Replaces"));
         assert_eq!(
@@ -241,11 +251,11 @@ mod tests {
             "12345@192.168.0.1;to-tag=abc;from-tag=xyz"
         );
     }
-    
+
     #[test]
     fn test_parse_refer_to_empty_should_fail() {
         let input = b"";
         let result = parse_refer_to_public(input);
         assert!(result.is_err());
     }
-} 
+}

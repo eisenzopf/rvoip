@@ -4,11 +4,11 @@
 //! It focuses on G.711 codec support (PCMU/PCMA) for basic voice over IP.
 
 pub mod audio;
-pub mod transcoding;  // Add transcoding module
-pub mod mapping;      // Add codec mapping utilities
-pub mod factory;      // Export codec factory
+pub mod factory;
+pub mod mapping; // Add codec mapping utilities
+pub mod transcoding; // Add transcoding module // Export codec factory
 
-use crate::relay::{G711PcmuCodec, G711PcmaCodec};
+use crate::relay::{G711PcmaCodec, G711PcmuCodec};
 
 // Re-export audio codec types
 pub use audio::common::*;
@@ -17,7 +17,7 @@ pub use audio::common::*;
 pub use transcoding::{Transcoder, TranscodingPath, TranscodingStats};
 
 // Re-export codec mapping types
-pub use mapping::{CodecMapper, CodecCapability};
+pub use mapping::{CodecCapability, CodecMapper};
 
 // Re-export codec factory
 pub use factory::CodecFactory;
@@ -26,10 +26,10 @@ pub use factory::CodecFactory;
 pub trait Codec: Send + Sync {
     /// Get the RTP payload type for this codec
     fn payload_type(&self) -> u8;
-    
+
     /// Get the codec name
     fn name(&self) -> &'static str;
-    
+
     /// Process RTP payload data (passthrough for basic relay)
     fn process_payload(&self, payload: &[u8]) -> crate::Result<Vec<u8>>;
 }
@@ -42,25 +42,26 @@ pub struct CodecRegistry {
 impl CodecRegistry {
     /// Create a new codec registry with G.711 codecs
     pub fn new() -> Self {
-        let mut codecs: std::collections::HashMap<u8, Box<dyn Codec>> = std::collections::HashMap::new();
-        
+        let mut codecs: std::collections::HashMap<u8, Box<dyn Codec>> =
+            std::collections::HashMap::new();
+
         // Register G.711 codecs
         codecs.insert(0, Box::new(G711PcmuCodec));
         codecs.insert(8, Box::new(G711PcmaCodec));
-        
+
         Self { codecs }
     }
-    
+
     /// Get a codec by payload type
     pub fn get_codec(&self, payload_type: u8) -> Option<&dyn Codec> {
         self.codecs.get(&payload_type).map(|c| c.as_ref())
     }
-    
+
     /// Check if a payload type is supported
     pub fn supports_payload_type(&self, payload_type: u8) -> bool {
         self.codecs.contains_key(&payload_type)
     }
-    
+
     /// Get all supported payload types
     pub fn supported_payload_types(&self) -> Vec<u8> {
         self.codecs.keys().copied().collect()
@@ -78,28 +79,28 @@ impl Default for CodecRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_codec_registry() {
         let registry = CodecRegistry::new();
-        
+
         // Test PCMU codec
         assert!(registry.supports_payload_type(0));
         let pcmu = registry.get_codec(0).unwrap();
         assert_eq!(pcmu.payload_type(), 0);
         assert_eq!(pcmu.name(), "PCMU");
-        
+
         // Test PCMA codec
         assert!(registry.supports_payload_type(8));
         let pcma = registry.get_codec(8).unwrap();
         assert_eq!(pcma.payload_type(), 8);
         assert_eq!(pcma.name(), "PCMA");
-        
+
         // Test unsupported codec
         assert!(!registry.supports_payload_type(96));
         assert!(registry.get_codec(96).is_none());
     }
-    
+
     #[test]
     fn test_supported_payload_types() {
         let registry = CodecRegistry::new();
@@ -107,4 +108,4 @@ mod tests {
         types.sort();
         assert_eq!(types, vec![0, 8]);
     }
-} 
+}

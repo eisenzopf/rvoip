@@ -33,7 +33,7 @@ pub fn parse_authority(input: &[u8]) -> ParseResult<&[u8]> {
             nom::error::ErrorKind::TakeWhile1,
         )));
     }
-    
+
     // Special case: Malformed IPv6 address (missing closing bracket)
     if input.starts_with(b"[") && !input.contains(&b']') {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -41,7 +41,7 @@ pub fn parse_authority(input: &[u8]) -> ParseResult<&[u8]> {
             nom::error::ErrorKind::Tag,
         )));
     }
-    
+
     // Special case: Invalid percent-encoded sequences
     let mut i = 0;
     while i < input.len() {
@@ -53,9 +53,9 @@ pub fn parse_authority(input: &[u8]) -> ParseResult<&[u8]> {
                     nom::error::ErrorKind::Tag,
                 )));
             }
-            
+
             // Invalid hex digits (like domain%GG)
-            if !is_hex_digit(input[i+1]) || !is_hex_digit(input[i+2]) {
+            if !is_hex_digit(input[i + 1]) || !is_hex_digit(input[i + 2]) {
                 return Err(nom::Err::Error(nom::error::Error::new(
                     input,
                     nom::error::ErrorKind::Tag,
@@ -64,7 +64,7 @@ pub fn parse_authority(input: &[u8]) -> ParseResult<&[u8]> {
         }
         i += 1;
     }
-    
+
     // All validation passed, return the full input
     // This keeps original behavior for authority.rs tests
     // But still allows usage in absolute.rs
@@ -73,9 +73,7 @@ pub fn parse_authority(input: &[u8]) -> ParseResult<&[u8]> {
 
 /// Helper to check if a byte is a valid hexadecimal digit
 fn is_hex_digit(c: u8) -> bool {
-    c.is_ascii_digit() || 
-    (b'A'..=b'F').contains(&c) || 
-    (b'a'..=b'f').contains(&c)
+    c.is_ascii_digit() || (b'A'..=b'F').contains(&c) || (b'a'..=b'f').contains(&c)
 }
 
 // reg-name-char = unreserved / escaped / "$" / "," / ";" / ":" / "@" / "&" / "=" / "+"
@@ -90,18 +88,17 @@ fn is_reg_name_char(c: u8) -> bool {
 // userinfo_bytes = use userinfo parser but return matched bytes instead
 fn userinfo_bytes(input: &[u8]) -> ParseResult<&[u8]> {
     recognize(terminated(
-        pair(crate::parser::uri::userinfo::user, 
-             opt(preceded(tag(b":"), crate::parser::uri::userinfo::password))),
-        tag(b"@")
+        pair(
+            crate::parser::uri::userinfo::user,
+            opt(preceded(tag(b":"), crate::parser::uri::userinfo::password)),
+        ),
+        tag(b"@"),
     ))(input)
 }
 
 // srvr = [ [ userinfo "@" ] hostport ]
 fn srvr(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(pair(
-        opt(userinfo_bytes), 
-        hostport
-    ))(input)
+    recognize(pair(opt(userinfo_bytes), hostport))(input)
 }
 
 // Function to validate that authority strings don't have invalid percent-encoding
@@ -110,9 +107,7 @@ fn validate_percent_encoding(input: &[u8]) -> bool {
     while i < input.len() {
         if input[i] == b'%' {
             // Check for incomplete sequence or invalid hex digits
-            if i + 2 >= input.len() || 
-               !is_hex_digit(input[i+1]) || 
-               !is_hex_digit(input[i+2]) {
+            if i + 2 >= input.len() || !is_hex_digit(input[i + 1]) || !is_hex_digit(input[i + 2]) {
                 return false;
             }
             i += 3;
@@ -147,7 +142,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(auth, b"some-registry.com:8080");
     }
-    
+
     // Additional RFC compliance tests
 
     #[test]
@@ -213,7 +208,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(auth, b"domain%2Ewith%2Descaped%2Dchars");
     }
-    
+
     // Invalid authority test cases
 
     #[test]
@@ -239,7 +234,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(auth, b"example.com:abc");
     }
-    
+
     #[test]
     fn test_reg_name_with_colons() {
         // A reg-name containing colons but not in a host:port pattern
@@ -247,7 +242,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(auth, b"reg:name:with:colons");
     }
-    
+
     #[test]
     fn test_authority_with_empty_port() {
         // Host with empty port
@@ -255,25 +250,25 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(auth, b"example.com:");
     }
-    
+
     #[test]
     fn test_authority_with_port_edge_cases() {
         // Valid port at upper boundary
         let (rem, auth) = parse_authority(b"example.com:65535").unwrap();
         assert!(rem.is_empty());
         assert_eq!(auth, b"example.com:65535");
-        
+
         // Port with leading zeros should be valid
         let (rem, auth) = parse_authority(b"example.com:0080").unwrap();
         assert!(rem.is_empty());
         assert_eq!(auth, b"example.com:0080");
-        
+
         // Only port with all zeros should be valid
         let (rem, auth) = parse_authority(b"example.com:0").unwrap();
         assert!(rem.is_empty());
         assert_eq!(auth, b"example.com:0");
     }
-    
+
     #[test]
     fn test_authority_comments() {
         // According to RFC 3261, we should be permissive in parsing
@@ -283,14 +278,14 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(auth, b"reg$name,with;special:chars");
     }
-    
+
     #[test]
     fn test_invalid_escaped_sequence() {
         // Test invalid percent-encoded sequence
         let result = parse_authority(b"domain%2");
         assert!(result.is_err());
-        
+
         let result = parse_authority(b"domain%GG");
         assert!(result.is_err());
     }
-} 
+}

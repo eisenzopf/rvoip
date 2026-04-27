@@ -1,12 +1,12 @@
 //! Multi-device presence example
-//! 
+//!
 //! This demonstrates how users-core supports multiple device registrations
 //! for presence aggregation in session-core-v2
 
-use users_core::{init, UsersConfig, CreateUserRequest};
 use anyhow::Result;
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+use users_core::{init, CreateUserRequest, UsersConfig};
 
 // Simulated device registration
 #[derive(Debug, Clone)]
@@ -64,30 +64,32 @@ async fn main() -> Result<()> {
         database_url: "sqlite://presence_example.db?mode=rwc".to_string(),
         ..Default::default()
     };
-    
+
     let auth_service = init(config).await?;
 
     // Create a user who will use multiple devices
     println!("📝 Creating user with presence capability...");
-    
-    let user = auth_service.create_user(CreateUserRequest {
-        username: "alice".to_string(),
-        password: "SecurePresence2024!".to_string(),
-        email: Some("alice@company.com".to_string()),
-        display_name: Some("Alice Johnson".to_string()),
-        roles: vec!["user".to_string()],
-    }).await?;
+
+    let user = auth_service
+        .create_user(CreateUserRequest {
+            username: "alice".to_string(),
+            password: "SecurePresence2024!".to_string(),
+            email: Some("alice@company.com".to_string()),
+            display_name: Some("Alice Johnson".to_string()),
+            roles: vec!["user".to_string()],
+        })
+        .await?;
 
     println!("✅ Created user: {}", user.username);
 
     // Simulate device registrations
     let mut device_registrations = HashMap::new();
-    
+
     println!("\n🖥️ Device 1: Desktop Softphone");
     let desktop_auth = auth_service
         .authenticate_password("alice", "SecurePresence2024!")
         .await?;
-    
+
     let desktop_reg = DeviceRegistration {
         user_id: user.id.clone(),
         username: user.username.clone(),
@@ -98,7 +100,7 @@ async fn main() -> Result<()> {
         token: desktop_auth.access_token.clone(),
         registered_at: Utc::now(),
     };
-    
+
     device_registrations.insert(desktop_reg.device_id.clone(), desktop_reg.clone());
     println!("   ✓ Registered from {}", desktop_reg.contact);
     println!("   ✓ User Agent: {}", desktop_reg.user_agent);
@@ -107,7 +109,7 @@ async fn main() -> Result<()> {
     let mobile_auth = auth_service
         .authenticate_password("alice", "SecurePresence2024!")
         .await?;
-    
+
     let mobile_reg = DeviceRegistration {
         user_id: user.id.clone(),
         username: user.username.clone(),
@@ -118,7 +120,7 @@ async fn main() -> Result<()> {
         token: mobile_auth.access_token.clone(),
         registered_at: Utc::now(),
     };
-    
+
     device_registrations.insert(mobile_reg.device_id.clone(), mobile_reg.clone());
     println!("   ✓ Registered from {}", mobile_reg.contact);
     println!("   ✓ User Agent: {}", mobile_reg.user_agent);
@@ -127,7 +129,7 @@ async fn main() -> Result<()> {
     let web_auth = auth_service
         .authenticate_password("alice", "SecurePresence2024!")
         .await?;
-    
+
     let web_reg = DeviceRegistration {
         user_id: user.id.clone(),
         username: user.username.clone(),
@@ -138,7 +140,7 @@ async fn main() -> Result<()> {
         token: web_auth.access_token.clone(),
         registered_at: Utc::now(),
     };
-    
+
     device_registrations.insert(web_reg.device_id.clone(), web_reg.clone());
     println!("   ✓ Registered from {}", web_reg.contact);
     println!("   ✓ User Agent: {}", web_reg.user_agent);
@@ -152,7 +154,7 @@ async fn main() -> Result<()> {
 
     // Simulate presence updates
     println!("\n🟢 Simulating presence updates...");
-    
+
     let mut user_presence = UserPresence {
         user_id: user.id.clone(),
         overall_state: PresenceState::Available,
@@ -191,7 +193,7 @@ async fn main() -> Result<()> {
     println!("\n🔄 Aggregating presence state...");
     user_presence.overall_state = calculate_overall_presence(&user_presence.devices);
     println!("   Overall state: {:?}", user_presence.overall_state);
-    
+
     // Show presence priority rules
     println!("\n📋 Presence Aggregation Rules:");
     println!("   1. If any device is 'Busy' → Overall: Busy");
@@ -202,14 +204,16 @@ async fn main() -> Result<()> {
 
     // Simulate device logout
     println!("\n🚪 Device logout scenario...");
-    
+
     // Mobile device logs out
     device_registrations.remove("mobile-001");
-    user_presence.devices.retain(|d| d.device_id != "mobile-001");
-    
+    user_presence
+        .devices
+        .retain(|d| d.device_id != "mobile-001");
+
     println!("   Mobile device logged out");
     println!("   Remaining devices: {}", device_registrations.len());
-    
+
     // Recalculate presence
     user_presence.overall_state = calculate_overall_presence(&user_presence.devices);
     println!("   New overall state: {:?}", user_presence.overall_state);
@@ -222,7 +226,8 @@ async fn main() -> Result<()> {
     for device in &user_presence.devices {
         println!("     <tuple id=\"{}\">", device.device_id);
         println!("       <status>");
-        println!("         <basic>{}</basic>", 
+        println!(
+            "         <basic>{}</basic>",
             match device.state {
                 PresenceState::Available => "open",
                 _ => "closed",
@@ -249,23 +254,35 @@ async fn main() -> Result<()> {
     println!("   • Support rich presence (status messages)");
     println!("   • Implement presence authorization (privacy)");
     println!("   • Use PIDF for standard compliance");
-    
+
     // Clean up
     std::fs::remove_file("presence_example.db").ok();
-    
+
     println!("\n✨ Multi-device presence example completed!");
     Ok(())
 }
 
 fn calculate_overall_presence(devices: &[DevicePresence]) -> PresenceState {
     // Priority: Busy > Available > Away > DND > Offline
-    if devices.iter().any(|d| matches!(d.state, PresenceState::Busy)) {
+    if devices
+        .iter()
+        .any(|d| matches!(d.state, PresenceState::Busy))
+    {
         PresenceState::Busy
-    } else if devices.iter().any(|d| matches!(d.state, PresenceState::Available)) {
+    } else if devices
+        .iter()
+        .any(|d| matches!(d.state, PresenceState::Available))
+    {
         PresenceState::Available
-    } else if devices.iter().any(|d| matches!(d.state, PresenceState::Away)) {
+    } else if devices
+        .iter()
+        .any(|d| matches!(d.state, PresenceState::Away))
+    {
         PresenceState::Away
-    } else if devices.iter().any(|d| matches!(d.state, PresenceState::DoNotDisturb)) {
+    } else if devices
+        .iter()
+        .any(|d| matches!(d.state, PresenceState::DoNotDisturb))
+    {
         PresenceState::DoNotDisturb
     } else {
         PresenceState::Offline

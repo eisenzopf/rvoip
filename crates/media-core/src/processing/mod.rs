@@ -3,18 +3,15 @@
 //! This module contains all media processing capabilities including audio processing,
 //! format conversion, and processing pipeline orchestration.
 
-pub mod pipeline;
 pub mod audio;
 pub mod format;
+pub mod pipeline;
 
 // Re-export main processing types
-pub use pipeline::{ProcessingPipeline, ProcessingConfig};
 pub use audio::{
-    AudioProcessor, AudioProcessingConfig, AudioProcessingResult,
-    VoiceActivityDetector, VadConfig, VadResult,
-    AutomaticGainControl, AgcConfig, AgcResult,
-    AcousticEchoCanceller, AecConfig, AecResult,
-    AudioStreamManager, AudioStreamConfig,
-    AudioMixer,
+    AcousticEchoCanceller, AecConfig, AecResult, AgcConfig, AgcResult, AudioMixer,
+    AudioProcessingConfig, AudioProcessingResult, AudioProcessor, AudioStreamConfig,
+    AudioStreamManager, AutomaticGainControl, VadConfig, VadResult, VoiceActivityDetector,
 };
-pub use format::{FormatConverter, ConversionParams}; 
+pub use format::{ConversionParams, FormatConverter};
+pub use pipeline::{ProcessingConfig, ProcessingPipeline};

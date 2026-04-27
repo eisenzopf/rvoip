@@ -15,8 +15,8 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use rvoip_sip_core::Method;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_core::Method;
 use rvoip_sip_transport::transport::tls::{TlsClientConfig, TlsTransport};
 use rvoip_sip_transport::{Transport, TransportEvent};
 use tempfile::tempdir;
@@ -24,7 +24,8 @@ use tempfile::tempdir;
 /// Generate a self-signed cert for `localhost` and write it + the key
 /// out as PEM files in a temp dir; return the dir handle (so tempfiles
 /// live for the test) and the two paths.
-fn write_self_signed_localhost_cert() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+fn write_self_signed_localhost_cert() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)
+{
     let dir = tempdir().expect("tempdir");
     let cert_path = dir.path().join("server.crt");
     let key_path = dir.path().join("server.key");
@@ -59,14 +60,10 @@ async fn tls_client_connect_and_send_succeeds_against_self_signed_server() {
     // server config).
     let server_addr = loopback_addr(0);
     let (server_tx, mut server_events) = tokio::sync::mpsc::channel(16);
-    let (server_transport, _server_rx_unused) = TlsTransport::bind(
-        server_addr,
-        &cert_path,
-        &key_path,
-        Some(server_tx),
-    )
-    .await
-    .expect("server bind");
+    let (server_transport, _server_rx_unused) =
+        TlsTransport::bind(server_addr, &cert_path, &key_path, Some(server_tx))
+            .await
+            .expect("server bind");
     let server_actual = server_transport.local_addr().expect("server local addr");
 
     // Give the listener a moment to actually bind.
@@ -132,26 +129,18 @@ async fn tls_client_default_validation_rejects_self_signed_cert() {
     // cause the handshake to fail.
     let (_dir, cert_path, key_path) = write_self_signed_localhost_cert();
 
-    let (server_transport, _server_rx) = TlsTransport::bind(
-        loopback_addr(0),
-        &cert_path,
-        &key_path,
-        None,
-    )
-    .await
-    .expect("server bind");
+    let (server_transport, _server_rx) =
+        TlsTransport::bind(loopback_addr(0), &cert_path, &key_path, None)
+            .await
+            .expect("server bind");
     let server_actual = server_transport.local_addr().expect("server local addr");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let (client_transport, _client_rx) = TlsTransport::bind(
-        loopback_addr(0),
-        &cert_path,
-        &key_path,
-        None,
-    )
-    .await
-    .expect("client bind");
+    let (client_transport, _client_rx) =
+        TlsTransport::bind(loopback_addr(0), &cert_path, &key_path, None)
+            .await
+            .expect("client bind");
 
     let result = tokio::time::timeout(
         Duration::from_secs(5),

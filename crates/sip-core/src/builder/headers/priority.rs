@@ -1,11 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
     priority::Priority,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 
 /// Priority header builder
 ///
@@ -149,7 +147,7 @@ pub trait PriorityBuilderExt {
     /// // The message now has Priority: emergency
     /// ```
     fn priority(self, priority: Priority) -> Self;
-    
+
     /// Add a Priority header with emergency priority
     ///
     /// This convenience method adds a Priority header with the emergency value.
@@ -176,7 +174,7 @@ pub trait PriorityBuilderExt {
     /// // The message now has Priority: emergency
     /// ```
     fn priority_emergency(self) -> Self;
-    
+
     /// Add a Priority header with urgent priority
     ///
     /// This convenience method adds a Priority header with the urgent value.
@@ -204,7 +202,7 @@ pub trait PriorityBuilderExt {
     /// // The message now has Priority: urgent
     /// ```
     fn priority_urgent(self) -> Self;
-    
+
     /// Add a Priority header with normal priority
     ///
     /// This convenience method adds a Priority header with the normal value.
@@ -231,7 +229,7 @@ pub trait PriorityBuilderExt {
     /// // The message now has Priority: normal
     /// ```
     fn priority_normal(self) -> Self;
-    
+
     /// Add a Priority header with non-urgent priority
     ///
     /// This convenience method adds a Priority header with the non-urgent value.
@@ -259,7 +257,7 @@ pub trait PriorityBuilderExt {
     /// // The message now has Priority: non-urgent
     /// ```
     fn priority_non_urgent(self) -> Self;
-    
+
     /// Add a Priority header with a numeric priority value
     ///
     /// This method adds a Priority header with a numeric value.
@@ -290,7 +288,7 @@ pub trait PriorityBuilderExt {
     /// // The message now has Priority: 1
     /// ```
     fn priority_numeric(self, value: u8) -> Self;
-    
+
     /// Add a Priority header with a custom token value
     ///
     /// This method adds a Priority header with a custom token value.
@@ -323,34 +321,34 @@ pub trait PriorityBuilderExt {
     fn priority_token(self, token: impl Into<String>) -> Self;
 }
 
-impl<T> PriorityBuilderExt for T 
-where 
+impl<T> PriorityBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn priority(self, priority: Priority) -> Self {
         self.set_header(priority)
     }
-    
+
     fn priority_emergency(self) -> Self {
         self.priority(Priority::Emergency)
     }
-    
+
     fn priority_urgent(self) -> Self {
         self.priority(Priority::Urgent)
     }
-    
+
     fn priority_normal(self) -> Self {
         self.priority(Priority::Normal)
     }
-    
+
     fn priority_non_urgent(self) -> Self {
         self.priority(Priority::NonUrgent)
     }
-    
+
     fn priority_numeric(self, value: u8) -> Self {
         self.priority(Priority::Other(value))
     }
-    
+
     fn priority_token(self, token: impl Into<String>) -> Self {
         self.priority(Priority::Token(token.into()))
     }
@@ -366,43 +364,47 @@ mod tests {
     #[test]
     fn test_priority_standard_values() {
         // Test emergency priority
-        let request = RequestBuilder::new(Method::Invite, "sip:emergency@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:emergency@example.com")
+            .unwrap()
             .priority_emergency()
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = request.header(&HeaderName::Priority) {
             assert_eq!(priority.clone(), Priority::Emergency);
         } else {
             panic!("Priority header not found or has wrong type");
         }
-        
+
         // Test urgent priority
-        let request = RequestBuilder::new(Method::Invite, "sip:urgent@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:urgent@example.com")
+            .unwrap()
             .priority_urgent()
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = request.header(&HeaderName::Priority) {
             assert_eq!(priority.clone(), Priority::Urgent);
         } else {
             panic!("Priority header not found or has wrong type");
         }
-        
+
         // Test normal priority
-        let request = RequestBuilder::new(Method::Invite, "sip:normal@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:normal@example.com")
+            .unwrap()
             .priority_normal()
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = request.header(&HeaderName::Priority) {
             assert_eq!(priority.clone(), Priority::Normal);
         } else {
             panic!("Priority header not found or has wrong type");
         }
-        
+
         // Test non-urgent priority
-        let request = RequestBuilder::new(Method::Invite, "sip:non-urgent@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:non-urgent@example.com")
+            .unwrap()
             .priority_non_urgent()
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = request.header(&HeaderName::Priority) {
             assert_eq!(priority.clone(), Priority::NonUrgent);
         } else {
@@ -413,23 +415,28 @@ mod tests {
     #[test]
     fn test_priority_custom_values() {
         // Test numeric priority
-        let request = RequestBuilder::new(Method::Message, "sip:support@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Message, "sip:support@example.com")
+            .unwrap()
             .priority_numeric(5)
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = request.header(&HeaderName::Priority) {
             assert_eq!(priority.clone(), Priority::Other(5));
         } else {
             panic!("Priority header not found or has wrong type");
         }
-        
+
         // Test token priority
-        let request = RequestBuilder::new(Method::Message, "sip:support@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Message, "sip:support@example.com")
+            .unwrap()
             .priority_token("high-priority")
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = request.header(&HeaderName::Priority) {
-            assert_eq!(priority.clone(), Priority::Token("high-priority".to_string()));
+            assert_eq!(
+                priority.clone(),
+                Priority::Token("high-priority".to_string())
+            );
         } else {
             panic!("Priority header not found or has wrong type");
         }
@@ -441,7 +448,7 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .priority_urgent()
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = response.header(&HeaderName::Priority) {
             assert_eq!(priority.clone(), Priority::Urgent);
         } else {
@@ -452,14 +459,15 @@ mod tests {
     #[test]
     fn test_priority_direct() {
         // Test direct priority setting
-        let request = RequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:example.com")
+            .unwrap()
             .priority(Priority::Emergency)
             .build();
-            
+
         if let Some(TypedHeader::Priority(priority)) = request.header(&HeaderName::Priority) {
             assert_eq!(priority.clone(), Priority::Emergency);
         } else {
             panic!("Priority header not found or has wrong type");
         }
     }
-} 
+}

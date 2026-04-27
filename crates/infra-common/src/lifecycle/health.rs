@@ -1,9 +1,8 @@
-
 use crate::lifecycle::component::Component;
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::time::{Duration, Instant};
-use async_trait::async_trait;
 
 /// Status of a health check
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,7 +54,7 @@ impl HealthCheck {
             duration: Duration::from_secs(0),
         }
     }
-    
+
     /// Create a new degraded health check
     pub fn degraded(component: &str, message: &str) -> Self {
         HealthCheck {
@@ -66,7 +65,7 @@ impl HealthCheck {
             duration: Duration::from_secs(0),
         }
     }
-    
+
     /// Create a new unhealthy health check
     pub fn unhealthy(component: &str, message: &str) -> Self {
         HealthCheck {
@@ -77,7 +76,7 @@ impl HealthCheck {
             duration: Duration::from_secs(0),
         }
     }
-    
+
     /// Create a new unknown health check
     pub fn unknown(component: &str) -> Self {
         HealthCheck {
@@ -88,13 +87,13 @@ impl HealthCheck {
             duration: Duration::from_secs(0),
         }
     }
-    
+
     /// Set the duration of the health check
     pub fn with_duration(mut self, duration: Duration) -> Self {
         self.duration = duration;
         self
     }
-    
+
     /// Add a message to the health check
     pub fn with_message(mut self, message: &str) -> Self {
         self.message = Some(message.to_string());
@@ -123,36 +122,39 @@ impl HealthCheckManager {
             results: HashMap::new(),
         }
     }
-    
+
     /// Perform a health check on a component
     pub async fn check_component<C: Component + ?Sized>(&mut self, component: &C) -> HealthCheck {
         let component_name = component.name();
         let start = Instant::now();
-        
+
         let check = match component.health_check().await {
             Ok(()) => HealthCheck::healthy(component_name),
             Err(e) => HealthCheck::unhealthy(component_name, &e.to_string()),
         };
-        
+
         let duration = start.elapsed();
         let result = check.with_duration(duration);
-        
-        self.results.insert(component_name.to_string(), result.clone());
+
+        self.results
+            .insert(component_name.to_string(), result.clone());
         result
     }
-    
+
     /// Get the latest health check result for a component
     pub fn get_result(&self, component: &str) -> Option<&HealthCheck> {
         self.results.get(component)
     }
-    
+
     /// Get all health check results
     pub fn get_all_results(&self) -> &HashMap<String, HealthCheck> {
         &self.results
     }
-    
+
     /// Check if all components are healthy
     pub fn is_system_healthy(&self) -> bool {
-        self.results.values().all(|check| check.status == HealthStatus::Healthy)
+        self.results
+            .values()
+            .all(|check| check.status == HealthStatus::Healthy)
     }
-} 
+}

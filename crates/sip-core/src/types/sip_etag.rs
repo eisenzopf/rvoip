@@ -29,13 +29,13 @@
 //! assert_eq!(parsed.tag(), "abc123");
 //! ```
 
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use nom::combinator::all_consuming;
 
-use crate::types::headers::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::parser::headers::parse_sip_etag;
+use crate::types::headers::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::{Error, Result};
 
 /// Represents the SIP-ETag header value
@@ -55,7 +55,7 @@ impl SipETag {
     pub fn new(tag: impl Into<String>) -> Self {
         Self(tag.into())
     }
-    
+
     /// Returns the entity tag value
     pub fn tag(&self) -> &str {
         &self.0
@@ -70,7 +70,7 @@ impl fmt::Display for SipETag {
 
 impl FromStr for SipETag {
     type Err = Error;
-    
+
     fn from_str(s: &str) -> Result<Self> {
         let (_, etag) = all_consuming(parse_sip_etag)(s.as_bytes()).map_err(Error::from)?;
         Ok(etag)
@@ -79,11 +79,11 @@ impl FromStr for SipETag {
 
 impl TypedHeaderTrait for SipETag {
     type Name = HeaderName;
-    
+
     fn header_name() -> Self::Name {
         HeaderName::SipETag
     }
-    
+
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
             return Err(Error::InvalidHeader(format!(
@@ -92,18 +92,18 @@ impl TypedHeaderTrait for SipETag {
                 header.name
             )));
         }
-        
+
         match &header.value {
             HeaderValue::Raw(bytes) => {
                 let value = String::from_utf8_lossy(bytes);
                 Self::from_str(&value)
             }
             _ => Err(Error::InvalidHeader(
-                "SIP-ETag header value must be raw text".to_string()
+                "SIP-ETag header value must be raw text".to_string(),
             )),
         }
     }
-    
+
     fn to_header(&self) -> Header {
         Header::new(Self::header_name(), HeaderValue::text(self.to_string()))
     }
@@ -112,30 +112,30 @@ impl TypedHeaderTrait for SipETag {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_sip_etag_creation() {
         let etag = SipETag::new("test123");
         assert_eq!(etag.tag(), "test123");
         assert_eq!(etag.to_string(), "test123");
     }
-    
+
     #[test]
     fn test_sip_etag_from_str() {
         let etag = SipETag::from_str("abc456").unwrap();
         assert_eq!(etag.tag(), "abc456");
-        
+
         // Empty string should fail
         assert!(SipETag::from_str("").is_err());
     }
-    
+
     #[test]
     fn test_sip_etag_header_conversion() {
         let etag = SipETag::new("xyz789");
         let header = etag.to_header();
-        
+
         assert_eq!(header.name, HeaderName::SipETag);
-        
+
         let parsed = SipETag::from_header(&header).unwrap();
         assert_eq!(parsed, etag);
     }

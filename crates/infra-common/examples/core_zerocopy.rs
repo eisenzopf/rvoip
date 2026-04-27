@@ -1,11 +1,11 @@
-use rvoip_infra_common::events::bus::{EventBus, EventBusConfig};
-use rvoip_infra_common::events::types::{Event, EventPriority, EventHandler};
 use async_trait::async_trait;
-use serde::{Serialize, Deserialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use rvoip_infra_common::events::bus::{EventBus, EventBusConfig};
+use rvoip_infra_common::events::types::{Event, EventHandler, EventPriority};
+use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ---- Constants for testing ----
 const SUBSCRIBER_COUNT: usize = 20;
@@ -29,12 +29,12 @@ impl Event for MediaPacketEvent {
     fn event_type() -> &'static str {
         "media_packet"
     }
-    
+
     fn priority() -> EventPriority {
         // Media packets need fast processing
         EventPriority::High
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -54,11 +54,13 @@ impl MediaProcessor {
             packets_processed: Arc::new(AtomicU64::new(0)),
         }
     }
-    
+
     fn print_stats(&self) {
-        println!("[{}] Processed {} packets",
+        println!(
+            "[{}] Processed {} packets",
             self.name,
-            self.packets_processed.load(Ordering::Relaxed));
+            self.packets_processed.load(Ordering::Relaxed)
+        );
     }
 }
 
@@ -91,75 +93,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(" - {} publishers", PUBLISHER_COUNT);
     println!(" - {} second test duration", TEST_DURATION_SECS);
     println!(" - {} channel capacity\n", CHANNEL_CAPACITY);
-    
+
     // Create an event bus with zero copy configuration
     let event_bus = EventBus::with_config(EventBusConfig {
         max_concurrent_dispatches: 1000,
         default_timeout: Duration::from_secs(1),
-        broadcast_capacity: CHANNEL_CAPACITY,  // Use the constant
+        broadcast_capacity: CHANNEL_CAPACITY, // Use the constant
         enable_priority: true,
         enable_zero_copy: true,
         batch_size: 100,
         shard_count: 8,
     });
-    
+
     // Create and register handlers
     let processors: Vec<MediaProcessor> = (0..SUBSCRIBER_COUNT)
-        .map(|i| MediaProcessor::new(&format!("Processor{}", i+1)))
+        .map(|i| MediaProcessor::new(&format!("Processor{}", i + 1)))
         .collect();
-    
+
     // Register all processors
     for processor in &processors {
-        event_bus.subscribe::<MediaPacketEvent, _>(None, processor.clone()).await?;
+        event_bus
+            .subscribe::<MediaPacketEvent, _>(None, processor.clone())
+            .await?;
     }
-    
+
     // Warmup phase
     println!("Running warmup phase...");
     for i in 0..WARMUP_EVENTS {
         event_bus.publish(create_media_packet(i as u64)).await?;
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
+
     // High throughput measurement
-    println!("Starting performance test for {} seconds...", TEST_DURATION_SECS);
-    
+    println!(
+        "Starting performance test for {} seconds...",
+        TEST_DURATION_SECS
+    );
+
     let start = Instant::now();
     let end_time = start + Duration::from_secs(TEST_DURATION_SECS);
-    
+
     // Shared event counter
     let events_published = Arc::new(AtomicU64::new(0));
     // Shared flag to stop publishing
     let stop_publishing = Arc::new(AtomicBool::new(false));
-    
+
     // Create multiple publisher tasks
-    let publisher_tasks: Vec<_> = (0..PUBLISHER_COUNT).map(|publisher_id| {
-        let event_bus = event_bus.clone();
-        let events_counter = events_published.clone();
-        let stop_flag = stop_publishing.clone();
-        
-        tokio::spawn(async move {
-            let mut local_counter: u64 = 0;
-            let mut event_id = publisher_id as u64 * 1_000_000; // Ensure unique IDs
-            
-            while !stop_flag.load(Ordering::Relaxed) {
-                let _ = event_bus.publish(create_media_packet(event_id)).await;
-                event_id += 1;
-                local_counter += 1;
-                
-                if local_counter % 10_000 == 0 {
-                    events_counter.fetch_add(local_counter, Ordering::Relaxed);
-                    local_counter = 0;
-                    
-                    // Give other tasks a chance to run
-                    tokio::task::yield_now().await;
+    let publisher_tasks: Vec<_> = (0..PUBLISHER_COUNT)
+        .map(|publisher_id| {
+            let event_bus = event_bus.clone();
+            let events_counter = events_published.clone();
+            let stop_flag = stop_publishing.clone();
+
+            tokio::spawn(async move {
+                let mut local_counter: u64 = 0;
+                let mut event_id = publisher_id as u64 * 1_000_000; // Ensure unique IDs
+
+                while !stop_flag.load(Ordering::Relaxed) {
+                    let _ = event_bus.publish(create_media_packet(event_id)).await;
+                    event_id += 1;
+                    local_counter += 1;
+
+                    if local_counter % 10_000 == 0 {
+                        events_counter.fetch_add(local_counter, Ordering::Relaxed);
+                        local_counter = 0;
+
+                        // Give other tasks a chance to run
+                        tokio::task::yield_now().await;
+                    }
                 }
-            }
-            
-            // Add any remaining events
-            events_counter.fetch_add(local_counter, Ordering::Relaxed);
+
+                // Add any remaining events
+                events_counter.fetch_add(local_counter, Ordering::Relaxed);
+            })
         })
-    }).collect();
-    
+        .collect();
+
     // Monitor task to report progress and stop publishers after duration
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<()>(1);
     tokio::spawn({
@@ -168,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         async move {
             let mut last_count = 0;
             let mut last_time = Instant::now();
-            
+
             while Instant::now() < end_time {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 let now = Instant::now();
@@ -176,50 +185,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let current_count = events_counter.load(Ordering::Relaxed);
                 let new_events = current_count - last_count;
                 let rate = new_events as f64 / elapsed.as_secs_f64();
-                
+
                 println!("Progress: {:.2} events/second", rate);
-                
+
                 last_count = current_count;
                 last_time = now;
             }
-            
+
             // Test duration reached, signal publishers to stop
             stop_flag.store(true, Ordering::Relaxed);
             let _ = progress_tx.send(()).await;
         }
     });
-    
+
     // Wait for test duration to complete
     let _ = progress_rx.recv().await;
-    
+
     // Wait for all publishers to complete
     for task in publisher_tasks {
         let _ = task.await;
     }
-    
+
     // Get final event count
     let total_events = events_published.load(Ordering::Relaxed);
     let publish_elapsed = start.elapsed();
     println!("Test completed in {:?}", publish_elapsed);
     println!("Total events published: {}", total_events);
-    println!("Average publishing throughput: {:.2} events/second", 
-             total_events as f64 / publish_elapsed.as_secs_f64());
-    
+    println!(
+        "Average publishing throughput: {:.2} events/second",
+        total_events as f64 / publish_elapsed.as_secs_f64()
+    );
+
     // Wait for events to be processed
     let processing_time = Duration::from_secs(1);
-    println!("Waiting {} seconds for event processing...", processing_time.as_secs());
+    println!(
+        "Waiting {} seconds for event processing...",
+        processing_time.as_secs()
+    );
     tokio::time::sleep(processing_time).await;
-    
+
     // Calculate event processing statistics
-    let total_processed: u64 = processors.iter()
+    let total_processed: u64 = processors
+        .iter()
         .map(|p| p.packets_processed.load(Ordering::Relaxed))
         .sum();
-    
+
     println!("\nProcessing Statistics:");
     println!("Total events published: {}", total_events);
     println!("Total events processed: {}", total_processed);
-    println!("Processing ratio: {:.2}%", (total_processed as f64 / total_events as f64) * 100.0);
-    
+    println!(
+        "Processing ratio: {:.2}%",
+        (total_processed as f64 / total_events as f64) * 100.0
+    );
+
     if SUBSCRIBER_COUNT <= 5 {
         // Print individual stats for a small number of subscribers
         for processor in &processors {
@@ -230,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let avg_per_subscriber = total_processed as f64 / SUBSCRIBER_COUNT as f64;
         println!("Average events per subscriber: {:.2}", avg_per_subscriber);
     }
-    
+
     println!("\nTest complete!");
     Ok(())
-} 
+}

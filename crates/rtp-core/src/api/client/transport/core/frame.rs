@@ -3,24 +3,24 @@
 //! This module handles the sending and receiving of media frames, including
 //! RTP packet construction, sequence number management, and frame processing.
 
+use bytes::Bytes;
+use rand::Rng;
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::collections::HashMap;
-use tokio::sync::{Mutex, mpsc};
-use bytes::Bytes;
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
-use rand::Rng;
 
-use crate::api::common::frame::{MediaFrame, MediaFrameType};
+use crate::api::client::config::ClientConfig;
 use crate::api::common::error::MediaTransportError;
-use crate::transport::{RtpTransport, UdpRtpTransport};
+use crate::api::common::frame::{MediaFrame, MediaFrameType};
 use crate::packet::RtpPacket;
 use crate::session::RtpSession;
+use crate::transport::{RtpTransport, UdpRtpTransport};
 use crate::CsrcManager;
-use crate::api::client::config::ClientConfig;
-use crate::{CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
+use crate::{CsrcMapping, RtpCsrc, RtpSsrc, MAX_CSRC_COUNT};
 
 /// Send a media frame to the remote peer
 ///
@@ -42,12 +42,17 @@ pub async fn send_frame(
     if !connected.load(Ordering::SeqCst) {
         return Err(MediaTransportError::NotConnected);
     }
-    
-    debug!("Send frame called: PT={}, TS={}, size={}, marker={}", 
-           frame.payload_type, frame.timestamp, frame.data.len(), frame.marker);
-    
+
+    debug!(
+        "Send frame called: PT={}, TS={}, size={}, marker={}",
+        frame.payload_type,
+        frame.timestamp,
+        frame.data.len(),
+        frame.marker
+    );
+
     let mut session_guard = session.lock().await;
-    
+
     // Select SSRC
     let ssrc = if config.ssrc_demultiplexing_enabled.unwrap_or(false) && frame.ssrc != 0 {
         // Use custom SSRC from the frame
@@ -56,7 +61,7 @@ pub async fn send_frame(
         // Use default SSRC from session
         session_guard.get_ssrc()
     };
-    
+
     // Get sequence number
     let sequence = if config.ssrc_demultiplexing_enabled.unwrap_or(false) && frame.ssrc != 0 {
         // Use sequence number mapping for this SSRC
@@ -81,47 +86,44 @@ pub async fn send_frame(
             rand::random::<u16>()
         }
     };
-    
+
     // Store frame data length before it's moved
     let data_len = frame.data.len();
-    
+
     // Get transport
     let transport_guard = transport.lock().await;
-    let transport = transport_guard.as_ref()
+    let transport = transport_guard
+        .as_ref()
         .ok_or_else(|| MediaTransportError::Transport("Transport not connected".to_string()))?;
-    
+
     // Create RTP header
-    let mut header = crate::packet::RtpHeader::new(
-        frame.payload_type,
-        sequence,
-        frame.timestamp,
-        ssrc
-    );
-    
+    let mut header =
+        crate::packet::RtpHeader::new(frame.payload_type, sequence, frame.timestamp, ssrc);
+
     // Set marker flag if present in frame
     if frame.marker {
         header.marker = true;
     }
-    
+
     // Add CSRCs if CSRC management is enabled
     if csrc_management_enabled {
         // For simplicity, we'll just use all active SSRCs as active sources
         // In a real conference mixer, this would be based on audio activity
         // Get all SSRCs from the session (we don't have get_active_streams)
         let active_ssrcs = session_guard.get_all_ssrcs().await;
-        
+
         if !active_ssrcs.is_empty() {
             // Get CSRC values from the manager
             let csrc_manager = csrc_manager.lock().await;
             let csrcs = csrc_manager.get_active_csrcs(&active_ssrcs);
-            
+
             // Take only up to MAX_CSRC_COUNT
             let csrcs = if csrcs.len() > MAX_CSRC_COUNT as usize {
                 csrcs[0..MAX_CSRC_COUNT as usize].to_vec()
             } else {
                 csrcs
             };
-            
+
             // Add CSRCs to the header if we have any
             if !csrcs.is_empty() {
                 debug!("Adding {} CSRCs to outgoing packet", csrcs.len());
@@ -129,20 +131,21 @@ pub async fn send_frame(
             }
         }
     }
-    
+
     // Create RTP packet
-    let packet = crate::packet::RtpPacket::new(
-        header,
-        Bytes::from(frame.data),
-    );
-    
+    let packet = crate::packet::RtpPacket::new(header, Bytes::from(frame.data));
+
     // Send packet
-    transport.send_rtp(&packet, remote_address).await
+    transport
+        .send_rtp(&packet, remote_address)
+        .await
         .map_err(|e| MediaTransportError::SendError(format!("Failed to send RTP packet: {}", e)))?;
-    
-    debug!("Sent frame: PT={}, TS={}, SEQ={}, Size={} bytes", 
-           frame.payload_type, frame.timestamp, sequence, data_len);
-    
+
+    debug!(
+        "Sent frame: PT={}, TS={}, SEQ={}, Size={} bytes",
+        frame.payload_type, frame.timestamp, sequence, data_len
+    );
+
     Ok(())
 }
 
@@ -156,10 +159,12 @@ pub async fn receive_frame(
     receiver: &Arc<Mutex<mpsc::Receiver<MediaFrame>>>,
 ) -> Result<Option<MediaFrame>, MediaTransportError> {
     let mut receiver = receiver.lock().await;
-    
+
     match tokio::time::timeout(timeout, receiver.recv()).await {
         Ok(Some(frame)) => Ok(Some(frame)),
-        Ok(None) => Err(MediaTransportError::ReceiveError("Channel closed".to_string())),
+        Ok(None) => Err(MediaTransportError::ReceiveError(
+            "Channel closed".to_string(),
+        )),
         Err(_) => Ok(None), // Timeout occurred
     }
 }
@@ -175,7 +180,7 @@ pub async fn process_packet(
     frame_sender: &mpsc::Sender<MediaFrame>,
 ) -> Result<(), MediaTransportError> {
     let mut session = session.lock().await;
-    
+
     // Handle the processing here manually since we have raw packet data
     match crate::packet::RtpPacket::parse(packet) {
         Ok(rtp_packet) => {
@@ -190,17 +195,20 @@ pub async fn process_packet(
                 ssrc: rtp_packet.header.ssrc,
                 csrcs: rtp_packet.header.csrc.clone(),
             };
-            
+
             // Forward frame to the application
             if let Err(e) = frame_sender.send(frame).await {
                 warn!("Error sending frame to application: {}", e);
             }
-            
+
             Ok(())
-        },
+        }
         Err(e) => {
             warn!("Error parsing RTP packet: {}", e);
-            Err(MediaTransportError::ReceiveError(format!("Failed to parse RTP packet: {}", e)))
+            Err(MediaTransportError::ReceiveError(format!(
+                "Failed to parse RTP packet: {}",
+                e
+            )))
         }
     }
 }
@@ -220,4 +228,4 @@ pub fn get_frame_type_from_payload_type(payload_type: u8) -> MediaFrameType {
         // All other types
         _ => MediaFrameType::Data,
     }
-} 
+}

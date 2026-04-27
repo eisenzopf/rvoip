@@ -1,128 +1,128 @@
 // Declare header parser modules
-pub mod via;
-/// Contact Header Parsing
-pub mod contact;
-pub mod from;
-pub mod to;
-pub mod route;
-pub mod record_route;
-pub mod cseq;
-pub mod max_forwards;
-pub mod expires;
-pub mod content_length;
-pub mod call_id;
-pub mod min_expires;
-pub mod mime_version;
-pub mod priority;
-pub mod subject;
-pub mod timestamp;
-pub mod user_agent;
-pub mod server;
-pub mod reply_to;
-pub mod refer_to;
-pub mod referred_by;
-pub mod organization;
-pub mod date;
-pub mod allow;
-pub mod require;
-pub mod supported;
-pub mod unsupported;
-pub mod proxy_require;
-pub mod in_reply_to;
-pub mod content_type;
-pub mod content_disposition;
 pub mod accept;
 pub mod accept_encoding;
 pub mod accept_language;
+pub mod alert_info;
+pub mod allow;
+pub mod allow_events; // Added for Allow-Events header
+pub mod auth; // Group for auth parsers
+pub mod authentication_info;
+pub mod authorization;
+pub mod call_id;
+pub mod call_info;
+/// Contact Header Parsing
+pub mod contact;
+pub mod content_disposition;
 pub mod content_encoding;
 pub mod content_language;
-pub mod alert_info;
-pub mod call_info;
+pub mod content_length;
+pub mod content_type;
+pub mod cseq;
+pub mod date;
 pub mod error_info;
-pub mod warning;
-pub mod retry_after;
-pub mod reason;
-pub mod auth; // Group for auth parsers
-pub mod www_authenticate;
-pub mod proxy_authenticate;
-pub mod authorization;
-pub mod proxy_authorization;
-pub mod authentication_info;
-pub mod uri_with_params; // Added
-pub mod session_expires; // Added for Session-Expires header
 pub mod event; // Added for Event header
+pub mod expires;
+pub mod from;
+pub mod in_reply_to;
+pub mod max_forwards;
 pub mod media_type;
+pub mod mime_version;
+pub mod min_expires;
 pub mod min_se; // Added
+pub mod organization;
+pub mod p_asserted_identity;
+pub mod priority;
+pub mod proxy_authenticate;
+pub mod proxy_authorization;
+pub mod proxy_require;
+pub mod reason;
+pub mod record_route;
+pub mod refer_to;
+pub mod referred_by;
+pub mod reply_to;
+pub mod require;
+pub mod retry_after;
+pub mod route;
 pub mod rseq; // Added for RSeq header
+pub mod server;
+pub mod session_expires; // Added for Session-Expires header
 pub mod sip_etag; // Added for SIP-ETag header
 pub mod sip_if_match; // Added for SIP-If-Match header
-pub mod allow_events; // Added for Allow-Events header
-pub mod p_asserted_identity; // RFC 3325 — P-Asserted-Identity / P-Preferred-Identity
+pub mod subject;
+pub mod supported;
+pub mod timestamp;
+pub mod to;
+pub mod unsupported;
+pub mod uri_with_params; // Added
+pub mod user_agent;
+pub mod via;
+pub mod warning;
+pub mod www_authenticate; // RFC 3325 — P-Asserted-Identity / P-Preferred-Identity
 
 // Keep internal modules private
 mod server_val;
 mod token_list;
 
 // Re-export public parser functions
-pub use via::parse_via;
-pub use contact::parse_contact;
-pub use from::parse_from;
-pub use to::{parse_to, to_header};
-pub use route::parse_route;
-pub use record_route::parse_record_route;
-pub use cseq::parse_cseq;
-pub use max_forwards::parse_max_forwards;
-pub use expires::parse_expires;
-pub use content_length::parse_content_length;
-pub use call_id::parse_call_id;
-pub use min_expires::parse_min_expires;
-pub use mime_version::parse_mime_version;
-pub use priority::parse_priority;
-pub use subject::parse_subject;
-pub use timestamp::parse_timestamp;
-pub use user_agent::parse_user_agent;
-pub use server::parse_server;
-pub use reply_to::parse_reply_to;
-pub use refer_to::parse_refer_to;
-pub use referred_by::parse_referred_by;
-pub use organization::parse_organization;
-pub use date::parse_date;
-pub use allow::parse_allow;
-pub use require::parse_require;
-pub use supported::parse_supported;
-pub use unsupported::parse_unsupported;
-pub use proxy_require::parse_proxy_require;
-pub use in_reply_to::parse_in_reply_to;
-pub use content_type::parse_content_type_value;
-pub use content_disposition::parse_content_disposition;
 pub use accept::parse_accept;
 pub use accept_encoding::parse_accept_encoding;
 pub use accept_language::parse_accept_language;
+pub use alert_info::parse_alert_info;
+pub use allow::parse_allow;
+pub use allow_events::parse_allow_events; // Added for Allow-Events header parsing
+pub use authentication_info::parse_authentication_info;
+pub use authorization::parse_authorization;
+pub use call_id::parse_call_id;
+pub use call_info::parse_call_info;
+pub use contact::parse_contact;
+pub use content_disposition::parse_content_disposition;
 pub use content_encoding::parse_content_encoding;
 pub use content_language::parse_content_language;
-pub use alert_info::parse_alert_info;
-pub use call_info::parse_call_info;
+pub use content_length::parse_content_length;
+pub use content_type::parse_content_type_value;
+pub use cseq::parse_cseq;
+pub use date::parse_date;
 pub use error_info::parse_error_info;
-pub use warning::parse_warning_value_list;
-pub use retry_after::parse_retry_after;
-pub use reason::parse_reason;
-pub use www_authenticate::parse_www_authenticate;
-pub use proxy_authenticate::parse_proxy_authenticate;
-pub use authorization::parse_authorization;
-pub use proxy_authorization::parse_proxy_authorization;
-pub use authentication_info::parse_authentication_info;
-pub use session_expires::parse_session_expires_header;
 pub use event::parse_event_header_value; // Added for Event header value parsing
+pub use expires::parse_expires;
+pub use from::parse_from;
+pub use in_reply_to::parse_in_reply_to;
+pub use max_forwards::parse_max_forwards;
 pub use media_type::media_type as parse_media_type;
+pub use mime_version::parse_mime_version;
 pub use mime_version::parse_mime_version as parse_mime_version_value;
+pub use min_expires::parse_min_expires;
 pub use min_expires::parse_min_expires as parse_min_expires_value;
 pub use min_se::parse_min_se_value; // Added
+pub use organization::parse_organization;
 pub use organization::parse_organization as parse_organization_value;
+pub use p_asserted_identity::{parse_p_asserted_identity, parse_p_preferred_identity};
+pub use priority::parse_priority;
+pub use proxy_authenticate::parse_proxy_authenticate;
+pub use proxy_authorization::parse_proxy_authorization;
+pub use proxy_require::parse_proxy_require;
+pub use reason::parse_reason;
+pub use record_route::parse_record_route;
+pub use refer_to::parse_refer_to;
+pub use referred_by::parse_referred_by;
+pub use reply_to::parse_reply_to;
+pub use require::parse_require;
+pub use retry_after::parse_retry_after;
+pub use route::parse_route;
 pub use rseq::{parse_rseq, parse_rseq_header}; // Added for RSeq header parsing
+pub use server::parse_server;
+pub use session_expires::parse_session_expires_header;
 pub use sip_etag::parse_sip_etag; // Added for SIP-ETag header parsing
 pub use sip_if_match::parse_sip_if_match; // Added for SIP-If-Match header parsing
-pub use allow_events::parse_allow_events; // Added for Allow-Events header parsing
-pub use p_asserted_identity::{parse_p_asserted_identity, parse_p_preferred_identity}; // RFC 3325
+pub use subject::parse_subject;
+pub use supported::parse_supported;
+pub use timestamp::parse_timestamp;
+pub use to::{parse_to, to_header};
+pub use unsupported::parse_unsupported;
+pub use user_agent::parse_user_agent;
+pub use via::parse_via;
+pub use warning::parse_warning_value_list;
+pub use www_authenticate::parse_www_authenticate; // RFC 3325
 
 // Re-export shared auth components if needed directly
 // pub use auth::common::{auth_param, realm, nonce, ...};
@@ -135,8 +135,8 @@ mod tests {
     use super::*;
     use crate::parser::ParseResult;
     use crate::types::event::EventType;
-    use crate::types::headers::HeaderName;
     use crate::types::event::ParamValue;
+    use crate::types::headers::HeaderName;
     use crate::types::MinSE; // For the new test
     use nom::error::VerboseError;
 
@@ -151,7 +151,7 @@ mod tests {
         let to_fn: fn(&[u8]) -> ParseResult<_> = parse_to;
         let cseq_fn: fn(&[u8]) -> ParseResult<_> = parse_cseq;
         let auth_fn: fn(&[u8]) -> ParseResult<_> = parse_www_authenticate;
-        
+
         // If this compiles, the exports are working correctly
         assert!(true);
     }
@@ -161,13 +161,13 @@ mod tests {
     fn test_via_parser() {
         // Use the direct via_param_parser function instead of parse_via since our test doesn't include the header name
         let input = b"SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds";
-        
+
         // Import and use the test function that parses without header name
         use crate::parser::headers::via::parse_via_params;
         let result = parse_via_params(input);
         assert!(result.is_ok());
     }
-    
+
     /// Test that parsing a Contact header works through the exported function
     #[test]
     fn test_contact_parser() {
@@ -175,7 +175,7 @@ mod tests {
         let result = parse_contact(input);
         assert!(result.is_ok());
     }
-    
+
     /// Test that parsing a From header works through the exported function
     #[test]
     fn test_from_parser() {
@@ -183,7 +183,7 @@ mod tests {
         let result = parse_from(input);
         assert!(result.is_ok());
     }
-    
+
     /// Test that parsing a CSeq header works through the exported function
     #[test]
     fn test_cseq_parser() {
@@ -191,19 +191,19 @@ mod tests {
         let result = parse_cseq(input);
         assert!(result.is_ok());
     }
-    
+
     /// Test that parsing a Call-ID header works through the exported function
     #[test]
     fn test_call_id_parser() {
         // Use the internal callid function instead of parse_call_id since our test doesn't include the header name
         let input = b"a84b4c76e66710@pc33.atlanta.com";
-        
+
         // Import and use the callid function that handles just the value part
         use crate::parser::headers::call_id::callid;
         let result = callid(input);
         assert!(result.is_ok());
     }
-    
+
     /// Test that parsing a Content-Type header works through the exported function
     #[test]
     fn test_content_type_parser() {
@@ -211,7 +211,7 @@ mod tests {
         let result = parse_content_type_value(input);
         assert!(result.is_ok());
     }
-    
+
     /// Test that parsing a WWW-Authenticate header works through the exported function
     #[test]
     fn test_www_authenticate_parser() {
@@ -219,7 +219,7 @@ mod tests {
         let result = parse_www_authenticate(input);
         assert!(result.is_ok());
     }
-    
+
     /// Test that parsing a Require header works through the exported function
     #[test]
     fn test_require_parser() {
@@ -236,9 +236,15 @@ mod tests {
         assert!(result.is_ok());
         if let Ok((rem, event_header)) = result {
             assert!(rem.is_empty());
-            assert_eq!(event_header.event_type, EventType::Token("presence".to_string()));
+            assert_eq!(
+                event_header.event_type,
+                EventType::Token("presence".to_string())
+            );
             assert_eq!(event_header.id, Some("123".to_string()));
-            assert_eq!(event_header.params.get("foo"), Some(&ParamValue::Value("bar".to_string())));
+            assert_eq!(
+                event_header.params.get("foo"),
+                Some(&ParamValue::Value("bar".to_string()))
+            );
         }
     }
 
@@ -246,13 +252,20 @@ mod tests {
     fn test_parse_min_se_header_value_export() {
         let input = b"120";
         let result = parse_min_se_value::<VerboseError<&[u8]>>(input);
-        assert!(result.is_ok(), "Failed to parse valid Min-SE value: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Failed to parse valid Min-SE value: {:?}",
+            result
+        );
         let (remaining, min_se_val) = result.unwrap();
         assert_eq!(remaining, b"", "Input not fully consumed");
         assert_eq!(min_se_val, MinSE::new(120));
 
         let input_invalid = b"abc";
         let result_invalid = parse_min_se_value::<VerboseError<&[u8]>>(input_invalid);
-        assert!(result_invalid.is_err(), "Parsed invalid Min-SE value successfully");
+        assert!(
+            result_invalid.is_err(),
+            "Parsed invalid Min-SE value successfully"
+        );
     }
 }

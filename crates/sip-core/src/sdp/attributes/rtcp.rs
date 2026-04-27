@@ -4,7 +4,7 @@
 //! Includes parsers for rtcp-mux and rtcp-fb attributes.
 
 use crate::error::{Error, Result};
-use crate::sdp::attributes::common::{token, to_result};
+use crate::sdp::attributes::common::{to_result, token};
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till1},
@@ -28,10 +28,10 @@ fn payload_type_parser(input: &str) -> IResult<&str, String> {
         map(
             verify(digit1, |s: &str| {
                 let pt = s.parse::<u8>().unwrap_or(255);
-                pt <= 127  // Valid payload types are 0-127
+                pt <= 127 // Valid payload types are 0-127
             }),
-            |s: &str| s.to_string()
-        )
+            |s: &str| s.to_string(),
+        ),
     ))(input)
 }
 
@@ -43,7 +43,7 @@ fn feedback_type_parser(input: &str) -> IResult<&str, &str> {
 
 /// Parser for additional feedback parameters
 fn additional_params_parser(input: &str) -> IResult<&str, &str> {
-    take_till1(|_| false)(input)  // Take everything until the end
+    take_till1(|_| false)(input) // Take everything until the end
 }
 
 /// Main parser for RTCP-FB attribute
@@ -52,15 +52,12 @@ fn rtcp_fb_parser(input: &str) -> IResult<&str, (String, String, Option<String>)
         // Payload type or "*"
         map(payload_type_parser, |s| s),
         // Space + feedback type
-        preceded(
-            space1,
-            map(feedback_type_parser, |s: &str| s.to_string())
-        ),
+        preceded(space1, map(feedback_type_parser, |s: &str| s.to_string())),
         // Optional space + additional parameters
         opt(preceded(
             space1,
-            map(additional_params_parser, |s: &str| s.trim().to_string())
-        ))
+            map(additional_params_parser, |s: &str| s.trim().to_string()),
+        )),
     ))(input)
 }
 
@@ -76,16 +73,19 @@ pub fn parse_rtcp_fb(value: &str) -> Result<(String, String, Option<String>)> {
         Ok((_, result)) => {
             // Validate feedback type (optional, as custom types may exist)
             match result.1.as_str() {
-                "nack" | "ack" | "ccm" | "trr-int" | "app" => {},
+                "nack" | "ack" | "ccm" | "trr-int" | "app" => {}
                 _ => {
                     // Unknown feedback type - this is not an error, just a note
                     // println!("Note: Unknown RTCP feedback type: {}", result.1);
                 }
             }
-            
+
             Ok(result)
-        },
-        Err(_) => Err(Error::SdpParsingError(format!("Invalid rtcp-fb format: {}", value)))
+        }
+        Err(_) => Err(Error::SdpParsingError(format!(
+            "Invalid rtcp-fb format: {}",
+            value
+        ))),
     }
 }
 
@@ -116,7 +116,7 @@ mod tests {
         // Test basic formats according to RFC 4585
         let result = parse_rtcp_fb("96 nack");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "nack");
@@ -128,7 +128,7 @@ mod tests {
         // Test with wildcard payload type
         let result = parse_rtcp_fb("* ack");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "*");
         assert_eq!(fb_type, "ack");
@@ -140,7 +140,7 @@ mod tests {
         // Test with additional parameters
         let result = parse_rtcp_fb("96 nack pli");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "nack");
@@ -152,7 +152,7 @@ mod tests {
         // Test with CCM and complex parameters
         let result = parse_rtcp_fb("96 ccm fir");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "ccm");
@@ -164,7 +164,7 @@ mod tests {
         // Test with APP and parameters according to RFC 4585
         let result = parse_rtcp_fb("96 app ecn tmmbr");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "app");
@@ -176,7 +176,7 @@ mod tests {
         // Test trr-int with value
         let result = parse_rtcp_fb("96 trr-int 5000");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "trr-int");
@@ -188,7 +188,7 @@ mod tests {
         // Test with complex parameters
         let result = parse_rtcp_fb("96 nack sli pli");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "nack");
@@ -200,7 +200,7 @@ mod tests {
         // Test with extra whitespace
         let result = parse_rtcp_fb("  96   nack   pli  ");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "nack");
@@ -212,7 +212,7 @@ mod tests {
         // Test with maximum valid payload type (127)
         let result = parse_rtcp_fb("127 nack");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, _) = result.unwrap();
         assert_eq!(pt, "127");
         assert_eq!(fb_type, "nack");
@@ -230,7 +230,7 @@ mod tests {
         // Test with custom feedback type (allowed but not standard)
         let result = parse_rtcp_fb("96 custom-type param");
         assert!(result.is_ok());
-        
+
         let (pt, fb_type, params) = result.unwrap();
         assert_eq!(pt, "96");
         assert_eq!(fb_type, "custom-type");
@@ -282,4 +282,4 @@ mod tests {
         assert_eq!(fb_type, "ccm");
         assert_eq!(params, Some("fir".to_string()));
     }
-} 
+}

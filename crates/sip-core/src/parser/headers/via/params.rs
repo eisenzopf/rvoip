@@ -11,9 +11,9 @@ use nom::{
     bytes::complete::{tag_no_case, take_while_m_n},
     character::complete::digit1,
     combinator::{map, map_res, opt},
+    error::{Error as NomError, ErrorKind, ParseError},
     sequence::{pair, preceded},
     IResult,
-    error::{Error as NomError, ErrorKind, ParseError},
 };
 use std::str;
 
@@ -32,18 +32,22 @@ use crate::types::uri::Host as UriHost;
 /// Example: ttl=10
 fn via_ttl(input: &[u8]) -> ParseResult<Param> {
     map_res(
-        preceded(pair(tag_no_case(b"ttl"), equal),
-                 take_while_m_n(1, 3, |c: u8| c.is_ascii_digit())),
+        preceded(
+            pair(tag_no_case(b"ttl"), equal),
+            take_while_m_n(1, 3, |c: u8| c.is_ascii_digit()),
+        ),
         |b| {
-            let s = str::from_utf8(b)
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
-            let parsed = s.parse::<u16>()
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))?;
-            
+            let s = str::from_utf8(b).map_err(|_| {
+                nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char))
+            })?;
+            let parsed = s.parse::<u16>().map_err(|_| {
+                nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit))
+            })?;
+
             // Cap the TTL value at 255 as per the SIP specification
             let capped_ttl = if parsed > 255 { 255 } else { parsed as u8 };
             Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Ttl(capped_ttl))
-        }
+        },
     )(input)
 }
 
@@ -56,7 +60,7 @@ fn via_maddr(input: &[u8]) -> ParseResult<Param> {
         |h: UriHost| {
             // Convert the host to a string representation for the Param
             Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Maddr(h.to_string()))
-        }
+        },
     )(input)
 }
 
@@ -64,7 +68,7 @@ fn via_maddr(input: &[u8]) -> ParseResult<Param> {
 /// received is an IPv4address or IPv6address
 /// Example: received=192.0.2.1
 fn via_received(input: &[u8]) -> ParseResult<Param> {
-     map_res(
+    map_res(
         preceded(pair(tag_no_case(b"received"), equal), host), // host parser handles IPs
         |h: UriHost| {
             match h {
@@ -75,11 +79,14 @@ fn via_received(input: &[u8]) -> ParseResult<Param> {
                         Ok(Param::Received(ip))
                     } else {
                         // Invalid received parameter - must be an IP address
-                        Err(nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Tag)))
+                        Err(nom::Err::Failure(NomError::from_error_kind(
+                            input,
+                            ErrorKind::Tag,
+                        )))
                     }
                 }
             }
-        }
+        },
     )(input)
 }
 
@@ -87,19 +94,16 @@ fn via_received(input: &[u8]) -> ParseResult<Param> {
 /// branch is a token value, must start with z9hG4bK for RFC 3261 compliant requests
 /// Example: branch=z9hG4bK776asdhds
 fn via_branch(input: &[u8]) -> ParseResult<Param> {
-    map_res(
-        preceded(pair(tag_no_case(b"branch"), equal), token),
-        |b| {
-            let branch_str = str::from_utf8(b)
-                .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?
-                .to_string();
-            
-            // Note: RFC 3261 compliant branch parameter must start with magic cookie z9hG4bK
-            // But we don't enforce this at parse time to allow parsing legacy implementations
-            
-            Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Branch(branch_str))
-        }
-    )(input)
+    map_res(preceded(pair(tag_no_case(b"branch"), equal), token), |b| {
+        let branch_str = str::from_utf8(b)
+            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?
+            .to_string();
+
+        // Note: RFC 3261 compliant branch parameter must start with magic cookie z9hG4bK
+        // But we don't enforce this at parse time to allow parsing legacy implementations
+
+        Ok::<Param, nom::Err<NomError<&[u8]>>>(Param::Branch(branch_str))
+    })(input)
 }
 
 /// Parser for the rport parameter of a Via header (RFC 3261 Section 18.2.1)
@@ -107,14 +111,19 @@ fn via_branch(input: &[u8]) -> ParseResult<Param> {
 /// Examples: rport (request) or rport=5060 (response)
 fn via_rport(input: &[u8]) -> ParseResult<Param> {
     let (input, _) = tag_no_case(b"rport")(input)?;
-    let (input, port_val) = opt(preceded(equal, map_res(digit1, |b| {
-        let s = str::from_utf8(b)
-            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char)))?;
-        let port = s.parse::<u16>()
-            .map_err(|_| nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit)))?;
-        Ok::<u16, nom::Err<NomError<&[u8]>>>(port)
-    })))(input)?;
-    
+    let (input, port_val) = opt(preceded(
+        equal,
+        map_res(digit1, |b| {
+            let s = str::from_utf8(b).map_err(|_| {
+                nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Char))
+            })?;
+            let port = s.parse::<u16>().map_err(|_| {
+                nom::Err::Failure(NomError::from_error_kind(input, ErrorKind::Digit))
+            })?;
+            Ok::<u16, nom::Err<NomError<&[u8]>>>(port)
+        }),
+    ))(input)?;
+
     Ok((input, Param::Rport(port_val)))
 }
 
@@ -133,4 +142,4 @@ pub fn via_param_item(input: &[u8]) -> ParseResult<Param> {
 }
 
 // The list parsing *( SEMI via-params ) should happen in the main via parser (via/mod.rs)
-// using semicolon_separated_params0(via_param_item) 
+// using semicolon_separated_params0(via_param_item)

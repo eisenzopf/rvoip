@@ -33,8 +33,7 @@ use std::collections::HashMap;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::{rngs::OsRng, RngCore};
 use rvoip_rtp_core::srtp::{
-    SrtpContext, SrtpCryptoSuite, SrtpCryptoKey,
-    SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32,
+    SrtpContext, SrtpCryptoKey, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
 };
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite};
 
@@ -81,10 +80,7 @@ fn generate_keysalt(suite: &SrtpCryptoSuite) -> (Vec<u8>, Vec<u8>, String) {
 fn decode_keysalt(inline_b64: &str, suite: &SrtpCryptoSuite) -> Result<(Vec<u8>, Vec<u8>)> {
     let key_b64 = inline_b64.split('|').next().unwrap_or(inline_b64);
     let combined = STANDARD.decode(key_b64).map_err(|e| {
-        SessionError::SDPNegotiationFailed(format!(
-            "invalid base64 in a=crypto inline: {}",
-            e
-        ))
+        SessionError::SDPNegotiationFailed(format!("invalid base64 in a=crypto inline: {}", e))
     })?;
     let expected = suite.key_length + SDES_SALT_LEN;
     if combined.len() < expected {
@@ -196,17 +192,21 @@ impl SrtpNegotiator {
             )));
         }
         let (peer_key, peer_salt) = decode_keysalt(&attr.key_inline, &slot.rtp_suite)?;
-        build_pair(slot.rtp_suite.clone(), &slot.key, &slot.salt, &peer_key, &peer_salt, slot.suite)
+        build_pair(
+            slot.rtp_suite.clone(),
+            &slot.key,
+            &slot.salt,
+            &peer_key,
+            &peer_salt,
+            slot.suite,
+        )
     }
 
     /// UAS: process an inbound offer's `a=crypto:` attributes. Picks
     /// the first suite we support, generates our master key, returns
     /// `(chosen_attribute_to_emit_in_answer, SrtpPair)`. The answer
     /// echoes the offerer's chosen tag with our own inline key.
-    pub fn process_offer(
-        &self,
-        attrs: &[CryptoAttribute],
-    ) -> Result<(CryptoAttribute, SrtpPair)> {
+    pub fn process_offer(&self, attrs: &[CryptoAttribute]) -> Result<(CryptoAttribute, SrtpPair)> {
         if !matches!(self, SrtpNegotiator::Answerer) {
             return Err(SessionError::SDPNegotiationFailed(
                 "SrtpNegotiator::process_offer called on non-answerer".into(),
@@ -372,7 +372,9 @@ mod tests {
         )];
         let answerer = SrtpNegotiator::new_answerer();
         let result = answerer.process_offer(&attrs);
-        assert!(matches!(&result, Err(e) if format!("{:?}", e).contains("no offered a=crypto suite")));
+        assert!(
+            matches!(&result, Err(e) if format!("{:?}", e).contains("no offered a=crypto suite"))
+        );
     }
 
     #[test]
@@ -391,10 +393,8 @@ mod tests {
         // Offerer's first preference is AES-256 (unsupported), second is _80.
         // Per D2 we prefer the offerer's order; since the first they want
         // isn't supported, fall through to the next supported.
-        let (mut offerer, mut attrs) = SrtpNegotiator::new_offerer(&[
-            CryptoSuite::AesCm128HmacSha1_80,
-        ])
-        .unwrap();
+        let (mut offerer, mut attrs) =
+            SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80]).unwrap();
         // Splice in an unsupported AES-256 at position 0 with tag 99.
         let unsupported = CryptoAttribute::new(
             99,
@@ -407,7 +407,10 @@ mod tests {
 
         let answerer = SrtpNegotiator::new_answerer();
         let (chosen, _) = answerer.process_offer(&attrs).unwrap();
-        assert_eq!(chosen.tag, 1, "answerer should fall through to first supported");
+        assert_eq!(
+            chosen.tag, 1,
+            "answerer should fall through to first supported"
+        );
         assert_eq!(chosen.suite, CryptoSuite::AesCm128HmacSha1_80);
     }
 }

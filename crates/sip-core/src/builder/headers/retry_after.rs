@@ -1,12 +1,10 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
     retry_after::RetryAfter,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
 use std::time::Duration;
-use super::HeaderSetter;
 
 /// RetryAfter header builder
 ///
@@ -22,7 +20,7 @@ use super::HeaderSetter;
 /// The Retry-After header serves several important purposes in SIP:
 ///
 /// 1. Indicates how long a service is expected to be unavailable to the requesting client
-/// 2. Provides guidance on when to retry a failed request 
+/// 2. Provides guidance on when to retry a failed request
 /// 3. Helps with load balancing and traffic management during service outages
 /// 4. Can include additional context like maintenance duration or reason for unavailability
 ///
@@ -145,7 +143,7 @@ pub trait RetryAfterBuilderExt {
     /// // The response now contains a Retry-After: 180 header
     /// ```
     fn retry_after(self, seconds: u32) -> Self;
-    
+
     /// Add a Retry-After header with a delay specified as a Duration
     ///
     /// This method adds a Retry-After header using a standard Rust Duration
@@ -175,7 +173,7 @@ pub trait RetryAfterBuilderExt {
     /// // The response contains Retry-After: 300
     /// ```
     fn retry_after_from_duration(self, duration: Duration) -> Self;
-    
+
     /// Add a Retry-After header with a delay and a comment
     ///
     /// This method adds a Retry-After header with the specified delay and
@@ -204,7 +202,7 @@ pub trait RetryAfterBuilderExt {
     /// // The response contains Retry-After: 3600 (Server maintenance)
     /// ```
     fn retry_after_with_comment(self, seconds: u32, comment: &str) -> Self;
-    
+
     /// Add a Retry-After header with a delay, duration parameter, and optional comment
     ///
     /// This method adds a Retry-After header with the specified retry delay,
@@ -236,7 +234,7 @@ pub trait RetryAfterBuilderExt {
     /// // The response contains Retry-After: 60 (System upgrade);duration=3600
     /// ```
     fn retry_after_duration(self, seconds: u32, duration: u32, comment: Option<&str>) -> Self;
-    
+
     /// Add a Retry-After header with a Duration and a comment
     ///
     /// This method adds a Retry-After header using a standard Rust Duration
@@ -269,35 +267,35 @@ pub trait RetryAfterBuilderExt {
     fn retry_after_duration_with_comment(self, duration: Duration, comment: &str) -> Self;
 }
 
-impl<T> RetryAfterBuilderExt for T 
-where 
+impl<T> RetryAfterBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn retry_after(self, seconds: u32) -> Self {
         let retry_after = RetryAfter::new(seconds);
         self.set_header(retry_after)
     }
-    
+
     fn retry_after_from_duration(self, duration: Duration) -> Self {
         let retry_after = RetryAfter::from_duration(duration);
         self.set_header(retry_after)
     }
-    
+
     fn retry_after_with_comment(self, seconds: u32, comment: &str) -> Self {
         let retry_after = RetryAfter::new(seconds).with_comment(comment);
         self.set_header(retry_after)
     }
-    
+
     fn retry_after_duration(self, seconds: u32, duration: u32, comment: Option<&str>) -> Self {
         let mut retry_after = RetryAfter::new(seconds).with_duration(duration);
-        
+
         if let Some(cmt) = comment {
             retry_after = retry_after.with_comment(cmt);
         }
-        
+
         self.set_header(retry_after)
     }
-    
+
     fn retry_after_duration_with_comment(self, duration: Duration, comment: &str) -> Self {
         let retry_after = RetryAfter::from_duration(duration).with_comment(comment);
         self.set_header(retry_after)
@@ -317,11 +315,12 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
             .retry_after(60)
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
-        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter) {
+
+        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter)
+        {
             assert_eq!(retry_after.delay, 60);
         } else {
             panic!("RetryAfter header not found or has wrong type");
@@ -334,8 +333,9 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
             .retry_after_from_duration(duration)
             .build();
-            
-        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter) {
+
+        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter)
+        {
             assert_eq!(retry_after.delay, 120);
             assert_eq!(retry_after.as_duration(), duration);
         } else {
@@ -348,8 +348,9 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
             .retry_after_with_comment(300, "System maintenance")
             .build();
-            
-        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter) {
+
+        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter)
+        {
             assert_eq!(retry_after.delay, 300);
             assert_eq!(retry_after.comment, Some("System maintenance".to_string()));
         } else {
@@ -362,8 +363,9 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
             .retry_after_duration(60, 3600, Some("Server update"))
             .build();
-            
-        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter) {
+
+        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter)
+        {
             assert_eq!(retry_after.delay, 60);
             assert_eq!(retry_after.duration, Some(3600));
             assert_eq!(retry_after.comment, Some("Server update".to_string()));
@@ -377,8 +379,9 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
             .retry_after_duration(60, 3600, None)
             .build();
-            
-        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter) {
+
+        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter)
+        {
             assert_eq!(retry_after.delay, 60);
             assert_eq!(retry_after.duration, Some(3600));
             assert_eq!(retry_after.comment, None);
@@ -393,12 +396,16 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
             .retry_after_duration_with_comment(duration, "Database maintenance")
             .build();
-            
-        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter) {
+
+        if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter)
+        {
             assert_eq!(retry_after.delay, 1800);
-            assert_eq!(retry_after.comment, Some("Database maintenance".to_string()));
+            assert_eq!(
+                retry_after.comment,
+                Some("Database maintenance".to_string())
+            );
         } else {
             panic!("RetryAfter header not found or has wrong type");
         }
     }
-} 
+}

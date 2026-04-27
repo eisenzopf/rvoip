@@ -2,9 +2,9 @@
 //!
 //! This module defines the Credentials type used in Authorization and ProxyAuthorization headers.
 
-use std::fmt;
-use serde::{Deserialize, Serialize};
 use crate::types::auth::params::{AuthParam, DigestParam};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Represents credentials (Authorization, Proxy-Authorization)
 ///
@@ -19,7 +19,10 @@ pub enum Credentials {
     /// Bearer token authentication (RFC 8898)
     Bearer { token: String },
     /// Other authentication scheme credentials
-    Other { scheme: String, params: Vec<AuthParam> },
+    Other {
+        scheme: String,
+        params: Vec<AuthParam>,
+    },
 }
 
 impl Credentials {
@@ -31,7 +34,7 @@ impl Credentials {
     pub fn is_digest(&self) -> bool {
         matches!(self, Credentials::Digest { .. })
     }
-    
+
     /// Returns true if the credentials are of the Bearer type
     ///
     /// # Returns
@@ -40,7 +43,7 @@ impl Credentials {
     pub fn is_bearer(&self) -> bool {
         matches!(self, Credentials::Bearer { .. })
     }
-    
+
     /// Creates new Bearer credentials with the given token
     ///
     /// # Parameters
@@ -51,29 +54,39 @@ impl Credentials {
     ///
     /// Bearer credentials with the specified token
     pub fn bearer(token: impl Into<String>) -> Self {
-        Credentials::Bearer { token: token.into() }
+        Credentials::Bearer {
+            token: token.into(),
+        }
     }
 }
 
 impl fmt::Display for Credentials {
-     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Credentials::Digest { params } => {
                 write!(f, "Digest ")?;
-                let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                let params_str = params
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(f, "{}", params_str)
-            },
-             Credentials::Basic { token } => {
-                 write!(f, "Basic {}", token)
-            },
+            }
+            Credentials::Basic { token } => {
+                write!(f, "Basic {}", token)
+            }
             Credentials::Bearer { token } => {
                 write!(f, "Bearer {}", token)
-            },
+            }
             Credentials::Other { scheme, params } => {
                 write!(f, "{} ", scheme)?;
-                let params_str = params.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+                let params_str = params
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 write!(f, "{}", params_str)
             }
         }
     }
-} 
+}

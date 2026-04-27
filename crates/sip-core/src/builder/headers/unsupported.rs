@@ -1,11 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
     unsupported::Unsupported,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 
 /// Unsupported header builder
 ///
@@ -152,7 +150,7 @@ pub trait UnsupportedBuilderExt {
     /// // The client must retry without requiring GRUU if it wants the request to succeed
     /// ```
     fn unsupported_tag(self, option_tag: impl Into<String>) -> Self;
-    
+
     /// Add an Unsupported header with multiple option tags
     ///
     /// This method adds an Unsupported header with multiple SIP extension option tags
@@ -190,7 +188,7 @@ pub trait UnsupportedBuilderExt {
     /// // translate between WebRTC and traditional SIP
     /// ```
     fn unsupported_tags(self, option_tags: Vec<impl Into<String>>) -> Self;
-    
+
     /// Add an Unsupported header for 100rel (reliable provisional responses)
     ///
     /// This convenience method adds an Unsupported header indicating that the
@@ -222,7 +220,7 @@ pub trait UnsupportedBuilderExt {
     /// // or may decide to use a different calling method
     /// ```
     fn unsupported_100rel(self) -> Self;
-    
+
     /// Add an Unsupported header for timer
     ///
     /// This convenience method adds an Unsupported header indicating that the
@@ -254,7 +252,7 @@ pub trait UnsupportedBuilderExt {
     /// // or may need to handle dialog refreshes via other means
     /// ```
     fn unsupported_timer(self) -> Self;
-    
+
     /// Add an Unsupported header for path
     ///
     /// This convenience method adds an Unsupported header indicating that the
@@ -288,8 +286,8 @@ pub trait UnsupportedBuilderExt {
     fn unsupported_path(self) -> Self;
 }
 
-impl<T> UnsupportedBuilderExt for T 
-where 
+impl<T> UnsupportedBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn unsupported_tag(self, option_tag: impl Into<String>) -> Self {
@@ -298,7 +296,7 @@ where
         unsupported.add_option_tag(&tag_str);
         self.set_header(unsupported)
     }
-    
+
     fn unsupported_tags(self, option_tags: Vec<impl Into<String>>) -> Self {
         let mut unsupported = Unsupported::new();
         for tag_impl in option_tags {
@@ -307,15 +305,15 @@ where
         }
         self.set_header(unsupported)
     }
-    
+
     fn unsupported_100rel(self) -> Self {
         self.unsupported_tag("100rel")
     }
-    
+
     fn unsupported_timer(self) -> Self {
         self.unsupported_tag("timer")
     }
-    
+
     fn unsupported_path(self) -> Self {
         self.unsupported_tag("path")
     }
@@ -330,14 +328,17 @@ mod tests {
 
     #[test]
     fn test_request_unsupported_tag() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .unsupported_tag("100rel")
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
-        if let Some(TypedHeader::Unsupported(unsupported)) = request.header(&HeaderName::Unsupported) {
+
+        if let Some(TypedHeader::Unsupported(unsupported)) =
+            request.header(&HeaderName::Unsupported)
+        {
             assert_eq!(unsupported.option_tags().len(), 1);
             assert!(unsupported.has_option_tag("100rel"));
         } else {
@@ -350,11 +351,13 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .unsupported_tags(vec!["100rel", "path"])
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
-        if let Some(TypedHeader::Unsupported(unsupported)) = response.header(&HeaderName::Unsupported) {
+
+        if let Some(TypedHeader::Unsupported(unsupported)) =
+            response.header(&HeaderName::Unsupported)
+        {
             assert_eq!(unsupported.option_tags().len(), 2);
             assert!(unsupported.has_option_tag("100rel"));
             assert!(unsupported.has_option_tag("path"));
@@ -366,11 +369,14 @@ mod tests {
 
     #[test]
     fn test_unsupported_convenience_methods() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .unsupported_timer()
             .build();
-            
-        if let Some(TypedHeader::Unsupported(unsupported)) = request.header(&HeaderName::Unsupported) {
+
+        if let Some(TypedHeader::Unsupported(unsupported)) =
+            request.header(&HeaderName::Unsupported)
+        {
             assert_eq!(unsupported.option_tags().len(), 1);
             assert!(unsupported.has_option_tag("timer"));
         } else {
@@ -380,30 +386,35 @@ mod tests {
 
     #[test]
     fn test_unsupported_multiple_methods() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .unsupported_timer()
             .unsupported_100rel()
             .build();
-        
+
         // When adding multiple headers with the same name, they get added as separate headers
         // rather than being merged. The header() method returns the first one it finds.
-        if let Some(TypedHeader::Unsupported(unsupported)) = request.header(&HeaderName::Unsupported) {
+        if let Some(TypedHeader::Unsupported(unsupported)) =
+            request.header(&HeaderName::Unsupported)
+        {
             assert_eq!(unsupported.option_tags().len(), 1);
             assert!(unsupported.has_option_tag("timer"));
         } else {
             panic!("Unsupported header not found or has wrong type");
         }
-        
+
         // Verify that there are actually two Unsupported headers
-        let unsupported_headers: Vec<_> = request.headers.iter()
+        let unsupported_headers: Vec<_> = request
+            .headers
+            .iter()
             .filter_map(|h| match h {
                 TypedHeader::Unsupported(u) => Some(u),
-                _ => None
+                _ => None,
             })
             .collect();
-        
+
         assert_eq!(unsupported_headers.len(), 2);
         assert!(unsupported_headers[0].has_option_tag("timer"));
         assert!(unsupported_headers[1].has_option_tag("100rel"));
     }
-} 
+}

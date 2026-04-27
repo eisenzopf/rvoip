@@ -9,7 +9,6 @@
 /// delivery over potentially unreliable transport layers. These types provide
 /// the necessary structure to implement the state machines and timer-based
 /// behaviors that SIP transactions require.
-
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -23,10 +22,10 @@ use std::time::Instant;
 /// the timer manager to properly track and fire the timers.
 ///
 /// ## SIP Transaction Timers
-/// 
+///
 /// - Timer A: INVITE retransmission interval, for UDP only
 /// - Timer B: INVITE transaction timeout
-/// - Timer C: Proxy INVITE transaction timeout 
+/// - Timer C: Proxy INVITE transaction timeout
 /// - Timer D: Wait time for response retransmissions
 /// - Timer E: Non-INVITE retransmission interval, for UDP only
 /// - Timer F: Non-INVITE transaction timeout
@@ -57,4 +56,4 @@ pub struct StrayRequest {
     pub request: rvoip_sip_core::Request,
     /// The source address from which the request was received
     pub source: SocketAddr,
-} 
+}

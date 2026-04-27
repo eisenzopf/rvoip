@@ -23,11 +23,12 @@ fn audio_offer(formats: &[&str]) -> SdpSession {
         .connection("IN", "IP4", "127.0.0.1")
         .time("0", "0")
         .media_audio(16000, "RTP/AVP")
-            .formats(formats);
+        .formats(formats);
     for fmt in formats {
         b = b.rtpmap(*fmt, &format!("CODEC{}/8000", fmt));
     }
-    let sdp = b.attribute("sendrecv", None::<String>)
+    let sdp = b
+        .attribute("sendrecv", None::<String>)
         .done()
         .build()
         .expect("offer builds")
@@ -91,11 +92,11 @@ fn srtp_offer_rejected_when_accept_srtp_false() {
         .connection("IN", "IP4", "127.0.0.1")
         .time("0", "0")
         .media_audio(16000, "RTP/SAVP")
-            .formats(&["0", "8"])
-            .rtpmap("0", "PCMU/8000")
-            .rtpmap("8", "PCMA/8000")
-            .attribute("sendrecv", None::<String>)
-            .done()
+        .formats(&["0", "8"])
+        .rtpmap("0", "PCMU/8000")
+        .rtpmap("8", "PCMA/8000")
+        .attribute("sendrecv", None::<String>)
+        .done()
         .build()
         .expect("savp offer builds")
         .to_string();
@@ -128,10 +129,10 @@ fn savp_offer_accepted_when_accept_srtp_true() {
         .connection("IN", "IP4", "127.0.0.1")
         .time("0", "0")
         .media_audio(16000, "RTP/SAVP")
-            .formats(&["0"])
-            .rtpmap("0", "PCMU/8000")
-            .attribute("sendrecv", None::<String>)
-            .done()
+        .formats(&["0"])
+        .rtpmap("0", "PCMU/8000")
+        .attribute("sendrecv", None::<String>)
+        .done()
         .build()
         .expect("savp offer builds")
         .to_string();
@@ -146,7 +147,10 @@ fn savp_offer_accepted_when_accept_srtp_true() {
 fn empty_offer_returns_error() {
     let mut sdp = audio_offer(&["0"]);
     sdp.media_descriptions.clear();
-    assert!(matches!(match_offer(&sdp, &caps(&["0"])), Err(MatchError::EmptyOffer)));
+    assert!(matches!(
+        match_offer(&sdp, &caps(&["0"])),
+        Err(MatchError::EmptyOffer)
+    ));
 }
 
 #[test]
@@ -165,14 +169,14 @@ fn ice_and_dtls_attributes_carried_verbatim() {
         .connection("IN", "IP4", "127.0.0.1")
         .time("0", "0")
         .media_audio(16000, "RTP/AVP")
-            .formats(&["0"])
-            .rtpmap("0", "PCMU/8000")
-            .attribute("ice-ufrag", Some("abcd1234"))
-            .attribute("ice-pwd", Some("supersecretpassword"))
-            .attribute("fingerprint", Some("sha-256 AB:CD:EF"))
-            .attribute("setup", Some("active"))
-            .attribute("sendrecv", None::<String>)
-            .done()
+        .formats(&["0"])
+        .rtpmap("0", "PCMU/8000")
+        .attribute("ice-ufrag", Some("abcd1234"))
+        .attribute("ice-pwd", Some("supersecretpassword"))
+        .attribute("fingerprint", Some("sha-256 AB:CD:EF"))
+        .attribute("setup", Some("active"))
+        .attribute("sendrecv", None::<String>)
+        .done()
         .build()
         .expect("d2-d3 offer builds")
         .to_string();
@@ -180,9 +184,15 @@ fn ice_and_dtls_attributes_carried_verbatim() {
     let m = match_offer(&offer, &caps(&["0"])).unwrap();
 
     let attrs = &m.media_lines[0].carry_over_attrs;
-    assert!(attrs.iter().any(|a| matches!(a, ParsedAttribute::IceUfrag(_))));
-    assert!(attrs.iter().any(|a| matches!(a, ParsedAttribute::IcePwd(_))));
-    assert!(attrs.iter().any(|a| matches!(a, ParsedAttribute::Fingerprint(..))));
+    assert!(attrs
+        .iter()
+        .any(|a| matches!(a, ParsedAttribute::IceUfrag(_))));
+    assert!(attrs
+        .iter()
+        .any(|a| matches!(a, ParsedAttribute::IcePwd(_))));
+    assert!(attrs
+        .iter()
+        .any(|a| matches!(a, ParsedAttribute::Fingerprint(..))));
     assert!(attrs.iter().any(|a| matches!(a, ParsedAttribute::Setup(_))));
 }
 
@@ -193,15 +203,15 @@ fn multi_m_line_offer_independently_matched() {
         .connection("IN", "IP4", "127.0.0.1")
         .time("0", "0")
         .media_audio(16000, "RTP/AVP")
-            .formats(&["0"])
-            .rtpmap("0", "PCMU/8000")
-            .attribute("sendrecv", None::<String>)
-            .done()
+        .formats(&["0"])
+        .rtpmap("0", "PCMU/8000")
+        .attribute("sendrecv", None::<String>)
+        .done()
         .media_video(17000, "RTP/AVP")
-            .formats(&["97"])
-            .rtpmap("97", "VP8/90000")
-            .attribute("sendrecv", None::<String>)
-            .done()
+        .formats(&["97"])
+        .rtpmap("97", "VP8/90000")
+        .attribute("sendrecv", None::<String>)
+        .done()
         .build()
         .expect("multi-m offer builds")
         .to_string();

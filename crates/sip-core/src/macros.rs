@@ -171,7 +171,7 @@
 //! // Verify request headers and body
 //! assert_eq!(invite.method(), Method::Invite);
 //! assert_eq!(invite.uri().to_string(), "sip:bob@biloxi.example.com");
-//! 
+//!
 //! let from_header = invite.header(&HeaderName::From).unwrap();
 //! assert!(from_header.to_string().contains("Alice"));
 //!
@@ -180,7 +180,7 @@
 //!
 //! let content_type = invite.header(&HeaderName::ContentType).unwrap();
 //! assert_eq!(content_type.to_string(), "Content-Type: application/sdp");
-//! 
+//!
 //! assert_eq!(String::from_utf8_lossy(invite.body()), sdp_body);
 //! ```
 //!
@@ -234,7 +234,7 @@
 //!     to_uri: "sip:alice@atlanta.example.com",
 //!     to_tag: "1928301774",
 //!     call_id: "a84b4c76e66710@atlanta.example.com",
-//!     cseq: "314159", 
+//!     cseq: "314159",
 //!     cseq_method: Method::Invite,
 //!     via_host: "atlanta.example.com",
 //!     via_transport: "UDP",
@@ -247,7 +247,7 @@
 //! // Verify the response headers
 //! assert_eq!(response.status_code(), 200);
 //! assert_eq!(response.reason_phrase(), "OK");
-//! 
+//!
 //! let server = response.header(&HeaderName::Server).unwrap();
 //! assert!(server.to_string().contains("BiloxyPBX/2.3"));
 //! ```
@@ -270,7 +270,7 @@
 //!     to_uri: "sip:bob@biloxi.example.com",
 //!     to_tag: "314159",
 //!     call_id: "3848276298220188511@atlanta.example.com",
-//!     cseq: "1", 
+//!     cseq: "1",
 //!     cseq_method: Method::Invite,
 //!     via_host: "atlanta.example.com",
 //!     via_transport: "UDP",
@@ -280,22 +280,26 @@
 //! // Verify the error response
 //! assert_eq!(error_response.status_code(), 403);
 //! assert_eq!(error_response.reason_phrase(), "Forbidden - Authentication Failed");
-//! 
+//!
 //! // Check specific headers from the response
 //! let from = error_response.header(&HeaderName::From).unwrap();
 //! assert!(from.to_string().contains("Alice"));
 //! ```
 
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use crate::types::{Method, StatusCode, TypedHeader, uri::Uri};
+use crate::types::{uri::Uri, Method, StatusCode, TypedHeader};
 use std::str::FromStr;
 
 /// Helper macro to convert optional parameters to Option<T>
 #[macro_export]
 #[doc(hidden)]
 macro_rules! option_expr {
-    () => { None::<String> };
-    ($expr:expr) => { Some($expr.to_string()) };
+    () => {
+        None::<String>
+    };
+    ($expr:expr) => {
+        Some($expr.to_string())
+    };
 }
 
 /// Macro for creating SIP request messages with a concise syntax.
@@ -388,30 +392,30 @@ macro_rules! sip_request {
             // Create the builder with method and URI
             let mut builder = SimpleRequestBuilder::new($method, $uri)
                 .expect("Failed to create SimpleRequestBuilder with the provided URI");
-            
+
             // Add From header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($from_name)?), 
+                option_expr!($($from_name)?),
                 option_expr!($($from_uri)?)
             ) {
                 let tag = option_expr!($($from_tag)?);
                 builder = builder.from(&name, &uri, tag.as_deref());
             }
-            
+
             // Add To header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($to_name)?), 
+                option_expr!($($to_name)?),
                 option_expr!($($to_uri)?)
             ) {
                 let tag = option_expr!($($to_tag)?);
                 builder = builder.to(&name, &uri, tag.as_deref());
             }
-            
+
             // Add Call-ID if provided
             if let Some(call_id) = option_expr!($($call_id)?) {
                 builder = builder.call_id(&call_id);
             }
-            
+
             // Add CSeq if provided
             if let Some(cseq_str) = option_expr!($($cseq)?) {
                 // Convert string to u32 if needed
@@ -421,16 +425,16 @@ macro_rules! sip_request {
                 };
                 builder = builder.cseq(cseq_num);
             }
-            
+
             // Add Via if required parts are provided
             if let (Some(host), Some(transport)) = (
-                option_expr!($($via_host)?), 
+                option_expr!($($via_host)?),
                 option_expr!($($via_transport)?)
             ) {
                 let branch = option_expr!($($via_branch)?);
                 builder = builder.via(&host, &transport, branch.as_deref());
             }
-            
+
             // Add Max-Forwards if provided
             if let Some(max_forwards_str) = option_expr!($($max_forwards)?) {
                 // Convert string to u32 if needed
@@ -440,24 +444,24 @@ macro_rules! sip_request {
                 };
                 builder = builder.max_forwards(max_forwards_num);
             }
-            
+
             // Add Contact if provided
             if let Some(uri) = option_expr!($($contact_uri)?) {
                 let name = option_expr!($($contact_name)?);
                 builder = builder.contact(&uri, name.as_deref());
             }
-            
+
             // Add Content-Type if provided
             if let Some(content_type) = option_expr!($($content_type)?) {
                 builder = builder.content_type(&content_type);
             }
-            
+
             // Add custom headers if provided
             $(
                 $(
                     let header_name = stringify!($header_name);
                     let header_value = $header_value;
-                    
+
                     // Special handling for common headers
                     match header_name {
                         "MaxForwards" => {
@@ -474,7 +478,7 @@ macro_rules! sip_request {
                     _ => {
                             // Generic header handling
                             use $crate::types::header::{HeaderName, HeaderValue};
-                            
+
                             // Handle capitalization for header names
                             let name = if header_name.contains('_') {
                                 // Convert snake_case to Header-Case
@@ -496,7 +500,7 @@ macro_rules! sip_request {
                                     None => String::new()
                                 }
                             };
-                        
+
                         builder = builder.header(TypedHeader::Other(
                             HeaderName::Other(name),
                                 HeaderValue::text(header_value)
@@ -505,12 +509,12 @@ macro_rules! sip_request {
                 }
             )*
             )?
-            
+
             // Add body if provided
             if let Some(body) = option_expr!($($body)?) {
                 builder = builder.body(body);
             }
-            
+
             // Build the final request
             builder.build()
         }
@@ -555,7 +559,7 @@ macro_rules! sip_request {
 ///     to_uri: "sip:alice@atlanta.example.com",
 ///     to_tag: "1928301774",
 ///     call_id: "a84b4c76e66710@atlanta.example.com",
-///     cseq: "314159", 
+///     cseq: "314159",
 ///     cseq_method: Method::Invite,
 ///     via_host: "atlanta.example.com",
 ///     via_transport: "UDP",
@@ -601,34 +605,34 @@ macro_rules! sip_response {
             use $crate::builder::SimpleResponseBuilder;
             use $crate::types::TypedHeader;
             use std::str::FromStr;
-            
+
             // Create the builder with status and optional reason
             let reason = option_expr!($($reason)?);
             let mut builder = SimpleResponseBuilder::new($status, reason.as_deref());
-            
+
             // Add From header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($from_name)?), 
+                option_expr!($($from_name)?),
                 option_expr!($($from_uri)?)
             ) {
                 let tag = option_expr!($($from_tag)?);
                 builder = builder.from(&name, &uri, tag.as_deref());
             }
-            
+
             // Add To header if required parts are provided
             if let (Some(name), Some(uri)) = (
-                option_expr!($($to_name)?), 
+                option_expr!($($to_name)?),
                 option_expr!($($to_uri)?)
             ) {
                 let tag = option_expr!($($to_tag)?);
                 builder = builder.to(&name, &uri, tag.as_deref());
             }
-            
+
             // Add Call-ID if provided
             if let Some(call_id) = option_expr!($($call_id)?) {
                 builder = builder.call_id(&call_id);
             }
-            
+
             // Add CSeq if all required parts are provided
             if let (Some(seq_str), Some(method_str)) = (
                 option_expr!($($cseq)?),
@@ -639,23 +643,23 @@ macro_rules! sip_response {
                     Ok(num) => num,
                     Err(_) => 0, // Fallback value
                 };
-                
+
                 // Parse the method string to a Method enum
                 let method_enum = Method::from_str(&method_str)
                     .unwrap_or(Method::Invite); // Default fallback
-                
+
                 builder = builder.cseq(cseq_num, method_enum);
             }
-            
+
             // Add Via if required parts are provided
             if let (Some(host), Some(transport)) = (
-                option_expr!($($via_host)?), 
+                option_expr!($($via_host)?),
                 option_expr!($($via_transport)?)
             ) {
                 let branch = option_expr!($($via_branch)?);
                 builder = builder.via(&host, &transport, branch.as_deref());
             }
-            
+
             // Add Max-Forwards if provided
             if let Some(max_forwards_str) = option_expr!($($max_forwards)?) {
                 // Convert string to u8 if needed
@@ -663,40 +667,40 @@ macro_rules! sip_response {
                     Ok(num) => num,
                     Err(_) => 70, // Default fallback value
                 };
-                
+
                 // Headers are added with the header() method in response
                 use $crate::types::header::{HeaderName, HeaderValue};
                 use $crate::types::max_forwards::MaxForwards;
-                
+
                 builder = builder.header(TypedHeader::MaxForwards(
                     MaxForwards::new(max_forwards_num)
                 ));
             }
-            
+
             // Add Contact if provided
             if let Some(uri) = option_expr!($($contact_uri)?) {
                 let name = option_expr!($($contact_name)?);
                 builder = builder.contact(&uri, name.as_deref());
             }
-            
+
             // Add Content-Type if provided
             if let Some(content_type) = option_expr!($($content_type)?) {
                 builder = builder.content_type(&content_type);
             }
-            
+
             // Add custom headers if provided
             $(
                 $(
                     let header_name = stringify!($header_name);
                     let header_value = $header_value;
-                    
+
                     // Special handling for specific headers
                     match header_name {
                         "MaxForwards" => {
                             // Add with the header method
                             use $crate::types::header::{HeaderName, HeaderValue};
                             use $crate::types::max_forwards::MaxForwards;
-                            
+
                             builder = builder.header(TypedHeader::MaxForwards(
                                 MaxForwards::new(header_value.parse::<u8>().expect("Invalid Max-Forwards value"))
                         ));
@@ -712,7 +716,7 @@ macro_rules! sip_response {
                     _ => {
                             // Generic header handling
                             use $crate::types::header::{HeaderName, HeaderValue};
-                            
+
                             // Handle capitalization for header names
                             let name = if header_name.contains('_') {
                                 // Convert snake_case to Header-Case
@@ -734,7 +738,7 @@ macro_rules! sip_response {
                                     None => String::new()
                                 }
                             };
-                        
+
                         builder = builder.header(TypedHeader::Other(
                             HeaderName::Other(name),
                                 HeaderValue::text(header_value)
@@ -743,12 +747,12 @@ macro_rules! sip_response {
                 }
             )*
             )?
-            
+
             // Add body if provided
             if let Some(body) = option_expr!($($body)?) {
                 builder = builder.body(body);
             }
-            
+
             // Build the final response
             builder.build()
         }
@@ -759,8 +763,11 @@ macro_rules! sip_response {
 mod tests {
     use super::*;
     use crate::types::{
-        Method, StatusCode, uri::Uri, Address, TypedHeader, header::{HeaderName, HeaderValue},
-            sip_request::Request, sip_response::Response,
+        header::{HeaderName, HeaderValue},
+        sip_request::Request,
+        sip_response::Response,
+        uri::Uri,
+        Address, Method, StatusCode, TypedHeader,
     };
 
     #[test]
@@ -768,22 +775,22 @@ mod tests {
         let request = sip_request! {
             method: Method::Invite,
             uri: "sip:bob@example.com",
-            from_name: "Alice", 
+            from_name: "Alice",
             from_uri: "sip:alice@example.com",
             from_tag: "1928301774",
-            to_name: "Bob", 
+            to_name: "Bob",
             to_uri: "sip:bob@example.com",
             call_id: "a84b4c76e66710@pc33.atlanta.com",
             cseq: 314159,
-            via_host: "pc33.atlanta.com", 
-            via_transport: "UDP", 
+            via_host: "pc33.atlanta.com",
+            via_transport: "UDP",
             via_branch: "z9hG4bK776asdhds",
             max_forwards: 70,
         };
-        
+
         assert_eq!(request.method(), Method::Invite);
         assert_eq!(request.uri().to_string(), "sip:bob@example.com");
-        
+
         if let Some(from_header) = request.header(&HeaderName::From) {
             assert!(from_header.to_string().contains("Alice"));
             assert!(from_header.to_string().contains("sip:alice@example.com"));
@@ -791,28 +798,30 @@ mod tests {
         } else {
             panic!("Missing From header");
         }
-        
+
         if let Some(to_header) = request.header(&HeaderName::To) {
             assert!(to_header.to_string().contains("Bob"));
             assert!(to_header.to_string().contains("sip:bob@example.com"));
         } else {
             panic!("Missing To header");
         }
-        
+
         if let Some(via_header) = request.header(&HeaderName::Via) {
-            assert!(via_header.to_string().contains("SIP/2.0/UDP pc33.atlanta.com"));
+            assert!(via_header
+                .to_string()
+                .contains("SIP/2.0/UDP pc33.atlanta.com"));
             assert!(via_header.to_string().contains("branch=z9hG4bK776asdhds"));
         } else {
             panic!("Missing Via header");
         }
-        
+
         if let Some(cseq_header) = request.header(&HeaderName::CSeq) {
             assert!(cseq_header.to_string().contains("314159"));
         } else {
             panic!("Missing CSeq header");
         }
     }
-    
+
     #[test]
     fn test_sip_request_with_body() {
         let body_content = "v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n";
@@ -824,20 +833,23 @@ mod tests {
             content_type: "application/sdp",
             body: body_content,
         };
-        
+
         assert_eq!(request.method(), Method::Invite);
         if let Some(content_type) = request.header(&HeaderName::ContentType) {
             assert_eq!(content_type.to_string(), "Content-Type: application/sdp");
         } else {
             panic!("Missing Content-Type header");
         }
-        
+
         if let Some(content_length) = request.header(&HeaderName::ContentLength) {
-            assert_eq!(content_length.to_string(), format!("Content-Length: {}", body_content.len()));
+            assert_eq!(
+                content_length.to_string(),
+                format!("Content-Length: {}", body_content.len())
+            );
         } else {
             panic!("Missing Content-Length header");
         }
-        
+
         assert_eq!(String::from_utf8_lossy(request.body()), body_content);
     }
 
@@ -846,23 +858,23 @@ mod tests {
         let response = sip_response! {
             status: StatusCode::Ok,
             reason: "OK",
-            from_name: "Alice", 
+            from_name: "Alice",
             from_uri: "sip:alice@example.com",
             from_tag: "1928301774",
-            to_name: "Bob", 
+            to_name: "Bob",
             to_uri: "sip:bob@example.com",
             to_tag: "a6c85cf",
             call_id: "a84b4c76e66710@pc33.atlanta.com",
-            cseq: 314159, 
+            cseq: 314159,
             cseq_method: Method::Invite,
-            via_host: "pc33.atlanta.com", 
-            via_transport: "UDP", 
+            via_host: "pc33.atlanta.com",
+            via_transport: "UDP",
             via_branch: "z9hG4bK776asdhds",
         };
-        
+
         assert_eq!(response.status_code(), 200);
         assert_eq!(response.reason_phrase(), "OK");
-        
+
         if let Some(from_header) = response.header(&HeaderName::From) {
             assert!(from_header.to_string().contains("Alice"));
             assert!(from_header.to_string().contains("sip:alice@example.com"));
@@ -870,7 +882,7 @@ mod tests {
         } else {
             panic!("Missing From header");
         }
-        
+
         if let Some(to_header) = response.header(&HeaderName::To) {
             assert!(to_header.to_string().contains("Bob"));
             assert!(to_header.to_string().contains("sip:bob@example.com"));
@@ -878,14 +890,16 @@ mod tests {
         } else {
             panic!("Missing To header");
         }
-        
+
         if let Some(via_header) = response.header(&HeaderName::Via) {
-            assert!(via_header.to_string().contains("SIP/2.0/UDP pc33.atlanta.com"));
+            assert!(via_header
+                .to_string()
+                .contains("SIP/2.0/UDP pc33.atlanta.com"));
             assert!(via_header.to_string().contains("branch=z9hG4bK776asdhds"));
         } else {
             panic!("Missing Via header");
         }
-        
+
         if let Some(cseq_header) = response.header(&HeaderName::CSeq) {
             assert!(cseq_header.to_string().contains("314159 INVITE"));
         } else {
@@ -906,20 +920,23 @@ mod tests {
             content_type: "application/sdp",
             body: body_content,
         };
-        
+
         assert_eq!(response.status_code(), 200);
         if let Some(content_type) = response.header(&HeaderName::ContentType) {
             assert_eq!(content_type.to_string(), "Content-Type: application/sdp");
         } else {
             panic!("Missing Content-Type header");
         }
-        
+
         if let Some(content_length) = response.header(&HeaderName::ContentLength) {
-            assert_eq!(content_length.to_string(), format!("Content-Length: {}", body_content.len()));
+            assert_eq!(
+                content_length.to_string(),
+                format!("Content-Length: {}", body_content.len())
+            );
         } else {
             panic!("Missing Content-Length header");
         }
-        
+
         assert_eq!(String::from_utf8_lossy(response.body()), body_content);
     }
 
@@ -937,15 +954,15 @@ mod tests {
                 CustomHeader: "Custom Value",
             }
         };
-        
+
         assert_eq!(request.method(), Method::Invite);
-        
+
         if let Some(ua_header) = request.header(&HeaderName::UserAgent) {
             assert_eq!(ua_header.to_string(), "User-Agent: My Custom UA");
         } else {
             panic!("Missing User-Agent header");
         }
-        
+
         if let Some(subject_header) = request.header(&HeaderName::Subject) {
             assert_eq!(subject_header.to_string(), "Subject: Test Call");
         } else {
@@ -954,7 +971,7 @@ mod tests {
             // TODO: Fix Subject header handling in the macro
             println!("Missing Subject header - known issue");
         }
-        
+
         if let Some(priority_header) = request.header(&HeaderName::Priority) {
             assert_eq!(priority_header.to_string(), "Priority: urgent");
         } else {
@@ -963,9 +980,10 @@ mod tests {
             // TODO: Fix Priority header handling in the macro
             println!("Missing Priority header - known issue");
         }
-        
+
         // Check custom header using the header method with a string
-        if let Some(custom_header) = request.header(&HeaderName::Other("CustomHeader".to_string())) {
+        if let Some(custom_header) = request.header(&HeaderName::Other("CustomHeader".to_string()))
+        {
             assert_eq!(custom_header.to_string(), "CustomHeader: Custom Value");
         } else {
             panic!("Missing custom header");
@@ -984,9 +1002,9 @@ mod tests {
             to_name: "InvalidToName",  // Add name to ensure the header is created
             to_uri: "invalid-to-uri"
         };
-        
+
         assert_eq!(request.method(), Method::Invite);
-        
+
         // The builder should have accepted the invalid URIs and created something
         if let Some(from_header) = request.header(&HeaderName::From) {
             assert!(from_header.to_string().contains("invalid-from-uri"));
@@ -996,7 +1014,7 @@ mod tests {
             // TODO: Fix invalid URI handling in the macro
             println!("Missing From header despite invalid URI - known issue");
         }
-        
+
         if let Some(to_header) = request.header(&HeaderName::To) {
             assert!(to_header.to_string().contains("invalid-to-uri"));
         } else {
@@ -1011,13 +1029,13 @@ mod tests {
             method: Method::Options,
             uri: "sip:server.example.com",
         };
-        
+
         assert_eq!(request.method(), Method::Options);
         assert_eq!(request.uri().to_string(), "sip:server.example.com");
-        
+
         // No From/To/etc headers should be present
         assert!(request.header(&HeaderName::From).is_none());
         assert!(request.header(&HeaderName::To).is_none());
         assert!(request.header(&HeaderName::CallId).is_none());
     }
-} 
+}

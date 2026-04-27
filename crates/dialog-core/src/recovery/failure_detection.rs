@@ -24,4 +24,4 @@
 //! Basic failure detection is integrated into transaction event processing.
 //! This module will contain enhanced detection algorithms when implemented.
 
-// TODO: Implement advanced failure detection mechanisms 
+// TODO: Implement advanced failure detection mechanisms

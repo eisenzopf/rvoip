@@ -1,14 +1,10 @@
-use crate::error::{Error, Result};
-use std::collections::HashMap;
-use ordered_float::NotNan;
-use crate::types::{
-    TypedHeader,
-    header::TypedHeaderTrait,
-    headers::header_access::HeaderAccess,
-};
-use crate::types::accept::Accept;
-use crate::parser::headers::accept::AcceptValue;
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::parser::headers::accept::AcceptValue;
+use crate::types::accept::Accept;
+use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
+use ordered_float::NotNan;
+use std::collections::HashMap;
 
 /// Accept Header Builder for SIP Messages
 ///
@@ -18,7 +14,7 @@ use super::HeaderSetter;
 /// ## SIP Accept Header Overview
 ///
 /// The Accept header is defined in [RFC 3261 Section 20.1](https://datatracker.ietf.org/doc/html/rfc3261#section-20.1)
-/// as part of the core SIP protocol. It follows the syntax and semantics defined in 
+/// as part of the core SIP protocol. It follows the syntax and semantics defined in
 /// [RFC 2616 Section 14.1](https://datatracker.ietf.org/doc/html/rfc2616#section-14.1) for HTTP.
 /// The header specifies which media types are acceptable for the response or future requests
 /// in the same dialog.
@@ -190,7 +186,7 @@ pub trait AcceptExt {
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptExt};
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create an INVITE that accepts SDP responses
     /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", Some("invite-234"))
@@ -200,16 +196,12 @@ pub trait AcceptExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 3261 Section 20.1](https://datatracker.ietf.org/doc/html/rfc3261#section-20.1),
-    /// the Accept header field follows the syntax defined in 
+    /// the Accept header field follows the syntax defined in
     /// [RFC 2616 Section 14.1](https://datatracker.ietf.org/doc/html/rfc2616#section-14.1),
     /// including the use of q-values to indicate relative preference.
-    fn accept(
-        self, 
-        media_type: &str, 
-        q: Option<f32>
-    ) -> Self;
+    fn accept(self, media_type: &str, q: Option<f32>) -> Self;
 
     /// Add an Accept header with multiple media types
     ///
@@ -230,14 +222,14 @@ pub trait AcceptExt {
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptExt};
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a SUBSCRIBE request for presence information with format preferences
     /// let media_types = vec![
     ///     ("application/pidf+xml", Some(1.0)),      // Preferred format
     ///     ("application/xpidf+xml", Some(0.8)),     // Acceptable alternative
     ///     ("application/cpim-pidf+xml", Some(0.5)), // Least preferred format
     /// ];
-    /// 
+    ///
     /// let request = SimpleRequestBuilder::new(Method::Subscribe, "sip:presence@example.com").unwrap()
     ///     .from("Watcher", "sip:watcher@example.com", Some("sub876"))
     ///     .to("Presence Service", "sip:presence@example.com", None)
@@ -255,21 +247,14 @@ pub trait AcceptExt {
     /// - `multipart/mixed`
     ///
     /// Invalid media types will be silently ignored.
-    fn accepts(
-        self, 
-        media_types: Vec<(&str, Option<f32>)>
-    ) -> Self;
+    fn accepts(self, media_types: Vec<(&str, Option<f32>)>) -> Self;
 }
 
-impl<T> AcceptExt for T 
-where 
+impl<T> AcceptExt for T
+where
     T: HeaderSetter,
 {
-    fn accept(
-        self, 
-        media_type: &str, 
-        q: Option<f32>
-    ) -> Self {
+    fn accept(self, media_type: &str, q: Option<f32>) -> Self {
         // Parse the media type (format: type/subtype)
         let parts: Vec<&str> = media_type.split('/').collect();
         if parts.len() != 2 {
@@ -300,10 +285,7 @@ where
         self.set_header(header_value)
     }
 
-    fn accepts(
-        self, 
-        media_types: Vec<(&str, Option<f32>)>
-    ) -> Self {
+    fn accepts(self, media_types: Vec<(&str, Option<f32>)>) -> Self {
         // Convert the media types input to the required format
         let mut accept_values = Vec::with_capacity(media_types.len());
 
@@ -354,78 +336,116 @@ mod tests {
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
     use crate::types::Accept;
-    
+
     #[test]
     fn test_accept_single() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .accept("application/sdp", Some(0.8))
             .build();
-            
+
         // Check if Accept header exists with the correct value
         let header = request.header(&HeaderName::Accept);
         assert!(header.is_some(), "Accept header not found");
-        
+
         if let Some(TypedHeader::Accept(accept)) = header {
             // Check if the accept includes "application/sdp"
-            assert!(accept.accepts_type("application", "sdp"), "application/sdp not found in Accept header");
-            
+            assert!(
+                accept.accepts_type("application", "sdp"),
+                "application/sdp not found in Accept header"
+            );
+
             // Check the q value
             let media_types = accept.media_types();
             assert_eq!(media_types.len(), 1);
-            
+
             let media_type = &media_types[0];
             assert_eq!(media_type.m_type, "application");
             assert_eq!(media_type.m_subtype, "sdp");
-            
+
             // Check if the q param is present
-            let has_q = media_type.q.map(|q| (q.into_inner() - 0.8).abs() < 0.001).unwrap_or(false);
+            let has_q = media_type
+                .q
+                .map(|q| (q.into_inner() - 0.8).abs() < 0.001)
+                .unwrap_or(false);
             assert!(has_q, "q parameter with value 0.8 not found");
         } else {
             panic!("Expected Accept header");
         }
     }
-    
+
     #[test]
     fn test_accepts_multiple() {
         let media_types = vec![
             ("application/sdp", Some(1.0)),
             ("application/json", Some(0.5)),
         ];
-        
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .accepts(media_types)
             .build();
-            
+
         // Check if Accept header exists with the correct values
         let header = request.header(&HeaderName::Accept);
         assert!(header.is_some(), "Accept header not found");
-        
+
         if let Some(TypedHeader::Accept(accept)) = header {
             // Check if the accept includes both media types
-            assert!(accept.accepts_type("application", "sdp"), "application/sdp not found in Accept header");
-            assert!(accept.accepts_type("application", "json"), "application/json not found in Accept header");
-            
+            assert!(
+                accept.accepts_type("application", "sdp"),
+                "application/sdp not found in Accept header"
+            );
+            assert!(
+                accept.accepts_type("application", "json"),
+                "application/json not found in Accept header"
+            );
+
             // Check the q values
             let media_types = accept.media_types();
             assert_eq!(media_types.len(), 2);
-            
+
             // Find the application/sdp media type and check its q value
-            let sdp_type = media_types.iter().find(|m| m.m_type == "application" && m.m_subtype == "sdp");
-            assert!(sdp_type.is_some(), "application/sdp not found in Accept header");
-            let has_q = sdp_type.unwrap().q.map(|q| (q.into_inner() - 1.0).abs() < 0.001).unwrap_or(false);
-            assert!(has_q, "q parameter with value 1.0 not found for application/sdp");
-            
+            let sdp_type = media_types
+                .iter()
+                .find(|m| m.m_type == "application" && m.m_subtype == "sdp");
+            assert!(
+                sdp_type.is_some(),
+                "application/sdp not found in Accept header"
+            );
+            let has_q = sdp_type
+                .unwrap()
+                .q
+                .map(|q| (q.into_inner() - 1.0).abs() < 0.001)
+                .unwrap_or(false);
+            assert!(
+                has_q,
+                "q parameter with value 1.0 not found for application/sdp"
+            );
+
             // Find the application/json media type and check its q value
-            let json_type = media_types.iter().find(|m| m.m_type == "application" && m.m_subtype == "json");
-            assert!(json_type.is_some(), "application/json not found in Accept header");
-            let has_q = json_type.unwrap().q.map(|q| (q.into_inner() - 0.5).abs() < 0.001).unwrap_or(false);
-            assert!(has_q, "q parameter with value 0.5 not found for application/json");
+            let json_type = media_types
+                .iter()
+                .find(|m| m.m_type == "application" && m.m_subtype == "json");
+            assert!(
+                json_type.is_some(),
+                "application/json not found in Accept header"
+            );
+            let has_q = json_type
+                .unwrap()
+                .q
+                .map(|q| (q.into_inner() - 0.5).abs() < 0.001)
+                .unwrap_or(false);
+            assert!(
+                has_q,
+                "q parameter with value 0.5 not found for application/json"
+            );
         } else {
             panic!("Expected Accept header");
         }
     }
-} 
+}

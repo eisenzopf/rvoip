@@ -1,14 +1,14 @@
-pub mod value;
+pub mod ext;
 pub mod path;
 pub mod query;
-pub mod ext;
+pub mod value;
 
 // Re-export main types and traits
-pub use value::SipValue;
 pub use ext::SipJsonExt;
+pub use value::SipValue;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::error::Error;
 use std::fmt;
 
@@ -266,7 +266,7 @@ pub type SipJsonResult<T> = Result<T, SipJsonError>;
 
 /// Core trait for converting between SIP types and JSON.
 ///
-/// This trait provides the fundamental conversion methods between SIP types 
+/// This trait provides the fundamental conversion methods between SIP types
 /// and JSON representation. It is implemented automatically for any type that
 /// implements Serialize and DeserializeOwned.
 ///
@@ -298,7 +298,7 @@ pub type SipJsonResult<T> = Result<T, SipJsonError>;
 /// ```
 ///
 /// Using with SIP types:
-/// 
+///
 /// ```
 /// # use rvoip_sip_core::json::{SipJson, SipValue, SipJsonError};
 /// # use rvoip_sip_core::prelude::*;
@@ -354,7 +354,7 @@ pub trait SipJson {
     /// # }
     /// ```
     fn to_sip_value(&self) -> SipJsonResult<SipValue>;
-    
+
     /// Create this type from a SipValue.
     ///
     /// # Parameters
@@ -382,7 +382,7 @@ pub trait SipJson {
     ///     "version": "SIP/2.0",
     ///     "headers": []
     /// });
-    /// 
+    ///
     /// let sip_value = SipValue::from_json_value(&json_value);
     ///
     /// // Convert to a SIP request
@@ -392,29 +392,31 @@ pub trait SipJson {
     /// # Ok(())
     /// # }
     /// ```
-    fn from_sip_value(value: &SipValue) -> SipJsonResult<Self> where Self: Sized;
+    fn from_sip_value(value: &SipValue) -> SipJsonResult<Self>
+    where
+        Self: Sized;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::json::value::SipValue;
+    use crate::builder::SimpleRequestBuilder;
     use crate::json::path;
     use crate::json::query;
+    use crate::json::value::SipValue;
     use crate::types::sip_request::Request;
-    use crate::builder::SimpleRequestBuilder;
+    use serde::{Deserialize, Serialize};
     use std::collections::HashMap;
-    use serde::{Serialize, Deserialize};
 
     #[test]
     fn test_module_exports() {
         // Verify that the essential types and modules are exported
         let _: SipValue = SipValue::Null;
-        
+
         // Test that we can create errors of different types
         let _: SipJsonError = SipJsonError::Other("test error".to_string());
         let _: SipJsonError = SipJsonError::InvalidPath("invalid.path".to_string());
-        
+
         // Test Result type alias
         let result: SipJsonResult<()> = Ok(());
         assert!(result.is_ok());
@@ -427,17 +429,17 @@ mod tests {
         let err2 = SipJsonError::InvalidQuery("$.invalid".to_string());
         let err3 = SipJsonError::TypeConversionError("cannot convert".to_string());
         let err4 = SipJsonError::Other("other error".to_string());
-        
+
         // Check the error messages
         assert!(format!("{}", err1).contains("Invalid path"));
         assert!(format!("{}", err2).contains("Invalid query"));
         assert!(format!("{}", err3).contains("Type conversion error"));
         assert!(format!("{}", err4).contains("Other error"));
-        
+
         // Check Error trait implementation
         let _: Box<dyn Error> = Box::new(err1);
     }
-    
+
     #[test]
     fn test_serde_errors() {
         // Test serialization error with invalid serialization
@@ -447,11 +449,11 @@ mod tests {
             #[serde(skip_serializing)]
             value: std::cell::RefCell<i32>,
         }
-        
+
         let non_serializable = NonSerializable {
             value: std::cell::RefCell::new(42),
         };
-        
+
         // Attempting to convert a SipValue to JSON string with invalid UTF-8
         let serialization_result = serde_json::to_string(&non_serializable);
         let error = SipJsonError::SerializeError(serialization_result.err().unwrap_or_else(|| {
@@ -459,63 +461,64 @@ mod tests {
             serde_json::from_str::<serde_json::Value>("{invalid}").unwrap_err()
         }));
         assert!(format!("{}", error).contains("Serialization error"));
-        
+
         // Test deserialization error with actual parsing
         let invalid_json = "{invalid json";
         let result: Result<serde_json::Value, _> = serde_json::from_str(invalid_json);
         let error = SipJsonError::DeserializeError(result.unwrap_err());
         assert!(format!("{}", error).contains("Deserialization error"));
     }
-    
+
     #[test]
     fn test_sipjson_implementation() {
         // Instead of testing the trait implementation, which seems problematic,
         // test the SipValue conversions directly
-        
+
         // Create a simple SipValue
         let mut obj = HashMap::new();
         obj.insert("name".to_string(), SipValue::String("test".to_string()));
         obj.insert("value".to_string(), SipValue::Number(42.0));
         let value = SipValue::Object(obj);
-        
+
         // Check field access works
         let name_value = value.get_path("name").unwrap();
         assert_eq!(name_value.as_str(), Some("test"));
-        
+
         let value_field = value.get_path("value").unwrap();
         assert_eq!(value_field.as_i64(), Some(42));
-        
+
         // Test that we can convert to JSON and back
         let json_str = value.to_string().unwrap();
         let parsed = SipValue::from_str(&json_str).unwrap();
-        
+
         // Check the round-trip conversion preserved values
         let name_value2 = parsed.get_path("name").unwrap();
         assert_eq!(name_value2.as_str(), Some("test"));
-        
+
         let value_field2 = parsed.get_path("value").unwrap();
         assert_eq!(value_field2.as_i64(), Some(42));
     }
-    
+
     #[test]
     fn test_json_integration() {
         // Create a SIP request
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", Some("tag12345"))
             .to("Bob", "sip:bob@example.com", None)
             .build();
-        
+
         // Convert to SipValue
         let value = <Request as SipJson>::to_sip_value(&request).unwrap();
-        
+
         // Test path access
         let method_value = path::get_path(&value, "method").unwrap();
         assert_eq!(method_value.as_str(), Some("Invite"));
-        
+
         // Test query access
         let tags = query::query(&value, "$..Tag");
         assert!(!tags.is_empty());
-        
+
         // Test simple SipValue manipulation
         let mut method_str = String::new();
         if let Some(method) = path::get_path(&value, "method") {
@@ -524,17 +527,17 @@ mod tests {
             }
         }
         assert_eq!(method_str, "Invite");
-        
+
         // Test direct modification of SipValue
         let mut obj = HashMap::new();
         obj.insert("key".to_string(), SipValue::String("value".to_string()));
         let mut test_value = SipValue::Object(obj);
-        
+
         // Modify the value
         if let SipValue::Object(ref mut map) = test_value {
             map.insert("key".to_string(), SipValue::String("modified".to_string()));
         }
-        
+
         // Verify modification
         if let SipValue::Object(map) = &test_value {
             if let Some(SipValue::String(s)) = map.get("key") {
@@ -546,37 +549,39 @@ mod tests {
             panic!("Expected Object");
         }
     }
-    
+
     #[test]
     fn test_json_result_operators() {
         // Test ? operator with chained results
         fn parse_and_extract(json: &str) -> SipJsonResult<String> {
             let value = serde_json::from_str::<serde_json::Value>(json)
                 .map_err(|e| SipJsonError::DeserializeError(e))?;
-            
+
             let sip_value = SipValue::from_json_value(&value);
-            
+
             // Fix by getting the SipValue first, then calling as_str
             if let Some(name_value) = sip_value.get_path("name") {
                 if let Some(name) = name_value.as_str() {
                     Ok(name.to_string())
                 } else {
-                    Err(SipJsonError::TypeConversionError("name is not a string".to_string()))
+                    Err(SipJsonError::TypeConversionError(
+                        "name is not a string".to_string(),
+                    ))
                 }
             } else {
                 Err(SipJsonError::Other("name field not found".to_string()))
             }
         }
-        
+
         // Test success case
         let result = parse_and_extract(r#"{"name": "Alice"}"#);
         assert_eq!(result.unwrap(), "Alice");
-        
+
         // Test failure case
         let result = parse_and_extract(r#"{"not_name": "Bob"}"#);
         assert!(result.is_err());
         assert!(format!("{}", result.unwrap_err()).contains("name field not found"));
-        
+
         // Test invalid JSON case
         let result = parse_and_extract(r#"{invalid"#);
         assert!(result.is_err());
@@ -588,27 +593,27 @@ mod tests {
         // Test invalid path
         let value = SipValue::Object(HashMap::new());
         assert!(path::get_path(&value, "invalid.path").is_none());
-        
+
         // Test invalid query - use a pattern that's guaranteed to not match
         let results = query::query(&value, "$[?(@.field == 'value that cannot exist')]");
         assert!(results.is_empty());
-        
+
         // Test conversion error scenarios
         #[derive(Serialize, Deserialize)]
         struct RequiredField {
             required: String,
         }
-        
+
         // Missing required field should fail to deserialize
         let missing_field = SipValue::Object(HashMap::new());
         let result = <RequiredField as SipJson>::from_sip_value(&missing_field);
         assert!(result.is_err());
-        
+
         // Type mismatch should fail
         let mut obj = HashMap::new();
         obj.insert("required".to_string(), SipValue::Number(42.0));
         let wrong_type = SipValue::Object(obj);
-        
+
         let result = <RequiredField as SipJson>::from_sip_value(&wrong_type);
         assert!(result.is_err());
     }
@@ -656,4 +661,5 @@ mod tests {
 /// # Ok(())
 /// # }
 /// ```
-mod implementaton { /* This is just a placeholder to associate the doc comment */ } 
+mod implementaton { /* This is just a placeholder to associate the doc comment */
+}

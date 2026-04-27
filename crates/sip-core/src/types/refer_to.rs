@@ -48,20 +48,20 @@
 //! assert_eq!(refer_to.get_param("method"), None); // Method is on URI, not Address
 //! ```
 
-use crate::types::address::Address; 
-use crate::parser::headers::parse_refer_to;
 use crate::error::{Error, Result};
-use std::fmt;
-use std::str::FromStr;
+use crate::parser::headers::parse_refer_to;
+use crate::types::address::Address;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::fmt;
+use std::str::FromStr;
 
 /// Represents a Refer-To header as defined in RFC 3515
-/// 
+///
 /// The Refer-To header field is used in a REFER request to provide the
 /// URI to reference, and in an INVITE to indicate the replacement target.
-/// 
+///
 /// Syntax (RFC 3515):
 /// Refer-To = "Refer-To" HCOLON (name-addr / addr-spec) *( SEMI refer-param )
 /// refer-param = generic-param
@@ -260,7 +260,7 @@ impl ReferTo {
     /// let uri_with_param = Uri::from_str("sip:alice@example.com;transport=tcp").unwrap();
     /// let addr = Address::new(uri_with_param);
     /// let refer_to = ReferTo::new(addr);
-    /// 
+    ///
     /// // The transport parameter is in the URI, not in the Address params
     /// assert!(!refer_to.has_param("transport"));
     /// assert!(refer_to.uri().to_string().contains("transport=tcp"));
@@ -296,7 +296,7 @@ impl ReferTo {
     ///
     /// // Add tag parameter to Address (not URI)
     /// address.set_tag("1234");
-    /// 
+    ///
     /// let refer_to = ReferTo::new(address);
     ///
     /// // Verify we can get the tag parameter
@@ -366,9 +366,11 @@ impl TypedHeaderTrait for ReferTo {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -377,14 +379,16 @@ impl TypedHeaderTrait for ReferTo {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ReferTo::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -439,4 +443,4 @@ impl FromStr for ReferTo {
             .map(|(_rem, address)| ReferTo::new(address))
             .map_err(|e| Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
     }
-} 
+}

@@ -50,9 +50,9 @@
 // MediaType representation for SIP Content-Type and Accept headers
 // Format is type/subtype;parameter=value
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use serde::{Serialize, Deserialize};
 
 /// MediaType represents a MIME media type with optional parameters
 ///
@@ -93,10 +93,10 @@ use serde::{Serialize, Deserialize};
 pub struct MediaType {
     /// Main type (e.g., "application", "text", "audio")
     pub typ: String,
-    
+
     /// Subtype (e.g., "sdp", "plain", "sip")
     pub subtype: String,
-    
+
     /// Optional parameters (e.g., charset=utf-8)
     pub parameters: HashMap<String, String>,
 }
@@ -214,7 +214,8 @@ impl MediaType {
     /// assert!(mt.to_string().contains("charset=utf-8"));
     /// ```
     pub fn with_param(mut self, name: &str, value: &str) -> Self {
-        self.parameters.insert(name.to_lowercase(), value.to_string());
+        self.parameters
+            .insert(name.to_lowercase(), value.to_string());
         self
     }
 
@@ -261,8 +262,8 @@ impl MediaType {
     /// assert!(!mt1.matches_type(&mt5));
     /// ```
     pub fn matches_type(&self, other: &MediaType) -> bool {
-        (self.typ == "*" || other.typ == "*" || self.typ == other.typ) &&
-        (self.subtype == "*" || other.subtype == "*" || self.subtype == other.subtype)
+        (self.typ == "*" || other.typ == "*" || self.typ == other.typ)
+            && (self.subtype == "*" || other.subtype == "*" || self.subtype == other.subtype)
     }
 }
 
@@ -291,12 +292,12 @@ impl fmt::Display for MediaType {
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.typ, self.subtype)?;
-        
+
         // Add parameters if any exist
         for (name, value) in &self.parameters {
             write!(f, ";{}={}", name, value)?;
         }
-        
+
         Ok(())
     }
 }
@@ -327,7 +328,7 @@ impl MediaType {
     pub fn sdp() -> Self {
         MediaType::new("application", "sdp")
     }
-    
+
     /// application/sip - SIP message
     ///
     /// Creates a media type for embedded SIP messages, used when
@@ -348,7 +349,7 @@ impl MediaType {
     pub fn sip() -> Self {
         MediaType::new("application", "sip")
     }
-    
+
     /// text/plain - Plain text
     ///
     /// Creates a media type for plain text content, which might be used
@@ -373,7 +374,7 @@ impl MediaType {
     pub fn text_plain() -> Self {
         MediaType::new("text", "plain")
     }
-    
+
     /// multipart/mixed - Multipart message with mixed content
     ///
     /// Creates a media type for multipart mixed content, used when a SIP message
@@ -404,36 +405,35 @@ impl MediaType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_media_type_display() {
         let mt = MediaType::new("application", "sdp");
         assert_eq!(mt.to_string(), "application/sdp");
-        
-        let mt_with_params = MediaType::new("text", "plain")
-            .with_param("charset", "utf-8");
+
+        let mt_with_params = MediaType::new("text", "plain").with_param("charset", "utf-8");
         assert_eq!(mt_with_params.to_string(), "text/plain;charset=utf-8");
     }
-    
+
     #[test]
     fn test_media_type_matching() {
         let mt1 = MediaType::new("application", "sdp");
         let mt2 = MediaType::new("application", "sdp");
         assert!(mt1.matches_type(&mt2));
-        
+
         let mt3 = MediaType::new("application", "*");
         assert!(mt1.matches_type(&mt3));
-        
+
         let mt4 = MediaType::new("*", "*");
         assert!(mt1.matches_type(&mt4));
-        
+
         let mt5 = MediaType::new("text", "plain");
         assert!(!mt1.matches_type(&mt5));
     }
-    
+
     #[test]
     fn test_common_media_types() {
         assert_eq!(MediaType::sdp().to_string(), "application/sdp");
         assert_eq!(MediaType::text_plain().to_string(), "text/plain");
     }
-} 
+}

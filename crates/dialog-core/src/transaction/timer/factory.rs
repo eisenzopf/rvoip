@@ -6,14 +6,14 @@
 //!
 //! # RFC 3261 Timer Requirements
 //!
-//! SIP transaction timers are crucial for ensuring reliable message delivery over unreliable 
+//! SIP transaction timers are crucial for ensuring reliable message delivery over unreliable
 //! transports like UDP. RFC 3261 Section 17 defines different transaction types (INVITE client,
 //! non-INVITE client, INVITE server, non-INVITE server) with different timer requirements.
 //!
 //! The `TimerFactory` abstracts these requirements, providing convenience methods for
 //! starting the appropriate timers for each transaction type and state:
 //!
-//! - **INVITE Client Transactions**: Use Timers A, B, and D for retransmission, 
+//! - **INVITE Client Transactions**: Use Timers A, B, and D for retransmission,
 //!   timeout, and wait time respectively
 //! - **Non-INVITE Client Transactions**: Use Timers E, F, and K for similar purposes
 //! - **INVITE Server Transactions**: Use Timers G, H, and I for response retransmission,
@@ -65,9 +65,8 @@ use std::time::Duration;
 use crate::transaction::error::Result; // Assuming crate::error::Result is suitable
 use crate::transaction::TransactionKey;
 // Use super::types to access TimerSettings, Timer, TimerType from the same module level.
-use super::types::{Timer, TimerSettings, TimerType};
 use super::manager::TimerManager;
-
+use super::types::{Timer, TimerSettings, TimerType};
 
 /// A factory for creating and scheduling SIP timers based on RFC 3261.
 ///
@@ -108,7 +107,7 @@ impl TimerFactory {
             timer_manager,
         }
     }
-    
+
     /// Returns a reference to the [`TimerSettings`] used by this factory.
     pub fn settings(&self) -> &TimerSettings {
         &self.settings
@@ -126,14 +125,17 @@ impl TimerFactory {
     ///
     /// # RFC 3261 Context
     ///
-    /// Timer A controls the retransmission interval for INVITE requests over unreliable 
-    /// transports. It starts at T1 seconds and doubles after each retransmission. 
+    /// Timer A controls the retransmission interval for INVITE requests over unreliable
+    /// transports. It starts at T1 seconds and doubles after each retransmission.
     /// See RFC 3261 Section 17.1.1.2 for details.
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_a(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::A, self.settings.t1).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::A, self.settings.t1)
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer B for an INVITE client transaction (transaction timeout).
@@ -141,14 +143,21 @@ impl TimerFactory {
     ///
     /// # RFC 3261 Context
     ///
-    /// Timer B determines how long an INVITE client transaction will continue 
+    /// Timer B determines how long an INVITE client transaction will continue
     /// to retry (retransmit) before timing out. The recommended value is 64*T1.
     /// See RFC 3261 Section 17.1.1.2 for details.
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_b(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::B, self.settings.transaction_timeout).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(
+                transaction_id,
+                TimerType::B,
+                self.settings.transaction_timeout,
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer D for an INVITE client transaction (wait for response retransmissions).
@@ -163,7 +172,10 @@ impl TimerFactory {
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE client transaction
     pub async fn schedule_timer_d(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::D, self.settings.wait_time_d).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::D, self.settings.wait_time_d)
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer E for a non-INVITE client transaction (initial retransmission timer).
@@ -178,7 +190,10 @@ impl TimerFactory {
     /// # Arguments
     /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_e(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::E, self.settings.t1).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::E, self.settings.t1)
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer F for a non-INVITE client transaction (transaction timeout).
@@ -186,14 +201,21 @@ impl TimerFactory {
     ///
     /// # RFC 3261 Context
     ///
-    /// Timer F determines how long a non-INVITE client transaction will continue 
+    /// Timer F determines how long a non-INVITE client transaction will continue
     /// to retry before timing out. The recommended value is 64*T1.
     /// See RFC 3261 Section 17.1.2.2 for details.
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_f(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::F, self.settings.transaction_timeout).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(
+                transaction_id,
+                TimerType::F,
+                self.settings.transaction_timeout,
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer G for an INVITE server transaction (2xx response retransmission).
@@ -208,7 +230,10 @@ impl TimerFactory {
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_g(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::G, self.settings.t1).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::G, self.settings.t1)
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer H for an INVITE server transaction (wait for ACK after 2xx).
@@ -216,15 +241,18 @@ impl TimerFactory {
     ///
     /// # RFC 3261 Context
     ///
-    /// Timer H limits how long an INVITE server transaction will retransmit 
-    /// the final response. If no ACK is received when Timer H fires, the 
+    /// Timer H limits how long an INVITE server transaction will retransmit
+    /// the final response. If no ACK is received when Timer H fires, the
     /// transaction terminates anyway. Typically 64*T1.
     /// See RFC 3261 Section 17.2.1 for details.
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_h(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::H, self.settings.wait_time_h).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::H, self.settings.wait_time_h)
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer I for an INVITE server transaction (wait in Confirmed state after ACK).
@@ -232,15 +260,18 @@ impl TimerFactory {
     ///
     /// # RFC 3261 Context
     ///
-    /// Timer I determines how long an INVITE server transaction stays in the 
-    /// Confirmed state after receiving an ACK, to absorb any retransmitted ACKs. 
+    /// Timer I determines how long an INVITE server transaction stays in the
+    /// Confirmed state after receiving an ACK, to absorb any retransmitted ACKs.
     /// For reliable transports, this can be 0. For UDP, it's typically T4 (5 seconds).
     /// See RFC 3261 Section 17.2.1 for details.
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE server transaction
     pub async fn schedule_timer_i(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::I, self.settings.wait_time_i).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::I, self.settings.wait_time_i)
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer J for a non-INVITE server transaction (wait for request retransmissions).
@@ -248,15 +279,18 @@ impl TimerFactory {
     ///
     /// # RFC 3261 Context
     ///
-    /// Timer J determines how long a non-INVITE server transaction stays in the 
-    /// Completed state, waiting for request retransmissions. For UDP, this is 
+    /// Timer J determines how long a non-INVITE server transaction stays in the
+    /// Completed state, waiting for request retransmissions. For UDP, this is
     /// typically 64*T1 (32 seconds). For reliable transports, it can be 0.
     /// See RFC 3261 Section 17.2.2 for details.
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the non-INVITE server transaction
     pub async fn schedule_timer_j(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::J, self.settings.wait_time_j).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::J, self.settings.wait_time_j)
+            .await
+            .map(|_| ())
     }
 
     /// Schedules Timer K for a non-INVITE client transaction (wait for response retransmissions).
@@ -264,15 +298,18 @@ impl TimerFactory {
     ///
     /// # RFC 3261 Context
     ///
-    /// Timer K determines how long a non-INVITE client transaction stays in the 
-    /// Completed state, waiting for response retransmissions. For UDP, this is 
+    /// Timer K determines how long a non-INVITE client transaction stays in the
+    /// Completed state, waiting for response retransmissions. For UDP, this is
     /// typically T4 (5 seconds). For reliable transports, it can be 0.
     /// See RFC 3261 Section 17.1.2.2 for details.
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the non-INVITE client transaction
     pub async fn schedule_timer_k(&self, transaction_id: TransactionKey) -> Result<()> {
-        self.timer_manager.start_timer(transaction_id, TimerType::K, self.settings.wait_time_k).await.map(|_| ()) 
+        self.timer_manager
+            .start_timer(transaction_id, TimerType::K, self.settings.wait_time_k)
+            .await
+            .map(|_| ())
     }
 
     // --- Transaction State Timer Combinations ---
@@ -290,7 +327,10 @@ impl TimerFactory {
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE client transaction
-    pub async fn schedule_invite_client_initial_timers(&self, transaction_id: TransactionKey) -> Result<()> {
+    pub async fn schedule_invite_client_initial_timers(
+        &self,
+        transaction_id: TransactionKey,
+    ) -> Result<()> {
         self.schedule_timer_a(transaction_id.clone()).await?;
         self.schedule_timer_b(transaction_id).await
     }
@@ -308,7 +348,10 @@ impl TimerFactory {
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the non-INVITE client transaction
-    pub async fn schedule_non_invite_client_initial_timers(&self, transaction_id: TransactionKey) -> Result<()> {
+    pub async fn schedule_non_invite_client_initial_timers(
+        &self,
+        transaction_id: TransactionKey,
+    ) -> Result<()> {
         self.schedule_timer_e(transaction_id.clone()).await?;
         self.schedule_timer_f(transaction_id).await
     }
@@ -324,11 +367,14 @@ impl TimerFactory {
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE server transaction
-    pub async fn schedule_invite_server_completed_timers_for_2xx(&self, transaction_id: TransactionKey) -> Result<()> {
+    pub async fn schedule_invite_server_completed_timers_for_2xx(
+        &self,
+        transaction_id: TransactionKey,
+    ) -> Result<()> {
         self.schedule_timer_g(transaction_id.clone()).await?; // For retransmitting 2xx
         self.schedule_timer_h(transaction_id).await // For ACK timeout
     }
-    
+
     /// Schedules Timer I for an INVITE server transaction that has received an ACK for its 2xx response.
     ///
     /// # RFC 3261 Context
@@ -338,7 +384,10 @@ impl TimerFactory {
     ///
     /// # Arguments
     /// * `transaction_id` - The transaction key for the INVITE server transaction
-    pub async fn schedule_invite_server_confirmed_timer(&self, transaction_id: TransactionKey) -> Result<()> {
+    pub async fn schedule_invite_server_confirmed_timer(
+        &self,
+        transaction_id: TransactionKey,
+    ) -> Result<()> {
         self.schedule_timer_i(transaction_id).await
     }
 
@@ -353,7 +402,9 @@ impl TimerFactory {
     /// # Arguments
     /// * `transaction_id` - The transaction key for which to cancel all timers
     pub async fn cancel_all_timers(&self, transaction_id: &TransactionKey) -> Result<()> {
-        self.timer_manager.unregister_transaction(transaction_id).await;
+        self.timer_manager
+            .unregister_transaction(transaction_id)
+            .await;
         Ok(())
     }
 }
@@ -398,16 +449,27 @@ mod tests {
         }
 
         // Mocked version of TimerManager's start_timer
-        async fn start_timer(&self, transaction_id: TransactionKey, timer_type: TimerType, duration: Duration) -> Result<()> {
-            self.started_timers.lock().unwrap().push((transaction_id, timer_type, duration));
+        async fn start_timer(
+            &self,
+            transaction_id: TransactionKey,
+            timer_type: TimerType,
+            duration: Duration,
+        ) -> Result<()> {
+            self.started_timers
+                .lock()
+                .unwrap()
+                .push((transaction_id, timer_type, duration));
             Ok(())
         }
 
         // Mocked version of TimerManager's unregister_transaction
         async fn unregister_transaction(&self, transaction_id: &TransactionKey) {
-            self.unregistered_transactions.lock().unwrap().push(transaction_id.clone());
+            self.unregistered_transactions
+                .lock()
+                .unwrap()
+                .push(transaction_id.clone());
         }
-        
+
         // Real TimerManager::new takes Option<mpsc::Sender<TimerEvent>>
         // For Arc<TimerManager> we need something that looks like TimerManager
         // This mock focuses on behavior, not full type compatibility for now.
@@ -415,7 +477,7 @@ mod tests {
         // implement all public methods of TimerManager or use a trait if available.
         // Let's assume for these tests, the factory only calls the above two.
     }
-    
+
     // To use MockTimerManager with TimerFactory, TimerFactory expects Arc<TimerManager>.
     // We can't directly cast Arc<MockTimerManager> to Arc<TimerManager>.
     // This requires either:
@@ -434,7 +496,10 @@ mod tests {
         // For now, just ensure it's constructed.
 
         let factory_default_settings = TimerFactory::new(None, mock_tm_arc.clone());
-        assert_eq!(*factory_default_settings.settings(), TimerSettings::default());
+        assert_eq!(
+            *factory_default_settings.settings(),
+            TimerSettings::default()
+        );
     }
 
     #[test]
@@ -444,7 +509,7 @@ mod tests {
         // Check if timer_manager is some default TimerManager
         assert!(Arc::strong_count(&factory.timer_manager()) >= 1);
     }
-    
+
     // Re-using MockTimerManager logic by making it an actual TimerManager for testing purposes,
     // by having it store calls. This is a bit of a hack.
     // A cleaner way involves traits or more complex mocking frameworks.
@@ -456,7 +521,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_timer_a() {
-        let settings = TimerSettings { t1: Duration::from_millis(100), ..Default::default() };
+        let settings = TimerSettings {
+            t1: Duration::from_millis(100),
+            ..Default::default()
+        };
         // For this test, we need to see what TimerFactory *would* call on TimerManager.
         // We'll use a real TimerManager but won't check its internal state, only that factory uses correct values.
         let tm = Arc::new(TimerManager::new(None)); // Corrected: TimerManager::new takes Option<TimerSettings>
@@ -487,7 +555,7 @@ mod tests {
         assert!(res_a.is_ok()); // Asserts that start_timer itself didn't fail for some reason.
                                 // Does not verify parameters easily.
     }
-    
+
     // To properly test interactions, TimerManager needs to be mockable.
     // Let's assume we *can* use the MockTimerManager defined earlier by making TimerFactory take a trait.
     // If not, these tests primarily check that the factory methods select correct settings.
@@ -495,29 +563,52 @@ mod tests {
     // Define a simple trait that TimerManager and MockTimerManager can implement for testing
     #[async_trait::async_trait]
     pub trait TimerManagerActions: Send + Sync {
-        async fn start_timer(&self, transaction_id: TransactionKey, timer_type: TimerType, duration: Duration) -> Result<()>;
+        async fn start_timer(
+            &self,
+            transaction_id: TransactionKey,
+            timer_type: TimerType,
+            duration: Duration,
+        ) -> Result<()>;
         async fn unregister_transaction(&self, transaction_id: &TransactionKey);
     }
 
     #[async_trait::async_trait]
     impl TimerManagerActions for TimerManager {
-        async fn start_timer(&self, transaction_id: TransactionKey, timer_type: TimerType, duration: Duration) -> Result<()> {
+        async fn start_timer(
+            &self,
+            transaction_id: TransactionKey,
+            timer_type: TimerType,
+            duration: Duration,
+        ) -> Result<()> {
             // Call the real method
-            TimerManager::start_timer(self, transaction_id, timer_type, duration).await.map(|_| ())
+            TimerManager::start_timer(self, transaction_id, timer_type, duration)
+                .await
+                .map(|_| ())
         }
         async fn unregister_transaction(&self, transaction_id: &TransactionKey) {
             TimerManager::unregister_transaction(self, transaction_id).await;
         }
     }
-    
+
     #[async_trait::async_trait]
     impl TimerManagerActions for MockTimerManager {
-         async fn start_timer(&self, transaction_id: TransactionKey, timer_type: TimerType, duration: Duration) -> Result<()> {
-            self.started_timers.lock().unwrap().push((transaction_id, timer_type, duration));
+        async fn start_timer(
+            &self,
+            transaction_id: TransactionKey,
+            timer_type: TimerType,
+            duration: Duration,
+        ) -> Result<()> {
+            self.started_timers
+                .lock()
+                .unwrap()
+                .push((transaction_id, timer_type, duration));
             Ok(())
         }
         async fn unregister_transaction(&self, transaction_id: &TransactionKey) {
-            self.unregistered_transactions.lock().unwrap().push(transaction_id.clone());
+            self.unregistered_transactions
+                .lock()
+                .unwrap()
+                .push(transaction_id.clone());
         }
     }
 
@@ -541,11 +632,11 @@ mod tests {
 
         let settings = TimerSettings::default();
         let mock_tm = Arc::new(MockTimerManager::new());
-        
+
         // To use this mock_tm, TimerFactory::new would need to accept Arc<MockTimerManager>
         // or Arc<dyn TimerManagerActions>.
         // Let's proceed assuming we are checking the factory's internal logic of choosing durations.
-        
+
         let factory = TimerFactory::new(Some(settings.clone()), Arc::new(TimerManager::new(None))); // Using real TM
         let tx_key_a = dummy_tx_key("timer_a_logic");
         let tx_key_b = dummy_tx_key("timer_b_logic");
@@ -557,28 +648,32 @@ mod tests {
         assert!(factory.schedule_timer_a(tx_key_a.clone()).await.is_ok());
         assert!(factory.schedule_timer_b(tx_key_b.clone()).await.is_ok());
 
-
         // Test a combination method
         let tx_key_combo = dummy_tx_key("combo_logic");
-        let res_combo = factory.schedule_invite_client_initial_timers(tx_key_combo.clone()).await;
+        let res_combo = factory
+            .schedule_invite_client_initial_timers(tx_key_combo.clone())
+            .await;
         assert!(res_combo.is_ok());
 
         // Test cancel
         let res_cancel = factory.cancel_all_timers(&tx_key_combo).await;
         assert!(res_cancel.is_ok());
     }
-    
+
     // More focused tests using a mock manager if TimerFactory were adapted:
     #[tokio::test]
     async fn test_schedule_timer_a_interaction() {
-        let settings = TimerSettings { t1: Duration::from_millis(123), ..Default::default() };
+        let settings = TimerSettings {
+            t1: Duration::from_millis(123),
+            ..Default::default()
+        };
         let mock_tm = Arc::new(MockTimerManager::new());
-        
+
         // Scenario: TimerFactory is refactored to accept Arc<impl TimerManagerActions>
         // let factory = TimerFactory::new(Some(settings.clone()), mock_tm.clone() as Arc<dyn TimerManagerActions>);
         // For now, this test is illustrative of what we *want* to test.
         // We can't run this directly with current TimerFactory.
-        
+
         // Illustrative assertions if mock was injectable:
         // factory.schedule_timer_a(dummy_tx_key("a")).await.unwrap();
         // let started = mock_tm.started_timers.lock().unwrap();
@@ -587,7 +682,7 @@ mod tests {
         // assert_eq!(started[0].2, settings.t1);
     }
 
-     #[tokio::test]
+    #[tokio::test]
     async fn test_schedule_invite_client_initial_timers_interaction() {
         let settings = TimerSettings::default();
         let mock_tm = Arc::new(MockTimerManager::new());
@@ -611,4 +706,4 @@ mod tests {
         // assert_eq!(unregistered.len(), 1);
         // assert_eq!(unregistered[0], tx_key);
     }
-} 
+}

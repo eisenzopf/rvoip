@@ -1,7 +1,7 @@
 /// # Transaction Logic
 ///
 /// This module defines the core trait that powers the different transaction state machines
-/// required by RFC 3261 Section 17. It provides a flexible, reusable architecture for 
+/// required by RFC 3261 Section 17. It provides a flexible, reusable architecture for
 /// implementing the distinct behavior of INVITE and non-INVITE client and server transactions.
 ///
 /// ## RFC 3261 Context
@@ -28,17 +28,16 @@
 /// This architecture separates the transaction-specific behavior (how each type processes messages
 /// and timers) from the common event loop machinery, reducing code duplication and making the
 /// code more maintainable.
-
 use std::sync::Arc;
 use std::time::Duration; // Required for timer configurations
-use tokio::task::JoinHandle;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 // Assuming these are accessible. Adjust paths if necessary.
-use rvoip_sip_core::Message;
 use crate::transaction::error::Result;
-use crate::transaction::{TransactionState, TransactionKind, InternalTransactionCommand};
 use crate::transaction::timer::TimerSettings;
+use crate::transaction::{InternalTransactionCommand, TransactionKind, TransactionState};
+use rvoip_sip_core::Message;
 
 /// Core trait defining the state machine logic for a SIP transaction type.
 ///
@@ -61,7 +60,7 @@ use crate::transaction::timer::TimerSettings;
 pub trait TransactionLogic<D, TH>
 where
     D: Send + Sync + 'static, // Shared transaction data
-    TH: Default + Send + Sync + 'static, // Holds timer JoinHandles
+    TH: Default + Send + Sync + 'static,
 {
     /// Returns the kind of this transaction implementation.
     ///
@@ -220,7 +219,7 @@ where
     /// * `timer_handles`: Mutable reference to the transaction's timer handles.
     ///                  The implementation should abort and remove all active timers.
     fn cancel_all_specific_timers(&self, timer_handles: &mut TH);
-    
+
     /// Cancels the automatic 100 Trying timer (Timer 100) for INVITE server transactions.
     ///
     /// This method is called when the TU sends any provisional response, making the
@@ -239,4 +238,4 @@ where
         // Default implementation is a no-op for non-INVITE server transactions
         Ok(())
     }
-} 
+}

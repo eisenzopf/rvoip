@@ -1,11 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
     organization::Organization,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 
 /// Organization header builder
 ///
@@ -106,8 +104,8 @@ pub trait OrganizationBuilderExt {
     fn organization<S: Into<String>>(self, name: S) -> Self;
 }
 
-impl<T> OrganizationBuilderExt for T 
-where 
+impl<T> OrganizationBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn organization<S: Into<String>>(self, name: S) -> Self {
@@ -125,13 +123,14 @@ mod tests {
 
     #[test]
     fn test_request_organization() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .organization("Example Corporation")
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Organization(org)) = request.header(&HeaderName::Organization) {
             assert_eq!(org.as_str(), "Example Corporation");
         } else {
@@ -144,10 +143,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .organization("Rudeless Ventures")
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Organization(org)) = response.header(&HeaderName::Organization) {
             assert_eq!(org.as_str(), "Rudeless Ventures");
         } else {
@@ -158,10 +157,11 @@ mod tests {
     #[test]
     fn test_organization_empty() {
         // Test with empty organization value
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .organization("")
             .build();
-            
+
         if let Some(TypedHeader::Organization(org)) = request.header(&HeaderName::Organization) {
             assert_eq!(org.as_str(), "");
         } else {
@@ -171,26 +171,28 @@ mod tests {
 
     #[test]
     fn test_organization_display() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .organization("Example Corporation")
             .build();
-            
+
         if let Some(TypedHeader::Organization(org)) = request.header(&HeaderName::Organization) {
             assert_eq!(org.to_string(), "Example Corporation");
         } else {
             panic!("Organization header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_multiple_organization() {
         // Test that setting Organization multiple times results in the last value being used,
         // as Organization should be a single-value header.
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .organization("First Organization")
             .organization("Second Organization") // This should replace the first one
             .build();
-            
+
         if let Some(TypedHeader::Organization(org)) = request.header(&HeaderName::Organization) {
             // We expect the last set value due to replacement logic.
             assert_eq!(org.as_str(), "Second Organization");
@@ -198,18 +200,19 @@ mod tests {
             panic!("Organization header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_organization_with_special_chars() {
         let special_org = "Acme, Inc. & Partners (2023)";
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .organization(special_org)
             .build();
-            
+
         if let Some(TypedHeader::Organization(org)) = request.header(&HeaderName::Organization) {
             assert_eq!(org.as_str(), special_org);
         } else {
             panic!("Organization header not found or has wrong type");
         }
     }
-} 
+}

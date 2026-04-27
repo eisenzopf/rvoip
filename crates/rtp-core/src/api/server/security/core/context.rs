@@ -6,9 +6,9 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
-use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
-use crate::api::server::security::{ServerSecurityContext, ServerSecurityConfig, SocketHandle};
+use crate::api::common::error::SecurityError;
+use crate::api::server::security::{ServerSecurityConfig, ServerSecurityContext, SocketHandle};
 use crate::dtls::DtlsConnection;
 
 /// Initialize security context if needed
@@ -18,13 +18,15 @@ pub async fn initialize_security_context(
     connection_template: &Arc<Mutex<Option<DtlsConnection>>>,
 ) -> Result<(), SecurityError> {
     debug!("Initializing server security context");
-    
+
     // Verify that the connection template is initialized
     let template = connection_template.lock().await;
     if template.is_none() {
-        return Err(SecurityError::Configuration("DTLS connection template not initialized".to_string()));
+        return Err(SecurityError::Configuration(
+            "DTLS connection template not initialized".to_string(),
+        ));
     }
-    
+
     // Nothing more to do for initialization - each client connection
     // will be initialized individually on first contact
     Ok(())
@@ -40,13 +42,15 @@ pub async fn get_security_info(
         Ok(fp) => Some(fp),
         Err(_) => None,
     };
-    
+
     // Create security info
     let security_info = SecurityInfo {
         mode: config.security_mode,
         fingerprint: fingerprint,
         fingerprint_algorithm: Some(config.fingerprint_algorithm.clone()),
-        crypto_suites: config.srtp_profiles.iter()
+        crypto_suites: config
+            .srtp_profiles
+            .iter()
             .map(|p| match p {
                 SrtpProfile::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
                 SrtpProfile::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
@@ -58,7 +62,7 @@ pub async fn get_security_info(
         key_params: None,
         srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
     };
-    
+
     Ok(security_info)
 }
 
@@ -69,21 +73,23 @@ pub async fn is_security_context_ready(
 ) -> Result<bool, SecurityError> {
     // Check if socket is set
     let socket_set = socket.lock().await.is_some();
-    
+
     // Check if template connection is initialized (needed for certificate)
     let connection_initialized = connection_template.lock().await.is_some();
-    
+
     // Check if template certificate is initialized
-    let certificate_initialized = get_fingerprint_from_template(connection_template).await.is_ok();
-    
+    let certificate_initialized = get_fingerprint_from_template(connection_template)
+        .await
+        .is_ok();
+
     // All prerequisites must be met for the context to be ready
     let is_ready = socket_set && connection_initialized && certificate_initialized;
-    
+
     debug!("Server security context ready: {}", is_ready);
     debug!("  - Socket set: {}", socket_set);
     debug!("  - Connection initialized: {}", connection_initialized);
     debug!("  - Certificate initialized: {}", certificate_initialized);
-    
+
     Ok(is_ready)
 }
 
@@ -98,13 +104,20 @@ pub async fn get_fingerprint_from_template(
             let mut cert_copy = cert.clone();
             match cert_copy.fingerprint("SHA-256") {
                 Ok(fingerprint) => Ok(fingerprint),
-                Err(e) => Err(SecurityError::Internal(format!("Failed to get fingerprint: {}", e))),
+                Err(e) => Err(SecurityError::Internal(format!(
+                    "Failed to get fingerprint: {}",
+                    e
+                ))),
             }
         } else {
-            Err(SecurityError::Configuration("No certificate available".to_string()))
+            Err(SecurityError::Configuration(
+                "No certificate available".to_string(),
+            ))
         }
     } else {
-        Err(SecurityError::Configuration("DTLS connection template not initialized".to_string()))
+        Err(SecurityError::Configuration(
+            "DTLS connection template not initialized".to_string(),
+        ))
     }
 }
 
@@ -114,4 +127,4 @@ pub async fn get_fingerprint_algorithm_from_template(
 ) -> Result<String, SecurityError> {
     // We hardcode this for now since the algorithm is set during certificate creation
     Ok("sha-256".to_string())
-} 
+}

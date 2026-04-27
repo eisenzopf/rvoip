@@ -7,20 +7,15 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 
-use crate::types::{DialogId, AudioFrame};
+use crate::performance::{metrics::PerformanceMetrics, pool::AudioFramePool, simd::SimdProcessor};
 use crate::processing::audio::{
-    AdvancedVoiceActivityDetector, AdvancedVadConfig,
-    AdvancedAutomaticGainControl, AdvancedAgcConfig,
-    AdvancedAcousticEchoCanceller, AdvancedAecConfig,
+    AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAgcConfig,
+    AdvancedAutomaticGainControl, AdvancedVadConfig, AdvancedVoiceActivityDetector,
 };
-use crate::performance::{
-    metrics::PerformanceMetrics,
-    pool::AudioFramePool,
-    simd::SimdProcessor,
-};
-use rvoip_rtp_core::{RtpSession, session::RtpSessionStats};
+use crate::types::{AudioFrame, DialogId};
+use rvoip_rtp_core::{session::RtpSessionStats, RtpSession};
 
 /// Media configuration for a session
 #[derive(Debug, Clone)]
@@ -102,10 +97,7 @@ pub enum MediaSessionEvent {
         session_id: DialogId,
     },
     /// Media session failed
-    SessionFailed {
-        dialog_id: DialogId,
-        error: String,
-    },
+    SessionFailed { dialog_id: DialogId, error: String },
     /// Remote address updated
     RemoteAddressUpdated {
         dialog_id: DialogId,
@@ -191,7 +183,7 @@ pub struct AdvancedProcessorSet {
 }
 
 /// RTP session wrapper for MediaSessionController
-/// 
+///
 /// This wrapper manages both the RTP session and its associated audio state.
 /// It supports two levels of audio control:
 /// - `transmission_enabled`: Whether to send any RTP packets at all
@@ -208,14 +200,14 @@ pub struct RtpSessionWrapper {
     /// Audio transmitter for outgoing audio
     pub audio_transmitter: Option<super::audio_generation::AudioTransmitter>,
     /// Whether audio transmission is enabled
-    /// 
+    ///
     /// When false, no RTP packets are sent at all. This is used when the
     /// session is completely stopped or paused.
     pub transmission_enabled: bool,
     /// Whether audio is muted (send silence instead of actual audio)
-    /// 
+    ///
     /// When true, RTP packets continue to be sent but audio samples are
     /// replaced with silence. This maintains RTP flow for NAT traversal
     /// and prevents remote endpoint timeouts.
     pub is_muted: bool,
-} 
+}

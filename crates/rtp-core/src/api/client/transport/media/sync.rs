@@ -3,15 +3,15 @@
 //! This module handles synchronization of multiple media streams, including
 //! timestamp conversion, clock drift measurement, and reference stream management.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
+use crate::api::client::transport::MediaSyncInfo;
 use crate::api::common::error::MediaTransportError;
 use crate::packet::rtcp::NtpTimestamp;
-use crate::api::client::transport::MediaSyncInfo;
 
 /// Enable media synchronization
 ///
@@ -28,28 +28,26 @@ pub async fn enable_media_sync(
     if media_sync_enabled.load(std::sync::atomic::Ordering::SeqCst) {
         return Ok(true);
     }
-    
+
     // Create media sync context if it doesn't exist
     let mut sync_guard = media_sync.write().await;
     if sync_guard.is_none() {
         *sync_guard = Some(crate::sync::MediaSync::new());
     }
-    
+
     // Set enabled flag
     media_sync_enabled.store(true, std::sync::atomic::Ordering::SeqCst);
-    
+
     // Register default stream
     if let Some(sync) = &mut *sync_guard {
         sync.register_stream(ssrc, clock_rate);
     }
-    
+
     Ok(true)
 }
 
 /// Check if media synchronization is enabled
-pub fn is_media_sync_enabled(
-    media_sync_enabled: &Arc<std::sync::atomic::AtomicBool>,
-) -> bool {
+pub fn is_media_sync_enabled(media_sync_enabled: &Arc<std::sync::atomic::AtomicBool>) -> bool {
     media_sync_enabled.load(std::sync::atomic::Ordering::SeqCst)
 }
 
@@ -62,10 +60,15 @@ pub async fn register_sync_stream(
     let mut sync_guard = media_sync.write().await;
     if let Some(sync) = &mut *sync_guard {
         sync.register_stream(ssrc, clock_rate);
-        debug!("Registered sync stream: SSRC={:08x}, clock_rate={}", ssrc, clock_rate);
+        debug!(
+            "Registered sync stream: SSRC={:08x}, clock_rate={}",
+            ssrc, clock_rate
+        );
         Ok(())
     } else {
-        Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        Err(MediaTransportError::ConfigError(
+            "Media synchronization context not initialized".to_string(),
+        ))
     }
 }
 
@@ -80,7 +83,9 @@ pub async fn set_sync_reference_stream(
         debug!("Set sync reference stream: SSRC={:08x}", ssrc);
         Ok(())
     } else {
-        Err(MediaTransportError::ConfigError("Media synchronization context not initialized".to_string()))
+        Err(MediaTransportError::ConfigError(
+            "Media synchronization context not initialized".to_string(),
+        ))
     }
 }
 
@@ -102,7 +107,10 @@ pub async fn get_sync_info(
                 last_rtp: stream_data.last_rtp,
                 clock_drift_ppm: stream_data.clock_drift_ppm,
             };
-            debug!("Retrieved sync info for SSRC={:08x}: drift={:.2} PPM", ssrc, sync_info.clock_drift_ppm);
+            debug!(
+                "Retrieved sync info for SSRC={:08x}: drift={:.2} PPM",
+                ssrc, sync_info.clock_drift_ppm
+            );
             Ok(Some(sync_info))
         } else {
             debug!("No sync info found for SSRC={:08x}", ssrc);
@@ -120,7 +128,7 @@ pub async fn get_all_sync_info(
     let sync_guard = media_sync.read().await;
     if let Some(sync) = sync_guard.as_ref() {
         let mut result = HashMap::new();
-        
+
         // Convert all streams from core MediaSync to API MediaSyncInfo
         for (ssrc, stream_data) in sync.get_streams() {
             let sync_info = MediaSyncInfo {
@@ -132,8 +140,11 @@ pub async fn get_all_sync_info(
             };
             result.insert(*ssrc, sync_info);
         }
-        
-        debug!("Retrieved sync info for {} registered streams", result.len());
+
+        debug!(
+            "Retrieved sync info for {} registered streams",
+            result.len()
+        );
         Ok(result)
     } else {
         Ok(HashMap::new())
@@ -151,8 +162,10 @@ pub async fn convert_timestamp(
     if let Some(sync) = sync_guard.as_ref() {
         let result = sync.convert_timestamp(from_ssrc, to_ssrc, rtp_ts);
         if result.is_some() {
-            debug!("Converted timestamp {} from SSRC={:08x} to SSRC={:08x}: result={:?}", 
-                   rtp_ts, from_ssrc, to_ssrc, result);
+            debug!(
+                "Converted timestamp {} from SSRC={:08x} to SSRC={:08x}: result={:?}",
+                rtp_ts, from_ssrc, to_ssrc, result
+            );
         } else {
             debug!("Failed to convert timestamp {} from SSRC={:08x} to SSRC={:08x} - insufficient sync data", 
                    rtp_ts, from_ssrc, to_ssrc);
@@ -172,8 +185,12 @@ pub async fn rtp_to_ntp(
     let sync_guard = media_sync.read().await;
     if let Some(sync) = sync_guard.as_ref() {
         let result = sync.rtp_to_ntp(ssrc, rtp_ts);
-        debug!("Converted RTP timestamp {} to NTP for SSRC={:08x}: success={}", 
-               rtp_ts, ssrc, result.is_some());
+        debug!(
+            "Converted RTP timestamp {} to NTP for SSRC={:08x}: success={}",
+            rtp_ts,
+            ssrc,
+            result.is_some()
+        );
         Ok(result)
     } else {
         Ok(None)
@@ -189,8 +206,11 @@ pub async fn ntp_to_rtp(
     let sync_guard = media_sync.read().await;
     if let Some(sync) = sync_guard.as_ref() {
         let result = sync.ntp_to_rtp(ssrc, ntp);
-        debug!("Converted NTP timestamp to RTP for SSRC={:08x}: success={}", 
-               ssrc, result.is_some());
+        debug!(
+            "Converted NTP timestamp to RTP for SSRC={:08x}: success={}",
+            ssrc,
+            result.is_some()
+        );
         Ok(result)
     } else {
         Ok(None)
@@ -224,10 +244,12 @@ pub async fn are_streams_synchronized(
     let sync_guard = media_sync.read().await;
     if let Some(sync) = sync_guard.as_ref() {
         let synchronized = sync.are_synchronized(ssrc1, ssrc2, tolerance_ms);
-        debug!("Streams synchronized check: SSRC1={:08x}, SSRC2={:08x}, tolerance={}ms, result={}", 
-               ssrc1, ssrc2, tolerance_ms, synchronized);
+        debug!(
+            "Streams synchronized check: SSRC1={:08x}, SSRC2={:08x}, tolerance={}ms, result={}",
+            ssrc1, ssrc2, tolerance_ms, synchronized
+        );
         Ok(synchronized)
     } else {
         Ok(false)
     }
-} 
+}

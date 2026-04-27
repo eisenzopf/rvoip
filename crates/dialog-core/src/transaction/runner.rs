@@ -1,3 +1,4 @@
+use std::env;
 /// # Transaction Runner
 ///
 /// This module provides the core event loop implementation that drives SIP transaction
@@ -32,22 +33,20 @@
 /// The architecture follows a dependency inversion principle - the runner depends on
 /// abstract traits rather than concrete implementations, allowing new transaction types
 /// to be added without modifying the runner itself.
-
 use std::sync::Arc;
-use std::env;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
-use rvoip_sip_core::Message; // Assuming common Message type
-use rvoip_sip_core::types::method::Method; // Import Method for method comparison
 use crate::transaction::error::{Error, Result};
-use crate::transaction::{
-    TransactionState, TransactionKind, TransactionKey, TransactionEvent,
-    InternalTransactionCommand, AtomicTransactionState,
-};
+use crate::transaction::logic::TransactionLogic;
 use crate::transaction::state::TransactionLifecycle;
-use crate::transaction::logic::TransactionLogic; // The new trait
+use crate::transaction::{
+    AtomicTransactionState, InternalTransactionCommand, TransactionEvent, TransactionKey,
+    TransactionKind, TransactionState,
+};
+use rvoip_sip_core::types::method::Method; // Import Method for method comparison
+use rvoip_sip_core::Message; // Assuming common Message type // The new trait
 
 /// Run the main event loop for a SIP transaction.
 ///
@@ -92,16 +91,22 @@ pub async fn run_transaction_loop<D, TH, L>(
     data: Arc<D>,
     logic: Arc<L>,
     mut cmd_rx: mpsc::Receiver<InternalTransactionCommand>,
-)
-where
-    D: AsRefState + AsRefKey +
-       HasTransactionEvents + HasTransport + HasCommandSender + HasLifecycle + Send + Sync + 'static,
+) where
+    D: AsRefState
+        + AsRefKey
+        + HasTransactionEvents
+        + HasTransport
+        + HasCommandSender
+        + HasLifecycle
+        + Send
+        + Sync
+        + 'static,
     TH: Default + Send + Sync + 'static,
     L: TransactionLogic<D, TH> + Send + Sync + 'static,
 {
     // Check if we're running in test mode
     let is_test_mode = env::var("RVOIP_TEST").map(|v| v == "1").unwrap_or(false);
-    
+
     let mut timer_handles = TH::default();
     let tx_id = data.as_ref_key().clone();
 
@@ -113,31 +118,58 @@ where
         let current_state = data.as_ref_state().get();
         let tx_id_clone = data.as_ref_key().clone();
 
-        tracing::trace!("Received command: {:?} for transaction {}", command, tx_id_clone);
+        tracing::trace!(
+            "Received command: {:?} for transaction {}",
+            command,
+            tx_id_clone
+        );
         debug!(id=%tx_id_clone, ?command, "Transaction received command");
-        
+
         match command {
             InternalTransactionCommand::TransitionTo(requested_new_state) => {
-                tracing::trace!("Processing TransitionTo({:?}) current state: {:?}", requested_new_state, current_state);
+                tracing::trace!(
+                    "Processing TransitionTo({:?}) current state: {:?}",
+                    requested_new_state,
+                    current_state
+                );
                 debug!(id=%tx_id_clone, current_state=?current_state, new_state=?requested_new_state, "Processing state transition");
-                
+
                 if current_state == requested_new_state {
-                    tracing::trace!("Already in requested state, no transition needed: {:?}", current_state);
+                    tracing::trace!(
+                        "Already in requested state, no transition needed: {:?}",
+                        current_state
+                    );
                     trace!(id=%tx_id_clone, state=?current_state, "Already in requested state, no transition needed.");
                     continue;
                 }
 
-                if let Err(e) = AtomicTransactionState::validate_transition(logic.kind(), current_state, requested_new_state) {
-                    tracing::trace!("Invalid state transition: {:?} -> {:?}, error: {}", current_state, requested_new_state, e);
+                if let Err(e) = AtomicTransactionState::validate_transition(
+                    logic.kind(),
+                    current_state,
+                    requested_new_state,
+                ) {
+                    tracing::trace!(
+                        "Invalid state transition: {:?} -> {:?}, error: {}",
+                        current_state,
+                        requested_new_state,
+                        e
+                    );
                     error!(id=%tx_id_clone, error=%e, "Invalid state transition: {:?} -> {:?}", current_state, requested_new_state);
-                    let _ = data.get_tu_event_sender().send(TransactionEvent::Error {
-                        transaction_id: Some(tx_id_clone.clone()),
-                        error: e.to_string(),
-                    }).await;
+                    let _ = data
+                        .get_tu_event_sender()
+                        .send(TransactionEvent::Error {
+                            transaction_id: Some(tx_id_clone.clone()),
+                            error: e.to_string(),
+                        })
+                        .await;
                     continue;
                 }
 
-                tracing::trace!("Valid state transition: {:?} -> {:?}", current_state, requested_new_state);
+                tracing::trace!(
+                    "Valid state transition: {:?} -> {:?}",
+                    current_state,
+                    requested_new_state
+                );
                 debug!(id=%tx_id_clone, "State transition: {:?} -> {:?}", current_state, requested_new_state);
                 logic.cancel_all_specific_timers(&mut timer_handles);
                 let previous_state = data.as_ref_state().set(requested_new_state);
@@ -149,7 +181,7 @@ where
                     debug!(id=%tx_id_clone, "Entering terminal state - transitioning to Terminating lifecycle");
                     data.set_lifecycle(TransactionLifecycle::Terminating);
                 }
-                
+
                 // Only send event if transaction should emit events (not in draining states)
                 let should_send_event = data.should_emit_events();
                 if should_send_event {
@@ -160,12 +192,11 @@ where
                         previous_state,
                         new_state: requested_new_state,
                     });
-                    
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
-                        send_future
-                    ).await;
-                
+
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_millis(100), send_future)
+                            .await;
+
                     match result {
                         Ok(Ok(())) => {
                             tracing::trace!("Sent StateChanged event result: Success");
@@ -173,7 +204,7 @@ where
                         Ok(Err(e)) => {
                             // Channel is closed
                             error!(id=%tx_id_clone, "Failed to send StateChanged event: channel closed");
-                            
+
                             // In test mode, don't terminate transactions when event channels close
                             if is_test_mode {
                                 debug!(id=%tx_id_clone, "Test mode detected, continuing despite closed event channel");
@@ -191,26 +222,30 @@ where
                         Err(_) => {
                             // Timeout - channel is likely full, log but continue
                             warn!(id=%tx_id_clone, "Timeout sending StateChanged event - channel may be congested");
-                            tracing::trace!("Sent StateChanged event result: Timeout (channel congested)");
+                            tracing::trace!(
+                                "Sent StateChanged event result: Timeout (channel congested)"
+                            );
                             // Don't terminate on timeout - just continue processing
                         }
                     }
                 } else {
                     debug!(id=%tx_id_clone, "Transaction in draining state, not emitting StateChanged event");
                 }
-                
+
                 // If we've reached Terminated state, start grace period timer
-                if requested_new_state == TransactionState::Terminated && data.get_lifecycle() == TransactionLifecycle::Terminating {
+                if requested_new_state == TransactionState::Terminated
+                    && data.get_lifecycle() == TransactionLifecycle::Terminating
+                {
                     debug!(id=%tx_id_clone, "Starting grace period for terminated transaction");
                     let data_clone = data.clone();
                     let tx_id_for_timer = tx_id_clone.clone();
-                    
+
                     tokio::spawn(async move {
                         // Wait for grace period
                         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         debug!(id=%tx_id_for_timer, "Grace period expired, transitioning to Draining");
                         data_clone.set_lifecycle(TransactionLifecycle::Draining);
-                        
+
                         // After additional time, transition to Destroyed
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                         debug!(id=%tx_id_for_timer, "Draining period complete, ready for cleanup");
@@ -218,27 +253,29 @@ where
                     });
                 }
 
-                if let Err(e) = logic.on_enter_state(
-                    &data,
-                    requested_new_state,
-                    previous_state,
-                    &mut timer_handles,
-                    data.get_self_command_sender(),
-                ).await {
+                if let Err(e) = logic
+                    .on_enter_state(
+                        &data,
+                        requested_new_state,
+                        previous_state,
+                        &mut timer_handles,
+                        data.get_self_command_sender(),
+                    )
+                    .await
+                {
                     error!(id=%tx_id_clone, error=%e, "Error in on_enter_state for state {:?}", requested_new_state);
-                    
+
                     // Try to send error event with timeout
                     let sender = data.get_tu_event_sender();
                     let send_future = sender.send(TransactionEvent::Error {
                         transaction_id: Some(tx_id_clone.clone()),
                         error: format!("Error entering state {:?}: {}", requested_new_state, e),
                     });
-                    
-                    let result = tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
-                        send_future
-                    ).await;
-                    
+
+                    let result =
+                        tokio::time::timeout(std::time::Duration::from_millis(100), send_future)
+                            .await;
+
                     // Only terminate on actual channel closure, not on timeout
                     if let Ok(Err(_)) = result {
                         if !is_test_mode {
@@ -252,28 +289,36 @@ where
             }
             InternalTransactionCommand::ProcessMessage(message) => {
                 debug!(id=%tx_id_clone, "Received ProcessMessage command with {:?}", message);
-                match logic.process_message(&data, message, current_state, &mut timer_handles).await {
+                match logic
+                    .process_message(&data, message, current_state, &mut timer_handles)
+                    .await
+                {
                     Ok(Some(next_state)) => {
-                        if let Err(e) = data.get_self_command_sender().send(InternalTransactionCommand::TransitionTo(next_state)).await {
-                             error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after ProcessMessage");
+                        if let Err(e) = data
+                            .get_self_command_sender()
+                            .send(InternalTransactionCommand::TransitionTo(next_state))
+                            .await
+                        {
+                            error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after ProcessMessage");
                         }
                     }
                     Ok(None) => { /* No state change needed */ }
                     Err(e) => {
                         error!(id=%tx_id_clone, error=%e, "Error processing message in state {:?}", current_state);
-                        
+
                         // Try to send error event with timeout
                         let sender = data.get_tu_event_sender();
                         let send_future = sender.send(TransactionEvent::Error {
                             transaction_id: Some(tx_id_clone.clone()),
                             error: e.to_string(),
                         });
-                        
+
                         let result = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
-                            send_future
-                        ).await;
-                        
+                            send_future,
+                        )
+                        .await;
+
                         // Only terminate on actual channel closure, not on timeout
                         if let Ok(Err(_)) = result {
                             if !is_test_mode {
@@ -287,28 +332,36 @@ where
                 }
             }
             InternalTransactionCommand::Timer(timer_name) => {
-                match logic.handle_timer(&data, &timer_name, current_state, &mut timer_handles).await {
+                match logic
+                    .handle_timer(&data, &timer_name, current_state, &mut timer_handles)
+                    .await
+                {
                     Ok(Some(next_state)) => {
-                        if let Err(e) = data.get_self_command_sender().send(InternalTransactionCommand::TransitionTo(next_state)).await {
-                             error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after Timer");
+                        if let Err(e) = data
+                            .get_self_command_sender()
+                            .send(InternalTransactionCommand::TransitionTo(next_state))
+                            .await
+                        {
+                            error!(id=%tx_id_clone, error=%e, "Failed to send self-command for state transition after Timer");
                         }
                     }
                     Ok(None) => { /* No state change needed */ }
                     Err(e) => {
                         error!(id=%tx_id_clone, error=%e, "Error handling timer '{}' in state {:?}", timer_name, current_state);
-                        
+
                         // Try to send error event with timeout
                         let sender = data.get_tu_event_sender();
                         let send_future = sender.send(TransactionEvent::Error {
                             transaction_id: Some(tx_id_clone.clone()),
                             error: e.to_string(),
                         });
-                        
+
                         let result = tokio::time::timeout(
                             std::time::Duration::from_millis(100),
-                            send_future
-                        ).await;
-                        
+                            send_future,
+                        )
+                        .await;
+
                         // Only terminate on actual channel closure, not on timeout
                         if let Ok(Err(_)) = result {
                             if !is_test_mode {
@@ -323,18 +376,16 @@ where
             }
             InternalTransactionCommand::TransportError => {
                 error!(id=%tx_id_clone, "Transport error occurred, terminating transaction");
-                
+
                 // Try to send transport error event with timeout
                 let sender = data.get_tu_event_sender();
                 let send_future = sender.send(TransactionEvent::TransportError {
                     transaction_id: tx_id_clone.clone(),
                 });
-                
-                let result = tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
-                    send_future
-                ).await;
-                
+
+                let result =
+                    tokio::time::timeout(std::time::Duration::from_millis(100), send_future).await;
+
                 // Only skip shutdown on actual channel closure in test mode
                 if let Ok(Err(_)) = result {
                     if !is_test_mode {
@@ -344,8 +395,14 @@ where
                         break;
                     }
                 }
-                
-                if let Err(e) = data.get_self_command_sender().send(InternalTransactionCommand::TransitionTo(TransactionState::Terminated)).await {
+
+                if let Err(e) = data
+                    .get_self_command_sender()
+                    .send(InternalTransactionCommand::TransitionTo(
+                        TransactionState::Terminated,
+                    ))
+                    .await
+                {
                     error!(id=%tx_id_clone, error=%e, "Failed to send self-command for Terminated state on TransportError");
                     // Even if we can't send the command, still terminate
                     if !is_test_mode {
@@ -360,7 +417,7 @@ where
                 data.as_ref_state().set(TransactionState::Terminated);
                 break;
             }
-            
+
             InternalTransactionCommand::CancelTimer100 => {
                 debug!(id=%tx_id_clone, "Received CancelTimer100 command, canceling automatic 100 Trying timer");
                 // This command is specific to INVITE server transactions
@@ -377,7 +434,7 @@ where
             debug!(id=%tx_id_clone, "Transaction lifecycle is Destroyed, stopping event loop.");
             break;
         }
-        
+
         // Handle messages in different lifecycle states
         if lifecycle_state != TransactionLifecycle::Active {
             debug!(id=%tx_id_clone, "Transaction in {:?} lifecycle - processing commands silently", lifecycle_state);
@@ -385,7 +442,11 @@ where
     }
 
     let final_state = data.as_ref_state().get();
-    tracing::trace!("Transaction loop ending for {}. Final state: {:?}", data.as_ref_key(), final_state);
+    tracing::trace!(
+        "Transaction loop ending for {}. Final state: {:?}",
+        data.as_ref_key(),
+        final_state
+    );
     logic.cancel_all_specific_timers(&mut timer_handles);
     debug!(id = %data.as_ref_key().branch, final_state=?final_state, "Generic transaction loop ended.");
 
@@ -395,11 +456,8 @@ where
         let send_future = sender.send(TransactionEvent::TransactionTerminated {
             transaction_id: data.as_ref_key().clone(),
         });
-        
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            send_future
-        ).await;
+
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), send_future).await;
         // Don't log errors here as it's expected during shutdown
     }
 }
@@ -459,10 +517,10 @@ pub trait HasCommandSender {
 pub trait HasLifecycle {
     /// Gets the current lifecycle state
     fn get_lifecycle(&self) -> TransactionLifecycle;
-    
+
     /// Sets the lifecycle state
     fn set_lifecycle(&self, new_lifecycle: TransactionLifecycle);
-    
+
     /// Checks if the transaction should emit events to the Transaction User
     fn should_emit_events(&self) -> bool;
-} 
+}

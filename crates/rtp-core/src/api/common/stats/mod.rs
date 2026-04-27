@@ -2,14 +2,14 @@
 //!
 //! This module contains statistics and quality monitoring functionality shared between client and server.
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use async_trait::async_trait;
 
-use crate::api::common::frame::MediaFrameType;
 use crate::api::common::error::StatsError;
+use crate::api::common::frame::MediaFrameType;
 
 mod stats_collector_impl;
 
@@ -18,19 +18,19 @@ mod stats_collector_impl;
 pub enum QualityLevel {
     /// Excellent quality, no noticeable issues
     Excellent,
-    
+
     /// Good quality, minor issues that do not affect user experience
     Good,
-    
+
     /// Fair quality, some noticeable issues but usable
     Fair,
-    
+
     /// Poor quality, significant issues affecting user experience
     Poor,
-    
+
     /// Bad quality, unusable
     Bad,
-    
+
     /// Unknown quality level
     Unknown,
 }
@@ -46,7 +46,7 @@ impl Default for QualityLevel {
 pub enum Direction {
     /// Inbound (receiving)
     Inbound,
-    
+
     /// Outbound (sending)
     Outbound,
 }
@@ -56,46 +56,46 @@ pub enum Direction {
 pub struct StreamStats {
     /// Direction of this stream
     pub direction: Direction,
-    
+
     /// Synchronization source identifier
     pub ssrc: u32,
-    
+
     /// Media type (audio, video, data)
     pub media_type: MediaFrameType,
-    
+
     /// Total packets sent or received
     pub packet_count: u64,
-    
+
     /// Total bytes sent or received
     pub byte_count: u64,
-    
+
     /// Number of packets lost
     pub packets_lost: u64,
-    
+
     /// Fraction of packets lost (0.0 - 1.0)
     pub fraction_lost: f32,
-    
+
     /// Jitter in milliseconds
     pub jitter_ms: f32,
-    
+
     /// Round-trip time in milliseconds (if available)
     pub rtt_ms: Option<f32>,
-    
+
     /// Mean Opinion Score (1.0 - 5.0, if available)
     pub mos: Option<f32>,
-    
+
     /// Remote address for this stream
     pub remote_addr: SocketAddr,
-    
+
     /// Average bitrate in bits per second
     pub bitrate_bps: u32,
-    
+
     /// Packet discard rate (0.0 - 1.0)
     pub discard_rate: f32,
-    
+
     /// Current quality level
     pub quality: QualityLevel,
-    
+
     /// Estimated available bandwidth in bits per second
     pub available_bandwidth_bps: Option<u32>,
 }
@@ -105,25 +105,25 @@ pub struct StreamStats {
 pub struct MediaStats {
     /// Timestamp when these statistics were collected
     pub timestamp: SystemTime,
-    
+
     /// Duration since the start of the session
     pub session_duration: Duration,
-    
+
     /// Map of stream statistics by SSRC
     pub streams: HashMap<u32, StreamStats>,
-    
+
     /// Overall quality level
     pub quality: QualityLevel,
-    
+
     /// Aggregate upstream bandwidth in bits per second
     pub upstream_bandwidth_bps: u32,
-    
+
     /// Aggregate downstream bandwidth in bits per second
     pub downstream_bandwidth_bps: u32,
-    
+
     /// Estimated available bandwidth in bits per second
     pub available_bandwidth_bps: Option<u32>,
-    
+
     /// Current network round-trip time in milliseconds
     pub network_rtt_ms: Option<f32>,
 }
@@ -148,16 +148,16 @@ impl Default for MediaStats {
 pub trait MediaStatsCollector: Send + Sync {
     /// Get current media statistics
     async fn get_stats(&self) -> Result<MediaStats, StatsError>;
-    
+
     /// Get statistics for a specific stream by SSRC
     async fn get_stream_stats(&self, ssrc: u32) -> Result<StreamStats, StatsError>;
-    
+
     /// Reset statistics
     async fn reset(&self);
-    
+
     /// Register a callback for quality changes
     async fn on_quality_change(&self, callback: Box<dyn Fn(QualityLevel) + Send + Sync>);
-    
+
     /// Register a callback for bandwidth estimation changes
     async fn on_bandwidth_update(&self, callback: Box<dyn Fn(u32) + Send + Sync>);
 }
@@ -187,22 +187,22 @@ impl QualityUtils {
             _ => QualityLevel::Unknown,
         }
     }
-    
+
     /// Calculate MOS from R-factor
     pub fn r_factor_to_mos(r: f32) -> f32 {
         if r < 0.0 {
             return 1.0;
         }
-        
+
         let mos = if r < 100.0 {
             1.0 + 0.035 * r + 0.000007 * r * (r - 60.0) * (100.0 - r)
         } else {
             4.5
         };
-        
+
         mos.max(1.0).min(5.0)
     }
-    
+
     /// Calculate quality level from network metrics
     pub fn calculate_quality(
         packet_loss: f32,
@@ -211,10 +211,10 @@ impl QualityUtils {
     ) -> QualityLevel {
         // This is a simplified quality calculation
         // A more sophisticated algorithm would be implemented in the real code
-        
+
         // Start with excellent and degrade based on metrics
         let mut quality = QualityLevel::Excellent;
-        
+
         // Degrade based on packet loss
         quality = match packet_loss {
             x if x < 0.01 => quality,
@@ -223,7 +223,7 @@ impl QualityUtils {
             x if x < 0.15 => quality.min(QualityLevel::Poor),
             _ => QualityLevel::Bad,
         };
-        
+
         // Degrade based on jitter
         quality = match jitter_ms {
             x if x < 10.0 => quality,
@@ -232,7 +232,7 @@ impl QualityUtils {
             x if x < 100.0 => quality.min(QualityLevel::Poor),
             _ => QualityLevel::Bad,
         };
-        
+
         // Degrade based on RTT if available
         if let Some(rtt) = rtt_ms {
             quality = match rtt {
@@ -243,7 +243,7 @@ impl QualityUtils {
                 _ => QualityLevel::Bad,
             };
         }
-        
+
         quality
     }
 }
@@ -259,7 +259,7 @@ impl Ord for QualityLevel {
             QualityLevel::Bad => 1,
             QualityLevel::Unknown => 0,
         };
-        
+
         let other_val = match other {
             QualityLevel::Excellent => 5,
             QualityLevel::Good => 4,
@@ -268,7 +268,7 @@ impl Ord for QualityLevel {
             QualityLevel::Bad => 1,
             QualityLevel::Unknown => 0,
         };
-        
+
         self_val.cmp(&other_val)
     }
 }
@@ -277,4 +277,4 @@ impl PartialOrd for QualityLevel {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
-} 
+}

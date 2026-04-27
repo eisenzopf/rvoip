@@ -41,14 +41,14 @@
 
 use crate::error::Result;
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-use std::fmt;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Require header (RFC 3261 Section 20.32)
 ///
-/// The Require header field is used by clients to tell UAS about options that 
+/// The Require header field is used by clients to tell UAS about options that
 /// the client expects the server to support in order to properly process the request.
-/// 
+///
 /// Although an optional header field, the Require MUST NOT be ignored if it
 /// is present. The server MUST respond with a 420 (Bad Extension) if it
 /// does not understand the option.
@@ -60,16 +60,16 @@ use serde::{Deserialize, Serialize};
 /// ```
 ///
 /// Where each option-tag is a token that identifies a SIP extension or feature.
-/// 
+///
 /// # Common Option Tags
 ///
 /// SIP defines several standard option tags:
-/// 
+///
 /// - `100rel`: Indicates the client requires reliable provisional responses
 /// - `precondition`: Indicates support for the precondition framework
 /// - `timer`: Indicates support for the SIP session timers extension
 /// - `replaces`: Indicates support for the SIP Replaces header
-/// 
+///
 /// # Examples
 ///
 /// ```rust
@@ -80,7 +80,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// // Create with a single tag
 /// let require = Require::with_tag("100rel");
-/// 
+///
 /// // Check if the "100rel" extension is required
 /// if require.requires("100rel") {
 ///     // Handle reliable provisional responses
@@ -117,7 +117,7 @@ impl Require {
     ///     "precondition".to_string(),
     ///     "timer".to_string()
     /// ]);
-    /// 
+    ///
     /// assert_eq!(require.option_tags.len(), 3);
     /// assert!(require.requires("100rel"));
     /// assert!(require.requires("precondition"));
@@ -146,7 +146,7 @@ impl Require {
     ///
     /// // Create a Require header requiring reliable provisional responses
     /// let require = Require::with_tag("100rel");
-    /// 
+    ///
     /// assert_eq!(require.option_tags.len(), 1);
     /// assert!(require.requires("100rel"));
     /// assert!(!require.requires("timer"));
@@ -160,7 +160,7 @@ impl Require {
     /// Check if a specific tag is required
     ///
     /// Tests whether the specified option tag is present in this Require header.
-    /// This indicates that the client requires support for the extension 
+    /// This indicates that the client requires support for the extension
     /// identified by this tag.
     ///
     /// # Parameters
@@ -177,12 +177,12 @@ impl Require {
     /// use rvoip_sip_core::prelude::*;
     ///
     /// let require = Require::new(vec!["100rel".to_string(), "precondition".to_string()]);
-    /// 
+    ///
     /// // Check for required extensions
     /// assert!(require.requires("100rel"));
     /// assert!(require.requires("precondition"));
     /// assert!(!require.requires("timer"));
-    /// 
+    ///
     /// // Use in conditional logic
     /// if require.requires("100rel") {
     ///     // Handle reliable provisional responses
@@ -208,7 +208,7 @@ impl Require {
     /// // Start with one option tag
     /// let mut require = Require::with_tag("100rel");
     /// assert_eq!(require.option_tags.len(), 1);
-    /// 
+    ///
     /// // Add another tag
     /// require.add_tag("precondition");
     /// assert_eq!(require.option_tags.len(), 2);
@@ -238,10 +238,10 @@ impl Require {
     ///     "precondition".to_string(),
     ///     "timer".to_string()
     /// ]);
-    /// 
+    ///
     /// // Remove a tag
     /// require.remove_tag("precondition");
-    /// 
+    ///
     /// // Verify it was removed
     /// assert_eq!(require.option_tags.len(), 2);
     /// assert!(require.requires("100rel"));
@@ -343,24 +343,31 @@ impl TypedHeaderTrait for Require {
     /// ```
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::Require {
-            return Err(crate::error::Error::InvalidHeader(format!("Expected Require header, got {}", header.name)));
+            return Err(crate::error::Error::InvalidHeader(format!(
+                "Expected Require header, got {}",
+                header.name
+            )));
         }
-        
+
         // Use the parser to convert the header value into a Require header
         use crate::parser::headers::require::parse_require;
         use nom::combinator::all_consuming;
-        
+
         // Get the raw bytes from the header value
         let bytes = match &header.value {
             crate::types::headers::HeaderValue::Raw(bytes) => bytes,
-            _ => return Err(crate::error::Error::InvalidHeader("Expected raw header value".to_string())),
+            _ => {
+                return Err(crate::error::Error::InvalidHeader(
+                    "Expected raw header value".to_string(),
+                ))
+            }
         };
-        
+
         // Parse the header value
         let require = all_consuming(parse_require)(bytes)
             .map_err(crate::error::Error::from)
             .map(|(_, v)| Require::new(v))?;
-            
+
         Ok(require)
     }
 }
@@ -408,7 +415,7 @@ mod tests {
     fn test_require_to_header() {
         let require = Require::new(vec!["100rel".to_string(), "precondition".to_string()]);
         let header = require.to_header();
-        
+
         assert_eq!(header.name, HeaderName::Require);
         match header.value {
             HeaderValue::Raw(bytes) => {
@@ -426,10 +433,10 @@ mod tests {
             HeaderName::Require,
             HeaderValue::Raw(b"100rel, precondition".to_vec()),
         );
-        
+
         // Convert to Require
         let require = Require::from_header(&header).unwrap();
-        
+
         // Check conversion
         assert_eq!(require.option_tags.len(), 2);
         assert_eq!(require.option_tags[0], "100rel");
@@ -440,14 +447,14 @@ mod tests {
     fn test_require_roundtrip() {
         // Create a Require
         let original = Require::new(vec!["100rel".to_string(), "precondition".to_string()]);
-        
+
         // Convert to header
         let header = original.to_header();
-        
+
         // Convert back to Require
         let roundtrip = Require::from_header(&header).unwrap();
-        
+
         // Check equality
         assert_eq!(original, roundtrip);
     }
-} 
+}

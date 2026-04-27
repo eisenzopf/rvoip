@@ -43,7 +43,7 @@ pub fn alaw_compress(sample: i16) -> u8 {
     } else {
         sample >> 4
     };
-    
+
     if ix > 15 {
         let mut iexp = 1;
         while ix > 16 + 15 {
@@ -53,11 +53,11 @@ pub fn alaw_compress(sample: i16) -> u8 {
         ix -= 16;
         ix += iexp << 4;
     }
-    
+
     if sample >= 0 {
         ix |= 0x0080;
     }
-    
+
     (ix ^ 0x0055) as u8
 }
 
@@ -78,21 +78,21 @@ pub fn alaw_compress(sample: i16) -> u8 {
 /// Based on ITU-T G.711 specification and reference implementation.
 pub fn alaw_expand(compressed: u8) -> i16 {
     let mut ix = (compressed ^ 0x0055) as i16;
-    
+
     ix &= 0x007F;
     let iexp = ix >> 4;
     let mut mant = ix & 0x000F;
-    
+
     if iexp > 0 {
         mant = mant + 16;
     }
-    
+
     mant = (mant << 4) + 0x0008;
-    
+
     if iexp > 1 {
         mant = mant << (iexp - 1);
     }
-    
+
     if compressed > 127 {
         mant
     } else {
@@ -121,24 +121,24 @@ pub fn ulaw_compress(sample: i16) -> u8 {
     } else {
         (sample >> 2) + 33
     };
-    
+
     let absno = if absno > 0x1FFF { 0x1FFF } else { absno };
-    
+
     let mut i = absno >> 6;
     let mut segno = 1;
     while i != 0 {
         segno += 1;
         i >>= 1;
     }
-    
+
     let high_nibble = 0x0008 - segno;
     let low_nibble = 0x000F - ((absno >> segno) & 0x000F);
     let mut result = (high_nibble << 4) | low_nibble;
-    
+
     if sample >= 0 {
         result |= 0x0080;
     }
-    
+
     result as u8
 }
 
@@ -163,24 +163,11 @@ pub fn ulaw_expand(compressed: u8) -> i16 {
     let exponent = (mantissa >> 4) & 0x0007;
     let segment = exponent + 1;
     let mantissa = mantissa & 0x000F;
-    
+
     let step = 4 << segment;
-    
-    sign * (
-        ((0x0080) << exponent) +
-        step * mantissa +
-        step / 2 -
-        4 * 33
-    )
+
+    sign * (((0x0080) << exponent) + step * mantissa + step / 2 - 4 * 33)
 }
-
-
-
-
-
-
-
-
 
 #[cfg(test)]
 mod tests {
@@ -189,48 +176,56 @@ mod tests {
     #[test]
     fn test_alaw_basic_round_trip() {
         let test_samples = vec![0i16, 100, -100, 1000, -1000, 10000, -10000];
-        
+
         for sample in test_samples {
             let encoded = alaw_compress(sample);
             let decoded = alaw_expand(encoded);
             let error = (decoded - sample).abs();
-            
+
             // A-law should have reasonable quantization error
-            assert!(error < 2000, "A-law error too large for {}: {} (error: {})", sample, decoded, error);
+            assert!(
+                error < 2000,
+                "A-law error too large for {}: {} (error: {})",
+                sample,
+                decoded,
+                error
+            );
         }
     }
 
     #[test]
     fn test_ulaw_basic_round_trip() {
         let test_samples = vec![0i16, 100, -100, 1000, -1000, 10000, -10000];
-        
+
         for sample in test_samples {
             let encoded = ulaw_compress(sample);
             let decoded = ulaw_expand(encoded);
             let error = (decoded - sample).abs();
-            
+
             // μ-law should have reasonable quantization error
-            assert!(error < 2000, "μ-law error too large for {}: {} (error: {})", sample, decoded, error);
+            assert!(
+                error < 2000,
+                "μ-law error too large for {}: {} (error: {})",
+                sample,
+                decoded,
+                error
+            );
         }
     }
-
-
-
-
 
     #[test]
     fn test_boundary_values() {
         let boundary_samples = vec![-32768i16, -32767, -1, 0, 1, 32766, 32767];
-        
+
         for sample in boundary_samples {
             // Test A-law doesn't panic on boundary values
             let alaw_encoded = alaw_compress(sample);
             let alaw_decoded = alaw_expand(alaw_encoded);
-            
+
             // Test μ-law doesn't panic on boundary values
             let ulaw_encoded = ulaw_compress(sample);
             let ulaw_decoded = ulaw_expand(ulaw_encoded);
-            
+
             // Basic sanity check - decoded values should be in reasonable range
             assert!(alaw_decoded >= -32768 && alaw_decoded <= 32767);
             assert!(ulaw_decoded >= -32768 && ulaw_decoded <= 32767);
@@ -245,23 +240,23 @@ mod tests {
         assert_eq!(alaw_compress(1024), 0xe5);
         assert_eq!(alaw_compress(-128), 0x52);
         assert_eq!(alaw_compress(-1024), 0x7a);
-        
+
         assert_eq!(ulaw_compress(0), 0xff);
         assert_eq!(ulaw_compress(128), 0xef);
         assert_eq!(ulaw_compress(1024), 0xcd);
         assert_eq!(ulaw_compress(-128), 0x6f);
         assert_eq!(ulaw_compress(-1024), 0x4d);
-        
+
         assert_eq!(alaw_expand(0xd5), 8);
         assert_eq!(alaw_expand(0xdd), 136);
         assert_eq!(alaw_expand(0xe5), 1056);
         assert_eq!(alaw_expand(0x52), -120);
         assert_eq!(alaw_expand(0x7a), -1008);
-        
+
         assert_eq!(ulaw_expand(0xff), 0);
         assert_eq!(ulaw_expand(0xef), 132);
         assert_eq!(ulaw_expand(0xcd), 1052);
         assert_eq!(ulaw_expand(0x6f), -132);
         assert_eq!(ulaw_expand(0x4d), -1052);
     }
-} 
+}

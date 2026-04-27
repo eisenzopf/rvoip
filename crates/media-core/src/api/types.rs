@@ -55,24 +55,24 @@ impl MediaFrame {
             csrcs: Vec::new(),
         }
     }
-    
+
     /// Set the marker bit
     pub fn with_marker(mut self, marker: bool) -> Self {
         self.marker = marker;
         self
     }
-    
+
     /// Set the CSRCs
     pub fn with_csrcs(mut self, csrcs: Vec<u32>) -> Self {
         self.csrcs = csrcs;
         self
     }
-    
+
     /// Get the frame size in bytes
     pub fn size(&self) -> usize {
         self.data.len()
     }
-    
+
     /// Check if the frame is empty
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
@@ -105,19 +105,19 @@ impl MediaCodec {
             parameters: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Set the number of channels (for audio codecs)
     pub fn with_channels(mut self, channels: u8) -> Self {
         self.channels = Some(channels);
         self
     }
-    
+
     /// Add a codec parameter
     pub fn with_parameter(mut self, key: String, value: String) -> Self {
         self.parameters.insert(key, value);
         self
     }
-    
+
     /// Check if this is an audio codec
     pub fn is_audio(&self) -> bool {
         matches!(
@@ -125,7 +125,7 @@ impl MediaCodec {
             "PCMU" | "PCMA" | "G722" | "G729" | "opus" | "AMR" | "AMR-WB"
         )
     }
-    
+
     /// Check if this is a video codec
     pub fn is_video(&self) -> bool {
         matches!(
@@ -171,19 +171,19 @@ impl MediaStreamConfig {
             preferred_codec: None,
         }
     }
-    
+
     /// Add a codec to the stream config
     pub fn with_codec(mut self, codec: MediaCodec) -> Self {
         self.codecs.push(codec);
         self
     }
-    
+
     /// Set the maximum bitrate
     pub fn with_max_bitrate(mut self, bitrate: u32) -> Self {
         self.max_bitrate = Some(bitrate);
         self
     }
-    
+
     /// Set the preferred codec
     pub fn with_preferred_codec(mut self, codec: String) -> Self {
         self.preferred_codec = Some(codec);

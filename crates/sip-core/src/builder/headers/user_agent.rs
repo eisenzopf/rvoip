@@ -1,11 +1,9 @@
-use crate::error::{Error, Result};
-use crate::types::{
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
-};
-use crate::types::user_agent::UserAgent;
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::types::user_agent::UserAgent;
+use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
+};
 
 /// User-Agent header builder
 ///
@@ -47,7 +45,7 @@ use super::HeaderSetter;
 /// - Some deployments may choose to provide minimal information
 /// - In secure environments, consistent generic identifiers may be preferred
 /// - Privacy-enhancing implementations might omit detailed version information
-/// 
+///
 /// # Examples
 ///
 /// ## Basic SIP Client Identification
@@ -147,7 +145,7 @@ pub trait UserAgentBuilderExt {
     /// // The server knows this is version 2.4 of the mobile client
     /// ```
     fn user_agent(self, product: impl Into<String>) -> Self;
-    
+
     /// Add a User-Agent header with multiple product tokens
     ///
     /// This method adds a User-Agent header with multiple product identifiers,
@@ -188,15 +186,15 @@ pub trait UserAgentBuilderExt {
     fn user_agent_products(self, products: Vec<impl Into<String>>) -> Self;
 }
 
-impl<T> UserAgentBuilderExt for T 
-where 
+impl<T> UserAgentBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn user_agent(self, product: impl Into<String>) -> Self {
         let user_agent = UserAgent::single(&product.into());
         self.set_header(user_agent)
     }
-    
+
     fn user_agent_products(self, products: Vec<impl Into<String>>) -> Self {
         let string_products: Vec<String> = products.into_iter().map(|p| p.into()).collect();
         let user_agent = UserAgent::with_products(&string_products);
@@ -213,13 +211,14 @@ mod tests {
 
     #[test]
     fn test_request_user_agent() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .user_agent("Example-SIP-Client/1.0")
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::UserAgent(user_agent)) = request.header(&HeaderName::UserAgent) {
             assert_eq!(user_agent.len(), 1);
             assert_eq!(user_agent[0], "Example-SIP-Client/1.0");
@@ -233,10 +232,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .user_agent_products(vec!["Example-SIP-Client/1.0", "(Platform/OS Version)"])
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::UserAgent(user_agent)) = response.header(&HeaderName::UserAgent) {
             assert_eq!(user_agent.len(), 2);
             assert_eq!(user_agent[0], "Example-SIP-Client/1.0");
@@ -251,19 +250,22 @@ mod tests {
         // The behavior when calling user_agent multiple times could be either:
         // 1. Replace previous header (desired)
         // 2. Add another header (current implementation)
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .user_agent("First-Client/1.0")
             .user_agent("Second-Client/2.0")
             .build();
-        
+
         // Get all User-Agent headers
-        let user_agent_headers: Vec<_> = request.headers.iter()
+        let user_agent_headers: Vec<_> = request
+            .headers
+            .iter()
             .filter_map(|h| match h {
                 TypedHeader::UserAgent(u) => Some(u),
-                _ => None
+                _ => None,
             })
             .collect();
-        
+
         // Check header count - there might be 1 or 2 depending on implementation
         if user_agent_headers.len() == 1 {
             // If there's only one header (replacement occurred), it should be the last one set
@@ -272,15 +274,19 @@ mod tests {
             // If there are two headers (append occurred), they should be in order of addition
             assert_eq!(user_agent_headers[0][0], "First-Client/1.0");
             assert_eq!(user_agent_headers[1][0], "Second-Client/2.0");
-            
+
             // But the request.header() method should return the first matching header
-            if let Some(TypedHeader::UserAgent(user_agent)) = request.header(&HeaderName::UserAgent) {
+            if let Some(TypedHeader::UserAgent(user_agent)) = request.header(&HeaderName::UserAgent)
+            {
                 assert_eq!(user_agent[0], "First-Client/1.0");
             } else {
                 panic!("User-Agent header not found or has wrong type");
             }
         } else {
-            panic!("Unexpected number of User-Agent headers: {}", user_agent_headers.len());
+            panic!(
+                "Unexpected number of User-Agent headers: {}",
+                user_agent_headers.len()
+            );
         }
     }
-} 
+}

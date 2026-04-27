@@ -46,7 +46,9 @@ async fn panicking_handler_triggers_drop_safety_net() {
     const CLIENT_PORT: u16 = 15311;
 
     let called = Arc::new(AtomicBool::new(false));
-    let handler = PanickingHandler { called: called.clone() };
+    let handler = PanickingHandler {
+        called: called.clone(),
+    };
 
     let server = CallbackPeer::new(handler, Config::local("srv", SERVER_PORT))
         .await
@@ -64,7 +66,11 @@ async fn panicking_handler_triggers_drop_safety_net() {
     let mut caller = StreamPeer::with_config(Config::local("caller", CLIENT_PORT))
         .await
         .expect("build caller");
-    let mut events = caller.control().subscribe_events().await.expect("subscribe");
+    let mut events = caller
+        .control()
+        .subscribe_events()
+        .await
+        .expect("subscribe");
     let handle = caller
         .call(&format!("sip:srv@127.0.0.1:{}", SERVER_PORT))
         .await
@@ -74,7 +80,11 @@ async fn panicking_handler_triggers_drop_safety_net() {
     let status = timeout(Duration::from_secs(5), async {
         loop {
             match events.next().await {
-                Some(Event::CallFailed { call_id, status_code, .. }) if call_id == *handle.id() => {
+                Some(Event::CallFailed {
+                    call_id,
+                    status_code,
+                    ..
+                }) if call_id == *handle.id() => {
                     return Some(status_code);
                 }
                 Some(_) => continue,
@@ -90,7 +100,11 @@ async fn panicking_handler_triggers_drop_safety_net() {
         called.load(Ordering::SeqCst),
         "handler never ran — INVITE did not reach the UAS"
     );
-    assert_eq!(status, 500, "expected 500 Server Internal Error, got {}", status);
+    assert_eq!(
+        status, 500,
+        "expected 500 Server Internal Error, got {}",
+        status
+    );
 
     // Clean shutdown
     stop.shutdown();
@@ -119,7 +133,9 @@ async fn normal_path_drop_is_noop() {
         .await
         .expect("build server");
     let stop = server.shutdown_handle();
-    let server_task = tokio::spawn(async move { let _ = server.run().await; });
+    let server_task = tokio::spawn(async move {
+        let _ = server.run().await;
+    });
     sleep(Duration::from_millis(500)).await;
 
     let mut caller = StreamPeer::with_config(Config::local("caller", CLIENT_PORT))
@@ -132,10 +148,13 @@ async fn normal_path_drop_is_noop() {
 
     // If Drop had spuriously fired, the call would have been rejected and
     // wait_for_answered would fail/time out.
-    tokio::time::timeout(Duration::from_secs(3), caller.wait_for_answered(handle.id()))
-        .await
-        .expect("wait_for_answered timed out — Drop may have rejected the call")
-        .expect("accept failed");
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        caller.wait_for_answered(handle.id()),
+    )
+    .await
+    .expect("wait_for_answered timed out — Drop may have rejected the call")
+    .expect("accept failed");
 
     let _ = handle.hangup().await;
     stop.shutdown();

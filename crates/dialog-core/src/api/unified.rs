@@ -140,19 +140,22 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
-use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
-use rvoip_sip_core::{Request, Response, Method, StatusCode};
+use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
+use rvoip_sip_core::{Method, Request, Response, StatusCode};
 
+use super::{
+    common::{CallHandle, DialogHandle},
+    ApiError, ApiResult, DialogStats,
+};
 use crate::config::DialogManagerConfig;
+use crate::dialog::{Dialog, DialogId, DialogState};
+use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::manager::unified::UnifiedDialogManager;
-use crate::dialog::{DialogId, Dialog, DialogState};
-use crate::events::{SessionCoordinationEvent, DialogEvent};
-use super::{ApiResult, ApiError, DialogStats, common::{DialogHandle, CallHandle}};
 
 /// Unified Dialog API
 ///
@@ -197,6 +200,19 @@ pub struct UnifiedDialogApi {
 
     /// Configuration for this API instance
     config: DialogManagerConfig,
+}
+
+/// Options for constructing a non-dialog REGISTER request.
+#[derive(Debug, Clone)]
+pub struct RegisterRequestOptions {
+    pub registrar_uri: String,
+    pub aor_uri: String,
+    pub contact_uri: String,
+    pub expires: u32,
+    pub authorization: Option<String>,
+    pub call_id: Option<String>,
+    pub cseq: Option<u32>,
+    pub outbound_contact: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
 }
 
 /// Build a RFC 5626 outbound-aware Contact header from a raw URI string and
@@ -267,48 +283,55 @@ impl UnifiedDialogApi {
         transaction_manager: Arc<TransactionManager>,
         config: DialogManagerConfig,
     ) -> ApiResult<Self> {
-        info!("Creating UnifiedDialogApi in {:?} mode", Self::mode_name(&config));
-        
-        let manager = Arc::new(
-            UnifiedDialogManager::new(transaction_manager, config.clone()).await
-                .map_err(ApiError::from)?
+        info!(
+            "Creating UnifiedDialogApi in {:?} mode",
+            Self::mode_name(&config)
         );
-        
-        Ok(Self {
-            manager,
-            config,
-        })
+
+        let manager = Arc::new(
+            UnifiedDialogManager::new(transaction_manager, config.clone())
+                .await
+                .map_err(ApiError::from)?,
+        );
+
+        Ok(Self { manager, config })
     }
-    
+
     /// Create a new unified dialog API with global event coordination
     pub async fn new_with_event_coordinator(
         transaction_manager: Arc<TransactionManager>,
         config: DialogManagerConfig,
         global_coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
     ) -> ApiResult<Self> {
-        info!("Creating UnifiedDialogApi with global event coordination in {:?} mode", Self::mode_name(&config));
-        
-        let manager = Arc::new(
-            UnifiedDialogManager::new(transaction_manager, config.clone()).await
-                .map_err(ApiError::from)?
+        info!(
+            "Creating UnifiedDialogApi with global event coordination in {:?} mode",
+            Self::mode_name(&config)
         );
-        
+
+        let manager = Arc::new(
+            UnifiedDialogManager::new(transaction_manager, config.clone())
+                .await
+                .map_err(ApiError::from)?,
+        );
+
         // Create and set up the event hub
         let event_hub = crate::events::DialogEventHub::new(
             global_coordinator,
             Arc::new(manager.as_ref().inner_manager().clone()),
-        ).await
+        )
+        .await
         .map_err(|e| ApiError::internal(format!("Failed to create event hub: {}", e)))?;
-        
+
         // Set the event hub on the dialog manager
-        manager.as_ref().inner_manager().set_event_hub(event_hub).await;
-        
-        Ok(Self {
-            manager,
-            config,
-        })
+        manager
+            .as_ref()
+            .inner_manager()
+            .set_event_hub(event_hub)
+            .await;
+
+        Ok(Self { manager, config })
     }
-    
+
     /// Create a new unified dialog API with global events AND event coordination
     pub async fn with_global_events_and_coordinator(
         transaction_manager: Arc<TransactionManager>,
@@ -316,30 +339,40 @@ impl UnifiedDialogApi {
         config: DialogManagerConfig,
         global_coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
     ) -> ApiResult<Self> {
-        info!("Creating UnifiedDialogApi with global events and event coordination in {:?} mode", Self::mode_name(&config));
-        
+        info!(
+            "Creating UnifiedDialogApi with global events and event coordination in {:?} mode",
+            Self::mode_name(&config)
+        );
+
         // Create the manager with global events
         let manager = Arc::new(
-            UnifiedDialogManager::with_global_events(transaction_manager, transaction_events, config.clone()).await
-                .map_err(ApiError::from)?
+            UnifiedDialogManager::with_global_events(
+                transaction_manager,
+                transaction_events,
+                config.clone(),
+            )
+            .await
+            .map_err(ApiError::from)?,
         );
-        
+
         // Create and set up the event hub
         let event_hub = crate::events::DialogEventHub::new(
             global_coordinator,
             Arc::new(manager.as_ref().inner_manager().clone()),
-        ).await
+        )
+        .await
         .map_err(|e| ApiError::internal(format!("Failed to create event hub: {}", e)))?;
-        
+
         // Set the event hub on the dialog manager
-        manager.as_ref().inner_manager().set_event_hub(event_hub).await;
-        
-        Ok(Self {
-            manager,
-            config,
-        })
+        manager
+            .as_ref()
+            .inner_manager()
+            .set_event_hub(event_hub)
+            .await;
+
+        Ok(Self { manager, config })
     }
-    
+
     /// Create a new unified dialog API with global events (RECOMMENDED)
     ///
     /// # Arguments
@@ -376,19 +409,24 @@ impl UnifiedDialogApi {
         transaction_events: mpsc::Receiver<TransactionEvent>,
         config: DialogManagerConfig,
     ) -> ApiResult<Self> {
-        info!("Creating UnifiedDialogApi with global events in {:?} mode", Self::mode_name(&config));
-        
-        let manager = Arc::new(
-            UnifiedDialogManager::with_global_events(transaction_manager, transaction_events, config.clone()).await
-                .map_err(ApiError::from)?
+        info!(
+            "Creating UnifiedDialogApi with global events in {:?} mode",
+            Self::mode_name(&config)
         );
-        
-        Ok(Self {
-            manager,
-            config,
-        })
+
+        let manager = Arc::new(
+            UnifiedDialogManager::with_global_events(
+                transaction_manager,
+                transaction_events,
+                config.clone(),
+            )
+            .await
+            .map_err(ApiError::from)?,
+        );
+
+        Ok(Self { manager, config })
     }
-    
+
     /// Get the configuration mode name for logging
     fn mode_name(config: &DialogManagerConfig) -> &'static str {
         match config {
@@ -397,28 +435,28 @@ impl UnifiedDialogApi {
             DialogManagerConfig::Hybrid(_) => "Hybrid",
         }
     }
-    
+
     /// Get the current configuration
     pub fn config(&self) -> &DialogManagerConfig {
         &self.config
     }
-    
+
     /// Get the underlying dialog manager
     ///
     /// Provides access to the underlying UnifiedDialogManager for advanced operations.
     pub fn dialog_manager(&self) -> &Arc<UnifiedDialogManager> {
         &self.manager
     }
-    
+
     /// Get reference to the subscription manager if configured
     pub fn subscription_manager(&self) -> Option<&Arc<crate::subscription::SubscriptionManager>> {
         self.manager.subscription_manager()
     }
-    
+
     // ========================================
     // LIFECYCLE MANAGEMENT
     // ========================================
-    
+
     /// Start the dialog API
     ///
     /// Initializes the API for processing SIP messages and events.
@@ -426,7 +464,7 @@ impl UnifiedDialogApi {
         info!("Starting UnifiedDialogApi");
         self.manager.start().await.map_err(ApiError::from)
     }
-    
+
     /// Stop the dialog API
     ///
     /// Gracefully shuts down the API and all active dialogs.
@@ -434,7 +472,7 @@ impl UnifiedDialogApi {
         info!("Stopping UnifiedDialogApi");
         self.manager.stop().await.map_err(ApiError::from)
     }
-    
+
     // ========================================
     // SESSION COORDINATION
     // ========================================
@@ -443,11 +481,11 @@ impl UnifiedDialogApi {
     // subscribe_to_dialog_events() — use GlobalEventCoordinator instead.
     // Wire the coordinator via `with_global_events(...)` at construction time
     // and receive events through the coordinator's broadcast channels.
-    
+
     // ========================================
     // CLIENT-MODE OPERATIONS
     // ========================================
-    
+
     /// Make an outgoing call (Client/Hybrid modes only)
     ///
     /// Creates a new dialog and sends an INVITE request to establish a call.
@@ -467,10 +505,10 @@ impl UnifiedDialogApi {
     /// # async fn example(api: rvoip_dialog_core::api::unified::UnifiedDialogApi) -> Result<(), Box<dyn std::error::Error>> {
     /// let call = api.make_call(
     ///     "sip:alice@example.com",
-    ///     "sip:bob@example.com", 
+    ///     "sip:bob@example.com",
     ///     Some("v=0\r\no=alice 123 456 IN IP4 192.168.1.100\r\n...".to_string())
     /// ).await?;
-    /// 
+    ///
     /// println!("Call created: {}", call.call_id());
     /// # Ok(())
     /// # }
@@ -504,7 +542,9 @@ impl UnifiedDialogApi {
         sdp_offer: Option<String>,
         call_id: Option<String>,
     ) -> ApiResult<CallHandle> {
-        self.manager.make_call_with_id(from_uri, to_uri, sdp_offer, call_id).await
+        self.manager
+            .make_call_with_id(from_uri, to_uri, sdp_offer, call_id)
+            .await
     }
 
     /// Send an INVITE and pre-register the given session↔dialog mapping
@@ -562,14 +602,19 @@ impl UnifiedDialogApi {
     ) -> ApiResult<CallHandle> {
         self.manager
             .make_call_with_extra_headers_for_session(
-                session_id, from_uri, to_uri, sdp_offer, call_id, extra_headers,
+                session_id,
+                from_uri,
+                to_uri,
+                sdp_offer,
+                call_id,
+                extra_headers,
             )
             .await
     }
-    
+
     /// Create an outgoing dialog without sending INVITE (Client/Hybrid modes only)
     ///
-    /// Creates a dialog in preparation for sending requests. Useful for 
+    /// Creates a dialog in preparation for sending requests. Useful for
     /// scenarios where you want to create the dialog before sending the INVITE.
     ///
     /// # Arguments
@@ -584,7 +629,7 @@ impl UnifiedDialogApi {
     /// ```rust,no_run
     /// # async fn example(api: rvoip_dialog_core::api::unified::UnifiedDialogApi) -> Result<(), Box<dyn std::error::Error>> {
     /// let dialog = api.create_dialog("sip:alice@example.com", "sip:bob@example.com").await?;
-    /// 
+    ///
     /// // Send custom requests within the dialog
     /// dialog.send_info("Custom application data".to_string()).await?;
     /// dialog.send_notify("presence".to_string(), Some("online".to_string())).await?;
@@ -594,11 +639,11 @@ impl UnifiedDialogApi {
     pub async fn create_dialog(&self, from_uri: &str, to_uri: &str) -> ApiResult<DialogHandle> {
         self.manager.create_dialog(from_uri, to_uri).await
     }
-    
+
     // ========================================
     // SERVER-MODE OPERATIONS
     // ========================================
-    
+
     /// Handle incoming INVITE request (Server/Hybrid modes only)
     ///
     /// Processes an incoming INVITE to potentially establish a call.
@@ -617,20 +662,24 @@ impl UnifiedDialogApi {
     /// # async fn example(api: rvoip_dialog_core::api::unified::UnifiedDialogApi, request: rvoip_sip_core::Request) -> Result<(), Box<dyn std::error::Error>> {
     /// let source = "192.168.1.100:5060".parse().unwrap();
     /// let call = api.handle_invite(request, source).await?;
-    /// 
+    ///
     /// // Accept the call
     /// call.answer(Some("v=0\r\no=server 789 012 IN IP4 192.168.1.10\r\n...".to_string())).await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn handle_invite(&self, request: Request, source: SocketAddr) -> ApiResult<CallHandle> {
+    pub async fn handle_invite(
+        &self,
+        request: Request,
+        source: SocketAddr,
+    ) -> ApiResult<CallHandle> {
         self.manager.handle_invite(request, source).await
     }
-    
+
     // ========================================
     // SHARED OPERATIONS (ALL MODES)
     // ========================================
-    
+
     /// Send a request within an existing dialog
     ///
     /// Available in all modes for sending in-dialog requests.
@@ -646,9 +695,11 @@ impl UnifiedDialogApi {
         &self,
         dialog_id: &DialogId,
         method: Method,
-        body: Option<bytes::Bytes>
+        body: Option<bytes::Bytes>,
     ) -> ApiResult<TransactionKey> {
-        self.manager.send_request_in_dialog(dialog_id, method, body).await
+        self.manager
+            .send_request_in_dialog(dialog_id, method, body)
+            .await
     }
 
     /// Send an INFO request (RFC 6086) with a caller-chosen `Content-Type`.
@@ -667,7 +718,7 @@ impl UnifiedDialogApi {
             .send_info_with_content_type(dialog_id, content_type, body)
             .await
     }
-    
+
     /// RFC 3261 §22.2 — resend an INVITE with digest auth after a 401/407
     /// challenge. Session-core-v3 uses this to transparently retry call setup
     /// when the UAS or proxy challenged the original INVITE.
@@ -710,11 +761,11 @@ impl UnifiedDialogApi {
     pub async fn send_response(
         &self,
         transaction_id: &TransactionKey,
-        response: Response
+        response: Response,
     ) -> ApiResult<()> {
         self.manager.send_response(transaction_id, response).await
     }
-    
+
     /// Build a response for a transaction
     ///
     /// Constructs a properly formatted SIP response.
@@ -730,11 +781,13 @@ impl UnifiedDialogApi {
         &self,
         transaction_id: &TransactionKey,
         status_code: StatusCode,
-        body: Option<String>
+        body: Option<String>,
     ) -> ApiResult<Response> {
-        self.manager.build_response(transaction_id, status_code, body).await
+        self.manager
+            .build_response(transaction_id, status_code, body)
+            .await
     }
-    
+
     /// Send a status response (convenience method)
     ///
     /// Builds and sends a simple status response.
@@ -747,11 +800,13 @@ impl UnifiedDialogApi {
         &self,
         transaction_id: &TransactionKey,
         status_code: StatusCode,
-        reason: Option<String>
+        reason: Option<String>,
     ) -> ApiResult<()> {
-        self.manager.send_status_response(transaction_id, status_code, reason).await
+        self.manager
+            .send_status_response(transaction_id, status_code, reason)
+            .await
     }
-    
+
     /// Send a 3xx redirect response for a session with one or more Contact
     /// URIs (RFC 3261 §8.1.3.4 / §21.3).
     ///
@@ -784,8 +839,7 @@ impl UnifiedDialogApi {
         }
         if contacts.is_empty() {
             return Err(ApiError::Internal {
-                message: "send_redirect_response_for_session: no Contact URIs supplied"
-                    .to_string(),
+                message: "send_redirect_response_for_session: no Contact URIs supplied".to_string(),
             });
         }
 
@@ -811,9 +865,7 @@ impl UnifiedDialogApi {
             })?;
 
         let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::MovedTemporarily);
-        let mut response = self
-            .build_response(&transaction_id, status, None)
-            .await?;
+        let mut response = self.build_response(&transaction_id, status, None).await?;
 
         // Build Contact: uri1, uri2, ... as a single header with multiple params.
         let mut params: Vec<ContactParamInfo> = Vec::with_capacity(contacts.len());
@@ -853,22 +905,27 @@ impl UnifiedDialogApi {
         &self,
         session_id: &str,
         status_code: u16,
-        body: Option<String>
+        body: Option<String>,
     ) -> ApiResult<()> {
-        debug!("send_response_for_session called for session {} with status {}", session_id, status_code);
-        
+        debug!(
+            "send_response_for_session called for session {} with status {}",
+            session_id, status_code
+        );
+
         // Look up the dialog ID for this session
-        let dialog_id = self.manager.core()
+        let dialog_id = self
+            .manager
+            .core()
             .session_to_dialog
             .get(session_id)
             .ok_or_else(|| {
                 error!("No dialog found for session {}", session_id);
-                ApiError::Dialog { 
-                    message: format!("No dialog found for session {}", session_id) 
+                ApiError::Dialog {
+                    message: format!("No dialog found for session {}", session_id),
                 }
             })?
             .clone();
-        
+
         debug!("Found dialog {} for session {}", dialog_id, session_id);
 
         // Find the *pending* server transaction for this dialog.
@@ -888,7 +945,9 @@ impl UnifiedDialogApi {
         // prefer a non-INVITE tx when available so an in-dialog UPDATE/
         // re-INVITE response doesn't get misrouted to the original INVITE.
         let tx_mgr = self.manager.core().transaction_manager();
-        let candidates: Vec<crate::transaction::TransactionKey> = self.manager.core()
+        let candidates: Vec<crate::transaction::TransactionKey> = self
+            .manager
+            .core()
             .transaction_to_dialog
             .iter()
             .filter(|entry| entry.value() == &dialog_id && entry.key().is_server())
@@ -920,32 +979,40 @@ impl UnifiedDialogApi {
             .or(pending_invite)
             .or(any_server)
             .ok_or_else(|| {
-                error!("No server transaction found for dialog {} (session {})", dialog_id, session_id);
+                error!(
+                    "No server transaction found for dialog {} (session {})",
+                    dialog_id, session_id
+                );
                 for entry in self.manager.core().transaction_to_dialog.iter() {
                     debug!("Transaction {} -> Dialog {}", entry.key(), entry.value());
                 }
                 ApiError::Dialog {
-                    message: format!("No transaction found for dialog {}", dialog_id)
+                    message: format!("No transaction found for dialog {}", dialog_id),
                 }
             })?;
 
-        debug!("Found transaction {} for dialog {}", transaction_id, dialog_id);
-        
+        debug!(
+            "Found transaction {} for dialog {}",
+            transaction_id, dialog_id
+        );
+
         // Build the response
         // For 200 OK responses to INVITE, we need special handling to ensure To tag is added
         let response = if status_code == 200 {
             // Get original request to check if it's an INVITE
-            let original_request = self.manager.core()
+            let original_request = self
+                .manager
+                .core()
                 .transaction_manager()
                 .original_request(&transaction_id)
                 .await
-                .map_err(|e| ApiError::Internal { 
-                    message: format!("Failed to get original request: {}", e) 
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to get original request: {}", e),
                 })?
-                .ok_or_else(|| ApiError::Internal { 
-                    message: "No original request found for transaction".to_string() 
+                .ok_or_else(|| ApiError::Internal {
+                    message: "No original request found for transaction".to_string(),
                 })?;
-            
+
             if original_request.method() == rvoip_sip_core::Method::Invite {
                 // Use special response builder for 200 OK to INVITE that adds To tag
                 use crate::transaction::utils::response_builders;
@@ -954,68 +1021,89 @@ impl UnifiedDialogApi {
                     &original_request,
                     "server",
                     &local_addr.ip().to_string(),
-                    Some(local_addr.port())
+                    Some(local_addr.port()),
                 );
-                
+
                 // Add SDP if provided
                 if let Some(sdp_body) = body {
                     response = response.with_body(sdp_body.as_bytes().to_vec());
                     // Add Content-Type header for SDP
-                    use rvoip_sip_core::{TypedHeader, types::content_type::ContentType};
                     use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-                    response.headers.push(TypedHeader::ContentType(ContentType::new(
-                        ContentTypeValue {
-                            m_type: "application".to_string(),
-                            m_subtype: "sdp".to_string(),
-                            parameters: std::collections::HashMap::new(),
-                        }
-                    )));
+                    use rvoip_sip_core::{types::content_type::ContentType, TypedHeader};
+                    response
+                        .headers
+                        .push(TypedHeader::ContentType(ContentType::new(
+                            ContentTypeValue {
+                                m_type: "application".to_string(),
+                                m_subtype: "sdp".to_string(),
+                                parameters: std::collections::HashMap::new(),
+                            },
+                        )));
                 }
-                
+
                 response
             } else {
                 // Not an INVITE, use regular response building
                 self.build_response(
                     &transaction_id,
                     StatusCode::from_u16(status_code).unwrap_or(StatusCode::Ok),
-                    body
-                ).await?
+                    body,
+                )
+                .await?
             }
         } else {
             // Not a 200 OK, use regular response building
             self.build_response(
                 &transaction_id,
                 StatusCode::from_u16(status_code).unwrap_or(StatusCode::Ok),
-                body
-            ).await?
+                body,
+            )
+            .await?
         };
-        
-        info!("Sending {} response for session {} via transaction {}", status_code, session_id, transaction_id);
+
+        info!(
+            "Sending {} response for session {} via transaction {}",
+            status_code, session_id, transaction_id
+        );
 
         // Call pre-send lifecycle hook for dialog state management
         // This handles UAS dialog confirmation when sending 200 OK to INVITE
-        if let Ok(Some(original_request)) = self.manager.core().transaction_manager().original_request(&transaction_id).await {
+        if let Ok(Some(original_request)) = self
+            .manager
+            .core()
+            .transaction_manager()
+            .original_request(&transaction_id)
+            .await
+        {
             use crate::manager::ResponseLifecycle;
-            if let Err(e) = self.manager.core().pre_send_response(&dialog_id, &response, &transaction_id, &original_request).await {
-                error!("Failed to execute pre_send_response hook for dialog {}: {}", dialog_id, e);
+            if let Err(e) = self
+                .manager
+                .core()
+                .pre_send_response(&dialog_id, &response, &transaction_id, &original_request)
+                .await
+            {
+                error!(
+                    "Failed to execute pre_send_response hook for dialog {}: {}",
+                    dialog_id, e
+                );
                 // Continue with sending - the error is logged but shouldn't block the response
             }
         }
 
         self.send_response(&transaction_id, response).await
     }
-    
+
     // ========================================
     // SIP METHOD HELPERS (ALL MODES)
     // ========================================
-    
+
     /// Send BYE request to terminate a dialog
     pub async fn send_bye(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
         self.manager.send_bye(dialog_id).await
     }
-    
+
     /// Send REGISTER request for SIP registration
-    /// 
+    ///
     /// Note: REGISTER is a non-dialog request, so it doesn't use a dialog_id.
     /// This method sends a REGISTER request directly via the transaction manager.
     ///
@@ -1026,7 +1114,7 @@ impl UnifiedDialogApi {
     /// * `expires` - Registration expiry in seconds
     /// * `authorization` - Optional Authorization header value for digest auth
     /// Send REGISTER request for SIP registration
-    /// 
+    ///
     /// Note: REGISTER is a non-dialog request, so it doesn't use a dialog_id.
     /// This method sends a REGISTER request directly via the transaction manager
     /// and waits for the response (including 401 auth challenges).
@@ -1091,14 +1179,16 @@ impl UnifiedDialogApi {
         expires: u32,
         authorization: Option<String>,
     ) -> ApiResult<Response> {
-        self.send_register_impl(
-            registrar_uri,
-            from_uri,
-            contact_uri,
+        self.send_register_with_options(RegisterRequestOptions {
+            registrar_uri: registrar_uri.to_string(),
+            aor_uri: from_uri.to_string(),
+            contact_uri: contact_uri.to_string(),
             expires,
             authorization,
-            None,
-        )
+            call_id: None,
+            cseq: None,
+            outbound_contact: None,
+        })
         .await
     }
 
@@ -1120,121 +1210,209 @@ impl UnifiedDialogApi {
         expires: u32,
         authorization: Option<String>,
     ) -> ApiResult<Response> {
-        self.send_register_impl(
-            registrar_uri,
-            from_uri,
-            contact_uri,
+        self.send_register_with_options(RegisterRequestOptions {
+            registrar_uri: registrar_uri.to_string(),
+            aor_uri: from_uri.to_string(),
+            contact_uri: contact_uri.to_string(),
             expires,
             authorization,
-            Some(outbound_params),
-        )
+            call_id: None,
+            cseq: None,
+            outbound_contact: Some(outbound_params.clone()),
+        })
         .await
     }
 
-    async fn send_register_impl(
+    pub async fn send_register_with_options(
         &self,
-        registrar_uri: &str,
-        from_uri: &str,
-        contact_uri: &str,
-        expires: u32,
-        authorization: Option<String>,
-        outbound_params: Option<&rvoip_sip_core::types::outbound::OutboundContactParams>,
+        options: RegisterRequestOptions,
     ) -> ApiResult<Response> {
-        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use crate::transaction::client::builders::RegisterBuilder;
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::TypedHeader;
-        use rvoip_sip_core::types::header::HeaderName;
 
-        // Determine CSeq based on whether this is a retry (has authorization)
-        let cseq = if authorization.is_some() { 2 } else { 1 };
+        let cseq = options.cseq.unwrap_or(1);
 
         debug!(
             "Building REGISTER request to {} (expires={}, cseq={}, auth={}, outbound={})",
-            registrar_uri,
-            expires,
+            options.registrar_uri,
+            options.expires,
             cseq,
-            authorization.is_some(),
-            outbound_params.is_some()
+            options.authorization.is_some(),
+            options.outbound_contact.is_some()
         );
 
-        // Build REGISTER request
-        let mut builder = SimpleRequestBuilder::register(registrar_uri)
-            .map_err(|e| ApiError::protocol(e.to_string()))?
-            .from("", from_uri, None)
-            .to("", from_uri, None); // To same as From for self-registration
+        let mut builder = RegisterBuilder::new()
+            .registrar(&options.registrar_uri)
+            .aor(&options.aor_uri)
+            .user_info(&options.aor_uri, "")
+            .contact(&options.contact_uri)
+            .local_address(self.manager.core().local_address())
+            .expires(options.expires)
+            .cseq(cseq);
 
-        // Build Contact header — either plain URI (legacy) or with RFC 5626
-        // outbound params (Phase 2a).
-        builder = match outbound_params {
-            None => builder.contact(contact_uri, None),
-            Some(params) => {
-                let contact = build_outbound_contact(contact_uri, params).map_err(|e| {
-                    ApiError::protocol(format!("Invalid outbound Contact URI {}: {}", contact_uri, e))
-                })?;
-                builder.header(TypedHeader::Contact(contact))
-            }
-        };
+        if let Some(call_id) = &options.call_id {
+            builder = builder.call_id(call_id);
+        }
 
-        builder = builder.expires(expires).cseq(cseq);
+        if let Some(params) = &options.outbound_contact {
+            let contact = build_outbound_contact(&options.contact_uri, params).map_err(|e| {
+                ApiError::protocol(format!(
+                    "Invalid outbound Contact URI {}: {}",
+                    options.contact_uri, e
+                ))
+            })?;
+            builder = builder.contact_header(contact);
+        }
 
-        // Build the request
-        let mut request = builder.build();
-        
-        // Add Authorization header if provided (must add after building)
-        if let Some(auth) = authorization {
-            use rvoip_sip_core::types::header::HeaderValue;
-            request.headers.push(TypedHeader::Other(
+        if let Some(auth) = options.authorization {
+            builder = builder.header(TypedHeader::Other(
                 HeaderName::Authorization,
-                HeaderValue::Raw(auth.into_bytes())
+                HeaderValue::Raw(auth.into_bytes()),
             ));
             debug!("Added Authorization header to REGISTER");
         }
-        
-        // Parse destination from registrar URI and resolve via DNS if needed.
-        // Shares the resolver used by INVITE (dialog_utils::resolve_uri_to_socketaddr),
-        // which tries a literal-IP parse first and falls back to system
-        // A/AAAA resolution — no SRV/NAPTR yet (RFC 3263 is future work).
-        let dest_uri = registrar_uri.parse::<rvoip_sip_core::Uri>()
+
+        let request = builder
+            .build()
+            .map_err(|e| ApiError::protocol(format!("Failed to build REGISTER request: {}", e)))?;
+
+        let dest_uri = options
+            .registrar_uri
+            .parse::<rvoip_sip_core::Uri>()
             .map_err(|e| ApiError::protocol(format!("Invalid registrar URI: {}", e)))?;
 
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
-            .ok_or_else(|| ApiError::protocol(format!(
-                "Failed to resolve registrar URI: {}",
-                registrar_uri
-            )))?;
+            .ok_or_else(|| {
+                ApiError::protocol(format!(
+                    "Failed to resolve registrar URI: {}",
+                    options.registrar_uri
+                ))
+            })?;
 
         debug!("Sending REGISTER to {}", destination);
-        
-        // Use existing send_non_dialog_request() - it handles everything!
-        let response = self.send_non_dialog_request(
-            request,
-            destination,
-            std::time::Duration::from_secs(32)  // RFC 3261 Timer F = 64*T1
-        ).await?;
-        
+
+        let response = self
+            .send_non_dialog_request(request, destination, std::time::Duration::from_secs(32))
+            .await?;
+
         debug!("Received REGISTER response: {}", response.status_code());
         Ok(response)
     }
-    
+
+    /// Send an out-of-dialog SUBSCRIBE request.
+    pub async fn send_subscribe_out_of_dialog(
+        &self,
+        target_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        event_package: &str,
+        expires: u32,
+    ) -> ApiResult<Response> {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::{ContentLength, TypedHeader};
+
+        let local_addr = self.manager.core().local_address();
+        let branch = crate::transaction::utils::dialog_utils::generate_branch();
+        let request = SimpleRequestBuilder::subscribe(target_uri, event_package, expires)
+            .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE request: {}", e)))?
+            .from(
+                "",
+                from_uri,
+                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
+            )
+            .to("", target_uri, None)
+            .call_id(&format!("sub-{}", uuid::Uuid::new_v4()))
+            .cseq(1)
+            .via(&local_addr.to_string(), "UDP", Some(&branch))
+            .max_forwards(70)
+            .contact(contact_uri, None)
+            .header(TypedHeader::ContentLength(ContentLength::new(0)))
+            .build();
+
+        let dest_uri = target_uri
+            .parse::<rvoip_sip_core::Uri>()
+            .map_err(|e| ApiError::protocol(format!("Invalid SUBSCRIBE target URI: {}", e)))?;
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+            .await
+            .ok_or_else(|| {
+                ApiError::protocol(format!(
+                    "Failed to resolve SUBSCRIBE target URI: {}",
+                    target_uri
+                ))
+            })?;
+
+        self.send_non_dialog_request(request, destination, std::time::Duration::from_secs(30))
+            .await
+    }
+
+    /// Send an out-of-dialog MESSAGE request.
+    pub async fn send_message_out_of_dialog(
+        &self,
+        target_uri: &str,
+        from_uri: &str,
+        body: String,
+    ) -> ApiResult<Response> {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+
+        let local_addr = self.manager.core().local_address();
+        let branch = crate::transaction::utils::dialog_utils::generate_branch();
+        let request = SimpleRequestBuilder::new(rvoip_sip_core::Method::Message, target_uri)
+            .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?
+            .from(
+                "",
+                from_uri,
+                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
+            )
+            .to("", target_uri, None)
+            .call_id(&format!("msg-{}", uuid::Uuid::new_v4()))
+            .cseq(1)
+            .via(&local_addr.to_string(), "UDP", Some(&branch))
+            .max_forwards(70)
+            .content_type("text/plain")
+            .body(bytes::Bytes::from(body))
+            .build();
+
+        let dest_uri = target_uri
+            .parse::<rvoip_sip_core::Uri>()
+            .map_err(|e| ApiError::protocol(format!("Invalid MESSAGE target URI: {}", e)))?;
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+            .await
+            .ok_or_else(|| {
+                ApiError::protocol(format!(
+                    "Failed to resolve MESSAGE target URI: {}",
+                    target_uri
+                ))
+            })?;
+
+        self.send_non_dialog_request(request, destination, std::time::Duration::from_secs(10))
+            .await
+    }
+
     /// Send REFER request for call transfer
     pub async fn send_refer(
         &self,
         dialog_id: &DialogId,
         target_uri: String,
-        refer_body: Option<String>
+        refer_body: Option<String>,
     ) -> ApiResult<TransactionKey> {
-        self.manager.send_refer(dialog_id, target_uri, refer_body).await
+        self.manager
+            .send_refer(dialog_id, target_uri, refer_body)
+            .await
     }
-    
+
     /// Send NOTIFY request for event notifications
     pub async fn send_notify(
         &self,
         dialog_id: &DialogId,
         event: String,
         body: Option<String>,
-        subscription_state: Option<String>
+        subscription_state: Option<String>,
     ) -> ApiResult<TransactionKey> {
-        self.manager.send_notify(dialog_id, event, body, subscription_state).await
+        self.manager
+            .send_notify(dialog_id, event, body, subscription_state)
+            .await
     }
 
     /// Send NOTIFY for REFER implicit subscription (RFC 3515)
@@ -1242,16 +1420,18 @@ impl UnifiedDialogApi {
         &self,
         dialog_id: &DialogId,
         status_code: u16,
-        reason: &str
+        reason: &str,
     ) -> ApiResult<TransactionKey> {
-        self.manager.send_refer_notify(dialog_id, status_code, reason).await
+        self.manager
+            .send_refer_notify(dialog_id, status_code, reason)
+            .await
     }
 
     /// Send UPDATE request for media modifications
     pub async fn send_update(
         &self,
         dialog_id: &DialogId,
-        sdp: Option<String>
+        sdp: Option<String>,
     ) -> ApiResult<TransactionKey> {
         self.manager.send_update(dialog_id, sdp).await
     }
@@ -1276,23 +1456,19 @@ impl UnifiedDialogApi {
     }
 
     /// Send PRACK for a reliable provisional response (RFC 3262).
-    pub async fn send_prack(
-        &self,
-        dialog_id: &DialogId,
-        rseq: u32,
-    ) -> ApiResult<TransactionKey> {
+    pub async fn send_prack(&self, dialog_id: &DialogId, rseq: u32) -> ApiResult<TransactionKey> {
         self.manager.send_prack(dialog_id, rseq).await
     }
-    
+
     /// Send INFO request for application-specific information
     pub async fn send_info(
         &self,
         dialog_id: &DialogId,
-        info_body: String
+        info_body: String,
     ) -> ApiResult<TransactionKey> {
         self.manager.send_info(dialog_id, info_body).await
     }
-    
+
     /// Send CANCEL request to cancel a pending INVITE
     ///
     /// This method cancels a pending INVITE transaction that hasn't received a final response.
@@ -1312,31 +1488,31 @@ impl UnifiedDialogApi {
     pub async fn send_cancel(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
         self.manager.send_cancel(dialog_id).await
     }
-    
+
     // ========================================
     // DIALOG MANAGEMENT (ALL MODES)
     // ========================================
-    
+
     /// Get information about a dialog
     pub async fn get_dialog_info(&self, dialog_id: &DialogId) -> ApiResult<Dialog> {
         self.manager.get_dialog_info(dialog_id).await
     }
-    
+
     /// Get the current state of a dialog
     pub async fn get_dialog_state(&self, dialog_id: &DialogId) -> ApiResult<DialogState> {
         self.manager.get_dialog_state(dialog_id).await
     }
-    
+
     /// Terminate a dialog
     pub async fn terminate_dialog(&self, dialog_id: &DialogId) -> ApiResult<()> {
         self.manager.terminate_dialog(dialog_id).await
     }
-    
+
     /// List all active dialogs
     pub async fn list_active_dialogs(&self) -> Vec<DialogId> {
         self.manager.list_active_dialogs().await
     }
-    
+
     /// Get a dialog handle for convenient operations
     ///
     /// # Arguments
@@ -1347,11 +1523,14 @@ impl UnifiedDialogApi {
     pub async fn get_dialog_handle(&self, dialog_id: &DialogId) -> ApiResult<DialogHandle> {
         // Verify dialog exists first
         self.get_dialog_info(dialog_id).await?;
-        
+
         // Create handle using the core dialog manager
-        Ok(DialogHandle::new(dialog_id.clone(), Arc::new(self.manager.core().clone())))
+        Ok(DialogHandle::new(
+            dialog_id.clone(),
+            Arc::new(self.manager.core().clone()),
+        ))
     }
-    
+
     /// Get a call handle for convenient call operations
     ///
     /// # Arguments
@@ -1362,22 +1541,25 @@ impl UnifiedDialogApi {
     pub async fn get_call_handle(&self, dialog_id: &DialogId) -> ApiResult<CallHandle> {
         // Verify dialog exists first
         self.get_dialog_info(dialog_id).await?;
-        
+
         // Create call handle using the core dialog manager
-        Ok(CallHandle::new(dialog_id.clone(), Arc::new(self.manager.core().clone())))
+        Ok(CallHandle::new(
+            dialog_id.clone(),
+            Arc::new(self.manager.core().clone()),
+        ))
     }
-    
+
     // ========================================
     // MONITORING & STATISTICS
     // ========================================
-    
+
     /// Get comprehensive statistics for this API instance
     ///
     /// Returns detailed statistics including dialog counts, call metrics,
     /// and mode-specific information.
     pub async fn get_stats(&self) -> DialogStats {
         let manager_stats = self.manager.get_stats().await;
-        
+
         DialogStats {
             active_dialogs: manager_stats.active_dialogs,
             total_dialogs: manager_stats.total_dialogs,
@@ -1390,23 +1572,23 @@ impl UnifiedDialogApi {
             },
         }
     }
-    
+
     /// Get active dialogs with handles for easy management
     ///
     /// Returns a list of DialogHandle instances for all active dialogs.
     pub async fn active_dialogs(&self) -> Vec<DialogHandle> {
         let dialog_ids = self.list_active_dialogs().await;
         let mut handles = Vec::new();
-        
+
         for dialog_id in dialog_ids {
             if let Ok(handle) = self.get_dialog_handle(&dialog_id).await {
                 handles.push(handle);
             }
         }
-        
+
         handles
     }
-    
+
     /// Send ACK for 2xx response to INVITE
     ///
     /// Handles the automatic ACK sending required by RFC 3261 for 200 OK responses to INVITE.
@@ -1423,50 +1605,52 @@ impl UnifiedDialogApi {
         &self,
         dialog_id: &DialogId,
         original_invite_tx_id: &TransactionKey,
-        response: &Response
+        response: &Response,
     ) -> ApiResult<()> {
-        self.manager.send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response).await
+        self.manager
+            .send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response)
+            .await
     }
-    
+
     // ========================================
     // CONVENIENCE METHODS
     // ========================================
-    
+
     /// Check if this API supports outgoing calls
     pub fn supports_outgoing_calls(&self) -> bool {
         self.config.supports_outgoing_calls()
     }
-    
+
     /// Check if this API supports incoming calls
     pub fn supports_incoming_calls(&self) -> bool {
         self.config.supports_incoming_calls()
     }
-    
+
     /// Get the from URI for outgoing requests (if configured)
     pub fn from_uri(&self) -> Option<&str> {
         self.config.from_uri()
     }
-    
+
     /// Get the domain for server operations (if configured)
     pub fn domain(&self) -> Option<&str> {
         self.config.domain()
     }
-    
+
     /// Check if automatic authentication is enabled
     pub fn auto_auth_enabled(&self) -> bool {
         self.config.auto_auth_enabled()
     }
-    
+
     /// Check if automatic OPTIONS response is enabled
     pub fn auto_options_enabled(&self) -> bool {
         self.config.auto_options_enabled()
     }
-    
+
     /// Check if automatic REGISTER response is enabled
     pub fn auto_register_enabled(&self) -> bool {
         self.config.auto_register_enabled()
     }
-    
+
     /// Create a new unified dialog API with automatic transport setup (SIMPLE)
     ///
     /// This is the recommended constructor for most use cases. It automatically
@@ -1496,10 +1680,16 @@ impl UnifiedDialogApi {
     /// # }
     /// ```
     pub async fn create(config: DialogManagerConfig) -> ApiResult<Self> {
-        use crate::transaction::{TransactionManager, transport::{TransportManager, TransportManagerConfig}};
-        
-        info!("Creating UnifiedDialogApi with automatic transport setup in {:?} mode", Self::mode_name(&config));
-        
+        use crate::transaction::{
+            transport::{TransportManager, TransportManagerConfig},
+            TransactionManager,
+        };
+
+        info!(
+            "Creating UnifiedDialogApi with automatic transport setup in {:?} mode",
+            Self::mode_name(&config)
+        );
+
         // Create transport manager automatically with sensible defaults
         let bind_addr = config.local_address();
         let transport_config = TransportManagerConfig {
@@ -1510,36 +1700,41 @@ impl UnifiedDialogApi {
             bind_addresses: vec![bind_addr],
             ..Default::default()
         };
-        
-        let (mut transport, transport_rx) = TransportManager::new(transport_config).await
-            .map_err(|e| ApiError::Internal { 
-                message: format!("Failed to create transport manager: {}", e) 
+
+        let (mut transport, transport_rx) =
+            TransportManager::new(transport_config)
+                .await
+                .map_err(|e| ApiError::Internal {
+                    message: format!("Failed to create transport manager: {}", e),
+                })?;
+
+        transport
+            .initialize()
+            .await
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to initialize transport: {}", e),
             })?;
-            
-        transport.initialize().await
-            .map_err(|e| ApiError::Internal { 
-                message: format!("Failed to initialize transport: {}", e) 
-            })?;
-        
+
         // Create transaction manager with global events automatically
         // Use larger channel capacity for high-concurrency scenarios (e.g., 500+ concurrent calls)
         let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
             transport,
             transport_rx,
-            Some(10000),  // Increased from 100 to handle high concurrent call volumes
-        ).await
-            .map_err(|e| ApiError::Internal { 
-                message: format!("Failed to create transaction manager: {}", e) 
-            })?;
-        
+            Some(10000), // Increased from 100 to handle high concurrent call volumes
+        )
+        .await
+        .map_err(|e| ApiError::Internal {
+            message: format!("Failed to create transaction manager: {}", e),
+        })?;
+
         // Create the unified dialog API with all components
         Self::with_global_events(Arc::new(transaction_manager), global_rx, config).await
     }
-    
+
     // ========================================
     // NON-DIALOG OPERATIONS
     // ========================================
-    
+
     /// Send a non-dialog SIP request (for REGISTER, OPTIONS, etc.)
     ///
     /// This method allows sending SIP requests that don't establish or require
@@ -1593,38 +1788,54 @@ impl UnifiedDialogApi {
         destination: SocketAddr,
         timeout: std::time::Duration,
     ) -> ApiResult<Response> {
-        debug!("Sending non-dialog {} request to {}", request.method(), destination);
-        
+        debug!(
+            "Sending non-dialog {} request to {}",
+            request.method(),
+            destination
+        );
+
         // Create a non-dialog transaction directly with the transaction manager
         let transaction_id = match request.method() {
             Method::Invite => {
                 return Err(ApiError::protocol(
-                    "INVITE requests must use dialog context. Use make_call() instead."
+                    "INVITE requests must use dialog context. Use make_call() instead.",
                 ));
             }
             _ => {
                 // Create non-INVITE client transaction
-                self.manager.core().transaction_manager()
+                self.manager
+                    .core()
+                    .transaction_manager()
                     .create_non_invite_client_transaction(request, destination)
                     .await
-                    .map_err(|e| ApiError::internal(format!("Failed to create transaction: {}", e)))?
+                    .map_err(|e| {
+                        ApiError::internal(format!("Failed to create transaction: {}", e))
+                    })?
             }
         };
-        
+
         // Send the request
-        self.manager.core().transaction_manager()
+        self.manager
+            .core()
+            .transaction_manager()
             .send_request(&transaction_id)
             .await
             .map_err(|e| ApiError::internal(format!("Failed to send request: {}", e)))?;
-        
+
         // Wait for final response
-        let response = self.manager.core().transaction_manager()
+        let response = self
+            .manager
+            .core()
+            .transaction_manager()
             .wait_for_final_response(&transaction_id, timeout)
             .await
             .map_err(|e| ApiError::internal(format!("Failed to wait for response: {}", e)))?
             .ok_or_else(|| ApiError::network(format!("Request timed out after {:?}", timeout)))?;
-        
-        debug!("Received response {} for non-dialog request", response.status_code());
+
+        debug!(
+            "Received response {} for non-dialog request",
+            response.status_code()
+        );
         Ok(response)
     }
 }
@@ -1687,7 +1898,9 @@ mod outbound_contact_tests {
             instance_urn: "urn:uuid:x".into(),
             reg_id: 7,
         };
-        let s = build_outbound_contact("sip:alice@host", &params).unwrap().to_string();
+        let s = build_outbound_contact("sip:alice@host", &params)
+            .unwrap()
+            .to_string();
         assert!(s.contains("reg-id=7"), "reg-id value not propagated: {}", s);
     }
 }

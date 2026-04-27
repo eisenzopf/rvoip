@@ -6,7 +6,7 @@
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-use rvoip_dialog_core::{DialogError, Dialog, DialogState};
+use rvoip_dialog_core::{Dialog, DialogError, DialogState};
 
 /// Test basic dialog recovery functionality without transport concerns
 #[tokio::test]
@@ -53,12 +53,12 @@ async fn test_dialog_recovery_state_transitions() -> Result<(), DialogError> {
     // Test multiple recovery cycles
     for i in 0..3 {
         let reason = format!("Recovery test cycle {}", i + 1);
-        
+
         // Enter recovery mode
         dialog.enter_recovery_mode(&reason);
         assert_eq!(dialog.state, DialogState::Recovering);
         assert!(dialog.is_recovering());
-        
+
         // Complete recovery
         let recovered = dialog.complete_recovery();
         assert!(recovered);
@@ -135,12 +135,12 @@ async fn test_multiple_dialog_recovery() -> Result<(), DialogError> {
     // Simulate recovery for multiple dialogs
     for dialog in &mut dialogs {
         let call_id = dialog.call_id.clone();
-        
+
         // Enter recovery mode
         dialog.enter_recovery_mode("Multi-dialog test");
         assert_eq!(dialog.state, DialogState::Recovering);
         info!("Dialog {} entered recovery mode", call_id);
-        
+
         // Complete recovery
         let recovered = dialog.complete_recovery();
         assert!(recovered);
@@ -171,7 +171,7 @@ async fn test_dialog_recovery_metadata() -> Result<(), DialogError> {
     // Enter recovery mode with specific reason
     let failure_reason = "Network timeout detected";
     dialog.enter_recovery_mode(failure_reason);
-    
+
     // Check recovery metadata is updated
     assert_eq!(dialog.recovery_attempts, 0); // Still 0, not auto-incremented
     assert_eq!(dialog.recovery_reason.as_ref().unwrap(), failure_reason);
@@ -180,7 +180,7 @@ async fn test_dialog_recovery_metadata() -> Result<(), DialogError> {
     // Complete recovery
     let recovered = dialog.complete_recovery();
     assert!(recovered);
-    
+
     // Check that recovery completion time is recorded
     assert!(dialog.recovered_at.is_some());
     info!("Dialog recovered at: {:?}", dialog.recovered_at);
@@ -226,4 +226,4 @@ async fn test_recovery_architecture_note() {
     info!("  - transaction-core: Handles network failure detection and transport recovery");
     info!("  - Full integration tests should be at transaction-core level");
     info!("  - dialog-core tests focus on pure dialog state management");
-} 
+}

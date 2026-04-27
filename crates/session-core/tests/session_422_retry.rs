@@ -21,8 +21,8 @@
 //! - `crates/dialog-core/src/manager/transaction_integration.rs::
 //!   send_invite_with_session_timer_override` (per-call timer headers)
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -31,8 +31,8 @@ use tokio::time::{sleep, timeout};
 use rvoip_session_core::api::unified::Config;
 use rvoip_session_core::{Event, StreamPeer};
 
-use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::parser::parse_message;
+use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
 
@@ -97,7 +97,8 @@ fn build_200(request: &Request, uas_port: u16) -> Vec<u8> {
     // Drop the Content-Length: 0 default from create_response and replace
     // with the actual body length. Also tag the body type so the UAC's SDP
     // parser picks it up for NegotiateSDPAsUAC.
-    resp.headers.retain(|h| !matches!(h, TypedHeader::ContentLength(_)));
+    resp.headers
+        .retain(|h| !matches!(h, TypedHeader::ContentLength(_)));
     resp.headers.push(TypedHeader::ContentLength(
         rvoip_sip_core::types::ContentLength::new(body_len),
     ));
@@ -209,9 +210,12 @@ async fn invite_422_retry_bumps_session_expires_and_succeeds() {
         .expect("make_call");
     let call_id = handle.id().clone();
 
-    let outcome = timeout(Duration::from_secs(10), wait_for_terminal(&mut peer, &call_id))
-        .await
-        .expect("call settled within 10s");
+    let outcome = timeout(
+        Duration::from_secs(10),
+        wait_for_terminal(&mut peer, &call_id),
+    )
+    .await
+    .expect("call settled within 10s");
 
     // Small grace window so the mock observes any queued ACK before asserting
     // the exact INVITE count (ensures we don't race with in-flight retries).
@@ -284,9 +288,12 @@ async fn invite_422_retry_cap_surfaces_call_failed() {
         .expect("make_call");
     let call_id = handle.id().clone();
 
-    let outcome = timeout(Duration::from_secs(10), wait_for_terminal(&mut peer, &call_id))
-        .await
-        .expect("call settled within 10s");
+    let outcome = timeout(
+        Duration::from_secs(10),
+        wait_for_terminal(&mut peer, &call_id),
+    )
+    .await
+    .expect("call settled within 10s");
 
     sleep(Duration::from_millis(200)).await;
 
@@ -299,7 +306,10 @@ async fn invite_422_retry_cap_surfaces_call_failed() {
     );
 
     match outcome {
-        Outcome::Failed { status_code, reason } => {
+        Outcome::Failed {
+            status_code,
+            reason,
+        } => {
             assert_eq!(status_code, 422, "terminal status must be 422");
             assert!(
                 reason.contains("Session Interval Too Small"),
@@ -339,8 +349,15 @@ async fn wait_for_terminal(
             Event::CallAnswered { call_id: id, .. } if &id == call_id => {
                 return Outcome::Answered;
             }
-            Event::CallFailed { call_id: id, status_code, reason } if &id == call_id => {
-                return Outcome::Failed { status_code, reason };
+            Event::CallFailed {
+                call_id: id,
+                status_code,
+                reason,
+            } if &id == call_id => {
+                return Outcome::Failed {
+                    status_code,
+                    reason,
+                };
             }
             Event::CallEnded { call_id: id, .. } if &id == call_id => {
                 return Outcome::Ended;

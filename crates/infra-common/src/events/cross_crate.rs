@@ -3,7 +3,7 @@
 //! Defines all events that cross crate boundaries, enabling event-driven
 //! communication between session-core, dialog-core, media-core, etc.
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::events::types::{Event, EventPriority};
@@ -19,25 +19,25 @@ pub type EventTypeId = &'static str;
 pub enum RvoipCrossCrateEvent {
     /// Session-core to dialog-core events
     SessionToDialog(SessionToDialogEvent),
-    
+
     /// Dialog-core to session-core events
     DialogToSession(DialogToSessionEvent),
-    
+
     /// Session-core to media-core events
     SessionToMedia(SessionToMediaEvent),
-    
+
     /// Media-core to session-core events
     MediaToSession(MediaToSessionEvent),
-    
+
     /// Dialog-core to sip-transport events
     DialogToTransport(DialogToTransportEvent),
-    
+
     /// Sip-transport to dialog-core events
     TransportToDialog(TransportToDialogEvent),
-    
+
     /// Media-core to rtp-core events
     MediaToRtp(MediaToRtpEvent),
-    
+
     /// Rtp-core to media-core events
     RtpToMedia(RtpToMediaEvent),
 }
@@ -48,7 +48,7 @@ pub trait CrossCrateEvent: Send + Sync + std::fmt::Debug {
     fn source_plane(&self) -> PlaneType;
     fn target_plane(&self) -> PlaneType;
     fn priority(&self) -> EventPriority;
-    
+
     /// Convert to Any for downcasting (trait-based approach)
     fn as_any(&self) -> &dyn Any;
 }
@@ -66,7 +66,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::RtpToMedia(_) => "rtp_to_media",
         }
     }
-    
+
     fn source_plane(&self) -> PlaneType {
         match self {
             RvoipCrossCrateEvent::SessionToDialog(_) => PlaneType::Signaling,
@@ -79,7 +79,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Transport,
         }
     }
-    
+
     fn target_plane(&self) -> PlaneType {
         match self {
             RvoipCrossCrateEvent::SessionToDialog(_) => PlaneType::Signaling,
@@ -92,7 +92,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Media,
         }
     }
-    
+
     fn priority(&self) -> EventPriority {
         match self {
             RvoipCrossCrateEvent::SessionToDialog(_) => EventPriority::High,
@@ -105,7 +105,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::RtpToMedia(_) => EventPriority::Normal,
         }
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -115,11 +115,11 @@ impl Event for RvoipCrossCrateEvent {
     fn event_type() -> &'static str {
         "rvoip_cross_crate_event"
     }
-    
+
     fn priority() -> EventPriority {
         EventPriority::High // Cross-crate events are high priority by default
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -129,7 +129,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
     fn event_type(&self) -> &'static str {
         CrossCrateEvent::event_type(self)
     }
-    
+
     fn session_id(&self) -> Option<&str> {
         // Extract session ID from the event if present
         match self {
@@ -156,7 +156,9 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::AuthRequired { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallRedirected { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::ReinviteGlare { session_id, .. } => Some(session_id),
-                DialogToSessionEvent::SessionIntervalTooSmall { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::SessionIntervalTooSmall { session_id, .. } => {
+                    Some(session_id)
+                }
                 DialogToSessionEvent::DtmfReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogError { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::DialogCreated { .. } => None, // No session_id in DialogCreated
@@ -197,7 +199,9 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 MediaToSessionEvent::MediaQualityDegraded { session_id, .. } => Some(session_id),
                 MediaToSessionEvent::DtmfDetected { session_id, .. } => Some(session_id),
                 MediaToSessionEvent::RtpTimeout { session_id, .. } => Some(session_id),
-                MediaToSessionEvent::PacketLossThresholdExceeded { session_id, .. } => Some(session_id),
+                MediaToSessionEvent::PacketLossThresholdExceeded { session_id, .. } => {
+                    Some(session_id)
+                }
             },
             RvoipCrossCrateEvent::DialogToTransport(_) => None, // Transport events don't have session context
             RvoipCrossCrateEvent::TransportToDialog(_) => None,
@@ -233,43 +237,35 @@ pub enum SessionToDialogEvent {
         sdp_offer: Option<String>,
         headers: HashMap<String, String>,
     },
-    
+
     /// Request to terminate a session
-    TerminateSession {
-        session_id: String,
-        reason: String,
-    },
-    
+    TerminateSession { session_id: String, reason: String },
+
     /// Request to hold a session
-    HoldSession {
-        session_id: String,
-    },
-    
+    HoldSession { session_id: String },
+
     /// Request to resume a session from hold
     ResumeSession {
         session_id: String,
         sdp_offer: Option<String>,
     },
-    
+
     /// Request to transfer a call
     TransferCall {
         session_id: String,
         target: String,
         transfer_type: TransferType,
     },
-    
+
     /// Send DTMF tones
-    SendDtmf {
-        session_id: String,
-        tones: String,
-    },
-    
+    SendDtmf { session_id: String, tones: String },
+
     /// Store dialog mapping (response to DialogCreated)
     StoreDialogMapping {
         session_id: String,
         dialog_id: String,
     },
-    
+
     /// Response to REFER request (Accept/Reject decision)
     ReferResponse {
         transaction_id: String,
@@ -277,15 +273,15 @@ pub enum SessionToDialogEvent {
         status_code: u16,
         reason: String,
     },
-    
+
     /// Send REGISTER response (401/200) - server-side
     SendRegisterResponse {
         transaction_id: String,
         status_code: u16,
         reason: String,
-        www_authenticate: Option<String>,  // For 401 challenge
-        contact: Option<String>,           // For 200 OK
-        expires: Option<u32>,              // For 200 OK
+        www_authenticate: Option<String>, // For 401 challenge
+        contact: Option<String>,          // For 200 OK
+        expires: Option<u32>,             // For 200 OK
     },
 }
 
@@ -305,20 +301,20 @@ pub enum DialogToSessionEvent {
         /// Source address for responses
         source_addr: String,
     },
-    
+
     /// Call state change notification
     CallStateChanged {
         session_id: String,
         new_state: CallState,
         reason: Option<String>,
     },
-    
+
     /// Call successfully established
     CallEstablished {
         session_id: String,
         sdp_answer: Option<String>,
     },
-    
+
     /// Call terminated notification
     CallTerminated {
         session_id: String,
@@ -337,9 +333,7 @@ pub enum DialogToSessionEvent {
     /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
     /// 487 Request Terminated after CANCEL). Distinct from CallFailed so
     /// applications can render "missed call" UX rather than "call failed".
-    CallCancelled {
-        session_id: String,
-    },
+    CallCancelled { session_id: String },
 
     /// RFC 4028 session-timer refresh succeeded (UPDATE or re-INVITE
     /// completed round-trip). Emitted once per successful refresh.
@@ -350,10 +344,7 @@ pub enum DialogToSessionEvent {
 
     /// RFC 4028 session-timer refresh failed; the dialog has been torn
     /// down with BYE (§10). A subsequent CallTerminated will also fire.
-    SessionRefreshFailed {
-        session_id: String,
-        reason: String,
-    },
+    SessionRefreshFailed { session_id: String, reason: String },
 
     /// RFC 3261 §22.2 — server challenged the UAC request. Emitted on any
     /// 401 Unauthorized or 407 Proxy Authentication Required that carries a
@@ -389,9 +380,7 @@ pub enum DialogToSessionEvent {
     /// UAC SHOULD wait a random interval and retry. Emitted only for
     /// re-INVITEs (and UPDATEs) — call-setup INVITEs fall through the
     /// generic CallFailed path.
-    ReinviteGlare {
-        session_id: String,
-    },
+    ReinviteGlare { session_id: String },
 
     /// RFC 4028 §6 — 422 Session Interval Too Small on INVITE. The UAS
     /// requires a longer session interval than the UAC offered; its
@@ -411,31 +400,25 @@ pub enum DialogToSessionEvent {
     },
 
     /// DTMF tones received
-    DtmfReceived {
-        session_id: String,
-        tones: String,
-    },
-    
+    DtmfReceived { session_id: String, tones: String },
+
     /// Dialog error occurred
     DialogError {
         session_id: String,
         error: String,
         error_code: Option<u32>,
     },
-    
+
     /// Dialog created (for session-core to track)
-    DialogCreated {
-        dialog_id: String,
-        call_id: String,
-    },
-    
+    DialogCreated { dialog_id: String, call_id: String },
+
     /// Dialog state changed
     DialogStateChanged {
         session_id: String,
         old_state: DialogState,
         new_state: DialogState,
     },
-    
+
     /// Re-INVITE or UPDATE received (mid-dialog request). `method` is the
     /// uppercase SIP method string ("INVITE" or "UPDATE"); session-core
     /// uses it to dispatch to the correct state-table event.
@@ -444,7 +427,7 @@ pub enum DialogToSessionEvent {
         sdp: Option<String>,
         method: String,
     },
-    
+
     /// Transfer requested
     TransferRequested {
         session_id: String,
@@ -460,9 +443,7 @@ pub enum DialogToSessionEvent {
     },
 
     /// Registration successful
-    RegistrationSuccess {
-        session_id: String,
-    },
+    RegistrationSuccess { session_id: String },
 
     /// Registration failed
     RegistrationFailed {
@@ -471,9 +452,7 @@ pub enum DialogToSessionEvent {
     },
 
     /// Subscription accepted
-    SubscriptionAccepted {
-        session_id: String,
-    },
+    SubscriptionAccepted { session_id: String },
 
     /// Subscription failed
     SubscriptionFailed {
@@ -503,16 +482,14 @@ pub enum DialogToSessionEvent {
     },
 
     /// MESSAGE delivered
-    MessageDelivered {
-        session_id: String,
-    },
+    MessageDelivered { session_id: String },
 
     /// MESSAGE delivery failed
     MessageFailed {
         session_id: String,
         status_code: u16,
     },
-    
+
     /// Incoming REGISTER request (server-side)
     IncomingRegister {
         transaction_id: String,
@@ -520,7 +497,7 @@ pub enum DialogToSessionEvent {
         to_uri: String,
         contact_uri: String,
         expires: u32,
-        authorization: Option<String>,  // Authorization header if present
+        authorization: Option<String>, // Authorization header if present
         call_id: String,
     },
 
@@ -547,7 +524,7 @@ pub enum DialogToSessionEvent {
 }
 
 // =============================================================================
-// SESSION-CORE ↔ MEDIA-CORE EVENTS  
+// SESSION-CORE ↔ MEDIA-CORE EVENTS
 // =============================================================================
 
 /// Events sent from session-core to media-core
@@ -560,52 +537,42 @@ pub enum SessionToMediaEvent {
         remote_sdp: Option<String>,
         media_config: MediaStreamConfig,
     },
-    
+
     /// Stop media stream for session
-    StopMediaStream {
-        session_id: String,
-    },
-    
+    StopMediaStream { session_id: String },
+
     /// Update media stream configuration
     UpdateMediaStream {
         session_id: String,
         local_sdp: Option<String>,
         remote_sdp: Option<String>,
     },
-    
+
     /// Hold media stream
-    HoldMedia {
-        session_id: String,
-    },
-    
+    HoldMedia { session_id: String },
+
     /// Resume media stream
-    ResumeMedia {
-        session_id: String,
-    },
-    
+    ResumeMedia { session_id: String },
+
     /// Start recording
     StartRecording {
         session_id: String,
         file_path: String,
         format: RecordingFormat,
     },
-    
+
     /// Stop recording
-    StopRecording {
-        session_id: String,
-    },
-    
+    StopRecording { session_id: String },
+
     /// Play audio file
     PlayAudio {
         session_id: String,
         file_path: String,
         loop_count: Option<u32>,
     },
-    
+
     /// Stop audio playback
-    StopAudio {
-        session_id: String,
-    },
+    StopAudio { session_id: String },
 }
 
 /// Events sent from media-core to session-core
@@ -617,69 +584,62 @@ pub enum MediaToSessionEvent {
         local_port: u16,
         codec: String,
     },
-    
+
     /// Media stream stopped
-    MediaStreamStopped {
-        session_id: String,
-        reason: String,
-    },
-    
+    MediaStreamStopped { session_id: String, reason: String },
+
     /// Media quality update
     MediaQualityUpdate {
         session_id: String,
         quality_metrics: MediaQualityMetrics,
     },
-    
+
     /// Recording started
     RecordingStarted {
         session_id: String,
         file_path: String,
     },
-    
+
     /// Recording stopped
     RecordingStopped {
         session_id: String,
         file_path: String,
         duration_ms: u64,
     },
-    
+
     /// Audio playback finished
-    AudioPlaybackFinished {
-        session_id: String,
-    },
-    
+    AudioPlaybackFinished { session_id: String },
+
     /// Media error occurred
     MediaError {
         session_id: String,
         error: String,
         error_code: Option<u32>,
     },
-    
+
     /// Media flow established
-    MediaFlowEstablished {
-        session_id: String,
-    },
-    
+    MediaFlowEstablished { session_id: String },
+
     /// Media quality degraded
     MediaQualityDegraded {
         session_id: String,
         metrics: MediaQualityMetrics,
         severity: QualitySeverity,
     },
-    
+
     /// DTMF detected
     DtmfDetected {
         session_id: String,
         digit: char,
         duration_ms: u32,
     },
-    
+
     /// RTP timeout
     RtpTimeout {
         session_id: String,
         last_packet_time: u64,
     },
-    
+
     /// Packet loss threshold exceeded
     PacketLossThresholdExceeded {
         session_id: String,
@@ -702,7 +662,7 @@ pub enum DialogToTransportEvent {
         body: Option<String>,
         transaction_id: Option<String>,
     },
-    
+
     /// Send SIP response
     SendSipResponse {
         transaction_id: String,
@@ -711,18 +671,16 @@ pub enum DialogToTransportEvent {
         headers: HashMap<String, String>,
         body: Option<String>,
     },
-    
+
     /// Register SIP endpoint
     RegisterEndpoint {
         uri: String,
         expires: Option<u32>,
         contact: Option<String>,
     },
-    
+
     /// Unregister SIP endpoint
-    UnregisterEndpoint {
-        uri: String,
-    },
+    UnregisterEndpoint { uri: String },
 }
 
 /// Events sent from sip-transport to dialog-core
@@ -736,7 +694,7 @@ pub enum TransportToDialogEvent {
         body: Option<String>,
         transaction_id: String,
     },
-    
+
     /// SIP response received
     SipResponseReceived {
         transaction_id: String,
@@ -745,13 +703,13 @@ pub enum TransportToDialogEvent {
         headers: HashMap<String, String>,
         body: Option<String>,
     },
-    
+
     /// Transport error occurred
     TransportError {
         error: String,
         transaction_id: Option<String>,
     },
-    
+
     /// Registration status update
     RegistrationStatusUpdate {
         uri: String,
@@ -776,12 +734,10 @@ pub enum MediaToRtpEvent {
         payload_type: u8,
         codec: String,
     },
-    
+
     /// Stop RTP stream
-    StopRtpStream {
-        session_id: String,
-    },
-    
+    StopRtpStream { session_id: String },
+
     /// Send RTP packet
     SendRtpPacket {
         session_id: String,
@@ -789,7 +745,7 @@ pub enum MediaToRtpEvent {
         timestamp: u32,
         sequence_number: u16,
     },
-    
+
     /// Update RTP stream parameters
     UpdateRtpStream {
         session_id: String,
@@ -802,17 +758,11 @@ pub enum MediaToRtpEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RtpToMediaEvent {
     /// RTP stream started
-    RtpStreamStarted {
-        session_id: String,
-        local_port: u16,
-    },
-    
+    RtpStreamStarted { session_id: String, local_port: u16 },
+
     /// RTP stream stopped
-    RtpStreamStopped {
-        session_id: String,
-        reason: String,
-    },
-    
+    RtpStreamStopped { session_id: String, reason: String },
+
     /// RTP packet received
     RtpPacketReceived {
         session_id: String,
@@ -821,18 +771,15 @@ pub enum RtpToMediaEvent {
         sequence_number: u16,
         payload_type: u8,
     },
-    
+
     /// RTP statistics update
     RtpStatisticsUpdate {
         session_id: String,
         stats: RtpStatistics,
     },
-    
+
     /// RTP error occurred
-    RtpError {
-        session_id: String,
-        error: String,
-    },
+    RtpError { session_id: String, error: String },
 }
 
 // =============================================================================
@@ -940,7 +887,7 @@ impl RvoipCrossCrateEvent {
             headers: HashMap::new(),
         })
     }
-    
+
     /// Create an incoming call event
     pub fn incoming_call(
         session_id: String,
@@ -957,19 +904,23 @@ impl RvoipCrossCrateEvent {
             sdp_offer,
             headers: HashMap::new(),
             transaction_id: String::new(), // Must be set by caller
-            source_addr: String::new(), // Must be set by caller
+            source_addr: String::new(),    // Must be set by caller
         })
     }
-    
+
     /// Create a call state changed event
-    pub fn call_state_changed(session_id: String, new_state: CallState, reason: Option<String>) -> Self {
+    pub fn call_state_changed(
+        session_id: String,
+        new_state: CallState,
+        reason: Option<String>,
+    ) -> Self {
         RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallStateChanged {
             session_id,
             new_state,
             reason,
         })
     }
-    
+
     /// Create a start media stream event
     pub fn start_media_stream(
         session_id: String,
@@ -989,7 +940,7 @@ impl RvoipCrossCrateEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_event_type_identification() {
         let event = RvoipCrossCrateEvent::initiate_call(
@@ -998,13 +949,13 @@ mod tests {
             "bob@example.com".to_string(),
             None,
         );
-        
+
         assert_eq!(event.event_type(), "session_to_dialog");
         assert_eq!(event.source_plane(), PlaneType::Signaling);
         assert_eq!(event.target_plane(), PlaneType::Signaling);
         assert_eq!(event.priority(), EventPriority::High);
     }
-    
+
     #[test]
     fn test_event_serialization() {
         let event = RvoipCrossCrateEvent::call_state_changed(
@@ -1012,11 +963,11 @@ mod tests {
             CallState::Active,
             None,
         );
-        
+
         // Test that events can be serialized and deserialized
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: RvoipCrossCrateEvent = serde_json::from_str(&serialized).unwrap();
-        
+
         assert_eq!(deserialized.event_type(), event.event_type());
     }
 }

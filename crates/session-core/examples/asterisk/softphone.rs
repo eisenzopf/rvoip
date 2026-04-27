@@ -19,15 +19,13 @@ fn env_or(key: &str, default: &str) -> String {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _ = dotenvy::from_filename(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("examples/asterisk/.env"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/asterisk/.env"),
     );
     let _ = dotenvy::dotenv();
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "info,rvoip_dialog_core=warn".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "info,rvoip_dialog_core=warn".into()),
         )
         .init();
 
@@ -39,6 +37,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let password = env_or("SIP_PASSWORD", "password123");
     let local_ip: IpAddr = env_or("LOCAL_IP", "0.0.0.0").parse()?;
     let local_port: u16 = env_or("LOCAL_PORT", "5070").parse()?;
+    let advertised_ip: IpAddr = match std::env::var("ADVERTISED_IP") {
+        Ok(value) => value.parse()?,
+        Err(_) if !local_ip.is_unspecified() => local_ip,
+        Err(_) => {
+            return Err("ADVERTISED_IP is required when LOCAL_IP is 0.0.0.0 or ::".into());
+        }
+    };
     let idle_secs: u64 = env_or("IDLE_SECS", "30").parse()?;
 
     let transport_suffix = match transport.as_str() {
@@ -46,18 +51,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         _ => "",
     };
     let registrar_uri = format!("sip:{}:{}{}", sip_server, sip_port, transport_suffix);
+    let aor_uri = format!("sip:{}@{}", username, sip_server);
+    let contact_uri = format!(
+        "sip:{}@{}:{}{}",
+        username, advertised_ip, local_port, transport_suffix
+    );
 
     // Install default credentials so future outbound INVITE retries (added in
     // a later test) can authenticate against the same Asterisk box.
     let mut config = Config::on(&username, local_ip, local_port);
-    config.local_uri = format!(
-        "sip:{}@{}:{}{}",
-        username, sip_server, sip_port, transport_suffix
-    );
+    config.local_uri = aor_uri.clone();
     config.credentials = Some(Credentials::new(&auth_user, &password));
 
     println!("[softphone] Local bind: {}:{}", local_ip, local_port);
-    println!("[softphone] AOR:        sip:{}@{}", username, sip_server);
+    println!("[softphone] AOR:        {}", aor_uri);
+    println!("[softphone] Contact:    {}", contact_uri);
     println!("[softphone] Registrar:  {}", registrar_uri);
     println!("[softphone] Transport:  {}", transport.to_uppercase());
 
@@ -65,7 +73,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("[softphone] Registering...");
     let reg = peer
-        .register_with(Registration::new(&registrar_uri, &auth_user, &password))
+        .register_with(
+            Registration::new(&registrar_uri, &auth_user, &password)
+                .from_uri(aor_uri)
+                .contact_uri(contact_uri),
+        )
         .await?;
 
     sleep(Duration::from_secs(2)).await;

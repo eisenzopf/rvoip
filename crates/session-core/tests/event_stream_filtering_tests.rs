@@ -23,7 +23,9 @@ fn test_config(port: u16) -> Config {
 
 async fn publish_synthetic(event: Event) {
     let wrapped = SessionApiCrossCrateEvent::new(event);
-    let coord = rvoip_infra_common::events::global_coordinator().await.clone();
+    let coord = rvoip_infra_common::events::global_coordinator()
+        .await
+        .clone();
     coord
         .publish(wrapped)
         .await
@@ -166,7 +168,10 @@ async fn events_for_session_helpers_filter_dtmf_and_incoming() {
         sdp: None,
     })
     .await;
-    publish_synthetic(Event::CallOnHold { call_id: id.clone() }).await;
+    publish_synthetic(Event::CallOnHold {
+        call_id: id.clone(),
+    })
+    .await;
     publish_synthetic(Event::DtmfReceived {
         call_id: id.clone(),
         digit: '7',

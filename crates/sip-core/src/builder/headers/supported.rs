@@ -1,11 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
     supported::Supported,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 
 /// Supported header builder
 ///
@@ -136,7 +134,7 @@ pub trait SupportedBuilderExt {
     /// // for attended transfer scenarios
     /// ```
     fn supported_tag(self, option_tag: impl Into<String>) -> Self;
-    
+
     /// Add a Supported header with multiple option tags
     ///
     /// This method adds a Supported header with multiple SIP extension option tags.
@@ -174,7 +172,7 @@ pub trait SupportedBuilderExt {
     /// // capable of handling advanced SIP features
     /// ```
     fn supported_tags(self, option_tags: Vec<impl Into<String>>) -> Self;
-    
+
     /// Add a Supported header for 100rel (reliable provisional responses)
     ///
     /// This convenience method adds support for the 100rel extension defined in RFC 3262.
@@ -205,7 +203,7 @@ pub trait SupportedBuilderExt {
     /// // to this provisional response
     /// ```
     fn supported_100rel(self) -> Self;
-    
+
     /// Add a Supported header for path
     ///
     /// This convenience method adds support for the Path extension defined in RFC 3327.
@@ -236,7 +234,7 @@ pub trait SupportedBuilderExt {
     /// // and can properly handle requests routed via Path-specified proxies
     /// ```
     fn supported_path(self) -> Self;
-    
+
     /// Add a Supported header for timer
     ///
     /// This convenience method adds support for the timer extension defined in RFC 4028.
@@ -270,7 +268,7 @@ pub trait SupportedBuilderExt {
     /// // and can negotiate the refresh interval and refresher role
     /// ```
     fn supported_timer(self) -> Self;
-    
+
     /// Add a Supported header with common WebRTC-related option tags
     ///
     /// This convenience method adds support for option tags commonly needed for
@@ -303,7 +301,7 @@ pub trait SupportedBuilderExt {
     /// // and can handle media negotiation appropriately
     /// ```
     fn supported_webrtc(self) -> Self;
-    
+
     /// Add a Supported header with standard option tags used by UAs
     ///
     /// This convenience method adds support for the most common standard SIP
@@ -336,15 +334,15 @@ pub trait SupportedBuilderExt {
     fn supported_standard(self) -> Self;
 }
 
-impl<T> SupportedBuilderExt for T 
-where 
+impl<T> SupportedBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn supported_tag(self, option_tag: impl Into<String>) -> Self {
         let supported = Supported::with_tag(option_tag);
         self.set_header(supported)
     }
-    
+
     fn supported_tags(self, option_tags: Vec<impl Into<String>>) -> Self {
         let mut tags = Vec::with_capacity(option_tags.len());
         for tag in option_tags {
@@ -353,23 +351,23 @@ where
         let supported = Supported::new(tags);
         self.set_header(supported)
     }
-    
+
     fn supported_100rel(self) -> Self {
         self.supported_tag("100rel")
     }
-    
+
     fn supported_path(self) -> Self {
         self.supported_tag("path")
     }
-    
+
     fn supported_timer(self) -> Self {
         self.supported_tag("timer")
     }
-    
+
     fn supported_webrtc(self) -> Self {
         self.supported_tags(vec!["ice", "replaces", "outbound", "gruu"])
     }
-    
+
     fn supported_standard(self) -> Self {
         self.supported_tags(vec!["100rel", "path", "timer", "replaces"])
     }
@@ -384,13 +382,14 @@ mod tests {
 
     #[test]
     fn test_request_supported_tag() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .supported_tag("100rel")
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Supported(supported)) = request.header(&HeaderName::Supported) {
             assert_eq!(supported.option_tags.len(), 1);
             assert!(supported.supports("100rel"));
@@ -404,10 +403,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .supported_tags(vec!["100rel", "path"])
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Supported(supported)) = response.header(&HeaderName::Supported) {
             assert_eq!(supported.option_tags.len(), 2);
             assert!(supported.supports("100rel"));
@@ -420,10 +419,11 @@ mod tests {
 
     #[test]
     fn test_supported_convenience_methods() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .supported_timer()
             .build();
-            
+
         if let Some(TypedHeader::Supported(supported)) = request.header(&HeaderName::Supported) {
             assert_eq!(supported.option_tags.len(), 1);
             assert!(supported.supports("timer"));
@@ -434,10 +434,11 @@ mod tests {
 
     #[test]
     fn test_supported_webrtc() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .supported_webrtc()
             .build();
-            
+
         if let Some(TypedHeader::Supported(supported)) = request.header(&HeaderName::Supported) {
             assert!(supported.supports("ice"));
             assert!(supported.supports("replaces"));
@@ -447,4 +448,4 @@ mod tests {
             panic!("Supported header not found or has wrong type");
         }
     }
-} 
+}

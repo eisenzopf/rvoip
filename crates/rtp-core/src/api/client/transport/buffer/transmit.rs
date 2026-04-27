@@ -5,15 +5,15 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::frame::MediaFrame;
-use crate::transport::RtpTransport;
 use crate::buffer::{
-    GlobalBufferManager, BufferPool, TransmitBuffer, TransmitBufferConfig, 
-    BufferLimits, PacketPriority
+    BufferLimits, BufferPool, GlobalBufferManager, PacketPriority, TransmitBuffer,
+    TransmitBufferConfig,
 };
+use crate::transport::RtpTransport;
 
 /// Initialize the transmit buffer
 ///
@@ -36,15 +36,18 @@ pub async fn init_transmit_buffer(
                 buffer_manager.clone(),
                 packet_pool.clone(),
             );
-            
+
             // Store it
             let mut tx_buffer_guard = transmit_buffer.write().await;
             *tx_buffer_guard = Some(tx_buffer);
-            
-            debug!("Initialized high-performance transmit buffer for SSRC {:#x}", ssrc);
+
+            debug!(
+                "Initialized high-performance transmit buffer for SSRC {:#x}",
+                ssrc
+            );
         }
     }
-    
+
     Ok(())
 }
 
@@ -72,28 +75,30 @@ pub async fn send_frame_with_priority(
                 frame.payload_type,
                 frame.sequence,
                 frame.timestamp,
-                frame.ssrc
+                frame.ssrc,
             );
-            
+
             // Set marker bit if present in frame
             if frame.marker {
                 header.marker = true;
             }
-            
+
             // Add CSRCs if present
             if !frame.csrcs.is_empty() {
                 header.add_csrcs(&frame.csrcs);
             }
-            
+
             // Create RTP packet
-            let packet = crate::packet::RtpPacket::new(
-                header,
-                bytes::Bytes::from(frame.data),
+            let packet = crate::packet::RtpPacket::new(header, bytes::Bytes::from(frame.data));
+
+            debug!(
+                "Queuing packet with priority {:?}: PT={}, SEQ={}, TS={}",
+                priority,
+                packet.header.payload_type,
+                packet.header.sequence_number,
+                packet.header.timestamp
             );
-            
-            debug!("Queuing packet with priority {:?}: PT={}, SEQ={}, TS={}", 
-                  priority, packet.header.payload_type, packet.header.sequence_number, packet.header.timestamp);
-            
+
             // Queue in transmit buffer with priority
             if tx_buffer.queue_packet(packet, priority).await {
                 // Get the next packet to send
@@ -101,24 +106,35 @@ pub async fn send_frame_with_priority(
                     // Send it through the transport
                     let transport_guard = transport.lock().await;
                     if let Some(transport) = transport_guard.as_ref() {
-                        transport.send_rtp(&packet, remote_address).await
-                            .map_err(|e| MediaTransportError::SendError(format!("Failed to send RTP packet: {}", e)))?;
-                        
+                        transport
+                            .send_rtp(&packet, remote_address)
+                            .await
+                            .map_err(|e| {
+                                MediaTransportError::SendError(format!(
+                                    "Failed to send RTP packet: {}",
+                                    e
+                                ))
+                            })?;
+
                         // Automatically acknowledge successful send (simplistic approach)
                         tx_buffer.acknowledge_packet(packet.header.sequence_number);
-                        
+
                         return Ok(());
                     } else {
-                        return Err(MediaTransportError::Transport("Transport not connected".to_string()));
+                        return Err(MediaTransportError::Transport(
+                            "Transport not connected".to_string(),
+                        ));
                     }
                 }
             }
-            
+
             // If we get here, the packet wasn't queued or wasn't ready to send
-            return Err(MediaTransportError::BufferFull("Transmit buffer is full".to_string()));
+            return Err(MediaTransportError::BufferFull(
+                "Transmit buffer is full".to_string(),
+            ));
         }
     }
-    
+
     // Fall back to regular send_frame if high-performance buffers aren't enabled
     // or if the transmit buffer isn't available
     debug!("Falling back to regular send_frame");
@@ -144,8 +160,10 @@ pub async fn update_transmit_buffer_config(
             return Ok(());
         }
     }
-    
-    Err(MediaTransportError::ConfigError("High-performance buffers not enabled".to_string()))
+
+    Err(MediaTransportError::ConfigError(
+        "High-performance buffers not enabled".to_string(),
+    ))
 }
 
 /// Set the packet priority threshold based on buffer fullness
@@ -164,10 +182,16 @@ pub async fn set_priority_threshold(
         if let Some(tx_buffer) = tx_buffer_guard.as_mut() {
             // set_priority_threshold is not an async method, so no need to await
             tx_buffer.set_priority_threshold(buffer_fullness, priority);
-            debug!("Set priority threshold: {}% fullness -> {:?} priority", buffer_fullness * 100.0, priority);
+            debug!(
+                "Set priority threshold: {}% fullness -> {:?} priority",
+                buffer_fullness * 100.0,
+                priority
+            );
             return Ok(());
         }
     }
-    
-    Err(MediaTransportError::ConfigError("High-performance buffers not enabled".to_string()))
-} 
+
+    Err(MediaTransportError::ConfigError(
+        "High-performance buffers not enabled".to_string(),
+    ))
+}

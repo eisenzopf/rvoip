@@ -4,9 +4,9 @@
 
 use nom::{
     branch::alt,
-    bytes::complete::{tag_no_case, tag},
+    bytes::complete::{tag, tag_no_case},
     character::complete::char,
-    combinator::{map, opt, map_res},
+    combinator::{map, map_res, opt},
     sequence::{pair, preceded},
     IResult,
 };
@@ -15,8 +15,8 @@ use nom::{
 use crate::parser::separators::hcolon;
 use crate::parser::token::word;
 use crate::parser::ParseResult;
-use std::str;
-use crate::types::call_id::CallId; // Import the specific type
+use crate::types::call_id::CallId;
+use std::str; // Import the specific type
 
 // callid = word [ "@" word ]
 // Returns String representation
@@ -31,24 +31,16 @@ pub fn callid(input: &[u8]) -> ParseResult<String> {
             } else {
                 Ok::<String, std::str::Utf8Error>(s1.to_string())
             }
-        }
+        },
     )(input)
 }
 
 // Call-ID = ( "Call-ID" / "i" ) HCOLON callid
-pub fn parse_call_id(input: &[u8]) -> ParseResult<CallId> { // Return CallId
+pub fn parse_call_id(input: &[u8]) -> ParseResult<CallId> {
+    // Return CallId
     preceded(
-        pair(
-            alt((
-                tag_no_case(b"Call-ID"),
-                tag_no_case(b"i")
-            )),
-            hcolon
-        ),
-        map(
-            callid,
-            |call_id_str| CallId(call_id_str)
-        )
+        pair(alt((tag_no_case(b"Call-ID"), tag_no_case(b"i"))), hcolon),
+        map(callid, |call_id_str| CallId(call_id_str)),
     )(input)
 }
 
@@ -147,44 +139,65 @@ mod tests {
         // Test with special characters defined in the word grammar
         let input = b"Call-ID: asd<.(!%*_+`'~)-:>\"/[]?{}=asd@example.com";
         let result = parse_call_id(input);
-        assert!(result.is_ok(), "Failed to parse input with special characters");
+        assert!(
+            result.is_ok(),
+            "Failed to parse input with special characters"
+        );
         let (rem, val) = result.unwrap();
-        
+
         // Debug output to see what's left in the remainder
         if !rem.is_empty() {
-            println!("Remainder: {:?}", std::str::from_utf8(rem).unwrap_or("Invalid UTF-8"));
+            println!(
+                "Remainder: {:?}",
+                std::str::from_utf8(rem).unwrap_or("Invalid UTF-8")
+            );
             println!("Parsed value: {}", val.0);
         }
-        
+
         assert!(rem.is_empty(), "Parser didn't consume all input");
         assert_eq!(val.0, "asd<.(!%*_+`'~)-:>\"/[]?{}=asd@example.com");
 
         // Test with a simpler example that should definitely pass
         let input = b"Call-ID: simple-id@domain-with-special.chars";
         let result = parse_call_id(input);
-        assert!(result.is_ok(), "Failed to parse simple-id@domain-with-special.chars");
+        assert!(
+            result.is_ok(),
+            "Failed to parse simple-id@domain-with-special.chars"
+        );
         let (rem, val) = result.unwrap();
-        
+
         // Debug output
         if !rem.is_empty() {
-            println!("Simple example remainder: {:?}", std::str::from_utf8(rem).unwrap_or("Invalid UTF-8"));
+            println!(
+                "Simple example remainder: {:?}",
+                std::str::from_utf8(rem).unwrap_or("Invalid UTF-8")
+            );
         }
-        
-        assert!(rem.is_empty(), "Parser didn't consume all input for simple example");
+
+        assert!(
+            rem.is_empty(),
+            "Parser didn't consume all input for simple example"
+        );
         assert_eq!(val.0, "simple-id@domain-with-special.chars");
-        
+
         // Try one more example with minimal special characters
         let input = b"Call-ID: test@domain";
         let result = parse_call_id(input);
         assert!(result.is_ok(), "Failed to parse test@domain");
         let (rem, val) = result.unwrap();
-        
+
         // Debug output
         if !rem.is_empty() {
-            println!("Basic example remainder: {:?}", std::str::from_utf8(rem).unwrap_or("Invalid UTF-8"));
+            println!(
+                "Basic example remainder: {:?}",
+                std::str::from_utf8(rem).unwrap_or("Invalid UTF-8")
+            );
         }
-        
-        assert!(rem.is_empty(), "Parser didn't consume all input for basic example");
+
+        assert!(
+            rem.is_empty(),
+            "Parser didn't consume all input for basic example"
+        );
         assert_eq!(val.0, "test@domain");
     }
 
@@ -235,4 +248,4 @@ mod tests {
         assert_eq!(rem, b"@another");
         assert_eq!(val.0, "local@domain");
     }
-} 
+}

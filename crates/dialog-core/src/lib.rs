@@ -120,16 +120,16 @@
 //! - **Clean API**: High-level `DialogClient` and `DialogServer` for easy integration
 
 // Core modules
-pub mod errors;
 pub mod dialog;
+pub mod errors;
+pub mod events;
 pub mod manager;
+pub mod presence;
 pub mod protocol;
+pub mod recovery;
 pub mod routing;
 pub mod sdp;
-pub mod recovery;
-pub mod events;
 pub mod subscription;
-pub mod presence;
 
 // Transaction layer (merged from transaction-core)
 pub mod transaction;
@@ -141,24 +141,19 @@ pub mod config;
 pub mod api;
 
 // Re-export main types
-pub use manager::{DialogManager, UnifiedDialogManager};
-pub use dialog::{DialogId, Dialog, DialogState};
+pub use dialog::{Dialog, DialogId, DialogState};
 pub use errors::{DialogError, DialogResult};
-pub use events::{SessionCoordinationEvent, DialogEvent};
+pub use events::{DialogEvent, SessionCoordinationEvent};
+pub use manager::{DialogManager, UnifiedDialogManager};
 
 // **NEW**: Re-export unified configuration types
-pub use config::{
-    DialogManagerConfig, 
-    ClientBehavior, 
-    ServerBehavior, 
-    HybridBehavior,
-};
+pub use config::{ClientBehavior, DialogManagerConfig, HybridBehavior, ServerBehavior};
 
 // **NEW**: Re-export clean API types
-pub use api::{DialogClient, DialogServer, UnifiedDialogApi};
 pub use api::config::{ClientConfig, ServerConfig};
-pub use api::{ApiResult, ApiError, DialogStats};
+pub use api::{ApiError, ApiResult, DialogStats};
+pub use api::{DialogClient, DialogServer, UnifiedDialogApi};
 
 // Re-export for convenience
-pub use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
-pub use transaction::TransactionKey; 
+pub use rvoip_sip_core::{Method, Request, Response, StatusCode, Uri};
+pub use transaction::TransactionKey;

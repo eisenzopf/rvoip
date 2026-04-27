@@ -1,13 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
+use crate::types::content_disposition::{ContentDisposition, DispositionType, Handling};
+use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
 use std::collections::HashMap;
 use std::str::FromStr;
-use crate::types::{
-    TypedHeader,
-    header::TypedHeaderTrait,
-    headers::header_access::HeaderAccess,
-};
-use crate::types::content_disposition::{ContentDisposition, DispositionType, Handling};
-use super::HeaderSetter;
 
 /// Content-Disposition Header Builder for SIP Messages
 ///
@@ -197,7 +193,7 @@ pub trait ContentDispositionExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentDispositionExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create an INVITE with SDP content
     /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", Some("invite123"))
@@ -209,7 +205,7 @@ pub trait ContentDispositionExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 5621 Section 3](https://datatracker.ietf.org/doc/html/rfc5621#section-3),
     /// the "session" disposition type indicates that the body is associated with the session
     /// and is the default disposition type for SDP content.
@@ -235,7 +231,7 @@ pub trait ContentDispositionExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentDispositionExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a MESSAGE with text content to be rendered
     /// let request = SimpleRequestBuilder::new(Method::Message, "sip:user@example.com").unwrap()
     ///     .from("System", "sip:system@example.com", Some("msg456"))
@@ -247,7 +243,7 @@ pub trait ContentDispositionExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 5621 Section 3](https://datatracker.ietf.org/doc/html/rfc5621#section-3),
     /// the "render" disposition type indicates that the body should be displayed or rendered
     /// to the user in the normal way.
@@ -273,7 +269,7 @@ pub trait ContentDispositionExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentDispositionExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create an INVITE with caller icon
     /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .from("Company", "sip:company@example.com", Some("inv789"))
@@ -285,7 +281,7 @@ pub trait ContentDispositionExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 5621 Section 3](https://datatracker.ietf.org/doc/html/rfc5621#section-3),
     /// the "icon" disposition type indicates that the body contains an icon image
     /// associated with the session.
@@ -310,7 +306,7 @@ pub trait ContentDispositionExt {
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::ContentDispositionExt};
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create an INVITE with custom ringtone
     /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:user@example.com").unwrap()
     ///     .from("Priority", "sip:priority@example.com", Some("urgent"))
@@ -322,9 +318,9 @@ pub trait ContentDispositionExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 5621 Section 3](https://datatracker.ietf.org/doc/html/rfc5621#section-3),
-    /// the "alert" disposition type indicates that the body contains information that 
+    /// the "alert" disposition type indicates that the body contains information that
     /// should be rendered by the UA when the session is being alerted.
     fn content_disposition_alert(self, handling: Option<&str>) -> Self;
 
@@ -350,13 +346,13 @@ pub trait ContentDispositionExt {
     /// use rvoip_sip_core::builder::headers::ContentTypeBuilderExt;
     /// use rvoip_sip_core::types::Method;
     /// use std::collections::HashMap;
-    /// 
+    ///
     /// // Create parameters for a file attachment
     /// let mut params = HashMap::new();
     /// params.insert("handling".to_string(), "optional".to_string());
     /// params.insert("filename".to_string(), "document.pdf".to_string());
     /// params.insert("creation-date".to_string(), "2023-06-15T14:30:00Z".to_string());
-    /// 
+    ///
     /// // Create a MESSAGE with a document attachment
     /// let request = SimpleRequestBuilder::new(Method::Message, "sip:colleague@example.com").unwrap()
     ///     .from("Sender", "sip:sender@example.com", Some("doc123"))
@@ -386,8 +382,8 @@ pub trait ContentDispositionExt {
     fn content_disposition(self, disposition_type: &str, params: HashMap<String, String>) -> Self;
 }
 
-impl<T> ContentDispositionExt for T 
-where 
+impl<T> ContentDispositionExt for T
+where
     T: HeaderSetter,
 {
     fn content_disposition_session(self, handling: &str) -> Self {
@@ -399,19 +395,19 @@ where
             disposition_type: DispositionType::Session,
             params,
         };
-        
+
         // Debug print
         eprintln!("Setting ContentDisposition header: {:?}", header_value);
-        
+
         // Try to convert it to a header and back to see if conversion is working
         let header = header_value.to_header();
         eprintln!("Created header: {:?}", header);
-        
+
         match ContentDisposition::from_header(&header) {
             Ok(cd) => eprintln!("Converted back to ContentDisposition: {:?}", cd),
             Err(e) => eprintln!("Failed to convert back: {:?}", e),
         }
-        
+
         self.set_header(header_value)
     }
 
@@ -459,13 +455,13 @@ where
             Ok(dt) => dt,
             Err(_) => return self, // Return self unchanged if parsing fails
         };
-        
+
         // Create Content-Disposition
         let header_value = ContentDisposition {
             disposition_type: disp_type,
             params,
         };
-        
+
         self.set_header(header_value)
     }
 }
@@ -475,126 +471,166 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
-    
+
     #[test]
     fn test_content_disposition_session() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_disposition_session("optional")
             .build();
-            
+
         // Check if Content-Disposition header exists with the correct value
         let header = request.header(&HeaderName::ContentDisposition);
         eprintln!("DEBUG: Header type: {:?}", header.map(|h| h.name()));
         assert!(header.is_some(), "Content-Disposition header not found");
-        
+
         // Try with typed_header instead
         let typed_header = request.typed_header::<ContentDisposition>();
         if let Some(content_disp) = typed_header {
             // Check for correct disposition type
-            assert_eq!(content_disp.disposition_type, DispositionType::Session, 
-                      "Expected disposition type 'session', got '{:?}'", content_disp.disposition_type);
-            
+            assert_eq!(
+                content_disp.disposition_type,
+                DispositionType::Session,
+                "Expected disposition type 'session', got '{:?}'",
+                content_disp.disposition_type
+            );
+
             // Check for the handling parameter
             let handling = content_disp.params.get("handling");
-            assert_eq!(handling, Some(&"optional".to_string()), 
-                      "Expected handling parameter 'optional', got '{:?}'", handling);
+            assert_eq!(
+                handling,
+                Some(&"optional".to_string()),
+                "Expected handling parameter 'optional', got '{:?}'",
+                handling
+            );
         } else {
             panic!("Expected Content-Disposition header via typed_header but got None");
         }
     }
-    
+
     #[test]
     fn test_content_disposition_render() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_disposition_render("required")
             .build();
-            
+
         // Check if Content-Disposition header exists with the correct value
         let header = request.header(&HeaderName::ContentDisposition);
         assert!(header.is_some(), "Content-Disposition header not found");
-        
+
         // Try with typed_header instead
         let typed_header = request.typed_header::<ContentDisposition>();
         if let Some(content_disp) = typed_header {
             // Check for correct disposition type
-            assert_eq!(content_disp.disposition_type, DispositionType::Render, 
-                      "Expected disposition type 'render', got '{:?}'", content_disp.disposition_type);
-            
+            assert_eq!(
+                content_disp.disposition_type,
+                DispositionType::Render,
+                "Expected disposition type 'render', got '{:?}'",
+                content_disp.disposition_type
+            );
+
             // Check for the handling parameter
             let handling = content_disp.params.get("handling");
-            assert_eq!(handling, Some(&"required".to_string()), 
-                      "Expected handling parameter 'required', got '{:?}'", handling);
+            assert_eq!(
+                handling,
+                Some(&"required".to_string()),
+                "Expected handling parameter 'required', got '{:?}'",
+                handling
+            );
         } else {
             panic!("Expected Content-Disposition header via typed_header but got None");
         }
     }
-    
+
     #[test]
     fn test_content_disposition_icon() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_disposition_icon("32")
             .build();
-            
+
         // Check if Content-Disposition header exists with the correct value
         let header = request.header(&HeaderName::ContentDisposition);
         assert!(header.is_some(), "Content-Disposition header not found");
-        
+
         // Try with typed_header instead
         let typed_header = request.typed_header::<ContentDisposition>();
         if let Some(content_disp) = typed_header {
             // Check for correct disposition type
-            assert_eq!(content_disp.disposition_type, DispositionType::Icon, 
-                      "Expected disposition type 'icon', got '{:?}'", content_disp.disposition_type);
-            
+            assert_eq!(
+                content_disp.disposition_type,
+                DispositionType::Icon,
+                "Expected disposition type 'icon', got '{:?}'",
+                content_disp.disposition_type
+            );
+
             // Check for the size parameter
             let size = content_disp.params.get("size");
-            assert_eq!(size, Some(&"32".to_string()), 
-                      "Expected size parameter '32', got '{:?}'", size);
+            assert_eq!(
+                size,
+                Some(&"32".to_string()),
+                "Expected size parameter '32', got '{:?}'",
+                size
+            );
         } else {
             panic!("Expected Content-Disposition header via typed_header but got None");
         }
     }
-    
+
     #[test]
     fn test_content_disposition_custom() {
         let mut params = HashMap::new();
         params.insert("handling".to_string(), "optional".to_string());
         params.insert("custom".to_string(), "value".to_string());
-        
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .content_disposition("custom-disp", params)
             .build();
-            
+
         // Check if Content-Disposition header exists with the correct value
         let header = request.header(&HeaderName::ContentDisposition);
         assert!(header.is_some(), "Content-Disposition header not found");
-        
+
         // Try with typed_header instead
         let typed_header = request.typed_header::<ContentDisposition>();
         if let Some(content_disp) = typed_header {
             // Check for correct disposition type
-            assert_eq!(content_disp.disposition_type, DispositionType::Other("custom-disp".to_string()), 
-                      "Expected disposition type 'custom-disp', got '{:?}'", content_disp.disposition_type);
-            
+            assert_eq!(
+                content_disp.disposition_type,
+                DispositionType::Other("custom-disp".to_string()),
+                "Expected disposition type 'custom-disp', got '{:?}'",
+                content_disp.disposition_type
+            );
+
             // Check for the handling parameter
             let handling = content_disp.params.get("handling");
-            assert_eq!(handling, Some(&"optional".to_string()), 
-                      "Expected handling parameter 'optional', got '{:?}'", handling);
-            
+            assert_eq!(
+                handling,
+                Some(&"optional".to_string()),
+                "Expected handling parameter 'optional', got '{:?}'",
+                handling
+            );
+
             // Check for the custom parameter
             let custom = content_disp.params.get("custom");
-            assert_eq!(custom, Some(&"value".to_string()), 
-                      "Expected custom parameter 'value', got '{:?}'", custom);
+            assert_eq!(
+                custom,
+                Some(&"value".to_string()),
+                "Expected custom parameter 'value', got '{:?}'",
+                custom
+            );
         } else {
             panic!("Expected Content-Disposition header via typed_header but got None");
         }
     }
-} 
+}

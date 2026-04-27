@@ -1,3 +1,5 @@
+use rvoip_sip_core::prelude::{Message, Method, Request, Response, StatusCode, Uri, Version};
+use std::fmt;
 /// # Transaction Events
 ///
 /// This module defines the events that flow from the transaction layer to the Transaction User (TU)
@@ -54,10 +56,7 @@
 /// These events provide the TU with all the information it needs to implement proper SIP
 /// dialog and session behavior without having to understand the complexities of the
 /// transaction state machines.
-
 use std::net::SocketAddr;
-use std::fmt;
-use rvoip_sip_core::prelude::{Request, Response, Message, Method, StatusCode, Uri, Version};
 
 use crate::transaction::{TransactionKey, TransactionState};
 
@@ -204,18 +203,18 @@ pub enum TransactionEvent {
     /// This is usually ignored by the transaction layer, but the TU might want to be informed for logging or diagnostics.
     StrayAck {
         /// The received ACK request.
-         request: Request,
+        request: Request,
         /// The network address from which the ACK was received.
-         source: SocketAddr,
+        source: SocketAddr,
     },
-     /// A CANCEL request was received that did not match any active Invite Server Transaction.
-     /// The transaction layer automatically responds with a "481 Call/Transaction Does Not Exist".
-     /// This event informs the TU that such a CANCEL was received and handled.
+    /// A CANCEL request was received that did not match any active Invite Server Transaction.
+    /// The transaction layer automatically responds with a "481 Call/Transaction Does Not Exist".
+    /// This event informs the TU that such a CANCEL was received and handled.
     StrayCancel {
         /// The received CANCEL request.
-         request: Request,
+        request: Request,
         /// The network address from which the CANCEL was received.
-         source: SocketAddr,
+        source: SocketAddr,
     },
 
     // --- Transaction Lifecycle Events ---
@@ -227,7 +226,7 @@ pub enum TransactionEvent {
         /// The unique identifier for the transaction that has terminated.
         transaction_id: TransactionKey,
     },
-    
+
     /// Indicates that a transaction has changed its internal state.
     ///
     /// This event allows the TU to observe the progression of the transaction through its
@@ -253,7 +252,7 @@ pub enum TransactionEvent {
         /// The unique identifier for the transaction associated with the timer.
         transaction_id: TransactionKey,
         /// A string identifying the specific timer that fired (e.g., "A", "B", "Timer_F", "Timer_G").
-        timer: String, 
+        timer: String,
     },
 
     /// A CANCEL request has been received that matches an active INVITE transaction.
@@ -268,7 +267,7 @@ pub enum TransactionEvent {
         /// The network address from which the request was received.
         source: SocketAddr,
     },
-    
+
     /// An ACK request for a 2xx response has been received.
     /// Since these ACKs are end-to-end, they don't belong to the transaction,
     /// but the TU needs to know about them.
@@ -280,7 +279,7 @@ pub enum TransactionEvent {
         /// The network address from which the request was received.
         source: SocketAddr,
     },
-    
+
     /// An INVITE request has been received and a new server transaction has been created.
     InviteRequest {
         /// The unique identifier for the newly created INVITE server transaction.
@@ -290,7 +289,7 @@ pub enum TransactionEvent {
         /// The network address from which the request was received.
         source: SocketAddr,
     },
-    
+
     /// A non-INVITE request has been received and a new server transaction has been created.
     NonInviteRequest {
         /// The unique identifier for the newly created non-INVITE server transaction.
@@ -300,7 +299,7 @@ pub enum TransactionEvent {
         /// The network address from which the request was received.
         source: SocketAddr,
     },
-    
+
     /// An ACK request was received that did not match any active INVITE server transaction.
     /// This is usually sent directly to the TU since ACKs for 2xx don't have transactions.
     StrayAckRequest {
@@ -309,18 +308,17 @@ pub enum TransactionEvent {
         /// The network address from which the ACK was received.
         source: SocketAddr,
     },
-    
+
     // ========== GRACEFUL SHUTDOWN EVENTS ==========
-    
     /// Shutdown request received from dialog layer
     ShutdownRequested,
-    
+
     /// Transaction manager is ready for shutdown
     ShutdownReady,
-    
+
     /// Transaction manager should shutdown now
     ShutdownNow,
-    
+
     /// Transaction manager shutdown complete
     ShutdownComplete,
 }
@@ -328,8 +326,8 @@ pub enum TransactionEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rvoip_sip_core::types::uri::Uri;
     use rvoip_sip_core::types::method::Method;
+    use rvoip_sip_core::types::uri::Uri;
 
     #[test]
     fn it_builds_provisional_response_event() {
@@ -338,7 +336,10 @@ mod tests {
             transaction_id: TransactionKey::new("branch123".to_string(), Method::Invite, false),
             response,
         };
-        assert!(matches!(event, TransactionEvent::ProvisionalResponse { .. }));
+        assert!(matches!(
+            event,
+            TransactionEvent::ProvisionalResponse { .. }
+        ));
     }
 
     #[test]
@@ -423,15 +424,22 @@ mod tests {
         let event = TransactionEvent::TransactionTerminated {
             transaction_id: TransactionKey::new("branch667".to_string(), Method::Invite, false),
         };
-        assert!(matches!(event, TransactionEvent::TransactionTerminated { .. }));
+        assert!(matches!(
+            event,
+            TransactionEvent::TransactionTerminated { .. }
+        ));
     }
 
     #[test]
     fn it_builds_error_event() {
         let event = TransactionEvent::Error {
-            transaction_id: Some(TransactionKey::new("branch778".to_string(), Method::Invite, false)),
+            transaction_id: Some(TransactionKey::new(
+                "branch778".to_string(),
+                Method::Invite,
+                false,
+            )),
             error: "Something went wrong".to_string(),
         };
         assert!(matches!(event, TransactionEvent::Error { .. }));
     }
-} 
+}

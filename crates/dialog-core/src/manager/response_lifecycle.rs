@@ -28,14 +28,14 @@
 //!   200 OK sent
 //! ```
 
+use rvoip_sip_core::{Method, Request, Response};
 use tracing::{debug, info, warn};
-use rvoip_sip_core::{Request, Response, Method};
 
 use crate::dialog::{DialogId, DialogState};
-use crate::transaction::TransactionKey;
-use crate::errors::{DialogResult, DialogError};
+use crate::errors::{DialogError, DialogResult};
 use crate::manager::core::DialogManager;
 use crate::manager::utils::DialogUtils;
+use crate::transaction::TransactionKey;
 
 /// Response lifecycle hooks for dialog state management
 ///
@@ -95,8 +95,12 @@ impl ResponseLifecycle for DialogManager {
         _transaction_id: &TransactionKey,
         original_request: &Request,
     ) -> DialogResult<()> {
-        debug!("pre_send_response: dialog={}, status={}, method={}",
-               dialog_id, response.status_code(), original_request.method());
+        debug!(
+            "pre_send_response: dialog={}, status={}, method={}",
+            dialog_id,
+            response.status_code(),
+            original_request.method()
+        );
 
         // Only process 200 OK responses to INVITE (dialog-confirming)
         if response.status_code() == 200 && original_request.method() == Method::Invite {
@@ -139,10 +143,14 @@ impl DialogManager {
         dialog_id: &DialogId,
         response: &Response,
     ) -> DialogResult<()> {
-        debug!("Confirming UAS dialog {} (sending 200 OK to INVITE)", dialog_id);
+        debug!(
+            "Confirming UAS dialog {} (sending 200 OK to INVITE)",
+            dialog_id
+        );
 
         // Extract the local tag from the response's To header
-        let local_tag = response.to()
+        let local_tag = response
+            .to()
             .and_then(|to_header| to_header.tag())
             .map(|tag| tag.to_string());
 
@@ -157,7 +165,7 @@ impl DialogManager {
             } else {
                 warn!("200 OK response missing To tag for dialog {}", dialog_id);
                 return Err(DialogError::protocol_error(
-                    "200 OK to INVITE must have To tag for dialog confirmation"
+                    "200 OK to INVITE must have To tag for dialog confirmation",
                 ));
             }
         }
@@ -166,19 +174,30 @@ impl DialogManager {
         if dialog.state == DialogState::Early {
             let old_state = dialog.state.clone();
             dialog.state = DialogState::Confirmed;
-            info!("🎯 Dialog {} transitioned Early → Confirmed (UAS sending 200 OK)", dialog_id);
+            info!(
+                "🎯 Dialog {} transitioned Early → Confirmed (UAS sending 200 OK)",
+                dialog_id
+            );
 
             // Register in dialog lookup table now that we have both tags
             if let Some(tuple) = dialog.dialog_id_tuple() {
                 let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
-                debug!("Registering UAS dialog in lookup table: call-id={}, local={}, remote={}",
-                       tuple.0, tuple.1, tuple.2);
+                debug!(
+                    "Registering UAS dialog in lookup table: call-id={}, local={}, remote={}",
+                    tuple.0, tuple.1, tuple.2
+                );
                 self.dialog_lookup.insert(key.clone(), dialog_id.clone());
-                info!("✅ Registered UAS dialog {} in lookup table with key: {}", dialog_id, key);
+                info!(
+                    "✅ Registered UAS dialog {} in lookup table with key: {}",
+                    dialog_id, key
+                );
             } else {
-                warn!("Dialog {} missing tags after 200 OK - cannot register in lookup table", dialog_id);
+                warn!(
+                    "Dialog {} missing tags after 200 OK - cannot register in lookup table",
+                    dialog_id
+                );
                 return Err(DialogError::protocol_error(
-                    "Dialog missing local or remote tag after confirmation"
+                    "Dialog missing local or remote tag after confirmation",
                 ));
             }
 
@@ -197,7 +216,10 @@ impl DialogManager {
                 }
             }
         } else {
-            debug!("Dialog {} already in {:?} state, not transitioning", dialog_id, dialog.state);
+            debug!(
+                "Dialog {} already in {:?} state, not transitioning",
+                dialog_id, dialog.state
+            );
         }
 
         Ok(())

@@ -1,17 +1,17 @@
+use bytes::{Buf, BufMut, BytesMut};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use bytes::{BytesMut, Buf, BufMut};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tracing::{debug, error, trace, warn};
 
-use rvoip_sip_core::{Message, parse_message};
 use crate::error::{Error, Result};
 use rvoip_sip_core::builder::ContentLengthBuilderExt;
+use rvoip_sip_core::{parse_message, Message};
 
 // Buffer sizes
 const INITIAL_BUFFER_SIZE: usize = 8192;
@@ -94,7 +94,7 @@ impl TcpConnection {
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.local_addr)
     }
-    
+
     /// Sends a SIP message over the connection
     pub async fn send_message(&self, message: &Message) -> Result<()> {
         if self.is_closed() {
@@ -104,17 +104,18 @@ impl TcpConnection {
         let message_bytes = message.to_bytes();
         let mut writer = self.write_half.lock().await;
 
-        writer.write_all(&message_bytes).await
-            .map_err(|e| {
-                if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
-                    self.closed.store(true, Ordering::Relaxed);
-                    Error::ConnectionReset
-                } else {
-                    Error::SendFailed(self.peer_addr, e)
-                }
-            })?;
+        writer.write_all(&message_bytes).await.map_err(|e| {
+            if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
+                self.closed.store(true, Ordering::Relaxed);
+                Error::ConnectionReset
+            } else {
+                Error::SendFailed(self.peer_addr, e)
+            }
+        })?;
 
-        writer.flush().await
+        writer
+            .flush()
+            .await
             .map_err(|e| Error::SendFailed(self.peer_addr, e))?;
 
         trace!("Sent {} bytes to {}", message_bytes.len(), self.peer_addr);
@@ -149,7 +150,7 @@ impl TcpConnection {
         trace!("Sent {} raw bytes to {}", data.len(), self.peer_addr);
         Ok(())
     }
-    
+
     /// Receives a SIP message from the connection.
     ///
     /// Legacy accessor retained for callers that only care about SIP
@@ -242,7 +243,9 @@ impl TcpConnection {
                     } else {
                         self.closed.store(true, Ordering::Relaxed);
 
-                        if e.kind() == io::ErrorKind::BrokenPipe || e.kind() == io::ErrorKind::ConnectionReset {
+                        if e.kind() == io::ErrorKind::BrokenPipe
+                            || e.kind() == io::ErrorKind::ConnectionReset
+                        {
                             return Err(Error::ConnectionReset);
                         } else {
                             return Err(Error::ReceiveFailed(e));
@@ -252,72 +255,75 @@ impl TcpConnection {
             }
         }
     }
-    
+
     /// Tries to parse a SIP message from the buffer
     fn try_parse_message(&self, buffer: &mut BytesMut) -> Result<Option<Message>> {
         if buffer.is_empty() {
             return Ok(None);
         }
-        
+
         // First check if we have headers and body
         if let Some(double_crlf_pos) = self.find_double_crlf(buffer) {
             // Found header/body separator, now check Content-Length
             let header_slice = &buffer[0..double_crlf_pos + 4]; // Include the separator
-            
+
             // Try to extract Content-Length
             let content_length = self.extract_content_length(header_slice);
-            
+
             // Calculate total message length
             let total_length = double_crlf_pos + 4 + content_length;
-            
+
             // Check if we have the complete message
             if buffer.len() >= total_length {
                 // We have a complete message, extract it
                 let message_slice = &buffer[0..total_length];
-                
+
                 // Parse the message
                 match parse_message(message_slice) {
                     Ok(message) => {
                         // Message parsed successfully
                         trace!("Parsed complete SIP message ({} bytes)", total_length);
-                        
+
                         // Remove the message from the buffer
                         buffer.advance(total_length);
-                        
+
                         return Ok(Some(message));
                     }
                     Err(e) => {
                         // Parsing error
                         warn!("Failed to parse SIP message: {}", e);
-                        
+
                         // Advance past this malformed message to avoid getting stuck
                         buffer.advance(total_length);
-                        
+
                         return Err(Error::ParseError(e.to_string()));
                     }
                 }
             }
         }
-        
+
         // No complete message found
         Ok(None)
     }
-    
+
     /// Finds the position of the double CRLF (end of headers)
     fn find_double_crlf(&self, buffer: &BytesMut) -> Option<usize> {
         for i in 0..buffer.len().saturating_sub(3) {
-            if buffer[i] == b'\r' && buffer[i + 1] == b'\n' && 
-               buffer[i + 2] == b'\r' && buffer[i + 3] == b'\n' {
+            if buffer[i] == b'\r'
+                && buffer[i + 1] == b'\n'
+                && buffer[i + 2] == b'\r'
+                && buffer[i + 3] == b'\n'
+            {
                 return Some(i);
             }
         }
         None
     }
-    
+
     /// Extracts the Content-Length value from the header section
     fn extract_content_length(&self, header_slice: &[u8]) -> usize {
         let header_str = String::from_utf8_lossy(header_slice);
-        
+
         // Simple parsing to extract Content-Length
         for line in header_str.lines() {
             let line = line.trim();
@@ -329,11 +335,11 @@ impl TcpConnection {
                 }
             }
         }
-        
+
         // Default to 0 if not found
         0
     }
-    
+
     /// Closes the TCP connection
     pub async fn close(&self) -> Result<()> {
         if self.closed.swap(true, Ordering::Relaxed) {
@@ -352,7 +358,7 @@ impl TcpConnection {
 
         Ok(())
     }
-    
+
     /// Returns whether the connection is closed
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
@@ -363,7 +369,10 @@ impl Drop for TcpConnection {
     fn drop(&mut self) {
         if !self.is_closed() {
             // The connection is being dropped without being closed
-            debug!("TCP connection to {} dropped without being closed", self.peer_addr);
+            debug!(
+                "TCP connection to {} dropped without being closed",
+                self.peer_addr
+            );
         }
     }
 }
@@ -371,55 +380,55 @@ impl Drop for TcpConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::TcpListener;
-    use rvoip_sip_core::{Method, Request};
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    
+    use rvoip_sip_core::{Method, Request};
+    use tokio::net::TcpListener;
+
     #[tokio::test]
     async fn test_tcp_connection_connect() {
         // Start a TCP server
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        
+
         // Start accepting connections in the background
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             // Just accept and drop it
             drop(socket);
         });
-        
+
         // Connect to the server
         let connection = TcpConnection::connect(server_addr).await.unwrap();
-        
+
         assert_eq!(connection.peer_addr(), server_addr);
         assert!(!connection.is_closed());
-        
+
         connection.close().await.unwrap();
         assert!(connection.is_closed());
     }
-    
+
     #[tokio::test]
     async fn test_tcp_connection_send_receive() {
         // Start a TCP server
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        
+
         // Set up a channel to communicate with the server task
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        
+
         // Start the server task
         tokio::spawn(async move {
             let (socket, _) = listener.accept().await.unwrap();
             let connection = TcpConnection::from_stream(socket, server_addr).unwrap();
-            
+
             // Receive a message and send it back through the channel
             let message = connection.receive_message().await.unwrap().unwrap();
             tx.send(message).await.unwrap();
         });
-        
+
         // Connect to the server
         let connection = TcpConnection::connect(server_addr).await.unwrap();
-        
+
         // Create a test SIP message
         let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
             .unwrap()
@@ -428,13 +437,13 @@ mod tests {
             .call_id("call1@example.com")
             .cseq(1)
             .build();
-        
+
         // Send the message
         connection.send_message(&request.into()).await.unwrap();
-        
+
         // Wait for the server to echo it back
         let received_message = rx.recv().await.unwrap();
-        
+
         // Verify the message was received correctly
         assert!(received_message.is_request());
         if let Message::Request(req) = received_message {
@@ -443,24 +452,24 @@ mod tests {
         } else {
             panic!("Expected a request");
         }
-        
+
         // Clean up
         connection.close().await.unwrap();
     }
-    
+
     #[tokio::test]
     async fn test_tcp_connection_framing() {
         // Start a TCP server
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        
+
         // Set up a channel to communicate with the server task
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        
+
         // Start the server task
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
-            
+
             // Send two messages in a single TCP packet/operation
             let req1 = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
                 .unwrap()
@@ -470,7 +479,7 @@ mod tests {
                 .cseq(1)
                 .content_length(0)
                 .build();
-            
+
             let req2 = SimpleRequestBuilder::new(Method::Options, "sip:example.com")
                 .unwrap()
                 .from("alice", "sip:alice@example.com", Some("tag2"))
@@ -479,26 +488,26 @@ mod tests {
                 .cseq(2)
                 .content_length(0)
                 .build();
-            
+
             // Combine both messages into a single buffer
             let mut combined = BytesMut::new();
             combined.extend_from_slice(&Message::Request(req1).to_bytes());
             combined.extend_from_slice(&Message::Request(req2).to_bytes());
-            
+
             // Send both messages at once
             socket.write_all(&combined).await.unwrap();
-            
+
             // Tell the test we sent the data
             tx.send(2).await.unwrap(); // Sent 2 messages
         });
-        
+
         // Connect to the server
         let connection = TcpConnection::connect(server_addr).await.unwrap();
-        
+
         // Wait for the server to send the messages
         let num_messages = rx.recv().await.unwrap();
         assert_eq!(num_messages, 2);
-        
+
         // Read the first message
         let message1 = connection.receive_message().await.unwrap().unwrap();
         assert!(message1.is_request());
@@ -508,7 +517,7 @@ mod tests {
         } else {
             panic!("Expected a request");
         }
-        
+
         // Read the second message
         let message2 = connection.receive_message().await.unwrap().unwrap();
         assert!(message2.is_request());
@@ -518,7 +527,7 @@ mod tests {
         } else {
             panic!("Expected a request");
         }
-        
+
         // Clean up
         connection.close().await.unwrap();
     }
@@ -604,10 +613,7 @@ mod tests {
         match second {
             Some(ReceivedFrame::Message(Message::Request(req))) => {
                 assert_eq!(req.method(), Method::Register);
-                assert_eq!(
-                    req.call_id().unwrap().to_string(),
-                    "after-pong@example.com"
-                );
+                assert_eq!(req.call_id().unwrap().to_string(), "after-pong@example.com");
             }
             other => panic!("Expected SIP request after pong, got {:?}", other),
         }

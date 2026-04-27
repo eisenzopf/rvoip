@@ -1,11 +1,11 @@
+use crate::builder::headers::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
+    call_id::CallId,
     header::{Header, HeaderName},
     headers::TypedHeader,
     in_reply_to::InReplyTo,
-    call_id::CallId,
 };
-use crate::builder::headers::HeaderSetter;
 
 /// In-Reply-To header builder
 ///
@@ -172,8 +172,8 @@ pub trait InReplyToBuilderExt {
     fn in_reply_to_multiple(self, call_ids: Vec<&str>) -> Self;
 }
 
-impl<T> InReplyToBuilderExt for T 
-where 
+impl<T> InReplyToBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn in_reply_to(self, call_id: &str) -> Self {
@@ -191,17 +191,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::headers::HeaderAccess;
     use crate::types::{method::Method, StatusCode};
     use crate::{RequestBuilder, ResponseBuilder};
-    use crate::types::headers::HeaderAccess;
     use std::str::FromStr;
 
     #[test]
     fn test_request_with_single_in_reply_to() {
-        let request = RequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:example.com")
+            .unwrap()
             .in_reply_to("70710@saturn.bell-tel.com")
             .build();
-            
+
         if let Some(TypedHeader::InReplyTo(in_reply_to)) = request.header(&HeaderName::InReplyTo) {
             assert_eq!(in_reply_to.len(), 1);
             assert!(in_reply_to.contains("70710@saturn.bell-tel.com"));
@@ -212,13 +213,14 @@ mod tests {
 
     #[test]
     fn test_request_with_multiple_in_reply_to() {
-        let request = RequestBuilder::new(Method::Invite, "sip:example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:example.com")
+            .unwrap()
             .in_reply_to_multiple(vec![
-                "70710@saturn.bell-tel.com", 
-                "17320@venus.bell-tel.com"
+                "70710@saturn.bell-tel.com",
+                "17320@venus.bell-tel.com",
             ])
             .build();
-            
+
         if let Some(TypedHeader::InReplyTo(in_reply_to)) = request.header(&HeaderName::InReplyTo) {
             assert_eq!(in_reply_to.len(), 2);
             assert!(in_reply_to.contains("70710@saturn.bell-tel.com"));
@@ -233,7 +235,7 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .in_reply_to("70710@saturn.bell-tel.com")
             .build();
-            
+
         if let Some(TypedHeader::InReplyTo(in_reply_to)) = response.header(&HeaderName::InReplyTo) {
             assert_eq!(in_reply_to.len(), 1);
             assert!(in_reply_to.contains("70710@saturn.bell-tel.com"));
@@ -241,4 +243,4 @@ mod tests {
             panic!("In-Reply-To header not found or has wrong type");
         }
     }
-} 
+}

@@ -34,13 +34,13 @@
 //! assert!(content_encoding.has_encoding("deflate"));
 //! ```
 
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
-use serde::{Serialize, Deserialize};
+use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use nom::error::ErrorKind as NomErrorKind;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Represents the Content-Encoding header field (RFC 3261 Section 20.12).
 ///
@@ -211,7 +211,9 @@ impl ContentEncoding {
     /// assert!(!content_encoding.has_encoding("compress"));
     /// ```
     pub fn has_encoding(&self, encoding: &str) -> bool {
-        self.encodings.iter().any(|e| e.eq_ignore_ascii_case(encoding))
+        self.encodings
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(encoding))
     }
 
     /// Returns the list of encodings.
@@ -278,25 +280,27 @@ impl FromStr for ContentEncoding {
             // Strip the "Content-Encoding:" prefix
             let parts: Vec<&str> = s.splitn(2, ':').collect();
             if parts.len() != 2 {
-                return Err(Error::ParseError("Invalid Content-Encoding header format".to_string()));
+                return Err(Error::ParseError(
+                    "Invalid Content-Encoding header format".to_string(),
+                ));
             }
             parts[1].trim()
         } else {
             s.trim()
         };
-        
+
         // Empty string is a valid Content-Encoding (means no encoding)
         if value_str.is_empty() {
             return Ok(ContentEncoding::new());
         }
-        
+
         // Split the string by commas and collect encodings
         let encodings = value_str
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-            
+
         Ok(ContentEncoding { encodings })
     }
 }
@@ -310,14 +314,19 @@ impl TypedHeaderTrait for ContentEncoding {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -325,23 +334,23 @@ impl TypedHeaderTrait for ContentEncoding {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ContentEncoding::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::ContentEncoding(tokens) => {
                 let encodings = tokens
                     .iter()
-                    .filter_map(|token| {
-                        std::str::from_utf8(token).ok().map(|s| s.to_string())
-                    })
+                    .filter_map(|token| std::str::from_utf8(token).ok().map(|s| s.to_string()))
                     .collect();
                 Ok(ContentEncoding { encodings })
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -356,7 +365,7 @@ mod tests {
         assert!(content_encoding.is_empty());
         assert_eq!(content_encoding.to_string(), "");
     }
-    
+
     #[test]
     fn test_single() {
         let content_encoding = ContentEncoding::single("gzip");
@@ -364,7 +373,7 @@ mod tests {
         assert_eq!(content_encoding.encodings()[0], "gzip");
         assert_eq!(content_encoding.to_string(), "gzip");
     }
-    
+
     #[test]
     fn test_with_encodings() {
         let content_encoding = ContentEncoding::with_encodings(&["gzip", "deflate"]);
@@ -373,84 +382,93 @@ mod tests {
         assert_eq!(content_encoding.encodings()[1], "deflate");
         assert_eq!(content_encoding.to_string(), "gzip, deflate");
     }
-    
+
     #[test]
     fn test_add_remove_encoding() {
         let mut content_encoding = ContentEncoding::new();
-        
+
         // Add encodings
         content_encoding.add_encoding("gzip");
         content_encoding.add_encoding("deflate");
-        
+
         assert_eq!(content_encoding.encodings().len(), 2);
         assert!(content_encoding.has_encoding("gzip"));
         assert!(content_encoding.has_encoding("deflate"));
-        
+
         // Remove an encoding
         content_encoding.remove_encoding("gzip");
-        
+
         assert_eq!(content_encoding.encodings().len(), 1);
         assert!(!content_encoding.has_encoding("gzip"));
         assert!(content_encoding.has_encoding("deflate"));
     }
-    
+
     #[test]
     fn test_has_encoding() {
         let content_encoding = ContentEncoding::with_encodings(&["gzip", "deflate"]);
-        
+
         // Check case-insensitive matching
         assert!(content_encoding.has_encoding("gzip"));
         assert!(content_encoding.has_encoding("GZIP"));
         assert!(content_encoding.has_encoding("Deflate"));
-        
+
         // Check non-existent encoding
         assert!(!content_encoding.has_encoding("compress"));
     }
-    
+
     #[test]
     fn test_from_str() {
         // Simple case
         let content_encoding: ContentEncoding = "gzip".parse().unwrap();
         assert_eq!(content_encoding.encodings().len(), 1);
         assert_eq!(content_encoding.encodings()[0], "gzip");
-        
+
         // Multiple encodings
         let content_encoding: ContentEncoding = "gzip, deflate".parse().unwrap();
         assert_eq!(content_encoding.encodings().len(), 2);
         assert_eq!(content_encoding.encodings()[0], "gzip");
         assert_eq!(content_encoding.encodings()[1], "deflate");
-        
+
         // With header name
         let content_encoding: ContentEncoding = "Content-Encoding: gzip, deflate".parse().unwrap();
         assert_eq!(content_encoding.encodings().len(), 2);
         assert_eq!(content_encoding.encodings()[0], "gzip");
         assert_eq!(content_encoding.encodings()[1], "deflate");
-        
+
         // Empty
         let content_encoding: ContentEncoding = "".parse().unwrap();
         assert!(content_encoding.is_empty());
-        
+
         // Empty with header name
         let content_encoding: ContentEncoding = "Content-Encoding:".parse().unwrap();
         assert!(content_encoding.is_empty());
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         // Create a header
         let content_encoding = ContentEncoding::with_encodings(&["gzip", "deflate"]);
         let header = content_encoding.to_header();
-        
+
         assert_eq!(header.name, HeaderName::ContentEncoding);
-        
+
         // Convert back from Header
         let content_encoding2 = ContentEncoding::from_header(&header).unwrap();
-        assert_eq!(content_encoding.encodings().len(), content_encoding2.encodings().len());
-        assert_eq!(content_encoding.encodings()[0], content_encoding2.encodings()[0]);
-        assert_eq!(content_encoding.encodings()[1], content_encoding2.encodings()[1]);
-        
+        assert_eq!(
+            content_encoding.encodings().len(),
+            content_encoding2.encodings().len()
+        );
+        assert_eq!(
+            content_encoding.encodings()[0],
+            content_encoding2.encodings()[0]
+        );
+        assert_eq!(
+            content_encoding.encodings()[1],
+            content_encoding2.encodings()[1]
+        );
+
         // Test invalid header name
         let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
         assert!(ContentEncoding::from_header(&wrong_header).is_err());
     }
-} 
+}

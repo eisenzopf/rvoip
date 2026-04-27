@@ -1,9 +1,6 @@
-use crate::types::{
-    min_se::MinSE,
-    headers::TypedHeader,
-};
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::types::{headers::TypedHeader, min_se::MinSE};
 
 /// Min-SE Header Builder Extension
 ///
@@ -121,12 +118,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode, headers::HeaderName, MinSE as MinSEType};
     use crate::types::headers::HeaderAccess;
+    use crate::types::{headers::HeaderName, Method, MinSE as MinSEType, StatusCode};
 
     #[test]
     fn test_request_builder_min_se() {
-        let request = SimpleRequestBuilder::new(Method::Invite, "sip:test@example.com").unwrap()
+        let request = SimpleRequestBuilder::new(Method::Invite, "sip:test@example.com")
+            .unwrap()
             .min_se(120)
             .build();
 
@@ -135,7 +133,10 @@ mod tests {
 
         match headers.first().unwrap() {
             TypedHeader::MinSE(min_se_val) => {
-                assert_eq!(min_se_val.delta_seconds, 120, "Min-SE delta_seconds mismatch ");
+                assert_eq!(
+                    min_se_val.delta_seconds, 120,
+                    "Min-SE delta_seconds mismatch "
+                );
             }
             _ => panic!("Expected TypedHeader::MinSE variant "),
         }
@@ -150,22 +151,32 @@ mod tests {
 
     #[test]
     fn test_response_builder_min_se() {
-        let response = SimpleResponseBuilder::new(StatusCode::from_u16(422).expect("Failed to create status code 422"), Some("Session Interval Too Small"))
-            .min_se(90)
-            .build();
+        let response = SimpleResponseBuilder::new(
+            StatusCode::from_u16(422).expect("Failed to create status code 422"),
+            Some("Session Interval Too Small"),
+        )
+        .min_se(90)
+        .build();
 
         let headers = response.headers(&HeaderName::MinSE);
-        assert_eq!(headers.len(), 1, "Min-SE header should be present in response ");
+        assert_eq!(
+            headers.len(),
+            1,
+            "Min-SE header should be present in response "
+        );
 
         match headers.first().unwrap() {
             TypedHeader::MinSE(min_se_val) => {
-                assert_eq!(min_se_val.delta_seconds, 90, "Min-SE delta_seconds mismatch in response ");
+                assert_eq!(
+                    min_se_val.delta_seconds, 90,
+                    "Min-SE delta_seconds mismatch in response "
+                );
             }
             _ => panic!("Expected TypedHeader::MinSE variant in response "),
         }
 
         // Also test access via typed_header helper if available
-         if let Some(min_se_header) = response.typed_header::<MinSEType>() {
+        if let Some(min_se_header) = response.typed_header::<MinSEType>() {
             assert_eq!(min_se_header.delta_seconds, 90);
         } else {
             panic!("Could not get MinSE header using typed_header on response ");
@@ -177,10 +188,17 @@ mod tests {
         // This test doesn't directly test the builder setting a default,
         // as the builder always sets an explicit value.
         // It's more about acknowledging the RFC default.
-        let request_without_min_se = SimpleRequestBuilder::new(Method::Invite, "sip:test@example.com").unwrap()
-            .build();
-        assert!(request_without_min_se.headers(&HeaderName::MinSE).is_empty(), "Min-SE should not be present if not set");
+        let request_without_min_se =
+            SimpleRequestBuilder::new(Method::Invite, "sip:test@example.com")
+                .unwrap()
+                .build();
+        assert!(
+            request_without_min_se
+                .headers(&HeaderName::MinSE)
+                .is_empty(),
+            "Min-SE should not be present if not set"
+        );
         // The interpretation of a missing Min-SE header (e.g., defaulting to 90s)
         // is up to the SIP entities processing the message, not the builder itself.
     }
-} 
+}

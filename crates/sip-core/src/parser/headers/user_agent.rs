@@ -8,7 +8,7 @@
  *   product-version = token
  *
  * RFC Compliance Status:
- * - The parser correctly handles single products with versions (e.g., "ExampleClient/2.1") 
+ * - The parser correctly handles single products with versions (e.g., "ExampleClient/2.1")
  * - The parser correctly handles products without versions (e.g., "SimpleSIPClient")
  * - The parser correctly handles multiple space-separated products (e.g., "SIPCore/1.0 SoftPhone/2.5.1")
  * - The parser correctly handles comments in parentheses (e.g., "(Debug build)")
@@ -26,7 +26,7 @@
  *   mentioned in RFC 3261, as it simply extracts each component in sequence.
  *
  * Suggestions for Improvement:
- * 1. Enhance the parser to better handle multiple consecutive comments without relying on 
+ * 1. Enhance the parser to better handle multiple consecutive comments without relying on
  *    strict LWS (Linear White Space) between them.
  * 2. Implement a more robust approach to continue parsing beyond the first successful match
  *    in complex mixed inputs.
@@ -50,13 +50,13 @@ use nom::{
 use std::fmt;
 
 // Import from new modules
+use super::server_val::server_val; // Use the shared server_val parser
 use crate::parser::separators::hcolon;
 use crate::parser::whitespace::lws;
-use super::server_val::server_val; // Use the shared server_val parser
 use crate::parser::ParseResult;
 
 // Import the types from the types module
-use crate::types::server::{ServerVal, Product};
+use crate::types::server::{Product, ServerVal};
 // Import the alias for backward compatibility
 use super::server_val::ServerValComponent;
 
@@ -79,19 +79,21 @@ mod tests {
     fn debug_server_vals(vals: &[ServerVal]) -> String {
         let mut result = String::new();
         result.push_str(&format!("Found {} ServerVal items:\n", vals.len()));
-        
+
         for (i, val) in vals.iter().enumerate() {
             match val {
                 ServerVal::Product(p) => {
-                    result.push_str(&format!("  [{}] Product: name=\"{}\", version={:?}\n", 
-                        i, p.name, p.version));
-                },
+                    result.push_str(&format!(
+                        "  [{}] Product: name=\"{}\", version={:?}\n",
+                        i, p.name, p.version
+                    ));
+                }
                 ServerVal::Comment(c) => {
                     result.push_str(&format!("  [{}] Comment: \"{}\"\n", i, c));
                 }
             }
         }
-        
+
         result
     }
 
@@ -103,9 +105,11 @@ mod tests {
         let (rem, vals) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vals.len(), 1);
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "ExampleClient" && p.version == Some("2.1".to_string())));
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "ExampleClient" && p.version == Some("2.1".to_string()))
+        );
     }
-    
+
     #[test]
     fn test_parse_user_agent_multiple() {
         // Run the parser first to get what it actually produces
@@ -114,25 +118,29 @@ mod tests {
         assert!(result.is_ok());
         let (rem, vals) = result.unwrap();
         assert!(rem.is_empty());
-        
+
         // Debug what we're getting
         println!("{}", debug_server_vals(&vals));
-        
+
         // The actual number of items might vary based on how whitespace is handled
         // Let's just check that we have the expected products and comment
         let mut found_softphone = false;
         let mut found_beta1 = false;
         let mut found_debug_build = false;
-        
+
         for val in &vals {
             match val {
-                ServerVal::Product(p) if p.name == "Softphone" && p.version.is_none() => found_softphone = true,
-                ServerVal::Product(p) if p.name == "Beta1" && p.version.is_none() => found_beta1 = true,
+                ServerVal::Product(p) if p.name == "Softphone" && p.version.is_none() => {
+                    found_softphone = true
+                }
+                ServerVal::Product(p) if p.name == "Beta1" && p.version.is_none() => {
+                    found_beta1 = true
+                }
                 ServerVal::Comment(c) if c == "Debug build" => found_debug_build = true,
                 _ => {}
             }
         }
-        
+
         assert!(found_softphone, "Softphone product not found");
         assert!(found_beta1, "Beta1 product not found");
         assert!(found_debug_build, "Debug build comment not found");
@@ -146,7 +154,9 @@ mod tests {
         let (rem, vals) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vals.len(), 1);
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "SimpleSIPClient" && p.version == None));
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "SimpleSIPClient" && p.version == None)
+        );
     }
 
     #[test]
@@ -157,9 +167,15 @@ mod tests {
         let (rem, vals) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vals.len(), 3);
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "SIPCore" && p.version == Some("1.0".to_string())));
-        assert!(matches!(&vals[1], ServerVal::Product(p) if p.name == "SoftPhone" && p.version == Some("2.5.1".to_string())));
-        assert!(matches!(&vals[2], ServerVal::Product(p) if p.name == "OS" && p.version == Some("Unix".to_string())));
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "SIPCore" && p.version == Some("1.0".to_string()))
+        );
+        assert!(
+            matches!(&vals[1], ServerVal::Product(p) if p.name == "SoftPhone" && p.version == Some("2.5.1".to_string()))
+        );
+        assert!(
+            matches!(&vals[2], ServerVal::Product(p) if p.name == "OS" && p.version == Some("Unix".to_string()))
+        );
     }
 
     #[test]
@@ -169,22 +185,24 @@ mod tests {
         let result = parse_user_agent(input);
         assert!(result.is_ok());
         let (rem, vals) = result.unwrap();
-        
+
         // Debug what we're getting
         println!("{}", debug_server_vals(&vals));
         println!("Remaining input: {:?}", std::str::from_utf8(rem));
-        
+
         // With this parser, it looks like multiple adjacent comments might not be fully parsed
         // due to how the LWS separator works. Let's check what we can actually get.
-        
+
         // Check that at least the first comment was parsed correctly
         assert!(!vals.is_empty(), "No comments were parsed");
         assert!(matches!(&vals[0], ServerVal::Comment(c) if c == "Open-Source"));
-        
+
         // If more comments were parsed, check them too
         if vals.len() > 1 {
-            assert!(vals.iter().any(|v| matches!(v, ServerVal::Comment(c) if c == "Testing Build 123") ||
-                                       matches!(v, ServerVal::Comment(c) if c == "RFC 3261 Compliant")));
+            assert!(vals.iter().any(
+                |v| matches!(v, ServerVal::Comment(c) if c == "Testing Build 123")
+                    || matches!(v, ServerVal::Comment(c) if c == "RFC 3261 Compliant")
+            ));
         }
     }
 
@@ -195,22 +213,24 @@ mod tests {
         let result = parse_user_agent(input);
         assert!(result.is_ok());
         let (rem, vals) = result.unwrap();
-        
+
         // Debug what we're getting
         println!("{}", debug_server_vals(&vals));
         println!("Remaining input: {:?}", std::str::from_utf8(rem));
-        
+
         // With this parser, we might only get a partial parse due to how LWS and comments interact
         // Let's check that we at least get the first part correctly
-        
+
         assert!(!vals.is_empty(), "No components were parsed");
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "SIP" && p.version == Some("2.0".to_string())));
-        
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "SIP" && p.version == Some("2.0".to_string()))
+        );
+
         // If the next comment is parsed, check it
         if vals.len() > 1 {
             assert!(matches!(&vals[1], ServerVal::Comment(c) if c == "Compatible"));
         }
-        
+
         // For this test, we'll just check the remainder without asserting on the full parse
         // since the complex mix might not be fully handled by the current parser
     }
@@ -224,9 +244,15 @@ mod tests {
         let (rem, vals) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vals.len(), 3);
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "SIP-Library" && p.version == Some("1.0".to_string())));
-        assert!(matches!(&vals[1], ServerVal::Product(p) if p.name == "SIP.Core" && p.version == Some("2.1-beta".to_string())));
-        assert!(matches!(&vals[2], ServerVal::Product(p) if p.name == "SIP!Proxy" && p.version == Some("3.0+".to_string())));
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "SIP-Library" && p.version == Some("1.0".to_string()))
+        );
+        assert!(
+            matches!(&vals[1], ServerVal::Product(p) if p.name == "SIP.Core" && p.version == Some("2.1-beta".to_string()))
+        );
+        assert!(
+            matches!(&vals[2], ServerVal::Product(p) if p.name == "SIP!Proxy" && p.version == Some("3.0+".to_string()))
+        );
     }
 
     #[test]
@@ -237,7 +263,9 @@ mod tests {
         let (rem, vals) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vals.len(), 1);
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "SIPClient" && p.version == Some("1.0-beta.3+build.45~rc.1".to_string())));
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "SIPClient" && p.version == Some("1.0-beta.3+build.45~rc.1".to_string()))
+        );
     }
 
     #[test]
@@ -246,16 +274,16 @@ mod tests {
         let result = parse_user_agent(input);
         assert!(result.is_ok());
         let (_, vals) = result.unwrap();
-        
+
         // Debug what we're getting
         println!("{}", debug_server_vals(&vals));
-        
+
         // Convert to ServerInfo
         let server_info = ServerInfo::from(vals.clone());
-        
+
         // Convert back to string for comparison
         // Note: We only check for the first two components as the test was failing
-        // The original test expects "SIPCore/1.0 (Experimental) Client/2.0" 
+        // The original test expects "SIPCore/1.0 (Experimental) Client/2.0"
         // but the actual output might be different based on ServerInfo::from implementation
         let info_string = server_info.to_string();
         assert!(info_string.contains("SIPCore/1.0"));
@@ -269,8 +297,12 @@ mod tests {
         assert!(result.is_ok());
         let (_, vals) = result.unwrap();
         assert_eq!(vals.len(), 2);
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "UserAgent" && p.version == Some("1.0".to_string())));
-        assert!(matches!(&vals[1], ServerVal::Comment(c) if c == "SIP (Session Initiation Protocol) Implementation"));
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "UserAgent" && p.version == Some("1.0".to_string()))
+        );
+        assert!(
+            matches!(&vals[1], ServerVal::Comment(c) if c == "SIP (Session Initiation Protocol) Implementation")
+        );
     }
 
     #[test]
@@ -282,8 +314,10 @@ mod tests {
         let (rem, vals) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(vals.len(), 1);
-        assert!(matches!(&vals[0], ServerVal::Product(p) if p.name == "Softphone" && p.version == Some("Beta1.5".to_string())));
-        
+        assert!(
+            matches!(&vals[0], ServerVal::Product(p) if p.name == "Softphone" && p.version == Some("Beta1.5".to_string()))
+        );
+
         // Although not explicitly mentioned in RFC 3261, test a common format
         let input2 = b"ACME-SIP/4.1.0 (Compatible SIP UA)";
         let result2 = parse_user_agent(input2);
@@ -291,7 +325,9 @@ mod tests {
         let (rem2, vals2) = result2.unwrap();
         assert!(rem2.is_empty());
         assert_eq!(vals2.len(), 2);
-        assert!(matches!(&vals2[0], ServerVal::Product(p) if p.name == "ACME-SIP" && p.version == Some("4.1.0".to_string())));
+        assert!(
+            matches!(&vals2[0], ServerVal::Product(p) if p.name == "ACME-SIP" && p.version == Some("4.1.0".to_string()))
+        );
         assert!(matches!(&vals2[1], ServerVal::Comment(c) if c == "Compatible SIP UA"));
     }
 }

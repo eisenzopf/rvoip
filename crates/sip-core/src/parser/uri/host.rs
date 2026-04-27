@@ -8,9 +8,9 @@ use nom::{
 };
 use std::str;
 
-use crate::types::uri::Host;
+use crate::parser::common_chars::digit;
 use crate::parser::ParseResult;
-use crate::parser::common_chars::digit; // Keep digit if still used by port
+use crate::types::uri::Host; // Keep digit if still used by port
 
 // Import the specific host type parsers
 use super::hostname::hostname;
@@ -27,37 +27,48 @@ pub fn host(input: &[u8]) -> ParseResult<Host> {
 pub fn port(input: &[u8]) -> ParseResult<u16> {
     // Manual implementation that ensures strict numeric validation
     if input.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Digit,
+        )));
     }
-    
+
     // Find the position of the first non-digit character
     let mut pos = 0;
     while pos < input.len() && input[pos].is_ascii_digit() {
         pos += 1;
     }
-    
+
     // Ensure we found at least one digit
     if pos == 0 {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Digit,
+        )));
     }
-    
+
     // Extract the digit sequence
     let digits = &input[..pos];
     let remaining = &input[pos..];
-    
+
     // Parse the port number
-    let port_str = std::str::from_utf8(digits)
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
-    
+    let port_str = std::str::from_utf8(digits).map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
+
     // Convert to u32 first to check for overflow
-    let port_num = port_str.parse::<u32>()
-        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)))?;
-    
+    let port_num = port_str.parse::<u32>().map_err(|_| {
+        nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+    })?;
+
     // Verify port is within valid range (0-65535)
     if port_num > 65535 {
-        return Err(nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify)));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
     }
-    
+
     Ok((remaining, port_num as u16))
 }
 
@@ -94,7 +105,7 @@ mod tests {
         match result {
             Host::Address(addr) => {
                 assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-            },
+            }
             _ => panic!("Expected IPv4 address"),
         }
 
@@ -104,7 +115,7 @@ mod tests {
         match result {
             Host::Address(addr) => {
                 assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-            },
+            }
             _ => panic!("Expected IPv4 address"),
         }
     }
@@ -120,7 +131,7 @@ mod tests {
                 if let IpAddr::V6(ipv6) = addr {
                     assert_eq!(ipv6.segments(), [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
                 }
-            },
+            }
             _ => panic!("Expected IPv6 address"),
         }
 
@@ -133,7 +144,7 @@ mod tests {
                 if let IpAddr::V6(ipv6) = addr {
                     assert_eq!(ipv6.segments(), [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
                 }
-            },
+            }
             _ => panic!("Expected IPv6 address"),
         }
     }
@@ -168,11 +179,11 @@ mod tests {
     fn test_port_invalid() {
         // Non-numeric port
         assert!(port(b"abc").is_err());
-        
+
         // Port exceeding u16 range
         let result = port(b"65536");
         assert!(result.is_err()); // Value exceeds u16 max
-        
+
         // Empty port
         assert!(port(b"").is_err());
     }
@@ -193,7 +204,7 @@ mod tests {
         match host_val {
             Host::Address(addr) => {
                 assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-            },
+            }
             _ => panic!("Expected IPv4 address"),
         }
         assert_eq!(port_opt, Some(8080));
@@ -207,7 +218,7 @@ mod tests {
                 if let IpAddr::V6(ipv6) = addr {
                     assert_eq!(ipv6.segments(), [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
                 }
-            },
+            }
             _ => panic!("Expected IPv6 address"),
         }
         assert_eq!(port_opt, Some(5060));
@@ -227,7 +238,7 @@ mod tests {
         match host_val {
             Host::Address(addr) => {
                 assert_eq!(addr, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
-            },
+            }
             _ => panic!("Expected IPv4 address"),
         }
         assert_eq!(port_opt, None);
@@ -241,7 +252,7 @@ mod tests {
                 if let IpAddr::V6(ipv6) = addr {
                     assert_eq!(ipv6.segments(), [0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
                 }
-            },
+            }
             _ => panic!("Expected IPv6 address"),
         }
         assert_eq!(port_opt, None);
@@ -279,22 +290,25 @@ mod tests {
         for (input, expected_host, expected_port) in examples {
             let (rem, (host_val, port_opt)) = hostport(input).unwrap();
             assert!(rem.is_empty());
-            
+
             match &host_val {
                 Host::Domain(domain) => {
                     assert_eq!(domain, expected_host);
-                },
+                }
                 Host::Address(addr) => {
                     if addr.is_ipv4() {
                         assert_eq!(addr.to_string(), expected_host);
                     } else if addr.is_ipv6() {
                         // For IPv6, the expected string should already include brackets
                         assert!(expected_host.starts_with("[") && expected_host.ends_with("]"));
-                        assert_eq!(format!("{}", addr), expected_host[1..expected_host.len()-1]);
+                        assert_eq!(
+                            format!("{}", addr),
+                            expected_host[1..expected_host.len() - 1]
+                        );
                     }
                 }
             }
-            
+
             assert_eq!(port_opt, expected_port);
         }
     }
@@ -307,7 +321,7 @@ mod tests {
         let (rem, host_val) = host(b"999.888.777.666").unwrap();
         assert!(rem.is_empty());
         assert!(matches!(host_val, Host::Domain(domain) if domain == "999.888.777.666"));
-        
+
         // This looks like an IPv4 address but has numbers > 255
         let (rem, host_val) = host(b"333.444.555.666").unwrap();
         assert!(rem.is_empty());
@@ -318,15 +332,15 @@ mod tests {
     fn test_invalid_hosts() {
         // Invalid IPv6 reference (missing closing bracket)
         assert!(host(b"[2001:db8::1").is_err());
-        
+
         // Invalid IPv4 address (extra dot)
         let result = host(b"192.168.1.1.");
         // This should either be an error or parse as a domain name
         if let Ok((_, result)) = result {
             assert!(matches!(result, Host::Domain(_)));
         }
-        
+
         // Invalid hostname (consecutive dots)
         assert!(host(b"example..com").is_err());
     }
-} 
+}

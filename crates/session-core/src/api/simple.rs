@@ -3,16 +3,16 @@
 //! This is the simplest possible API for developers who don't know SIP.
 //! Just call methods sequentially like you would in any normal program.
 
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::sync::mpsc;
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
 use rvoip_media_core::types::AudioFrame;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 // Re-export types that users need
+pub use crate::api::events::{CallId, Event};
 pub use crate::api::unified::Config;
-pub use crate::api::events::{Event, CallId};
 
 /// Information about an incoming REFER request
 #[derive(Debug, Clone)]
@@ -42,14 +42,14 @@ impl SimplePeer {
         config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
         Self::with_config(name, config).await
     }
-    
+
     /// Create a new peer with custom configuration
     pub async fn with_config(name: &str, mut config: Config) -> Result<Self> {
         if config.local_uri.starts_with("sip:user@") {
             config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
         }
         let local_uri = config.local_uri.clone();
-        
+
         let (event_tx, event_rx) = mpsc::channel(1000);
         #[allow(deprecated)]
         let coordinator = UnifiedCoordinator::with_simple_peer_events(config, event_tx).await?;
@@ -62,14 +62,14 @@ impl SimplePeer {
             pending_refer: Arc::new(tokio::sync::Mutex::new(None)),
         })
     }
-    
+
     // ===== Core Operations =====
-    
+
     /// Make an outgoing call (returns immediately with call ID)
     pub async fn call(&mut self, target: &str) -> Result<CallId> {
         self.coordinator.make_call(&self.local_uri, target).await
     }
-    
+
     /// Wait for a call to be answered
     pub async fn wait_for_answered(&mut self, expected_call_id: &CallId) -> Result<CallId> {
         while let Some(event) = self.event_rx.recv().await {
@@ -79,9 +79,11 @@ impl SimplePeer {
                 }
             }
         }
-        Err(crate::errors::SessionError::Other("Event channel closed".to_string()))
+        Err(crate::errors::SessionError::Other(
+            "Event channel closed".to_string(),
+        ))
     }
-    
+
     /// Wait for incoming call
     pub async fn wait_for_incoming_call(&mut self) -> Result<(CallId, String)> {
         while let Some(event) = self.event_rx.recv().await {
@@ -89,24 +91,32 @@ impl SimplePeer {
                 return Ok((call_id, from));
             }
         }
-        Err(crate::errors::SessionError::Other("Event channel closed".to_string()))
+        Err(crate::errors::SessionError::Other(
+            "Event channel closed".to_string(),
+        ))
     }
-    
+
     /// Wait for REFER request with full context
     pub async fn wait_for_refer(&mut self) -> Result<Option<ReferRequest>> {
         while let Some(event) = self.event_rx.recv().await {
             match event {
-                Event::ReferReceived { call_id, refer_to, transaction_id, transfer_type, .. } => {
+                Event::ReferReceived {
+                    call_id,
+                    refer_to,
+                    transaction_id,
+                    transfer_type,
+                    ..
+                } => {
                     let refer = ReferRequest {
                         call_id,
                         refer_to,
                         transaction_id,
                         transfer_type,
                     };
-                    
+
                     // Store for later use
                     *self.pending_refer.lock().await = Some(refer.clone());
-                    
+
                     return Ok(Some(refer));
                 }
                 Event::CallEnded { .. } => return Ok(None),
@@ -115,16 +125,16 @@ impl SimplePeer {
         }
         Ok(None)
     }
-    
+
     /// Accept an incoming call
     pub async fn accept(&mut self, call_id: &CallId) -> Result<()> {
         self.coordinator.accept_call(call_id).await
     }
-    
+
     /// Hangup a call (fire-and-forget to avoid blocking)
     pub async fn hangup(&mut self, call_id: &CallId) -> Result<()> {
         tracing::info!("[SimplePeer] hangup() called - initiating BYE (fire-and-forget)");
-        
+
         // Fire-and-forget: Spawn hangup in background to avoid blocking
         // The background event loop will handle the BYE response and CallEnded event
         // This prevents deadlocks from nested locks in state machine
@@ -133,7 +143,10 @@ impl SimplePeer {
         tokio::spawn(async move {
             match coordinator.hangup(&call_id_clone).await {
                 Ok(()) => {
-                    tracing::info!("[SimplePeer] Background hangup completed for {}", call_id_clone);
+                    tracing::info!(
+                        "[SimplePeer] Background hangup completed for {}",
+                        call_id_clone
+                    );
                 }
                 Err(e) if e.is_session_gone() => {
                     tracing::trace!(
@@ -146,11 +159,11 @@ impl SimplePeer {
                 }
             }
         });
-        
+
         tracing::info!("[SimplePeer] hangup() returning immediately (BYE sent in background)");
         Ok(())
     }
-    
+
     /// Exchange audio for a duration (send and receive simultaneously)
     pub async fn exchange_audio(
         &mut self,
@@ -160,10 +173,10 @@ impl SimplePeer {
     ) -> Result<(Vec<i16>, Vec<i16>)> {
         let mut sent_samples = Vec::new();
         let mut received_samples = Vec::new();
-        
+
         // Subscribe to receive audio
         let mut audio_rx = self.coordinator.subscribe_to_audio(call_id).await?;
-        
+
         // Spawn receiving task
         let (tx, mut rx) = mpsc::channel(1000);
         tokio::spawn(async move {
@@ -173,68 +186,68 @@ impl SimplePeer {
                 }
             }
         });
-        
+
         // Send and receive for duration
         let start = std::time::Instant::now();
         let mut timestamp = 0u32;
         let mut frame_count = 0;
-        
+
         while start.elapsed() < duration {
             // Generate and send audio
             let samples = generator(frame_count);
             let frame = AudioFrame::new(samples.clone(), 8000, 1, timestamp);
             self.coordinator.send_audio(call_id, frame).await?;
             sent_samples.extend(samples);
-            
+
             // Receive audio (non-blocking)
             while let Ok(samples) = rx.try_recv() {
                 received_samples.extend(samples);
             }
-            
+
             timestamp += 160;
             frame_count += 1;
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        
+
         // Collect remaining audio
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         while let Ok(samples) = rx.try_recv() {
             received_samples.extend(samples);
         }
-        
+
         Ok((sent_samples, received_samples))
     }
-    
+
     /// Send REFER for call transfer
     pub async fn send_refer(&mut self, call_id: &CallId, refer_to: &str) -> Result<()> {
         self.coordinator.send_refer(call_id, refer_to).await
     }
-    
+
     /// Complete a blind transfer by terminating current call and calling target
-    pub async fn complete_blind_transfer(
-        &mut self, 
-        refer: &ReferRequest,
-    ) -> Result<CallId> {
-        tracing::info!("[SimplePeer] Completing blind transfer from call {} to {}", 
-                       refer.call_id, refer.refer_to);
-        
+    pub async fn complete_blind_transfer(&mut self, refer: &ReferRequest) -> Result<CallId> {
+        tracing::info!(
+            "[SimplePeer] Completing blind transfer from call {} to {}",
+            refer.call_id,
+            refer.refer_to
+        );
+
         // 1. Hangup current call (this triggers BYE)
         self.hangup(&refer.call_id).await?;
-        
+
         // 2. Wait for call to actually end
         let ended_call = self.wait_for_call_ended().await?;
         tracing::info!("[SimplePeer] Original call {} ended", ended_call);
-        
+
         // 3. Make new call to transfer target
         let new_call_id = self.call(&refer.refer_to).await?;
         tracing::info!("[SimplePeer] Transfer call initiated: {}", new_call_id);
-        
+
         // 4. When call is established, the state machine will send NOTIFY (success)
         // This happens automatically via the state table transitions
-        
+
         Ok(new_call_id)
     }
-    
+
     /// Wait for call to end
     pub async fn wait_for_call_ended(&mut self) -> Result<CallId> {
         while let Some(event) = self.event_rx.recv().await {
@@ -242,13 +255,15 @@ impl SimplePeer {
                 return Ok(call_id);
             }
         }
-        Err(crate::errors::SessionError::Other("Event channel closed".to_string()))
+        Err(crate::errors::SessionError::Other(
+            "Event channel closed".to_string(),
+        ))
     }
-    
+
     /// Forceful shutdown - stops EVERYTHING and exits
     pub async fn shutdown(self, _timeout: Duration) -> Result<()> {
         tracing::info!("[SimplePeer] shutdown() called - exiting immediately");
-        
+
         // FORCEFUL: Kill the entire process immediately
         // This stops all tokio tasks, all threads, everything
         // Background event loop tasks would keep the process alive otherwise

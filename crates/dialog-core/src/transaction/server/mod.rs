@@ -1,8 +1,9 @@
+pub mod builders;
 /// # Server Transaction Module
 ///
-/// This module implements the server-side transaction state machines according to 
+/// This module implements the server-side transaction state machines according to
 /// [RFC 3261 Section 17.2](https://datatracker.ietf.org/doc/html/rfc3261#section-17.2).
-/// 
+///
 /// ## SIP Server Transactions
 ///
 /// Server transactions are created when a SIP element receives a request from a client.
@@ -39,29 +40,27 @@
 /// Server transactions are typically created by the `TransactionManager` when it receives
 /// a request from the network. It routes incoming messages to the appropriate transaction
 /// and provides a clean API for the Transaction User (TU) to send responses.
-
 mod common;
+mod data;
 mod invite;
 mod non_invite;
-mod data;
-pub mod builders;
 pub mod reliable_invite;
 
 pub use common::*;
+pub use data::{CommandReceiver, CommandSender, CommonServerTransaction, ServerTransactionData};
 pub use invite::ServerInviteTransaction;
 pub use non_invite::ServerNonInviteTransaction;
-pub use data::{ServerTransactionData, CommandSender, CommandReceiver, CommonServerTransaction};
 
 use async_trait::async_trait;
-use std::net::SocketAddr;
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::transaction::error::Result;
-use crate::transaction::{Transaction, TransactionState, TransactionKey, TransactionAsync};
-use rvoip_sip_core::prelude::*;
+use crate::transaction::{Transaction, TransactionAsync, TransactionKey, TransactionState};
 use rvoip_sip_core::json::ext::SipMessageJson;
+use rvoip_sip_core::prelude::*;
 
 /// Common interface for server transactions, implementing the behavior defined in RFC 3261 Section 17.2.
 ///
@@ -69,7 +68,9 @@ use rvoip_sip_core::json::ext::SipMessageJson;
 /// It encapsulates the functionality required to process requests, send responses, and track state
 /// according to the SIP specification.
 #[async_trait]
-pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransaction + Send + Sync + 'static {
+pub trait ServerTransaction:
+    Transaction + TransactionAsync + CommonServerTransaction + Send + Sync + 'static
+{
     /// Processes an incoming request associated with this transaction.
     ///
     /// This handles various types of requests that may arrive for this transaction:
@@ -84,11 +85,14 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
     ///
     /// A Future that resolves to Ok(()) if the request was processed successfully,
     /// or an Error if there was a problem.
-    fn process_request(&self, request: Request) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn process_request(
+        &self,
+        request: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
 
     /// Sends a response for this transaction, triggering appropriate state transitions.
     ///
-    /// According to RFC 3261 Sections 17.2.1 and 17.2.2, sending responses triggers 
+    /// According to RFC 3261 Sections 17.2.1 and 17.2.2, sending responses triggers
     /// specific state transitions based on the response status code:
     ///
     /// - For INVITE server transactions:
@@ -108,7 +112,10 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
     ///
     /// A Future that resolves to Ok(()) if the response was sent successfully,
     /// or an Error if there was a problem.
-    fn send_response(&self, response: Response) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn send_response(
+        &self,
+        response: Response,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
 
     /// Returns the last response sent by this transaction.
     ///
@@ -119,7 +126,7 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
     ///
     /// The last SIP response sent by this transaction, or None if no response has been sent.
     fn last_response(&self) -> Option<Response>;
-    
+
     /// Gets the Call-ID from the original request that created this transaction.
     ///
     /// Call-ID is a critical dialog identifier used to match ACK with its INVITE.
@@ -127,7 +134,7 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
     /// requests and responses in a dialog, including the ACK for a final response.
     ///
     /// # Returns
-    /// 
+    ///
     /// Some(call_id) if the transaction has an original request with a Call-ID header,
     /// None otherwise.
     fn original_request_call_id(&self) -> Option<String> {
@@ -137,7 +144,7 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
             None
         }
     }
-    
+
     /// Gets the From tag from the original request that created this transaction.
     ///
     /// From tag is part of the dialog identifiers used to match ACK with its INVITE.
@@ -145,7 +152,7 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
     /// requests and responses in a dialog (including ACK and CANCEL).
     ///
     /// # Returns
-    /// 
+    ///
     /// Some(from_tag) if the transaction has an original request with a From tag,
     /// None otherwise.
     fn original_request_from_tag(&self) -> Option<String> {
@@ -155,7 +162,7 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
             None
         }
     }
-    
+
     /// Gets the To tag from the original request that created this transaction.
     ///
     /// To tag may be part of the dialog identifiers used to match ACK with its INVITE.
@@ -163,7 +170,7 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
     /// ACKs for final responses will include the To tag from the response.
     ///
     /// # Returns
-    /// 
+    ///
     /// Some(to_tag) if the transaction has an original request with a To tag,
     /// None otherwise.
     fn original_request_to_tag(&self) -> Option<String> {
@@ -173,13 +180,13 @@ pub trait ServerTransaction: Transaction + TransactionAsync + CommonServerTransa
             None
         }
     }
-    
+
     /// Synchronous accessor for the original request if it's available without async operations.
     /// This is an internal helper method that should be implemented by transaction types
     /// that can provide synchronous access to the original request.
     ///
     /// # Returns
-    /// 
+    ///
     /// Some(Request) if the transaction has cached the original request,
     /// None if it would require an async operation to retrieve.
     fn original_request_sync(&self) -> Option<Request> {
@@ -205,26 +212,31 @@ pub trait TransactionExt {
 impl<T: Transaction + ?Sized> TransactionExt for T {
     fn as_server_transaction(&self) -> Option<&dyn ServerTransaction> {
         use crate::transaction::TransactionKind;
-        
+
         match self.kind() {
             TransactionKind::InviteServer | TransactionKind::NonInviteServer => {
                 // Get the Any representation and try downcasting
-                self.as_any().downcast_ref::<Box<dyn ServerTransaction>>()
+                self.as_any()
+                    .downcast_ref::<Box<dyn ServerTransaction>>()
                     .map(|boxed| boxed.as_ref())
                     .or_else(|| {
                         // Try with specific implementations
-                        use crate::transaction::server::{ServerInviteTransaction, ServerNonInviteTransaction};
-                        
+                        use crate::transaction::server::{
+                            ServerInviteTransaction, ServerNonInviteTransaction,
+                        };
+
                         if let Some(tx) = self.as_any().downcast_ref::<ServerInviteTransaction>() {
                             Some(tx as &dyn ServerTransaction)
-                        } else if let Some(tx) = self.as_any().downcast_ref::<ServerNonInviteTransaction>() {
+                        } else if let Some(tx) =
+                            self.as_any().downcast_ref::<ServerNonInviteTransaction>()
+                        {
                             Some(tx as &dyn ServerTransaction)
                         } else {
                             None
                         }
                     })
-            },
+            }
             _ => None,
         }
     }
-} 
+}

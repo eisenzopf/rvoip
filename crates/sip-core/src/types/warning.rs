@@ -3,8 +3,8 @@
 //! This module provides an implementation of the SIP Warning header as defined in
 //! [RFC 3261 Section 20.43](https://datatracker.ietf.org/doc/html/rfc3261#section-20.43).
 //!
-//! The Warning header field is used to carry additional information about the status of a response. 
-//! Warning headers are sent with responses and contain a three-digit warning code, host, and 
+//! The Warning header field is used to carry additional information about the status of a response.
+//! Warning headers are sent with responses and contain a three-digit warning code, host, and
 //! warning text.
 //!
 //! Warning headers are used for debugging and to provide additional information about why a
@@ -45,19 +45,19 @@
 //! assert_eq!(warning.to_string(), "370 example.com \"Insufficient bandwidth\"");
 //! ```
 
-use crate::types::uri::Uri;
-use crate::parser::headers::warning::parse_warning_value_list;
 use crate::error::Result;
-use std::fmt;
-use std::str::FromStr;
-use nom::combinator::all_consuming;
-use serde::{Serialize, Deserialize};
-use std::str::from_utf8;
-use crate::types::uri::Host;
+use crate::parser::headers::warning::parse_warning_value_list;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::uri::Host;
+use crate::types::uri::Uri;
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::from_utf8;
+use std::str::FromStr;
 
 /// Represents the agent in a Warning header
-/// 
+///
 /// The warn-agent can be either a host:port combination
 /// or a pseudonym (token).
 #[derive(Debug, PartialEq, Clone)]
@@ -99,7 +99,7 @@ pub struct WarningValue {
 /// RFC 3261 defines several standard warning codes:
 ///
 /// - 300: Incompatible network protocol
-/// - 301: Incompatible network address formats 
+/// - 301: Incompatible network address formats
 /// - 302: Incompatible transport protocol
 /// - 303: Incompatible bandwidth units
 /// - 305: Incompatible media format
@@ -124,7 +124,7 @@ pub struct WarningValue {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Warning {
     /// The warning code (300-399)
-    pub code: u16,   // 3xx
+    pub code: u16, // 3xx
     /// The hostname or IP address of the entity that added the Warning header
     pub agent: Uri, // Or maybe just Host?
     /// The warning text
@@ -161,7 +161,11 @@ impl Warning {
     /// let warning = Warning::new(305, agent, "H.264 profile not supported");
     /// ```
     pub fn new(code: u16, agent: Uri, text: impl Into<String>) -> Self {
-        Self { code, agent, text: text.into() }
+        Self {
+            code,
+            agent,
+            text: text.into(),
+        }
     }
 }
 
@@ -216,7 +220,7 @@ impl FromStr for Warning {
     ///
     /// // Parse a warning header
     /// let warning = Warning::from_str("370 example.com \"Insufficient bandwidth\"").unwrap();
-    /// 
+    ///
     /// // Verify the parsed values
     /// assert_eq!(warning.code, 370);
     /// assert_eq!(warning.agent.host.to_string(), "example.com");
@@ -240,32 +244,37 @@ impl FromStr for Warning {
                                 uri.port = Some(*p);
                             }
                             uri
-                        },
+                        }
                         WarnAgent::Pseudonym(name) => {
                             // For pseudonyms, just create a simple SIP URI
                             Uri::sip(name)
                         }
                     };
-                    
+
                     // Convert text from Vec<u8> to String
                     let text = match from_utf8(&value.text) {
                         Ok(s) => s.to_string(),
-                        Err(_) => return Err(Error::ParseError("Invalid UTF-8 in warning text".to_string()))
+                        Err(_) => {
+                            return Err(Error::ParseError(
+                                "Invalid UTF-8 in warning text".to_string(),
+                            ))
+                        }
                     };
-                    
+
                     // Create and return the Warning struct
                     Ok(Warning {
                         code: value.code,
                         agent,
-                        text
+                        text,
                     })
                 } else {
                     Err(Error::ParseError("No warning values found".to_string()))
                 }
-            },
-            Err(e) => Err(Error::ParseError(
-                format!("Failed to parse Warning header: {:?}", e)
-            ))
+            }
+            Err(e) => Err(Error::ParseError(format!(
+                "Failed to parse Warning header: {:?}",
+                e
+            ))),
         }
     }
 }
@@ -322,7 +331,9 @@ impl WarningHeader {
     ///
     /// A new WarningHeader instance with a single warning
     pub fn single(code: u16, agent: Uri, text: impl Into<String>) -> Self {
-        Self { warnings: vec![Warning::new(code, agent, text)] }
+        Self {
+            warnings: vec![Warning::new(code, agent, text)],
+        }
     }
 
     /// Adds a warning to this header.
@@ -381,7 +392,7 @@ impl FromStr for WarningHeader {
         match all_consuming(parse_warning_value_list)(s.as_bytes()) {
             Ok((_, values)) => {
                 let mut warnings = Vec::with_capacity(values.len());
-                
+
                 for value in values {
                     // Convert the agent to a URI
                     let agent = match &value.agent {
@@ -391,30 +402,33 @@ impl FromStr for WarningHeader {
                                 uri.port = Some(*p);
                             }
                             uri
-                        },
-                        WarnAgent::Pseudonym(name) => {
-                            Uri::sip(name)
                         }
+                        WarnAgent::Pseudonym(name) => Uri::sip(name),
                     };
-                    
+
                     // Convert text from Vec<u8> to String
                     let text = match from_utf8(&value.text) {
                         Ok(s) => s.to_string(),
-                        Err(_) => return Err(Error::ParseError("Invalid UTF-8 in warning text".to_string()))
+                        Err(_) => {
+                            return Err(Error::ParseError(
+                                "Invalid UTF-8 in warning text".to_string(),
+                            ))
+                        }
                     };
-                    
+
                     warnings.push(Warning {
                         code: value.code,
                         agent,
-                        text
+                        text,
                     });
                 }
-                
+
                 Ok(WarningHeader { warnings })
-            },
-            Err(e) => Err(Error::ParseError(
-                format!("Failed to parse Warning header: {:?}", e)
-            ))
+            }
+            Err(e) => Err(Error::ParseError(format!(
+                "Failed to parse Warning header: {:?}",
+                e
+            ))),
         }
     }
 }
@@ -428,14 +442,19 @@ impl TypedHeaderTrait for Warning {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(crate::error::Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(crate::error::Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -443,14 +462,16 @@ impl TypedHeaderTrait for Warning {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Warning::from_str(s.trim())
                 } else {
-                    Err(crate::error::Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(crate::error::Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(crate::error::Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(crate::error::Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -464,14 +485,19 @@ impl TypedHeaderTrait for WarningHeader {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(crate::error::Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(crate::error::Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -479,14 +505,16 @@ impl TypedHeaderTrait for WarningHeader {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     WarningHeader::from_str(s.trim())
                 } else {
-                    Err(crate::error::Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(crate::error::Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(crate::error::Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(crate::error::Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
-} 
+}

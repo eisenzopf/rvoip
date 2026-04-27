@@ -25,7 +25,10 @@ use rvoip_session_core::{CallState, Config, StreamPeer};
 use tokio::time::{sleep, timeout, Duration, Instant as TokioInstant};
 
 fn env_port(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_u64(key: &str) -> Option<u64> {
@@ -43,8 +46,7 @@ fn now_ms() -> u64 {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
         )
         .init();
 
@@ -97,7 +99,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Retry once after a short backoff so the test is stable; a second
     // failure is treated as a real bug.
     if let Err(e) = handle.hold().await {
-        eprintln!("[ALICE] hold() returned error on first try: {} — retrying in 500ms", e);
+        eprintln!(
+            "[ALICE] hold() returned error on first try: {} — retrying in 500ms",
+            e
+        );
         sleep(Duration::from_millis(500)).await;
         if let Err(e2) = handle.hold().await {
             eprintln!("[ALICE] hold() retry also failed: {}", e2);

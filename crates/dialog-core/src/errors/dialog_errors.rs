@@ -15,46 +15,46 @@ pub enum DialogError {
     /// Dialog not found
     #[error("Dialog not found: {id}")]
     DialogNotFound { id: String },
-    
+
     /// Invalid dialog state for operation
     #[error("Invalid dialog state: expected {expected}, got {actual}")]
     InvalidState { expected: String, actual: String },
-    
+
     /// Dialog already exists
     #[error("Dialog already exists: {id}")]
     DialogAlreadyExists { id: String },
-    
+
     /// Transaction error from transaction-core
     #[error("Transaction error: {message}")]
     TransactionError { message: String },
-    
+
     /// SIP protocol error
     #[error("SIP protocol error: {message}")]
     ProtocolError { message: String },
-    
+
     /// Request routing error
     #[error("Request routing error: {message}")]
     RoutingError { message: String },
-    
+
     /// SDP negotiation error
     #[error("SDP negotiation error: {message}")]
     SdpError { message: String },
-    
+
     /// Internal error with context
     #[error("Internal error: {message}")]
-    InternalError { 
+    InternalError {
         message: String,
         context: Option<ErrorContext>,
     },
-    
+
     /// Network/connectivity error
     #[error("Network error: {message}")]
     NetworkError { message: String },
-    
+
     /// Timeout error
     #[error("Operation timed out: {operation}")]
     TimeoutError { operation: String },
-    
+
     /// Configuration error
     #[error("Configuration error: {message}")]
     ConfigError { message: String },
@@ -65,16 +65,16 @@ pub enum DialogError {
 pub struct ErrorContext {
     /// Dialog ID if applicable
     pub dialog_id: Option<String>,
-    
+
     /// Transaction ID if applicable
     pub transaction_id: Option<String>,
-    
+
     /// Call-ID if applicable
     pub call_id: Option<String>,
-    
+
     /// Timestamp when error occurred
     pub timestamp: SystemTime,
-    
+
     /// Additional details
     pub details: Option<String>,
 }
@@ -99,7 +99,7 @@ impl ErrorContext {
             ..Default::default()
         }
     }
-    
+
     /// Create a new error context with a transaction ID
     pub fn with_transaction_id(transaction_id: String) -> Self {
         Self {
@@ -107,7 +107,7 @@ impl ErrorContext {
             ..Default::default()
         }
     }
-    
+
     /// Add details to the context
     pub fn with_details(mut self, details: String) -> Self {
         self.details = Some(details);
@@ -119,11 +119,9 @@ impl ErrorContext {
 impl DialogError {
     /// Create a dialog not found error
     pub fn dialog_not_found(id: &str) -> Self {
-        Self::DialogNotFound {
-            id: id.to_string(),
-        }
+        Self::DialogNotFound { id: id.to_string() }
     }
-    
+
     /// Create an invalid state error
     pub fn invalid_state(expected: &str, actual: &str) -> Self {
         Self::InvalidState {
@@ -131,21 +129,21 @@ impl DialogError {
             actual: actual.to_string(),
         }
     }
-    
+
     /// Create a protocol error
     pub fn protocol_error(message: &str) -> Self {
         Self::ProtocolError {
             message: message.to_string(),
         }
     }
-    
+
     /// Create a routing error
     pub fn routing_error(message: &str) -> Self {
         Self::RoutingError {
             message: message.to_string(),
         }
     }
-    
+
     /// Create an internal error with context
     pub fn internal_error(message: &str, context: Option<ErrorContext>) -> Self {
         Self::InternalError {
@@ -153,4 +151,4 @@ impl DialogError {
             context,
         }
     }
-} 
+}

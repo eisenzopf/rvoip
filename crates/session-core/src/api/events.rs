@@ -3,15 +3,15 @@
 //! This module defines the event-driven architecture that replaces callbacks
 //! for a truly simple API experience.
 
+use crate::errors::Result;
 use crate::state_table::types::SessionId;
 use tokio::sync::mpsc;
-use crate::errors::Result;
 
 /// Type alias for call ID (same as SessionId)
 pub type CallId = SessionId;
 
 /// Handle for managing a specific call
-/// 
+///
 /// Provides audio channels and call identification for a specific call session.
 /// Each call gets its own handle with dedicated audio send/receive channels.
 #[derive(Debug)]
@@ -29,26 +29,26 @@ impl CallHandle {
     pub fn new(call_id: CallId) -> (Self, mpsc::Receiver<Vec<i16>>, mpsc::Sender<Vec<i16>>) {
         let (audio_tx, audio_rx_for_handle) = mpsc::channel(100);
         let (audio_tx_for_coordinator, audio_rx) = mpsc::channel(100);
-        
+
         let handle = Self {
             call_id,
             audio_tx,
             audio_rx,
         };
-        
+
         (handle, audio_rx_for_handle, audio_tx_for_coordinator)
     }
-    
+
     /// Get the call ID for this handle
     pub fn call_id(&self) -> &CallId {
         &self.call_id
     }
-    
+
     /// Send audio samples to this call
-    /// 
+    ///
     /// # Arguments
     /// * `samples` - PCM audio samples (16-bit, mono, 8kHz)
-    /// 
+    ///
     /// # Example
     /// ```rust,no_run
     /// # use rvoip_session_core::api::events::CallHandle;
@@ -59,17 +59,19 @@ impl CallHandle {
     /// # }
     /// ```
     pub async fn send_audio(&mut self, samples: Vec<i16>) -> Result<()> {
-        self.audio_tx.send(samples).await
+        self.audio_tx
+            .send(samples)
+            .await
             .map_err(|_| crate::errors::SessionError::Other("Audio channel closed".to_string()))?;
         Ok(())
     }
-    
+
     /// Receive audio samples from this call (non-blocking)
-    /// 
+    ///
     /// # Returns
     /// * `Some(samples)` - Audio data received from remote party
     /// * `None` - No audio available right now
-    /// 
+    ///
     /// # Example
     /// ```rust,no_run
     /// # use rvoip_session_core::api::events::CallHandle;
@@ -83,9 +85,9 @@ impl CallHandle {
     pub async fn recv_audio(&mut self) -> Option<Vec<i16>> {
         self.audio_rx.recv().await
     }
-    
+
     /// Try to receive audio samples (non-blocking)
-    /// 
+    ///
     /// # Returns
     /// * `Ok(samples)` - Audio data received
     /// * `Err(TryRecvError::Empty)` - No audio available
@@ -93,7 +95,7 @@ impl CallHandle {
     pub fn try_recv_audio(&mut self) -> std::result::Result<Vec<i16>, mpsc::error::TryRecvError> {
         self.audio_rx.try_recv()
     }
-    
+
     /// Check if the call handle is still connected
     pub fn is_connected(&self) -> bool {
         !self.audio_tx.is_closed() && !self.audio_rx.is_closed()
@@ -101,15 +103,14 @@ impl CallHandle {
 }
 
 /// Events that SimplePeer can receive
-/// 
+///
 /// These events are published by the state machine when SIP protocol
 /// events occur. Developers handle these events to implement business logic.
 #[derive(Debug, Clone)]
 pub enum Event {
     // ===== Call Lifecycle Events =====
-    
     /// Incoming call received
-    /// 
+    ///
     /// The state machine has already sent 180 Ringing. Developer must
     /// call `accept()` or `reject()` to complete the call handling.
     IncomingCall {
@@ -118,19 +119,16 @@ pub enum Event {
         to: String,
         sdp: Option<String>,
     },
-    
+
     /// Call was answered (200 OK received for outgoing call)
     CallAnswered {
         call_id: CallId,
         sdp: Option<String>,
     },
-    
+
     /// Call ended (BYE sent/received)
-    CallEnded {
-        call_id: CallId,
-        reason: String,
-    },
-    
+    CallEnded { call_id: CallId, reason: String },
+
     /// Call failed (4xx/5xx response or timeout)
     CallFailed {
         call_id: CallId,
@@ -141,24 +139,16 @@ pub enum Event {
     /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
     /// 487 Request Terminated following CANCEL). Distinct from `CallFailed`
     /// so UIs can render "missed call" rather than "call rejected".
-    CallCancelled {
-        call_id: CallId,
-    },
+    CallCancelled { call_id: CallId },
 
     /// RFC 4028 session timer refresh succeeded (UPDATE or re-INVITE
     /// round-tripped). Emitted once per successful refresh — applications
     /// can use this to reset connection-health dashboards or log activity.
-    SessionRefreshed {
-        call_id: CallId,
-        expires_secs: u32,
-    },
+    SessionRefreshed { call_id: CallId, expires_secs: u32 },
 
     /// RFC 4028 session-timer refresh failed; the dialog has been torn
     /// down with BYE (§10). Follow-up `CallEnded` will still fire.
-    SessionRefreshFailed {
-        call_id: CallId,
-        reason: String,
-    },
+    SessionRefreshFailed { call_id: CallId, reason: String },
 
     /// RFC 3261 §22.2 — server challenged our INVITE with 401/407 and we're
     /// about to retry with a digest authorization header. Informational; no
@@ -173,9 +163,8 @@ pub enum Event {
     },
 
     // ===== Transfer Events =====
-    
     /// REFER request received
-    /// 
+    ///
     /// The state machine has already sent 202 Accepted. Developer can
     /// create a new session to the transfer target or ignore the transfer.
     ReferReceived {
@@ -183,30 +172,27 @@ pub enum Event {
         refer_to: String,
         referred_by: Option<String>,
         replaces: Option<String>,
-        transaction_id: String,    // For NOTIFY correlation
-        transfer_type: String,      // "blind" or "attended"
+        transaction_id: String, // For NOTIFY correlation
+        transfer_type: String,  // "blind" or "attended"
     },
-    
+
     /// Transfer accepted by recipient
-    TransferAccepted {
-        call_id: CallId,
-        refer_to: String,
-    },
-    
+    TransferAccepted { call_id: CallId, refer_to: String },
+
     /// Transfer completed successfully
     TransferCompleted {
         old_call_id: CallId,
         new_call_id: CallId,
         target: String,
     },
-    
+
     /// Transfer failed
     TransferFailed {
         call_id: CallId,
         reason: String,
         status_code: u16,
     },
-    
+
     /// Transfer progress update (for transferor monitoring)
     TransferProgress {
         call_id: CallId,
@@ -215,7 +201,6 @@ pub enum Event {
     },
 
     // ===== Subscription / NOTIFY =====
-
     /// Inbound NOTIFY surfaced to the application (RFC 6665).
     ///
     /// Fires for every NOTIFY received on any event package — REFER
@@ -235,145 +220,124 @@ pub enum Event {
     },
 
     // ===== Call State Events =====
-    
     /// Call was put on hold (re-INVITE with inactive SDP received)
-    CallOnHold {
-        call_id: CallId,
-    },
-    
+    CallOnHold { call_id: CallId },
+
     /// Call was resumed from hold
-    CallResumed {
-        call_id: CallId,
-    },
-    
+    CallResumed { call_id: CallId },
+
     /// Call was muted locally
-    CallMuted {
-        call_id: CallId,
-    },
-    
+    CallMuted { call_id: CallId },
+
     /// Call was unmuted locally
-    CallUnmuted {
-        call_id: CallId,
-    },
-    
+    CallUnmuted { call_id: CallId },
+
     // ===== Media Events =====
-    
     /// DTMF digit received
-    DtmfReceived {
-        call_id: CallId,
-        digit: char,
-    },
-    
+    DtmfReceived { call_id: CallId, digit: char },
+
     /// Media quality changed
     MediaQualityChanged {
         call_id: CallId,
         packet_loss_percent: u32,
         jitter_ms: u32,
     },
-    
+
     // ===== Registration Events =====
-    
     /// Registration successful
     RegistrationSuccess {
         registrar: String,
         expires: u32,
         contact: String,
     },
-    
+
     /// Registration failed
     RegistrationFailed {
         registrar: String,
         status_code: u16,
         reason: String,
     },
-    
+
     /// Unregistration successful
-    UnregistrationSuccess {
-        registrar: String,
-    },
-    
+    UnregistrationSuccess { registrar: String },
+
     /// Unregistration failed
-    UnregistrationFailed {
-        registrar: String,
-        reason: String,
-    },
-    
+    UnregistrationFailed { registrar: String, reason: String },
+
     // ===== Error Events =====
-    
     /// Network error occurred
     NetworkError {
         call_id: Option<CallId>,
         error: String,
     },
-    
+
     /// Authentication required (401/407 response)
-    AuthenticationRequired {
-        call_id: CallId,
-        realm: String,
-    },
+    AuthenticationRequired { call_id: CallId, realm: String },
 }
 
 impl Event {
     /// Get the call ID associated with this event (if any)
     pub fn call_id(&self) -> Option<&CallId> {
         match self {
-            Event::IncomingCall { call_id, .. } |
-            Event::CallAnswered { call_id, .. } |
-            Event::CallEnded { call_id, .. } |
-            Event::CallFailed { call_id, .. } |
-            Event::CallCancelled { call_id, .. } |
-            Event::SessionRefreshed { call_id, .. } |
-            Event::SessionRefreshFailed { call_id, .. } |
-            Event::CallAuthRetrying { call_id, .. } |
-            Event::ReferReceived { call_id, .. } |
-            Event::TransferAccepted { call_id, .. } |
-            Event::TransferFailed { call_id, .. } |
-            Event::TransferProgress { call_id, .. } |
-            Event::CallOnHold { call_id, .. } |
-            Event::CallResumed { call_id, .. } |
-            Event::CallMuted { call_id, .. } |
-            Event::CallUnmuted { call_id, .. } |
-            Event::DtmfReceived { call_id, .. } |
-            Event::MediaQualityChanged { call_id, .. } |
-            Event::NotifyReceived { call_id, .. } |
-            Event::AuthenticationRequired { call_id, .. } => Some(call_id),
+            Event::IncomingCall { call_id, .. }
+            | Event::CallAnswered { call_id, .. }
+            | Event::CallEnded { call_id, .. }
+            | Event::CallFailed { call_id, .. }
+            | Event::CallCancelled { call_id, .. }
+            | Event::SessionRefreshed { call_id, .. }
+            | Event::SessionRefreshFailed { call_id, .. }
+            | Event::CallAuthRetrying { call_id, .. }
+            | Event::ReferReceived { call_id, .. }
+            | Event::TransferAccepted { call_id, .. }
+            | Event::TransferFailed { call_id, .. }
+            | Event::TransferProgress { call_id, .. }
+            | Event::CallOnHold { call_id, .. }
+            | Event::CallResumed { call_id, .. }
+            | Event::CallMuted { call_id, .. }
+            | Event::CallUnmuted { call_id, .. }
+            | Event::DtmfReceived { call_id, .. }
+            | Event::MediaQualityChanged { call_id, .. }
+            | Event::NotifyReceived { call_id, .. }
+            | Event::AuthenticationRequired { call_id, .. } => Some(call_id),
             Event::TransferCompleted { old_call_id, .. } => Some(old_call_id),
             Event::NetworkError { call_id, .. } => call_id.as_ref(),
             // Registration events don't have call_id
-            Event::RegistrationSuccess { .. } |
-            Event::RegistrationFailed { .. } |
-            Event::UnregistrationSuccess { .. } |
-            Event::UnregistrationFailed { .. } => None,
+            Event::RegistrationSuccess { .. }
+            | Event::RegistrationFailed { .. }
+            | Event::UnregistrationSuccess { .. }
+            | Event::UnregistrationFailed { .. } => None,
         }
     }
-    
+
     /// Check if this is a call-related event
     pub fn is_call_event(&self) -> bool {
-        matches!(self,
-            Event::IncomingCall { .. } |
-            Event::CallAnswered { .. } |
-            Event::CallEnded { .. } |
-            Event::CallFailed { .. } |
-            Event::CallCancelled { .. }
+        matches!(
+            self,
+            Event::IncomingCall { .. }
+                | Event::CallAnswered { .. }
+                | Event::CallEnded { .. }
+                | Event::CallFailed { .. }
+                | Event::CallCancelled { .. }
         )
     }
-    
+
     /// Check if this is a transfer-related event
     pub fn is_transfer_event(&self) -> bool {
-        matches!(self, 
-            Event::ReferReceived { .. } |
-            Event::TransferAccepted { .. } |
-            Event::TransferCompleted { .. } |
-            Event::TransferFailed { .. } |
-            Event::TransferProgress { .. }
+        matches!(
+            self,
+            Event::ReferReceived { .. }
+                | Event::TransferAccepted { .. }
+                | Event::TransferCompleted { .. }
+                | Event::TransferFailed { .. }
+                | Event::TransferProgress { .. }
         )
     }
-    
+
     /// Check if this is a media-related event
     pub fn is_media_event(&self) -> bool {
-        matches!(self, 
-            Event::DtmfReceived { .. } |
-            Event::MediaQualityChanged { .. }
+        matches!(
+            self,
+            Event::DtmfReceived { .. } | Event::MediaQualityChanged { .. }
         )
     }
 }

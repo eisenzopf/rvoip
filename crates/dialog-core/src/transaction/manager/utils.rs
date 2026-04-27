@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 /// # Transaction Manager Utilities
 ///
 /// This module provides utility functions for the TransactionManager implementation.
@@ -12,28 +13,26 @@
 ///
 /// These functions encapsulate low-level details, allowing the TransactionManager
 /// to focus on higher-level transaction state management.
-
 use std::net::SocketAddr;
 use std::str::FromStr;
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{Host, TypedHeader};
 
-use crate::transaction::error::{self, Error, Result};
-use crate::transaction::{TransactionKey, Transaction};
 use crate::transaction::client::ClientTransaction;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
+use crate::transaction::error::{self, Error, Result};
 use crate::transaction::server::TransactionExt as ServerTransactionExt;
+use crate::transaction::{Transaction, TransactionKey};
 
 /// Extensions for response building to ensure RFC 3261 compliance.
 ///
-/// RFC 3261 Section 8.2.6.2 specifies that responses need to copy specific 
+/// RFC 3261 Section 8.2.6.2 specifies that responses need to copy specific
 /// headers from the request, including Via, From, To, Call-ID, and CSeq.
 /// This trait simplifies that process.
 pub trait ResponseBuilderExt {
@@ -64,7 +63,9 @@ pub trait ResponseBuilderExt {
     /// # Ok(response)
     /// # }
     /// ```
-    fn copy_essential_headers(self, request: &Request) -> Result<Self> where Self: Sized;
+    fn copy_essential_headers(self, request: &Request) -> Result<Self>
+    where
+        Self: Sized;
 }
 
 impl ResponseBuilderExt for ResponseBuilder {
@@ -98,7 +99,7 @@ impl ResponseBuilderExt for ResponseBuilder {
 }
 
 /// Extract the socket address from a SIP URI if possible.
-/// 
+///
 /// RFC 3261 Section 19.1.1 describes SIP URI syntax, which can include a host
 /// and port. This function attempts to parse the host and port as a socket address,
 /// which is needed for network transmission.
@@ -124,7 +125,7 @@ impl ResponseBuilderExt for ResponseBuilder {
 pub fn socket_addr_from_uri(uri: &Uri) -> Option<SocketAddr> {
     let host = uri.host.to_string();
     let port = uri.port.unwrap_or(5060); // Default to 5060 if no port specified
-    
+
     // Try to parse the host as an IP address
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         Some(SocketAddr::new(ip, port))
@@ -135,7 +136,7 @@ pub fn socket_addr_from_uri(uri: &Uri) -> Option<SocketAddr> {
 
 /// Extract CSeq header from a SIP message.
 ///
-/// The CSeq header is crucial for transaction matching and reliable request 
+/// The CSeq header is crucial for transaction matching and reliable request
 /// processing as defined in RFC 3261 Section 8.1.1.5.
 ///
 /// # Arguments
@@ -156,12 +157,8 @@ pub fn socket_addr_from_uri(uri: &Uri) -> Option<SocketAddr> {
 /// ```
 pub fn extract_cseq(message: &Message) -> Option<(u32, Method)> {
     match message {
-        Message::Request(request) => {
-            request.cseq().map(|cseq| (cseq.seq, cseq.method.clone()))
-        },
-        Message::Response(response) => {
-            response.cseq().map(|cseq| (cseq.seq, cseq.method.clone()))
-        }
+        Message::Request(request) => request.cseq().map(|cseq| (cseq.seq, cseq.method.clone())),
+        Message::Response(response) => response.cseq().map(|cseq| (cseq.seq, cseq.method.clone())),
     }
 }
 
@@ -194,7 +191,7 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
     if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
         if let Some(contact_addr) = contact.addresses().next() {
             debug!("Found Contact URI in response: {}", contact_addr.uri);
-            
+
             // Try to parse the URI as a socket address
             if let Some(addr) = socket_addr_from_uri(&contact_addr.uri) {
                 debug!("Parsed Contact URI to socket address: {}", addr);
@@ -202,13 +199,13 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
             }
         }
     }
-    
+
     // Fall back to using the received/rport parameters in the top Via
     if let Some(via) = response.first_via() {
         // Extract host and port from Via header
         // Since we can't access the parameters directly, try to parse them from the Via string
         let via_str = via.to_string();
-        
+
         // Look for received parameter
         if let Some(received_start) = via_str.find("received=") {
             let received_part = &via_str[received_start + 9..];
@@ -227,23 +224,26 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
                             port = rport;
                         }
                     }
-                    
+
                     return Some(SocketAddr::new(ip, port));
                 }
             }
         }
-        
+
         // If we couldn't extract received/rport, try to use the sent-by part
         let host_start = via_str.find(' ').map(|pos| pos + 1).unwrap_or(0);
-        let host_end = via_str[host_start..].find(';').map(|pos| host_start + pos).unwrap_or(via_str.len());
+        let host_end = via_str[host_start..]
+            .find(';')
+            .map(|pos| host_start + pos)
+            .unwrap_or(via_str.len());
         let host_port = &via_str[host_start..host_end];
-        
+
         if let Ok(addr) = host_port.parse::<SocketAddr>() {
             return Some(addr);
         } else if let Some(colon_pos) = host_port.find(':') {
             let host = &host_port[..colon_pos];
-            let port = host_port[colon_pos+1..].parse::<u16>().unwrap_or(5060);
-            
+            let port = host_port[colon_pos + 1..].parse::<u16>().unwrap_or(5060);
+
             if let Ok(ip) = host.parse::<std::net::IpAddr>() {
                 return Some(SocketAddr::new(ip, port));
             }
@@ -251,7 +251,7 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
             return Some(SocketAddr::new(ip, 5060));
         }
     }
-    
+
     None
 }
 
@@ -273,10 +273,10 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
 /// * `Result<Request>` - The original request or an error
 pub async fn get_transaction_request(
     transactions: &Mutex<HashMap<TransactionKey, Box<dyn ClientTransaction + Send>>>,
-    tx_id: &TransactionKey
+    tx_id: &TransactionKey,
 ) -> Result<Request> {
     let transactions_lock = transactions.lock().await;
-    
+
     if let Some(tx) = transactions_lock.get(tx_id) {
         if let Some(client_tx) = tx.as_client_transaction() {
             if let Some(request) = client_tx.original_request().await {
@@ -284,6 +284,9 @@ pub async fn get_transaction_request(
             }
         }
     }
-    
-    Err(Error::transaction_not_found(tx_id.clone(), "get_transaction_request - transaction not found"))
+
+    Err(Error::transaction_not_found(
+        tx_id.clone(),
+        "get_transaction_request - transaction not found",
+    ))
 }

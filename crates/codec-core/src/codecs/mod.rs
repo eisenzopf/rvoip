@@ -5,7 +5,7 @@
 //! ## Available Codecs
 //!
 //! ### G.711 (PCMU/PCMA) - [`g711`]
-//! - **Standard**: ITU-T G.711 
+//! - **Standard**: ITU-T G.711
 //! - **Sample Rate**: 8 kHz
 //! - **Bitrate**: 64 kbps
 //! - **Quality**: ~37 dB SNR
@@ -72,8 +72,6 @@ use std::collections::HashMap;
 #[cfg(feature = "g711")]
 pub mod g711;
 
-
-
 #[cfg(any(feature = "opus", feature = "opus-sim"))]
 pub mod opus;
 
@@ -85,35 +83,33 @@ impl CodecFactory {
     pub fn create(config: CodecConfig) -> Result<Box<dyn AudioCodec>> {
         // Validate configuration first
         config.validate()?;
-        
+
         match config.codec_type {
             #[cfg(feature = "g711")]
             CodecType::G711Pcmu => {
                 let codec = g711::G711Codec::new_pcmu(config)?;
                 Ok(Box::new(codec))
             }
-            
+
             #[cfg(feature = "g711")]
             CodecType::G711Pcma => {
                 let codec = g711::G711Codec::new_pcma(config)?;
                 Ok(Box::new(codec))
             }
-            
 
-            
             #[cfg(any(feature = "opus", feature = "opus-sim"))]
             CodecType::Opus => {
                 let codec = opus::OpusCodec::new(config)?;
                 Ok(Box::new(codec))
             }
-            
+
             codec_type => Err(CodecError::feature_not_enabled(format!(
                 "Codec {} not enabled in build features",
                 codec_type.name()
             ))),
         }
     }
-    
+
     /// Create a codec by name
     pub fn create_by_name(name: &str, config: CodecConfig) -> Result<Box<dyn AudioCodec>> {
         let codec_type = match name.to_uppercase().as_str() {
@@ -123,32 +119,35 @@ impl CodecFactory {
             "OPUS" => CodecType::Opus,
             _ => return Err(CodecError::unsupported_codec(name)),
         };
-        
+
         let config = CodecConfig {
             codec_type,
             ..config
         };
-        
+
         Self::create(config)
     }
-    
+
     /// Create a codec by RTP payload type
-    pub fn create_by_payload_type(payload_type: u8, config: CodecConfig) -> Result<Box<dyn AudioCodec>> {
+    pub fn create_by_payload_type(
+        payload_type: u8,
+        config: CodecConfig,
+    ) -> Result<Box<dyn AudioCodec>> {
         let codec_type = match payload_type {
             0 => CodecType::G711Pcmu,
             8 => CodecType::G711Pcma,
 
             _ => return Err(CodecError::unsupported_codec(format!("PT{}", payload_type))),
         };
-        
+
         let config = CodecConfig {
             codec_type,
             ..config
         };
-        
+
         Self::create(config)
     }
-    
+
     /// Get all supported codec names
     pub fn supported_codecs() -> Vec<&'static str> {
         vec![
@@ -156,12 +155,11 @@ impl CodecFactory {
             "PCMU",
             #[cfg(feature = "g711")]
             "PCMA",
-            
             #[cfg(any(feature = "opus", feature = "opus-sim"))]
             "OPUS",
         ]
     }
-    
+
     /// Check if a codec is supported
     pub fn is_supported(name: &str) -> bool {
         Self::supported_codecs().contains(&name.to_uppercase().as_str())
@@ -180,42 +178,42 @@ impl CodecRegistry {
             codecs: HashMap::new(),
         }
     }
-    
+
     /// Register a codec with a name
     pub fn register(&mut self, name: String, codec: Box<dyn AudioCodec>) {
         self.codecs.insert(name, codec);
     }
-    
+
     /// Get a codec by name
     pub fn get(&self, name: &str) -> Option<&dyn AudioCodec> {
         self.codecs.get(name).map(|codec| codec.as_ref())
     }
-    
+
     /// Get a mutable codec by name
     pub fn get_mut(&mut self, name: &str) -> Option<&mut Box<dyn AudioCodec>> {
         self.codecs.get_mut(name)
     }
-    
+
     /// Remove a codec by name
     pub fn remove(&mut self, name: &str) -> Option<Box<dyn AudioCodec>> {
         self.codecs.remove(name)
     }
-    
+
     /// List all registered codec names
     pub fn list_codecs(&self) -> Vec<&String> {
         self.codecs.keys().collect()
     }
-    
+
     /// Get the count of registered codecs
     pub fn len(&self) -> usize {
         self.codecs.len()
     }
-    
+
     /// Check if the registry is empty
     pub fn is_empty(&self) -> bool {
         self.codecs.is_empty()
     }
-    
+
     /// Clear all registered codecs
     pub fn clear(&mut self) {
         self.codecs.clear();
@@ -242,57 +240,64 @@ impl CodecCapabilities {
     pub fn get_all() -> Self {
         let mut codec_types = Vec::new();
         let mut codec_info = HashMap::new();
-        
+
         #[cfg(feature = "g711")]
         {
             codec_types.push(CodecType::G711Pcmu);
             codec_types.push(CodecType::G711Pcma);
-            
-            codec_info.insert(CodecType::G711Pcmu, CodecInfo {
-                name: "PCMU",
-                sample_rate: 8000,
-                channels: 1,
-                bitrate: 64000,
-                frame_size: 160,
-                payload_type: Some(0),
-            });
-            
-            codec_info.insert(CodecType::G711Pcma, CodecInfo {
-                name: "PCMA",
-                sample_rate: 8000,
-                channels: 1,
-                bitrate: 64000,
-                frame_size: 160,
-                payload_type: Some(8),
-            });
-        }
-        
 
-        
+            codec_info.insert(
+                CodecType::G711Pcmu,
+                CodecInfo {
+                    name: "PCMU",
+                    sample_rate: 8000,
+                    channels: 1,
+                    bitrate: 64000,
+                    frame_size: 160,
+                    payload_type: Some(0),
+                },
+            );
+
+            codec_info.insert(
+                CodecType::G711Pcma,
+                CodecInfo {
+                    name: "PCMA",
+                    sample_rate: 8000,
+                    channels: 1,
+                    bitrate: 64000,
+                    frame_size: 160,
+                    payload_type: Some(8),
+                },
+            );
+        }
+
         #[cfg(any(feature = "opus", feature = "opus-sim"))]
         {
             codec_types.push(CodecType::Opus);
-            codec_info.insert(CodecType::Opus, CodecInfo {
-                name: "opus",
-                sample_rate: 48000,
-                channels: 1,
-                bitrate: 64000,
-                frame_size: 960,
-                payload_type: None,
-            });
+            codec_info.insert(
+                CodecType::Opus,
+                CodecInfo {
+                    name: "opus",
+                    sample_rate: 48000,
+                    channels: 1,
+                    bitrate: 64000,
+                    frame_size: 960,
+                    payload_type: None,
+                },
+            );
         }
-        
+
         Self {
             codec_types,
             codec_info,
         }
     }
-    
+
     /// Check if a codec type is supported
     pub fn is_supported(&self, codec_type: CodecType) -> bool {
         self.codec_types.contains(&codec_type)
     }
-    
+
     /// Get information for a specific codec type
     pub fn get_info(&self, codec_type: CodecType) -> Option<&CodecInfo> {
         self.codec_info.get(&codec_type)
@@ -308,7 +313,7 @@ mod tests {
     fn test_codec_factory_supported_codecs() {
         let supported = CodecFactory::supported_codecs();
         assert!(!supported.is_empty());
-        
+
         #[cfg(feature = "g711")]
         {
             assert!(supported.contains(&"PCMU"));
@@ -324,7 +329,7 @@ mod tests {
             assert!(CodecFactory::is_supported("pcmu"));
             assert!(CodecFactory::is_supported("PCMA"));
         }
-        
+
         assert!(!CodecFactory::is_supported("UNSUPPORTED"));
     }
 
@@ -333,18 +338,18 @@ mod tests {
         let mut registry = CodecRegistry::new();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
-        
+
         #[cfg(feature = "g711")]
         {
             let config = CodecConfig::g711_pcmu();
             let codec = CodecFactory::create(config).unwrap();
             registry.register("test_pcmu".to_string(), codec);
-            
+
             assert_eq!(registry.len(), 1);
             assert!(!registry.is_empty());
             assert!(registry.get("test_pcmu").is_some());
         }
-        
+
         registry.clear();
         assert!(registry.is_empty());
     }
@@ -354,7 +359,7 @@ mod tests {
         let caps = CodecCapabilities::get_all();
         assert!(!caps.codec_types.is_empty());
         assert!(!caps.codec_info.is_empty());
-        
+
         #[cfg(feature = "g711")]
         {
             assert!(caps.is_supported(CodecType::G711Pcmu));
@@ -368,7 +373,7 @@ mod tests {
         let config = CodecConfig::g711_pcmu();
         let codec = CodecFactory::create(config);
         assert!(codec.is_ok());
-        
+
         let codec = codec.unwrap();
         let info = codec.info();
         assert_eq!(info.name, "PCMU");
@@ -381,7 +386,7 @@ mod tests {
         let config = CodecConfig::new(CodecType::G711Pcmu);
         let codec = CodecFactory::create_by_name("PCMU", config.clone());
         assert!(codec.is_ok());
-        
+
         let codec = CodecFactory::create_by_name("UNKNOWN", config);
         assert!(codec.is_err());
     }
@@ -392,8 +397,8 @@ mod tests {
         let config = CodecConfig::new(CodecType::G711Pcmu);
         let codec = CodecFactory::create_by_payload_type(0, config.clone());
         assert!(codec.is_ok());
-        
+
         let codec = CodecFactory::create_by_payload_type(255, config);
         assert!(codec.is_err());
     }
-} 
+}

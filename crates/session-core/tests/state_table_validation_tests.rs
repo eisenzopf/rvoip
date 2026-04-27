@@ -6,23 +6,24 @@
 //! - Defines transitions for common scenarios
 //! - Is compatible with the current state table loader
 
-use rvoip_session_core::state_table::{
-    YamlTableLoader, StateTable, StateKey, EventType, Role
-};
+use rvoip_session_core::state_table::{EventType, Role, StateKey, StateTable, YamlTableLoader};
 use rvoip_session_core::types::CallState;
 use std::path::Path;
 
 /// Helper to load a state table from the state_tables directory
 fn load_state_table(filename: &str) -> Result<StateTable, Box<dyn std::error::Error>> {
     let path = Path::new("state_tables").join(filename);
-    YamlTableLoader::load_from_file(path)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+    YamlTableLoader::load_from_file(path).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 #[test]
 fn test_default_state_table_loads() {
     let result = load_state_table("default.yaml");
-    assert!(result.is_ok(), "Failed to load default.yaml: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to load default.yaml: {:?}",
+        result.err()
+    );
 
     let table = result.unwrap();
 
@@ -31,7 +32,9 @@ fn test_default_state_table_loads() {
     let make_call_key = StateKey {
         role: Role::UAC,
         state: CallState::Idle,
-        event: EventType::MakeCall { target: String::new() },
+        event: EventType::MakeCall {
+            target: String::new(),
+        },
     };
     assert!(
         table.has_transition(&make_call_key),
@@ -42,7 +45,10 @@ fn test_default_state_table_loads() {
     let incoming_call_key = StateKey {
         role: Role::UAS,
         state: CallState::Idle,
-        event: EventType::IncomingCall { from: String::new(), sdp: None },
+        event: EventType::IncomingCall {
+            from: String::new(),
+            sdp: None,
+        },
     };
     assert!(
         table.has_transition(&incoming_call_key),
@@ -54,7 +60,11 @@ fn test_default_state_table_loads() {
 fn test_embedded_default_table_loads() {
     // Test loading the embedded default table
     let result = YamlTableLoader::load_default();
-    assert!(result.is_ok(), "Failed to load embedded default table: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Failed to load embedded default table: {:?}",
+        result.err()
+    );
 
     let table = result.unwrap();
 
@@ -62,7 +72,9 @@ fn test_embedded_default_table_loads() {
     let make_call_key = StateKey {
         role: Role::UAC,
         state: CallState::Idle,
-        event: EventType::MakeCall { target: String::new() },
+        event: EventType::MakeCall {
+            target: String::new(),
+        },
     };
     assert!(
         table.has_transition(&make_call_key),
@@ -72,8 +84,7 @@ fn test_embedded_default_table_loads() {
 
 #[test]
 fn test_hold_resume_transitions() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check hold transition from Active
     let hold_key = StateKey {
@@ -100,8 +111,7 @@ fn test_hold_resume_transitions() {
 
 #[test]
 fn test_basic_call_termination() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check that Active state can handle hangup
     let hangup_key = StateKey {
@@ -118,15 +128,10 @@ fn test_basic_call_termination() {
 
 #[test]
 fn test_error_handling_transitions() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check network error handling in various states
-    let states_to_check = vec![
-        CallState::Initiating,
-        CallState::Ringing,
-        CallState::Active,
-    ];
+    let states_to_check = vec![CallState::Initiating, CallState::Ringing, CallState::Active];
 
     for state in states_to_check {
         let error_key = StateKey {
@@ -136,14 +141,16 @@ fn test_error_handling_transitions() {
         };
 
         let has_error_handling = table.has_transition(&error_key);
-        println!("State {:?} handles DialogError: {}", state, has_error_handling);
+        println!(
+            "State {:?} handles DialogError: {}",
+            state, has_error_handling
+        );
     }
 }
 
 #[test]
 fn test_media_event_handling() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check media ready handling
     let media_ready_key = StateKey {
@@ -168,8 +175,7 @@ fn test_media_event_handling() {
 
 #[test]
 fn test_registration_transitions() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check registration start
     let register_key = StateKey {
@@ -194,8 +200,7 @@ fn test_registration_transitions() {
 
 #[test]
 fn test_subscription_transitions() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check subscription start
     let subscribe_key = StateKey {
@@ -220,8 +225,7 @@ fn test_subscription_transitions() {
 
 #[test]
 fn test_transfer_transitions() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check transfer requested handling from Active state
     let transfer_key = StateKey {
@@ -235,13 +239,15 @@ fn test_transfer_transitions() {
     };
 
     let has_transfer = table.has_transition(&transfer_key);
-    assert!(has_transfer, "Missing TransferRequested transition from Active");
+    assert!(
+        has_transfer,
+        "Missing TransferRequested transition from Active"
+    );
 }
 
 #[test]
 fn test_message_handling() {
-    let table = load_state_table("default.yaml")
-        .expect("Failed to load default.yaml");
+    let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
     // Check MESSAGE sending
     let send_message_key = StateKey {

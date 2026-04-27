@@ -7,10 +7,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::error::{Result, AudioProcessingError};
+use super::audio::{AudioProcessingConfig, AudioProcessingResult, AudioProcessor};
+use super::format::{ConversionParams, FormatConverter};
+use crate::error::{AudioProcessingError, Result};
 use crate::types::{AudioFrame, SampleRate};
-use super::audio::{AudioProcessor, AudioProcessingConfig, AudioProcessingResult};
-use super::format::{FormatConverter, ConversionParams};
 
 /// Configuration for the processing pipeline
 #[derive(Debug, Clone)]
@@ -90,7 +90,7 @@ impl ProcessingPipeline {
     /// Create a new processing pipeline
     pub async fn new(config: ProcessingConfig) -> Result<Self> {
         info!("Creating ProcessingPipeline with config: {:?}", config);
-        
+
         // Create audio processor if audio processing is enabled
         let audio_processor = if config.audio_config.enable_vad {
             let processor = AudioProcessor::new(config.audio_config.clone())?;
@@ -98,10 +98,10 @@ impl ProcessingPipeline {
         } else {
             None
         };
-        
+
         // Create format converter
         let format_converter = Arc::new(RwLock::new(FormatConverter::new()));
-        
+
         Ok(Self {
             config,
             audio_processor,
@@ -109,37 +109,43 @@ impl ProcessingPipeline {
             stats: RwLock::new(PipelineStats::default()),
         })
     }
-    
+
     /// Process capture audio (from microphone/input)
     pub async fn process_capture(&self, input: &AudioFrame) -> Result<PipelineResult> {
         let start_time = std::time::Instant::now();
-        
-        debug!("Processing capture audio: {}Hz, {}ch, {} samples", 
-               input.sample_rate, input.channels, input.samples.len());
-        
+
+        debug!(
+            "Processing capture audio: {}Hz, {}ch, {} samples",
+            input.sample_rate,
+            input.channels,
+            input.samples.len()
+        );
+
         let mut current_frame = input.clone();
         let mut audio_result = None;
         let mut format_converted = false;
-        
+
         // Step 1: Audio processing (VAD, etc.)
         if let Some(audio_processor) = &self.audio_processor {
             let processor = audio_processor.read().await;
             let result = processor.process_capture_audio(&current_frame).await?;
             current_frame = result.frame.clone();
             audio_result = Some(result);
-            
+
             // Update stats
             let mut stats = self.stats.write().await;
             stats.audio_processing_operations += 1;
         }
-        
+
         // Step 2: Format conversion (if needed and enabled)
         if self.config.enable_format_conversion {
-            current_frame = self.apply_format_conversion(&current_frame, &mut format_converted).await?;
+            current_frame = self
+                .apply_format_conversion(&current_frame, &mut format_converted)
+                .await?;
         }
-        
+
         let total_time = start_time.elapsed();
-        
+
         // Update general stats
         {
             let mut stats = self.stats.write().await;
@@ -149,13 +155,16 @@ impl ProcessingPipeline {
                 stats.format_conversions += 1;
             }
         }
-        
+
         // Check latency constraint
         if total_time.as_millis() > self.config.max_latency_ms as u128 {
-            warn!("Processing latency exceeded limit: {}ms > {}ms", 
-                  total_time.as_millis(), self.config.max_latency_ms);
+            warn!(
+                "Processing latency exceeded limit: {}ms > {}ms",
+                total_time.as_millis(),
+                self.config.max_latency_ms
+            );
         }
-        
+
         Ok(PipelineResult {
             frame: current_frame,
             audio_result,
@@ -163,23 +172,29 @@ impl ProcessingPipeline {
             total_processing_time_us: total_time.as_micros() as u64,
         })
     }
-    
+
     /// Process playback audio (to speaker/output)
     pub async fn process_playback(&self, input: &AudioFrame) -> Result<PipelineResult> {
         let start_time = std::time::Instant::now();
-        
-        debug!("Processing playback audio: {}Hz, {}ch, {} samples", 
-               input.sample_rate, input.channels, input.samples.len());
-        
+
+        debug!(
+            "Processing playback audio: {}Hz, {}ch, {} samples",
+            input.sample_rate,
+            input.channels,
+            input.samples.len()
+        );
+
         let mut current_frame = input.clone();
         let mut audio_result = None;
         let mut format_converted = false;
-        
+
         // Step 1: Format conversion (if needed and enabled)
         if self.config.enable_format_conversion {
-            current_frame = self.apply_format_conversion(&current_frame, &mut format_converted).await?;
+            current_frame = self
+                .apply_format_conversion(&current_frame, &mut format_converted)
+                .await?;
         }
-        
+
         // Step 2: Audio processing for playback
         if let Some(audio_processor) = &self.audio_processor {
             let processor = audio_processor.read().await;
@@ -187,9 +202,9 @@ impl ProcessingPipeline {
             current_frame = result.frame.clone();
             audio_result = Some(result);
         }
-        
+
         let total_time = start_time.elapsed();
-        
+
         // Update stats
         {
             let mut stats = self.stats.write().await;
@@ -199,7 +214,7 @@ impl ProcessingPipeline {
                 stats.format_conversions += 1;
             }
         }
-        
+
         Ok(PipelineResult {
             frame: current_frame,
             audio_result,
@@ -207,42 +222,40 @@ impl ProcessingPipeline {
             total_processing_time_us: total_time.as_micros() as u64,
         })
     }
-    
+
     /// Get pipeline statistics
     pub async fn get_stats(&self) -> PipelineStats {
         self.stats.read().await.clone()
     }
-    
+
     /// Reset pipeline statistics
     pub async fn reset_stats(&self) {
         let mut stats = self.stats.write().await;
         *stats = PipelineStats::default();
         debug!("Pipeline statistics reset");
     }
-    
+
     /// Apply format conversion if needed
     async fn apply_format_conversion(
-        &self, 
-        input: &AudioFrame, 
-        was_converted: &mut bool
+        &self,
+        input: &AudioFrame,
+        was_converted: &mut bool,
     ) -> Result<AudioFrame> {
         let target_sample_rate = self.config.target_format.sample_rate.as_hz();
         let target_channels = self.config.target_format.channels;
-        
+
         // Check if conversion is needed
         if input.sample_rate == target_sample_rate && input.channels == target_channels {
             return Ok(input.clone());
         }
-        
+
         // Apply format conversion
-        let conversion_params = ConversionParams::new(
-            self.config.target_format.sample_rate,
-            target_channels,
-        );
-        
+        let conversion_params =
+            ConversionParams::new(self.config.target_format.sample_rate, target_channels);
+
         let mut converter = self.format_converter.write().await;
         let result = converter.convert_frame(input, &conversion_params)?;
-        
+
         *was_converted = result.was_converted;
         Ok(result.frame)
     }
@@ -257,4 +270,4 @@ impl Clone for PipelineStats {
             audio_processing_operations: self.audio_processing_operations,
         }
     }
-} 
+}

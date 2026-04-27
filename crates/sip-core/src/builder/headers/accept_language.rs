@@ -1,15 +1,11 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
+use crate::parser::headers::accept_language::LanguageInfo;
+use crate::types::accept_language::AcceptLanguage;
+use crate::types::param::Param;
+use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
 use ordered_float::NotNan;
 use std::str::FromStr;
-use crate::types::{
-    TypedHeader,
-    header::TypedHeaderTrait,
-    headers::header_access::HeaderAccess,
-};
-use crate::types::accept_language::AcceptLanguage;
-use crate::parser::headers::accept_language::LanguageInfo;
-use crate::types::param::Param;
-use super::HeaderSetter;
 
 /// Accept-Language Header Builder for SIP Messages
 ///
@@ -19,7 +15,7 @@ use super::HeaderSetter;
 /// ## SIP Accept-Language Header Overview
 ///
 /// The Accept-Language header is defined in [RFC 3261 Section 20.3](https://datatracker.ietf.org/doc/html/rfc3261#section-20.3)
-/// as part of the core SIP protocol. It follows the syntax and semantics defined in 
+/// as part of the core SIP protocol. It follows the syntax and semantics defined in
 /// [RFC 2616 Section 14.4](https://datatracker.ietf.org/doc/html/rfc2616#section-14.4) for HTTP,
 /// with language tags conforming to [RFC 5646](https://datatracker.ietf.org/doc/html/rfc5646) (BCP 47).
 ///
@@ -203,7 +199,7 @@ pub trait AcceptLanguageExt {
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptLanguageExt};
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a request that indicates language preference
     /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:conference@example.com").unwrap()
     ///     .from("Participant", "sip:user@example.net", Some("call123"))
@@ -213,9 +209,9 @@ pub trait AcceptLanguageExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 3261 Section 20.3](https://datatracker.ietf.org/doc/html/rfc3261#section-20.3),
-    /// the Accept-Language header field follows the syntax defined in 
+    /// the Accept-Language header field follows the syntax defined in
     /// [RFC 2616 Section 14.4](https://datatracker.ietf.org/doc/html/rfc2616#section-14.4),
     /// with language tags as defined in [RFC 5646](https://datatracker.ietf.org/doc/html/rfc5646).
     fn accept_language(self, language: &str, q: Option<f32>) -> Self;
@@ -239,7 +235,7 @@ pub trait AcceptLanguageExt {
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptLanguageExt};
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a request with comprehensive language preferences
     /// let languages = vec![
     ///     ("fr-CA", Some(1.0)),        // Canadian French (highest priority)
@@ -248,7 +244,7 @@ pub trait AcceptLanguageExt {
     ///     ("en", Some(0.6)),           // Generic English (medium-low priority)
     ///     ("es", Some(0.3)),           // Spanish (low priority)
     /// ];
-    /// 
+    ///
     /// let request = SimpleRequestBuilder::new(Method::Options, "sip:service@example.com").unwrap()
     ///     .from("User", "sip:user@example.net", Some("options321"))
     ///     .to("Service", "sip:service@example.com", None)
@@ -267,60 +263,53 @@ pub trait AcceptLanguageExt {
     fn accept_languages(self, languages: Vec<(&str, Option<f32>)>) -> Self;
 }
 
-impl<T> AcceptLanguageExt for T 
-where 
+impl<T> AcceptLanguageExt for T
+where
     T: HeaderSetter,
 {
-    fn accept_language(
-        self, 
-        language: &str, 
-        q: Option<f32>
-    ) -> Self {
+    fn accept_language(self, language: &str, q: Option<f32>) -> Self {
         // Create language tag
         let language_tag = language.to_string();
-        
+
         // Create language info with optional q value
         let params = Vec::new(); // No params - q goes in the q field
-        
+
         let language_info = LanguageInfo {
             range: language_tag,
             q: q.and_then(|v| NotNan::new(v).ok()),
             params,
         };
-        
+
         // Create the Accept-Language header
         let header_value = AcceptLanguage(vec![language_info]);
         self.set_header(header_value)
     }
-    
-    fn accept_languages(
-        self, 
-        languages: Vec<(&str, Option<f32>)>
-    ) -> Self {
+
+    fn accept_languages(self, languages: Vec<(&str, Option<f32>)>) -> Self {
         // Create language infos
         let mut language_infos = Vec::with_capacity(languages.len());
-        
+
         for (language, q) in languages {
             // Create language tag
             let language_tag = language.to_string();
-            
+
             // Create language info with optional q value
             let params = Vec::new(); // No params - q goes in the q field
-            
+
             let language_info = LanguageInfo {
                 range: language_tag,
                 q: q.and_then(|v| NotNan::new(v).ok()),
                 params,
             };
-            
+
             language_infos.push(language_info);
         }
-        
+
         // If no valid languages, return self unchanged
         if language_infos.is_empty() {
             return self;
         }
-        
+
         // Create the Accept-Language header
         let header_value = AcceptLanguage(language_infos);
         self.set_header(header_value)
@@ -332,78 +321,101 @@ mod tests {
     use super::*;
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
-    
+
     #[test]
     fn test_accept_language_single() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .accept_language("en-US", Some(0.8))
             .build();
-            
+
         // Check if Accept-Language header exists with the correct value
         let header = request.header(&HeaderName::AcceptLanguage);
         assert!(header.is_some(), "Accept-Language header not found");
-        
+
         if let Some(TypedHeader::AcceptLanguage(AcceptLanguage(languages))) = header {
-            assert_eq!(languages.len(), 1, "Expected 1 language, got {}", languages.len());
-            
+            assert_eq!(
+                languages.len(),
+                1,
+                "Expected 1 language, got {}",
+                languages.len()
+            );
+
             // Check language tag, case-insensitive
             let language = &languages[0].range;
-            assert!(language.eq_ignore_ascii_case("en-US"), 
-                   "Expected language 'en-US', got '{}'", language);
-            
+            assert!(
+                language.eq_ignore_ascii_case("en-US"),
+                "Expected language 'en-US', got '{}'",
+                language
+            );
+
             // Check q parameter directly through q field
-            let has_q = languages[0].q.map(|q| (q.into_inner() - 0.8).abs() < 0.00001).unwrap_or(false);
+            let has_q = languages[0]
+                .q
+                .map(|q| (q.into_inner() - 0.8).abs() < 0.00001)
+                .unwrap_or(false);
             assert!(has_q, "Q value 0.8 not found");
         } else {
             panic!("Expected Accept-Language header");
         }
     }
-    
+
     #[test]
     fn test_accept_languages_multiple() {
-        let languages = vec![
-            ("en-US", Some(0.8)),
-            ("fr", Some(1.0)),
-            ("de", Some(0.7)),
-        ];
-        
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let languages = vec![("en-US", Some(0.8)), ("fr", Some(1.0)), ("de", Some(0.7))];
+
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .accept_languages(languages)
             .build();
-            
+
         // Check if Accept-Language header exists with the correct values
         let header = request.header(&HeaderName::AcceptLanguage);
         assert!(header.is_some(), "Accept-Language header not found");
-        
+
         if let Some(TypedHeader::AcceptLanguage(AcceptLanguage(languages))) = header {
-            assert_eq!(languages.len(), 3, "Expected 3 languages, got {}", languages.len());
-            
+            assert_eq!(
+                languages.len(),
+                3,
+                "Expected 3 languages, got {}",
+                languages.len()
+            );
+
             // Check for en-US with q=0.8, case-insensitive
             let has_en_us = languages.iter().any(|lang| {
-                lang.range.eq_ignore_ascii_case("en-US") && 
-                lang.q.map(|q| (q.into_inner() - 0.8).abs() < 0.00001).unwrap_or(false)
+                lang.range.eq_ignore_ascii_case("en-US")
+                    && lang
+                        .q
+                        .map(|q| (q.into_inner() - 0.8).abs() < 0.00001)
+                        .unwrap_or(false)
             });
             assert!(has_en_us, "en-US language not found with q=0.8");
-            
+
             // Check for fr with q=1.0
             let has_fr = languages.iter().any(|lang| {
-                lang.range == "fr" && 
-                lang.q.map(|q| (q.into_inner() - 1.0).abs() < 0.00001).unwrap_or(false)
+                lang.range == "fr"
+                    && lang
+                        .q
+                        .map(|q| (q.into_inner() - 1.0).abs() < 0.00001)
+                        .unwrap_or(false)
             });
             assert!(has_fr, "fr language not found with q=1.0");
-            
+
             // Check for de with q=0.7
             let has_de = languages.iter().any(|lang| {
-                lang.range == "de" && 
-                lang.q.map(|q| (q.into_inner() - 0.7).abs() < 0.00001).unwrap_or(false)
+                lang.range == "de"
+                    && lang
+                        .q
+                        .map(|q| (q.into_inner() - 0.7).abs() < 0.00001)
+                        .unwrap_or(false)
             });
             assert!(has_de, "de language not found with q=0.7");
         } else {
             panic!("Expected Accept-Language header");
         }
     }
-} 
+}

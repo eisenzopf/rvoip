@@ -20,32 +20,37 @@
 /// - Section 8.2.6: Generating automatic responses
 /// - Section 9.2: CANCEL handling
 /// - Section 17.1.1.3: ACK handling
-
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
-use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::json::ext::SipMessageJson;
+use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::{Transport, TransportEvent};
 
+use crate::transaction::client::{
+    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
+    TransactionExt as ClientTransactionExt,
+};
 use crate::transaction::error::{self, Error, Result};
-use crate::transaction::{
-    Transaction, TransactionAsync, TransactionState, TransactionKind, TransactionKey, TransactionEvent,
-    InternalTransactionCommand,
+use crate::transaction::runner::HasLifecycle;
+use crate::transaction::server::{
+    ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
+    TransactionExt as ServerTransactionExt,
 };
 use crate::transaction::state::TransactionLifecycle;
-use crate::transaction::runner::HasLifecycle;
-use crate::transaction::client::{ClientTransaction, TransactionExt as ClientTransactionExt, ClientInviteTransaction, ClientNonInviteTransaction};
-use crate::transaction::server::{ServerTransaction, TransactionExt as ServerTransactionExt, ServerInviteTransaction, ServerNonInviteTransaction};
-use crate::transaction::utils::{self, transaction_key_from_message, create_ack_from_invite};
+use crate::transaction::utils::{self, create_ack_from_invite, transaction_key_from_message};
+use crate::transaction::{
+    InternalTransactionCommand, Transaction, TransactionAsync, TransactionEvent, TransactionKey,
+    TransactionKind, TransactionState,
+};
 
-use super::TransactionManager;
 use super::types::*;
+use super::TransactionManager;
 
 /// Handle transport message events and route them to appropriate transactions.
 ///
@@ -80,25 +85,32 @@ pub async fn handle_transport_message(
     manager: &TransactionManager,
 ) -> Result<()> {
     match event {
-        TransportEvent::MessageReceived { message, source, destination } => {
+        TransportEvent::MessageReceived {
+            message,
+            source,
+            destination,
+        } => {
             match message {
                 Message::Request(request) => {
                     // First, determine the transaction ID/key
-                    let tx_id = match transaction_key_from_message(&Message::Request(request.clone())) {
-                        Some(key) => key,
-                        None => {
-                            return Err(Error::Other("Could not determine transaction ID from request".into()));
-                        }
-                    };
-                    
+                    let tx_id =
+                        match transaction_key_from_message(&Message::Request(request.clone())) {
+                            Some(key) => key,
+                            None => {
+                                return Err(Error::Other(
+                                    "Could not determine transaction ID from request".into(),
+                                ));
+                            }
+                        };
+
                     // Handle ACK specially
                     if request.method() == Method::Ack {
                         // Clone the request before we start working with it
                         let ack_request = request.clone();
-                        
+
                         // Get a lock on server transactions
                         let server_txs = server_transactions.lock().await;
-                        
+
                         // Check if we have a direct matching transaction
                         let tx_opt = if server_txs.contains_key(&tx_id) {
                             Some(server_txs[&tx_id].clone())
@@ -134,35 +146,37 @@ pub async fn handle_transport_message(
                                     }
                                     None
                                 });
-                            
+
                             matching_tx
                         };
-                        
+
                         // If we found a transaction, process the ACK
                         if let Some(tx) = tx_opt {
                             let tx_id = tx.id().clone();
                             let tx_kind = tx.kind();
-                            
+
                             if tx_kind == TransactionKind::InviteServer {
                                 debug!(%tx_id, "Processing ACK for server INVITE transaction");
-                                
+
                                 // Clone what we need so we can release the lock
                                 let tx_clone = tx.clone();
-                                
+
                                 // Drop the lock before async operations
                                 drop(server_txs);
-                                
+
                                 // Use a timeout to avoid blocking indefinitely if the transaction is shutting down
                                 match tokio::time::timeout(
-                                    std::time::Duration::from_millis(500), 
-                                    tx_clone.process_request(ack_request.clone())
-                                ).await {
+                                    std::time::Duration::from_millis(500),
+                                    tx_clone.process_request(ack_request.clone()),
+                                )
+                                .await
+                                {
                                     Ok(result) => {
                                         // Process the result
                                         match result {
                                             Ok(_) => {
                                                 // Successfully processed ACK
-                                                
+
                                                 // Broadcast the event
                                                 TransactionManager::broadcast_event(
                                                     TransactionEvent::AckReceived {
@@ -173,17 +187,18 @@ pub async fn handle_transport_message(
                                                     event_subscribers,
                                                     None,
                                                     None,
-                                                ).await;
-                                                
+                                                )
+                                                .await;
+
                                                 return Ok(());
-                                            },
+                                            }
                                             Err(e) => {
                                                 // Transaction error - likely channel closed
                                                 warn!(%tx_id, error=%e, "Failed to process ACK request, treating as stray ACK");
                                                 // Fall through to stray ACK handling
                                             }
                                         }
-                                    },
+                                    }
                                     Err(_) => {
                                         // Timeout waiting for transaction to process ACK
                                         warn!(%tx_id, "Timeout processing ACK request, treating as stray ACK");
@@ -200,7 +215,7 @@ pub async fn handle_transport_message(
                             drop(server_txs);
                             // Fall through to stray ACK handling
                         }
-                        
+
                         // Handle as stray ACK if we reached this point
                         debug!("Received ACK that doesn't match any server transaction");
                         TransactionManager::broadcast_event(
@@ -212,11 +227,12 @@ pub async fn handle_transport_message(
                             event_subscribers,
                             None,
                             None,
-                        ).await;
-                        
+                        )
+                        .await;
+
                         return Ok(());
                     }
-                    
+
                     // Handle CANCEL specially
                     if request.method() == Method::Cancel {
                         // Extract the branch parameter from the CANCEL request
@@ -227,46 +243,44 @@ pub async fn handle_transport_message(
                                     debug!("CANCEL request has no branch parameter, can't find matching INVITE");
                                     // Fall through to stray CANCEL handling
                                     handle_stray_cancel(request.clone(), source, transport).await?;
-                                    
+
                                     // Broadcast stray CANCEL event
                                     TransactionManager::broadcast_event(
-                                        TransactionEvent::StrayCancel {
-                                            request,
-                                            source,
-                                        },
+                                        TransactionEvent::StrayCancel { request, source },
                                         events_tx,
                                         event_subscribers,
                                         None,
                                         None,
-                                    ).await;
+                                    )
+                                    .await;
                                     return Ok(());
                                 }
                             },
                             None => {
-                                debug!("CANCEL request has no Via header, can't find matching INVITE");
+                                debug!(
+                                    "CANCEL request has no Via header, can't find matching INVITE"
+                                );
                                 // Fall through to stray CANCEL handling
                                 handle_stray_cancel(request.clone(), source, transport).await?;
-                                
+
                                 // Broadcast stray CANCEL event
                                 TransactionManager::broadcast_event(
-                                    TransactionEvent::StrayCancel {
-                                        request,
-                                        source,
-                                    },
+                                    TransactionEvent::StrayCancel { request, source },
                                     events_tx,
                                     event_subscribers,
                                     None,
                                     None,
-                                ).await;
+                                )
+                                .await;
                                 return Ok(());
                             }
                         };
-                        
+
                         // Create a modified key for the INVITE transaction with the same branch
                         let invite_tx_id = TransactionKey::new(cancel_branch, Method::Invite, true);
-                        
+
                         debug!("Looking for INVITE transaction with key: {}", invite_tx_id);
-                        
+
                         // Check if we have a matching INVITE transaction with the same branch
                         let tx_clone_opt = {
                             let server_txs = server_transactions.lock().await;
@@ -283,13 +297,13 @@ pub async fn handle_transport_message(
                             }
                             // Lock is released at the end of this block
                         };
-                        
+
                         if let Some((tx, tx_id_clone)) = tx_clone_opt {
                             // Now proceed with the transaction outside the lock
                             let request_clone = request.clone();
-                            
+
                             debug!(%tx_id_clone, "Processing CANCEL for server INVITE transaction");
-                            
+
                             // Broadcast event
                             TransactionManager::broadcast_event(
                                 TransactionEvent::CancelReceived {
@@ -300,107 +314,114 @@ pub async fn handle_transport_message(
                                 event_subscribers,
                                 None,
                                 None,
-                            ).await;
-                            
+                            )
+                            .await;
+
                             // Send OK response to CANCEL
                             let mut builder = ResponseBuilder::new(StatusCode::Ok, None);
-                            
+
                             // Add necessary headers
                             if let Some(to) = request_clone.to() {
                                 builder = builder.header(TypedHeader::To(to.clone()));
                             }
-                            
+
                             if let Some(from) = request_clone.from() {
                                 builder = builder.header(TypedHeader::From(from.clone()));
                             }
-                            
+
                             if let Some(call_id) = request_clone.call_id() {
                                 builder = builder.header(TypedHeader::CallId(call_id.clone()));
                             }
-                            
+
                             if let Some(cseq) = request_clone.cseq() {
                                 builder = builder.header(TypedHeader::CSeq(cseq.clone()));
                             }
-                            
+
                             if let Some(via) = request_clone.header(&HeaderName::Via) {
                                 builder = builder.header(via.clone());
                             }
-                            
+
                             // Build and send response to CANCEL
                             let cancel_response = builder.build();
                             if let Err(e) = transport
                                 .send_message(Message::Response(cancel_response), source)
-                                .await {
-                                return Err(Error::transport_error(e, "Failed to send 200 OK response to CANCEL"));
+                                .await
+                            {
+                                return Err(Error::transport_error(
+                                    e,
+                                    "Failed to send 200 OK response to CANCEL",
+                                ));
                             }
-                            
+
                             // Now send 487 Request Terminated for the original INVITE
                             debug!(%tx_id_clone, "Sending 487 Request Terminated for the original INVITE");
-                            
-                            let mut builder = ResponseBuilder::new(StatusCode::RequestTerminated, None);
-                            
+
+                            let mut builder =
+                                ResponseBuilder::new(StatusCode::RequestTerminated, None);
+
                             if let Some(invite_request) = tx.original_request().await {
                                 // Add necessary headers from the INVITE request
                                 if let Some(to) = invite_request.to() {
                                     builder = builder.header(TypedHeader::To(to.clone()));
                                 }
-                                
+
                                 if let Some(from) = invite_request.from() {
                                     builder = builder.header(TypedHeader::From(from.clone()));
                                 }
-                                
+
                                 if let Some(call_id) = invite_request.call_id() {
                                     builder = builder.header(TypedHeader::CallId(call_id.clone()));
                                 }
-                                
+
                                 if let Some(cseq) = invite_request.cseq() {
                                     builder = builder.header(TypedHeader::CSeq(cseq.clone()));
                                 }
-                                
+
                                 if let Some(via) = invite_request.header(&HeaderName::Via) {
                                     builder = builder.header(via.clone());
                                 }
-                                
+
                                 // Build the 487 response
                                 let invite_response = builder.build();
-                                
-                                // Instead of sending directly through the transport, 
+
+                                // Instead of sending directly through the transport,
                                 // send through the transaction's send_response method
                                 // This ensures proper state transition and processing
                                 if let Err(e) = tx.send_response(invite_response).await {
                                     warn!(%tx_id_clone, error=%e, "Failed to send 487 Request Terminated through transaction");
-                                    return Err(Error::Other(format!("Failed to send 487 Request Terminated: {}", e)));
+                                    return Err(Error::Other(format!(
+                                        "Failed to send 487 Request Terminated: {}",
+                                        e
+                                    )));
                                 }
                             }
-                            
+
                             return Ok(());
                         }
-                        
+
                         // If no matching transaction was found, handle as stray CANCEL
                         debug!("Received CANCEL that doesn't match any INVITE server transaction");
                         handle_stray_cancel(request.clone(), source, transport).await?;
-                        
+
                         // Broadcast stray CANCEL event
                         TransactionManager::broadcast_event(
-                            TransactionEvent::StrayCancel {
-                                request,
-                                source,
-                            },
+                            TransactionEvent::StrayCancel { request, source },
                             events_tx,
                             event_subscribers,
                             None,
                             None,
-                        ).await;
+                        )
+                        .await;
                         return Ok(());
                     }
-                    
+
                     // Handle regular request retransmission and new requests
                     let mut server_txs = server_transactions.lock().await;
-                    
+
                     // Check if we have a matching transaction
                     if server_txs.contains_key(&tx_id) {
                         debug!(%tx_id, "Processing retransmission of existing request");
-                        
+
                         // Check transaction lifecycle before processing
                         let lifecycle = server_txs[&tx_id].data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
@@ -408,53 +429,56 @@ pub async fn handle_transport_message(
                             drop(server_txs);
                             return Ok(());
                         }
-                        
+
                         // Process the request while still holding the lock
                         // The implementation of process_request will handle async operations properly
                         let result = server_txs[&tx_id].process_request(request.clone()).await;
-                        
+
                         // Now we can drop the lock
                         drop(server_txs);
-                        
+
                         // Check for errors
                         result?;
-                        
+
                         return Ok(());
                     }
-                    
+
                     // Drop the lock
                     drop(server_txs);
-                    
+
                     // If we get here, this is a new request
                     debug!(%tx_id, method = ?request.method(), "Received new request, delegate to proper handler");
-                    
+
                     // Delegate to the actual request handler which will create appropriate transactions
                     // and generate the correct InviteRequest or NonInviteRequest events
                     if let Err(e) = manager.handle_request(request, source).await {
                         warn!(error=%e, "Failed to handle new request");
                     }
-                    
+
                     return Ok(());
-                },
+                }
                 Message::Response(response) => {
                     // Try to match the response to a client transaction by deriving its ID
-                    let tx_id = match transaction_key_from_message(&Message::Response(response.clone())) {
-                        Some(key) => key,
-                        None => {
-                            return Err(Error::Other("Could not determine transaction ID from response".into()));
-                        }
-                    };
-                    
+                    let tx_id =
+                        match transaction_key_from_message(&Message::Response(response.clone())) {
+                            Some(key) => key,
+                            None => {
+                                return Err(Error::Other(
+                                    "Could not determine transaction ID from response".into(),
+                                ));
+                            }
+                        };
+
                     // Look up the client transaction using the same pattern
                     let mut client_txs = client_transactions.lock().await;
-                    
+
                     // Check if we have a matching transaction
                     if client_txs.contains_key(&tx_id) {
                         let tx_kind = client_txs[&tx_id].kind();
                         let remote_addr = client_txs[&tx_id].remote_addr();
-                        
+
                         debug!(%tx_id, status = ?response.status(), "Routing response to client transaction");
-                        
+
                         // Check transaction lifecycle before processing
                         let lifecycle = client_txs[&tx_id].data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
@@ -462,79 +486,83 @@ pub async fn handle_transport_message(
                             drop(client_txs);
                             return Ok(());
                         }
-                        
+
                         // Process the response while still holding the lock
                         let result = client_txs[&tx_id].process_response(response.clone()).await;
-                        
+
                         // Now we can drop the lock
                         drop(client_txs);
-                        
+
                         // Check for errors
                         result?;
-                        
+
                         // Automatic ACK for non-2xx responses to INVITE
-                        if !response.status().is_success() && tx_kind == TransactionKind::InviteClient {
+                        if !response.status().is_success()
+                            && tx_kind == TransactionKind::InviteClient
+                        {
                             debug!(%tx_id, status=%response.status(), "Sending ACK automatically for non-2xx response");
-                            
+
                             // Create a dummy request for ACK creation
                             let dummy_uri = if let Some(to) = response.to() {
                                 to.address().uri.clone()
                             } else {
                                 Uri::sip("invalid")
                             };
-                            
+
                             let dummy_request = Request::new(Method::Invite, dummy_uri);
-                            
+
                             match create_ack_from_invite(&dummy_request, &response) {
                                 Ok(ack_request) => {
                                     // Send the ACK
                                     if let Err(e) = transport
                                         .send_message(Message::Request(ack_request), remote_addr)
-                                        .await {
-                                        return Err(Error::transport_error(e, "Failed to send ACK for non-2xx response"));
+                                        .await
+                                    {
+                                        return Err(Error::transport_error(
+                                            e,
+                                            "Failed to send ACK for non-2xx response",
+                                        ));
                                     }
-                                },
+                                }
                                 Err(e) => {
                                     warn!(%tx_id, error=%e, "Failed to create ACK request");
                                 }
                             }
                         }
-                        
+
                         return Ok(());
                     }
-                    
+
                     // Drop the lock
                     drop(client_txs);
-                    
+
                     // If we get here, this is a stray response
                     debug!(status=%response.status(), "Received stray response that doesn't match any client transaction");
-                    
+
                     // Broadcast stray response event
                     TransactionManager::broadcast_event(
-                        TransactionEvent::StrayResponse {
-                            response,
-                            source,
-                        },
+                        TransactionEvent::StrayResponse { response, source },
                         events_tx,
                         event_subscribers,
                         None,
                         None,
-                    ).await;
-                    
+                    )
+                    .await;
+
                     return Ok(());
                 }
             }
-        },
+        }
         TransportEvent::Error { error } => {
             warn!("Transport error: {}", error);
             // TODO: Determine if any transactions were affected by this error
             // and propagate the error to them
-        },
+        }
         _ => {
             // Ignore other transport events for now
         }
     }
-    
+
     Ok(())
 }
 
@@ -560,10 +588,13 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
             }
         }
     }
-    
+
     // Try via received/rport
     if let Some(via) = response.first_via() {
-        if let (Some(received_ip_str), Some(port)) = (via.received().map(|ip| ip.to_string()), via.rport().flatten()) {
+        if let (Some(received_ip_str), Some(port)) = (
+            via.received().map(|ip| ip.to_string()),
+            via.rport().flatten(),
+        ) {
             if let Ok(ip) = IpAddr::from_str(&received_ip_str) {
                 let dest = SocketAddr::new(ip, port);
                 return Some(dest);
@@ -571,13 +602,13 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
                 warn!(ip=%received_ip_str, "Failed to parse received IP in Via");
             }
         }
-        
+
         // Fallback to Via host/port
         // For the sent_by, use ViaHeader struct fields
         if let Some(via_header) = via.headers().first() {
             let host = &via_header.sent_by_host;
             let port = via_header.sent_by_port.unwrap_or(5060);
-            
+
             if let Some(dest) = resolve_host_to_socketaddr(host, port).await {
                 return Some(dest);
             }
@@ -652,9 +683,14 @@ pub fn create_via_header(local_addr: &SocketAddr, branch: &str) -> Result<TypedH
     let local_port = local_addr.port();
 
     let via = Via::new(
-        "SIP", "2.0", "UDP",
-        &local_host, Some(local_port), via_params
-    ).map_err(Error::SipCoreError)?;
+        "SIP",
+        "2.0",
+        "UDP",
+        &local_host,
+        Some(local_port),
+        via_params,
+    )
+    .map_err(Error::SipCoreError)?;
 
     Ok(TypedHeader::Via(via))
 }
@@ -695,17 +731,22 @@ impl TransactionManager {
     /// * `Result<()>` - Success or error depending on message processing outcome
     pub(crate) async fn handle_transport_event(&self, event: TransportEvent) -> Result<()> {
         match event {
-            TransportEvent::MessageReceived { message, source, destination } => {
+            TransportEvent::MessageReceived {
+                message,
+                source,
+                destination,
+            } => {
                 debug!("Received message from {}", source);
                 self.handle_message(message, source, destination).await
-            },
+            }
             TransportEvent::KeepAlivePongReceived { source, .. } => {
                 // RFC 5626 §3.5.1 pong arrived on a connection-oriented
                 // transport. Forward to dialog-core's outbound-flow
                 // monitor if it's subscribed; no-op otherwise.
                 if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
-                    let _ = sender
-                        .try_send(crate::manager::outbound_flow::FlowTransportEvent::PongReceived { source });
+                    let _ = sender.try_send(
+                        crate::manager::outbound_flow::FlowTransportEvent::PongReceived { source },
+                    );
                 }
                 Ok(())
             }
@@ -715,7 +756,9 @@ impl TransactionManager {
                 // and trigger re-REGISTER.
                 if let Some(sender) = self.flow_event_sender.read().await.as_ref() {
                     let _ = sender.try_send(
-                        crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed { remote_addr },
+                        crate::manager::outbound_flow::FlowTransportEvent::ConnectionClosed {
+                            remote_addr,
+                        },
                     );
                 }
                 Ok(())
@@ -727,7 +770,7 @@ impl TransactionManager {
             }
         }
     }
-    
+
     /// Handle a SIP message, routing it to appropriate transaction or creating a new one.
     ///
     /// This method dispatches incoming messages to either request or response
@@ -753,15 +796,13 @@ impl TransactionManager {
                     // ACK requests matching a 2xx response are end-to-end and don't have a transaction
                     return self.handle_ack_request(request, source).await;
                 }
-                
+
                 self.handle_request(request, source).await
-            },
-            Message::Response(response) => {
-                self.handle_response(response, source).await
             }
+            Message::Response(response) => self.handle_response(response, source).await,
         }
     }
-    
+
     /// Handle an incoming SIP request according to RFC 3261 transaction rules.
     ///
     /// This method:
@@ -777,7 +818,9 @@ impl TransactionManager {
     /// * `Result<()>` - Success or error depending on request processing outcome
     async fn handle_request(&self, request: Request, source: SocketAddr) -> Result<()> {
         // Try to find a matching transaction
-        if let Some(key) = crate::transaction::utils::transaction_key_from_message(&Message::Request(request.clone())) {
+        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
+            &Message::Request(request.clone()),
+        ) {
             // Check for existing server transaction
             let server_txs = self.server_transactions.lock().await;
             if let Some(transaction) = server_txs.get(&key) {
@@ -788,53 +831,61 @@ impl TransactionManager {
                     drop(server_txs);
                     return Ok(());
                 }
-                
+
                 let tx = transaction.clone();
                 drop(server_txs);
-                
+
                 // Process the request in the existing transaction
                 return tx.process_request(request).await;
             }
             drop(server_txs);
         }
-        
+
         // No existing transaction found, create a new one
-        let transaction = self.create_server_transaction(request.clone(), source).await?;
-        
+        let transaction = self
+            .create_server_transaction(request.clone(), source)
+            .await?;
+
         // Notify the transaction user about the new transaction
         match transaction.kind() {
             TransactionKind::InviteServer => {
-                self.events_tx.send(crate::transaction::TransactionEvent::InviteRequest {
-                    transaction_id: transaction.id().clone(),
-                    request,
-                    source,
-                }).await.ok();
-            },
+                self.events_tx
+                    .send(crate::transaction::TransactionEvent::InviteRequest {
+                        transaction_id: transaction.id().clone(),
+                        request,
+                        source,
+                    })
+                    .await
+                    .ok();
+            }
             TransactionKind::NonInviteServer => {
                 // For non-INVITE requests, notify based on the method
                 match request.method() {
                     Method::Cancel => {
                         // CANCEL events are handled in create_server_transaction
                         // to link them with the target INVITE transaction
-                    },
+                    }
                     _ => {
-                        self.events_tx.send(crate::transaction::TransactionEvent::NonInviteRequest {
-                            transaction_id: transaction.id().clone(),
-                            request,
-                            source,
-                        }).await.ok();
+                        self.events_tx
+                            .send(crate::transaction::TransactionEvent::NonInviteRequest {
+                                transaction_id: transaction.id().clone(),
+                                request,
+                                source,
+                            })
+                            .await
+                            .ok();
                     }
                 }
-            },
+            }
             // Client transaction kinds shouldn't occur here, but handle them for completeness
             TransactionKind::InviteClient | TransactionKind::NonInviteClient => {
                 warn!("Unexpected client transaction kind in handle_request");
-            },
+            }
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle an incoming SIP response according to RFC 3261 transaction rules.
     ///
     /// This method:
@@ -850,25 +901,35 @@ impl TransactionManager {
     /// * `Result<()>` - Success or error depending on response processing
     async fn handle_response(&self, response: Response, source: SocketAddr) -> Result<()> {
         // Debug logging for response processing
-        debug!("🔍 RESPONSE HANDLER: Processing response {} from {}", response.status(), source);
-        
+        debug!(
+            "🔍 RESPONSE HANDLER: Processing response {} from {}",
+            response.status(),
+            source
+        );
+
         // Try to find a matching client transaction
-        if let Some(key) = crate::transaction::utils::transaction_key_from_message(&Message::Response(response.clone())) {
+        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
+            &Message::Response(response.clone()),
+        ) {
             debug!(id=%key, "🔍 RESPONSE HANDLER: Generated transaction key from response");
-            
+
             // Debug the current client transactions
             let client_txs_guard = self.client_transactions.lock().await;
             let client_keys: Vec<String> = client_txs_guard.keys().map(|k| k.to_string()).collect();
-            debug!("🔍 RESPONSE HANDLER: Current client transactions: {:?}", client_keys);
+            debug!(
+                "🔍 RESPONSE HANDLER: Current client transactions: {:?}",
+                client_keys
+            );
             drop(client_txs_guard);
-            
+
             debug!(id=%key, "Found matching transaction for response");
-            
+
             // Check that the key is for a client transaction (not is_server)
             if key.is_server() {
                 // This is a response but the transaction key is for a server - this is a mismatch
                 return Err(Error::Other(format!(
-                    "Received response but matching transaction key {} is for a server transaction", key
+                    "Received response but matching transaction key {} is for a server transaction",
+                    key
                 )));
             }
 
@@ -876,10 +937,12 @@ impl TransactionManager {
             // Use the original approach but with larger channel capacity to prevent errors
             let mut client_txs_guard = self.client_transactions.lock().await;
             let mut processed = false;
-            
+
             if client_txs_guard.contains_key(&key) {
-                debug!("🔍 RESPONSE HANDLER: Found matching client transaction, processing response");
-                
+                debug!(
+                    "🔍 RESPONSE HANDLER: Found matching client transaction, processing response"
+                );
+
                 // Check transaction lifecycle before processing
                 let lifecycle = client_txs_guard[&key].data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
@@ -887,12 +950,12 @@ impl TransactionManager {
                     drop(client_txs_guard);
                     return Ok(());
                 }
-                
+
                 let transaction = client_txs_guard.remove(&key).unwrap();
-                
+
                 // Drop the lock so we can do async operations
                 drop(client_txs_guard);
-                
+
                 // Process the response - should succeed now with larger channel capacity
                 if let Err(e) = transaction.process_response(response.clone()).await {
                     warn!(id=%key, error=%e, "Error processing response - this should be rare now");
@@ -900,76 +963,91 @@ impl TransactionManager {
                     debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
                     processed = true;
                 }
-                
+
                 // Put the transaction back (if it's not terminated)
                 let mut client_txs_guard = self.client_transactions.lock().await;
                 client_txs_guard.insert(key.clone(), transaction);
                 drop(client_txs_guard);
             } else {
-                debug!("🔍 RESPONSE HANDLER: No matching client transaction found for key {}", key);
+                debug!(
+                    "🔍 RESPONSE HANDLER: No matching client transaction found for key {}",
+                    key
+                );
                 drop(client_txs_guard);
             }
-            
+
             // If not processed via transaction, still send the event
             if !processed {
                 debug!(id=%key, "Response matches key but no active transaction found");
-                
+
                 // Deliver to the transaction user anyway
                 let status = response.status();
                 if key.method() == &Method::Invite && status.is_success() {
                     // Special handling for 2xx responses to INVITE
-                    self.events_tx.send(crate::transaction::TransactionEvent::SuccessResponse {
-                        transaction_id: key,
-                        response,
-                        need_ack: true,
-                        source,
-                    }).await.ok();
+                    self.events_tx
+                        .send(crate::transaction::TransactionEvent::SuccessResponse {
+                            transaction_id: key,
+                            response,
+                            need_ack: true,
+                            source,
+                        })
+                        .await
+                        .ok();
                 } else {
                     // All other responses - classify by status code
                     let status_code = response.status_code();
                     if status_code >= 100 && status_code < 200 {
                         // 1xx provisional response
-                        self.events_tx.send(crate::transaction::TransactionEvent::ProvisionalResponse {
-                            transaction_id: key,
-                            response,
-                        }).await.ok();
+                        self.events_tx
+                            .send(crate::transaction::TransactionEvent::ProvisionalResponse {
+                                transaction_id: key,
+                                response,
+                            })
+                            .await
+                            .ok();
                     } else if status.is_success() && key.method() != &Method::Invite {
                         // 2xx success response for non-INVITE
-                        self.events_tx.send(crate::transaction::TransactionEvent::SuccessResponse {
-                            transaction_id: key,
-                            response,
-                            need_ack: false,
-                            source,
-                        }).await.ok();
+                        self.events_tx
+                            .send(crate::transaction::TransactionEvent::SuccessResponse {
+                                transaction_id: key,
+                                response,
+                                need_ack: false,
+                                source,
+                            })
+                            .await
+                            .ok();
                     } else {
                         // 3xx, 4xx, 5xx, 6xx failure response
-                        self.events_tx.send(crate::transaction::TransactionEvent::FailureResponse {
-                            transaction_id: key,
-                            response,
-                        }).await.ok();
+                        self.events_tx
+                            .send(crate::transaction::TransactionEvent::FailureResponse {
+                                transaction_id: key,
+                                response,
+                            })
+                            .await
+                            .ok();
                     }
                 }
             }
-            
+
             return Ok(());
         } else {
             debug!("🔍 RESPONSE HANDLER: Could not generate transaction key from response");
         }
-        
+
         // No transaction match
         debug!("No matching transaction found for response");
-        
+
         // This could be a response for a transaction that has already terminated
         // or a response forwarded by another SIP entity (for proxy scenarios)
         // In any case, deliver it to the transaction user
-        self.events_tx.send(crate::transaction::TransactionEvent::StrayResponse {
-            response,
-            source,
-        }).await.ok();
-        
+        self.events_tx
+            .send(crate::transaction::TransactionEvent::StrayResponse { response, source })
+            .await
+            .ok();
+
         Ok(())
     }
-    
+
     /// Handle an ACK request with RFC 3261 compliant dialog-based matching.
     ///
     /// ACK is a special method in SIP:
@@ -987,11 +1065,13 @@ impl TransactionManager {
     /// * `Result<()>` - Success or error depending on ACK processing
     async fn handle_ack_request(&self, request: Request, source: SocketAddr) -> Result<()> {
         debug!("Processing ACK request with dialog-based matching");
-        
+
         // First try direct branch-based matching for non-2xx ACKs
-        if let Some(key) = crate::transaction::utils::transaction_key_from_message(&Message::Request(request.clone())) {
+        if let Some(key) = crate::transaction::utils::transaction_key_from_message(
+            &Message::Request(request.clone()),
+        ) {
             let invite_key = key.with_method(Method::Invite);
-            
+
             let server_txs = self.server_transactions.lock().await;
             if let Some(transaction) = server_txs.get(&invite_key) {
                 if transaction.state() != TransactionState::Confirmed {
@@ -1002,22 +1082,25 @@ impl TransactionManager {
                         drop(server_txs);
                         return Ok(());
                     }
-                    
+
                     // This is an ACK for a non-2xx response, process it in the transaction
                     let tx = transaction.clone();
                     drop(server_txs);
-                    
-                    debug!("Processing ACK for non-2xx response in transaction {}", invite_key);
+
+                    debug!(
+                        "Processing ACK for non-2xx response in transaction {}",
+                        invite_key
+                    );
                     return tx.process_request(request).await;
                 }
             }
             drop(server_txs);
         }
-        
+
         // RFC 3261 Section 17.1.1.3: For 2xx responses, ACK has different branch
         // Use dialog-based matching (Call-ID, From tag, To tag)
         let server_txs = self.server_transactions.lock().await;
-        
+
         let matching_tx = server_txs.iter()
             .filter(|(key, _tx)| {
                 // Only look at INVITE server transactions
@@ -1047,79 +1130,88 @@ impl TransactionManager {
                 }
                 None
             });
-        
+
         if let Some(tx) = matching_tx {
             let tx_id = tx.id().clone();
             drop(server_txs);
-            
-            debug!("Found ACK for 2xx response using dialog-based matching: {}", tx_id);
-            
+
+            debug!(
+                "Found ACK for 2xx response using dialog-based matching: {}",
+                tx_id
+            );
+
             // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
             // Instead, emit AckReceived event for dialog-core to handle
-            self.events_tx.send(crate::transaction::TransactionEvent::AckReceived {
-                transaction_id: tx_id,
-                request,
-            }).await
+            self.events_tx
+                .send(crate::transaction::TransactionEvent::AckReceived {
+                    transaction_id: tx_id,
+                    request,
+                })
+                .await
                 .map_err(|e| Error::Other(format!("Failed to emit AckReceived event: {}", e)))?;
-                
+
             debug!("Emitted AckReceived event for dialog-core to handle 2xx ACK");
             return Ok(());
         } else {
             drop(server_txs);
         }
-        
+
         // No matching INVITE transaction found, this is a stray ACK
         debug!("No matching INVITE transaction found for ACK request");
-        
+
         // Notify the transaction user about the stray ACK
-        self.events_tx.send(crate::transaction::TransactionEvent::StrayAckRequest {
-            request,
-            source,
-        }).await.ok();
-        
+        self.events_tx
+            .send(crate::transaction::TransactionEvent::StrayAckRequest { request, source })
+            .await
+            .ok();
+
         Ok(())
     }
 }
 
 /// Helper function to handle stray CANCEL requests
 async fn handle_stray_cancel(
-    request: Request, 
+    request: Request,
     source: SocketAddr,
     transport: &Arc<dyn Transport>,
 ) -> Result<()> {
     // Send 481 Transaction Does Not Exist
     let mut builder = ResponseBuilder::new(StatusCode::CallOrTransactionDoesNotExist, None);
-    
+
     // Add necessary headers
     if let Some(to) = request.to() {
         builder = builder.header(TypedHeader::To(to.clone()));
     }
-    
+
     if let Some(from) = request.from() {
         builder = builder.header(TypedHeader::From(from.clone()));
     }
-    
+
     if let Some(call_id) = request.call_id() {
         builder = builder.header(TypedHeader::CallId(call_id.clone()));
     }
-    
+
     if let Some(cseq) = request.cseq() {
         builder = builder.header(TypedHeader::CSeq(cseq.clone()));
     }
-    
+
     if let Some(via) = request.header(&HeaderName::Via) {
         builder = builder.header(via.clone());
     }
-    
+
     // Build the response
     let cancel_response = builder.build();
-    
+
     // Send the response
     if let Err(e) = transport
         .send_message(Message::Response(cancel_response), source)
-        .await {
-        return Err(Error::transport_error(e, "Failed to send 481 response to stray CANCEL"));
+        .await
+    {
+        return Err(Error::transport_error(
+            e,
+            "Failed to send 481 response to stray CANCEL",
+        ));
     }
-    
+
     Ok(())
-} 
+}

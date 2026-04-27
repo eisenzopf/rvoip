@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::adapters::SessionApiCrossCrateEvent;
 use crate::api::events::Event;
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::IncomingCall;
 use crate::api::unified::{Config, UnifiedCoordinator};
-use crate::adapters::SessionApiCrossCrateEvent;
 use crate::errors::{Result, SessionError};
 
 // Re-export Config so callers can import it from this module
@@ -52,7 +52,10 @@ impl EventReceiver {
         rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
         call_id: CallId,
     ) -> Self {
-        Self { rx, filter: Some(call_id) }
+        Self {
+            rx,
+            filter: Some(call_id),
+        }
     }
 
     /// Wait for the next event (optionally filtered to one session).
@@ -62,9 +65,7 @@ impl EventReceiver {
         loop {
             let raw = self.rx.recv().await?;
             // Downcast from Arc<dyn CrossCrateEvent> to our concrete wrapper
-            let session_event = raw
-                .as_any()
-                .downcast_ref::<SessionApiCrossCrateEvent>()?;
+            let session_event = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()?;
             let event = session_event.event.clone();
             // Apply per-session filter if set
             if let Some(ref filter) = self.filter {
@@ -80,9 +81,7 @@ impl EventReceiver {
     pub fn try_next(&mut self) -> Option<Event> {
         loop {
             let raw = self.rx.try_recv().ok()?;
-            let session_event = raw
-                .as_any()
-                .downcast_ref::<SessionApiCrossCrateEvent>()?;
+            let session_event = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()?;
             let event = session_event.event.clone();
             if let Some(ref filter) = self.filter {
                 if event.call_id() != Some(filter) {
@@ -105,7 +104,12 @@ impl EventReceiver {
     pub async fn next_incoming(&mut self) -> Option<(CallId, String, String, Option<String>)> {
         loop {
             match self.next().await? {
-                Event::IncomingCall { call_id, from, to, sdp } => {
+                Event::IncomingCall {
+                    call_id,
+                    from,
+                    to,
+                    sdp,
+                } => {
                     return Some((call_id, from, to, sdp));
                 }
                 _ => continue,
@@ -143,7 +147,10 @@ impl EventReceiver {
     /// Wait for the next event matching `predicate`, discarding non-matches.
     ///
     /// Returns `None` on channel close.
-    pub async fn next_where<F: FnMut(&Event) -> bool>(&mut self, mut predicate: F) -> Option<Event> {
+    pub async fn next_where<F: FnMut(&Event) -> bool>(
+        &mut self,
+        mut predicate: F,
+    ) -> Option<Event> {
         loop {
             let event = self.next().await?;
             if predicate(&event) {
@@ -212,7 +219,10 @@ impl PeerControl {
     /// Accept an incoming call that was presented as an event.
     pub async fn accept(&self, call_id: &CallId) -> Result<SessionHandle> {
         self.coordinator.accept_call(call_id).await?;
-        Ok(SessionHandle::new(call_id.clone(), self.coordinator.clone()))
+        Ok(SessionHandle::new(
+            call_id.clone(),
+            self.coordinator.clone(),
+        ))
     }
 
     /// Reject an incoming call with the given SIP status code and reason phrase.
@@ -235,11 +245,7 @@ impl PeerControl {
     /// the remote peer did not advertise `Supported: 100rel` on the INVITE.
     ///
     /// [`accept()`]: Self::accept
-    pub async fn send_early_media(
-        &self,
-        call_id: &CallId,
-        sdp: Option<String>,
-    ) -> Result<()> {
+    pub async fn send_early_media(&self, call_id: &CallId, sdp: Option<String>) -> Result<()> {
         self.coordinator.send_early_media(call_id, sdp).await
     }
 
@@ -308,7 +314,10 @@ impl StreamPeer {
         let coordinator = UnifiedCoordinator::new(config).await?;
         let event_rx = coordinator.subscribe_events().await?;
         Ok(Self {
-            control: PeerControl { coordinator, local_uri },
+            control: PeerControl {
+                coordinator,
+                local_uri,
+            },
             events: EventReceiver::new(event_rx),
         })
     }
@@ -340,7 +349,12 @@ impl StreamPeer {
     pub async fn wait_for_incoming(&mut self) -> Result<IncomingCall> {
         loop {
             match self.events.next().await {
-                Some(Event::IncomingCall { call_id, from, to, sdp }) => {
+                Some(Event::IncomingCall {
+                    call_id,
+                    from,
+                    to,
+                    sdp,
+                }) => {
                     return Ok(IncomingCall::new(
                         call_id,
                         from,
@@ -359,17 +373,20 @@ impl StreamPeer {
     pub async fn wait_for_answered(&mut self, call_id: &CallId) -> Result<SessionHandle> {
         loop {
             match self.events.next().await {
-                Some(Event::CallAnswered { call_id: answered_id, .. })
-                    if &answered_id == call_id =>
-                {
+                Some(Event::CallAnswered {
+                    call_id: answered_id,
+                    ..
+                }) if &answered_id == call_id => {
                     return Ok(SessionHandle::new(
                         answered_id,
                         self.control.coordinator.clone(),
                     ));
                 }
-                Some(Event::CallFailed { call_id: failed_id, reason, status_code })
-                    if &failed_id == call_id =>
-                {
+                Some(Event::CallFailed {
+                    call_id: failed_id,
+                    reason,
+                    status_code,
+                }) if &failed_id == call_id => {
                     return Err(SessionError::Other(format!(
                         "Call failed with {}: {}",
                         status_code, reason
@@ -385,9 +402,10 @@ impl StreamPeer {
     pub async fn wait_for_ended(&mut self, call_id: &CallId) -> Result<String> {
         loop {
             match self.events.next().await {
-                Some(Event::CallEnded { call_id: ended_id, reason })
-                    if &ended_id == call_id =>
-                {
+                Some(Event::CallEnded {
+                    call_id: ended_id,
+                    reason,
+                }) if &ended_id == call_id => {
                     return Ok(reason);
                 }
                 None => return Err(SessionError::Other("Event channel closed".to_string())),
@@ -416,7 +434,14 @@ impl StreamPeer {
     ) -> Result<crate::api::unified::RegistrationHandle> {
         self.control
             .coordinator
-            .register(registrar_uri, from_uri, contact_uri, username, password, expires)
+            .register(
+                registrar_uri,
+                from_uri,
+                contact_uri,
+                username,
+                password,
+                expires,
+            )
             .await
     }
 
@@ -456,10 +481,7 @@ impl StreamPeer {
     }
 
     /// Unregister (sends REGISTER with `Expires: 0`).
-    pub async fn unregister(
-        &self,
-        handle: &crate::api::unified::RegistrationHandle,
-    ) -> Result<()> {
+    pub async fn unregister(&self, handle: &crate::api::unified::RegistrationHandle) -> Result<()> {
         self.control.coordinator.unregister(handle).await
     }
 
@@ -585,8 +607,10 @@ impl StreamPeerBuilder {
     /// Build the `StreamPeer`.
     pub async fn build(mut self) -> Result<StreamPeer> {
         if let Some(name) = self.name {
-            self.config.local_uri =
-                format!("sip:{}@{}:{}", name, self.config.local_ip, self.config.sip_port);
+            self.config.local_uri = format!(
+                "sip:{}@{}:{}",
+                name, self.config.local_ip, self.config.sip_port
+            );
         }
         StreamPeer::with_config(self.config).await
     }

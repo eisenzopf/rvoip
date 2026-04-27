@@ -1,8 +1,8 @@
+use nom::error::Error as NomError;
 use std::fmt;
 use std::io;
-use thiserror::Error;
 use std::str::Utf8Error;
-use nom::error::{Error as NomError};
+use thiserror::Error;
 
 /// A type alias for handling `Result`s with `Error`
 pub type Result<T> = std::result::Result<T, Error>;
@@ -44,11 +44,11 @@ pub enum Error {
         /// Error message
         message: String,
     },
-    
+
     /// Parser error
     #[error("Parser error: {0}")]
     Parser(String),
-    
+
     /// Parse error
     #[error("Parse error: {0}")]
     ParseError(String),
@@ -76,7 +76,7 @@ pub enum Error {
         /// URI component that is malformed (e.g., "host", "port")
         component: String,
         /// Error message
-        message: String, 
+        message: String,
     },
 
     /// Error related to SDP processing
@@ -106,7 +106,7 @@ pub enum Error {
     /// Input/output error
     #[error("I/O Error: {0}")]
     IoError(String),
-    
+
     /// Line too long in SIP message
     #[error("Line too long: {0} characters")]
     LineTooLong(usize),
@@ -152,9 +152,13 @@ impl From<nom::Err<nom::error::Error<&str>>> for Error {
                 Error::ParserWithLocation {
                     line,
                     column,
-                    message: format!("Failed to parse at position {}: {:?}", e.input.len(), e.code),
+                    message: format!(
+                        "Failed to parse at position {}: {:?}",
+                        e.input.len(),
+                        e.code
+                    ),
                 }
-            },
+            }
             nom::Err::Incomplete(_) => Error::IncompleteParse("Need more data".to_string()),
         }
     }
@@ -170,7 +174,7 @@ impl From<nom::Err<(&str, nom::error::ErrorKind)>> for Error {
                     column,
                     message: format!("Parser error: {:?}", kind),
                 }
-            },
+            }
             nom::Err::Incomplete(_) => Error::IncompleteParse("Need more data".to_string()),
         }
     }
@@ -192,14 +196,14 @@ impl From<String> for Error {
 fn calculate_position(input: &str) -> (usize, usize) {
     let mut line = 1;
     let mut last_line_start = 0;
-    
+
     for (i, c) in input.char_indices() {
         if c == '\n' {
             line += 1;
             last_line_start = i + 1;
         }
     }
-    
+
     let column = input.len() - last_line_start + 1;
     (line, column)
 }
@@ -219,8 +223,11 @@ pub struct LocationAwareError {
 
 impl fmt::Display for LocationAwareError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Error at line {}, column {}: {}\nContext: '{}'", 
-               self.line, self.column, self.message, self.context)
+        write!(
+            f,
+            "Error at line {}, column {}: {}\nContext: '{}'",
+            self.line, self.column, self.message, self.context
+        )
     }
 }
 
@@ -258,4 +265,4 @@ impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::IoError(err.to_string())
     }
-} 
+}

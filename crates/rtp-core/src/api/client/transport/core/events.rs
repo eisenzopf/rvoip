@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::api::common::events::{MediaTransportEvent, MediaEventCallback};
 use crate::api::common::error::MediaTransportError;
+use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
 
 /// Register a callback for media transport events
 ///
@@ -21,7 +21,10 @@ pub async fn register_event_callback(
     // Placeholder for the extracted event callback registration
     let mut callbacks_guard = callbacks.lock().await;
     callbacks_guard.push(callback);
-    debug!("Registered new event callback, total callbacks: {}", callbacks_guard.len());
+    debug!(
+        "Registered new event callback, total callbacks: {}",
+        callbacks_guard.len()
+    );
     Ok(())
 }
 
@@ -36,7 +39,10 @@ pub async fn register_connect_callback(
     // Placeholder for the extracted connect callback registration
     let mut callbacks_guard = callbacks.lock().await;
     callbacks_guard.push(callback);
-    debug!("Registered new connect callback, total callbacks: {}", callbacks_guard.len());
+    debug!(
+        "Registered new connect callback, total callbacks: {}",
+        callbacks_guard.len()
+    );
     Ok(())
 }
 
@@ -51,7 +57,10 @@ pub async fn register_disconnect_callback(
     // Placeholder for the extracted disconnect callback registration
     let mut callbacks_guard = callbacks.lock().await;
     callbacks_guard.push(callback);
-    debug!("Registered new disconnect callback, total callbacks: {}", callbacks_guard.len());
+    debug!(
+        "Registered new disconnect callback, total callbacks: {}",
+        callbacks_guard.len()
+    );
     Ok(())
 }
 
@@ -71,4 +80,4 @@ pub async fn notify_event(
         callback(event_clone);
     }
     Ok(())
-} 
+}

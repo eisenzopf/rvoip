@@ -4,7 +4,7 @@
 //! [RFC 3261 Section 20.35](https://datatracker.ietf.org/doc/html/rfc3261#section-20.35).
 //!
 //! The Server header contains information about the software used by the UAS (User Agent Server)
-//! or proxy server that generated a response. This information is typically included in response 
+//! or proxy server that generated a response. This information is typically included in response
 //! messages to identify the server software.
 //!
 //! ## Purpose
@@ -40,10 +40,10 @@
 // Server header type for SIP messages
 // Format defined in RFC 3261 Section 20.35
 
-use std::fmt;
-use serde::{Serialize, Deserialize};
 use crate::error::Result;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::str::FromStr;
 
 /// ServerInfo represents the software used by the server
@@ -251,7 +251,8 @@ impl ServerInfo {
     /// assert_eq!(server.to_string(), "(Debug Build) SIPCore/2.0");
     /// ```
     pub fn add_comment(&mut self, comment: &str) {
-        self.products.push(ServerProduct::Comment(comment.to_string()));
+        self.products
+            .push(ServerProduct::Comment(comment.to_string()));
     }
 
     /// Create a builder method for adding products
@@ -335,27 +336,27 @@ impl fmt::Display for ServerInfo {
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
-        
+
         for product in &self.products {
             if !first {
                 write!(f, " ")?;
             }
-            
+
             match product {
                 ServerProduct::Product { name, version } => {
                     write!(f, "{}", name)?;
                     if let Some(ver) = version {
                         write!(f, "/{}", ver)?;
                     }
-                },
+                }
                 ServerProduct::Comment(comment) => {
                     write!(f, "({})", comment)?;
                 }
             }
-            
+
             first = false;
         }
-        
+
         Ok(())
     }
 }
@@ -386,7 +387,7 @@ impl FromStr for ServerInfo {
         // Use the parser defined in another module
         let result = crate::parser::headers::server::parse_server(s.as_bytes())
             .map_err(|_| crate::error::Error::ParseError("Failed to parse Server header".into()))?;
-            
+
         Ok(ServerInfo::from(result.1))
     }
 }
@@ -400,14 +401,19 @@ impl TypedHeaderTrait for ServerInfo {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(crate::error::Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(crate::error::Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -415,38 +421,45 @@ impl TypedHeaderTrait for ServerInfo {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ServerInfo::from_str(s.trim())
                 } else {
-                    Err(crate::error::Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(crate::error::Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::Server(vals) => {
-                let products = vals.iter().map(|val| {
-                    match val {
-                        (Some((name, version)), None) => {
-                            // Convert from raw bytes to strings
-                            let name_str = String::from_utf8_lossy(name).to_string();
-                            let version_str = version.as_ref().map(|v| String::from_utf8_lossy(v).to_string());
-                            
-                            ServerProduct::Product {
-                                name: name_str,
-                                version: version_str
+                let products = vals
+                    .iter()
+                    .map(|val| {
+                        match val {
+                            (Some((name, version)), None) => {
+                                // Convert from raw bytes to strings
+                                let name_str = String::from_utf8_lossy(name).to_string();
+                                let version_str = version
+                                    .as_ref()
+                                    .map(|v| String::from_utf8_lossy(v).to_string());
+
+                                ServerProduct::Product {
+                                    name: name_str,
+                                    version: version_str,
+                                }
                             }
-                        },
-                        (None, Some(comment)) => {
-                            // Convert from raw bytes to string
-                            let comment_str = String::from_utf8_lossy(comment).to_string();
-                            ServerProduct::Comment(comment_str)
-                        },
-                        _ => ServerProduct::Comment("".to_string())  // Fallback for unexpected format
-                    }
-                }).collect();
-                
+                            (None, Some(comment)) => {
+                                // Convert from raw bytes to string
+                                let comment_str = String::from_utf8_lossy(comment).to_string();
+                                ServerProduct::Comment(comment_str)
+                            }
+                            _ => ServerProduct::Comment("".to_string()), // Fallback for unexpected format
+                        }
+                    })
+                    .collect();
+
                 Ok(ServerInfo { products })
-            },
-            _ => Err(crate::error::Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(crate::error::Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -486,7 +499,7 @@ impl From<Vec<ServerVal>> for ServerInfo {
             match val {
                 ServerVal::Product(p) => {
                     info.add_product(&p.name, p.version.as_deref());
-                },
+                }
                 ServerVal::Comment(c) => {
                     info.add_comment(&c);
                 }
@@ -499,51 +512,52 @@ impl From<Vec<ServerVal>> for ServerInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_server_info_display() {
         let server = ServerInfo::new()
             .with_product("SIP-Server", Some("1.0"))
             .with_comment("SIP Core Library")
             .with_product("OS", Some("Unix"));
-            
-        assert_eq!(server.to_string(), "SIP-Server/1.0 (SIP Core Library) OS/Unix");
+
+        assert_eq!(
+            server.to_string(),
+            "SIP-Server/1.0 (SIP Core Library) OS/Unix"
+        );
     }
-    
+
     #[test]
     fn test_server_info_no_version() {
-        let server = ServerInfo::new()
-            .with_product("MyServer", None);
-            
+        let server = ServerInfo::new().with_product("MyServer", None);
+
         assert_eq!(server.to_string(), "MyServer");
     }
-    
+
     #[test]
     fn test_server_info_just_comment() {
-        let server = ServerInfo::new()
-            .with_comment("Test Server");
-            
+        let server = ServerInfo::new().with_comment("Test Server");
+
         assert_eq!(server.to_string(), "(Test Server)");
     }
-    
+
     #[test]
     fn test_server_info_empty() {
         let server = ServerInfo::new();
         assert_eq!(server.to_string(), "");
     }
-    
+
     #[test]
     fn test_from_server_val() {
         let vals = vec![
             ServerVal::Product(Product {
                 name: "MyProduct".to_string(),
-                version: Some("1.0".to_string())
+                version: Some("1.0".to_string()),
             }),
-            ServerVal::Comment("Test Build".to_string())
+            ServerVal::Comment("Test Build".to_string()),
         ];
-        
+
         let info = ServerInfo::from(vals);
         assert_eq!(info.products.len(), 2);
         assert_eq!(info.to_string(), "MyProduct/1.0 (Test Build)");
     }
-} 
+}

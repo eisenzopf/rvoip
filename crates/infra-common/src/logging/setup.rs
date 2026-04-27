@@ -1,8 +1,8 @@
 use crate::errors::types::{Error, Result};
-use tracing::Level;
-use tracing_subscriber::{fmt, EnvFilter};
-use tracing_subscriber::fmt::format::FmtSpan;
 use std::str::FromStr;
+use tracing::Level;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::{fmt, EnvFilter};
 
 /// Configuration for the logging system
 #[derive(Debug, Clone)]
@@ -40,19 +40,19 @@ impl LoggingConfig {
             ..Default::default()
         }
     }
-    
+
     /// Enable JSON formatting
     pub fn with_json(mut self) -> Self {
         self.json = true;
         self
     }
-    
+
     /// Enable file and line information in logs
     pub fn with_file_info(mut self) -> Self {
         self.file_info = true;
         self
     }
-    
+
     /// Enable span logging
     pub fn with_spans(mut self) -> Self {
         self.log_spans = true;
@@ -62,42 +62,38 @@ impl LoggingConfig {
 
 /// Set up the logging system with the provided configuration
 pub fn setup_logging(config: LoggingConfig) -> Result<()> {
-    let filter = EnvFilter::from_default_env()
-        .add_directive(config.level.into());
-    
+    let filter = EnvFilter::from_default_env().add_directive(config.level.into());
+
     let span_events = if config.log_spans {
         FmtSpan::ACTIVE
     } else {
         FmtSpan::NONE
     };
-    
+
     let mut subscriber = fmt::Subscriber::builder()
         .with_env_filter(filter)
         .with_span_events(span_events);
-    
+
     if config.file_info {
         subscriber = subscriber.with_file(true).with_line_number(true);
     }
-    
+
     if config.json {
         // Setup JSON formatting
-        subscriber.with_writer(std::io::stdout)
-            .json()
-            .init();
+        subscriber.with_writer(std::io::stdout).json().init();
     } else {
         subscriber.init();
     }
-    
+
     Ok(())
 }
 
 /// Parse a log level from a string
 pub fn parse_log_level(level: &str) -> Result<Level> {
-    Level::from_str(level)
-        .map_err(|_| Error::Config(format!("Invalid log level: {}", level)))
+    Level::from_str(level).map_err(|_| Error::Config(format!("Invalid log level: {}", level)))
 }
 
 /// Log a welcome message with version info
 pub fn log_welcome(app_name: &str, version: &str) {
     tracing::info!("Starting {} v{}", app_name, version);
-} 
+}

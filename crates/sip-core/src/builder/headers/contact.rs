@@ -1,13 +1,12 @@
 use std::str::FromStr;
 
-use crate::types::{
-    uri::Uri,
-    contact::{Contact, ContactParamInfo},
-    Address,
-    TypedHeader,
-};
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::types::{
+    contact::{Contact, ContactParamInfo},
+    uri::Uri,
+    Address, TypedHeader,
+};
 
 /// Contact header builder
 ///
@@ -156,15 +155,15 @@ impl ContactBuilderExt for SimpleRequestBuilder {
                 // Create an address with or without display name
                 let address = match display_name {
                     Some(name) => Address::new_with_display_name(name, uri),
-                    None => Address::new(uri)
+                    None => Address::new(uri),
                 };
-                
+
                 // Create a contact param with the address
                 let contact_param = ContactParamInfo { address };
                 let contact = Contact::new_params(vec![contact_param]);
-                
+
                 self.header(TypedHeader::Contact(contact))
-            },
+            }
             Err(_) => {
                 // Silently fail - contact is not critical
                 self
@@ -180,15 +179,15 @@ impl ContactBuilderExt for SimpleResponseBuilder {
                 // Create an address with or without display name
                 let address = match display_name {
                     Some(name) => Address::new_with_display_name(name, uri),
-                    None => Address::new(uri)
+                    None => Address::new(uri),
                 };
-                
+
                 // Create a contact param with the address
                 let contact_param = ContactParamInfo { address };
                 let contact = Contact::new_params(vec![contact_param]);
-                
+
                 self.header(TypedHeader::Contact(contact))
-            },
+            }
             Err(_) => {
                 // Silently fail - contact is not critical
                 self
@@ -201,46 +200,69 @@ impl ContactBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::types::{Method, StatusCode};
-    
+
     #[test]
     fn test_request_contact_header() {
         // Test with valid URI and display name
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .contact("sip:alice@192.168.1.1:5060", Some("Alice"))
             .build();
-            
-        let contact_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Contact(c) = h { Some(c) } else { None })
+
+        let contact_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Contact(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(contact_headers.len(), 1);
         let address = contact_headers[0].address().unwrap();
         assert_eq!(address.display_name(), Some("Alice"));
         assert_eq!(address.uri().to_string(), "sip:alice@192.168.1.1:5060");
-        
+
         // Test without display name
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .contact("sip:alice@192.168.1.1:5060", None)
             .build();
-            
-        let contact_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Contact(c) = h { Some(c) } else { None })
+
+        let contact_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Contact(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(contact_headers.len(), 1);
         let address = contact_headers[0].address().unwrap();
         assert_eq!(address.display_name(), None);
         assert_eq!(address.uri().to_string(), "sip:alice@192.168.1.1:5060");
-        
+
         // Test with invalid URI (should not add the header)
-        let initial_headers_count = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap().build().all_headers().len();
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let initial_headers_count = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
+            .build()
+            .all_headers()
+            .len();
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .contact("invalid-uri", Some("Alice"))
             .build();
-            
+
         assert_eq!(request.all_headers().len(), initial_headers_count);
     }
-    
+
     #[test]
     fn test_response_contact_header() {
         // Test with valid URI and display name
@@ -251,16 +273,24 @@ mod tests {
             .cseq(1, Method::Invite)
             .contact("sip:bob@192.168.1.2:5060", Some("Bob"))
             .build();
-            
-        let contact_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Contact(c) = h { Some(c) } else { None })
+
+        let contact_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Contact(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(contact_headers.len(), 1);
         let address = contact_headers[0].address().unwrap();
         assert_eq!(address.display_name(), Some("Bob"));
         assert_eq!(address.uri().to_string(), "sip:bob@192.168.1.2:5060");
-        
+
         // Test without display name
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
@@ -269,16 +299,24 @@ mod tests {
             .cseq(1, Method::Invite)
             .contact("sip:bob@192.168.1.2:5060", None)
             .build();
-            
-        let contact_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Contact(c) = h { Some(c) } else { None })
+
+        let contact_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Contact(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(contact_headers.len(), 1);
         let address = contact_headers[0].address().unwrap();
         assert_eq!(address.display_name(), None);
         assert_eq!(address.uri().to_string(), "sip:bob@192.168.1.2:5060");
-        
+
         // Test with invalid URI (should not add the header)
         let initial_response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
@@ -286,9 +324,9 @@ mod tests {
             .call_id("test-call-id")
             .cseq(1, Method::Invite)
             .build();
-            
+
         let initial_headers_count = initial_response.all_headers().len();
-        
+
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
             .to("Bob", "sip:bob@example.com", Some("tag5678"))
@@ -296,7 +334,7 @@ mod tests {
             .cseq(1, Method::Invite)
             .contact("invalid-uri", Some("Bob"))
             .build();
-            
+
         assert_eq!(response.all_headers().len(), initial_headers_count);
     }
-} 
+}

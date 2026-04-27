@@ -3,12 +3,9 @@
 //! Tests all guard variants in `check_guard()` from `state_machine/guards.rs`.
 //! Guards are pure functions on SessionState — no adapters or network needed.
 
-use rvoip_session_core::internals::{
-    Guard, SessionId, Role,
-    SessionState, NegotiatedConfig,
-};
-use rvoip_session_core::types::CallState;
+use rvoip_session_core::internals::{Guard, NegotiatedConfig, Role, SessionId, SessionState};
 use rvoip_session_core::state_machine::guards::check_guard;
+use rvoip_session_core::types::CallState;
 use std::net::SocketAddr;
 
 fn make_session() -> SessionState {

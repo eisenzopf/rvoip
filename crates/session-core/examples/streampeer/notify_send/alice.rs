@@ -8,15 +8,17 @@ use rvoip_session_core::{Config, Event, StreamPeer};
 use tokio::time::{sleep, timeout, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
         )
         .init();
 
@@ -28,7 +30,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut events = alice.control().subscribe_events().await?;
 
     println!("[ALICE] Calling Bob on port {}…", bob_port);
-    let handle = alice.call(&format!("sip:bob@127.0.0.1:{}", bob_port)).await?;
+    let handle = alice
+        .call(&format!("sip:bob@127.0.0.1:{}", bob_port))
+        .await?;
 
     let answered = timeout(Duration::from_secs(8), async {
         loop {

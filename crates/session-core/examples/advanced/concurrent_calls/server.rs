@@ -9,7 +9,9 @@ use tokio::time::Duration;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     const NUM_CALLERS: usize = 5;
@@ -56,11 +58,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("[ANSWERER] {} calls active, waiting for them to end...", handles.len());
+    println!(
+        "[ANSWERER] {} calls active, waiting for them to end...",
+        handles.len()
+    );
     for h in &handles {
         h.wait_for_end(Some(Duration::from_secs(10))).await.ok();
     }
-    println!("[ANSWERER] All calls ended. {} total calls handled.", handles.len());
+    println!(
+        "[ANSWERER] All calls ended. {} total calls handled.",
+        handles.len()
+    );
 
     std::process::exit(0);
 }

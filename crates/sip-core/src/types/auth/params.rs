@@ -2,10 +2,10 @@
 //!
 //! This module defines various parameter types used in SIP authentication headers.
 
-use std::fmt;
-use serde::{Deserialize, Serialize};
-use crate::types::uri::Uri;
 use crate::types::auth::scheme::{Algorithm, Qop};
+use crate::types::uri::Uri;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Generic Authentication Parameter (name=value)
 ///
@@ -41,29 +41,29 @@ pub enum DigestParam {
     /// Server-generated nonce (mandatory in challenges and credentials)
     Nonce(String),
     /// Opaque data from server (Optional in challenge, MUST be returned if present)
-    Opaque(String), 
+    Opaque(String),
     /// Hashing algorithm (Optional in both challenge and credentials)
-    Algorithm(Algorithm), 
+    Algorithm(Algorithm),
     // Challenge Only
     /// List of URIs that share credentials (Optional in challenges)
-    Domain(Vec<String>), 
+    Domain(Vec<String>),
     /// Indicates if the nonce is stale (Optional in challenges)
-    Stale(bool),       
+    Stale(bool),
     /// Quality of protection options (Optional in challenges)
-    Qop(Vec<Qop>),     
+    Qop(Vec<Qop>),
     // Credentials Only
     /// User's username (Mandatory in credentials)
     Username(String),
     /// Request URI (Mandatory in credentials)
     Uri(Uri),
     /// Digest response hash (Mandatory in credentials)
-    Response(String), 
+    Response(String),
     /// Client nonce (Mandatory if QOP is used)
-    Cnonce(String),   
+    Cnonce(String),
     /// Quality of protection used (Mandatory if QOP is offered)
-    MsgQop(Qop),      
+    MsgQop(Qop),
     /// Nonce count (Mandatory if QOP is used)
-    NonceCount(u32),  
+    NonceCount(u32),
     // Generic fallback
     /// Generic parameter not specifically typed above
     Param(AuthParam),
@@ -78,7 +78,14 @@ impl fmt::Display for DigestParam {
             DigestParam::Algorithm(v) => write!(f, "algorithm={}", v),
             DigestParam::Domain(v) => write!(f, "domain=\"{}\"", v.join(", ")),
             DigestParam::Stale(v) => write!(f, "stale={}", v),
-            DigestParam::Qop(v) => write!(f, "qop={}", v.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(",")),
+            DigestParam::Qop(v) => write!(
+                f,
+                "qop={}",
+                v.iter()
+                    .map(|q| q.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             DigestParam::Username(v) => write!(f, "username=\"{}\"", v),
             DigestParam::Uri(v) => write!(f, "uri=\"{}\"", v),
             DigestParam::Response(v) => write!(f, "response=\"{}\"", v),
@@ -118,4 +125,4 @@ impl fmt::Display for AuthenticationInfoParam {
             AuthenticationInfoParam::NonceCount(v) => write!(f, "nc={:08x}", v),
         }
     }
-} 
+}

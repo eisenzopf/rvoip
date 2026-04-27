@@ -3,8 +3,8 @@
 //! This module provides an implementation of the SIP Supported header as defined in
 //! [RFC 3261 Section 20.37](https://datatracker.ietf.org/doc/html/rfc3261#section-20.37).
 //!
-//! The Supported header field (also called by the short form "k") enumerates all the extensions 
-//! supported by the User Agent Client (UAC) or User Agent Server (UAS). It contains a list of 
+//! The Supported header field (also called by the short form "k") enumerates all the extensions
+//! supported by the User Agent Client (UAC) or User Agent Server (UAS). It contains a list of
 //! option tags that are understood by the UA.
 //!
 //! This header allows UAs to advertise their capabilities and for the recipient to understand
@@ -44,9 +44,9 @@
 
 use crate::error::Result;
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
 
 /// Supported header (RFC 3261 Section 20.37)
 ///
@@ -99,7 +99,7 @@ pub struct Supported {
 impl Supported {
     /// Create a new Supported header with the given option tags
     ///
-    /// Initializes a new Supported header with a list of option tags, 
+    /// Initializes a new Supported header with a list of option tags,
     /// indicating the extensions that the UA supports.
     ///
     /// # Parameters
@@ -118,7 +118,7 @@ impl Supported {
     /// // Create a Supported header with multiple option tags
     /// let supported = Supported::new(vec![
     ///     "timer".to_string(),
-    ///     "100rel".to_string() 
+    ///     "100rel".to_string()
     /// ]);
     ///
     /// assert_eq!(supported.option_tags.len(), 2);
@@ -135,7 +135,7 @@ impl Supported {
 
     /// Create a new Supported header with a single option tag
     ///
-    /// Convenience method to create a Supported header with just one 
+    /// Convenience method to create a Supported header with just one
     /// option tag. This is useful when a UA wants to advertise support
     /// for just a single extension.
     ///
@@ -349,7 +349,7 @@ impl FromStr for Supported {
                 .filter(|tag| !tag.is_empty())
                 .collect()
         };
-        
+
         Ok(Supported { option_tags })
     }
 }
@@ -432,18 +432,23 @@ impl TypedHeaderTrait for Supported {
         match &header.value {
             HeaderValue::Raw(raw) => {
                 // Parse raw value using the parser
-                let (_, option_tags) = 
-                    crate::parser::headers::supported::parse_supported(raw)
-                        .map_err(|e| crate::error::Error::ParseError(format!("Failed to parse Supported header: {:?}", e)))?;
+                let (_, option_tags) = crate::parser::headers::supported::parse_supported(raw)
+                    .map_err(|e| {
+                        crate::error::Error::ParseError(format!(
+                            "Failed to parse Supported header: {:?}",
+                            e
+                        ))
+                    })?;
                 Ok(Self { option_tags })
-            },
+            }
             HeaderValue::Supported(tags) => {
                 // Convert Vec<Vec<u8>> to Vec<String>
-                let option_tags = tags.iter()
+                let option_tags = tags
+                    .iter()
                     .map(|tag| String::from_utf8_lossy(tag).to_string())
                     .collect();
                 Ok(Self { option_tags })
-            },
+            }
             _ => Err(crate::error::Error::ParseError(
                 "Invalid header value type for Supported".to_string(),
             )),
@@ -496,13 +501,13 @@ mod tests {
         assert_eq!(supported.option_tags.len(), 2);
         assert!(supported.supports("timer"));
         assert!(supported.supports("100rel"));
-        
+
         // Test with whitespace
         let supported = Supported::from_str(" timer , 100rel ").unwrap();
         assert_eq!(supported.option_tags.len(), 2);
         assert!(supported.supports("timer"));
         assert!(supported.supports("100rel"));
-        
+
         // Test with empty string
         let supported = Supported::from_str("").unwrap();
         assert_eq!(supported.option_tags.len(), 0);
@@ -516,7 +521,7 @@ mod tests {
         match &header.value {
             HeaderValue::Raw(raw) => {
                 assert_eq!(std::str::from_utf8(raw).unwrap(), "timer, 100rel");
-            },
+            }
             _ => panic!("Expected HeaderValue::Raw"),
         }
     }
@@ -528,10 +533,10 @@ mod tests {
             HeaderName::Supported,
             HeaderValue::Raw(b"timer, 100rel".to_vec()),
         );
-        
+
         // Convert to Supported
         let supported = Supported::from_header(&header).unwrap();
-        
+
         // Check conversion
         assert_eq!(supported.option_tags.len(), 2);
         assert_eq!(supported.option_tags[0], "timer");
@@ -542,13 +547,13 @@ mod tests {
     fn test_supported_roundtrip() {
         // Create a Supported header
         let original = Supported::new(vec!["timer".to_string(), "100rel".to_string()]);
-        
+
         // Convert to header
         let header = original.to_header();
-        
+
         // Convert back to Supported
         let roundtrip = Supported::from_header(&header).unwrap();
-        
+
         // Check equality
         assert_eq!(original, roundtrip);
     }
@@ -557,14 +562,14 @@ mod tests {
     fn test_supported_empty_roundtrip() {
         // Create an empty Supported header
         let original = Supported::new(vec![]);
-        
+
         // Convert to header
         let header = original.to_header();
-        
+
         // Convert back to Supported
         let roundtrip = Supported::from_header(&header).unwrap();
-        
+
         // Check equality
         assert_eq!(original, roundtrip);
     }
-} 
+}

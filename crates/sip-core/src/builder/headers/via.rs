@@ -1,10 +1,9 @@
-use crate::types::{
-    via::{Via, ViaHeader, SentProtocol},
-    TypedHeader,
-    Param,
-};
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::types::{
+    via::{SentProtocol, Via, ViaHeader},
+    Param, TypedHeader,
+};
 
 /// Extension trait for adding Via headers to SIP message builders.
 ///
@@ -62,7 +61,7 @@ use crate::builder::headers::HeaderSetter;
 ///
 /// ## Multiple Via Headers (Request Through Proxies)
 ///
-/// When a SIP message traverses multiple proxies, each one adds a Via header. 
+/// When a SIP message traverses multiple proxies, each one adds a Via header.
 /// The topmost (first) Via header represents the most recent hop.
 ///
 /// ```rust
@@ -133,7 +132,7 @@ use crate::builder::headers::HeaderSetter;
 /// let mut params = Vec::new();
 /// params.push(Param::branch("z9hG4bK776asdhds"));
 /// params.push(Param::new("rport", None::<String>)); // Empty rport parameter
-/// 
+///
 /// let client_via = Via::new("SIP", "2.0", "UDP", "client.example.com", Some(5060), params).unwrap();
 /// let request = initial_request.header(TypedHeader::Via(client_via)).build();
 ///
@@ -148,7 +147,7 @@ use crate::builder::headers::HeaderSetter;
 /// params.push(Param::branch("z9hG4bK776asdhds"));
 /// params.push(Param::new("rport", Some("12345"))); // The actual source port
 /// params.push(Param::new("received", Some("203.0.113.1"))); // The actual source IP
-/// 
+///
 /// let server_via = Via::new("SIP", "2.0", "UDP", "client.example.com", Some(5060), params).unwrap();
 /// let response_with_via = response.header(TypedHeader::Via(server_via));
 ///
@@ -173,7 +172,7 @@ use crate::builder::headers::HeaderSetter;
 /// params.push(Param::new("ttl", Some("16")));          // Time-to-live for multicast
 /// params.push(Param::new("maddr", Some("224.2.0.1"))); // Multicast address
 /// params.push(Param::new("hidden", None::<String>));   // Flag parameter (no value)
-/// 
+///
 /// let via = Via::new("SIP", "2.0", "UDP", "proxy.example.com", Some(5060), params).unwrap();
 /// let final_request = request.header(TypedHeader::Via(via)).build();
 /// ```
@@ -205,7 +204,7 @@ use crate::builder::headers::HeaderSetter;
 /// // then forwards response with that Via removed
 /// // (In a real implementation, the proxy would extract Via headers from the response)
 /// let incoming_response = SimpleResponseBuilder::ok()
-///     // Response with both Via headers 
+///     // Response with both Via headers
 ///     .via("proxy.example.com:5060", "UDP", Some("z9hG4bK123a4b"))
 ///     .via("client.atlanta.example.com:5060", "UDP", Some("z9hG4bK74bf9"))
 ///     .build();
@@ -268,12 +267,12 @@ pub trait ViaBuilderExt {
 impl ViaBuilderExt for SimpleRequestBuilder {
     fn via(mut self, host: &str, transport: &str, branch: Option<&str>) -> Self {
         let mut params = Vec::new();
-        
+
         // Add branch parameter if provided
         if let Some(branch_value) = branch {
             params.push(Param::branch(branch_value));
         }
-        
+
         // Parse host to separate hostname and port
         let (hostname, port) = if host.contains(':') {
             let parts: Vec<&str> = host.split(':').collect();
@@ -289,7 +288,7 @@ impl ViaBuilderExt for SimpleRequestBuilder {
         } else {
             (host.to_string(), None)
         };
-        
+
         // Create Via header
         if let Ok(via) = Via::new("SIP", "2.0", transport, &hostname, port, params) {
             self.header(TypedHeader::Via(via))
@@ -302,12 +301,12 @@ impl ViaBuilderExt for SimpleRequestBuilder {
 impl ViaBuilderExt for SimpleResponseBuilder {
     fn via(mut self, host: &str, transport: &str, branch: Option<&str>) -> Self {
         let mut params = Vec::new();
-        
+
         // Add branch parameter if provided
         if let Some(branch_value) = branch {
             params.push(Param::branch(branch_value));
         }
-        
+
         // Parse host to separate hostname and port
         let (hostname, port) = if host.contains(':') {
             let parts: Vec<&str> = host.split(':').collect();
@@ -323,7 +322,7 @@ impl ViaBuilderExt for SimpleResponseBuilder {
         } else {
             (host.to_string(), None)
         };
-        
+
         // Create Via header
         if let Ok(via) = Via::new("SIP", "2.0", transport, &hostname, port, params) {
             self.header(TypedHeader::Via(via))
@@ -337,56 +336,83 @@ impl ViaBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::types::{Method, StatusCode};
-    
+
     #[test]
     fn test_request_via_header() {
         // Test with hostname and port
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .via("example.com:5060", "UDP", Some("z9hG4bK776asdhds"))
             .build();
-            
-        let via_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Via(v) = h { Some(v) } else { None })
+
+        let via_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Via(v) = h {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(via_headers.len(), 1);
         let header = &via_headers[0].headers()[0]; // Get first ViaHeader
         assert_eq!(header.host().to_string(), "example.com");
         assert_eq!(header.port(), Some(5060));
         assert_eq!(header.transport(), "UDP");
         assert_eq!(header.branch(), Some("z9hG4bK776asdhds"));
-        
+
         // Test with hostname only
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .via("example.com", "TCP", None)
             .build();
-            
-        let via_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Via(v) = h { Some(v) } else { None })
+
+        let via_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Via(v) = h {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(via_headers.len(), 1);
         let header = &via_headers[0].headers()[0]; // Get first ViaHeader
         assert_eq!(header.host().to_string(), "example.com");
         assert_eq!(header.port(), None);
         assert_eq!(header.transport(), "TCP");
         assert_eq!(header.branch(), None);
-        
+
         // Test with invalid port format (should use host as is)
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .via("example.com:invalid", "UDP", Some("z9hG4bK776asdhds"))
             .build();
-            
-        let via_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Via(v) = h { Some(v) } else { None })
+
+        let via_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Via(v) = h {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(via_headers.len(), 1);
         let header = &via_headers[0].headers()[0]; // Get first ViaHeader
         assert_eq!(header.host().to_string(), "example.com:invalid");
         assert_eq!(header.port(), None);
     }
-    
+
     #[test]
     fn test_response_via_header() {
         // Test with hostname and port
@@ -397,18 +423,26 @@ mod tests {
             .cseq(1, Method::Invite)
             .via("example.com:5060", "UDP", Some("z9hG4bK776asdhds"))
             .build();
-            
-        let via_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Via(v) = h { Some(v) } else { None })
+
+        let via_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Via(v) = h {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(via_headers.len(), 1);
         let header = &via_headers[0].headers()[0]; // Get first ViaHeader
         assert_eq!(header.host().to_string(), "example.com");
         assert_eq!(header.port(), Some(5060));
         assert_eq!(header.transport(), "UDP");
         assert_eq!(header.branch(), Some("z9hG4bK776asdhds"));
-        
+
         // Test with IP address
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
@@ -417,11 +451,19 @@ mod tests {
             .cseq(1, Method::Invite)
             .via("192.168.1.1", "TCP", None)
             .build();
-            
-        let via_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::Via(v) = h { Some(v) } else { None })
+
+        let via_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Via(v) = h {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(via_headers.len(), 1);
         let header = &via_headers[0].headers()[0]; // Get first ViaHeader
         assert_eq!(header.host().to_string(), "192.168.1.1");
@@ -429,4 +471,4 @@ mod tests {
         assert_eq!(header.transport(), "TCP");
         assert_eq!(header.branch(), None);
     }
-} 
+}

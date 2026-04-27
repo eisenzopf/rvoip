@@ -13,7 +13,10 @@ const SAMPLE_RATE: u32 = 8000;
 const FRAME_SIZE: usize = 160;
 
 fn env_u16(k: &str, default: u16) -> u16 {
-    std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(k)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_string(k: &str, default: &str) -> String {
@@ -54,7 +57,9 @@ fn save_wav(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let alice_port = env_u16("ALICE_SIP_PORT", 35590);
@@ -109,11 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // The bridge tears the call down from its side. Wait for that to
     // propagate rather than hanging up ourselves, so the bridge's Drop
     // on the BridgeHandle closes the relay before we exit.
-    let _ = tokio::time::timeout(
-        Duration::from_secs(5),
-        alice.wait_for_ended(handle.id()),
-    )
-    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), alice.wait_for_ended(handle.id())).await;
 
     // Give the RTP pipeline a short drain window, then abort whether the
     // channel closed or not and pull whatever samples arrived.

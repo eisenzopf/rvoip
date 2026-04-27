@@ -17,7 +17,10 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout};
 
 fn env_u16(k: &str, default: u16) -> u16 {
-    std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(k)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 async fn wait_for_state(
@@ -46,7 +49,9 @@ async fn wait_for_state(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let bridge_port = env_u16("BRIDGE_SIP_PORT", 35592);
@@ -71,7 +76,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let inbound_id = loop {
         match events.next().await {
             Some(Event::IncomingCall { call_id, from, .. }) => {
-                println!("[BRIDGE] Incoming call from {} (leg A = {})", from, call_id.0);
+                println!(
+                    "[BRIDGE] Incoming call from {} (leg A = {})",
+                    from, call_id.0
+                );
                 break call_id;
             }
             Some(_) => continue,
@@ -122,14 +130,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Both legs must be Active before we bridge — inbound transitions via
     // the 200-OK → ACK round-trip, outbound via the answer above.
-    wait_for_state(&coord, &inbound_id, CallState::Active, Duration::from_secs(5)).await?;
-    wait_for_state(&coord, &outbound_id, CallState::Active, Duration::from_secs(5)).await?;
+    wait_for_state(
+        &coord,
+        &inbound_id,
+        CallState::Active,
+        Duration::from_secs(5),
+    )
+    .await?;
+    wait_for_state(
+        &coord,
+        &outbound_id,
+        CallState::Active,
+        Duration::from_secs(5),
+    )
+    .await?;
 
     println!("[BRIDGE] Both legs active — bridging RTP streams");
     let bridge = coord.bridge(&inbound_id, &outbound_id).await?;
     println!(
         "[BRIDGE] Bridge established ({:?} <-> {:?})",
-        bridge.sessions().0, bridge.sessions().1
+        bridge.sessions().0,
+        bridge.sessions().1
     );
 
     // Let audio flow end-to-end for the configured duration.

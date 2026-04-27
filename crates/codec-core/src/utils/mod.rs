@@ -6,4 +6,4 @@ pub mod validation;
 
 pub use simd::*;
 pub use tables::*;
-pub use validation::*; 
+pub use validation::*;

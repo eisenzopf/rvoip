@@ -1,13 +1,13 @@
 //! Basic usage example for users-core
-//! 
+//!
 //! This example demonstrates:
 //! - Creating a new user
 //! - Authenticating with password
 //! - Refreshing tokens
 //! - Changing passwords
 
-use users_core::{init, UsersConfig, CreateUserRequest};
 use anyhow::Result;
+use users_core::{init, CreateUserRequest, UsersConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,13 +28,15 @@ async fn main() -> Result<()> {
 
     // Create a new user
     println!("\n📝 Creating a new user...");
-    let user = auth_service.create_user(CreateUserRequest {
-        username: "alice".to_string(),
-        password: "SecurePassword123!".to_string(),
-        email: Some("alice@example.com".to_string()),
-        display_name: Some("Alice Johnson".to_string()),
-        roles: vec!["user".to_string()],
-    }).await?;
+    let user = auth_service
+        .create_user(CreateUserRequest {
+            username: "alice".to_string(),
+            password: "SecurePassword123!".to_string(),
+            email: Some("alice@example.com".to_string()),
+            display_name: Some("Alice Johnson".to_string()),
+            roles: vec!["user".to_string()],
+        })
+        .await?;
 
     println!("✅ User created successfully!");
     println!("   ID: {}", user.id);
@@ -48,21 +50,36 @@ async fn main() -> Result<()> {
         .await?;
 
     println!("✅ Authentication successful!");
-    println!("   Access token (first 50 chars): {}...", &auth_result.access_token[..50]);
-    println!("   Token expires in: {} seconds", auth_result.expires_in.as_secs());
-    println!("   Refresh token (first 50 chars): {}...", &auth_result.refresh_token[..50]);
+    println!(
+        "   Access token (first 50 chars): {}...",
+        &auth_result.access_token[..50]
+    );
+    println!(
+        "   Token expires in: {} seconds",
+        auth_result.expires_in.as_secs()
+    );
+    println!(
+        "   Refresh token (first 50 chars): {}...",
+        &auth_result.refresh_token[..50]
+    );
 
     // Simulate token expiration and refresh
     println!("\n🔄 Refreshing access token...");
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    
+
     let refreshed = auth_service
         .refresh_token(&auth_result.refresh_token)
         .await?;
 
     println!("✅ Token refreshed!");
-    println!("   New access token (first 50 chars): {}...", &refreshed.access_token[..50]);
-    println!("   Token is different: {}", refreshed.access_token != auth_result.access_token);
+    println!(
+        "   New access token (first 50 chars): {}...",
+        &refreshed.access_token[..50]
+    );
+    println!(
+        "   Token is different: {}",
+        refreshed.access_token != auth_result.access_token
+    );
 
     // Change password
     println!("\n🔑 Changing password...");
@@ -89,7 +106,8 @@ async fn main() -> Result<()> {
 
     // List users
     println!("\n📋 Listing all users...");
-    let all_users = auth_service.user_store()
+    let all_users = auth_service
+        .user_store()
         .list_users(Default::default())
         .await?;
 

@@ -9,7 +9,9 @@ use tokio::time::Duration;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Bob: receive the call ---
     tokio::spawn(async {
-        let mut bob = StreamPeer::with_config(Config::local("bob", 5061)).await.unwrap();
+        let mut bob = StreamPeer::with_config(Config::local("bob", 5061))
+            .await
+            .unwrap();
         println!("[BOB] Waiting for call...");
         let incoming = bob.wait_for_incoming().await.unwrap();
         println!("[BOB] Call from {}", incoming.from);

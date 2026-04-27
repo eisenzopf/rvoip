@@ -4,15 +4,15 @@
 //! It handles various failure scenarios and provides automatic fallback to alternative
 //! security methods when the primary method fails.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::VecDeque;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
 use crate::api::common::config::{KeyExchangeMethod, SecurityConfig};
 use crate::api::common::error::SecurityError;
-use crate::api::common::unified_security::{UnifiedSecurityContext, SecurityState};
+use crate::api::common::unified_security::{SecurityState, UnifiedSecurityContext};
 
 /// Recovery strategy defines how to handle security failures
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,10 +59,18 @@ impl RecoveryStrategy {
     pub fn description(&self) -> String {
         match self {
             Self::ImmediateFallback => "Immediate fallback".to_string(),
-            Self::RetryWithBackoff { max_retries, initial_delay, max_delay } => {
-                format!("Retry with backoff: {} retries, {:.1}s-{:.1}s delay", 
-                       max_retries, initial_delay.as_secs_f64(), max_delay.as_secs_f64())
-            },
+            Self::RetryWithBackoff {
+                max_retries,
+                initial_delay,
+                max_delay,
+            } => {
+                format!(
+                    "Retry with backoff: {} retries, {:.1}s-{:.1}s delay",
+                    max_retries,
+                    initial_delay.as_secs_f64(),
+                    max_delay.as_secs_f64()
+                )
+            }
             Self::Manual => "Manual intervention required".to_string(),
             Self::Fail => "No recovery".to_string(),
         }
@@ -97,8 +105,8 @@ impl FailureType {
             Self::CryptoFailure => false, // Usually indicates a more serious issue
             Self::TimeoutFailure => true,
             Self::AuthenticationFailure => false, // Usually indicates credential issues
-            Self::ConfigurationFailure => false, // Needs manual intervention
-            Self::UnknownFailure => true, // Err on the side of trying recovery
+            Self::ConfigurationFailure => false,  // Needs manual intervention
+            Self::UnknownFailure => true,         // Err on the side of trying recovery
         }
     }
 
@@ -165,7 +173,10 @@ impl Default for FallbackConfig {
         let mut recovery_strategies = std::collections::HashMap::new();
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::enterprise());
         recovery_strategies.insert(KeyExchangeMethod::DtlsSrtp, RecoveryStrategy::enterprise());
-        recovery_strategies.insert(KeyExchangeMethod::PreSharedKey, RecoveryStrategy::ImmediateFallback);
+        recovery_strategies.insert(
+            KeyExchangeMethod::PreSharedKey,
+            RecoveryStrategy::ImmediateFallback,
+        );
 
         Self {
             method_priority: vec![
@@ -187,7 +198,10 @@ impl FallbackConfig {
         let mut recovery_strategies = std::collections::HashMap::new();
         recovery_strategies.insert(KeyExchangeMethod::Mikey, RecoveryStrategy::enterprise());
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::enterprise());
-        recovery_strategies.insert(KeyExchangeMethod::DtlsSrtp, RecoveryStrategy::high_availability());
+        recovery_strategies.insert(
+            KeyExchangeMethod::DtlsSrtp,
+            RecoveryStrategy::high_availability(),
+        );
 
         Self {
             method_priority: vec![
@@ -205,9 +219,15 @@ impl FallbackConfig {
     /// Configuration for peer-to-peer scenarios
     pub fn peer_to_peer() -> Self {
         let mut recovery_strategies = std::collections::HashMap::new();
-        recovery_strategies.insert(KeyExchangeMethod::Zrtp, RecoveryStrategy::high_availability());
+        recovery_strategies.insert(
+            KeyExchangeMethod::Zrtp,
+            RecoveryStrategy::high_availability(),
+        );
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::enterprise());
-        recovery_strategies.insert(KeyExchangeMethod::PreSharedKey, RecoveryStrategy::ImmediateFallback);
+        recovery_strategies.insert(
+            KeyExchangeMethod::PreSharedKey,
+            RecoveryStrategy::ImmediateFallback,
+        );
 
         Self {
             method_priority: vec![
@@ -225,14 +245,14 @@ impl FallbackConfig {
     /// Configuration for development/testing
     pub fn development() -> Self {
         let mut recovery_strategies = std::collections::HashMap::new();
-        recovery_strategies.insert(KeyExchangeMethod::PreSharedKey, RecoveryStrategy::development());
+        recovery_strategies.insert(
+            KeyExchangeMethod::PreSharedKey,
+            RecoveryStrategy::development(),
+        );
         recovery_strategies.insert(KeyExchangeMethod::Sdes, RecoveryStrategy::development());
 
         Self {
-            method_priority: vec![
-                KeyExchangeMethod::PreSharedKey,
-                KeyExchangeMethod::Sdes,
-            ],
+            method_priority: vec![KeyExchangeMethod::PreSharedKey, KeyExchangeMethod::Sdes],
             recovery_strategies,
             max_fallback_attempts: 2,
             method_cooldown: Duration::from_secs(5),
@@ -327,12 +347,16 @@ impl ErrorRecoveryManager {
         error: SecurityError,
     ) -> Result<RecoveryAction, SecurityError> {
         let failure_type = FailureType::from_error(&error);
-        
-        info!("Handling security failure: {:?} method failed with {:?}", method, failure_type);
+
+        info!(
+            "Handling security failure: {:?} method failed with {:?}",
+            method, failure_type
+        );
         debug!("Error details: {}", error);
 
         // Record the failure
-        self.record_failure(method, failure_type, error.to_string(), 0).await;
+        self.record_failure(method, failure_type, error.to_string(), 0)
+            .await;
 
         // Check if this failure type is recoverable
         if !failure_type.is_recoverable() {
@@ -342,26 +366,31 @@ impl ErrorRecoveryManager {
         }
 
         // Get recovery strategy for this method
-        let strategy = self.config.recovery_strategies
+        let strategy = self
+            .config
+            .recovery_strategies
             .get(&method)
             .cloned()
             .unwrap_or(RecoveryStrategy::ImmediateFallback);
 
         match strategy {
-            RecoveryStrategy::ImmediateFallback => {
-                self.attempt_fallback(method).await
-            },
-            RecoveryStrategy::RetryWithBackoff { max_retries, initial_delay, max_delay } => {
-                self.attempt_retry_with_backoff(method, max_retries, initial_delay, max_delay).await
-            },
+            RecoveryStrategy::ImmediateFallback => self.attempt_fallback(method).await,
+            RecoveryStrategy::RetryWithBackoff {
+                max_retries,
+                initial_delay,
+                max_delay,
+            } => {
+                self.attempt_retry_with_backoff(method, max_retries, initial_delay, max_delay)
+                    .await
+            }
             RecoveryStrategy::Manual => {
                 *self.state.write().await = RecoveryState::WaitingForIntervention;
                 Ok(RecoveryAction::ManualIntervention)
-            },
+            }
             RecoveryStrategy::Fail => {
                 *self.state.write().await = RecoveryState::Exhausted;
                 Ok(RecoveryAction::Abandoned)
-            },
+            }
         }
     }
 
@@ -377,13 +406,12 @@ impl ErrorRecoveryManager {
 
         for retry_attempt in 1..=max_retries {
             // Calculate backoff delay (exponential with max cap)
-            let delay = std::cmp::min(
-                initial_delay * (2_u32.pow(retry_attempt - 1)),
-                max_delay,
-            );
+            let delay = std::cmp::min(initial_delay * (2_u32.pow(retry_attempt - 1)), max_delay);
 
-            info!("Retrying {:?} method (attempt {}/{}) after {:?} delay", 
-                  method, retry_attempt, max_retries, delay);
+            info!(
+                "Retrying {:?} method (attempt {}/{}) after {:?} delay",
+                method, retry_attempt, max_retries, delay
+            );
 
             // Wait for backoff delay
             tokio::time::sleep(delay).await;
@@ -395,29 +423,43 @@ impl ErrorRecoveryManager {
                         info!("Retry successful for {:?} method", method);
                         *self.state.write().await = RecoveryState::Normal;
                         return Ok(RecoveryAction::Retry);
-                    },
+                    }
                     Err(e) => {
                         let failure_type = FailureType::from_error(&e);
-                        self.record_failure(method, failure_type, e.to_string(), retry_attempt).await;
-                        warn!("Retry {}/{} failed for {:?} method: {}", 
-                              retry_attempt, max_retries, method, e);
+                        self.record_failure(method, failure_type, e.to_string(), retry_attempt)
+                            .await;
+                        warn!(
+                            "Retry {}/{} failed for {:?} method: {}",
+                            retry_attempt, max_retries, method, e
+                        );
                     }
                 }
             }
         }
 
         // All retries exhausted, attempt fallback
-        warn!("All retries exhausted for {:?} method, attempting fallback", method);
+        warn!(
+            "All retries exhausted for {:?} method, attempting fallback",
+            method
+        );
         self.attempt_fallback(method).await
     }
 
     /// Attempt to fallback to the next available method
-    fn attempt_fallback(&self, failed_method: KeyExchangeMethod) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecoveryAction, SecurityError>> + Send + '_>> {
+    fn attempt_fallback(
+        &self,
+        failed_method: KeyExchangeMethod,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<RecoveryAction, SecurityError>> + Send + '_>,
+    > {
         Box::pin(async move {
             let mut fallback_attempts = self.fallback_attempts.write().await;
-            
+
             if *fallback_attempts >= self.config.max_fallback_attempts {
-                warn!("Maximum fallback attempts ({}) reached", self.config.max_fallback_attempts);
+                warn!(
+                    "Maximum fallback attempts ({}) reached",
+                    self.config.max_fallback_attempts
+                );
                 *self.state.write().await = RecoveryState::Exhausted;
                 return Ok(RecoveryAction::Abandoned);
             }
@@ -427,11 +469,13 @@ impl ErrorRecoveryManager {
 
             // Find the next available method
             let next_method = self.find_next_available_method(failed_method).await;
-            
+
             match next_method {
                 Some(method) => {
-                    info!("Attempting fallback to {:?} method (attempt {}/{})", 
-                          method, *fallback_attempts, self.config.max_fallback_attempts);
+                    info!(
+                        "Attempting fallback to {:?} method (attempt {}/{})",
+                        method, *fallback_attempts, self.config.max_fallback_attempts
+                    );
 
                     // Set cooldown for the failed method
                     self.set_method_cooldown(failed_method).await;
@@ -442,14 +486,14 @@ impl ErrorRecoveryManager {
                             info!("Successfully fell back to {:?} method", method);
                             *self.state.write().await = RecoveryState::Normal;
                             Ok(RecoveryAction::Fallback(method))
-                        },
+                        }
                         Err(e) => {
                             warn!("Fallback to {:?} method failed: {}", method, e);
                             // Try the next method recursively
                             self.attempt_fallback(method).await
                         }
                     }
-                },
+                }
                 None => {
                     warn!("No more methods available for fallback");
                     *self.state.write().await = RecoveryState::Exhausted;
@@ -460,19 +504,28 @@ impl ErrorRecoveryManager {
     }
 
     /// Find the next available method in the priority list
-    async fn find_next_available_method(&self, current_method: KeyExchangeMethod) -> Option<KeyExchangeMethod> {
+    async fn find_next_available_method(
+        &self,
+        current_method: KeyExchangeMethod,
+    ) -> Option<KeyExchangeMethod> {
         let cooldowns = self.method_cooldowns.read().await;
         let now = Instant::now();
 
         // Find current method in priority list
-        let current_index = self.config.method_priority.iter()
+        let current_index = self
+            .config
+            .method_priority
+            .iter()
             .position(|&m| m == current_method)?;
 
         // Look for next available method (not on cooldown)
         for &method in &self.config.method_priority[current_index + 1..] {
             if let Some(cooldown_expiry) = cooldowns.get(&method) {
                 if now < *cooldown_expiry {
-                    debug!("Method {:?} is on cooldown until {:?}", method, cooldown_expiry);
+                    debug!(
+                        "Method {:?} is on cooldown until {:?}",
+                        method, cooldown_expiry
+                    );
                     continue;
                 }
             }
@@ -500,7 +553,10 @@ impl ErrorRecoveryManager {
     }
 
     /// Create a new security context for fallback method
-    async fn create_fallback_context(&self, method: KeyExchangeMethod) -> Result<(), SecurityError> {
+    async fn create_fallback_context(
+        &self,
+        method: KeyExchangeMethod,
+    ) -> Result<(), SecurityError> {
         // This is a simplified implementation
         // In practice, you'd need to create appropriate SecurityConfig for the method
         let config = match method {
@@ -513,7 +569,7 @@ impl ErrorRecoveryManager {
 
         let new_context = UnifiedSecurityContext::new(config)?;
         new_context.initialize().await?;
-        
+
         *self.security_context.write().await = Some(new_context);
         Ok(())
     }
@@ -553,15 +609,16 @@ impl ErrorRecoveryManager {
     pub async fn get_failure_statistics(&self) -> FailureStatistics {
         let history = self.failure_history.read().await;
         let mut stats = FailureStatistics::default();
-        
+
         for record in history.iter() {
             stats.total_failures += 1;
-            
-            let method_stats = stats.failures_by_method.entry(record.method)
-                .or_insert(0);
+
+            let method_stats = stats.failures_by_method.entry(record.method).or_insert(0);
             *method_stats += 1;
-            
-            let type_stats = stats.failures_by_type.entry(record.failure_type)
+
+            let type_stats = stats
+                .failures_by_type
+                .entry(record.failure_type)
                 .or_insert(0);
             *type_stats += 1;
         }
@@ -587,7 +644,10 @@ impl ErrorRecoveryManager {
     /// Check if recovery is possible
     pub async fn can_recover(&self) -> bool {
         let state = *self.state.read().await;
-        matches!(state, RecoveryState::Normal | RecoveryState::Retrying | RecoveryState::FallingBack)
+        matches!(
+            state,
+            RecoveryState::Normal | RecoveryState::Retrying | RecoveryState::FallingBack
+        )
     }
 }
 
@@ -605,14 +665,16 @@ pub struct FailureStatistics {
 impl FailureStatistics {
     /// Get the most problematic method
     pub fn most_problematic_method(&self) -> Option<(KeyExchangeMethod, u32)> {
-        self.failures_by_method.iter()
+        self.failures_by_method
+            .iter()
             .max_by_key(|(_, count)| *count)
             .map(|(&method, &count)| (method, count))
     }
 
     /// Get the most common failure type
     pub fn most_common_failure_type(&self) -> Option<(FailureType, u32)> {
-        self.failures_by_type.iter()
+        self.failures_by_type
+            .iter()
             .max_by_key(|(_, count)| *count)
             .map(|(&failure_type, &count)| (failure_type, count))
     }
@@ -622,8 +684,8 @@ impl FailureStatistics {
         if self.total_failures == 0 {
             return 0.0;
         }
-        
+
         let method_failures = self.failures_by_method.get(&method).unwrap_or(&0);
         (*method_failures as f64) / (self.total_failures as f64)
     }
-} 
+}

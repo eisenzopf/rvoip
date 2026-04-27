@@ -4,15 +4,15 @@
 //! SIP dialogs, including codec lifecycle, and quality monitoring.
 
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
-use tracing::{debug, warn, info, error};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info, warn};
 
-use crate::error::{Result, MediaSessionError};
-use crate::types::{MediaSessionId, DialogId, AudioFrame, MediaPacket, MediaType, MediaDirection};
-use crate::codec::audio::common::AudioCodec;
-use crate::processing::audio::AudioProcessor;
-use crate::quality::{QualityMonitor, QualityMetrics};
 use super::events::{MediaSessionEvent, MediaSessionEventType, QualitySeverity};
+use crate::codec::audio::common::AudioCodec;
+use crate::error::{MediaSessionError, Result};
+use crate::processing::audio::AudioProcessor;
+use crate::quality::{QualityMetrics, QualityMonitor};
+use crate::types::{AudioFrame, DialogId, MediaDirection, MediaPacket, MediaSessionId, MediaType};
 
 /// Media session state
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -60,29 +60,29 @@ impl Default for MediaSessionConfig {
 pub struct MediaSession {
     /// Unique session identifier
     session_id: MediaSessionId,
-    
+
     /// Associated SIP dialog ID
     dialog_id: DialogId,
-    
+
     /// Current session state
     state: Arc<RwLock<MediaSessionState>>,
-    
+
     /// Session configuration
     config: MediaSessionConfig,
-    
+
     /// Audio codec for this session
     #[allow(clippy::arc_with_non_send_sync)]
     audio_codec: Arc<RwLock<Option<Box<dyn AudioCodec>>>>,
-    
+
     /// Audio processor
     audio_processor: Option<Arc<AudioProcessor>>,
-    
+
     /// Quality monitor
     quality_monitor: Option<Arc<QualityMonitor>>,
-    
+
     /// Event channel for notifying other components
     event_tx: mpsc::UnboundedSender<MediaSessionEvent>,
-    
+
     /// Media session statistics
     stats: Arc<RwLock<MediaSessionStats>>,
 }
@@ -112,22 +112,25 @@ impl MediaSession {
         config: MediaSessionConfig,
         event_tx: mpsc::UnboundedSender<MediaSessionEvent>,
     ) -> Result<Self> {
-        debug!("Creating MediaSession {} for dialog {}", session_id, dialog_id);
-        
+        debug!(
+            "Creating MediaSession {} for dialog {}",
+            session_id, dialog_id
+        );
+
         // Create audio processor if enabled
         let audio_processor = if config.enable_audio_processing {
             Some(Arc::new(AudioProcessor::new(Default::default())?))
         } else {
             None
         };
-        
+
         // Create quality monitor if enabled
         let quality_monitor = if config.enable_quality_monitoring {
             Some(Arc::new(QualityMonitor::new(Default::default())))
         } else {
             None
         };
-        
+
         let session = Self {
             session_id: session_id.clone(),
             dialog_id: dialog_id.clone(),
@@ -140,121 +143,127 @@ impl MediaSession {
             event_tx,
             stats: Arc::new(RwLock::new(MediaSessionStats::default())),
         };
-        
+
         // Send session created event
         let event = MediaSessionEvent::session_created(session_id, dialog_id);
         if let Err(e) = session.event_tx.send(event) {
             warn!("Failed to send session created event: {}", e);
         }
-        
+
         Ok(session)
     }
-    
+
     /// Get session ID
     pub fn session_id(&self) -> &MediaSessionId {
         &self.session_id
     }
-    
+
     /// Get dialog ID
     pub fn dialog_id(&self) -> &DialogId {
         &self.dialog_id
     }
-    
+
     /// Get current session state
     pub async fn state(&self) -> MediaSessionState {
         self.state.read().await.clone()
     }
-    
+
     /// Set session state
     async fn set_state(&self, new_state: MediaSessionState) {
         let mut state = self.state.write().await;
         if *state != new_state {
-            debug!("MediaSession {} state changed: {:?} -> {:?}", 
-                   self.session_id, *state, new_state);
+            debug!(
+                "MediaSession {} state changed: {:?} -> {:?}",
+                self.session_id, *state, new_state
+            );
             *state = new_state;
         }
     }
-    
+
     /// Start the media session
     pub async fn start(&self) -> Result<()> {
         let current_state = self.state().await;
         if current_state != MediaSessionState::Creating {
             return Err(MediaSessionError::InvalidState {
                 state: format!("{:?}", current_state),
-            }.into());
+            }
+            .into());
         }
-        
+
         self.set_state(MediaSessionState::Active).await;
         info!("MediaSession {} started", self.session_id);
-        
+
         Ok(())
     }
-    
+
     /// Pause the media session
     pub async fn pause(&self) -> Result<()> {
         let current_state = self.state().await;
         if current_state != MediaSessionState::Active {
             return Err(MediaSessionError::InvalidState {
                 state: format!("{:?}", current_state),
-            }.into());
+            }
+            .into());
         }
-        
+
         self.set_state(MediaSessionState::Paused).await;
         info!("MediaSession {} paused", self.session_id);
-        
+
         Ok(())
     }
-    
+
     /// Resume the media session
     pub async fn resume(&self) -> Result<()> {
         let current_state = self.state().await;
         if current_state != MediaSessionState::Paused {
             return Err(MediaSessionError::InvalidState {
                 state: format!("{:?}", current_state),
-            }.into());
+            }
+            .into());
         }
-        
+
         self.set_state(MediaSessionState::Active).await;
         info!("MediaSession {} resumed", self.session_id);
-        
+
         Ok(())
     }
-    
+
     /// Stop the media session
     pub async fn stop(&self) -> Result<()> {
         self.set_state(MediaSessionState::Destroying).await;
-        
+
         // Send session destroyed event
-        let event = MediaSessionEvent::session_destroyed(
-            self.session_id.clone(),
-            self.dialog_id.clone(),
-        );
+        let event =
+            MediaSessionEvent::session_destroyed(self.session_id.clone(), self.dialog_id.clone());
         if let Err(e) = self.event_tx.send(event) {
             warn!("Failed to send session destroyed event: {}", e);
         }
-        
+
         self.set_state(MediaSessionState::Destroyed).await;
         info!("MediaSession {} stopped", self.session_id);
-        
+
         Ok(())
     }
-    
+
     /// Set audio codec for this session
     pub async fn set_audio_codec(&self, codec: Box<dyn AudioCodec>) -> Result<()> {
         let codec_info = codec.get_info();
-        
+
         // Check if codec changed
         let old_codec_name = {
             let current_codec = self.audio_codec.read().await;
-            current_codec.as_ref().map(|c| c.get_info().name).unwrap_or_else(|| "None".to_string())
+            current_codec
+                .as_ref()
+                .map(|c| c.get_info().name)
+                .unwrap_or_else(|| "None".to_string())
         };
-        
+
         // Update codec
         {
             let mut audio_codec = self.audio_codec.write().await;
             *audio_codec = Some(codec);
         }
-        
+
         // Send codec changed event
         let event = MediaSessionEvent::codec_changed(
             self.session_id.clone(),
@@ -266,12 +275,15 @@ impl MediaSession {
         if let Err(e) = self.event_tx.send(event) {
             warn!("Failed to send codec changed event: {}", e);
         }
-        
-        info!("MediaSession {} audio codec set to {}", self.session_id, codec_info.name);
-        
+
+        info!(
+            "MediaSession {} audio codec set to {}",
+            self.session_id, codec_info.name
+        );
+
         Ok(())
     }
-    
+
     /// Process incoming media packet
     pub async fn process_incoming_media(&self, packet: MediaPacket) -> Result<AudioFrame> {
         // Check session state
@@ -279,23 +291,27 @@ impl MediaSession {
         if state != MediaSessionState::Active {
             return Err(MediaSessionError::InvalidState {
                 state: format!("{:?}", state),
-            }.into());
+            }
+            .into());
         }
-        
+
         // Update statistics
         {
             let mut stats = self.stats.write().await;
             stats.packets_received += 1;
             stats.bytes_received += packet.payload.len() as u64;
         }
-        
+
         // Quality monitoring
         if let Some(quality_monitor) = &self.quality_monitor {
-            if let Err(e) = quality_monitor.analyze_media_packet(&self.session_id, &packet).await {
+            if let Err(e) = quality_monitor
+                .analyze_media_packet(&self.session_id, &packet)
+                .await
+            {
                 warn!("Quality analysis failed: {}", e);
             }
         }
-        
+
         // Decode audio
         let audio_frame = {
             let mut codec_guard = self.audio_codec.write().await;
@@ -304,11 +320,12 @@ impl MediaSession {
                 None => {
                     return Err(MediaSessionError::OperationFailed {
                         operation: "decode".to_string(),
-                    }.into());
+                    }
+                    .into());
                 }
             }
         };
-        
+
         // Audio processing
         let processed_frame = if let Some(audio_processor) = &self.audio_processor {
             let result = audio_processor.process_playback_audio(&audio_frame).await?;
@@ -316,10 +333,10 @@ impl MediaSession {
         } else {
             audio_frame
         };
-        
+
         Ok(processed_frame)
     }
-    
+
     /// Process outgoing media frame
     pub async fn process_outgoing_media(&self, audio_frame: AudioFrame) -> Result<Vec<u8>> {
         // Check session state
@@ -327,9 +344,10 @@ impl MediaSession {
         if state != MediaSessionState::Active {
             return Err(MediaSessionError::InvalidState {
                 state: format!("{:?}", state),
-            }.into());
+            }
+            .into());
         }
-        
+
         // Audio processing
         let processed_frame = if let Some(audio_processor) = &self.audio_processor {
             let result = audio_processor.process_capture_audio(&audio_frame).await?;
@@ -337,7 +355,7 @@ impl MediaSession {
         } else {
             audio_frame
         };
-        
+
         // Encode audio
         let encoded_data = {
             let mut codec_guard = self.audio_codec.write().await;
@@ -346,34 +364,33 @@ impl MediaSession {
                 None => {
                     return Err(MediaSessionError::OperationFailed {
                         operation: "encode".to_string(),
-                    }.into());
+                    }
+                    .into());
                 }
             }
         };
-        
+
         // Update statistics
         {
             let mut stats = self.stats.write().await;
             stats.packets_sent += 1;
             stats.bytes_sent += encoded_data.len() as u64;
         }
-        
+
         Ok(encoded_data)
     }
-    
+
     /// Get quality metrics for this session
     pub async fn get_quality_metrics(&self) -> Option<QualityMetrics> {
         match &self.quality_monitor {
-            Some(monitor) => {
-                match monitor.get_session_metrics(&self.session_id).await {
-                    Some(session_metrics) => Some(session_metrics.current),
-                    None => None,
-                }
-            }
+            Some(monitor) => match monitor.get_session_metrics(&self.session_id).await {
+                Some(session_metrics) => Some(session_metrics.current),
+                None => None,
+            },
             None => None,
         }
     }
-    
+
     /// Get session statistics
     pub async fn get_statistics(&self) -> MediaSessionStats {
         self.stats.read().await.clone()
@@ -383,75 +400,68 @@ impl MediaSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::SampleRate;
     use crate::codec::audio::G711Codec;
-    
+    use crate::types::SampleRate;
+
     #[tokio::test]
     async fn test_media_session_creation() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let session_id = MediaSessionId::new("test-session");
         let dialog_id = DialogId::new("test-dialog");
-        
+
         let session = MediaSession::new(
             session_id.clone(),
             dialog_id.clone(),
             MediaSessionConfig::default(),
             tx,
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         assert_eq!(session.session_id(), &session_id);
         assert_eq!(session.dialog_id(), &dialog_id);
         assert_eq!(session.state().await, MediaSessionState::Creating);
     }
-    
+
     #[tokio::test]
     async fn test_media_session_lifecycle() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let session_id = MediaSessionId::new("test-session");
         let dialog_id = DialogId::new("test-dialog");
-        
-        let session = MediaSession::new(
-            session_id,
-            dialog_id,
-            MediaSessionConfig::default(),
-            tx,
-        ).unwrap();
-        
+
+        let session =
+            MediaSession::new(session_id, dialog_id, MediaSessionConfig::default(), tx).unwrap();
+
         // Test state transitions
         session.start().await.unwrap();
         assert_eq!(session.state().await, MediaSessionState::Active);
-        
+
         session.pause().await.unwrap();
         assert_eq!(session.state().await, MediaSessionState::Paused);
-        
+
         session.resume().await.unwrap();
         assert_eq!(session.state().await, MediaSessionState::Active);
-        
+
         session.stop().await.unwrap();
         assert_eq!(session.state().await, MediaSessionState::Destroyed);
     }
-    
+
     #[tokio::test]
     async fn test_audio_codec_management() {
         let (tx, _rx) = mpsc::unbounded_channel();
         let session_id = MediaSessionId::new("test-session");
         let dialog_id = DialogId::new("test-dialog");
-        
-        let session = MediaSession::new(
-            session_id,
-            dialog_id,
-            MediaSessionConfig::default(),
-            tx,
-        ).unwrap();
-        
+
+        let session =
+            MediaSession::new(session_id, dialog_id, MediaSessionConfig::default(), tx).unwrap();
+
         // Set audio codec using factory
         let codec = crate::codec::factory::CodecFactory::create_codec_default(0).unwrap();
         session.set_audio_codec(codec).await.unwrap();
-        
+
         // Verify codec is set
         let codec_guard = session.audio_codec.read().await;
         assert!(codec_guard.is_some());
         let info = codec_guard.as_ref().unwrap().get_info();
         assert!(info.name.contains("μ-law"));
     }
-} 
+}

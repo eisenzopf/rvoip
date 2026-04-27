@@ -1,5 +1,5 @@
 //! # SIP Call-Info Header
-//! 
+//!
 //! This module provides an implementation of the SIP Call-Info header as defined in
 //! [RFC 3261 Section 20.9](https://datatracker.ietf.org/doc/html/rfc3261#section-20.9).
 //!
@@ -43,15 +43,15 @@
 //! let call_info = CallInfo::from_str("<http://example.com/alice/photo.jpg>;purpose=icon").unwrap();
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
 
 use crate::error::{Error, Result};
+use crate::parser::headers::call_info::parse_call_info;
+use crate::types::header::{Header, HeaderName, TypedHeaderTrait};
 use crate::types::param::Param;
 use crate::types::uri::Uri;
-use crate::types::header::{Header, HeaderName, TypedHeaderTrait};
-use crate::parser::headers::call_info::parse_call_info;
 
 /// Represents the purpose of a Call-Info entry
 ///
@@ -212,21 +212,33 @@ impl CallInfoValue {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::http("example.com/alice/photo.jpg");
-    /// 
+    ///
     /// // Set common purpose values
     /// let icon_value = CallInfoValue::new(uri.clone()).with_purpose(InfoPurpose::Icon);
     /// let info_value = CallInfoValue::new(uri.clone()).with_purpose(InfoPurpose::Info);
     /// let card_value = CallInfoValue::new(uri.clone()).with_purpose(InfoPurpose::Card);
-    /// 
+    ///
     /// // Set custom purpose value
     /// let custom_value = CallInfoValue::new(uri).with_purpose(InfoPurpose::Other("ringtone".to_string()));
     /// ```
     pub fn with_purpose(self, purpose: InfoPurpose) -> Self {
         let purpose_param = match purpose {
-            InfoPurpose::Icon => Param::Other("purpose".to_string(), Some(crate::types::param::GenericValue::Token("icon".to_string()))),
-            InfoPurpose::Info => Param::Other("purpose".to_string(), Some(crate::types::param::GenericValue::Token("info".to_string()))),
-            InfoPurpose::Card => Param::Other("purpose".to_string(), Some(crate::types::param::GenericValue::Token("card".to_string()))),
-            InfoPurpose::Other(val) => Param::Other("purpose".to_string(), Some(crate::types::param::GenericValue::Token(val))),
+            InfoPurpose::Icon => Param::Other(
+                "purpose".to_string(),
+                Some(crate::types::param::GenericValue::Token("icon".to_string())),
+            ),
+            InfoPurpose::Info => Param::Other(
+                "purpose".to_string(),
+                Some(crate::types::param::GenericValue::Token("info".to_string())),
+            ),
+            InfoPurpose::Card => Param::Other(
+                "purpose".to_string(),
+                Some(crate::types::param::GenericValue::Token("card".to_string())),
+            ),
+            InfoPurpose::Other(val) => Param::Other(
+                "purpose".to_string(),
+                Some(crate::types::param::GenericValue::Token(val)),
+            ),
         };
         self.with_param(purpose_param)
     }
@@ -254,7 +266,8 @@ impl CallInfoValue {
     /// ```
     pub fn purpose(&self) -> Option<InfoPurpose> {
         for param in &self.params {
-            if let Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) = param {
+            if let Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) = param
+            {
                 if name == "purpose" {
                     return match value.as_str() {
                         "icon" => Some(InfoPurpose::Icon),
@@ -375,27 +388,28 @@ impl CallInfo {
 
 impl TypedHeaderTrait for CallInfo {
     type Name = HeaderName;
-    
+
     fn header_name() -> Self::Name {
         HeaderName::CallInfo
     }
-    
+
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), crate::types::header::HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            crate::types::header::HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
-    
+
     fn from_header(header: &Header) -> Result<Self> {
         match header.value {
-            crate::types::header::HeaderValue::CallInfo(ref values) => {
-                Ok(CallInfo(values.clone()))
+            crate::types::header::HeaderValue::CallInfo(ref values) => Ok(CallInfo(values.clone())),
+            crate::types::header::HeaderValue::Raw(ref bytes) => match std::str::from_utf8(bytes) {
+                Ok(s) => s.parse(),
+                Err(_) => Err(Error::ParseError("Invalid UTF-8".to_string())),
             },
-            crate::types::header::HeaderValue::Raw(ref bytes) => {
-                match std::str::from_utf8(bytes) {
-                    Ok(s) => s.parse(),
-                    Err(_) => Err(Error::ParseError("Invalid UTF-8".to_string())),
-                }
-            },
-            _ => Err(Error::ParseError("Invalid header value type for Call-Info".to_string())),
+            _ => Err(Error::ParseError(
+                "Invalid header value type for Call-Info".to_string(),
+            )),
         }
     }
 }
@@ -456,4 +470,4 @@ impl FromStr for CallInfo {
             Err(e) => Err(Error::from(e)),
         }
     }
-} 
+}

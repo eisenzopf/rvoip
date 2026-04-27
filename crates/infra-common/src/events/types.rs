@@ -1,10 +1,10 @@
+use async_trait::async_trait;
+use std::any::Any;
 use std::fmt::{self, Debug, Display};
 use std::hash::Hash;
 use std::sync::Arc;
-use std::any::Any;
-use async_trait::async_trait;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 /// Represents a type of event
 pub type EventType = &'static str;
@@ -32,12 +32,12 @@ impl Default for EventPriority {
 pub trait Event: Clone + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static {
     /// Return the type identifier for this event
     fn event_type() -> EventType;
-    
+
     /// Return the priority of this event
     fn priority() -> EventPriority {
         EventPriority::Normal
     }
-    
+
     /// Convert to a typeless Any object (for internal use)
     fn as_any(&self) -> &dyn Any;
 }
@@ -115,4 +115,4 @@ impl Display for EventError {
 impl std::error::Error for EventError {}
 
 /// Result type for event operations
-pub type EventResult<T> = std::result::Result<T, EventError>; 
+pub type EventResult<T> = std::result::Result<T, EventError>;

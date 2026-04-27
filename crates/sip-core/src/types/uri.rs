@@ -1,10 +1,10 @@
 //! # SIP URI Implementation
 //!
-//! This module provides a comprehensive implementation of SIP Uniform Resource Identifiers (URIs) 
+//! This module provides a comprehensive implementation of SIP Uniform Resource Identifiers (URIs)
 //! as defined in [RFC 3261](https://tools.ietf.org/html/rfc3261).
 //!
 //! SIP URIs are used to identify users, servers, and services in a SIP network.
-//! They have a similar structure to email addresses, with additional parameters 
+//! They have a similar structure to email addresses, with additional parameters
 //! and headers for SIP-specific functionality.
 //!
 //! ## URI Structure
@@ -53,14 +53,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::str::FromStr;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
 
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_till, take_until, take_while, take_while1},
     character::complete::{char, digit1, hex_digit1},
-    combinator::{map, map_res, opt, recognize, verify, all_consuming},
+    combinator::{all_consuming, map, map_res, opt, recognize, verify},
     multi::{many0, separated_list0},
     sequence::{delimited, pair, preceded, separated_pair, terminated, tuple},
     IResult,
@@ -68,8 +68,8 @@ use nom::{
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::types::param::Param; // Updated import path
-use crate::parser::uri::parse_uri; // Import the nom parser
+use crate::parser::uri::parse_uri;
+use crate::types::param::Param; // Updated import path // Import the nom parser
 
 /// SIP URI scheme types
 ///
@@ -133,7 +133,7 @@ impl FromStr for Scheme {
 
     fn from_str(s: &str) -> Result<Self> {
         // Check specifically for schemes followed by ':' implicitly
-        // The nom parser `terminated(scheme_parser, char(':'))` ensures this, 
+        // The nom parser `terminated(scheme_parser, char(':'))` ensures this,
         // so direct FromStr should handle the base scheme string correctly.
         match s.to_lowercase().as_str() {
             "sip" => Ok(Scheme::Sip),
@@ -250,23 +250,26 @@ impl FromStr for Host {
         } else if s.starts_with('[') {
             if s.ends_with(']') {
                 // Properly formatted IPv6 with brackets
-                if let Ok(addr) = Ipv6Addr::from_str(&s[1..s.len()-1]) {
+                if let Ok(addr) = Ipv6Addr::from_str(&s[1..s.len() - 1]) {
                     return Ok(Host::Address(IpAddr::V6(addr)));
                 }
                 // If it looked like IPv6 but failed, treat as domain
                 Ok(Host::Domain(s.to_string()))
             } else {
                 // String starts with '[' but doesn't end with ']' - malformed IPv6
-                Err(Error::InvalidUri(format!("Malformed IPv6 address (unclosed bracket): {}", s)))
+                Err(Error::InvalidUri(format!(
+                    "Malformed IPv6 address (unclosed bracket): {}",
+                    s
+                )))
             }
         } else {
             // Assume domain name if not a valid IP
             // TODO: Add stricter domain name validation?
-             if s.is_empty() {
-                 Err(Error::ParseError("Host cannot be empty".to_string()))
-             } else {
+            if s.is_empty() {
+                Err(Error::ParseError("Host cannot be empty".to_string()))
+            } else {
                 Ok(Host::Domain(s.to_string()))
-             }
+            }
         }
     }
 }
@@ -370,7 +373,7 @@ impl Uri {
     pub fn scheme(&self) -> &Scheme {
         &self.scheme
     }
-    
+
     /// Returns the host and port (if present) formatted as a string
     ///
     /// # Returns
@@ -378,7 +381,7 @@ impl Uri {
     pub fn host_port(&self) -> String {
         match self.port {
             Some(port) if port > 0 => format!("{}:{}", self.host, port),
-            _ => self.host.to_string()
+            _ => self.host.to_string(),
         }
     }
 
@@ -515,7 +518,7 @@ impl Uri {
     /// A new URI with the appropriate scheme and preserved raw string
     pub fn custom(uri_string: impl Into<String>) -> Self {
         let uri_string = uri_string.into();
-        
+
         // Try to extract the scheme if possible
         let scheme = if let Some(colon_pos) = uri_string.find(':') {
             let scheme_str = &uri_string[0..colon_pos];
@@ -531,7 +534,7 @@ impl Uri {
             // If no scheme found, create a custom scheme from the whole string
             Scheme::Custom(uri_string.clone())
         };
-        
+
         Uri {
             scheme,
             user: None,
@@ -712,27 +715,27 @@ impl fmt::Display for Uri {
 
         // Normal URI formatting
         write!(f, "{}:", self.scheme)?;
-        
+
         // User info (username and optional password)
         if let Some(ref user) = self.user {
             let escaped_user = escape_user_info(user);
             write!(f, "{}", escaped_user)?;
-            
+
             if let Some(ref password) = self.password {
                 let escaped_password = escape_user_info(password);
                 write!(f, ":{}", escaped_password)?;
             }
-            
+
             write!(f, "@")?;
         }
-        
+
         // Host (domain or IP address)
         match &self.host {
             Host::Domain(domain) => write!(f, "{}", domain)?,
             Host::Address(IpAddr::V4(addr)) => write!(f, "{}", addr)?,
             Host::Address(IpAddr::V6(addr)) => write!(f, "[{}]", addr)?,
         }
-        
+
         // Optional port (only if not 0)
         if let Some(port) = self.port {
             // Don't show port 0
@@ -740,12 +743,12 @@ impl fmt::Display for Uri {
                 write!(f, ":{}", port)?;
             }
         }
-        
+
         // Parameters (;key=value or ;key)
         for param in &self.parameters {
             write!(f, ";{}", param)?;
         }
-        
+
         // Headers (?key=value&key=value)
         if !self.headers.is_empty() {
             let mut first = true;
@@ -756,12 +759,12 @@ impl fmt::Display for Uri {
                 } else {
                     write!(f, "&")?;
                 }
-                
+
                 // URL-encode key and value
                 write!(f, "{}={}", escape_param(key), escape_param(value))?;
             }
         }
-        
+
         Ok(())
     }
 }
@@ -777,24 +780,21 @@ impl FromStr for Uri {
             Err(e) => {
                 // For HTTP and HTTPS URIs, create a special case
                 if s.starts_with("http://") || s.starts_with("https://") {
-                    let scheme = if s.starts_with("https://") { 
-                        Scheme::Https 
-                    } else { 
-                        Scheme::Http 
+                    let scheme = if s.starts_with("https://") {
+                        Scheme::Https
+                    } else {
+                        Scheme::Http
                     };
-                    
+
                     // Extract host from the URL (simple implementation)
                     let without_scheme = if s.starts_with("https://") {
                         &s[8..]
                     } else {
                         &s[7..]
                     };
-                    
-                    let host_part = without_scheme
-                        .split('/')
-                        .next()
-                        .unwrap_or(without_scheme);
-                    
+
+                    let host_part = without_scheme.split('/').next().unwrap_or(without_scheme);
+
                     return Ok(Uri {
                         scheme,
                         user: None,
@@ -806,7 +806,7 @@ impl FromStr for Uri {
                         raw_uri: Some(s.to_string()),
                     });
                 }
-                
+
                 // Otherwise return the original error
                 Err(Error::from(e.to_owned())) // Convert nom::Err to crate::error::Error
             }
@@ -846,10 +846,20 @@ fn escape_user_info(s: &str) -> String {
 
     for c in s.chars() {
         match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' |
-            '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' => {
+            'a'..='z'
+            | 'A'..='Z'
+            | '0'..='9'
+            | '-'
+            | '_'
+            | '.'
+            | '!'
+            | '~'
+            | '*'
+            | '\''
+            | '('
+            | ')' => {
                 result.push(c);
-            },
+            }
             _ => {
                 // Escape all other characters
                 for byte in c.to_string().bytes() {
@@ -877,7 +887,7 @@ fn unescape_user_info(s: &str) -> Result<String> {
             } else {
                 return Err(Error::MalformedUriComponent {
                     component: "user info".to_string(),
-                    message: "Incomplete percent encoding".to_string()
+                    message: "Incomplete percent encoding".to_string(),
                 });
             }
 
@@ -886,7 +896,7 @@ fn unescape_user_info(s: &str) -> Result<String> {
             } else {
                 return Err(Error::MalformedUriComponent {
                     component: "user info".to_string(),
-                    message: "Incomplete percent encoding".to_string()
+                    message: "Incomplete percent encoding".to_string(),
                 });
             }
 
@@ -895,7 +905,7 @@ fn unescape_user_info(s: &str) -> Result<String> {
             } else {
                 return Err(Error::MalformedUriComponent {
                     component: "user info".to_string(),
-                    message: format!("Invalid percent encoding: %{}", hex)
+                    message: format!("Invalid percent encoding: %{}", hex),
                 });
             }
         } else {
@@ -912,10 +922,21 @@ fn escape_param(s: &str) -> String {
 
     for c in s.chars() {
         match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' |
-            '-' | '_' | '.' | '!' | '~' | '*' | '\'' | '(' | ')' | '+' => {
+            'a'..='z'
+            | 'A'..='Z'
+            | '0'..='9'
+            | '-'
+            | '_'
+            | '.'
+            | '!'
+            | '~'
+            | '*'
+            | '\''
+            | '('
+            | ')'
+            | '+' => {
                 result.push(c);
-            },
+            }
             _ => {
                 // Escape all other characters
                 for byte in c.to_string().bytes() {
@@ -990,4 +1011,4 @@ fn is_valid_ipv6(s: &str) -> bool {
     }
 
     true
-} 
+}

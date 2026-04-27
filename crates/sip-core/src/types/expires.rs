@@ -41,15 +41,15 @@
 //! assert_eq!(expires.0, 1800);
 //! ```
 
+use crate::error::{Error, Result};
 use crate::parser;
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
 use crate::parser::headers::parse_expires;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 use std::time::Duration;
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Expires header field (RFC 3261 Section 20.19).
 /// Indicates the duration for which a registration or subscription is valid.
@@ -175,7 +175,7 @@ impl FromStr for Expires {
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         use crate::parser::headers::expires::parse_expires;
-        
+
         // Use map_err and From to convert Nom error to crate::Error::ParseError
         all_consuming(parse_expires)(s.as_bytes())
             .map_err(Error::from)
@@ -196,30 +196,38 @@ impl TypedHeaderTrait for Expires {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
             HeaderValue::Raw(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
-                    s.trim().parse::<u32>().map(Expires)
-                        .map_err(|_| Error::InvalidHeader(
-                            format!("Invalid integer value in {} header: '{}'", Self::header_name(), s)
+                    s.trim().parse::<u32>().map(Expires).map_err(|_| {
+                        Error::InvalidHeader(format!(
+                            "Invalid integer value in {} header: '{}'",
+                            Self::header_name(),
+                            s
                         ))
+                    })
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::Expires(expires) => Ok(*expires),
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type {:?} for {}", header.value, Self::header_name())
-            )),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type {:?} for {}",
+                header.value,
+                Self::header_name()
+            ))),
         }
     }
 }
 
-// TODO: Implement methods if needed 
+// TODO: Implement methods if needed

@@ -1,13 +1,13 @@
 //! # Event System
-//! 
+//!
 //! A high-performance, flexible event system for publish-subscribe communication patterns.
-//! 
+//!
 //! This module provides an event publishing and subscription system with multiple
 //! implementations optimized for different use cases. Based on our benchmarks,
 //! the Zero Copy implementation offers the best performance and is recommended for most uses.
-//! 
+//!
 //! ## Quick Start - Zero Copy Implementation
-//! 
+//!
 //! ```rust,no_run
 //! use rvoip_infra_common::events::system::EventSystem;
 //! use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
@@ -16,14 +16,14 @@
 //! use std::any::Any;
 //! use std::time::Duration;
 //! use serde::{Serialize, Deserialize};
-//! 
+//!
 //! // 1. Define your event type
 //! #[derive(Clone, Debug, Serialize, Deserialize)]
 //! struct MyEvent {
 //!     id: u32,
 //!     message: String,
 //! }
-//! 
+//!
 //! // 2. Implement the Event trait
 //! impl Event for MyEvent {
 //!     fn event_type() -> &'static str {
@@ -38,7 +38,7 @@
 //!         self
 //!     }
 //! }
-//! 
+//!
 //! async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //!     // 3. Create a Zero Copy event system
 //!     let system = EventSystemBuilder::new()
@@ -77,9 +77,9 @@
 //!     Ok(())
 //! }
 //! ```
-//! 
+//!
 //! ## Features of the Zero Copy Implementation
-//! 
+//!
 //! - **High Performance**: Benchmarked at ~2.2 million events/sec with 5 subscribers
 //! - **Zero Copy**: Events are wrapped in Arc for minimal copying between publishers and subscribers
 //! - **Prioritization**: Events can have different priority levels
@@ -88,14 +88,14 @@
 //! - **Sharding**: Improve performance by using multiple shards
 //! - **Batch Publishing**: Publish multiple events efficiently
 //! - **Event Filtering**: Filter events based on their content
-//! 
+//!
 //! ## Configuration Options
-//! 
+//!
 //! When creating a Zero Copy event system, you can configure:
-//! 
+//!
 //! ```rust,no_run
 //! use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
-//! 
+//!
 //! let system = EventSystemBuilder::new()
 //!     .implementation(ImplementationType::ZeroCopy)
 //!     .channel_capacity(10_000)        // Buffer size for channels
@@ -173,25 +173,24 @@
 
 // Shared components
 pub mod bus;
+pub mod publisher;
 pub mod registry;
 pub mod subscriber;
 pub mod types;
-pub mod publisher;
 
 // Core interfaces for the new API
 pub mod api;
-pub mod static_path;
-pub mod zero_copy;
-pub mod system;
 pub mod builder;
+pub mod static_path;
+pub mod system;
+pub mod zero_copy;
 
 // Phase 2.5: Global Event Coordination for Monolithic Event Integration
+pub mod config;
 pub mod coordinator;
 pub mod cross_crate;
-pub mod config;
 pub mod transport;
 
 // Re-export commonly used items
+pub use config::{DeploymentConfig, EventCoordinatorConfig};
 pub use coordinator::{global_coordinator, GlobalEventCoordinator};
-pub use config::{EventCoordinatorConfig, DeploymentConfig};
-

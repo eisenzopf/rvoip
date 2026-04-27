@@ -147,7 +147,12 @@ impl MultiplexedTransport {
                 // *not* probe UDP because it always reports false (the
                 // default-impl `has_connection_to` is a no-op) and it's
                 // the fallback anyway.
-                for kind in [TransportType::Tls, TransportType::Tcp, TransportType::Wss, TransportType::Ws] {
+                for kind in [
+                    TransportType::Tls,
+                    TransportType::Tcp,
+                    TransportType::Wss,
+                    TransportType::Ws,
+                ] {
                     if let Some(transport) = self.transports.get(&kind) {
                         if transport.has_connection_to(destination) {
                             trace!(
@@ -176,11 +181,7 @@ impl Transport for MultiplexedTransport {
         Ok(self.local_addr)
     }
 
-    async fn send_message(
-        &self,
-        message: Message,
-        destination: SocketAddr,
-    ) -> TransportResult<()> {
+    async fn send_message(&self, message: Message, destination: SocketAddr) -> TransportResult<()> {
         let transport = self.pick_transport(&message, destination);
         transport.send_message(message, destination).await
     }
@@ -189,12 +190,18 @@ impl Transport for MultiplexedTransport {
         let mut last_err: Option<TransportError> = None;
         for (kind, transport) in &self.transports {
             if let Err(e) = transport.close().await {
-                warn!("MultiplexedTransport: error closing {} transport: {}", kind, e);
+                warn!(
+                    "MultiplexedTransport: error closing {} transport: {}",
+                    kind, e
+                );
                 last_err = Some(e);
             }
         }
         if let Err(e) = self.default.close().await {
-            warn!("MultiplexedTransport: error closing default transport: {}", e);
+            warn!(
+                "MultiplexedTransport: error closing default transport: {}",
+                e
+            );
             last_err = Some(e);
         }
         match last_err {
@@ -234,7 +241,12 @@ impl Transport for MultiplexedTransport {
     fn has_connection_to(&self, remote_addr: SocketAddr) -> bool {
         // A multiplexed transport "has a connection" if any of its
         // connection-oriented children does.
-        for kind in [TransportType::Tls, TransportType::Tcp, TransportType::Wss, TransportType::Ws] {
+        for kind in [
+            TransportType::Tls,
+            TransportType::Tcp,
+            TransportType::Wss,
+            TransportType::Ws,
+        ] {
             if let Some(transport) = self.transports.get(&kind) {
                 if transport.has_connection_to(remote_addr) {
                     return true;
@@ -249,7 +261,12 @@ impl Transport for MultiplexedTransport {
         // transports for an existing flow to `destination` and dispatch
         // bare bytes on the first that matches. UDP is never asked —
         // RFC 5626 UDP keep-alive uses STUN, out of scope here.
-        for kind in [TransportType::Tls, TransportType::Tcp, TransportType::Wss, TransportType::Ws] {
+        for kind in [
+            TransportType::Tls,
+            TransportType::Tcp,
+            TransportType::Wss,
+            TransportType::Ws,
+        ] {
             if let Some(transport) = self.transports.get(&kind) {
                 if transport.has_connection_to(destination) {
                     trace!(
@@ -374,11 +391,7 @@ mod tests {
             Ok(())
         }
 
-        async fn send_raw(
-            &self,
-            _destination: SocketAddr,
-            _data: Bytes,
-        ) -> TransportResult<()> {
+        async fn send_raw(&self, _destination: SocketAddr, _data: Bytes) -> TransportResult<()> {
             self.raw_sends.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -432,8 +445,7 @@ mod tests {
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux =
-            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
         let msg = make_invite("sips:bob@example.com");
@@ -453,8 +465,7 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
 
-        let mux =
-            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let msg = make_invite("sip:bob@example.com;transport=tcp");
@@ -473,14 +484,17 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
 
-        let mux =
-            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let msg = make_invite("sip:bob@example.com");
 
         mux.send_message(msg, dest).await.unwrap();
-        assert_eq!(udp.count(), 1, "sip: URI with no transport= must default to UDP");
+        assert_eq!(
+            udp.count(),
+            1,
+            "sip: URI with no transport= must default to UDP"
+        );
         assert_eq!(tcp.count(), 0);
     }
 
@@ -498,17 +512,24 @@ mod tests {
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux =
-            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
             .await
             .unwrap();
 
-        assert_eq!(tcp.raw_count(), 1, "send_raw must route to TCP (live connection)");
+        assert_eq!(
+            tcp.raw_count(),
+            1,
+            "send_raw must route to TCP (live connection)"
+        );
         assert_eq!(tls.raw_count(), 0);
-        assert_eq!(udp.raw_count(), 0, "UDP is never used for send_raw (RFC 5626 UDP uses STUN)");
+        assert_eq!(
+            udp.raw_count(),
+            0,
+            "UDP is never used for send_raw (RFC 5626 UDP uses STUN)"
+        );
     }
 
     #[tokio::test]
@@ -521,13 +542,10 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
 
-        let mux =
-            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-        let result = mux
-            .send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
-            .await;
+        let result = mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n")).await;
         assert!(
             result.is_err(),
             "send_raw must error when no connection-oriented transport has a live flow"
@@ -549,8 +567,7 @@ mod tests {
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux =
-            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
         mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
@@ -573,8 +590,7 @@ mod tests {
         let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
 
-        let mux =
-            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let msg = make_invite("sip:bob@example.com;transport=tcp");

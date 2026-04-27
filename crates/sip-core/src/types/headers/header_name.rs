@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
 
 /// Common SIP header names
 ///
@@ -238,9 +238,11 @@ impl FromStr for HeaderName {
     fn from_str(s: &str) -> Result<Self> {
         // Return an error for empty header names
         if s.is_empty() {
-            return Err(Error::ParseError("Empty header name is not allowed".to_string()));
+            return Err(Error::ParseError(
+                "Empty header name is not allowed".to_string(),
+            ));
         }
-        
+
         let lower_s = s.to_lowercase();
         match lower_s.as_str() {
             "call-id" | "i" => Ok(HeaderName::CallId),
@@ -319,17 +321,26 @@ mod tests {
         assert_eq!(HeaderName::from_str("To").unwrap(), HeaderName::To);
         assert_eq!(HeaderName::from_str("t").unwrap(), HeaderName::To);
         assert_eq!(HeaderName::from_str("cSeq").unwrap(), HeaderName::CSeq);
-        
+
         // Extension header
         let custom = HeaderName::from_str("X-Custom").unwrap();
         assert!(matches!(custom, HeaderName::Other(s) if s == "X-Custom"));
-        
+
         // Empty header name is invalid
         assert!(HeaderName::from_str("").is_err());
 
-        assert_eq!(HeaderName::from_str("Session-Expires").unwrap(), HeaderName::SessionExpires);
-        assert_eq!(HeaderName::from_str("session-expires").unwrap(), HeaderName::SessionExpires);
-        assert_eq!(HeaderName::from_str("x").unwrap(), HeaderName::SessionExpires);
+        assert_eq!(
+            HeaderName::from_str("Session-Expires").unwrap(),
+            HeaderName::SessionExpires
+        );
+        assert_eq!(
+            HeaderName::from_str("session-expires").unwrap(),
+            HeaderName::SessionExpires
+        );
+        assert_eq!(
+            HeaderName::from_str("x").unwrap(),
+            HeaderName::SessionExpires
+        );
     }
 
     #[test]
@@ -349,11 +360,11 @@ mod tests {
         ];
         // Later-RFC compact forms registered at IANA.
         let later = [
-            ("o", HeaderName::Event),           // RFC 6665
-            ("u", HeaderName::AllowEvents),     // RFC 6665 (previously mis-mapped to Unsupported)
-            ("r", HeaderName::ReferTo),         // RFC 3515
-            ("b", HeaderName::ReferredBy),      // RFC 3892
-            ("x", HeaderName::SessionExpires),  // RFC 4028
+            ("o", HeaderName::Event),          // RFC 6665
+            ("u", HeaderName::AllowEvents),    // RFC 6665 (previously mis-mapped to Unsupported)
+            ("r", HeaderName::ReferTo),        // RFC 3515
+            ("b", HeaderName::ReferredBy),     // RFC 3892
+            ("x", HeaderName::SessionExpires), // RFC 4028
         ];
         for (compact, expected) in rfc3261.iter().chain(later.iter()) {
             // Case-insensitive lookup — try lower and upper.

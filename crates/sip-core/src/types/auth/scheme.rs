@@ -3,10 +3,10 @@
 //! This module defines the authentication schemes, algorithms, and quality of protection
 //! options used in SIP authentication.
 
+use crate::error::{Error, Result};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Deserialize, Serialize};
-use crate::error::{Result, Error};
 
 /// Authentication Scheme (Digest, Basic, etc.)
 ///
@@ -70,7 +70,7 @@ pub enum Algorithm {
 }
 
 impl fmt::Display for Algorithm {
-     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Algorithm::Md5 => write!(f, "MD5"),
             Algorithm::Md5Sess => write!(f, "MD5-sess"),
@@ -136,4 +136,4 @@ impl FromStr for Qop {
             _ => Err(Error::InvalidInput("Empty qop value".to_string())),
         }
     }
-} 
+}

@@ -2,4 +2,4 @@
 //!
 //! This module contains components for fingerprint generation and verification.
 
-pub mod verify; 
+pub mod verify;

@@ -1,21 +1,21 @@
 //! Common audio codec types and utilities
 
-use crate::{AudioBuffer, AudioFormat};
-use crate::types::SampleRate;
 use crate::error::Result;
 use crate::types::AudioFrame;
+use crate::types::SampleRate;
+use crate::{AudioBuffer, AudioFormat};
 
 /// Audio codec trait for encoding and decoding
 pub trait AudioCodec: Send {
     /// Encode an audio frame to compressed data
     fn encode(&mut self, audio_frame: &AudioFrame) -> Result<Vec<u8>>;
-    
+
     /// Decode compressed data to an audio frame
     fn decode(&mut self, encoded_data: &[u8]) -> Result<AudioFrame>;
-    
+
     /// Get codec information
     fn get_info(&self) -> CodecInfo;
-    
+
     /// Reset codec state
     fn reset(&mut self);
 }
@@ -53,13 +53,13 @@ impl FrameSize {
     pub fn as_ms(&self) -> u32 {
         *self as u32
     }
-    
+
     /// Get the number of samples in a frame at the given sample rate
     pub fn samples(&self, sample_rate: SampleRate) -> usize {
         let samples_per_ms = sample_rate.as_hz() as usize / 1000;
         samples_per_ms * self.as_ms() as usize
     }
-    
+
     /// Create from raw milliseconds, defaulting to 20ms if not a standard size
     pub fn from_ms(ms: u32) -> Self {
         match ms {
@@ -139,9 +139,9 @@ pub struct AudioCodecParameters {
 impl Default for AudioCodecParameters {
     fn default() -> Self {
         Self {
-            sample_rate: 8000,  // Default to 8kHz for telephony
+            sample_rate: 8000, // Default to 8kHz for telephony
             channels: 1,
-            bitrate: 64000,     // 64kbps for G.711
+            bitrate: 64000, // 64kbps for G.711
             complexity: 5,
             bitrate_mode: BitrateMode::Constant,
             quality_mode: QualityMode::Voice,
@@ -154,7 +154,12 @@ impl Default for AudioCodecParameters {
 }
 
 /// Calculate the expected PCM frame size in bytes
-pub fn pcm_frame_size(sample_rate: SampleRate, frame_size: FrameSize, channels: u8, bytes_per_sample: usize) -> usize {
+pub fn pcm_frame_size(
+    sample_rate: SampleRate,
+    frame_size: FrameSize,
+    channels: u8,
+    bytes_per_sample: usize,
+) -> usize {
     let samples = frame_size.samples(sample_rate) * channels as usize;
     samples * bytes_per_sample
 }
@@ -164,4 +169,4 @@ pub fn codec_frame_size(sample_rate: SampleRate, frame_size: FrameSize, bitrate:
     let duration_sec = frame_size.as_ms() as f64 / 1000.0;
     let bytes = (bitrate as f64 * duration_sec / 8.0).ceil() as usize;
     bytes
-} 
+}

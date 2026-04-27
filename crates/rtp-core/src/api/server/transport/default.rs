@@ -3,106 +3,108 @@
 //! This file contains the implementation of the MediaTransportServer trait
 //! through the DefaultMediaTransportServer struct.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use std::any::Any;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tokio::sync::{mpsc, Mutex, RwLock, broadcast};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::api::common::frame::MediaFrame;
+use crate::api::client::transport::{RtcpStats, VoipMetrics};
+use crate::api::common::config::{SecurityInfo, SecurityMode};
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
-use crate::api::common::stats::{MediaStats, QualityLevel, StreamStats, Direction};
-use crate::api::common::config::{SecurityInfo, SecurityMode};
-use crate::api::common::frame::MediaFrameType;
 use crate::api::common::extension::ExtensionFormat;
-use crate::api::server::transport::{MediaTransportServer, ClientInfo, HeaderExtension};
-use crate::api::server::security::{ServerSecurityContext, ClientSecurityContext, DefaultServerSecurityContext};
+use crate::api::common::frame::MediaFrame;
+use crate::api::common::frame::MediaFrameType;
+use crate::api::common::stats::{Direction, MediaStats, QualityLevel, StreamStats};
 use crate::api::server::config::ServerConfig;
-use crate::api::client::transport::{RtcpStats, VoipMetrics};
+use crate::api::server::security::{
+    ClientSecurityContext, DefaultServerSecurityContext, ServerSecurityContext,
+};
+use crate::api::server::transport::{ClientInfo, HeaderExtension, MediaTransportServer};
 use crate::session::{RtpSession, RtpSessionConfig, RtpSessionEvent};
-use crate::transport::{RtpTransportConfig, UdpRtpTransport, RtpTransport, SecurityRtpTransport};
-use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
 use crate::srtp::crypto::SrtpCryptoKey;
+use crate::srtp::{SrtpContext, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_80};
+use crate::transport::{RtpTransport, RtpTransportConfig, SecurityRtpTransport, UdpRtpTransport};
+use crate::{CsrcManager, CsrcMapping, RtpCsrc, RtpSsrc, MAX_CSRC_COUNT};
 
-use super::core::{ClientConnection, handle_client, handle_client_static};
+use super::core::{handle_client, handle_client_static, ClientConnection};
 
 /// Default implementation of the MediaTransportServer
 pub struct DefaultMediaTransportServer {
     /// Session identifier
     id: String,
-    
+
     /// Configuration
     config: ServerConfig,
-    
+
     /// Whether the server is running
     running: Arc<RwLock<bool>>,
-    
+
     /// Main socket for the server
     main_socket: Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
-    
+
     /// Socket
     socket: Arc<RwLock<Option<UdpSocket>>>,
-    
+
     /// Main transport
     transport: Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
-    
+
     /// Client sockets
     client_sockets: Arc<RwLock<HashMap<String, UdpSocket>>>,
-    
+
     /// Client transports
     client_transports: Arc<RwLock<HashMap<String, Arc<dyn RtpTransport>>>>,
-    
+
     /// Security context for DTLS/SRTP
     security_context: Arc<RwLock<Option<Arc<dyn ServerSecurityContext + Send + Sync>>>>,
-    
+
     /// Client connections
     clients: Arc<RwLock<HashMap<String, ClientConnection>>>,
-    
+
     /// Transport event callbacks
     event_callbacks: Arc<RwLock<Vec<MediaEventCallback>>>,
-    
+
     /// Client connected callbacks
     client_connected_callbacks: Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
-    
+
     /// Client disconnected callbacks
     client_disconnected_callbacks: Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
-    
+
     /// SSRC demultiplexing enabled flag
     ssrc_demultiplexing_enabled: Arc<RwLock<bool>>,
-    
+
     /// CSRC management status
     csrc_management_enabled: Arc<RwLock<bool>>,
-    
+
     /// CSRC manager
     csrc_manager: Arc<RwLock<CsrcManager>>,
-    
+
     /// Header extension format
     header_extension_format: Arc<RwLock<ExtensionFormat>>,
-    
+
     /// Header extensions enabled flag
     header_extensions_enabled: Arc<RwLock<bool>>,
-    
+
     /// Header extension ID-to-URI mappings
     header_extension_mappings: Arc<RwLock<HashMap<u8, String>>>,
-    
+
     /// Pending header extensions to be added to outgoing packets
     pending_extensions: Arc<RwLock<HashMap<String, Vec<HeaderExtension>>>>,
-    
+
     /// Header extensions received from clients
     received_extensions: Arc<RwLock<HashMap<String, Vec<HeaderExtension>>>>,
-    
+
     /// Frame sender for broadcast
     frame_sender: broadcast::Sender<(String, MediaFrame)>,
-    
+
     /// Event handling task
     event_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
@@ -140,18 +142,16 @@ impl Clone for DefaultMediaTransportServer {
 
 impl DefaultMediaTransportServer {
     /// Create a new DefaultMediaTransportServer
-    pub async fn new(
-        config: ServerConfig,
-    ) -> Result<Self, MediaTransportError> {
+    pub async fn new(config: ServerConfig) -> Result<Self, MediaTransportError> {
         // Extract configuration values
         let csrc_management_enabled = config.csrc_management_enabled;
         let header_extensions_enabled = config.header_extensions_enabled;
         let header_extension_format = config.header_extension_format;
         let ssrc_demultiplexing_enabled = config.ssrc_demultiplexing_enabled.unwrap_or(false); // Read from config, default to false if not specified
-        
+
         // Create broadcast channel for frames with buffer size 16
         let (sender, _) = broadcast::channel(16);
-        
+
         Ok(Self {
             id: format!("media-server-main-{}", Uuid::new_v4()),
             config,
@@ -180,21 +180,23 @@ impl DefaultMediaTransportServer {
     }
 
     /// Get the frame type based on payload type
-    pub fn get_frame_type_from_payload_type(&self, payload_type: u8) -> crate::api::common::frame::MediaFrameType {
+    pub fn get_frame_type_from_payload_type(
+        &self,
+        payload_type: u8,
+    ) -> crate::api::common::frame::MediaFrameType {
         super::util::get_frame_type_from_payload_type(payload_type)
     }
 
     /// Create a new instance of ServerMetrics
-    pub async fn get_server_metrics(&self, server_start_time: std::time::Duration) -> Result<super::stats::ServerMetrics, MediaTransportError> {
+    pub async fn get_server_metrics(
+        &self,
+        server_start_time: std::time::Duration,
+    ) -> Result<super::stats::ServerMetrics, MediaTransportError> {
         // Get current media stats
         let media_stats = self.get_stats().await?;
-        
+
         // Create server metrics
-        super::stats::get_server_metrics(
-            &self.clients,
-            &media_stats,
-            server_start_time
-        ).await
+        super::stats::get_server_metrics(&self.clients, &media_stats, server_start_time).await
     }
 }
 
@@ -212,19 +214,16 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 return Ok(());
             }
         }
-        
+
         // Set running flag
         {
             let mut running = self.running.write().await;
             *running = true;
         }
-        
+
         // Initialize security if needed
-        super::security::init_security_if_needed(
-            &self.config, 
-            &self.security_context
-        ).await?;
-        
+        super::security::init_security_if_needed(&self.config, &self.security_context).await?;
+
         // Create main transport
         let transport_config = RtpTransportConfig {
             local_rtp_addr: self.config.local_address,
@@ -234,21 +233,31 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             session_id: Some(format!("media-server-main-{}", Uuid::new_v4())),
             use_port_allocator: false, // Changed from true to false to use exact specified port
         };
-        
-        debug!("Creating main transport with config: {:?}", transport_config);
-        
+
+        debug!(
+            "Creating main transport with config: {:?}",
+            transport_config
+        );
+
         // Create base UDP transport
-        let udp_transport = UdpRtpTransport::new(transport_config).await
-            .map_err(|e| MediaTransportError::Transport(format!("Failed to create UDP transport: {}", e)))?;
-        
+        let udp_transport = UdpRtpTransport::new(transport_config).await.map_err(|e| {
+            MediaTransportError::Transport(format!("Failed to create UDP transport: {}", e))
+        })?;
+
         // Create SecurityRtpTransport wrapper
-        let transport = SecurityRtpTransport::new(Arc::new(udp_transport), true).await
-            .map_err(|e| MediaTransportError::Transport(format!("Failed to create SecurityRtpTransport: {}", e)))?;
-        
+        let transport = SecurityRtpTransport::new(Arc::new(udp_transport), true)
+            .await
+            .map_err(|e| {
+                MediaTransportError::Transport(format!(
+                    "Failed to create SecurityRtpTransport: {}",
+                    e
+                ))
+            })?;
+
         // Note: We don't start the UDP receiver here since SecurityRtpTransport handles packet reception
-        
+
         let transport_arc: Arc<dyn RtpTransport> = Arc::new(transport);
-        
+
         // Wire SRTP context if security is enabled
         let security_guard = self.security_context.read().await;
         if let Some(security_ctx) = security_guard.as_ref() {
@@ -257,37 +266,56 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             if self.config.security_config.security_mode == SecurityMode::Srtp {
                 if let Some(srtp_key) = &self.config.security_config.srtp_key {
                     debug!("Configuring server SRTP context with pre-shared keys");
-                    debug!("Creating server SRTP context from {} byte key", srtp_key.len());
-                    
+                    debug!(
+                        "Creating server SRTP context from {} byte key",
+                        srtp_key.len()
+                    );
+
                     // Extract key and salt (first 16 bytes = key, next 14 bytes = salt)
                     if srtp_key.len() >= 30 {
                         let key = srtp_key[0..16].to_vec();
                         let salt = srtp_key[16..30].to_vec();
-                        
-                        debug!("Creating server SrtpCryptoKey with key: {} bytes, salt: {} bytes", key.len(), salt.len());
+
+                        debug!(
+                            "Creating server SrtpCryptoKey with key: {} bytes, salt: {} bytes",
+                            key.len(),
+                            salt.len()
+                        );
                         let crypto_key = SrtpCryptoKey::new(key, salt);
-                        
+
                         match SrtpContext::new(SRTP_AES128_CM_SHA1_80, crypto_key) {
                             Ok(srtp_context) => {
                                 debug!("Successfully created server SRTP context");
-                                
+
                                 // Set SRTP context on security transport
-                                if let Some(sec_transport) = transport_arc.as_any()
-                                    .downcast_ref::<SecurityRtpTransport>() {
+                                if let Some(sec_transport) = transport_arc
+                                    .as_any()
+                                    .downcast_ref::<SecurityRtpTransport>()
+                                {
                                     sec_transport.set_srtp_context(srtp_context).await;
-                                    info!("SRTP context successfully configured on server transport");
+                                    info!(
+                                        "SRTP context successfully configured on server transport"
+                                    );
                                 } else {
                                     warn!("Failed to downcast to SecurityRtpTransport for server SRTP context setting");
                                 }
-                            },
+                            }
                             Err(e) => {
                                 error!("Failed to create server SRTP context: {}", e);
-                                return Err(MediaTransportError::Security(format!("Server SRTP context creation failed: {}", e)));
+                                return Err(MediaTransportError::Security(format!(
+                                    "Server SRTP context creation failed: {}",
+                                    e
+                                )));
                             }
                         }
                     } else {
-                        error!("Server SRTP key too short: {} bytes (expected at least 30)", srtp_key.len());
-                        return Err(MediaTransportError::Security("Server SRTP key too short".to_string()));
+                        error!(
+                            "Server SRTP key too short: {} bytes (expected at least 30)",
+                            srtp_key.len()
+                        );
+                        return Err(MediaTransportError::Security(
+                            "Server SRTP key too short".to_string(),
+                        ));
                     }
                 } else {
                     warn!("SRTP mode enabled on server but no key provided");
@@ -295,37 +323,49 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             }
         }
         drop(security_guard);
-        
+
         // Store the socket in a thread-safe way using RwLock
         {
             let mut main_socket = self.main_socket.write().await;
             *main_socket = Some(transport_arc.clone());
         }
-        
+
         // Subscribe to transport events
         let mut transport_events = transport_arc.subscribe();
         let clients_clone = self.clients.clone();
         let sender_clone = self.frame_sender.clone();
         let ssrc_demux_enabled_clone = self.ssrc_demultiplexing_enabled.clone();
-        
+
         let task = tokio::spawn(async move {
             debug!("Started transport event task");
             while let Ok(event) = transport_events.recv().await {
                 match event {
-                    crate::traits::RtpEvent::MediaReceived { source, payload, payload_type, timestamp, marker, ssrc } => {
+                    crate::traits::RtpEvent::MediaReceived {
+                        source,
+                        payload,
+                        payload_type,
+                        timestamp,
+                        marker,
+                        ssrc,
+                    } => {
                         // Debug output to help diagnose issues
-                        debug!("RtpEvent::MediaReceived from {} - SSRC={:08x}, payload size={}", source, ssrc, payload.len());
-                        
+                        debug!(
+                            "RtpEvent::MediaReceived from {} - SSRC={:08x}, payload size={}",
+                            source,
+                            ssrc,
+                            payload.len()
+                        );
+
                         // Smart detection: if the payload is small and looks like text/media data rather than RTP packet,
                         // it's likely already processed by SecurityRtpTransport
-                        let is_processed_payload = payload.len() < 100 && 
-                            (payload.len() < 12 || // Too small for RTP header
+                        let is_processed_payload = payload.len() < 100
+                            && (payload.len() < 12 || // Too small for RTP header
                              (payload.len() >= 1 && payload[0] != 0x80)); // First byte doesn't look like RTP version 2
-                        
+
                         let (frame, final_ssrc) = if is_processed_payload {
                             // This is already processed payload from SecurityRtpTransport - use event SSRC
                             debug!("Detected processed payload from SecurityRtpTransport - using event SSRC={:08x}", ssrc);
-                            
+
                             // Use the RTP header information already provided in the event
                             let frame = crate::api::common::frame::MediaFrame {
                                 frame_type: crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
@@ -337,28 +377,29 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                 ssrc, // Use the SSRC from the event!
                                 csrcs: Vec::new(),
                             };
-                            
+
                             // Log payload data if it's text (helps with debugging)
                             if let Ok(text) = std::str::from_utf8(&payload) {
                                 debug!("Processed payload (text): {}", text);
                             }
-                            
+
                             // Use the event SSRC directly
                             (frame, ssrc)
                         } else {
                             // This looks like a raw RTP packet - parse it normally
                             debug!("Attempting to parse raw RTP packet from payload...");
                             let packet_result = crate::packet::RtpPacket::parse(&payload);
-                            
+
                             match packet_result {
                                 Ok(packet) => {
                                     // Successfully parsed the packet, use its header information
                                     debug!("Successfully parsed RTP packet with SSRC={:08x}, seq={}, ts={}, PT={}", 
                                            packet.header.ssrc, packet.header.sequence_number, 
                                            packet.header.timestamp, packet.header.payload_type);
-                                    
+
                                     let frame = crate::api::common::frame::MediaFrame {
-                                        frame_type: crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
+                                        frame_type:
+                                            crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
                                         data: packet.payload.to_vec(),
                                         timestamp: packet.header.timestamp,
                                         sequence: packet.header.sequence_number,
@@ -367,31 +408,35 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                         ssrc: packet.header.ssrc,
                                         csrcs: packet.header.csrc.clone(),
                                     };
-                                    
+
                                     // Log payload data if it's text (helps with debugging)
                                     if let Ok(text) = std::str::from_utf8(&packet.payload) {
                                         debug!("Raw packet payload (text): {}", text);
                                     }
-                                    
+
                                     (frame, packet.header.ssrc)
-                                },
+                                }
                                 Err(e) => {
                                     // If we couldn't parse the packet, create a MediaFrame with the available info
-                                    debug!("Couldn't parse RTP packet, using available info: {}", e);
-                                    
+                                    debug!(
+                                        "Couldn't parse RTP packet, using available info: {}",
+                                        e
+                                    );
+
                                     // Attempt to dump the first few bytes for debugging
                                     if payload.len() >= 12 {
                                         let mut header_bytes = [0u8; 12];
                                         header_bytes.copy_from_slice(&payload[0..12]);
                                         debug!("First 12 bytes of payload: {:?}", header_bytes);
                                     }
-                                    
+
                                     // Generate a random sequence number and SSRC as fallback
                                     let sequence_number = rand::random::<u16>();
                                     let ssrc = rand::random::<u32>();
-                                    
+
                                     let frame = crate::api::common::frame::MediaFrame {
-                                        frame_type: crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
+                                        frame_type:
+                                            crate::api::common::frame::MediaFrameType::Audio, // Default to Audio, media-core handles frame type
                                         data: payload.to_vec(),
                                         timestamp,
                                         sequence: sequence_number,
@@ -404,18 +449,21 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                                 }
                             }
                         };
-                        
+
                         // Check if SSRC demultiplexing is enabled
                         let ssrc_demux_enabled = *ssrc_demux_enabled_clone.read().await;
-                        debug!("SSRC demultiplexing enabled: {}, handling packet with SSRC={:08x}", 
-                               ssrc_demux_enabled, final_ssrc);
-                        
+                        debug!(
+                            "SSRC demultiplexing enabled: {}, handling packet with SSRC={:08x}",
+                            ssrc_demux_enabled, final_ssrc
+                        );
+
                         // Check if we already have a client for this address
                         let clients = clients_clone.read().await;
                         let client_exists = clients.values().any(|c| c.address == source);
                         let client_id = if client_exists {
                             // Find the client ID for this address
-                            clients.values()
+                            clients
+                                .values()
                                 .find(|c| c.address == source)
                                 .map(|c| c.id.clone())
                                 .unwrap_or_else(|| format!("unknown-{}", source))
@@ -424,41 +472,56 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                             format!("pending-{}", source)
                         };
                         drop(clients);
-                        
+
                         // Forward directly to broadcast channel
                         // This ensures frames are available immediately via the receive_frame method
                         match sender_clone.send((client_id.clone(), frame)) {
                             Ok(receivers) => {
                                 debug!("Directly forwarded frame to {} receivers for client {} (SSRC={:08x})", 
                                         receivers, client_id, final_ssrc);
-                            },
+                            }
                             Err(e) => {
                                 debug!("No receivers for direct frame forwarding: {}", e);
                             }
                         }
-                        
+
                         // Handle client creation if new
                         if !client_exists {
                             // New client - handle it
                             debug!("New client detected at {}, handling...", source);
                             let client_result = super::core::handle_client_static(
-                                source, 
-                                &clients_clone, 
-                                &sender_clone
-                            ).await;
-                            
+                                source,
+                                &clients_clone,
+                                &sender_clone,
+                            )
+                            .await;
+
                             match client_result {
-                                Ok(client_id) => debug!("Successfully handled new client {} from {}", client_id, source),
-                                Err(e) => error!("Failed to handle new client from {}: {}", source, e),
+                                Ok(client_id) => debug!(
+                                    "Successfully handled new client {} from {}",
+                                    client_id, source
+                                ),
+                                Err(e) => {
+                                    error!("Failed to handle new client from {}: {}", source, e)
+                                }
                             }
                         } else {
-                            debug!("Existing client from {}, no new client creation needed", source);
+                            debug!(
+                                "Existing client from {}, no new client creation needed",
+                                source
+                            );
                         }
-                    },
+                    }
                     crate::traits::RtpEvent::RtcpReceived { source, .. } => {
                         debug!("RtpEvent::RtcpReceived from {}", source);
-                    },
-                    crate::traits::RtpEvent::DtmfEvent { source, event, end_of_event, timestamp: _, .. } => {
+                    }
+                    crate::traits::RtpEvent::DtmfEvent {
+                        source,
+                        event,
+                        end_of_event,
+                        timestamp: _,
+                        ..
+                    } => {
                         // RFC 4733 DTMF is surfaced on the transport
                         // broadcast channel directly; the server-side
                         // transport doesn't synthesize a MediaFrame.
@@ -466,22 +529,22 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                             "RtpEvent::DtmfEvent from {} event={} end={}",
                             source, event, end_of_event
                         );
-                    },
+                    }
                     crate::traits::RtpEvent::Error(e) => {
                         error!("Transport error: {}", e);
-                    },
+                    }
                 }
             }
             debug!("Transport event task ended");
         });
-        
+
         // Store task handle
         let mut event_task = self.event_task.lock().await;
         *event_task = Some(task);
-        
+
         Ok(())
     }
-    
+
     /// Stop the server
     ///
     /// This stops listening for new connections and disconnects all
@@ -501,9 +564,9 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             let mut running = self.running.write().await;
             *running = false;
         }
-        
+
         debug!("Stopping server - aborting event task");
-        
+
         // Stop event task first to prevent new client connections
         {
             let mut event_task = self.event_task.lock().await;
@@ -519,16 +582,16 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 debug!("No event task to abort");
             }
         }
-        
+
         debug!("Disconnecting all clients");
-        
+
         // Disconnect all clients
         let mut clients = self.clients.write().await;
         debug!("Disconnecting {} clients", clients.len());
-        
+
         for (id, client) in clients.iter_mut() {
             debug!("Disconnecting client {}", id);
-            
+
             // Abort task
             if let Some(task) = client.task.take() {
                 debug!("Aborting client task for {}", id);
@@ -539,7 +602,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                     Err(_) => debug!("Client task termination for {} timed out", id),
                 }
             }
-            
+
             // Close session
             debug!("Closing session for client {}", id);
             let mut session = client.session.lock().await;
@@ -547,7 +610,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 warn!("Error closing client session {}: {}", id, e);
             }
             drop(session);
-            
+
             // Close security context if present
             if let Some(security_ctx) = &client.security {
                 debug!("Closing security for client {}", id);
@@ -555,10 +618,10 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                     warn!("Error closing client security {}: {}", id, e);
                 }
             }
-            
+
             // Mark as disconnected
             client.connected = false;
-            
+
             // Notify callbacks
             debug!("Notifying disconnection callbacks for client {}", id);
             let callbacks_guard = self.client_disconnected_callbacks.read().await;
@@ -569,18 +632,18 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                 security_info: None,
                 connected: false,
             };
-            
+
             for callback in &*callbacks_guard {
                 callback(client_info.clone());
             }
             drop(callbacks_guard);
         }
-        
+
         // Clear clients
         debug!("Clearing client list");
         clients.clear();
         drop(clients);
-        
+
         // Close main socket if available
         debug!("Closing main socket");
         let mut main_socket = self.main_socket.write().await;
@@ -592,7 +655,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
         } else {
             debug!("No main socket to close");
         }
-        
+
         // Ensure we release broadcast channel resources
         debug!("Ensuring broadcast channel resources are released");
         // Create a temporary receiver and then immediately drop it to avoid any lingering receivers
@@ -600,384 +663,452 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             let _temp_receiver = self.frame_sender.subscribe();
             // Immediately drop the receiver
         }
-        
+
         debug!("Server stopped successfully");
         Ok(())
     }
-    
+
     /// Receive a media frame from any client
     async fn receive_frame(&self) -> Result<(String, MediaFrame), MediaTransportError> {
         super::core::receive_frame(&self.frame_sender).await
     }
-    
+
     /// Get a persistent frame receiver for receiving multiple frames
     fn get_frame_receiver(&self) -> broadcast::Receiver<(String, MediaFrame)> {
         self.frame_sender.subscribe()
     }
-    
+
     /// Get the local address currently bound to
     async fn get_local_address(&self) -> Result<SocketAddr, MediaTransportError> {
         let main_socket = self.main_socket.read().await;
         if let Some(socket) = main_socket.as_ref() {
             match socket.local_rtp_addr() {
                 Ok(addr) => Ok(addr),
-                Err(e) => Err(MediaTransportError::Transport(format!("Failed to get local address: {}", e))),
+                Err(e) => Err(MediaTransportError::Transport(format!(
+                    "Failed to get local address: {}",
+                    e
+                ))),
             }
         } else {
-            Err(MediaTransportError::Transport("No socket bound yet. Start server first.".to_string()))
+            Err(MediaTransportError::Transport(
+                "No socket bound yet. Start server first.".to_string(),
+            ))
         }
     }
-    
+
     /// Send a media frame to a specific client
-    async fn send_frame_to(&self, client_id: &str, frame: MediaFrame) -> Result<(), MediaTransportError> {
+    async fn send_frame_to(
+        &self,
+        client_id: &str,
+        frame: MediaFrame,
+    ) -> Result<(), MediaTransportError> {
         super::core::send_frame_to(
-            client_id, 
-            frame, 
+            client_id,
+            frame,
             &self.clients,
             &self.ssrc_demultiplexing_enabled,
             &self.csrc_management_enabled,
             &self.csrc_manager,
             &self.main_socket,
-        ).await
+        )
+        .await
     }
-    
+
     /// Broadcast a media frame to all connected clients
     async fn broadcast_frame(&self, frame: MediaFrame) -> Result<(), MediaTransportError> {
         super::core::broadcast_frame(
-            frame, 
+            frame,
             &self.clients,
             &self.csrc_management_enabled,
             &self.csrc_manager,
             &self.main_socket,
-        ).await
+        )
+        .await
     }
-    
+
     /// Get a list of connected clients
     async fn get_clients(&self) -> Result<Vec<ClientInfo>, MediaTransportError> {
-        super::core::get_clients_info(
-            &self.clients,
-            &self.config,
-        ).await
+        super::core::get_clients_info(&self.clients, &self.config).await
     }
-    
+
     /// Disconnect a specific client
     async fn disconnect_client(&self, client_id: &str) -> Result<(), MediaTransportError> {
         super::core::disconnect_client(
             client_id,
             &self.clients,
             &self.client_disconnected_callbacks,
-        ).await
+        )
+        .await
     }
-    
+
     /// Register a callback for transport events
     async fn on_event(&self, callback: MediaEventCallback) -> Result<(), MediaTransportError> {
-        super::core::on_event(
-            callback,
-            &self.event_callbacks,
-        ).await
+        super::core::on_event(callback, &self.event_callbacks).await
     }
-    
+
     /// Register a callback for client connection events
-    async fn on_client_connected(&self, callback: Box<dyn Fn(ClientInfo) + Send + Sync>) -> Result<(), MediaTransportError> {
-        super::core::on_client_connected(
-            callback,
-            &self.client_connected_callbacks,
-        ).await
+    async fn on_client_connected(
+        &self,
+        callback: Box<dyn Fn(ClientInfo) + Send + Sync>,
+    ) -> Result<(), MediaTransportError> {
+        super::core::on_client_connected(callback, &self.client_connected_callbacks).await
     }
-    
+
     /// Register a callback for client disconnection events
-    async fn on_client_disconnected(&self, callback: Box<dyn Fn(ClientInfo) + Send + Sync>) -> Result<(), MediaTransportError> {
-        super::core::on_client_disconnected(
-            callback,
-            &self.client_disconnected_callbacks,
-        ).await
+    async fn on_client_disconnected(
+        &self,
+        callback: Box<dyn Fn(ClientInfo) + Send + Sync>,
+    ) -> Result<(), MediaTransportError> {
+        super::core::on_client_disconnected(callback, &self.client_disconnected_callbacks).await
     }
-    
+
     /// Get statistics for all clients
     async fn get_stats(&self) -> Result<MediaStats, MediaTransportError> {
         // Stats aggregation moved to media-core
         Ok(MediaStats::default())
     }
-    
+
     /// Get statistics for a specific client
     async fn get_client_stats(&self, client_id: &str) -> Result<MediaStats, MediaTransportError> {
         // Stats aggregation moved to media-core
         Ok(MediaStats::default())
     }
-    
+
     /// Get security information for SDP exchange
     async fn get_security_info(&self) -> Result<SecurityInfo, MediaTransportError> {
-        super::security::get_security_info(
-            &self.config,
-            &self.security_context,
-        ).await
+        super::security::get_security_info(&self.config, &self.security_context).await
     }
-    
+
     async fn send_rtcp_receiver_report(&self) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_receiver_report(
-            &self.clients
-        ).await
+        super::rtcp::send_rtcp_receiver_report(&self.clients).await
     }
-    
+
     async fn send_rtcp_sender_report(&self) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_sender_report(
-            &self.clients
-        ).await
+        super::rtcp::send_rtcp_sender_report(&self.clients).await
     }
-    
-    async fn send_rtcp_receiver_report_to_client(&self, client_id: &str) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_receiver_report_to_client(
-            client_id,
-            &self.clients
-        ).await
+
+    async fn send_rtcp_receiver_report_to_client(
+        &self,
+        client_id: &str,
+    ) -> Result<(), MediaTransportError> {
+        super::rtcp::send_rtcp_receiver_report_to_client(client_id, &self.clients).await
     }
-    
-    async fn send_rtcp_sender_report_to_client(&self, client_id: &str) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_sender_report_to_client(
-            client_id,
-            &self.clients
-        ).await
+
+    async fn send_rtcp_sender_report_to_client(
+        &self,
+        client_id: &str,
+    ) -> Result<(), MediaTransportError> {
+        super::rtcp::send_rtcp_sender_report_to_client(client_id, &self.clients).await
     }
-    
+
     async fn get_rtcp_stats(&self) -> Result<RtcpStats, MediaTransportError> {
-        super::rtcp::get_rtcp_stats(
-            &self.clients
-        ).await
+        super::rtcp::get_rtcp_stats(&self.clients).await
     }
-    
-    async fn get_client_rtcp_stats(&self, client_id: &str) -> Result<RtcpStats, MediaTransportError> {
-        super::rtcp::get_client_rtcp_stats(
-            client_id,
-            &self.clients
-        ).await
+
+    async fn get_client_rtcp_stats(
+        &self,
+        client_id: &str,
+    ) -> Result<RtcpStats, MediaTransportError> {
+        super::rtcp::get_client_rtcp_stats(client_id, &self.clients).await
     }
-    
+
     async fn set_rtcp_interval(&self, interval: Duration) -> Result<(), MediaTransportError> {
-        super::rtcp::set_rtcp_interval(
-            &self.clients,
-            interval
-        ).await
+        super::rtcp::set_rtcp_interval(&self.clients, interval).await
     }
-    
+
     async fn send_rtcp_app(&self, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_app(
-            &self.clients,
-            &self.main_socket,
-            name,
-            data
-        ).await
+        super::rtcp::send_rtcp_app(&self.clients, &self.main_socket, name, data).await
     }
-    
-    async fn send_rtcp_app_to_client(&self, client_id: &str, name: &str, data: Vec<u8>) -> Result<(), MediaTransportError> {
+
+    async fn send_rtcp_app_to_client(
+        &self,
+        client_id: &str,
+        name: &str,
+        data: Vec<u8>,
+    ) -> Result<(), MediaTransportError> {
         super::rtcp::send_rtcp_app_to_client(
             client_id,
             &self.clients,
             &self.main_socket,
             name,
-            data
-        ).await
+            data,
+        )
+        .await
     }
-    
+
     async fn send_rtcp_bye(&self, reason: Option<String>) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_bye(
-            &self.clients,
-            &self.main_socket,
-            reason
-        ).await
+        super::rtcp::send_rtcp_bye(&self.clients, &self.main_socket, reason).await
     }
-    
-    async fn send_rtcp_bye_to_client(&self, client_id: &str, reason: Option<String>) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_bye_to_client(
-            client_id,
-            &self.clients,
-            &self.main_socket,
-            reason
-        ).await
+
+    async fn send_rtcp_bye_to_client(
+        &self,
+        client_id: &str,
+        reason: Option<String>,
+    ) -> Result<(), MediaTransportError> {
+        super::rtcp::send_rtcp_bye_to_client(client_id, &self.clients, &self.main_socket, reason)
+            .await
     }
-    
-    async fn send_rtcp_xr_voip_metrics(&self, metrics: VoipMetrics) -> Result<(), MediaTransportError> {
-        super::rtcp::send_rtcp_xr_voip_metrics(
-            &self.clients,
-            &self.main_socket,
-            metrics
-        ).await
+
+    async fn send_rtcp_xr_voip_metrics(
+        &self,
+        metrics: VoipMetrics,
+    ) -> Result<(), MediaTransportError> {
+        super::rtcp::send_rtcp_xr_voip_metrics(&self.clients, &self.main_socket, metrics).await
     }
-    
-    async fn send_rtcp_xr_voip_metrics_to_client(&self, client_id: &str, metrics: VoipMetrics) -> Result<(), MediaTransportError> {
+
+    async fn send_rtcp_xr_voip_metrics_to_client(
+        &self,
+        client_id: &str,
+        metrics: VoipMetrics,
+    ) -> Result<(), MediaTransportError> {
         super::rtcp::send_rtcp_xr_voip_metrics_to_client(
             client_id,
             &self.clients,
             &self.main_socket,
-            metrics
-        ).await
+            metrics,
+        )
+        .await
     }
-    
+
     async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
         Ok(*self.csrc_management_enabled.read().await)
     }
-    
+
     async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError> {
         // Check if already enabled
         if *self.csrc_management_enabled.read().await {
             return Ok(true);
         }
-        
+
         // Set enabled flag
         *self.csrc_management_enabled.write().await = true;
-        
+
         debug!("Enabled CSRC management on server");
         Ok(true)
     }
-    
+
     async fn add_csrc_mapping(&self, mapping: CsrcMapping) -> Result<(), MediaTransportError> {
         // CSRC management moved to media-core
         Ok(())
     }
-    
-    async fn add_simple_csrc_mapping(&self, original_ssrc: RtpSsrc, csrc: RtpCsrc) -> Result<(), MediaTransportError> {
+
+    async fn add_simple_csrc_mapping(
+        &self,
+        original_ssrc: RtpSsrc,
+        csrc: RtpCsrc,
+    ) -> Result<(), MediaTransportError> {
         // CSRC management moved to media-core
         Ok(())
     }
-    
-    async fn remove_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+
+    async fn remove_csrc_mapping_by_ssrc(
+        &self,
+        original_ssrc: RtpSsrc,
+    ) -> Result<Option<CsrcMapping>, MediaTransportError> {
         // CSRC management moved to media-core
         Ok(None)
     }
-    
-    async fn get_csrc_mapping_by_ssrc(&self, original_ssrc: RtpSsrc) -> Result<Option<CsrcMapping>, MediaTransportError> {
+
+    async fn get_csrc_mapping_by_ssrc(
+        &self,
+        original_ssrc: RtpSsrc,
+    ) -> Result<Option<CsrcMapping>, MediaTransportError> {
         // CSRC management moved to media-core
         Ok(None)
     }
-    
+
     async fn get_all_csrc_mappings(&self) -> Result<Vec<CsrcMapping>, MediaTransportError> {
         // CSRC management moved to media-core
         Ok(Vec::new())
     }
-    
-    async fn get_active_csrcs(&self, active_ssrcs: &[RtpSsrc]) -> Result<Vec<RtpCsrc>, MediaTransportError> {
+
+    async fn get_active_csrcs(
+        &self,
+        active_ssrcs: &[RtpSsrc],
+    ) -> Result<Vec<RtpCsrc>, MediaTransportError> {
         // CSRC management moved to media-core
         Ok(Vec::new())
     }
-    
+
     async fn is_header_extensions_enabled(&self) -> Result<bool, MediaTransportError> {
         Ok(*self.header_extensions_enabled.read().await)
     }
-    
-    async fn enable_header_extensions(&self, format: ExtensionFormat) -> Result<bool, MediaTransportError> {
+
+    async fn enable_header_extensions(
+        &self,
+        format: ExtensionFormat,
+    ) -> Result<bool, MediaTransportError> {
         // Check if already enabled
         if *self.header_extensions_enabled.read().await {
             return Ok(true);
         }
-        
+
         // Set format and enabled flag
         *self.header_extension_format.write().await = format;
         *self.header_extensions_enabled.write().await = true;
-        
+
         debug!("Enabled header extensions with format: {:?}", format);
         Ok(true)
     }
-    
-    async fn configure_header_extension(&self, id: u8, uri: String) -> Result<(), MediaTransportError> {
+
+    async fn configure_header_extension(
+        &self,
+        id: u8,
+        uri: String,
+    ) -> Result<(), MediaTransportError> {
         // Header extension configuration moved to media-core
         Ok(())
     }
-    
-    async fn configure_header_extensions(&self, mappings: HashMap<u8, String>) -> Result<(), MediaTransportError> {
+
+    async fn configure_header_extensions(
+        &self,
+        mappings: HashMap<u8, String>,
+    ) -> Result<(), MediaTransportError> {
         // Header extension configuration moved to media-core
         Ok(())
     }
-    
-    async fn add_header_extension_for_client(&self, client_id: &str, extension: HeaderExtension) -> Result<(), MediaTransportError> {
+
+    async fn add_header_extension_for_client(
+        &self,
+        client_id: &str,
+        extension: HeaderExtension,
+    ) -> Result<(), MediaTransportError> {
         // Header extension handling moved to media-core
         Ok(())
     }
-    
-    async fn add_header_extension_for_all_clients(&self, extension: HeaderExtension) -> Result<(), MediaTransportError> {
+
+    async fn add_header_extension_for_all_clients(
+        &self,
+        extension: HeaderExtension,
+    ) -> Result<(), MediaTransportError> {
         // Header extension handling moved to media-core
         Ok(())
     }
-    
-    async fn add_audio_level_extension_for_client(&self, client_id: &str, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
+
+    async fn add_audio_level_extension_for_client(
+        &self,
+        client_id: &str,
+        voice_activity: bool,
+        level: u8,
+    ) -> Result<(), MediaTransportError> {
         // Audio level extension handling moved to media-core
         Ok(())
     }
-    
-    async fn add_audio_level_extension_for_all_clients(&self, voice_activity: bool, level: u8) -> Result<(), MediaTransportError> {
+
+    async fn add_audio_level_extension_for_all_clients(
+        &self,
+        voice_activity: bool,
+        level: u8,
+    ) -> Result<(), MediaTransportError> {
         // Audio level extension handling moved to media-core
         Ok(())
     }
-    
-    async fn add_video_orientation_extension_for_client(&self, client_id: &str, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
+
+    async fn add_video_orientation_extension_for_client(
+        &self,
+        client_id: &str,
+        camera_front_facing: bool,
+        camera_flipped: bool,
+        rotation: u16,
+    ) -> Result<(), MediaTransportError> {
         todo!("Implement add_video_orientation_extension_for_client")
     }
-    
-    async fn add_video_orientation_extension_for_all_clients(&self, camera_front_facing: bool, camera_flipped: bool, rotation: u16) -> Result<(), MediaTransportError> {
+
+    async fn add_video_orientation_extension_for_all_clients(
+        &self,
+        camera_front_facing: bool,
+        camera_flipped: bool,
+        rotation: u16,
+    ) -> Result<(), MediaTransportError> {
         todo!("Implement add_video_orientation_extension_for_all_clients")
     }
-    
-    async fn add_transport_cc_extension_for_client(&self, client_id: &str, sequence_number: u16) -> Result<(), MediaTransportError> {
+
+    async fn add_transport_cc_extension_for_client(
+        &self,
+        client_id: &str,
+        sequence_number: u16,
+    ) -> Result<(), MediaTransportError> {
         todo!("Implement add_transport_cc_extension_for_client")
     }
-    
-    async fn add_transport_cc_extension_for_all_clients(&self, sequence_number: u16) -> Result<(), MediaTransportError> {
+
+    async fn add_transport_cc_extension_for_all_clients(
+        &self,
+        sequence_number: u16,
+    ) -> Result<(), MediaTransportError> {
         todo!("Implement add_transport_cc_extension_for_all_clients")
     }
-    
-    async fn get_received_header_extensions(&self, client_id: &str) -> Result<Vec<HeaderExtension>, MediaTransportError> {
+
+    async fn get_received_header_extensions(
+        &self,
+        client_id: &str,
+    ) -> Result<Vec<HeaderExtension>, MediaTransportError> {
         // Header extension handling moved to media-core
         Ok(Vec::new())
     }
-    
-    async fn get_received_audio_level(&self, client_id: &str) -> Result<Option<(bool, u8)>, MediaTransportError> {
+
+    async fn get_received_audio_level(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<(bool, u8)>, MediaTransportError> {
         // Audio level extension handling moved to media-core
         Ok(None)
     }
-    
-    async fn get_received_video_orientation(&self, client_id: &str) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
+
+    async fn get_received_video_orientation(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
         todo!("Implement get_received_video_orientation")
     }
-    
-    async fn get_received_transport_cc(&self, client_id: &str) -> Result<Option<u16>, MediaTransportError> {
+
+    async fn get_received_transport_cc(
+        &self,
+        client_id: &str,
+    ) -> Result<Option<u16>, MediaTransportError> {
         todo!("Implement get_received_transport_cc")
     }
 
     async fn is_ssrc_demultiplexing_enabled(&self) -> Result<bool, MediaTransportError> {
-        super::ssrc::is_ssrc_demultiplexing_enabled(
-            &self.ssrc_demultiplexing_enabled
-        ).await
+        super::ssrc::is_ssrc_demultiplexing_enabled(&self.ssrc_demultiplexing_enabled).await
     }
 
     async fn enable_ssrc_demultiplexing(&self) -> Result<bool, MediaTransportError> {
-        super::ssrc::enable_ssrc_demultiplexing(
-            &self.ssrc_demultiplexing_enabled
-        ).await
+        super::ssrc::enable_ssrc_demultiplexing(&self.ssrc_demultiplexing_enabled).await
     }
 
-    async fn register_client_ssrc(&self, client_id: &str, ssrc: u32) -> Result<bool, MediaTransportError> {
+    async fn register_client_ssrc(
+        &self,
+        client_id: &str,
+        ssrc: u32,
+    ) -> Result<bool, MediaTransportError> {
         super::ssrc::register_client_ssrc(
             client_id,
             ssrc,
             &self.ssrc_demultiplexing_enabled,
-            &self.clients
-        ).await
+            &self.clients,
+        )
+        .await
     }
 
     async fn get_client_ssrcs(&self, client_id: &str) -> Result<Vec<u32>, MediaTransportError> {
-        super::ssrc::get_client_ssrcs(
-            client_id,
-            &self.clients
-        ).await
+        super::ssrc::get_client_ssrcs(client_id, &self.clients).await
     }
 
-    async fn update_csrc_cname(&self, original_ssrc: RtpSsrc, cname: String) -> Result<bool, MediaTransportError> {
+    async fn update_csrc_cname(
+        &self,
+        original_ssrc: RtpSsrc,
+        cname: String,
+    ) -> Result<bool, MediaTransportError> {
         // CSRC management moved to media-core
         Ok(false)
     }
 
-    async fn update_csrc_display_name(&self, original_ssrc: RtpSsrc, name: String) -> Result<bool, MediaTransportError> {
+    async fn update_csrc_display_name(
+        &self,
+        original_ssrc: RtpSsrc,
+        name: String,
+    ) -> Result<bool, MediaTransportError> {
         // CSRC management moved to media-core
         Ok(false)
     }
 }
-
- 

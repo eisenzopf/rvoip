@@ -9,7 +9,7 @@
 //! - Serialize messages for transmission
 //!
 //! ## Message Structure
-//! 
+//!
 //! A SIP message consists of:
 //! - A start line (either a request line or a status line)
 //! - Headers (metadata about the message)
@@ -39,24 +39,24 @@
 //! let message: Message = response.into();
 //! ```
 
-use std::fmt;
-use std::convert::From as StdFrom;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::convert::From as StdFrom;
+use std::fmt;
 
-use crate::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
-use crate::types::method::Method;
-use crate::types::StatusCode;
 use crate::types;
+use crate::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
+use crate::types::headers::HeaderAccess;
+use crate::types::method::Method;
 use crate::types::uri::Uri;
 use crate::types::via::Via;
-use crate::types::headers::HeaderAccess;
+use crate::types::StatusCode;
 // Import the request and response types directly
+use crate::types::from::From;
+use crate::types::param::Param;
 use crate::types::sip_request::Request;
 use crate::types::sip_response::Response;
 use crate::types::to::To;
-use crate::types::from::From;
-use crate::types::param::Param;
 
 /// Represents either a SIP request or response
 ///
@@ -67,7 +67,7 @@ use crate::types::param::Param;
 ///
 /// # Standard RFC Compliance
 ///
-/// This implementation follows [RFC 3261](https://tools.ietf.org/html/rfc3261), 
+/// This implementation follows [RFC 3261](https://tools.ietf.org/html/rfc3261),
 /// which defines the Session Initiation Protocol.
 ///
 /// # Type Parameters
@@ -312,15 +312,16 @@ impl Message {
     ///
     /// # Returns
     /// An optional reference to the first header of the specified type
-    pub fn typed_header<T>(&self) -> Option<&T> 
-    where 
+    pub fn typed_header<T>(&self) -> Option<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         for h in self.all_headers() {
             // Check name first for a small optimization, though as_typed_ref also checks.
-            if h.name() == T::header_name().into() { 
-                if let Some(typed_val) = h.as_typed_ref::<T>() { // as_typed_ref now expects these bounds on T
+            if h.name() == T::header_name().into() {
+                if let Some(typed_val) = h.as_typed_ref::<T>() {
+                    // as_typed_ref now expects these bounds on T
                     return Some(typed_val);
                 }
             }
@@ -355,7 +356,7 @@ impl Message {
         }
         None
     }
-    
+
     /// Retrieves the From header value, if present
     ///
     /// # Returns
@@ -368,7 +369,7 @@ impl Message {
         }
         None
     }
-    
+
     /// Retrieves the To header value, if present
     ///
     /// # Returns
@@ -409,15 +410,15 @@ impl Message {
             Message::Request(req) => req.headers_by_name("Via"),
             Message::Response(resp) => resp.headers_by_name("Via"),
         };
-        
+
         let mut vias = Vec::with_capacity(headers_vec.len());
-        
+
         for h in headers_vec {
             if let TypedHeader::Via(via) = h {
                 vias.push(via.clone());
             }
         }
-        
+
         vias
     }
 
@@ -474,44 +475,51 @@ impl Message {
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        
+
         match self {
             Message::Request(request) => {
                 // Add request line: METHOD URI SIP/2.0\r\n
-                bytes.extend_from_slice(format!("{} {} {}\r\n", 
-                    request.method, request.uri, request.version).as_bytes());
-                
+                bytes.extend_from_slice(
+                    format!("{} {} {}\r\n", request.method, request.uri, request.version)
+                        .as_bytes(),
+                );
+
                 // Add headers
                 for header in &request.headers {
                     bytes.extend_from_slice(format!("{}\r\n", header).as_bytes());
                 }
-                
+
                 // Add empty line to separate headers from body
                 bytes.extend_from_slice(b"\r\n");
-                
+
                 // Add body if any
                 bytes.extend_from_slice(&request.body);
-            },
+            }
             Message::Response(response) => {
                 // Add status line: SIP/2.0 CODE REASON\r\n
-                bytes.extend_from_slice(format!("{} {} {}\r\n", 
-                    response.version, 
-                    response.status.as_u16(), 
-                    response.reason_phrase()).as_bytes());
-                
+                bytes.extend_from_slice(
+                    format!(
+                        "{} {} {}\r\n",
+                        response.version,
+                        response.status.as_u16(),
+                        response.reason_phrase()
+                    )
+                    .as_bytes(),
+                );
+
                 // Add headers
                 for header in &response.headers {
                     bytes.extend_from_slice(format!("{}\r\n", header).as_bytes());
                 }
-                
+
                 // Add empty line to separate headers from body
                 bytes.extend_from_slice(b"\r\n");
-                
+
                 // Add body if any
                 bytes.extend_from_slice(&response.body);
             }
         }
-        
+
         bytes
     }
 
@@ -550,14 +558,14 @@ impl Message {
             Message::Request(mut req) => {
                 req.headers.push(header);
                 Message::Request(req)
-            },
+            }
             Message::Response(mut resp) => {
                 resp.headers.push(header);
                 Message::Response(resp)
             }
         }
     }
-    
+
     /// Create a new SIP Message (request)
     ///
     /// This is a convenience method that creates a new Message with a Request.
@@ -625,7 +633,7 @@ impl Message {
             Message::Response(resp) => Message::Response(resp.with_body(body)),
         }
     }
-    
+
     /// Returns the content length of the message, if present.
     pub fn content_length(&self) -> Option<u64> {
         if let Some(h) = self.header(&HeaderName::ContentLength) {
@@ -662,27 +670,27 @@ impl StdFrom<Response> for Message {
 
 // Implement HeaderAccess for Message
 impl HeaderAccess for Message {
-    fn typed_headers<T>(&self) -> Vec<&T> 
-    where 
+    fn typed_headers<T>(&self) -> Vec<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         use crate::types::headers::collect_typed_headers;
-        
+
         // Get the headers from the message
         let headers = match self {
             Message::Request(req) => &req.headers,
             Message::Response(resp) => &resp.headers,
         };
-        
+
         // Use our safer collect_typed_headers implementation
         collect_typed_headers::<T>(headers)
     }
 
-    fn typed_header<T>(&self) -> Option<&T> 
-    where 
+    fn typed_header<T>(&self) -> Option<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         self.typed_headers::<T>().into_iter().next()
     }
@@ -740,23 +748,23 @@ impl HeaderAccess for Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::Bytes;
     use crate::types::headers::HeaderAccess;
-    use crate::types::param::Param;
     use crate::types::method::Method;
+    use crate::types::param::Param;
+    use bytes::Bytes;
 
     #[test]
     fn test_message_from_request() {
         let request = Request::new(Method::Invite, "sip:alice@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(types::CallId::new("test-call-id")));
-        
+
         let message: Message = request.clone().into();
-        
+
         assert!(message.is_request());
         assert!(!message.is_response());
         assert_eq!(message.method(), Some(Method::Invite));
         assert_eq!(message.status(), None);
-        
+
         let request_ref = message.as_request().unwrap();
         assert_eq!(request_ref.method, request.method);
         assert_eq!(request_ref.uri, request.uri);
@@ -767,14 +775,14 @@ mod tests {
     fn test_message_from_response() {
         let response = Response::new(StatusCode::Ok)
             .with_header(TypedHeader::CallId(types::CallId::new("test-call-id")));
-        
+
         let message: Message = response.clone().into();
-        
+
         assert!(!message.is_request());
         assert!(message.is_response());
         assert_eq!(message.method(), None);
         assert_eq!(message.status(), Some(StatusCode::Ok));
-        
+
         let response_ref = message.as_response().unwrap();
         assert_eq!(response_ref.status, response.status);
         assert_eq!(response_ref.headers.len(), response.headers.len());
@@ -785,24 +793,24 @@ mod tests {
         let call_id = types::CallId::new("test-call-id");
         let request = Request::new(Method::Invite, "sip:alice@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(call_id.clone()));
-        
+
         let message: Message = request.into();
-        
+
         // Test direct header access
         let header = message.header(&HeaderName::CallId);
         assert!(header.is_some());
-        
+
         // Test for multiple headers with the same name
         let call_id_headers = message.headers_by_name("Call-ID");
         assert_eq!(call_id_headers.len(), 1);
-        
+
         // We know typed_header will return None in the current implementation,
         // so we won't test it
-        
+
         // Get all headers
         let all_headers = message.all_headers();
         assert_eq!(all_headers.len(), 1);
-        
+
         // Test call_id convenience method
         let call_id_header = message.call_id();
         assert!(call_id_header.is_some());
@@ -812,18 +820,22 @@ mod tests {
     #[test]
     fn test_via_headers() {
         let via = Via::new(
-            "SIP", "2.0", "UDP",
-            "example.com", Some(5060),
-            vec![Param::branch("z9hG4bK123456")]
-        ).unwrap();
+            "SIP",
+            "2.0",
+            "UDP",
+            "example.com",
+            Some(5060),
+            vec![Param::branch("z9hG4bK123456")],
+        )
+        .unwrap();
         let request = Request::new(Method::Invite, "sip:alice@example.com".parse().unwrap())
             .with_header(TypedHeader::Via(via.clone()));
-        
+
         let message: Message = request.into();
-        
+
         let vias = message.via_headers();
         assert_eq!(vias.len(), 1);
-        
+
         let first_via = message.first_via();
         assert!(first_via.is_some());
     }
@@ -833,12 +845,12 @@ mod tests {
         let response = Response::new(StatusCode::Ok)
             .with_header(TypedHeader::CallId(types::CallId::new("test-call-id")))
             .with_body(Bytes::from("test body"));
-        
+
         let message: Message = response.into();
-        
+
         let bytes = message.to_bytes();
         let content = String::from_utf8_lossy(&bytes);
-        
+
         assert!(content.contains("SIP/2.0 200 OK"));
         assert!(content.contains("Call-ID: test-call-id"));
         assert!(content.contains("test body"));
@@ -849,20 +861,20 @@ mod tests {
         let call_id = types::CallId::new("test-call-id");
         let request = Request::new(Method::Invite, "sip:alice@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(call_id.clone()));
-        
+
         let message: Message = request.into();
-        
+
         // Test HeaderAccess implementation - only test methods that don't rely on typed_header
         assert!(message.has_header(&HeaderName::CallId));
         assert!(!message.has_header(&HeaderName::To));
-        
+
         let headers = message.headers_by_name("Call-ID");
         assert_eq!(headers.len(), 1);
-        
+
         let names = message.header_names();
         assert_eq!(names.len(), 1);
         assert!(names.contains(&HeaderName::CallId));
-        
+
         let value = message.raw_header_value(&HeaderName::CallId);
         assert!(value.is_some());
         assert!(value.unwrap().contains("test-call-id"));
@@ -872,38 +884,45 @@ mod tests {
     fn test_message_creation() {
         use crate::types::from::From;
         use crate::types::to::To;
-        use crate::types::CallId;
         use crate::types::CSeq;
-        
+        use crate::types::CallId;
+
         let address = types::Address::new("sip:alice@example.com".parse().unwrap());
-        
+
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::From(From::new(address)))
-            .with_header(TypedHeader::To(To::new(types::Address::new("sip:bob@example.com".parse().unwrap()))))
-            .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.example.com")))
+            .with_header(TypedHeader::To(To::new(types::Address::new(
+                "sip:bob@example.com".parse().unwrap(),
+            ))))
+            .with_header(TypedHeader::CallId(CallId::new(
+                "a84b4c76e66710@pc33.atlanta.example.com",
+            )))
             .with_header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)))
-            .with_header(TypedHeader::Via(Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![]).expect("Failed to create Via")))
+            .with_header(TypedHeader::Via(
+                Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![])
+                    .expect("Failed to create Via"),
+            ))
             .with_body("Hello World".to_string());
-        
+
         let message: Message = request.into();
-        
+
         // Now we should be able to successfully get typed headers
         assert!(message.typed_header::<CallId>().is_some());
         let call_id = message.typed_header::<CallId>().unwrap();
         assert_eq!(call_id.value(), "a84b4c76e66710@pc33.atlanta.example.com");
-        
+
         // Check the From header
         assert!(message.typed_header::<From>().is_some());
         let from = message.typed_header::<From>().unwrap();
         assert_eq!(from.address().uri.to_string(), "sip:alice@example.com");
-        
+
         // Check CSeq
         assert!(message.typed_header::<CSeq>().is_some());
         let cseq = message.typed_header::<CSeq>().unwrap();
         assert_eq!(cseq.sequence(), 1);
         assert_eq!(*cseq.method(), Method::Invite);
-        
+
         // Check body
         assert_eq!(message.body(), "Hello World");
     }
-} 
+}

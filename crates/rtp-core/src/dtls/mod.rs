@@ -3,26 +3,26 @@
 //! This module provides a DTLS 1.2 implementation for use with SRTP key exchange.
 //! It follows RFC 6347 (DTLS) and RFC 5764 (DTLS-SRTP) specifications.
 
-pub mod connection;
-pub mod handshake;
-pub mod record;
 pub mod alert;
+pub mod connection;
 pub mod crypto;
+pub mod handshake;
 pub mod message;
-pub mod transport;
+pub mod record;
 pub mod srtp;
+pub mod transport;
 
 // Re-export key public API types
 pub use connection::DtlsConnection;
-pub use srtp::extractor::DtlsSrtpContext;
 pub use crypto::keys::DtlsKeyingMaterial;
+pub use srtp::extractor::DtlsSrtpContext;
 
 /// DTLS protocol version
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DtlsVersion {
     /// DTLS 1.0 (equivalent to TLS 1.1)
     Dtls10 = 0xFEFF,
-    
+
     /// DTLS 1.2 (equivalent to TLS 1.2)
     Dtls12 = 0xFEFD,
 }
@@ -32,7 +32,7 @@ pub enum DtlsVersion {
 pub enum DtlsRole {
     /// DTLS client role
     Client,
-    
+
     /// DTLS server role
     Server,
 }
@@ -42,16 +42,16 @@ pub enum DtlsRole {
 pub struct DtlsConfig {
     /// The DTLS role (client or server)
     pub role: DtlsRole,
-    
+
     /// The DTLS protocol version
     pub version: DtlsVersion,
-    
+
     /// Maximum transmission unit (MTU) size
     pub mtu: usize,
-    
+
     /// Maximum number of retransmissions
     pub max_retransmissions: usize,
-    
+
     /// SRTP profiles to offer/accept
     pub srtp_profiles: Vec<crate::srtp::SrtpCryptoSuite>,
 }
@@ -83,4 +83,4 @@ pub type Result<T> = std::result::Result<T, crate::error::Error>;
 /// A new DTLS connection
 pub async fn create_connection(config: DtlsConfig) -> Result<DtlsConnection> {
     unimplemented!("DTLS implementation is not yet complete")
-} 
+}

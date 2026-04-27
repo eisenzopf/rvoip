@@ -7,13 +7,18 @@ use rvoip_session_core::{Config, Event, StreamPeer};
 use tokio::time::{sleep, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     // Port overrides (for the integration test); defaults match run.sh.
@@ -23,7 +28,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut alice = StreamPeer::with_config(Config::local("alice", alice_port)).await?;
 
     println!("[ALICE] Calling Bob...");
-    let handle = alice.call(&format!("sip:bob@127.0.0.1:{}", bob_port)).await?;
+    let handle = alice
+        .call(&format!("sip:bob@127.0.0.1:{}", bob_port))
+        .await?;
     alice.wait_for_answered(handle.id()).await?;
     println!("[ALICE] Connected to Bob!");
 

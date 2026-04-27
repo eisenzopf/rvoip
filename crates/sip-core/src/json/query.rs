@@ -1,10 +1,10 @@
 use crate::json::value::SipValue;
-use crate::json::{SipJsonResult, SipJsonError};
+use crate::json::{SipJsonError, SipJsonResult};
 use std::collections::HashSet;
 
 /// # Query-based Access to SIP Values
-/// 
-/// This module provides a simplified JSONPath-like query system for extracting 
+///
+/// This module provides a simplified JSONPath-like query system for extracting
 /// and searching for values within SIP message structures.
 ///
 /// ## Query Syntax
@@ -43,7 +43,7 @@ use std::collections::HashSet;
 ///
 /// // Find all display names (in From, To headers)
 /// let display_names = request.query("$..display_name");
-/// 
+///
 /// // Find all branch parameters (in Via headers)
 /// let branches = request.query("$..Branch");
 ///
@@ -185,7 +185,7 @@ use std::collections::HashSet;
 /// header3.insert("name".to_string(), SipValue::String("From".to_string()));
 ///
 /// let headers = vec![
-///    SipValue::Object(header1), 
+///    SipValue::Object(header1),
 ///    SipValue::Object(header2),
 ///    SipValue::Object(header3)
 /// ];
@@ -286,13 +286,13 @@ fn execute_query<'a>(value: &'a SipValue, query: &[QueryPart]) -> Vec<&'a SipVal
                 } else {
                     arr.len().saturating_sub(start.unsigned_abs() as usize)
                 };
-                
+
                 let end_idx = if *end >= 0 {
                     (*end as usize).min(arr.len())
                 } else {
                     arr.len().saturating_sub(end.unsigned_abs() as usize)
                 };
-                
+
                 if start_idx < arr.len() && start_idx < end_idx {
                     for item in arr.iter().take(end_idx).skip(start_idx) {
                         results.extend(execute_query(item, tail));
@@ -330,7 +330,7 @@ fn execute_recursive_descent<'a>(
     remaining_query: &[QueryPart],
 ) -> Vec<&'a SipValue> {
     let mut results = Vec::new();
-    
+
     match value {
         SipValue::Object(obj) => {
             // Check all children recursively
@@ -339,7 +339,7 @@ fn execute_recursive_descent<'a>(
                 if name == "*" || key == name {
                     results.extend(execute_query(child, remaining_query));
                 }
-                
+
                 // Continue recursion for all children
                 results.extend(execute_recursive_descent(child, name, remaining_query));
             }
@@ -352,7 +352,7 @@ fn execute_recursive_descent<'a>(
         }
         _ => {}
     }
-    
+
     results
 }
 
@@ -373,9 +373,10 @@ fn evaluate_filter(value: &SipValue, filter: &FilterExpression) -> bool {
                 false
             }
         }
-        FilterExpression::NotEquals(path, expected) => {
-            !evaluate_filter(value, &FilterExpression::Equals(path.clone(), expected.clone()))
-        }
+        FilterExpression::NotEquals(path, expected) => !evaluate_filter(
+            value,
+            &FilterExpression::Equals(path.clone(), expected.clone()),
+        ),
         FilterExpression::Contains(path, substring) => {
             if let Some(actual) = crate::json::path::get_path(value, path) {
                 if let SipValue::String(s) = actual {
@@ -391,9 +392,7 @@ fn evaluate_filter(value: &SipValue, filter: &FilterExpression) -> bool {
                 false
             }
         }
-        FilterExpression::Exists(path) => {
-            crate::json::path::get_path(value, path).is_some()
-        }
+        FilterExpression::Exists(path) => crate::json::path::get_path(value, path).is_some(),
     }
 }
 
@@ -401,16 +400,16 @@ fn evaluate_filter(value: &SipValue, filter: &FilterExpression) -> bool {
 fn parse_query(query: &str) -> Vec<QueryPart> {
     let mut parts = Vec::new();
     let mut chars = query.chars().peekable();
-    
+
     // Add root if query starts with $
     if chars.peek() == Some(&'$') {
         parts.push(QueryPart::Root);
         chars.next();
     }
-    
+
     let mut in_brackets = false;
     let mut current = String::new();
-    
+
     while let Some(c) = chars.next() {
         match c {
             '.' => {
@@ -418,14 +417,14 @@ fn parse_query(query: &str) -> Vec<QueryPart> {
                     parts.push(QueryPart::Child(current));
                     current = String::new();
                 }
-                
+
                 // Check for recursive descent (..)
                 if chars.peek() == Some(&'.') {
                     chars.next(); // Consume the second dot
-                    
+
                     // For recursive descent, collect the entire field name after the double dots
                     let mut field_name = String::new();
-                    
+
                     // Read until next . or [ or end of string
                     for next_char in chars.by_ref() {
                         if next_char == '.' || next_char == '[' {
@@ -433,7 +432,7 @@ fn parse_query(query: &str) -> Vec<QueryPart> {
                         }
                         field_name.push(next_char);
                     }
-                    
+
                     if !field_name.is_empty() {
                         parts.push(QueryPart::RecursiveDescent(field_name));
                     } else {
@@ -444,7 +443,7 @@ fn parse_query(query: &str) -> Vec<QueryPart> {
                             if next_char == '[' {
                                 in_brackets = true;
                                 chars.next(); // Consume the [
-                                // Handle bracket parsing separately
+                                              // Handle bracket parsing separately
                             }
                         }
                     }
@@ -455,10 +454,10 @@ fn parse_query(query: &str) -> Vec<QueryPart> {
                     parts.push(QueryPart::Child(current));
                     current = String::new();
                 }
-                
+
                 in_brackets = true;
                 let mut bracket_content = String::new();
-                
+
                 // Parse bracket content
                 while let Some(next_char) = chars.next() {
                     if next_char == ']' {
@@ -467,7 +466,7 @@ fn parse_query(query: &str) -> Vec<QueryPart> {
                     }
                     bracket_content.push(next_char);
                 }
-                
+
                 // Parse the bracket content
                 if bracket_content == "*" {
                     parts.push(QueryPart::ArrayWildcard);
@@ -493,12 +492,12 @@ fn parse_query(query: &str) -> Vec<QueryPart> {
             _ => {}
         }
     }
-    
+
     // Add the last part if any
     if !current.is_empty() {
         parts.push(QueryPart::Child(current));
     }
-    
+
     parts
 }
 
@@ -507,10 +506,10 @@ fn parse_filter(filter_str: &str) -> Option<FilterExpression> {
     // Very basic filter parsing for now
     // Expecting format like (@.path == value) or (@.path != value)
     let filter_str = filter_str.trim();
-    
+
     if filter_str.starts_with("(@.") && filter_str.ends_with(")") {
-        let content = &filter_str[3..filter_str.len()-1].trim();
-        
+        let content = &filter_str[3..filter_str.len() - 1].trim();
+
         if content.contains(" == ") {
             let parts: Vec<&str> = content.split(" == ").collect();
             if parts.len() == 2 {
@@ -537,7 +536,7 @@ fn parse_filter(filter_str: &str) -> Option<FilterExpression> {
             return Some(FilterExpression::Exists(content.to_string()));
         }
     }
-    
+
     None
 }
 
@@ -552,7 +551,7 @@ fn parse_filter_value(value_str: &str) -> SipValue {
     } else if let Ok(n) = value_str.parse::<f64>() {
         SipValue::Number(n)
     } else if value_str.starts_with('"') && value_str.ends_with('"') {
-        SipValue::String(value_str[1..value_str.len()-1].to_string())
+        SipValue::String(value_str[1..value_str.len() - 1].to_string())
     } else {
         SipValue::String(value_str.to_string())
     }
@@ -594,201 +593,223 @@ enum FilterExpression {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    
+
     #[test]
     fn test_basic_query() {
         // Create a simple object
         let mut obj = HashMap::new();
         obj.insert("method".to_string(), SipValue::String("INVITE".to_string()));
-        obj.insert("version".to_string(), SipValue::String("SIP/2.0".to_string()));
+        obj.insert(
+            "version".to_string(),
+            SipValue::String("SIP/2.0".to_string()),
+        );
         let value = SipValue::Object(obj);
-        
+
         // Test direct field access
         let results = query(&value, "$.method");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_str(), Some("INVITE"));
-        
+
         // Test non-existent field
         let results = query(&value, "$.nonexistent");
         assert_eq!(results.len(), 0);
     }
-    
+
     #[test]
     fn test_nested_query() {
         // Create a nested object
         let mut from = HashMap::new();
-        from.insert("display_name".to_string(), SipValue::String("Alice".to_string()));
-        
+        from.insert(
+            "display_name".to_string(),
+            SipValue::String("Alice".to_string()),
+        );
+
         let mut to = HashMap::new();
-        to.insert("display_name".to_string(), SipValue::String("Bob".to_string()));
-        
+        to.insert(
+            "display_name".to_string(),
+            SipValue::String("Bob".to_string()),
+        );
+
         let mut headers = HashMap::new();
         headers.insert("From".to_string(), SipValue::Object(from));
         headers.insert("To".to_string(), SipValue::Object(to));
-        
+
         let mut message = HashMap::new();
         message.insert("headers".to_string(), SipValue::Object(headers));
-        
+
         let value = SipValue::Object(message);
-        
+
         // Test nested field access
         let results = query(&value, "$.headers.From.display_name");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_str(), Some("Alice"));
-        
+
         // Test recursive descent
         let results = query(&value, "$..display_name");
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|v| v.as_str() == Some("Alice")));
         assert!(results.iter().any(|v| v.as_str() == Some("Bob")));
     }
-    
+
     #[test]
     fn test_array_query() {
         // Create an array
         let array = vec![
             SipValue::String("first".to_string()),
             SipValue::String("second".to_string()),
-            SipValue::String("third".to_string())
+            SipValue::String("third".to_string()),
         ];
-        
+
         let mut obj = HashMap::new();
         obj.insert("items".to_string(), SipValue::Array(array));
         let value = SipValue::Object(obj);
-        
+
         // Test array indexing
         let results = query(&value, "$.items[0]");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_str(), Some("first"));
-        
+
         // Test array wildcard
         let results = query(&value, "$.items[*]");
         assert_eq!(results.len(), 3);
-        
+
         // Test array slice
         let results = query(&value, "$.items[1:3]");
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].as_str(), Some("second"));
         assert_eq!(results[1].as_str(), Some("third"));
-        
+
         // Test negative indices
         let results = query(&value, "$.items[-1]");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_str(), Some("third"));
     }
-    
+
     #[test]
     fn test_filter_query() {
         // Create a complex structure with different types of headers
         let mut header1 = HashMap::new();
         header1.insert("name".to_string(), SipValue::String("Via".to_string()));
         header1.insert("transport".to_string(), SipValue::String("UDP".to_string()));
-        
+
         let mut header2 = HashMap::new();
         header2.insert("name".to_string(), SipValue::String("Via".to_string()));
         header2.insert("transport".to_string(), SipValue::String("TCP".to_string()));
-        
+
         let mut header3 = HashMap::new();
         header3.insert("name".to_string(), SipValue::String("From".to_string()));
         header3.insert("tag".to_string(), SipValue::String("1234".to_string()));
-        
+
         let headers = vec![
             SipValue::Object(header1),
             SipValue::Object(header2),
-            SipValue::Object(header3)
+            SipValue::Object(header3),
         ];
-        
+
         let value = SipValue::Array(headers);
-        
+
         // Test equality filter
         let results = query(&value, "$[?(@.name == \"Via\")]");
         assert_eq!(results.len(), 2);
-        
+
         // Test with specific value
         let results = query(&value, "$[?(@.transport == \"TCP\")]");
         assert_eq!(results.len(), 1);
-        
+
         // Test field existence
         let results = query(&value, "$[?(@.tag)]");
         assert_eq!(results.len(), 1);
     }
-    
+
     #[test]
     fn test_complex_sip_query() {
         // Create a more realistic SIP message structure
         let mut sip_message = HashMap::new();
-        
+
         // Add method and version
         sip_message.insert("method".to_string(), SipValue::String("INVITE".to_string()));
-        sip_message.insert("version".to_string(), SipValue::String("SIP/2.0".to_string()));
-        
+        sip_message.insert(
+            "version".to_string(),
+            SipValue::String("SIP/2.0".to_string()),
+        );
+
         // Create headers object
         let mut headers = HashMap::new();
-        
+
         // From header
         let mut from = HashMap::new();
-        from.insert("display_name".to_string(), SipValue::String("Alice".to_string()));
-        
+        from.insert(
+            "display_name".to_string(),
+            SipValue::String("Alice".to_string()),
+        );
+
         // From params
         let mut from_params = Vec::new();
         let mut tag_param = HashMap::new();
         tag_param.insert("Tag".to_string(), SipValue::String("1234".to_string()));
         from_params.push(SipValue::Object(tag_param));
         from.insert("params".to_string(), SipValue::Array(from_params));
-        
+
         headers.insert("From".to_string(), SipValue::Object(from));
-        
+
         // To header
         let mut to = HashMap::new();
-        to.insert("display_name".to_string(), SipValue::String("Bob".to_string()));
+        to.insert(
+            "display_name".to_string(),
+            SipValue::String("Bob".to_string()),
+        );
         headers.insert("To".to_string(), SipValue::Object(to));
-        
+
         // Via headers
         let mut via1 = HashMap::new();
         let mut via1_params = Vec::new();
         let mut branch_param1 = HashMap::new();
-        branch_param1.insert("Branch".to_string(), SipValue::String("z9hG4bK776asdhds".to_string()));
+        branch_param1.insert(
+            "Branch".to_string(),
+            SipValue::String("z9hG4bK776asdhds".to_string()),
+        );
         via1_params.push(SipValue::Object(branch_param1));
         via1.insert("params".to_string(), SipValue::Array(via1_params));
         via1.insert("transport".to_string(), SipValue::String("UDP".to_string()));
-        
+
         let mut via2 = HashMap::new();
         let mut via2_params = Vec::new();
         let mut branch_param2 = HashMap::new();
-        branch_param2.insert("Branch".to_string(), SipValue::String("z9hG4bK887jhd".to_string()));
+        branch_param2.insert(
+            "Branch".to_string(),
+            SipValue::String("z9hG4bK887jhd".to_string()),
+        );
         via2_params.push(SipValue::Object(branch_param2));
         via2.insert("params".to_string(), SipValue::Array(via2_params));
         via2.insert("transport".to_string(), SipValue::String("TCP".to_string()));
-        
+
         let vias = vec![SipValue::Object(via1), SipValue::Object(via2)];
         headers.insert("Via".to_string(), SipValue::Array(vias));
-        
+
         sip_message.insert("headers".to_string(), SipValue::Object(headers));
-        
+
         let value = SipValue::Object(sip_message);
-        
+
         // Test finding all display names
         let results = query(&value, "$..display_name");
         assert_eq!(results.len(), 2);
-        
+
         // Test finding all branch parameters
         let results = query(&value, "$..Branch");
         assert_eq!(results.len(), 2);
-        
+
         // Test finding the From tag
         let results = query(&value, "$.headers.From.params[0].Tag");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].as_str(), Some("1234"));
-        
+
         // Test finding all UDP transports - adjust the query to use recursive descent
         // The original filter query might not work correctly with nested structures
         let results = query(&value, "$..transport");
         assert_eq!(results.len(), 2); // Should find both transports
-        
+
         // Check that at least one of them is UDP
-        let udp_count = results.iter()
-            .filter(|v| v.as_str() == Some("UDP"))
-            .count();
+        let udp_count = results.iter().filter(|v| v.as_str() == Some("UDP")).count();
         assert_eq!(udp_count, 1);
     }
-} 
+}

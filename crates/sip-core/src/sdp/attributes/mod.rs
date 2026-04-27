@@ -1,41 +1,41 @@
 //! SDP Attribute Parsers
-//! 
+//!
 //! This module contains parsers for SDP attributes as defined in RFC 8866
 //! and related RFCs.
 
 // Media attribute modules
-pub mod rtpmap;
+pub mod direction;
 pub mod fmtp;
 pub mod ptime;
-pub mod direction;
+pub mod rtpmap;
 
 // Transport modules
 pub mod candidate;
-pub mod ice;
 pub mod dtls;
+pub mod ice;
 
 // Identification modules
-pub mod ssrc;
 pub mod mid;
 pub mod msid;
+pub mod ssrc;
 
 // Grouping and stream management
 pub mod group;
-pub mod simulcast;
 pub mod rid;
+pub mod simulcast;
 
 // RTCP-related
 pub mod rtcp;
 
 // Extension modules
-pub mod extmap;
 pub mod bandwidth;
+pub mod extmap;
 
 // Data channel
 pub mod datachannel;
 pub mod sctp;
 
-// SVC-related 
+// SVC-related
 pub mod scalability;
 pub mod sctpmap;
 
@@ -43,27 +43,27 @@ pub mod sctpmap;
 pub mod common;
 
 // Publicly expose all attribute parsers
-pub use rtpmap::*;
-pub use fmtp::*;
-pub use ptime::*;
-pub use direction::*;
+pub use bandwidth::*;
 pub use candidate::*;
-pub use ice::*;
+pub use common::*;
+pub use datachannel::*;
+pub use direction::*;
 pub use dtls::*;
-pub use ssrc::*;
+pub use extmap::*;
+pub use fmtp::*;
+pub use group::*;
+pub use ice::*;
 pub use mid::*;
 pub use msid::*;
-pub use group::*;
-pub use simulcast::*;
+pub use ptime::*;
 pub use rid::*;
 pub use rtcp::*;
-pub use extmap::*;
-pub use bandwidth::*;
-pub use datachannel::*;
-pub use sctp::*;
+pub use rtpmap::*;
 pub use scalability::*;
+pub use sctp::*;
 pub use sctpmap::*;
-pub use common::*;
+pub use simulcast::*;
+pub use ssrc::*;
 
 // Re-export MediaDirection enum for backward compatibility
-pub use crate::sdp::attributes::direction::MediaDirection; 
+pub use crate::sdp::attributes::direction::MediaDirection;

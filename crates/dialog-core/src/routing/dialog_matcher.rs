@@ -15,4 +15,4 @@
 //! Currently implemented in manager/message_routing.rs and manager/utils.rs.
 //! This module will contain the extracted matching logic when fully modularized.
 
-// TODO: Extract dialog matching logic from manager modules 
+// TODO: Extract dialog matching logic from manager modules

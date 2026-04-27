@@ -115,8 +115,7 @@ pub fn decode_binding_response(
 
     while cursor + 4 <= body_end {
         let attr_type = u16::from_be_bytes([bytes[cursor], bytes[cursor + 1]]);
-        let attr_len =
-            u16::from_be_bytes([bytes[cursor + 2], bytes[cursor + 3]]) as usize;
+        let attr_len = u16::from_be_bytes([bytes[cursor + 2], bytes[cursor + 3]]) as usize;
         let body_start = cursor + 4;
         let body_end_attr = body_start + attr_len;
         if body_end_attr > body_end {
@@ -149,9 +148,7 @@ pub fn decode_binding_response(
     // would mangle a plain MAPPED-ADDRESS in the body). Fall back to
     // plain MAPPED-ADDRESS for legacy RFC 5389 servers that emit only
     // it.
-    found_xor
-        .or(found_plain)
-        .ok_or(StunError::NoMappedAddress)
+    found_xor.or(found_plain).ok_or(StunError::NoMappedAddress)
 }
 
 fn decode_mapped_address(body: &[u8]) -> Result<SocketAddr, StunError> {
@@ -251,7 +248,11 @@ mod tests {
     #[test]
     fn binding_request_has_correct_header_shape() {
         let (bytes, txn) = encode_binding_request();
-        assert_eq!(bytes.len(), 20, "request with no attributes is exactly the header");
+        assert_eq!(
+            bytes.len(),
+            20,
+            "request with no attributes is exactly the header"
+        );
         assert_eq!(u16::from_be_bytes([bytes[0], bytes[1]]), BINDING_REQUEST);
         assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 0, "no attributes");
         assert_eq!(

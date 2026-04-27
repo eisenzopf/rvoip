@@ -13,7 +13,10 @@ const SAMPLE_RATE: u32 = 8000;
 const FRAME_SIZE: usize = 160;
 
 fn env_u16(k: &str, default: u16) -> u16 {
-    std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(k)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_string(k: &str, default: &str) -> String {
@@ -54,7 +57,9 @@ fn save_wav(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let carol_port = env_u16("CAROL_SIP_PORT", 35591);

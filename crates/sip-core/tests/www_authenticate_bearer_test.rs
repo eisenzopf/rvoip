@@ -13,7 +13,7 @@ fn test_www_authenticate_digest() {
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .www_authenticate_digest("example.com", "abc123xyz")
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("401 Unauthorized"));
     assert!(response_str.contains("WWW-Authenticate: Digest"));
@@ -31,7 +31,7 @@ fn test_www_authenticate_bearer() {
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .www_authenticate_bearer("example.com")
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("401 Unauthorized"));
     assert!(response_str.contains("WWW-Authenticate: Bearer realm=\"example.com\""));
@@ -45,9 +45,13 @@ fn test_www_authenticate_bearer_with_error() {
         .call_id("test-call-id")
         .cseq(1, Method::Register)
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
-        .www_authenticate_bearer_error("example.com", "invalid_token", Some("The access token has expired"))
+        .www_authenticate_bearer_error(
+            "example.com",
+            "invalid_token",
+            Some("The access token has expired"),
+        )
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("401 Unauthorized"));
     assert!(response_str.contains("WWW-Authenticate: Bearer"));
@@ -67,7 +71,7 @@ fn test_unauthorized_response_helper() {
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .www_authenticate_bearer("presence.example.com")
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("401 Unauthorized"));
     assert!(response_str.contains("WWW-Authenticate: Bearer realm=\"presence.example.com\""));
@@ -76,18 +80,18 @@ fn test_unauthorized_response_helper() {
 #[test]
 fn test_multiple_challenges() {
     // Test that we can add multiple challenges using the generic header method
+    use rvoip_sip_core::types::auth::{Challenge, DigestParam, WwwAuthenticate};
     use rvoip_sip_core::types::TypedHeader;
-    use rvoip_sip_core::types::auth::{WwwAuthenticate, Challenge, DigestParam};
-    
+
     // Create a WWW-Authenticate with multiple challenges
     let mut www_auth = WwwAuthenticate::new_bearer("example.com");
-    www_auth.add_challenge(Challenge::Digest { 
+    www_auth.add_challenge(Challenge::Digest {
         params: vec![
             DigestParam::Realm("example.com".to_string()),
             DigestParam::Nonce("xyz987".to_string()),
-        ]
+        ],
     });
-    
+
     let response = SimpleResponseBuilder::new(StatusCode::Unauthorized, None)
         .from("Alice", "sip:alice@example.com", Some("1928301774"))
         .to("Bob", "sip:bob@example.com", None)
@@ -96,7 +100,7 @@ fn test_multiple_challenges() {
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .header(TypedHeader::WwwAuthenticate(www_auth))
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("401 Unauthorized"));
     // Should contain both Bearer and Digest challenges

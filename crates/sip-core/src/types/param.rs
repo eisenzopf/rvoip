@@ -1,5 +1,5 @@
 //! # SIP Parameters
-//! 
+//!
 //! This module provides types for representing SIP parameters as defined in
 //! [RFC 3261](https://datatracker.ietf.org/doc/html/rfc3261).
 //!
@@ -30,7 +30,7 @@
 //! let q = Param::Q(NotNan::new(0.8).unwrap());
 //! assert_eq!(q.to_string(), "q=0.800");
 //!
-//! // Create a flag parameter 
+//! // Create a flag parameter
 //! let lr = Param::Lr;
 //! assert_eq!(lr.to_string(), "lr");
 //!
@@ -39,17 +39,17 @@
 //! assert_eq!(custom.to_string(), "x-custom=abc123");
 //! ```
 
+use ordered_float::NotNan;
+use serde::{Deserialize, Serialize};
+use std::default::Default;
 use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
-use ordered_float::NotNan;
-use serde::{Serialize, Deserialize};
-use std::default::Default;
 
 use crate::error::{Error, Result};
 use crate::types::uri::Host; // Assuming Host type exists
 
-// TODO: Add more specific parameter types (like rsip NewTypes) 
+// TODO: Add more specific parameter types (like rsip NewTypes)
 // e.g., Branch(String), Tag(String), Expires(u32), etc.
 
 /// Represents the parsed value of a generic parameter.
@@ -149,11 +149,13 @@ impl GenericValue {
 
 // Implement Display for GenericValue for use in Param::Display
 impl fmt::Display for GenericValue {
-     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GenericValue::Token(s) => write!(f, "{}", s),
             GenericValue::Host(h) => write!(f, "{}", h), // Assuming Host implements Display
-            GenericValue::Quoted(s) => write!(f, "\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")), // Re-quote safely
+            GenericValue::Quoted(s) => {
+                write!(f, "\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+            } // Re-quote safely
         }
     }
 }
@@ -162,9 +164,28 @@ impl fmt::Display for GenericValue {
 impl From<&str> for GenericValue {
     fn from(s: &str) -> Self {
         // Check if it should be quoted - if it has spaces or special chars
-        if s.contains(char::is_whitespace) || s.contains(|c: char| {
-            matches!(c, ';' | ',' | '?' | ':' | '@' | '&' | '=' | '+' | '$' | '/' | '<' | '>' | '#' | '['| ']' | '"')
-        }) {
+        if s.contains(char::is_whitespace)
+            || s.contains(|c: char| {
+                matches!(
+                    c,
+                    ';' | ','
+                        | '?'
+                        | ':'
+                        | '@'
+                        | '&'
+                        | '='
+                        | '+'
+                        | '$'
+                        | '/'
+                        | '<'
+                        | '>'
+                        | '#'
+                        | '['
+                        | ']'
+                        | '"'
+                )
+            })
+        {
             GenericValue::Quoted(s.to_string())
         } else {
             GenericValue::Token(s.to_string())
@@ -385,8 +406,8 @@ impl Param {
                 // Convert the value into a GenericValue (will be token or quoted)
                 let generic_val = GenericValue::from(val.into());
                 Param::Other(key.into(), Some(generic_val))
-            },
-            None => Param::Other(key.into(), None)
+            }
+            None => Param::Other(key.into(), None),
         }
     }
 
@@ -432,7 +453,7 @@ impl Param {
     /// For flag parameters like `lr`, this returns `None`.
     /// For parameters with values, returns `Some(value)`.
     ///
-    /// Note that certain parameter types (like IpAddr, Q values) are 
+    /// Note that certain parameter types (like IpAddr, Q values) are
     /// converted to strings.
     ///
     /// # Returns
@@ -604,5 +625,5 @@ impl fmt::Display for Param {
     }
 }
 
-// Note: A FromStr or TryFrom implementation will be added 
-// once the parser logic in parser/uri.rs is updated. 
+// Note: A FromStr or TryFrom implementation will be added
+// once the parser logic in parser/uri.rs is updated.

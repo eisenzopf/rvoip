@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use crate::json::{SipJsonError, SipJsonResult};
+use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::HashMap;
 use std::fmt;
-use crate::json::{SipJsonResult, SipJsonError};
 
 /// # SIP JSON Value Representation
 ///
@@ -27,19 +27,19 @@ use crate::json::{SipJsonResult, SipJsonError};
 /// let mut person = HashMap::new();
 /// person.insert("name".to_string(), SipValue::String("Alice".to_string()));
 /// person.insert("age".to_string(), SipValue::Number(30.0));
-/// 
+///
 /// // Create a nested object
 /// let mut address = HashMap::new();
 /// address.insert("city".to_string(), SipValue::String("New York".to_string()));
 /// address.insert("zip".to_string(), SipValue::String("10001".to_string()));
 /// person.insert("address".to_string(), SipValue::Object(address));
-/// 
+///
 /// let value = SipValue::Object(person);
-/// 
+///
 /// // Access basic fields
 /// assert_eq!(value.get_path("name").unwrap().as_str(), Some("Alice"));
 /// assert_eq!(value.get_path("age").unwrap().as_f64(), Some(30.0));
-/// 
+///
 /// // Access nested fields
 /// assert_eq!(value.get_path("address.city").unwrap().as_str(), Some("New York"));
 /// assert_eq!(value.get_path("address.zip").unwrap().as_str(), Some("10001"));
@@ -114,17 +114,17 @@ use crate::json::{SipJsonResult, SipJsonError};
 /// # use std::collections::HashMap;
 /// // Create a simple array of objects
 /// let mut items = Vec::new();
-/// 
+///
 /// let mut item1 = HashMap::new();
 /// item1.insert("id".to_string(), SipValue::String("item1".to_string()));
 /// item1.insert("value".to_string(), SipValue::Number(100.0));
 /// items.push(SipValue::Object(item1));
-/// 
+///
 /// let mut item2 = HashMap::new();
 /// item2.insert("id".to_string(), SipValue::String("item2".to_string()));
 /// item2.insert("value".to_string(), SipValue::Number(200.0));
 /// items.push(SipValue::Object(item2));
-/// 
+///
 /// let mut obj = HashMap::new();
 /// obj.insert("items".to_string(), SipValue::Array(items));
 /// let value = SipValue::Object(obj);
@@ -338,17 +338,17 @@ impl SipValue {
     /// # use std::collections::HashMap;
     /// // Create a simple array of objects
     /// let mut items = Vec::new();
-    /// 
+    ///
     /// let mut item1 = HashMap::new();
     /// item1.insert("id".to_string(), SipValue::String("item1".to_string()));
     /// item1.insert("value".to_string(), SipValue::Number(100.0));
     /// items.push(SipValue::Object(item1));
-    /// 
+    ///
     /// let mut item2 = HashMap::new();
     /// item2.insert("id".to_string(), SipValue::String("item2".to_string()));
     /// item2.insert("value".to_string(), SipValue::Number(200.0));
     /// items.push(SipValue::Object(item2));
-    /// 
+    ///
     /// let mut obj = HashMap::new();
     /// obj.insert("items".to_string(), SipValue::Array(items));
     /// let value = SipValue::Object(obj);
@@ -427,18 +427,18 @@ impl SipValue {
         match self {
             SipValue::Null => serde_json::Value::Null,
             SipValue::Bool(b) => serde_json::Value::Bool(*b),
-            SipValue::Number(n) => serde_json::Value::Number(serde_json::Number::from_f64(*n).unwrap_or(serde_json::Number::from(0))),
+            SipValue::Number(n) => serde_json::Value::Number(
+                serde_json::Number::from_f64(*n).unwrap_or(serde_json::Number::from(0)),
+            ),
             SipValue::String(s) => serde_json::Value::String(s.clone()),
             SipValue::Array(a) => {
                 serde_json::Value::Array(a.iter().map(|v| v.to_json_value()).collect())
-            },
-            SipValue::Object(o) => {
-                serde_json::Value::Object(
-                    o.iter()
-                     .map(|(k, v)| (k.clone(), v.to_json_value()))
-                     .collect()
-                )
-            },
+            }
+            SipValue::Object(o) => serde_json::Value::Object(
+                o.iter()
+                    .map(|(k, v)| (k.clone(), v.to_json_value()))
+                    .collect(),
+            ),
         }
     }
 
@@ -456,20 +456,16 @@ impl SipValue {
         match value {
             serde_json::Value::Null => SipValue::Null,
             serde_json::Value::Bool(b) => SipValue::Bool(*b),
-            serde_json::Value::Number(n) => {
-                SipValue::Number(n.as_f64().unwrap_or(0.0))
-            },
+            serde_json::Value::Number(n) => SipValue::Number(n.as_f64().unwrap_or(0.0)),
             serde_json::Value::String(s) => SipValue::String(s.clone()),
             serde_json::Value::Array(a) => {
                 SipValue::Array(a.iter().map(SipValue::from_json_value).collect())
-            },
-            serde_json::Value::Object(o) => {
-                SipValue::Object(
-                    o.iter()
-                     .map(|(k, v)| (k.clone(), SipValue::from_json_value(v)))
-                     .collect()
-                )
-            },
+            }
+            serde_json::Value::Object(o) => SipValue::Object(
+                o.iter()
+                    .map(|(k, v)| (k.clone(), SipValue::from_json_value(v)))
+                    .collect(),
+            ),
         }
     }
 
@@ -487,8 +483,7 @@ impl SipValue {
     /// ```
     pub fn to_string(&self) -> SipJsonResult<String> {
         let json_value = self.to_json_value();
-        serde_json::to_string(&json_value)
-            .map_err(SipJsonError::SerializeError)
+        serde_json::to_string(&json_value).map_err(SipJsonError::SerializeError)
     }
 
     /// Convert to pretty-printed JSON string.
@@ -497,8 +492,7 @@ impl SipValue {
     /// A Result containing either the pretty-printed JSON string or an error
     pub fn to_string_pretty(&self) -> SipJsonResult<String> {
         let json_value = self.to_json_value();
-        serde_json::to_string_pretty(&json_value)
-            .map_err(SipJsonError::SerializeError)
+        serde_json::to_string_pretty(&json_value).map_err(SipJsonError::SerializeError)
     }
 
     /// Parse from JSON string.
@@ -519,8 +513,7 @@ impl SipValue {
     /// assert_eq!(value.get_path("age").unwrap().as_f64(), Some(30.0));
     /// ```
     pub fn from_str(s: &str) -> SipJsonResult<Self> {
-        let json_value = serde_json::from_str(s)
-            .map_err(|e| SipJsonError::DeserializeError(e))?;
+        let json_value = serde_json::from_str(s).map_err(|e| SipJsonError::DeserializeError(e))?;
         Ok(SipValue::from_json_value(&json_value))
     }
 }
@@ -572,18 +565,18 @@ impl From<&str> for SipValue {
     }
 }
 
-impl<T> From<Vec<T>> for SipValue 
-where 
-    T: Into<SipValue>
+impl<T> From<Vec<T>> for SipValue
+where
+    T: Into<SipValue>,
 {
     fn from(v: Vec<T>) -> Self {
         SipValue::Array(v.into_iter().map(|x| x.into()).collect())
     }
 }
 
-impl<T> From<HashMap<String, T>> for SipValue 
-where 
-    T: Into<SipValue>
+impl<T> From<HashMap<String, T>> for SipValue
+where
+    T: Into<SipValue>,
 {
     fn from(m: HashMap<String, T>) -> Self {
         SipValue::Object(m.into_iter().map(|(k, v)| (k, v.into())).collect())
@@ -592,7 +585,7 @@ where
 
 impl<T> From<Option<T>> for SipValue
 where
-    T: Into<SipValue>
+    T: Into<SipValue>,
 {
     fn from(opt: Option<T>) -> Self {
         match opt {
@@ -605,7 +598,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_primitive_types() {
         // Test boolean
@@ -614,123 +607,153 @@ mod tests {
         assert!(bool_value.is_bool());
         assert!(!bool_value.is_null());
         assert!(!bool_value.is_number());
-        
+
         // Test number
         let num_value = SipValue::Number(42.0);
         assert_eq!(num_value.as_f64(), Some(42.0));
         assert_eq!(num_value.as_i64(), Some(42));
         assert!(num_value.is_number());
-        
+
         // Test string
         let str_value = SipValue::String("test".to_string());
         assert_eq!(str_value.as_str(), Some("test"));
         assert!(str_value.is_string());
-        
+
         // Test null
         let null_value = SipValue::Null;
         assert!(null_value.is_null());
     }
-    
+
     #[test]
     fn test_composite_types() {
         // Test array
         let array = vec![
             SipValue::Number(1.0),
             SipValue::Number(2.0),
-            SipValue::String("three".to_string())
+            SipValue::String("three".to_string()),
         ];
         let array_value = SipValue::Array(array.clone());
-        
+
         assert!(array_value.is_array());
         assert_eq!(array_value.as_array().unwrap().len(), 3);
         assert_eq!(array_value.as_array().unwrap()[2].as_str(), Some("three"));
-        
+
         // Test object
         let mut obj = HashMap::new();
         obj.insert("name".to_string(), SipValue::String("Alice".to_string()));
         obj.insert("age".to_string(), SipValue::Number(30.0));
-        
+
         let obj_value = SipValue::Object(obj.clone());
-        
+
         assert!(obj_value.is_object());
         assert_eq!(obj_value.as_object().unwrap().len(), 2);
-        assert_eq!(obj_value.as_object().unwrap().get("name").unwrap().as_str(), Some("Alice"));
+        assert_eq!(
+            obj_value.as_object().unwrap().get("name").unwrap().as_str(),
+            Some("Alice")
+        );
     }
-    
+
     #[test]
     fn test_basic_path_access() {
         // Create a simpler structure to test basic path functionality
         let mut name_obj = HashMap::new();
         name_obj.insert("first".to_string(), SipValue::String("Alice".to_string()));
         name_obj.insert("last".to_string(), SipValue::String("Smith".to_string()));
-        
+
         let mut user_obj = HashMap::new();
         user_obj.insert("name".to_string(), SipValue::Object(name_obj));
         user_obj.insert("age".to_string(), SipValue::Number(30.0));
-        
+
         let mut address_obj = HashMap::new();
         address_obj.insert("city".to_string(), SipValue::String("New York".to_string()));
         address_obj.insert("zip".to_string(), SipValue::String("10001".to_string()));
         user_obj.insert("address".to_string(), SipValue::Object(address_obj));
-        
+
         let value = SipValue::Object(user_obj);
-        
+
         // Test simple path
         assert_eq!(value.get_path("age").unwrap().as_f64(), Some(30.0));
-        
+
         // Test nested path
-        assert_eq!(value.get_path("name.first").unwrap().as_str(), Some("Alice"));
+        assert_eq!(
+            value.get_path("name.first").unwrap().as_str(),
+            Some("Alice")
+        );
         assert_eq!(value.get_path("name.last").unwrap().as_str(), Some("Smith"));
-        
+
         // Test another nested path
-        assert_eq!(value.get_path("address.city").unwrap().as_str(), Some("New York"));
-        
+        assert_eq!(
+            value.get_path("address.city").unwrap().as_str(),
+            Some("New York")
+        );
+
         // Test non-existent path
         assert!(value.get_path("nonexistent").is_none());
         assert!(value.get_path("name.middle").is_none());
     }
-    
+
     #[test]
     fn test_sip_message_path_access() {
         // Create a SIP message structure
         let mut obj = HashMap::new();
-        
+
         // Add method
         obj.insert("method".to_string(), SipValue::String("INVITE".to_string()));
-        
+
         // Create headers map
         let mut headers = HashMap::new();
-        
+
         // Create From header
         let mut from = HashMap::new();
-        from.insert("display_name".to_string(), SipValue::String("Alice".to_string()));
-        from.insert("uri".to_string(), SipValue::String("sip:alice@example.com".to_string()));
-        
+        from.insert(
+            "display_name".to_string(),
+            SipValue::String("Alice".to_string()),
+        );
+        from.insert(
+            "uri".to_string(),
+            SipValue::String("sip:alice@example.com".to_string()),
+        );
+
         // Create From params with tag
         let mut from_params = Vec::new();
         let mut tag_param = HashMap::new();
         tag_param.insert("Tag".to_string(), SipValue::String("1234".to_string()));
         from_params.push(SipValue::Object(tag_param));
         from.insert("params".to_string(), SipValue::Array(from_params));
-        
+
         headers.insert("From".to_string(), SipValue::Object(from));
-        
+
         // Add the headers to the root object
         obj.insert("headers".to_string(), SipValue::Object(headers));
-        
+
         let value = SipValue::Object(obj);
-        
+
         // Test method access
         assert_eq!(value.get_path("method").unwrap().as_str(), Some("INVITE"));
-        
+
         // Test From header access
-        assert_eq!(value.get_path("headers.From.display_name").unwrap().as_str(), Some("Alice"));
-        assert_eq!(value.get_path("headers.From.uri").unwrap().as_str(), Some("sip:alice@example.com"));
-        
+        assert_eq!(
+            value
+                .get_path("headers.From.display_name")
+                .unwrap()
+                .as_str(),
+            Some("Alice")
+        );
+        assert_eq!(
+            value.get_path("headers.From.uri").unwrap().as_str(),
+            Some("sip:alice@example.com")
+        );
+
         // Test From tag access (deeply nested)
-        assert_eq!(value.get_path("headers.From.params[0].Tag").unwrap().as_str(), Some("1234"));
+        assert_eq!(
+            value
+                .get_path("headers.From.params[0].Tag")
+                .unwrap()
+                .as_str(),
+            Some("1234")
+        );
     }
-    
+
     #[test]
     fn test_json_conversion() {
         // Create a SipValue
@@ -738,43 +761,43 @@ mod tests {
         obj.insert("name".to_string(), SipValue::String("Alice".to_string()));
         obj.insert("age".to_string(), SipValue::Number(30.0));
         obj.insert("active".to_string(), SipValue::Bool(true));
-        
+
         let value = SipValue::Object(obj);
-        
+
         // Convert to JSON string
         let json_str = value.to_string().unwrap();
-        
+
         // Convert back to SipValue
         let parsed = SipValue::from_str(&json_str).unwrap();
-        
+
         // Verify the round-trip conversion
         assert_eq!(parsed.get_path("name").unwrap().as_str(), Some("Alice"));
         assert_eq!(parsed.get_path("age").unwrap().as_f64(), Some(30.0));
         assert_eq!(parsed.get_path("active").unwrap().as_bool(), Some(true));
     }
-    
+
     #[test]
     fn test_conversions() {
         // Test From<bool>
         let bool_value: SipValue = true.into();
         assert_eq!(bool_value, SipValue::Bool(true));
-        
+
         // Test From<i32>
         let int_value: SipValue = 42.into();
         assert_eq!(int_value, SipValue::Number(42.0));
-        
+
         // Test From<f64>
         let float_value: SipValue = 3.14.into();
         assert_eq!(float_value, SipValue::Number(3.14));
-        
+
         // Test From<String>
         let string_value: SipValue = "hello".to_string().into();
         assert_eq!(string_value, SipValue::String("hello".to_string()));
-        
+
         // Test From<&str>
         let str_value: SipValue = "world".into();
         assert_eq!(str_value, SipValue::String("world".to_string()));
-        
+
         // Test From<Vec<T>>
         let vec_value: SipValue = vec![1, 2, 3].into();
         let expected = SipValue::Array(vec![
@@ -783,12 +806,12 @@ mod tests {
             SipValue::Number(3.0),
         ]);
         assert_eq!(vec_value, expected);
-        
+
         // Test From<Option<T>>
         let some_value: SipValue = Some("test").into();
         assert_eq!(some_value, SipValue::String("test".to_string()));
-        
+
         let none_value: SipValue = Option::<String>::None.into();
         assert_eq!(none_value, SipValue::Null);
     }
-} 
+}

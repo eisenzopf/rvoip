@@ -18,16 +18,19 @@
 //! - For UAC: local tag = From tag, remote tag = To tag
 //! - For UAS: local tag = To tag, remote tag = From tag
 
+use super::core::DialogManager;
 use crate::dialog::DialogId;
 use crate::errors::DialogResult;
-use rvoip_sip_core::Request;
 use crate::transaction::TransactionKey;
-use super::core::DialogManager;
+use rvoip_sip_core::Request;
 
 /// Trait for message routing operations
 pub trait MessageRouter {
     /// Route an incoming request to the appropriate dialog
-    fn route_request(&self, request: &Request) -> impl std::future::Future<Output = Option<DialogId>> + Send;
+    fn route_request(
+        &self,
+        request: &Request,
+    ) -> impl std::future::Future<Output = Option<DialogId>> + Send;
 }
 
 /// Trait for dialog matching operations
@@ -48,4 +51,4 @@ impl DialogMatcher for DialogManager {
     fn match_transaction(&self, transaction_id: &TransactionKey) -> DialogResult<DialogId> {
         self.find_dialog_for_transaction(transaction_id)
     }
-} 
+}

@@ -8,11 +8,11 @@
 //! The `MonolithicEventBus` inside the coordinator uses a lock-free broadcast channel
 //! internally, so multiple subscribers each get an independent, low-latency delivery.
 
-use std::any::Any;
-use std::sync::Arc;
 use rvoip_infra_common::events::cross_crate::CrossCrateEvent;
 use rvoip_infra_common::events::types::EventPriority;
 use rvoip_infra_common::planes::PlaneType;
+use std::any::Any;
+use std::sync::Arc;
 
 /// Event type identifier for session API events on the global coordinator.
 ///

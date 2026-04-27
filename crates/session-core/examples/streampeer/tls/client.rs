@@ -62,9 +62,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Secure: validate the server cert against the CA. The
         // server cert's SAN must cover `127.0.0.1` for hostname
         // verification to pass.
-        let ca_path = std::env::var("TLS_CA_PATH").expect(
-            "TLS_CA_PATH must be set for secure mode (the run.sh script does this)",
-        );
+        let ca_path = std::env::var("TLS_CA_PATH")
+            .expect("TLS_CA_PATH must be set for secure mode (the run.sh script does this)");
         config.tls_extra_ca_path = Some(ca_path.into());
         println!("Mode: secure (CA validation via tls_extra_ca_path) — full cert chain verified");
     }

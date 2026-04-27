@@ -1,5 +1,5 @@
 /*! Session Description Protocol (SDP) implementation
- 
+
 This module provides a comprehensive implementation of the Session Description Protocol as defined in
 [RFC 8866](https://tools.ietf.org/html/rfc8866) with additional support for WebRTC extensions.
 SDP is commonly used in VoIP and WebRTC applications to describe multimedia sessions and negotiate
@@ -328,21 +328,21 @@ let session = sdp! {
 For more information on SDP and related standards, see the [RFC references](#supported-sdp-message-types-and-features).
 */
 
-pub mod parser;
-pub mod session;
-pub mod media;
 pub mod attributes;
-pub mod macros;
 pub mod builder;
-pub mod integration;  // New module for SIP/SDP integration helpers
+pub mod integration;
+pub mod macros;
+pub mod media;
+pub mod parser;
+pub mod session; // New module for SIP/SDP integration helpers
 
 #[cfg(test)]
 mod tests;
 
-pub use parser::parse_sdp;
-pub use parser::validate_sdp;
+pub use crate::sdp;
 pub use builder::SdpBuilder;
-pub use crate::sdp; // Directly use the sdp macro
+pub use parser::parse_sdp;
+pub use parser::validate_sdp; // Directly use the sdp macro
 
 // For backward compatibility
 pub mod media_parser {
@@ -361,15 +361,15 @@ pub mod time_parser {
 
 // Re-exports
 pub use attributes::MediaDirection;
-pub use integration::*;  // Re-export integration helpers
+pub use integration::*; // Re-export integration helpers
 
 /// Prelude module
 ///
 /// Import common SDP types and functions.
 pub mod prelude {
-    pub use super::SdpBuilder;
-    pub use super::parse_sdp;
     pub use super::attributes::MediaDirection;
-    pub use crate::sdp; // Use the sdp macro from crate root
-    pub use super::integration::*;  // Make integration helpers available in prelude
-} 
+    pub use super::integration::*;
+    pub use super::parse_sdp;
+    pub use super::SdpBuilder;
+    pub use crate::sdp; // Use the sdp macro from crate root // Make integration helpers available in prelude
+}

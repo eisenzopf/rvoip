@@ -25,9 +25,9 @@
 
 use crate::error::Result;
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
 
 /// Subject header (RFC 3261 Section 20.38)
 ///
@@ -47,10 +47,10 @@ use serde::{Serialize, Deserialize};
 ///
 /// // Create a new Subject header
 /// let subject = Subject::new("Weekly Team Sync");
-/// 
+///
 /// // Access the subject text
 /// assert_eq!(subject.text(), "Weekly Team Sync");
-/// 
+///
 /// // Convert to string for inclusion in a SIP message
 /// assert_eq!(subject.to_string(), "Weekly Team Sync");
 /// ```
@@ -301,11 +301,15 @@ impl TypedHeaderTrait for Subject {
         match &header.value {
             HeaderValue::Raw(raw) => {
                 // Parse raw value using the parser - it now returns Subject directly
-                let (_, subject) = 
-                    crate::parser::headers::subject::parse_subject(raw)
-                        .map_err(|e| crate::error::Error::ParseError(format!("Failed to parse Subject header: {:?}", e)))?;
+                let (_, subject) =
+                    crate::parser::headers::subject::parse_subject(raw).map_err(|e| {
+                        crate::error::Error::ParseError(format!(
+                            "Failed to parse Subject header: {:?}",
+                            e
+                        ))
+                    })?;
                 Ok(subject)
-            },
+            }
             _ => Err(crate::error::Error::ParseError(
                 "Invalid header value type for Subject".to_string(),
             )),
@@ -358,7 +362,7 @@ mod tests {
         match &header.value {
             HeaderValue::Raw(raw) => {
                 assert_eq!(std::str::from_utf8(raw).unwrap(), "Test Subject");
-            },
+            }
             _ => panic!("Expected HeaderValue::Raw"),
         }
     }
@@ -370,10 +374,10 @@ mod tests {
             HeaderName::Subject,
             HeaderValue::Raw(b"Test Subject".to_vec()),
         );
-        
+
         // Convert to Subject
         let subject = Subject::from_header(&header).unwrap();
-        
+
         // Check conversion
         assert_eq!(subject.text(), "Test Subject");
     }
@@ -382,13 +386,13 @@ mod tests {
     fn test_subject_roundtrip() {
         // Create a Subject
         let original = Subject::new("Project X Discussion");
-        
+
         // Convert to header
         let header = original.to_header();
-        
+
         // Convert back to Subject
         let roundtrip = Subject::from_header(&header).unwrap();
-        
+
         // Check equality
         assert_eq!(original, roundtrip);
     }
@@ -397,14 +401,14 @@ mod tests {
     fn test_subject_empty_roundtrip() {
         // Create an empty Subject
         let original = Subject::new("");
-        
+
         // Convert to header
         let header = original.to_header();
-        
+
         // Convert back to Subject
         let roundtrip = Subject::from_header(&header).unwrap();
-        
+
         // Check equality
         assert_eq!(original, roundtrip);
     }
-} 
+}

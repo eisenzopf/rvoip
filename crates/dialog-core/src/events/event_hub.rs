@@ -3,22 +3,22 @@
 //! This module provides the central event hub that integrates dialog-core with the global
 //! event coordinator from infra-common, replacing channel-based communication.
 
-use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
-use tracing::{debug, info, warn, error};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
-use rvoip_infra_common::events::coordinator::{GlobalEventCoordinator, CrossCrateEventHandler};
-use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, RvoipCrossCrateEvent, DialogToSessionEvent, SessionToDialogEvent,
-    DialogToTransportEvent, TransportToDialogEvent, CallState, TerminationReason
-};
-use rvoip_sip_core::{StatusCode, Request, Method};
 use crate::transaction::TransactionKey;
+use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
+use rvoip_infra_common::events::cross_crate::{
+    CallState, CrossCrateEvent, DialogToSessionEvent, DialogToTransportEvent, RvoipCrossCrateEvent,
+    SessionToDialogEvent, TerminationReason, TransportToDialogEvent,
+};
+use rvoip_sip_core::{Method, Request, StatusCode};
 
-use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::DialogError;
+use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::manager::DialogManager;
 
 /// Dialog Event Hub that handles all cross-crate event communication
@@ -26,7 +26,7 @@ use crate::manager::DialogManager;
 pub struct DialogEventHub {
     /// Global event coordinator for cross-crate communication
     global_coordinator: Arc<GlobalEventCoordinator>,
-    
+
     /// Reference to dialog manager for handling incoming events
     dialog_manager: Arc<DialogManager>,
 }
@@ -50,67 +50,84 @@ impl DialogEventHub {
             global_coordinator: global_coordinator.clone(),
             dialog_manager,
         });
-        
+
         // Clone hub for registration (CrossCrateEventHandler must be implemented for DialogEventHub not Arc<DialogEventHub>)
         let handler = DialogEventHub {
             global_coordinator: global_coordinator.clone(),
             dialog_manager: hub.dialog_manager.clone(),
         };
-        
+
         // Register as handler for session-to-dialog events
         global_coordinator
             .register_handler("session_to_dialog", handler.clone())
             .await?;
-            
+
         // Register as handler for transport-to-dialog events
         global_coordinator
             .register_handler("transport_to_dialog", handler)
             .await?;
-        
+
         info!("Dialog Event Hub initialized and registered with GlobalEventCoordinator");
-        
+
         Ok(hub)
     }
-    
+
     /// Publish a dialog event to the global bus
     pub async fn publish_dialog_event(&self, event: DialogEvent) -> Result<()> {
         debug!("Publishing dialog event: {:?}", event);
-        
+
         // Convert to cross-crate event if applicable
         if let Some(cross_crate_event) = self.convert_dialog_to_cross_crate(event) {
-            self.global_coordinator.publish(Arc::new(cross_crate_event)).await?;
+            self.global_coordinator
+                .publish(Arc::new(cross_crate_event))
+                .await?;
         }
-        
+
         Ok(())
     }
-    
+
     /// Publish a session coordination event to the global bus
-    pub async fn publish_session_coordination_event(&self, event: SessionCoordinationEvent) -> Result<()> {
+    pub async fn publish_session_coordination_event(
+        &self,
+        event: SessionCoordinationEvent,
+    ) -> Result<()> {
         debug!("Publishing session coordination event: {:?}", event);
 
         // Convert to cross-crate event
         if let Some(cross_crate_event) = self.convert_coordination_to_cross_crate(event.clone()) {
-            info!("🚀 [event_hub] About to publish cross-crate event for event: {:?}", event);
-            self.global_coordinator.publish(Arc::new(cross_crate_event)).await?;
+            info!(
+                "🚀 [event_hub] About to publish cross-crate event for event: {:?}",
+                event
+            );
+            self.global_coordinator
+                .publish(Arc::new(cross_crate_event))
+                .await?;
             info!("✅ [event_hub] Published cross-crate event successfully");
         } else {
-            info!("⚠️ [event_hub] convert_coordination_to_cross_crate returned None for: {:?}", event);
+            info!(
+                "⚠️ [event_hub] convert_coordination_to_cross_crate returned None for: {:?}",
+                event
+            );
         }
 
         Ok(())
     }
-    
+
     /// Publish a cross-crate event directly
     pub async fn publish_cross_crate_event(&self, event: RvoipCrossCrateEvent) -> Result<()> {
         debug!("Publishing cross-crate event directly: {:?}", event);
         self.global_coordinator.publish(Arc::new(event)).await?;
         Ok(())
     }
-    
+
     /// Convert DialogEvent to cross-crate event
     fn convert_dialog_to_cross_crate(&self, event: DialogEvent) -> Option<RvoipCrossCrateEvent> {
         match event {
-            DialogEvent::StateChanged { dialog_id, old_state, new_state } => {
+            DialogEvent::StateChanged {
+                dialog_id,
+                old_state,
+                new_state,
+            } => {
                 // Map dialog states to cross-crate call states
                 let call_state = match new_state {
                     DialogState::Initial => CallState::Initiating,
@@ -119,7 +136,7 @@ impl DialogEventHub {
                     DialogState::Recovering => CallState::Active, // Still active but recovering
                     DialogState::Terminated => CallState::Terminated,
                 };
-                
+
                 // Get session ID from dialog ID mapping
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     Some(RvoipCrossCrateEvent::DialogToSession(
@@ -127,59 +144,76 @@ impl DialogEventHub {
                             session_id,
                             new_state: call_state,
                             reason: None,
-                        }
+                        },
                     ))
                 } else {
                     warn!("No session ID found for dialog {:?}", dialog_id);
                     None
                 }
             }
-            
+
             DialogEvent::Terminated { dialog_id, reason } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::CallTerminated {
                             session_id,
                             reason: TerminationReason::RemoteHangup,
-                        }
+                        },
                     ))
                 } else {
                     None
                 }
             }
-            
+
             _ => None, // Other events are internal only
         }
     }
-    
+
     /// Convert SessionCoordinationEvent to cross-crate event
-    fn convert_coordination_to_cross_crate(&self, event: SessionCoordinationEvent) -> Option<RvoipCrossCrateEvent> {
+    fn convert_coordination_to_cross_crate(
+        &self,
+        event: SessionCoordinationEvent,
+    ) -> Option<RvoipCrossCrateEvent> {
         match event {
-            SessionCoordinationEvent::IncomingCall { dialog_id, transaction_id, request, source } => {
-                let call_id = request.call_id()
+            SessionCoordinationEvent::IncomingCall {
+                dialog_id,
+                transaction_id,
+                request,
+                source,
+            } => {
+                let call_id = request
+                    .call_id()
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| format!("unknown-{}", uuid::Uuid::new_v4()));
-                
-                let from = request.from()
+
+                let from = request
+                    .from()
                     .map(|f| f.to_string())
                     .unwrap_or_else(|| "anonymous".to_string());
-                    
-                let to = request.to()
+
+                let to = request
+                    .to()
                     .map(|t| t.to_string())
                     .unwrap_or_else(|| "unknown".to_string());
-                
+
                 let sdp_offer = if !request.body().is_empty() {
                     String::from_utf8(request.body().to_vec()).ok()
                 } else {
                     None
                 };
-                
+
                 // Generate session ID
                 let session_id = format!("session-{}", uuid::Uuid::new_v4());
-                
+
                 // Store mapping
-                self.dialog_manager.store_dialog_mapping(&session_id, dialog_id.clone(), transaction_id.clone(), request.clone(), source);
-                
+                self.dialog_manager.store_dialog_mapping(
+                    &session_id,
+                    dialog_id.clone(),
+                    transaction_id.clone(),
+                    request.clone(),
+                    source,
+                );
+
                 // Include dialog_id in headers since IncomingCall doesn't have a dialog_id field
                 let mut headers = std::collections::HashMap::new();
                 headers.insert("X-Dialog-Id".to_string(), dialog_id.to_string());
@@ -198,7 +232,7 @@ impl DialogEventHub {
                         _ => {}
                     }
                 }
-                
+
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
                         session_id,
@@ -209,20 +243,29 @@ impl DialogEventHub {
                         headers,
                         transaction_id: transaction_id.to_string(),
                         source_addr: source.to_string(),
-                    }
+                    },
                 ))
             }
-            
-            SessionCoordinationEvent::CallAnswered { dialog_id, session_answer } => {
-                info!("🔍 [event_hub] Processing CallAnswered for dialog: {}", dialog_id);
+
+            SessionCoordinationEvent::CallAnswered {
+                dialog_id,
+                session_answer,
+            } => {
+                info!(
+                    "🔍 [event_hub] Processing CallAnswered for dialog: {}",
+                    dialog_id
+                );
                 match self.dialog_manager.get_session_id(&dialog_id) {
                     Some(session_id) => {
-                        info!("✅ [event_hub] Found session ID {} for dialog {}", session_id, dialog_id);
+                        info!(
+                            "✅ [event_hub] Found session ID {} for dialog {}",
+                            session_id, dialog_id
+                        );
                         Some(RvoipCrossCrateEvent::DialogToSession(
                             DialogToSessionEvent::CallEstablished {
                                 session_id,
                                 sdp_answer: Some(session_answer),
-                            }
+                            },
                         ))
                     }
                     None => {
@@ -231,37 +274,48 @@ impl DialogEventHub {
                     }
                 }
             }
-            
+
             SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::CallTerminated {
                             session_id,
                             reason: TerminationReason::RemoteHangup,
-                        }
+                        },
                     ))
                 } else {
                     None
                 }
             }
 
-            SessionCoordinationEvent::SessionRefreshed { dialog_id, expires_secs } => {
-                self.dialog_manager.get_session_id(&dialog_id).map(|session_id| {
-                    RvoipCrossCrateEvent::DialogToSession(
-                        DialogToSessionEvent::SessionRefreshed { session_id, expires_secs },
-                    )
-                })
-            }
+            SessionCoordinationEvent::SessionRefreshed {
+                dialog_id,
+                expires_secs,
+            } => self
+                .dialog_manager
+                .get_session_id(&dialog_id)
+                .map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::SessionRefreshed {
+                        session_id,
+                        expires_secs,
+                    })
+                }),
 
-            SessionCoordinationEvent::SessionRefreshFailed { dialog_id, reason } => {
-                self.dialog_manager.get_session_id(&dialog_id).map(|session_id| {
+            SessionCoordinationEvent::SessionRefreshFailed { dialog_id, reason } => self
+                .dialog_manager
+                .get_session_id(&dialog_id)
+                .map(|session_id| {
                     RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::SessionRefreshFailed { session_id, reason },
                     )
-                })
-            }
+                }),
 
-            SessionCoordinationEvent::OutboundFlowFailed { aor, reg_id, instance, reason } => {
+            SessionCoordinationEvent::OutboundFlowFailed {
+                aor,
+                reg_id,
+                instance,
+                reason,
+            } => {
                 // RFC 5626 flow-level event: no session_id association
                 // (registrations can be coordinator-global, not tied to a
                 // single dialog). Session-core locates the registration
@@ -276,7 +330,11 @@ impl DialogEventHub {
                 ))
             }
 
-            SessionCoordinationEvent::ResponseReceived { dialog_id, response, .. } => {
+            SessionCoordinationEvent::ResponseReceived {
+                dialog_id,
+                response,
+                ..
+            } => {
                 // Try to get session ID from stored mapping first
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     // Handle specific response codes
@@ -293,7 +351,7 @@ impl DialogEventHub {
                                 DialogToSessionEvent::CallEstablished {
                                     session_id,
                                     sdp_answer,
-                                }
+                                },
                             ))
                         }
                         180 | 183 => {
@@ -303,7 +361,7 @@ impl DialogEventHub {
                                     session_id,
                                     new_state: CallState::Ringing,
                                     reason: None,
-                                }
+                                },
                             ))
                         }
                         181 | 182 | 199 => {
@@ -325,7 +383,7 @@ impl DialogEventHub {
                                     session_id,
                                     new_state: CallState::Ringing,
                                     reason,
-                                }
+                                },
                             ))
                         }
                         487 => {
@@ -333,7 +391,7 @@ impl DialogEventHub {
                             // CANCEL. Distinct from generic CallFailed so UIs can
                             // render "missed call" rather than "call rejected".
                             Some(RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::CallCancelled { session_id }
+                                DialogToSessionEvent::CallCancelled { session_id },
                             ))
                         }
                         491 => {
@@ -343,7 +401,7 @@ impl DialogEventHub {
                             // nonsensical per the spec so we surface it as glare
                             // unconditionally; higher layers decide how to handle.
                             Some(RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::ReinviteGlare { session_id }
+                                DialogToSessionEvent::ReinviteGlare { session_id },
                             ))
                         }
                         422 => {
@@ -425,7 +483,8 @@ impl DialogEventHub {
                                             .params
                                             .iter()
                                             .find_map(|p| {
-                                                if let rvoip_sip_core::types::param::Param::Q(v) = p {
+                                                if let rvoip_sip_core::types::param::Param::Q(v) = p
+                                                {
                                                     Some(*v.as_ref() as f32)
                                                 } else {
                                                     None
@@ -442,7 +501,7 @@ impl DialogEventHub {
                                     status_code: code,
                                     targets,
                                     q_values,
-                                }
+                                },
                             ))
                         }
                         401 | 407 => {
@@ -469,7 +528,7 @@ impl DialogEventHub {
                                         status_code: response.status_code(),
                                         challenge,
                                         realm,
-                                    }
+                                    },
                                 ))
                             } else {
                                 Some(RvoipCrossCrateEvent::DialogToSession(
@@ -477,7 +536,7 @@ impl DialogEventHub {
                                         session_id,
                                         status_code: response.status_code(),
                                         reason_phrase: response.reason_phrase().to_string(),
-                                    }
+                                    },
                                 ))
                             }
                         }
@@ -491,7 +550,7 @@ impl DialogEventHub {
                                     session_id,
                                     status_code: code,
                                     reason_phrase: response.reason_phrase().to_string(),
-                                }
+                                },
                             ))
                         }
                         _ => None, // Other 1xx provisional responses stay unmapped
@@ -501,8 +560,14 @@ impl DialogEventHub {
                     None
                 }
             }
-            
-            SessionCoordinationEvent::TransferRequest { dialog_id, transaction_id, refer_to, replaces, .. } => {
+
+            SessionCoordinationEvent::TransferRequest {
+                dialog_id,
+                transaction_id,
+                refer_to,
+                replaces,
+                ..
+            } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     // Convert ReferTo to string
                     let refer_to_uri = refer_to.uri().to_string();
@@ -520,10 +585,13 @@ impl DialogEventHub {
                             refer_to: refer_to_uri,
                             transfer_type,
                             transaction_id: transaction_id.to_string(),
-                        }
+                        },
                     ))
                 } else {
-                    warn!("No session ID found for dialog {:?} in TransferRequest", dialog_id);
+                    warn!(
+                        "No session ID found for dialog {:?} in TransferRequest",
+                        dialog_id
+                    );
                     None
                 }
             }
@@ -533,22 +601,35 @@ impl DialogEventHub {
                 // AckSent is primarily for UAC - session layer may need to know ACK was sent
                 // but typically this isn't needed for state transitions
                 // We'll pass it through in case session-core-v2 wants to track it
-                debug!("AckSent event for dialog {}, converting to cross-crate format", dialog_id);
+                debug!(
+                    "AckSent event for dialog {}, converting to cross-crate format",
+                    dialog_id
+                );
                 None // For now, UAC doesn't need this event
             }
 
-            SessionCoordinationEvent::AckReceived { dialog_id, negotiated_sdp, .. } => {
+            SessionCoordinationEvent::AckReceived {
+                dialog_id,
+                negotiated_sdp,
+                ..
+            } => {
                 // AckReceived is critical for UAS - dialog-core received ACK, now session must transition
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    info!("Converting AckReceived to cross-crate event for session {}", session_id);
+                    info!(
+                        "Converting AckReceived to cross-crate event for session {}",
+                        session_id
+                    );
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::AckReceived {
                             session_id,
                             sdp: negotiated_sdp,
-                        }
+                        },
                     ))
                 } else {
-                    warn!("No session ID found for dialog {:?} in AckReceived", dialog_id);
+                    warn!(
+                        "No session ID found for dialog {:?} in AckReceived",
+                        dialog_id
+                    );
                     None
                 }
             }
@@ -556,7 +637,10 @@ impl DialogEventHub {
             SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
                 // When BYE completes, notify session-core that dialog is terminating
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    info!("Converting CallTerminating to CallTerminated for session {}", session_id);
+                    info!(
+                        "Converting CallTerminating to CallTerminated for session {}",
+                        session_id
+                    );
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::CallTerminated {
                             session_id,
@@ -564,7 +648,10 @@ impl DialogEventHub {
                         }
                     ))
                 } else {
-                    warn!("No session ID found for dialog {:?} in CallTerminating", dialog_id);
+                    warn!(
+                        "No session ID found for dialog {:?} in CallTerminating",
+                        dialog_id
+                    );
                     None
                 }
             }
@@ -574,17 +661,16 @@ impl DialogEventHub {
             // transition Initiating → Ringing (which is what the
             // `UAC/Ringing/HangupCall → CANCEL` path and the public
             // ringback signals rely on).
-            SessionCoordinationEvent::CallRinging { dialog_id } => {
-                self.dialog_manager.get_session_id(&dialog_id).map(|session_id| {
-                    RvoipCrossCrateEvent::DialogToSession(
-                        DialogToSessionEvent::CallStateChanged {
-                            session_id,
-                            new_state: CallState::Ringing,
-                            reason: Some("180 Ringing".to_string()),
-                        },
-                    )
-                })
-            }
+            SessionCoordinationEvent::CallRinging { dialog_id } => self
+                .dialog_manager
+                .get_session_id(&dialog_id)
+                .map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallStateChanged {
+                        session_id,
+                        new_state: CallState::Ringing,
+                        reason: Some("180 Ringing".to_string()),
+                    })
+                }),
 
             // DTMF events would be handled separately if implemented
             // SessionCoordinationEvent doesn't have DtmfReceived yet
@@ -594,7 +680,9 @@ impl DialogEventHub {
             // on glare) through its state machine. INFO and NOTIFY are also
             // emitted via this variant today — we deliberately skip them
             // here so they do not get misrouted to the re-INVITE handler.
-            SessionCoordinationEvent::ReInvite { dialog_id, request, .. } => {
+            SessionCoordinationEvent::ReInvite {
+                dialog_id, request, ..
+            } => {
                 let method = request.method();
                 if !matches!(method, Method::Invite | Method::Update) {
                     debug!(
@@ -635,7 +723,7 @@ impl DialogEventHub {
 impl CrossCrateEventHandler for DialogEventHub {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
-        
+
         // Use trait-based downcasting via as_any()
         if let Some(concrete) = event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
             match concrete {
@@ -649,7 +737,10 @@ impl CrossCrateEventHandler for DialogEventHub {
                             contact,
                             expires,
                         } => {
-                            info!("📩 Handling SendRegisterResponse via trait: {} {}", status_code, reason);
+                            info!(
+                                "📩 Handling SendRegisterResponse via trait: {} {}",
+                                status_code, reason
+                            );
                             self.handle_register_response(
                                 transaction_id,
                                 *status_code,
@@ -657,7 +748,8 @@ impl CrossCrateEventHandler for DialogEventHub {
                                 www_authenticate.as_deref(),
                                 contact.as_deref(),
                                 *expires,
-                            ).await?;
+                            )
+                            .await?;
                             return Ok(()); // Early return after handling
                         }
                         _ => {}
@@ -666,14 +758,14 @@ impl CrossCrateEventHandler for DialogEventHub {
                 _ => {}
             }
         }
-        
+
         // Fallback to string parsing for other events (legacy support)
         let event_str = format!("{:?}", event);
-        
+
         match event.event_type() {
             "session_to_dialog" => {
                 debug!("Processing session-to-dialog event: {}", event_str);
-                
+
                 // Handle ReferResponse event
                 if event_str.contains("ReferResponse") {
                     self.handle_refer_response(&event_str).await?;
@@ -683,24 +775,42 @@ impl CrossCrateEventHandler for DialogEventHub {
                     // Extract session_id and dialog_id
                     if let Some(session_id_start) = event_str.find("session_id: \"") {
                         let session_id_content_start = session_id_start + 13;
-                        if let Some(session_id_end) = event_str[session_id_content_start..].find("\"") {
-                            let session_id = event_str[session_id_content_start..session_id_content_start + session_id_end].to_string();
-                            
+                        if let Some(session_id_end) =
+                            event_str[session_id_content_start..].find("\"")
+                        {
+                            let session_id = event_str[session_id_content_start
+                                ..session_id_content_start + session_id_end]
+                                .to_string();
+
                             if let Some(dialog_id_start) = event_str.find("dialog_id: \"") {
                                 let dialog_id_content_start = dialog_id_start + 12;
-                                if let Some(dialog_id_end) = event_str[dialog_id_content_start..].find("\"") {
-                                    let dialog_id = event_str[dialog_id_content_start..dialog_id_content_start + dialog_id_end].to_string();
-                                    
-                                    info!("Storing dialog mapping: session {} -> dialog {}", session_id, dialog_id);
-                                    
+                                if let Some(dialog_id_end) =
+                                    event_str[dialog_id_content_start..].find("\"")
+                                {
+                                    let dialog_id = event_str[dialog_id_content_start
+                                        ..dialog_id_content_start + dialog_id_end]
+                                        .to_string();
+
+                                    info!(
+                                        "Storing dialog mapping: session {} -> dialog {}",
+                                        session_id, dialog_id
+                                    );
+
                                     // Parse dialog ID from UUID string
                                     if let Ok(uuid) = dialog_id.parse::<uuid::Uuid>() {
                                         let parsed_dialog_id = DialogId(uuid);
                                         // Store the bidirectional mapping
-                                        self.dialog_manager.session_to_dialog.insert(session_id.clone(), parsed_dialog_id.clone());
-                                        self.dialog_manager.dialog_to_session.insert(parsed_dialog_id, session_id.clone());
-                                        
-                                        info!("Successfully stored dialog mapping for session {}", session_id);
+                                        self.dialog_manager
+                                            .session_to_dialog
+                                            .insert(session_id.clone(), parsed_dialog_id.clone());
+                                        self.dialog_manager
+                                            .dialog_to_session
+                                            .insert(parsed_dialog_id, session_id.clone());
+
+                                        info!(
+                                            "Successfully stored dialog mapping for session {}",
+                                            session_id
+                                        );
                                     } else {
                                         warn!("Failed to parse dialog ID: {}", dialog_id);
                                     }
@@ -710,17 +820,17 @@ impl CrossCrateEventHandler for DialogEventHub {
                     }
                 }
             }
-            
+
             "transport_to_dialog" => {
                 info!("Processing transport-to-dialog event");
                 // Handle transport events if needed
             }
-            
+
             _ => {
                 debug!("Unhandled event type: {}", event.event_type());
             }
         }
-        
+
         Ok(())
     }
 }
@@ -736,87 +846,126 @@ impl DialogEventHub {
         contact: Option<&str>,
         expires: Option<u32>,
     ) -> Result<()> {
-        debug!("Handling SendRegisterResponse: transaction={}, status={} {}", 
-               transaction_id, status_code, reason);
-        
+        debug!(
+            "Handling SendRegisterResponse: transaction={}, status={} {}",
+            transaction_id, status_code, reason
+        );
+
         // Parse transaction_id to TransactionKey
-        let tx_key = transaction_id.parse::<TransactionKey>()
+        let tx_key = transaction_id
+            .parse::<TransactionKey>()
             .map_err(|e| anyhow::anyhow!("Failed to parse transaction_id: {}", e))?;
-        
+
         // Check if this transaction exists in our dialog manager
         // This prevents multiple DialogEventHubs from trying to handle the same event
-        if self.dialog_manager.transaction_manager().original_request(&tx_key).await.is_err() {
-            debug!("Transaction {} not found in this DialogManager - skipping", transaction_id);
+        if self
+            .dialog_manager
+            .transaction_manager()
+            .original_request(&tx_key)
+            .await
+            .is_err()
+        {
+            debug!(
+                "Transaction {} not found in this DialogManager - skipping",
+                transaction_id
+            );
             return Ok(()); // Not our transaction, skip silently
         }
-        
+
         // Call the dialog manager's send_register_response method
-        self.dialog_manager.send_register_response(
-            &tx_key,
-            status_code,
-            reason,
-            www_authenticate,
-            contact,
-            expires,
-        ).await
-        .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
-        
+        self.dialog_manager
+            .send_register_response(
+                &tx_key,
+                status_code,
+                reason,
+                www_authenticate,
+                contact,
+                expires,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
+
         info!("✅ Sent REGISTER response: {} {}", status_code, reason);
         Ok(())
     }
-    
+
     /// Handle ReferResponse event from session-core
     async fn handle_refer_response(&self, event_str: &str) -> Result<()> {
         // Extract transaction_id, accept flag, status_code, and reason
-        let transaction_id = self.extract_field(event_str, "transaction_id: \"")
+        let transaction_id = self
+            .extract_field(event_str, "transaction_id: \"")
             .ok_or_else(|| anyhow::anyhow!("Missing transaction_id in ReferResponse"))?;
-        
+
         let accept = event_str.contains("accept: true");
-        
-        let status_code = self.extract_field(event_str, "status_code: ")
+
+        let status_code = self
+            .extract_field(event_str, "status_code: ")
             .and_then(|s| s.parse::<u16>().ok())
             .unwrap_or(if accept { 202 } else { 603 });
-            
-        let reason = self.extract_field(event_str, "reason: \"")
-            .unwrap_or_else(|| if accept { "Accepted".to_string() } else { "Decline".to_string() });
-        
-        info!("Handling ReferResponse: transaction={}, accept={}, status={} {}", 
-              transaction_id, accept, status_code, reason);
-        
+
+        let reason = self
+            .extract_field(event_str, "reason: \"")
+            .unwrap_or_else(|| {
+                if accept {
+                    "Accepted".to_string()
+                } else {
+                    "Decline".to_string()
+                }
+            });
+
+        info!(
+            "Handling ReferResponse: transaction={}, accept={}, status={} {}",
+            transaction_id, accept, status_code, reason
+        );
+
         // Parse transaction_id and send response
         if let Ok(tx_key) = transaction_id.parse::<crate::transaction::TransactionKey>() {
             use rvoip_sip_core::StatusCode;
             let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::Accepted);
-            
+
             // Get original REFER request to build proper response
-            match self.dialog_manager.transaction_manager().original_request(&tx_key).await {
+            match self
+                .dialog_manager
+                .transaction_manager()
+                .original_request(&tx_key)
+                .await
+            {
                 Ok(Some(original_request)) => {
                     // Build proper response using the original request
                     let response = crate::transaction::utils::response_builders::create_response(
-                        &original_request, 
-                        status
+                        &original_request,
+                        status,
                     );
-                    
+
                     if let Err(e) = self.dialog_manager.send_response(&tx_key, response).await {
                         error!("Failed to send REFER response: {}", e);
                     } else {
-                        info!("Successfully sent REFER response: {} {}", status_code, reason);
+                        info!(
+                            "Successfully sent REFER response: {} {}",
+                            status_code, reason
+                        );
                     }
                 }
                 Ok(None) => {
-                    error!("No original request found for transaction: {}", transaction_id);
+                    error!(
+                        "No original request found for transaction: {}",
+                        transaction_id
+                    );
                 }
                 Err(e) => {
-                    error!("Failed to get original request for transaction {}: {}", transaction_id, e);
+                    error!(
+                        "Failed to get original request for transaction {}: {}",
+                        transaction_id, e
+                    );
                 }
             }
         } else {
             error!("Failed to parse transaction_id: {}", transaction_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Extract field value from event debug string
     fn extract_field(&self, event_str: &str, field_prefix: &str) -> Option<String> {
         if let Some(start) = event_str.find(field_prefix) {
@@ -824,13 +973,14 @@ impl DialogEventHub {
             if field_prefix.ends_with("\"") {
                 // String field - find closing quote
                 if let Some(end) = event_str[start..].find('"') {
-                    return Some(event_str[start..start+end].to_string());
+                    return Some(event_str[start..start + end].to_string());
                 }
             } else {
                 // Numeric field - find next space or comma
-                let end = event_str[start..].find(|c: char| c.is_whitespace() || c == ',')
+                let end = event_str[start..]
+                    .find(|c: char| c.is_whitespace() || c == ',')
                     .unwrap_or(event_str[start..].len());
-                return Some(event_str[start..start+end].to_string());
+                return Some(event_str[start..start + end].to_string());
             }
         }
         None

@@ -1,6 +1,6 @@
+use crate::types::CallState;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use crate::types::CallState;
 
 /// Session ID type
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -44,12 +44,12 @@ impl DialogId {
     pub fn new() -> Self {
         Self(uuid::Uuid::new_v4())
     }
-    
+
     /// Create from a UUID
     pub fn from_uuid(uuid: uuid::Uuid) -> Self {
         Self(uuid)
     }
-    
+
     /// Get the inner UUID
     pub fn as_uuid(&self) -> &uuid::Uuid {
         &self.0
@@ -69,7 +69,7 @@ impl From<rvoip_dialog_core::DialogId> for DialogId {
     }
 }
 
-// Conversion from our DialogId to rvoip_dialog_core::DialogId  
+// Conversion from our DialogId to rvoip_dialog_core::DialogId
 impl From<DialogId> for rvoip_dialog_core::DialogId {
     fn from(dialog_id: DialogId) -> Self {
         rvoip_dialog_core::DialogId(dialog_id.0)
@@ -119,32 +119,50 @@ pub enum Role {
 #[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EventType {
     // User-initiated events
-    MakeCall { target: String },
-    IncomingCall { from: String, sdp: Option<String> },
+    MakeCall {
+        target: String,
+    },
+    IncomingCall {
+        from: String,
+        sdp: Option<String>,
+    },
     AcceptCall,
-    RejectCall { status: u16, reason: String },
+    RejectCall {
+        status: u16,
+        reason: String,
+    },
     /// RFC 3261 §8.1.3.4 — UAS-side redirect. Send a 3xx response with one
     /// or more `Contact:` URIs so the UAC can retarget. Valid from Ringing
     /// and EarlyMedia on the UAS role.
-    RedirectCall { status: u16, contacts: Vec<String> },
+    RedirectCall {
+        status: u16,
+        contacts: Vec<String>,
+    },
     /// RFC 3262 — emit a reliable 183 Session Progress with early-media SDP.
     /// `sdp: Some(_)` uses caller-supplied SDP verbatim; `None` triggers
     /// `negotiate_sdp_as_uas` against the stored remote offer.
-    SendEarlyMedia { sdp: Option<String> },
+    SendEarlyMedia {
+        sdp: Option<String>,
+    },
     /// RFC 3261 §22.2 — server or proxy challenged the UAC request with
     /// 401/407. `challenge` is the raw header value (e.g.
     /// `Digest realm="...", nonce="..."`) ready for
     /// `auth-core::DigestAuthenticator::parse_challenge`. Same variant drives
     /// INVITE (`Initiating`) and REGISTER (`Registering`) retries — the
     /// current state disambiguates which request to re-send.
-    AuthRequired { status_code: u16, challenge: String },
+    AuthRequired {
+        status_code: u16,
+        challenge: String,
+    },
     /// RFC 4028 §6 — UAS replied 422 Session Interval Too Small. `min_se_secs`
     /// is the peer's required floor, parsed from the `Min-SE` response header.
     /// The state machine caches it onto the session and fires
     /// `SendINVITEWithBumpedSessionExpires` to retry with the bumped values;
     /// the 2-retry cap lives in the action, and on exhaustion the session
     /// falls through to the generic `Dialog4xxFailure` failure path.
-    SessionIntervalTooSmall { min_se_secs: u32 },
+    SessionIntervalTooSmall {
+        min_se_secs: u32,
+    },
     HangupCall,
     HoldCall,
     ResumeCall,
@@ -152,14 +170,21 @@ pub enum EventType {
     UnmuteCall,
 
     // Media control events
-    PlayAudio { file: String },
+    PlayAudio {
+        file: String,
+    },
     StartRecording,
     StopRecording,
 
-
     // Dialog events (from dialog-core)
-    DialogCreated { dialog_id: String, call_id: String },
-    CallEstablished { session_id: String, sdp_answer: Option<String> },
+    DialogCreated {
+        dialog_id: String,
+        call_id: String,
+    },
+    CallEstablished {
+        session_id: String,
+        sdp_answer: Option<String>,
+    },
     DialogInvite,
     Dialog180Ringing,
     Dialog183SessionProgress,
@@ -169,7 +194,10 @@ pub enum EventType {
     DialogCANCEL,
     DialogREFER,
     DialogReINVITE,
-    Dialog3xxRedirect { status: u16, targets: Vec<String> },
+    Dialog3xxRedirect {
+        status: u16,
+        targets: Vec<String>,
+    },
     /// RFC 3261 §14.1 — 491 Request Pending on a re-INVITE. UAC should wait
     /// a random interval and retry whatever re-INVITE was in flight
     /// (session.pending_reinvite captures that).
@@ -181,15 +209,26 @@ pub enum EventType {
     DialogTimeout,
     DialogTerminated,
     DialogError(String),
-    DialogStateChanged { old_state: String, new_state: String },
-    ReinviteReceived { sdp: Option<String> },
+    DialogStateChanged {
+        old_state: String,
+        new_state: String,
+    },
+    ReinviteReceived {
+        sdp: Option<String>,
+    },
     /// UPDATE received (RFC 3311 / RFC 4028). Distinct from re-INVITE so
     /// the state table can route them to different transitions —
     /// session-timer refresh over UPDATE carries no SDP, media renegotiation
     /// over re-INVITE does.
-    UpdateReceived { sdp: Option<String> },
-    TransferRequested { refer_to: String, transfer_type: String, transaction_id: String }, // Kept for callback system
-    
+    UpdateReceived {
+        sdp: Option<String>,
+    },
+    TransferRequested {
+        refer_to: String,
+        transfer_type: String,
+        transaction_id: String,
+    }, // Kept for callback system
+
     // Media events (from media-core)
     MediaSessionCreated,
     MediaSessionReady,
@@ -197,11 +236,22 @@ pub enum EventType {
     MediaFlowEstablished,
     MediaError(String),
     MediaEvent(String), // Generic media events like "rfc_compliant_media_creation_uac"
-    MediaQualityDegraded { packet_loss_percent: u32, jitter_ms: u32, severity: String },
-    DtmfDetected { digit: char, duration_ms: u32 },
-    RtpTimeout { last_packet_time: String },
-    PacketLossThresholdExceeded { loss_percentage: u32 },
-    
+    MediaQualityDegraded {
+        packet_loss_percent: u32,
+        jitter_ms: u32,
+        severity: String,
+    },
+    DtmfDetected {
+        digit: char,
+        duration_ms: u32,
+    },
+    RtpTimeout {
+        last_packet_time: String,
+    },
+    PacketLossThresholdExceeded {
+        loss_percentage: u32,
+    },
+
     // Internal coordination events
     InternalCheckReady,
     InternalACKSent,
@@ -209,19 +259,27 @@ pub enum EventType {
     InternalCleanupComplete,
     CheckConditions,
     PublishCallEstablished,
-    
+
     // Conference events
-    CreateConference { name: String },
-    AddParticipant { session_id: String },
-    JoinConference { conference_id: String },
+    CreateConference {
+        name: String,
+    },
+    AddParticipant {
+        session_id: String,
+    },
+    JoinConference {
+        conference_id: String,
+    },
     LeaveConference,
     MuteInConference,
     UnmuteInConference,
-    
+
     // Bridge events (kept for single session bridging)
-    BridgeSessions { other_session: SessionId },
+    BridgeSessions {
+        other_session: SessionId,
+    },
     UnbridgeSessions,
-    
+
     // Session modification
     ModifySession,
 
@@ -269,30 +327,51 @@ impl EventType {
     pub fn normalize(&self) -> Self {
         match self {
             // User events - normalize to empty/default values
-            EventType::MakeCall { .. } => EventType::MakeCall { target: String::new() },
-            EventType::IncomingCall { .. } => EventType::IncomingCall { from: String::new(), sdp: None },
-            EventType::RejectCall { .. } => EventType::RejectCall { status: 0, reason: String::new() },
-            EventType::RedirectCall { .. } => EventType::RedirectCall { status: 0, contacts: Vec::new() },
+            EventType::MakeCall { .. } => EventType::MakeCall {
+                target: String::new(),
+            },
+            EventType::IncomingCall { .. } => EventType::IncomingCall {
+                from: String::new(),
+                sdp: None,
+            },
+            EventType::RejectCall { .. } => EventType::RejectCall {
+                status: 0,
+                reason: String::new(),
+            },
+            EventType::RedirectCall { .. } => EventType::RedirectCall {
+                status: 0,
+                contacts: Vec::new(),
+            },
             EventType::SendEarlyMedia { .. } => EventType::SendEarlyMedia { sdp: None },
             EventType::AuthRequired { .. } => EventType::AuthRequired {
                 status_code: 0,
                 challenge: String::new(),
             },
-            EventType::SessionIntervalTooSmall { .. } => EventType::SessionIntervalTooSmall {
-                min_se_secs: 0,
-            },
+            EventType::SessionIntervalTooSmall { .. } => {
+                EventType::SessionIntervalTooSmall { min_se_secs: 0 }
+            }
             // BlindTransfer and AttendedTransfer events removed
-            
+
             // Media events - normalize
-            EventType::PlayAudio { .. } => EventType::PlayAudio { file: String::new() },
+            EventType::PlayAudio { .. } => EventType::PlayAudio {
+                file: String::new(),
+            },
 
             // Conference events - normalize
-            EventType::CreateConference { .. } => EventType::CreateConference { name: String::new() },
-            EventType::AddParticipant { .. } => EventType::AddParticipant { session_id: String::new() },
-            EventType::JoinConference { .. } => EventType::JoinConference { conference_id: String::new() },
+            EventType::CreateConference { .. } => EventType::CreateConference {
+                name: String::new(),
+            },
+            EventType::AddParticipant { .. } => EventType::AddParticipant {
+                session_id: String::new(),
+            },
+            EventType::JoinConference { .. } => EventType::JoinConference {
+                conference_id: String::new(),
+            },
 
             // Bridge events - normalize session ID
-            EventType::BridgeSessions { .. } => EventType::BridgeSessions { other_session: SessionId::new() },
+            EventType::BridgeSessions { .. } => EventType::BridgeSessions {
+                other_session: SessionId::new(),
+            },
 
             // Transfer events - normalize
             EventType::TransferRequested { .. } => EventType::TransferRequested {
@@ -339,16 +418,16 @@ impl EventType {
 pub struct Transition {
     /// Conditions that must be true for this transition
     pub guards: Vec<Guard>,
-    
+
     /// Actions to execute
     pub actions: Vec<Action>,
-    
+
     /// Next state (if changing)
     pub next_state: Option<CallState>,
-    
+
     /// Condition flags to update
     pub condition_updates: ConditionUpdates,
-    
+
     /// Events to publish after transition
     pub publish_events: Vec<EventTemplate>,
 }
@@ -425,7 +504,7 @@ pub enum Action {
     TransferCall(String),
     StartRecording,
     StopRecording,
-    
+
     // Media actions
     StartMediaSession,
     /// Switch the RTP audio transmitter back to `PassThrough` on the
@@ -460,7 +539,7 @@ pub enum Action {
     PlayAudioFile(String),
     StartRecordingMedia,
     StopRecordingMedia,
-    
+
     // Conference actions
     CreateAudioMixer,
     RedirectToMixer,
@@ -473,10 +552,12 @@ pub enum Action {
     RestoreDirectMedia,
     StartRecordingMixer,
     StopRecordingMixer,
-    
+
     // Media direction actions
-    UpdateMediaDirection { direction: MediaDirection },
-    
+    UpdateMediaDirection {
+        direction: MediaDirection,
+    },
+
     // Hold/Resume actions (kept for single session)
     HoldCurrentCall,
 
@@ -485,22 +566,22 @@ pub enum Action {
     StoreLocalSDP,
     StoreRemoteSDP,
     StoreNegotiatedConfig,
-    
+
     // Bridge/Transfer actions
     CreateBridge(SessionId),
     DestroyBridge,
-    
+
     // Resource management
     RestoreMediaFlow,
     ReleaseAllResources,
     StartEmergencyCleanup,
     AttemptMediaRecovery,
     CleanupResources,
-    
+
     // Callbacks
     TriggerCallEstablished,
     TriggerCallTerminated,
-    
+
     // Cleanup
     StartDialogCleanup,
     StartMediaCleanup,
@@ -565,21 +646,21 @@ impl ConditionUpdates {
     pub fn none() -> Self {
         Self::default()
     }
-    
+
     pub fn set_dialog_established(established: bool) -> Self {
         Self {
             dialog_established: Some(established),
             ..Default::default()
         }
     }
-    
+
     pub fn set_media_ready(ready: bool) -> Self {
         Self {
             media_session_ready: Some(ready),
             ..Default::default()
         }
     }
-    
+
     pub fn set_sdp_negotiated(negotiated: bool) -> Self {
         Self {
             sdp_negotiated: Some(negotiated),
@@ -628,7 +709,7 @@ impl MasterStateTable {
             wildcard_transitions: HashMap::new(),
         }
     }
-    
+
     pub fn insert(&mut self, key: StateKey, transition: Transition) {
         // Always normalize the event when inserting
         let normalized_key = StateKey {
@@ -638,13 +719,14 @@ impl MasterStateTable {
         };
         self.transitions.insert(normalized_key, transition);
     }
-    
+
     /// Insert a wildcard transition that applies to any state
     pub fn insert_wildcard(&mut self, role: Role, event: EventType, transition: Transition) {
         let normalized_event = event.normalize();
-        self.wildcard_transitions.insert((role, normalized_event), transition);
+        self.wildcard_transitions
+            .insert((role, normalized_event), transition);
     }
-    
+
     pub fn get(&self, key: &StateKey) -> Option<&Transition> {
         // Normalize the event for lookup
         let normalized_key = StateKey {
@@ -674,11 +756,11 @@ impl MasterStateTable {
         let normalized_event = key.event.normalize();
         self.wildcard_transitions.get(&(key.role, normalized_event))
     }
-    
+
     pub fn get_transition(&self, key: &StateKey) -> Option<&Transition> {
         self.get(key)
     }
-    
+
     pub fn has_transition(&self, key: &StateKey) -> bool {
         // Normalize the event for lookup
         let normalized_key = StateKey {
@@ -706,17 +788,18 @@ impl MasterStateTable {
 
         // Check wildcard match
         let normalized_event = key.event.normalize();
-        self.wildcard_transitions.contains_key(&(key.role, normalized_event))
+        self.wildcard_transitions
+            .contains_key(&(key.role, normalized_event))
     }
-    
+
     pub fn transition_count(&self) -> usize {
         self.transitions.len() + self.wildcard_transitions.len()
     }
-    
+
     /// Collect all states referenced in this state table
     pub fn collect_used_states(&self) -> HashSet<CallState> {
         let mut states = HashSet::new();
-        
+
         // Collect from regular transitions
         for (key, transition) in &self.transitions {
             states.insert(key.state);
@@ -724,34 +807,37 @@ impl MasterStateTable {
                 states.insert(*next_state);
             }
         }
-        
+
         // Collect from wildcard transitions
         for (_, transition) in &self.wildcard_transitions {
             if let Some(next_state) = &transition.next_state {
                 states.insert(*next_state);
             }
         }
-        
+
         states
     }
-    
+
     pub fn validate(&self) -> Result<(), Vec<String>> {
         let mut errors = Vec::new();
-        
+
         // Collect states actually used in this table
         let used_states = self.collect_used_states();
-        
+
         // Check for orphan states only among used states
         for state in used_states.iter() {
             // Skip terminal states
-            if matches!(state, CallState::Terminated | CallState::Cancelled | CallState::Failed(_)) {
+            if matches!(
+                state,
+                CallState::Terminated | CallState::Cancelled | CallState::Failed(_)
+            ) {
                 continue;
             }
-            
+
             // Check if state has exit transitions
             let has_exact_exit = self.transitions.iter().any(|(k, _)| k.state == *state);
             let has_wildcard_exit = !self.wildcard_transitions.is_empty();
-            
+
             if !has_exact_exit && !has_wildcard_exit {
                 // Only error for core states, warn for others
                 if CORE_STATES_REQUIRING_EXITS.contains(state) {
@@ -761,7 +847,7 @@ impl MasterStateTable {
                 // For now, we just skip them to avoid false positives
             }
         }
-        
+
         if errors.is_empty() {
             Ok(())
         } else {

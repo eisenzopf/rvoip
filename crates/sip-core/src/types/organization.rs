@@ -38,12 +38,12 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use super::header::{HeaderValue, HeaderName, Header, TypedHeaderTrait};
+use super::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::parser::headers::organization::parse_organization;
 
 /// Represents the Organization header field as defined in RFC 3261 Section 20.27
-/// 
-/// The Organization header field indicates the identity of the organizational entity 
+///
+/// The Organization header field indicates the identity of the organizational entity
 /// associated with the user agent (for example, "Rudeless Ventures").
 ///
 /// This header is optional in SIP messages and is primarily used for informational
@@ -154,9 +154,10 @@ impl FromStr for Organization {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         // Parse the input as bytes
         let bytes = s.as_bytes();
-        let (_, org) = parse_organization(bytes)
-            .map_err(|_| crate::error::Error::ParseError("Failed to parse Organization header".into()))?;
-        
+        let (_, org) = parse_organization(bytes).map_err(|_| {
+            crate::error::Error::ParseError("Failed to parse Organization header".into())
+        })?;
+
         // Return the parsed Organization
         Ok(org)
     }
@@ -188,7 +189,7 @@ impl fmt::Display for Organization {
 
 impl TypedHeaderTrait for Organization {
     type Name = HeaderName;
-    
+
     /// Returns the HeaderName for the Organization header.
     ///
     /// Implements the required method from `TypedHeaderTrait` to provide the
@@ -208,7 +209,7 @@ impl TypedHeaderTrait for Organization {
     fn header_name() -> Self::Name {
         HeaderName::Organization
     }
-    
+
     /// Converts the Organization object to a generic Header.
     ///
     /// Transforms this typed `Organization` header into a generic `Header` object
@@ -232,7 +233,7 @@ impl TypedHeaderTrait for Organization {
     fn to_header(&self) -> Header {
         Header::text(HeaderName::Organization, &self.0)
     }
-    
+
     /// Creates an Organization object from a generic Header.
     ///
     /// Attempts to convert a generic `Header` into a typed `Organization` object,
@@ -266,16 +267,19 @@ impl TypedHeaderTrait for Organization {
     /// ```
     fn from_header(header: &Header) -> Result<Self, crate::error::Error> {
         if header.name != HeaderName::Organization {
-            return Err(crate::error::Error::ParseError(
-                format!("Expected Organization header, got {}", header.name)
-            ));
+            return Err(crate::error::Error::ParseError(format!(
+                "Expected Organization header, got {}",
+                header.name
+            )));
         }
-        
+
         // Get the value as a string
         if let Some(text) = header.value.as_text() {
             Ok(Organization(text.to_string()))
         } else {
-            Err(crate::error::Error::ParseError("Invalid Organization header value".to_string()))
+            Err(crate::error::Error::ParseError(
+                "Invalid Organization header value".to_string(),
+            ))
         }
     }
 }
@@ -297,12 +301,12 @@ mod tests {
         for test_case in test_cases {
             let org = Organization::from_str(test_case).unwrap();
             assert_eq!(org.as_str(), test_case);
-            
+
             // Test TypedHeaderTrait implementation
             let header = Header::text(HeaderName::Organization, test_case);
             let parsed_org = Organization::from_header(&header).unwrap();
             assert_eq!(parsed_org, org);
-            
+
             // Test conversion back to Header
             let converted_header = org.to_header();
             assert_eq!(converted_header.name, HeaderName::Organization);
@@ -315,4 +319,4 @@ mod tests {
         let org = Organization::new("Rudeless Ventures");
         assert_eq!(format!("{}", org), "Rudeless Ventures");
     }
-} 
+}

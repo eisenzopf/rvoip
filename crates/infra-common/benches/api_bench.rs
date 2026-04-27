@@ -1,13 +1,13 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use rvoip_infra_common::events::api::{EventSystem, EventPublisher, EventSubscriber};
-use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
-use rvoip_infra_common::events::types::{Event, EventPriority, StaticEvent};
-use rvoip_infra_common::events::registry::GlobalTypeRegistry;
 use async_trait::async_trait;
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use rvoip_infra_common::events::api::{EventPublisher, EventSubscriber, EventSystem};
+use rvoip_infra_common::events::builder::{EventSystemBuilder, ImplementationType};
+use rvoip_infra_common::events::registry::GlobalTypeRegistry;
+use rvoip_infra_common::events::types::{Event, EventPriority, StaticEvent};
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::runtime::Runtime;
-use serde::{Serialize, Deserialize};
 
 // --- Common benchmark configuration ---
 const CHANNEL_CAPACITY: usize = 10000;
@@ -80,13 +80,13 @@ fn create_static_event(id: u64) -> StaticTestEvent {
 /// Benchmarks the Zero Copy implementation using the public API
 fn bench_api_zero_copy(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    
+
     let mut group = c.benchmark_group("api_zero_copy");
-    
+
     // Configure measurement parameters
     group.measurement_time(BENCH_MEASUREMENT_TIME);
     group.sample_size(BENCH_SAMPLE_SIZE);
-    
+
     for &num_subscribers in &SUBSCRIBER_COUNTS {
         group.throughput(Throughput::Elements(EVENT_COUNT as u64));
         group.bench_with_input(
@@ -105,78 +105,85 @@ fn bench_api_zero_copy(c: &mut Criterion) {
                             .batch_size(100)
                             .shard_count(SHARD_COUNT)
                             .build();
-                        
+
                         // Start the event system
                         system.start().await.unwrap();
-                        
+
                         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-                        
+
                         // Create subscribers
                         let mut subscribers = Vec::new();
                         for _ in 0..n {
                             let subscriber = system.subscribe::<TestEvent>().await.unwrap();
                             subscribers.push(subscriber);
                         }
-                        
+
                         // Spawn tasks to count received events
-                        let tasks: Vec<_> = subscribers.into_iter().map(|mut subscriber| {
-                            let counter = counter.clone();
-                            tokio::spawn(async move {
-                                while let Ok(event) = subscriber.receive_timeout(Duration::from_secs(2)).await {
-                                    let _ = black_box(event); // Prevent compiler optimization
-                                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
+                        let tasks: Vec<_> = subscribers
+                            .into_iter()
+                            .map(|mut subscriber| {
+                                let counter = counter.clone();
+                                tokio::spawn(async move {
+                                    while let Ok(event) =
+                                        subscriber.receive_timeout(Duration::from_secs(2)).await
+                                    {
+                                        let _ = black_box(event); // Prevent compiler optimization
+                                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                })
                             })
-                        }).collect();
-                        
+                            .collect();
+
                         // Create publisher
                         let publisher = system.create_publisher::<TestEvent>();
-                        
+
                         // Publish events
                         for i in 0..EVENT_COUNT {
                             let event = create_test_event(i as u64, EventPriority::Normal);
                             let _ = publisher.publish(event).await;
                         }
-                        
+
                         // Wait for events to be processed
                         let expected_count = (n * EVENT_COUNT) as u64;
                         let mut attempts = 0;
-                        while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
+                        while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count
+                            && attempts < 100
+                        {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                             attempts += 1;
                         }
-                        
+
                         // Clean up
                         for task in tasks {
                             task.abort();
                         }
-                        
+
                         system.shutdown().await.unwrap();
                     });
                 });
             },
         );
     }
-    
+
     group.finish();
 }
 
 /// Benchmarks the Static Fast Path implementation using the public API
 fn bench_api_static_fast_path(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
-    
+
     let mut group = c.benchmark_group("api_static_fast_path");
-    
+
     // Register the static event type with the global registry
     rt.block_on(async {
         GlobalTypeRegistry::register_static_event_type::<StaticTestEvent>();
         GlobalTypeRegistry::register_with_capacity::<StaticTestEvent>(CHANNEL_CAPACITY);
     });
-    
+
     // Configure measurement parameters (same as zero copy)
     group.measurement_time(BENCH_MEASUREMENT_TIME);
     group.sample_size(BENCH_SAMPLE_SIZE);
-    
+
     for &num_subscribers in &SUBSCRIBER_COUNTS {
         group.throughput(Throughput::Elements(EVENT_COUNT as u64));
         group.bench_with_input(
@@ -190,67 +197,70 @@ fn bench_api_static_fast_path(c: &mut Criterion) {
                         let system = EventSystemBuilder::new()
                             .implementation(ImplementationType::StaticFastPath)
                             .channel_capacity(CHANNEL_CAPACITY)
-                            .shard_count(SHARD_COUNT)  // Applying the same shard count as Zero Copy
+                            .shard_count(SHARD_COUNT) // Applying the same shard count as Zero Copy
                             .build();
-                        
+
                         // Start the event system
                         system.start().await.unwrap();
-                        
+
                         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-                        
+
                         // Create subscribers
                         let mut subscribers = Vec::new();
                         for _ in 0..n {
                             let subscriber = system.subscribe::<StaticTestEvent>().await.unwrap();
                             subscribers.push(subscriber);
                         }
-                        
+
                         // Spawn tasks to count received events
-                        let tasks: Vec<_> = subscribers.into_iter().map(|mut subscriber| {
-                            let counter = counter.clone();
-                            tokio::spawn(async move {
-                                while let Ok(event) = subscriber.receive_timeout(Duration::from_secs(2)).await {
-                                    let _ = black_box(event); // Prevent compiler optimization
-                                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                }
+                        let tasks: Vec<_> = subscribers
+                            .into_iter()
+                            .map(|mut subscriber| {
+                                let counter = counter.clone();
+                                tokio::spawn(async move {
+                                    while let Ok(event) =
+                                        subscriber.receive_timeout(Duration::from_secs(2)).await
+                                    {
+                                        let _ = black_box(event); // Prevent compiler optimization
+                                        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                })
                             })
-                        }).collect();
-                        
+                            .collect();
+
                         // Create publisher and publish events
                         let publisher = system.create_publisher::<StaticTestEvent>();
-                        
+
                         // Publish events (same count as zero copy)
                         for i in 0..EVENT_COUNT {
                             let event = create_static_event(i as u64);
                             let _ = publisher.publish(event).await;
                         }
-                        
+
                         // Wait for events to be processed
                         let expected_count = (n * EVENT_COUNT) as u64;
                         let mut attempts = 0;
-                        while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count && attempts < 100 {
+                        while counter.load(std::sync::atomic::Ordering::Relaxed) < expected_count
+                            && attempts < 100
+                        {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                             attempts += 1;
                         }
-                        
+
                         // Clean up
                         for task in tasks {
                             task.abort();
                         }
-                        
+
                         system.shutdown().await.unwrap();
                     });
                 });
             },
         );
     }
-    
+
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_api_zero_copy,
-    bench_api_static_fast_path
-);
-criterion_main!(benches); 
+criterion_group!(benches, bench_api_zero_copy, bench_api_static_fast_path);
+criterion_main!(benches);

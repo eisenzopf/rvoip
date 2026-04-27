@@ -6,9 +6,9 @@
 
 use crate::error::{Error, Result};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use std::any::TypeId;
 use std::collections::HashSet;
 use std::str::FromStr;
-use std::any::TypeId;
 
 /// Trait for consistent header access across SIP message types.
 ///
@@ -26,7 +26,7 @@ pub trait HeaderAccess {
     ///
     /// A vector of references to all headers of the specified type
     fn typed_headers<T: TypedHeaderTrait + 'static>(&self) -> Vec<&T>
-    where 
+    where
         <T as TypedHeaderTrait>::Name: std::fmt::Debug,
         T: std::fmt::Debug;
 
@@ -40,7 +40,7 @@ pub trait HeaderAccess {
     ///
     /// An optional reference to the first header of the specified type
     fn typed_header<T: TypedHeaderTrait + 'static>(&self) -> Option<&T>
-    where 
+    where
         <T as TypedHeaderTrait>::Name: std::fmt::Debug,
         T: std::fmt::Debug;
 
@@ -122,35 +122,35 @@ pub trait HeaderAccess {
 /// Helper function to try to extract a typed header of a specific type
 /// from a `TypedHeader` enum.
 pub fn try_as_typed_header<T: TypedHeaderTrait + 'static>(header: &TypedHeader) -> Option<&T>
-where 
+where
     <T as TypedHeaderTrait>::Name: std::fmt::Debug,
-    T: std::fmt::Debug
+    T: std::fmt::Debug,
 {
     header.as_typed_ref::<T>()
 }
 
 /// Helper function to collect all headers of a specific type from a list of headers
-/// 
+///
 /// This function uses the more efficient `as_typed_ref` method on TypedHeader
 /// and handles special cases like Via headers that can contain multiple entries.
 pub fn collect_typed_headers<T: TypedHeaderTrait + 'static>(headers: &[TypedHeader]) -> Vec<&T>
-where 
+where
     <T as TypedHeaderTrait>::Name: std::fmt::Debug,
-    T: std::fmt::Debug
+    T: std::fmt::Debug,
 {
     // Filter headers by name first for efficiency
     let target_name: HeaderName = T::header_name().into();
     let type_id = std::any::TypeId::of::<T>();
-    
+
     let mut result = Vec::new();
-    
+
     // Special handling for Via headers - each Via can contain multiple entries
     if type_id == std::any::TypeId::of::<crate::types::via::Via>() {
         let vias = headers
             .iter()
             .filter(|h| h.name() == target_name)
             .filter_map(|h| h.as_typed_ref::<T>());
-            
+
         // Via headers should always count as multiple headers since the struct contains a Vec of ViaHeader
         for via in vias {
             // For Via headers, we count each entry as separate header
@@ -161,11 +161,11 @@ where
         }
         return result;
     }
-    
+
     // Standard handling for all other header types
     headers
         .iter()
         .filter(|h| h.name() == target_name)
         .filter_map(|h| h.as_typed_ref::<T>())
         .collect()
-} 
+}

@@ -6,15 +6,13 @@
 //! - Packet priority handling
 
 // Re-export modules
-pub mod transmit;
 pub mod stats;
+pub mod transmit;
 
 // Re-export important types and functions
 pub use transmit::{
-    init_transmit_buffer, send_frame_with_priority,
-    update_transmit_buffer_config, set_priority_threshold
+    init_transmit_buffer, send_frame_with_priority, set_priority_threshold,
+    update_transmit_buffer_config,
 };
 
-pub use stats::{
-    get_transmit_buffer_stats
-}; 
+pub use stats::get_transmit_buffer_stats;

@@ -7,17 +7,17 @@ pub use listener::TcpListener;
 pub use pool::{ConnectionPool, PoolConfig};
 
 use bytes::Bytes;
+use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::collections::HashMap;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
-use rvoip_sip_core::Message;
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent, TransportType};
+use rvoip_sip_core::Message;
 
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 100;
@@ -47,16 +47,16 @@ impl TcpTransport {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
-        
+
         // Create the TCP listener
         let listener = TcpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
         info!("SIP TCP transport bound to {}", local_addr);
-        
+
         // Create the connection pool with the specified configuration or defaults
         let config = pool_config.unwrap_or_default();
         let connection_pool = ConnectionPool::new(config);
-        
+
         // Create the transport
         let transport = TcpTransport {
             inner: Arc::new(TcpTransportInner {
@@ -92,9 +92,12 @@ impl TcpTransport {
                             Ok(conn) => conn,
                             Err(e) => {
                                 error!("Failed to create connection from stream: {}", e);
-                                let _ = inner.events_tx.send(TransportEvent::Error {
-                                    error: format!("Connection setup error: {}", e),
-                                }).await;
+                                let _ = inner
+                                    .events_tx
+                                    .send(TransportEvent::Error {
+                                        error: format!("Connection setup error: {}", e),
+                                    })
+                                    .await;
                                 continue;
                             }
                         };
@@ -104,18 +107,24 @@ impl TcpTransport {
                         // via `send_raw`) can find it, then spawn the unified
                         // reader.
                         let arc = Arc::new(connection);
-                        inner.connection_pool.add_connection(peer_addr, arc.clone()).await;
+                        inner
+                            .connection_pool
+                            .add_connection(peer_addr, arc.clone())
+                            .await;
                         transport.clone().spawn_connection_handler(arc);
-                    },
+                    }
                     Err(e) => {
                         if inner.closed.load(Ordering::Relaxed) {
                             break;
                         }
 
                         error!("Error accepting TCP connection: {}", e);
-                        let _ = inner.events_tx.send(TransportEvent::Error {
-                            error: format!("Accept error: {}", e),
-                        }).await;
+                        let _ = inner
+                            .events_tx
+                            .send(TransportEvent::Error {
+                                error: format!("Accept error: {}", e),
+                            })
+                            .await;
 
                         // Brief pause to avoid tight accept loop on errors
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -169,7 +178,7 @@ impl TcpTransport {
                             error!("Error sending event: {}", e);
                             break;
                         }
-                    },
+                    }
                     Ok(Some(ReceivedFrame::KeepAlivePong)) => {
                         let local_addr = connection.local_addr().unwrap_or(peer_addr);
                         let _ = events_tx
@@ -178,7 +187,7 @@ impl TcpTransport {
                                 destination: local_addr,
                             })
                             .await;
-                    },
+                    }
                     Ok(Some(ReceivedFrame::KeepAlivePing)) => {
                         // Peer-initiated ping. RFC 5626 §3.5.1 says reply
                         // with a single CRLF pong. Keep-alive frames are
@@ -186,20 +195,22 @@ impl TcpTransport {
                         if let Err(e) = connection.send_raw_bytes(b"\r\n").await {
                             debug!("Failed to send CRLF pong to {}: {}", peer_addr, e);
                         }
-                    },
+                    }
                     Ok(None) => {
                         info!("Connection from {} closed gracefully", peer_addr);
                         break;
-                    },
+                    }
                     Err(e) => {
                         if inner.closed.load(Ordering::Relaxed) {
                             break;
                         }
 
                         error!("Error reading from connection {}: {}", peer_addr, e);
-                        let _ = events_tx.send(TransportEvent::Error {
-                            error: format!("Connection error from {}: {}", peer_addr, e),
-                        }).await;
+                        let _ = events_tx
+                            .send(TransportEvent::Error {
+                                error: format!("Connection error from {}: {}", peer_addr, e),
+                            })
+                            .await;
                         break;
                     }
                 }
@@ -209,10 +220,12 @@ impl TcpTransport {
             // downstream observer (e.g. RFC 5626 OutboundFlow) can see
             // the lifecycle event before a subsequent `has_connection_to`
             // query returns false.
-            let _ = events_tx.send(TransportEvent::ConnectionClosed {
-                remote_addr: peer_addr,
-                transport_type: TransportType::Tcp,
-            }).await;
+            let _ = events_tx
+                .send(TransportEvent::ConnectionClosed {
+                    remote_addr: peer_addr,
+                    transport_type: TransportType::Tcp,
+                })
+                .await;
 
             inner.connection_pool.remove_connection(&peer_addr).await;
         });
@@ -235,8 +248,12 @@ impl TcpTransport {
         // side are surfaced as events. Without this, outbound-initiated
         // TCP flows would silently fill their read buffers.
         let connection_arc = Arc::new(connection);
-        self.inner.connection_pool.add_connection(addr, connection_arc.clone()).await;
-        self.clone().spawn_connection_handler(connection_arc.clone());
+        self.inner
+            .connection_pool
+            .add_connection(addr, connection_arc.clone())
+            .await;
+        self.clone()
+            .spawn_connection_handler(connection_arc.clone());
 
         Ok(connection_arc)
     }
@@ -247,27 +264,29 @@ impl Transport for TcpTransport {
     fn local_addr(&self) -> Result<SocketAddr> {
         self.inner.listener.local_addr()
     }
-    
+
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
-        
-        debug!("Sending {} message to {}", 
-            if let Message::Request(ref req) = message { 
-                format!("{}", req.method) 
-            } else { 
-                "response".to_string() 
-            }, 
-            destination);
-        
+
+        debug!(
+            "Sending {} message to {}",
+            if let Message::Request(ref req) = message {
+                format!("{}", req.method)
+            } else {
+                "response".to_string()
+            },
+            destination
+        );
+
         // Get or create a connection to the destination
         let connection = self.connect_to(destination).await?;
-        
+
         // Send the message
         connection.send_message(&message).await
     }
-    
+
     async fn close(&self) -> Result<()> {
         // Set the closed flag to prevent new operations
         self.inner.closed.store(true, Ordering::Relaxed);
@@ -299,7 +318,11 @@ impl Transport for TcpTransport {
         // — never open a fresh TCP dial for a bare-bytes write. If the
         // flow is gone, the caller (typically a ping task in dialog-
         // core) terminates; a fresh flow is the upper layer's job.
-        let Some(connection) = self.inner.connection_pool.get_connection(&destination).await
+        let Some(connection) = self
+            .inner
+            .connection_pool
+            .get_connection(&destination)
+            .await
         else {
             return Err(Error::InvalidState(format!(
                 "No active TCP connection to {} for send_raw",
@@ -324,48 +347,45 @@ impl fmt::Debug for TcpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::Duration;
-    use rvoip_sip_core::{Method, Request};
     use rvoip_sip_core::builder::SimpleRequestBuilder;
-    
+    use rvoip_sip_core::{Method, Request};
+    use tokio::time::Duration;
+
     #[tokio::test]
     async fn test_tcp_transport_bind() {
         let config = PoolConfig {
             max_connections: 10,
             idle_timeout: Duration::from_secs(10),
         };
-        
-        let (transport, _rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            Some(config)
-        ).await.unwrap();
-        
+
+        let (transport, _rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), Some(config))
+                .await
+                .unwrap();
+
         let addr = transport.local_addr().unwrap();
         assert!(addr.port() > 0);
-        
+
         transport.close().await.unwrap();
         assert!(transport.is_closed());
     }
-    
+
     #[tokio::test]
     async fn test_tcp_transport_send_receive() {
         // Start a server transport
-        let (server_transport, mut server_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            None
-        ).await.unwrap();
-        
+        let (server_transport, mut server_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
+
         let server_addr = server_transport.local_addr().unwrap();
-        
+
         // Start a client transport
-        let (client_transport, _client_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(), 
-            Some(10),
-            None
-        ).await.unwrap();
-        
+        let (client_transport, _client_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
+
         // Create a test SIP message
         let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
             .unwrap()
@@ -374,18 +394,25 @@ mod tests {
             .call_id("call1@example.com")
             .cseq(1)
             .build();
-        
+
         // Send the message
-        client_transport.send_message(request.into(), server_addr).await.unwrap();
-        
+        client_transport
+            .send_message(request.into(), server_addr)
+            .await
+            .unwrap();
+
         // Receive the message
         let event = tokio::time::timeout(Duration::from_secs(5), server_rx.recv())
             .await
             .unwrap()
             .unwrap();
-        
+
         match event {
-            TransportEvent::MessageReceived { message, source, destination } => {
+            TransportEvent::MessageReceived {
+                message,
+                source,
+                destination,
+            } => {
                 assert_eq!(destination, server_addr);
                 assert!(message.is_request());
                 if let Message::Request(req) = message {
@@ -393,10 +420,10 @@ mod tests {
                 } else {
                     panic!("Expected a request");
                 }
-            },
+            }
             _ => panic!("Expected MessageReceived event"),
         }
-        
+
         // Clean up
         client_transport.close().await.unwrap();
         server_transport.close().await.unwrap();
@@ -406,22 +433,16 @@ mod tests {
     /// false after the connection is dropped.
     #[tokio::test]
     async fn has_connection_to_reflects_pool() {
-        let (server, _server_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            None,
-        )
-        .await
-        .unwrap();
+        let (server, _server_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
         let server_addr = server.local_addr().unwrap();
 
-        let (client, _client_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            None,
-        )
-        .await
-        .unwrap();
+        let (client, _client_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
 
         // No connection yet.
         assert!(!client.has_connection_to(server_addr));
@@ -434,10 +455,7 @@ mod tests {
             .call_id("has-conn@example.com")
             .cseq(1)
             .build();
-        client
-            .send_message(req.into(), server_addr)
-            .await
-            .unwrap();
+        client.send_message(req.into(), server_addr).await.unwrap();
 
         assert!(client.has_connection_to(server_addr));
 
@@ -451,22 +469,16 @@ mod tests {
     /// as `KeepAlivePongReceived`.
     #[tokio::test]
     async fn send_raw_triggers_server_pong() {
-        let (server, _server_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            None,
-        )
-        .await
-        .unwrap();
+        let (server, _server_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
         let server_addr = server.local_addr().unwrap();
 
-        let (client, mut client_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            None,
-        )
-        .await
-        .unwrap();
+        let (client, mut client_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
 
         // Warm-up REGISTER so there's a pooled TCP connection.
         let req = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
@@ -476,10 +488,7 @@ mod tests {
             .call_id("warmup@example.com")
             .cseq(1)
             .build();
-        client
-            .send_message(req.into(), server_addr)
-            .await
-            .unwrap();
+        client.send_message(req.into(), server_addr).await.unwrap();
 
         // Ping → pong.
         client
@@ -511,22 +520,16 @@ mod tests {
     /// pool (so observers can correlate the drop with flow state).
     #[tokio::test]
     async fn connection_closed_emits_before_pool_eviction() {
-        let (server, _server_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            None,
-        )
-        .await
-        .unwrap();
+        let (server, _server_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
         let server_addr = server.local_addr().unwrap();
 
-        let (client, mut client_rx) = TcpTransport::bind(
-            "127.0.0.1:0".parse().unwrap(),
-            Some(10),
-            None,
-        )
-        .await
-        .unwrap();
+        let (client, mut client_rx) =
+            TcpTransport::bind("127.0.0.1:0".parse().unwrap(), Some(10), None)
+                .await
+                .unwrap();
 
         // Establish a connection.
         let req = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
@@ -536,10 +539,7 @@ mod tests {
             .call_id("closed@example.com")
             .cseq(1)
             .build();
-        client
-            .send_message(req.into(), server_addr)
-            .await
-            .unwrap();
+        client.send_message(req.into(), server_addr).await.unwrap();
         assert!(client.has_connection_to(server_addr));
 
         // Force-close the server side. The client's spawned reader

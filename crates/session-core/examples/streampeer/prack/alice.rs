@@ -14,7 +14,10 @@ use rvoip_session_core::{Config, Event, RelUsage, StreamPeer};
 use tokio::time::{timeout, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn positive_mode() -> bool {
@@ -26,7 +29,9 @@ fn positive_mode() -> bool {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let alice_port = env_port("ALICE_PORT", 35063);
@@ -44,15 +49,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut events = alice.control().subscribe_events().await?;
 
     if positive {
-        println!("[ALICE] Calling Bob (PRACK_MODE=positive; expecting reliable 183 → PRACK → 200 OK)…");
+        println!(
+            "[ALICE] Calling Bob (PRACK_MODE=positive; expecting reliable 183 → PRACK → 200 OK)…"
+        );
     } else {
         println!("[ALICE] Calling Bob (100rel=NotSupported; expecting 420)…");
     }
-    let _handle = alice.call(&format!("sip:bob@127.0.0.1:{}", bob_port)).await?;
+    let _handle = alice
+        .call(&format!("sip:bob@127.0.0.1:{}", bob_port))
+        .await?;
 
     // Positive path allows more time because Bob sleeps mid-flow before
     // accepting (to let the ringback play in a real deployment).
-    let deadline = if positive { Duration::from_secs(12) } else { Duration::from_secs(8) };
+    let deadline = if positive {
+        Duration::from_secs(12)
+    } else {
+        Duration::from_secs(8)
+    };
 
     let outcome = timeout(deadline, async {
         loop {
@@ -89,7 +102,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(0);
             }
             other => {
-                eprintln!("[ALICE] negative mode: expected Failed(420), got {:?}", other);
+                eprintln!(
+                    "[ALICE] negative mode: expected Failed(420), got {:?}",
+                    other
+                );
                 std::process::exit(1);
             }
         }

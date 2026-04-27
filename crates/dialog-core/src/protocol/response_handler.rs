@@ -22,12 +22,12 @@
 
 use tracing::{debug, info, warn};
 
-use rvoip_sip_core::Response;
-use crate::transaction::TransactionKey;
 use crate::dialog::{DialogId, DialogState};
 use crate::errors::DialogResult;
 use crate::events::SessionCoordinationEvent;
-use crate::manager::{DialogManager, SessionCoordinator, MessageExtensions};
+use crate::manager::{DialogManager, MessageExtensions, SessionCoordinator};
+use crate::transaction::TransactionKey;
+use rvoip_sip_core::Response;
 
 /// Response-specific handling operations
 pub trait ResponseHandler {
@@ -44,8 +44,16 @@ impl ResponseHandler for DialogManager {
     /// Handle responses to client transactions
     ///
     /// Processes responses and updates dialog state accordingly.
-    async fn handle_response_message(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {
-        debug!("Processing response {} for transaction {}", response.status_code(), transaction_id);
+    async fn handle_response_message(
+        &self,
+        response: Response,
+        transaction_id: TransactionKey,
+    ) -> DialogResult<()> {
+        debug!(
+            "Processing response {} for transaction {}",
+            response.status_code(),
+            transaction_id
+        );
 
         // RFC 3581 NAT discovery — peek at the top Via for
         // `received=`/`rport=` and update our cache. This applies to
@@ -75,9 +83,13 @@ impl ResponseHandler for DialogManager {
 
         // Find associated dialog
         if let Ok(dialog_id) = self.find_dialog_for_transaction(&transaction_id) {
-            self.process_response_in_dialog(response, transaction_id, dialog_id).await
+            self.process_response_in_dialog(response, transaction_id, dialog_id)
+                .await
         } else {
-            debug!("Response for transaction {} has no associated dialog", transaction_id);
+            debug!(
+                "Response for transaction {} has no associated dialog",
+                transaction_id
+            );
             Ok(())
         }
     }
@@ -117,12 +129,11 @@ pub(crate) fn extract_nat_discovery(
 /// Most-recent observation wins (single global slot — see field doc).
 /// Free function rather than `DialogManager` method so it stays close
 /// to the call site and doesn't pollute the manager's public surface.
-async fn record_nat_discovery_from_response(
-    manager: &DialogManager,
-    response: &Response,
-) {
+async fn record_nat_discovery_from_response(manager: &DialogManager, response: &Response) {
     let local_addr = manager.local_address;
-    let Some(new_addr) = extract_nat_discovery(local_addr, response) else { return };
+    let Some(new_addr) = extract_nat_discovery(local_addr, response) else {
+        return;
+    };
 
     let mut guard = manager.nat_discovered_addr.write().await;
     let prev = guard.replace(new_addr);
@@ -193,19 +204,12 @@ pub(crate) fn extract_service_route(
 pub(crate) fn format_redirect_or_terminate_reason(response: &Response) -> String {
     use rvoip_sip_core::types::TypedHeader;
 
-    let base = format!(
-        "{} {}",
-        response.status_code(),
-        response.reason_phrase()
-    );
+    let base = format!("{} {}", response.status_code(), response.reason_phrase());
 
     // Only redirect status codes carry load-bearing Contact URIs per §21.3.
     // (300 Multiple Choices, 301 Moved Permanently, 302 Moved Temporarily,
     // 305 Use Proxy, 380 Alternative Service.)
-    let is_redirect = matches!(
-        response.status_code(),
-        300 | 301 | 302 | 305 | 380
-    );
+    let is_redirect = matches!(response.status_code(), 300 | 301 | 302 | 305 | 380);
     if !is_redirect {
         return base;
     }
@@ -215,7 +219,12 @@ pub(crate) fn format_redirect_or_terminate_reason(response: &Response) -> String
         .iter()
         .filter_map(|h| {
             if let TypedHeader::Contact(contact) = h {
-                Some(contact.addresses().map(|a| a.uri.to_string()).collect::<Vec<_>>())
+                Some(
+                    contact
+                        .addresses()
+                        .map(|a| a.uri.to_string())
+                        .collect::<Vec<_>>(),
+                )
             } else {
                 None
             }
@@ -230,11 +239,10 @@ pub(crate) fn format_redirect_or_terminate_reason(response: &Response) -> String
     }
 }
 
-async fn record_service_route_from_response(
-    manager: &DialogManager,
-    response: &Response,
-) {
-    let Some((aor_key, uris)) = extract_service_route(response) else { return };
+async fn record_service_route_from_response(manager: &DialogManager, response: &Response) {
+    let Some((aor_key, uris)) = extract_service_route(response) else {
+        return;
+    };
 
     let mut guard = manager.service_route_by_aor.write().await;
     let prev = guard.insert(aor_key.clone(), uris.clone());
@@ -303,11 +311,10 @@ pub(crate) fn extract_gruu(
 /// Inspect the response. If it's a 2xx to a REGISTER and the echoed
 /// Contact carries pub-gruu/temp-gruu, capture into
 /// `DialogManager::gruu_by_aor` keyed by the AoR (To URI).
-async fn record_gruu_from_response(
-    manager: &DialogManager,
-    response: &Response,
-) {
-    let Some((aor_key, params)) = extract_gruu(response) else { return };
+async fn record_gruu_from_response(manager: &DialogManager, response: &Response) {
+    let Some((aor_key, params)) = extract_gruu(response) else {
+        return;
+    };
 
     let mut guard = manager.gruu_by_aor.write().await;
     let prev = guard.insert(aor_key.clone(), params.clone());
@@ -331,7 +338,10 @@ async fn record_gruu_from_response(
 /// registrations). Pure/sync for unit-testability.
 pub(crate) fn extract_outbound_flow(
     response: &Response,
-) -> Option<(String, rvoip_sip_core::types::outbound::OutboundContactParams)> {
+) -> Option<(
+    String,
+    rvoip_sip_core::types::outbound::OutboundContactParams,
+)> {
     use rvoip_sip_core::types::{method::Method, TypedHeader};
 
     if !(200..300).contains(&response.status_code()) {
@@ -356,7 +366,9 @@ pub(crate) fn extract_outbound_flow(
         _ => None,
     }) {
         for address in contact.addresses() {
-            if let Some(params) = rvoip_sip_core::types::outbound::read_outbound_contact_params(address) {
+            if let Some(params) =
+                rvoip_sip_core::types::outbound::read_outbound_contact_params(address)
+            {
                 return Some((aor_key, params));
             }
         }
@@ -374,7 +386,9 @@ async fn record_outbound_flow_from_response(
     response: &Response,
     transaction_id: &TransactionKey,
 ) {
-    let Some((aor, params)) = extract_outbound_flow(response) else { return };
+    let Some((aor, params)) = extract_outbound_flow(response) else {
+        return;
+    };
 
     // Destination to ping is wherever we sent the REGISTER. The
     // transaction-destinations map in TransactionManager captured that
@@ -405,7 +419,11 @@ mod nat_discovery_tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use rvoip_sip_core::types::{
-        param::Param, status::StatusCode, via::{Via, ViaHeader}, TypedHeader, headers::HeaderAccess,
+        headers::HeaderAccess,
+        param::Param,
+        status::StatusCode,
+        via::{Via, ViaHeader},
+        TypedHeader,
     };
     use rvoip_sip_core::Response;
 
@@ -423,7 +441,9 @@ mod nat_discovery_tests {
                 version: "2.0".to_string(),
                 transport: "UDP".to_string(),
             },
-            sent_by_host: rvoip_sip_core::types::uri::Host::Address(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10))),
+            sent_by_host: rvoip_sip_core::types::uri::Host::Address(IpAddr::V4(Ipv4Addr::new(
+                192, 168, 1, 10,
+            ))),
             sent_by_port: Some(5060),
             params: via_params,
         }]);
@@ -444,7 +464,10 @@ mod nat_discovery_tests {
         let discovered = extract_nat_discovery(local(), &response);
         assert_eq!(
             discovered,
-            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 54321))
+            Some(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)),
+                54321
+            ))
         );
     }
 
@@ -489,16 +512,8 @@ mod nat_discovery_tests {
 mod service_route_tests {
     use super::extract_service_route;
     use rvoip_sip_core::types::{
-        address::Address,
-        cseq::CSeq,
-        from::From as FromHdr,
-        method::Method,
-        param::Param,
-        service_route::ServiceRoute,
-        status::StatusCode,
-        to::To,
-        uri::Uri,
-        TypedHeader,
+        address::Address, cseq::CSeq, from::From as FromHdr, method::Method, param::Param,
+        service_route::ServiceRoute, status::StatusCode, to::To, uri::Uri, TypedHeader,
     };
     use rvoip_sip_core::Response;
     use std::str::FromStr;
@@ -514,14 +529,13 @@ mod service_route_tests {
             .headers
             .push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
         let to_addr = Address::new(Uri::from_str(to_uri).unwrap());
-        response
-            .headers
-            .push(TypedHeader::To(To::new(to_addr)));
+        response.headers.push(TypedHeader::To(To::new(to_addr)));
         // Also need From to satisfy a typical response shape (not consulted
         // by the helper but keeps the fixture realistic).
-        let from_addr = Address::new(Uri::from_str(to_uri).unwrap())
-            .with_tag("abcd");
-        response.headers.push(TypedHeader::From(FromHdr::new(from_addr)));
+        let from_addr = Address::new(Uri::from_str(to_uri).unwrap()).with_tag("abcd");
+        response
+            .headers
+            .push(TypedHeader::From(FromHdr::new(from_addr)));
         if let Some(uris) = service_routes {
             let mut sr = ServiceRoute::empty();
             for u in uris {
@@ -538,10 +552,7 @@ mod service_route_tests {
             StatusCode::Ok,
             Method::Register,
             "sip:alice@example.com",
-            Some(vec![
-                "sip:orig1.example.com;lr",
-                "sip:orig2.example.com;lr",
-            ]),
+            Some(vec!["sip:orig1.example.com;lr", "sip:orig2.example.com;lr"]),
         );
         let extracted = extract_service_route(&response).unwrap();
         assert_eq!(extracted.0, "sip:alice@example.com");
@@ -638,14 +649,16 @@ mod outbound_flow_tests {
         contact_addr: Option<Address>,
     ) -> Response {
         let mut response = Response::new(status);
-        response.headers.push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
         response
             .headers
-            .push(TypedHeader::To(To::new(Address::new(
-                Uri::from_str(to_uri).unwrap(),
-            ))));
+            .push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
+        response.headers.push(TypedHeader::To(To::new(Address::new(
+            Uri::from_str(to_uri).unwrap(),
+        ))));
         if let Some(addr) = contact_addr {
-            let contact = Contact(vec![ContactValue::Params(vec![ContactParamInfo { address: addr }])]);
+            let contact = Contact(vec![ContactValue::Params(vec![ContactParamInfo {
+                address: addr,
+            }])]);
             response.headers.push(TypedHeader::Contact(contact));
         }
         response
@@ -764,12 +777,12 @@ mod gruu_tests {
         contact_addr: Option<Address>,
     ) -> Response {
         let mut response = Response::new(status);
-        response.headers.push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
         response
             .headers
-            .push(TypedHeader::To(To::new(Address::new(
-                Uri::from_str(to_uri).unwrap(),
-            ))));
+            .push(TypedHeader::CSeq(CSeq::new(1, cseq_method)));
+        response.headers.push(TypedHeader::To(To::new(Address::new(
+            Uri::from_str(to_uri).unwrap(),
+        ))));
         if let Some(addr) = contact_addr {
             let contact = Contact(vec![ContactValue::Params(vec![ContactParamInfo {
                 address: addr,
@@ -921,7 +934,8 @@ mod redirect_reason_tests {
 
     #[test]
     fn non_redirect_status_is_unchanged() {
-        let response = response_with_contacts(StatusCode::NotFound, &["sip:alt@ignored.example.com"]);
+        let response =
+            response_with_contacts(StatusCode::NotFound, &["sip:alt@ignored.example.com"]);
         // 404 is not a redirect — Contact must NOT be surfaced.
         let reason = format_redirect_or_terminate_reason(&response);
         assert_eq!(reason, "404 Not Found");
@@ -936,10 +950,7 @@ mod redirect_reason_tests {
 
     #[test]
     fn redirect_305_appends_single_contact() {
-        let response = response_with_contacts(
-            StatusCode::UseProxy,
-            &["sip:proxy.example.com;lr"],
-        );
+        let response = response_with_contacts(StatusCode::UseProxy, &["sip:proxy.example.com;lr"]);
         let reason = format_redirect_or_terminate_reason(&response);
         assert_eq!(
             reason,
@@ -983,8 +994,12 @@ impl DialogManager {
         _transaction_id: TransactionKey,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
-        debug!("Processing response {} for dialog {}", response.status_code(), dialog_id);
-        
+        debug!(
+            "Processing response {} for dialog {}",
+            response.status_code(),
+            dialog_id
+        );
+
         // Update dialog state based on response
         {
             let mut dialog = self.get_dialog_mut(&dialog_id)?;
@@ -1003,22 +1018,27 @@ impl DialogManager {
                 // omitted it — RFC 4028 §7 default is uac when the UAC
                 // originally requested uac) we are the refresher.
                 if response.status_code() == 200 {
-                    use rvoip_sip_core::types::TypedHeader;
                     use rvoip_sip_core::types::session_expires::Refresher;
+                    use rvoip_sip_core::types::TypedHeader;
                     if let Some(se) = response.headers.iter().find_map(|h| {
-                        if let TypedHeader::SessionExpires(se) = h { Some(se) } else { None }
+                        if let TypedHeader::SessionExpires(se) = h {
+                            Some(se)
+                        } else {
+                            None
+                        }
                     }) {
                         dialog.session_expires_secs = Some(se.delta_seconds);
-                        dialog.is_session_refresher = matches!(
-                            se.refresher,
-                            None | Some(Refresher::Uac)
-                        );
+                        dialog.is_session_refresher =
+                            matches!(se.refresher, None | Some(Refresher::Uac));
                     }
                 }
             } else if response.status_code() >= 300 {
                 // 3xx+ response - terminate dialog
                 dialog.terminate();
-                debug!("Terminated dialog {} due to final non-2xx response", dialog_id);
+                debug!(
+                    "Terminated dialog {} due to final non-2xx response",
+                    dialog_id
+                );
             }
         }
 
@@ -1038,7 +1058,7 @@ impl DialogManager {
                 }
             }
         }
-        
+
         // Send appropriate session coordination event
         let event = if response.status_code() >= 200 && response.status_code() < 300 {
             SessionCoordinationEvent::CallAnswered {
@@ -1064,12 +1084,12 @@ impl DialogManager {
                 reason_phrase: response.reason_phrase().to_string(),
             }
         };
-        
+
         self.notify_session_layer(event).await?;
         debug!("Response processed for dialog {}", dialog_id);
         Ok(())
     }
-    
+
     /// Handle provisional responses (1xx)
     pub async fn handle_provisional_response(
         &self,
@@ -1077,13 +1097,17 @@ impl DialogManager {
         _transaction_id: TransactionKey,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
-        debug!("Processing provisional response {} for dialog {}", response.status_code(), dialog_id);
-        
+        debug!(
+            "Processing provisional response {} for dialog {}",
+            response.status_code(),
+            dialog_id
+        );
+
         // Update dialog state for early dialogs
         let dialog_created = {
             let mut dialog = self.get_dialog_mut(&dialog_id)?;
             let old_state = dialog.state.clone();
-            
+
             // For provisional responses with to-tag, create early dialog
             if let Some(to_header) = response.to() {
                 if let Some(to_tag) = to_header.tag() {
@@ -1105,60 +1129,69 @@ impl DialogManager {
                 None
             }
         };
-        
+
         // Emit dialog state change if early dialog was created
         if let Some((old_state, new_state)) = dialog_created {
             self.emit_dialog_event(crate::events::DialogEvent::StateChanged {
                 dialog_id: dialog_id.clone(),
                 old_state,
                 new_state,
-            }).await;
+            })
+            .await;
         }
-        
+
         // Handle specific provisional responses and emit session coordination events
         match response.status_code() {
             180 => {
                 info!("Call ringing for dialog {}", dialog_id);
-                
+
                 self.notify_session_layer(SessionCoordinationEvent::CallRinging {
                     dialog_id: dialog_id.clone(),
-                }).await?;
-            },
-            
+                })
+                .await?;
+            }
+
             183 => {
                 info!("Session progress for dialog {}", dialog_id);
-                
+
                 // Check for early media (SDP in 183)
                 if !response.body().is_empty() {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.notify_session_layer(SessionCoordinationEvent::EarlyMedia {
                         dialog_id: dialog_id.clone(),
                         sdp,
-                    }).await?;
+                    })
+                    .await?;
                 } else {
                     self.notify_session_layer(SessionCoordinationEvent::CallProgress {
                         dialog_id: dialog_id.clone(),
                         status_code: response.status_code(),
                         reason_phrase: response.reason_phrase().to_string(),
-                    }).await?;
+                    })
+                    .await?;
                 }
-            },
-            
+            }
+
             _ => {
-                debug!("Other provisional response {} for dialog {}", response.status_code(), dialog_id);
-                
+                debug!(
+                    "Other provisional response {} for dialog {}",
+                    response.status_code(),
+                    dialog_id
+                );
+
                 // Emit general call progress event
                 self.notify_session_layer(SessionCoordinationEvent::CallProgress {
                     dialog_id: dialog_id.clone(),
                     status_code: response.status_code(),
                     reason_phrase: response.reason_phrase().to_string(),
-                }).await?;
+                })
+                .await?;
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle successful responses (2xx)
     pub async fn handle_success_response(
         &self,
@@ -1166,77 +1199,91 @@ impl DialogManager {
         transaction_id: TransactionKey,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
-        info!("Processing success response {} for dialog {}", response.status_code(), dialog_id);
-        
+        info!(
+            "Processing success response {} for dialog {}",
+            response.status_code(),
+            dialog_id
+        );
+
         // Update dialog state based on successful response
         let dialog_state_changed = {
             let mut dialog = self.get_dialog_mut(&dialog_id)?;
             let old_state = dialog.state.clone();
-            
+
             // Update dialog with response information (remote tag, etc.)
             if let Some(to_header) = response.to() {
                 if let Some(to_tag) = to_header.tag() {
                     dialog.set_remote_tag(to_tag.to_string());
                 }
             }
-            
+
             // Update dialog state based on response status and current state
             let state_changed = match response.status_code() {
                 200 => {
                     if dialog.state == DialogState::Early {
                         dialog.state = DialogState::Confirmed;
-                        
+
                         // CRITICAL FIX: Update dialog lookup now that we have both tags
                         if let Some(tuple) = dialog.dialog_id_tuple() {
-                            let key = crate::manager::utils::DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
+                            let key = crate::manager::utils::DialogUtils::create_lookup_key(
+                                &tuple.0, &tuple.1, &tuple.2,
+                            );
                             self.dialog_lookup.insert(key, dialog_id.clone());
                             info!("Updated dialog lookup for confirmed dialog {}", dialog_id);
                         }
-                        
+
                         true
                     } else {
                         false
                     }
-                },
-                _ => false
+                }
+                _ => false,
             };
-            
+
             if state_changed {
                 Some((old_state, dialog.state.clone()))
             } else {
                 None
             }
         };
-        
+
         // Emit dialog events for session-core
         if let Some((old_state, new_state)) = dialog_state_changed {
             self.emit_dialog_event(crate::events::DialogEvent::StateChanged {
                 dialog_id: dialog_id.clone(),
                 old_state,
                 new_state,
-            }).await;
+            })
+            .await;
         }
-        
+
         // Emit session coordination events for session-core
         self.notify_session_layer(SessionCoordinationEvent::ResponseReceived {
             dialog_id: dialog_id.clone(),
             response: response.clone(),
             transaction_id: transaction_id.clone(),
-        }).await?;
-        
+        })
+        .await?;
+
         // Handle specific successful response types
         match response.status_code() {
             200 => {
-                println!("🎯 RESPONSE HANDLER: Processing 200 OK, checking if INVITE response needs ACK");
-                
+                println!(
+                    "🎯 RESPONSE HANDLER: Processing 200 OK, checking if INVITE response needs ACK"
+                );
+
                 // For 200 OK responses to INVITE, automatically send ACK
                 // Check if this is a response to an INVITE by looking at the transaction
-                if let Some(original_request_method) = self.get_transaction_method(&transaction_id) {
+                if let Some(original_request_method) = self.get_transaction_method(&transaction_id)
+                {
                     if original_request_method == rvoip_sip_core::Method::Invite {
                         println!("🚀 RESPONSE HANDLER: This is a 200 OK to INVITE - sending automatic ACK");
-                        
+
                         // Create and send ACK for this 2xx response
-                        if let Err(e) = self.send_automatic_ack_for_2xx(&transaction_id, &response, &dialog_id).await {
+                        if let Err(e) = self
+                            .send_automatic_ack_for_2xx(&transaction_id, &response, &dialog_id)
+                            .await
+                        {
                             warn!("Failed to send automatic ACK for 200 OK to INVITE: {}", e);
                         } else {
                             info!("Successfully sent automatic ACK for 200 OK to INVITE");
@@ -1249,34 +1296,42 @@ impl DialogManager {
                                 None
                             };
 
-                            if let Err(e) = self.notify_session_layer(SessionCoordinationEvent::AckSent {
-                                dialog_id: dialog_id.clone(),
-                                transaction_id: transaction_id.clone(),
-                                negotiated_sdp,
-                            }).await {
+                            if let Err(e) = self
+                                .notify_session_layer(SessionCoordinationEvent::AckSent {
+                                    dialog_id: dialog_id.clone(),
+                                    transaction_id: transaction_id.clone(),
+                                    negotiated_sdp,
+                                })
+                                .await
+                            {
                                 warn!("Failed to notify session layer of ACK sent: {}", e);
                             }
                         }
                     }
                 }
-                
+
                 // Successful completion - could be call answered, request completed, etc.
                 if !response.body().is_empty() {
                     let sdp = String::from_utf8_lossy(response.body()).to_string();
                     self.notify_session_layer(SessionCoordinationEvent::CallAnswered {
                         dialog_id: dialog_id.clone(),
                         session_answer: sdp,
-                    }).await?;
+                    })
+                    .await?;
                 }
-            },
+            }
             _ => {
-                debug!("Other successful response {} for dialog {}", response.status_code(), dialog_id);
+                debug!(
+                    "Other successful response {} for dialog {}",
+                    response.status_code(),
+                    dialog_id
+                );
             }
         }
-        
+
         Ok(())
     }
-    
+
     /// Handle failure responses (4xx, 5xx, 6xx)
     pub async fn handle_failure_response(
         &self,
@@ -1284,31 +1339,40 @@ impl DialogManager {
         transaction_id: TransactionKey,
         dialog_id: DialogId,
     ) -> DialogResult<()> {
-        warn!("Processing failure response {} for dialog {}", response.status_code(), dialog_id);
-        
+        warn!(
+            "Processing failure response {} for dialog {}",
+            response.status_code(),
+            dialog_id
+        );
+
         // Handle specific failure cases and emit appropriate events
         match response.status_code() {
             487 => {
                 // Request Terminated (CANCEL received)
                 info!("Call cancelled for dialog {}", dialog_id);
-                
+
                 // Emit dialog event
                 self.emit_dialog_event(crate::events::DialogEvent::Terminated {
                     dialog_id: dialog_id.clone(),
                     reason: "Request terminated".to_string(),
-                }).await;
-                
+                })
+                .await;
+
                 // Emit session coordination event
                 self.notify_session_layer(SessionCoordinationEvent::CallCancelled {
                     dialog_id: dialog_id.clone(),
                     reason: "Request terminated".to_string(),
-                }).await?;
-            },
-            
+                })
+                .await?;
+            }
+
             status if status >= 400 && status < 500 => {
                 // Client error - may require dialog termination
-                warn!("Client error {} for dialog {} - considering termination", status, dialog_id);
-                
+                warn!(
+                    "Client error {} for dialog {} - considering termination",
+                    status, dialog_id
+                );
+
                 // Emit session coordination event for failed requests
                 self.notify_session_layer(SessionCoordinationEvent::RequestFailed {
                     dialog_id: Some(dialog_id.clone()),
@@ -1316,13 +1380,17 @@ impl DialogManager {
                     status_code: status,
                     reason_phrase: response.reason_phrase().to_string(),
                     method: "Unknown".to_string(), // TODO: Extract from transaction context
-                }).await?;
-            },
-            
+                })
+                .await?;
+            }
+
             status if status >= 500 => {
                 // Server error - may require retry or termination
-                warn!("Server error {} for dialog {} - considering retry", status, dialog_id);
-                
+                warn!(
+                    "Server error {} for dialog {} - considering retry",
+                    status, dialog_id
+                );
+
                 // Emit session coordination event for server errors
                 self.notify_session_layer(SessionCoordinationEvent::RequestFailed {
                     dialog_id: Some(dialog_id.clone()),
@@ -1330,29 +1398,38 @@ impl DialogManager {
                     status_code: status,
                     reason_phrase: response.reason_phrase().to_string(),
                     method: "Unknown".to_string(), // TODO: Extract from transaction context
-                }).await?;
-            },
-            
+                })
+                .await?;
+            }
+
             _ => {
-                debug!("Other failure response {} for dialog {}", response.status_code(), dialog_id);
+                debug!(
+                    "Other failure response {} for dialog {}",
+                    response.status_code(),
+                    dialog_id
+                );
             }
         }
-        
+
         // Always emit the response received event for session-core to handle
         self.notify_session_layer(SessionCoordinationEvent::ResponseReceived {
             dialog_id: dialog_id.clone(),
             response: response.clone(),
             transaction_id: transaction_id.clone(),
-        }).await?;
-        
+        })
+        .await?;
+
         Ok(())
     }
-    
+
     /// Get the original request method for a transaction
-    /// 
+    ///
     /// This is a simplified implementation - in a real system this would
     /// query the transaction manager for the original request method.
-    fn get_transaction_method(&self, transaction_id: &TransactionKey) -> Option<rvoip_sip_core::Method> {
+    fn get_transaction_method(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<rvoip_sip_core::Method> {
         // Extract method from transaction key (simplified approach)
         // The transaction key typically contains the method information
         if transaction_id.to_string().contains("INVITE") {
@@ -1365,9 +1442,9 @@ impl DialogManager {
             Some(rvoip_sip_core::Method::Invite)
         }
     }
-    
+
     /// Send automatic ACK for 2xx response to INVITE
-    /// 
+    ///
     /// Uses the existing dialog-core → transaction-core → transport architecture
     /// to properly send ACKs according to RFC 3261 while maintaining separation of concerns.
     async fn send_automatic_ack_for_2xx(
@@ -1377,14 +1454,15 @@ impl DialogManager {
         dialog_id: &DialogId,
     ) -> DialogResult<()> {
         debug!("Sending automatic ACK for 2xx response to INVITE using proper architecture");
-        
+
         println!("📧 RESPONSE HANDLER: Using existing send_ack_for_2xx_response method");
-        
+
         // Use the existing dialog-core method that properly delegates to transaction-core
         // This maintains separation of concerns: dialog-core → transaction-core → transport
-        self.send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response).await?;
-        
+        self.send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response)
+            .await?;
+
         println!("✅ RESPONSE HANDLER: Successfully sent ACK for 2xx response via proper channels");
         Ok(())
     }
-} 
+}

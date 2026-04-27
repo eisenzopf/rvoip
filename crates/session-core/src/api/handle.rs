@@ -1,16 +1,16 @@
 //! SessionHandle — the primary interface for controlling an active SIP session.
 
+use rvoip_media_core::types::AudioFrame;
 use std::sync::Arc;
 use std::time::Duration;
-use rvoip_media_core::types::AudioFrame;
 use tokio::sync::mpsc;
 
-use crate::api::audio::{AudioStream, AudioSender, AudioReceiver};
+use crate::api::audio::{AudioReceiver, AudioSender, AudioStream};
 use crate::api::events::Event;
+use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
 use crate::state_table::types::SessionId;
 use crate::types::{CallState, SessionInfo};
-use crate::api::unified::UnifiedCoordinator;
 
 /// Type alias so callers can refer to a session by `CallId`.
 pub type CallId = SessionId;
@@ -47,7 +47,10 @@ pub struct SessionHandle {
 
 impl SessionHandle {
     pub(crate) fn new(call_id: CallId, coordinator: Arc<UnifiedCoordinator>) -> Self {
-        Self { call_id, coordinator }
+        Self {
+            call_id,
+            coordinator,
+        }
     }
 
     /// The unique identifier for this call session.
@@ -74,7 +77,8 @@ impl SessionHandle {
                 } else {
                     tracing::warn!(
                         "[SessionHandle] background hangup failed for {}: {}",
-                        call_id, e
+                        call_id,
+                        e
                     );
                 }
             }
@@ -95,20 +99,22 @@ impl SessionHandle {
     /// Mute local audio.
     pub async fn mute(&self) -> Result<()> {
         use crate::state_table::types::EventType;
-        self.coordinator.helpers.state_machine.process_event(
-            &self.call_id,
-            EventType::MuteCall,
-        ).await?;
+        self.coordinator
+            .helpers
+            .state_machine
+            .process_event(&self.call_id, EventType::MuteCall)
+            .await?;
         Ok(())
     }
 
     /// Unmute local audio.
     pub async fn unmute(&self) -> Result<()> {
         use crate::state_table::types::EventType;
-        self.coordinator.helpers.state_machine.process_event(
-            &self.call_id,
-            EventType::UnmuteCall,
-        ).await?;
+        self.coordinator
+            .helpers
+            .state_machine
+            .process_event(&self.call_id, EventType::UnmuteCall)
+            .await?;
         Ok(())
     }
 
@@ -269,7 +275,10 @@ impl SessionHandle {
     /// same events (broadcast semantics via the global event bus).
     pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {
         let rx = self.coordinator.subscribe_events().await?;
-        Ok(crate::api::stream_peer::EventReceiver::filtered(rx, self.call_id.clone()))
+        Ok(crate::api::stream_peer::EventReceiver::filtered(
+            rx,
+            self.call_id.clone(),
+        ))
     }
 
     /// Wait for this specific call to end, with optional timeout.

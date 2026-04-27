@@ -45,21 +45,21 @@
 //!     .with_body(Bytes::from("SDP body content here"));
 //! ```
 
-use std::fmt;
-use std::collections::HashSet;
-use std::str::FromStr;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fmt;
+use std::str::FromStr;
 
+use crate::types;
+use crate::types::from::From;
 use crate::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
+use crate::types::headers::HeaderAccess;
+use crate::types::method::Method;
+use crate::types::to::To;
 use crate::types::uri::Uri;
 use crate::types::version::Version;
-use crate::types::method::Method;
-use crate::types;
-use crate::types::to::To;
-use crate::types::from::From;
 use crate::types::via::Via;
-use crate::types::headers::HeaderAccess;
 use crate::types::CSeq;
 
 /// A SIP request message
@@ -70,7 +70,7 @@ use crate::types::CSeq;
 ///
 /// # Standard RFC Compliance
 ///
-/// This implementation follows [RFC 3261](https://tools.ietf.org/html/rfc3261), 
+/// This implementation follows [RFC 3261](https://tools.ietf.org/html/rfc3261),
 /// which defines the Session Initiation Protocol.
 ///
 /// # Fields
@@ -200,16 +200,19 @@ impl Request {
     /// Self for method chaining
     pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = body.into();
-        
+
         // Add or update Content-Length header
-        let content_length = TypedHeader::ContentLength(types::content_length::ContentLength(self.body.len() as u32));
-        
+        let content_length = TypedHeader::ContentLength(types::content_length::ContentLength(
+            self.body.len() as u32,
+        ));
+
         // Remove any existing Content-Length headers
-        self.headers.retain(|h| h.name() != HeaderName::ContentLength);
-        
+        self.headers
+            .retain(|h| h.name() != HeaderName::ContentLength);
+
         // Add the new Content-Length header
         self.headers.push(content_length);
-        
+
         self
     }
 
@@ -252,7 +255,7 @@ impl Request {
     pub fn method(&self) -> Method {
         self.method.clone()
     }
-    
+
     /// Returns the URI of the request
     ///
     /// # Returns
@@ -270,12 +273,12 @@ impl Request {
     pub fn uri(&self) -> &Uri {
         &self.uri
     }
-    
+
     /// Retrieves the first header with the specified type, if any.
-    pub fn typed_header<T>(&self) -> Option<&T> 
-    where 
+    pub fn typed_header<T>(&self) -> Option<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         for header in &self.headers {
             if let Some(typed) = try_as_typed_header::<T>(header) {
@@ -297,7 +300,7 @@ impl Request {
         }
         None
     }
-    
+
     /// Retrieves the From header value, if present
     ///
     /// # Returns
@@ -317,7 +320,7 @@ impl Request {
     /// let mut from = From::new(address);
     /// // Add a tag parameter
     /// from.set_tag("1928301774");
-    /// 
+    ///
     /// let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
     ///     .with_header(TypedHeader::From(from.clone()));
     ///
@@ -332,7 +335,7 @@ impl Request {
         }
         None
     }
-    
+
     /// Retrieves the To header value, if present
     ///
     /// # Returns
@@ -358,7 +361,7 @@ impl Request {
         }
         None
     }
-    
+
     /// Retrieves the CSeq header value, if present
     ///
     /// # Returns
@@ -442,11 +445,11 @@ impl Request {
     /// ```
     pub fn first_via(&self) -> Option<Via> {
         self.headers.iter().find_map(|h| {
-             if let TypedHeader::Via(via_data) = h {
-                 Some(via_data.clone())
-             } else {
-                 None
-             }
+            if let TypedHeader::Via(via_data) = h {
+                Some(via_data.clone())
+            } else {
+                None
+            }
         })
     }
 
@@ -469,8 +472,8 @@ impl Request {
         for header in &self.headers {
             // Directly match the TypedHeader::Via variant (similar to via_headers)
             if let TypedHeader::Via(via_data) = header {
-                 // Via is already a Vec<ViaHeader> wrapper
-                 result.push(via_data.clone());
+                // Via is already a Vec<ViaHeader> wrapper
+                result.push(via_data.clone());
             }
         }
         result
@@ -480,11 +483,11 @@ impl Request {
     /// TODO: Refactor similar to via_headers.
     pub fn first_via_no_body(&self) -> Option<Via> {
         self.headers.iter().find_map(|h| {
-             if let TypedHeader::Via(via_data) = h {
-                 Some(via_data.clone())
-             } else {
-                 None
-             }
+            if let TypedHeader::Via(via_data) = h {
+                Some(via_data.clone())
+            } else {
+                None
+            }
         })
     }
 
@@ -511,19 +514,20 @@ impl Request {
     /// ```
     pub fn to_bytes_no_body(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
-        
+
         // Add request line: METHOD URI SIP/2.0\r\n
-        buffer.extend_from_slice(format!("{} {} {}\r\n", 
-            self.method, self.uri, self.version).as_bytes());
-        
+        buffer.extend_from_slice(
+            format!("{} {} {}\r\n", self.method, self.uri, self.version).as_bytes(),
+        );
+
         // Add headers
         for header in &self.headers {
             buffer.extend_from_slice(format!("{}\r\n", header).as_bytes());
         }
-        
+
         // Add empty line to separate headers from body
         buffer.extend_from_slice(b"\r\n");
-        
+
         buffer
     }
 
@@ -603,7 +607,7 @@ impl Request {
     ) -> Self {
         let from_addr = types::Address::new(from_uri);
         let to_addr = types::Address::new(to_uri.clone());
-        
+
         Request::new(method.clone(), to_uri)
             .with_header(TypedHeader::From(From::new(from_addr)))
             .with_header(TypedHeader::To(To::new(to_addr)))
@@ -628,7 +632,7 @@ impl Request {
     pub fn version(&self) -> Version {
         self.version.clone()
     }
-    
+
     /// Returns a reference to the request headers
     ///
     /// # Returns
@@ -647,7 +651,7 @@ impl Request {
     pub fn all_headers(&self) -> &[TypedHeader] {
         &self.headers
     }
-    
+
     /// Returns a reference to the request body as Bytes
     ///
     /// # Returns
@@ -676,15 +680,16 @@ impl Request {
     pub fn cseq_number(&self) -> Option<u32> {
         self.cseq().map(|cseq| cseq.seq)
     }
-    
+
     /// Retrieves the From tag, if present
     ///
     /// # Returns
     /// An optional From tag string
     pub fn from_tag(&self) -> Option<String> {
-        self.from().and_then(|from| from.tag().map(|s| s.to_string()))
+        self.from()
+            .and_then(|from| from.tag().map(|s| s.to_string()))
     }
-    
+
     /// Retrieves the From display name, if present
     ///
     /// # Returns  
@@ -692,7 +697,7 @@ impl Request {
     pub fn from_display_name(&self) -> Option<&str> {
         self.from().and_then(|from| from.address().display_name())
     }
-    
+
     /// Retrieves the From URI as a string, if present
     ///
     /// # Returns
@@ -700,7 +705,7 @@ impl Request {
     pub fn from_uri(&self) -> Option<String> {
         self.from().map(|from| from.address().uri.to_string())
     }
-    
+
     /// Retrieves the To tag, if present
     ///
     /// # Returns
@@ -708,7 +713,7 @@ impl Request {
     pub fn to_tag(&self) -> Option<String> {
         self.to().and_then(|to| to.tag().map(|s| s.to_string()))
     }
-    
+
     /// Retrieves the To display name, if present
     ///
     /// # Returns
@@ -716,7 +721,7 @@ impl Request {
     pub fn to_display_name(&self) -> Option<&str> {
         self.to().and_then(|to| to.address().display_name())
     }
-    
+
     /// Retrieves the To URI as a string, if present
     ///
     /// # Returns
@@ -724,7 +729,7 @@ impl Request {
     pub fn to_uri(&self) -> Option<String> {
         self.to().map(|to| to.address().uri.to_string())
     }
-    
+
     /// Retrieves the Via branch parameter, if present
     ///
     /// # Returns
@@ -739,7 +744,7 @@ impl Request {
         }
         None
     }
-    
+
     /// Retrieves the Contact URI as a string, if present
     ///
     /// # Returns
@@ -762,7 +767,7 @@ impl Request {
     pub fn via_transport(&self) -> Option<&str> {
         self.first_via_transport()
     }
-    
+
     /// Retrieves the Via host from the first (topmost) Via header
     ///
     /// # Returns
@@ -770,7 +775,7 @@ impl Request {
     pub fn via_host(&self) -> Option<String> {
         self.first_via_host()
     }
-    
+
     /// Retrieves the Via transport protocol from the first (topmost) Via header
     ///
     /// # Returns
@@ -785,7 +790,7 @@ impl Request {
         }
         None
     }
-    
+
     /// Retrieves the Via host from the first (topmost) Via header
     ///
     /// # Returns
@@ -800,7 +805,7 @@ impl Request {
         }
         None
     }
-    
+
     /// Retrieves all Via transport protocols in order
     ///
     /// # Returns
@@ -816,7 +821,7 @@ impl Request {
         }
         transports
     }
-    
+
     /// Retrieves all Via hosts in order
     ///
     /// # Returns
@@ -832,7 +837,7 @@ impl Request {
         }
         hosts
     }
-    
+
     /// Retrieves all Via branches in order
     ///
     /// # Returns
@@ -859,19 +864,19 @@ impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Write request line: METHOD URI SIP/2.0
         write!(f, "{} {} {}", self.method, self.uri, self.version)?;
-        
+
         // Write headers
         for header in &self.headers {
             write!(f, "\r\n{}", header)?;
         }
-        
+
         // Write separator
         write!(f, "\r\n")?;
-        
+
         // Write body if present
         if !self.body.is_empty() {
             write!(f, "\r\n")?;
-            
+
             // Try to decode body as UTF-8, fall back to hex representation
             match std::str::from_utf8(&self.body) {
                 Ok(body_str) => write!(f, "{}", body_str)?,
@@ -887,34 +892,32 @@ impl fmt::Display for Request {
                 }
             }
         }
-        
+
         Ok(())
     }
 }
 
 // Implement HeaderAccess for Request
 impl HeaderAccess for Request {
-    fn typed_headers<T>(&self) -> Vec<&T> 
-    where 
+    fn typed_headers<T>(&self) -> Vec<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         use crate::types::headers::collect_typed_headers;
         collect_typed_headers::<T>(&self.headers)
     }
 
-    fn typed_header<T>(&self) -> Option<&T> 
-    where 
+    fn typed_header<T>(&self) -> Option<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         self.typed_headers::<T>().into_iter().next()
     }
 
     fn headers(&self, name: &HeaderName) -> Vec<&TypedHeader> {
-        self.headers.iter()
-            .filter(|h| h.name() == *name)
-            .collect()
+        self.headers.iter().filter(|h| h.name() == *name).collect()
     }
 
     fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
@@ -929,22 +932,19 @@ impl HeaderAccess for Request {
     }
 
     fn raw_header_value(&self, name: &HeaderName) -> Option<String> {
-        self.header(name).and_then(|h| {
-            match h.to_string().split_once(':') {
+        self.header(name)
+            .and_then(|h| match h.to_string().split_once(':') {
                 Some((_, value)) => Some(value.trim().to_string()),
                 None => None,
-            }
-        })
+            })
     }
 
     fn raw_headers(&self, name: &HeaderName) -> Vec<Vec<u8>> {
         self.headers(name)
             .iter()
-            .filter_map(|h| {
-                match h.to_string().split_once(':') {
-                    Some((_, value)) => Some(value.trim().as_bytes().to_vec()),
-                    None => None,
-                }
+            .filter_map(|h| match h.to_string().split_once(':') {
+                Some((_, value)) => Some(value.trim().as_bytes().to_vec()),
+                None => None,
             })
             .collect()
     }
@@ -963,10 +963,10 @@ impl HeaderAccess for Request {
 }
 
 // Helper function to try casting a TypedHeader to a specific type
-fn try_as_typed_header<'a, T>(header: &'a TypedHeader) -> Option<&'a T> 
-where 
+fn try_as_typed_header<'a, T>(header: &'a TypedHeader) -> Option<&'a T>
+where
     T: TypedHeaderTrait + std::fmt::Debug + 'static,
-    <T as TypedHeaderTrait>::Name: std::fmt::Debug
+    <T as TypedHeaderTrait>::Name: std::fmt::Debug,
 {
     header.as_typed_ref::<T>()
 }
@@ -974,27 +974,34 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::CSeq;
+    use crate::types::CallId;
     use crate::types::ContentLength;
     use crate::types::MaxForwards;
-    use crate::types::CallId;
-    use crate::types::CSeq;
 
     #[test]
     fn test_request_creation() {
         let address = types::Address::new("sip:alice@example.com".parse().unwrap());
-        
+
         let request = Request::new(Method::Invite, Uri::sip("bob@example.com"))
             .with_header(TypedHeader::From(From::new(address)))
-            .with_header(TypedHeader::To(To::new(types::Address::new("sip:bob@example.com".parse().unwrap()))))
-            .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.example.com")))
+            .with_header(TypedHeader::To(To::new(types::Address::new(
+                "sip:bob@example.com".parse().unwrap(),
+            ))))
+            .with_header(TypedHeader::CallId(CallId::new(
+                "a84b4c76e66710@pc33.atlanta.example.com",
+            )))
             .with_header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)))
-            .with_header(TypedHeader::Via(Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![]).expect("Failed to create Via")))
+            .with_header(TypedHeader::Via(
+                Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![])
+                    .expect("Failed to create Via"),
+            ))
             .with_body("v=0\r\no=alice 123 456 IN IP4 127.0.0.1\r\ns=A call\r\nt=0 0\r\n");
 
         assert_eq!(request.method, Method::Invite);
         assert_eq!(request.uri.to_string(), "sip:bob@example.com");
         assert_eq!(request.version, Version::new(2, 0));
-        
+
         // Check for the main headers
         assert!(request.has_header(&HeaderName::From));
         assert!(request.has_header(&HeaderName::To));
@@ -1002,7 +1009,7 @@ mod tests {
         assert!(request.has_header(&HeaderName::CSeq));
         assert!(request.has_header(&HeaderName::Via));
         assert!(request.has_header(&HeaderName::ContentLength));
-        
+
         // Get content length directly from the headers
         let cl = request.header(&HeaderName::ContentLength).unwrap();
         if let TypedHeader::ContentLength(cl) = cl {
@@ -1017,7 +1024,7 @@ mod tests {
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
             .with_header(TypedHeader::MaxForwards(MaxForwards::new(70)));
-        
+
         assert_eq!(request.headers.len(), 2);
         assert!(request.header(&HeaderName::CallId).is_some());
         assert!(request.header(&HeaderName::MaxForwards).is_some());
@@ -1028,7 +1035,7 @@ mod tests {
         let body_content = "test body content";
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_body(Bytes::from(body_content));
-        
+
         assert_eq!(request.body, Bytes::from(body_content));
         assert_eq!(request.body(), body_content.as_bytes());
     }
@@ -1038,11 +1045,11 @@ mod tests {
         let mut request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap());
         let headers = vec![
             TypedHeader::CallId(types::CallId::new("test-id")),
-            TypedHeader::MaxForwards(MaxForwards::new(70))
+            TypedHeader::MaxForwards(MaxForwards::new(70)),
         ];
-        
+
         request.set_headers(headers);
-        
+
         assert_eq!(request.headers.len(), 2);
         assert!(request.header(&HeaderName::CallId).is_some());
         assert!(request.header(&HeaderName::MaxForwards).is_some());
@@ -1053,11 +1060,11 @@ mod tests {
         let call_id = types::CallId::new("test-id");
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(call_id.clone()));
-        
+
         let retrieved = request.typed_header::<types::CallId>();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().value(), call_id.value());
-        
+
         // Test for a header that doesn't exist
         let non_existent = request.typed_header::<ContentLength>();
         assert!(non_existent.is_none());
@@ -1068,7 +1075,7 @@ mod tests {
         let call_id = types::CallId::new("test-id");
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(call_id.clone()));
-        
+
         let retrieved = request.call_id();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().value(), call_id.value());
@@ -1076,13 +1083,14 @@ mod tests {
 
     #[test]
     fn test_via_headers() {
-        let via = Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![]).expect("Failed to create Via");
+        let via = Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![])
+            .expect("Failed to create Via");
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::Via(via.clone()));
-        
+
         let vias = request.via_headers();
         assert_eq!(vias.len(), 1);
-        
+
         let first_via = request.first_via();
         assert!(first_via.is_some());
     }
@@ -1092,10 +1100,10 @@ mod tests {
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
             .with_body(Bytes::from("test body"));
-        
+
         let bytes = request.to_bytes_no_body();
         let content = String::from_utf8_lossy(&bytes);
-        
+
         assert!(content.contains("INVITE sip:bob@example.com SIP/2.0"));
         assert!(content.contains("Call-ID: test-id"));
         assert!(!content.contains("test body"));
@@ -1106,9 +1114,9 @@ mod tests {
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
             .with_body(Bytes::from("test body"));
-        
+
         let display = format!("{}", request);
-        
+
         assert!(display.contains("INVITE sip:bob@example.com SIP/2.0"));
         assert!(display.contains("Call-ID: test-id"));
         assert!(display.contains("test body"));
@@ -1119,23 +1127,23 @@ mod tests {
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
             .with_header(TypedHeader::MaxForwards(MaxForwards::new(70)));
-        
+
         // Test HeaderAccess implementation
         assert!(request.has_header(&HeaderName::CallId));
         assert!(request.has_header(&HeaderName::MaxForwards));
         assert!(!request.has_header(&HeaderName::To));
-        
+
         let call_id_headers = request.headers(&HeaderName::CallId);
         assert_eq!(call_id_headers.len(), 1);
-        
+
         let by_name = request.headers_by_name("Call-ID");
         assert_eq!(by_name.len(), 1);
-        
+
         let names = request.header_names();
         assert_eq!(names.len(), 2);
         assert!(names.contains(&HeaderName::CallId));
         assert!(names.contains(&HeaderName::MaxForwards));
-        
+
         let raw_value = request.raw_header_value(&HeaderName::CallId);
         assert!(raw_value.is_some());
         assert!(raw_value.unwrap().contains("test-id"));
@@ -1145,24 +1153,19 @@ mod tests {
     fn test_new_with_essentials() {
         let to_uri = "sip:bob@example.com".parse().unwrap();
         let from_uri = "sip:alice@example.com".parse().unwrap();
-        
-        let request = Request::new_with_essentials(
-            Method::Invite,
-            to_uri,
-            from_uri,
-            "abc123@example.com",
-            1
-        );
-        
+
+        let request =
+            Request::new_with_essentials(Method::Invite, to_uri, from_uri, "abc123@example.com", 1);
+
         assert_eq!(request.method, Method::Invite);
         assert!(request.has_header(&HeaderName::From));
         assert!(request.has_header(&HeaderName::To));
         assert!(request.has_header(&HeaderName::CallId));
         assert!(request.has_header(&HeaderName::CSeq));
         assert!(request.has_header(&HeaderName::MaxForwards));
-        
+
         let call_id = request.call_id();
         assert!(call_id.is_some());
         assert_eq!(call_id.unwrap().value(), "abc123@example.com");
     }
-} 
+}

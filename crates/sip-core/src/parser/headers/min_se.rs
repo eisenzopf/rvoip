@@ -8,12 +8,12 @@
 use crate::types::MinSE;
 use nom::character::complete::u32 as parse_u32_nom; // ADDED import
 use nom::{
-    IResult,
-    sequence::terminated,
     character::complete::multispace0,
     combinator::eof,
     error::ParseError,
     // Removed unused imports: tuple, tag, char, digit1, map_res, map, opt, many0, alt, common_params
+    sequence::terminated,
+    IResult,
 };
 
 // delta_seconds helper is no longer needed if parse_u32 is used directly.
@@ -29,8 +29,8 @@ where
 {
     // Use parse_u32_nom for delta-seconds directly
     let (input, val) = parse_u32_nom(input)?; // CHANGED to parse_u32_nom
-    // Ensure that after delta_seconds, there's only optional whitespace and EOF.
-    // Any parameters would cause `eof` to fail.
+                                              // Ensure that after delta_seconds, there's only optional whitespace and EOF.
+                                              // Any parameters would cause `eof` to fail.
     let (input, _) = terminated(multispace0, eof)(input)?;
     Ok((input, MinSE { delta_seconds: val }))
 }
@@ -38,18 +38,27 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::error::{VerboseError, Error as NomError};
+    use nom::error::{Error as NomError, VerboseError};
 
     #[test]
     fn test_parse_min_se_value_valid() {
-        assert_eq!(parse_min_se_value::<VerboseError<&[u8]>>(b"90"), Ok((&b""[..], MinSE::new(90))));
-        assert_eq!(parse_min_se_value::<VerboseError<&[u8]>>(b"1800"), Ok((&b""[..], MinSE::new(1800))));
+        assert_eq!(
+            parse_min_se_value::<VerboseError<&[u8]>>(b"90"),
+            Ok((&b""[..], MinSE::new(90)))
+        );
+        assert_eq!(
+            parse_min_se_value::<VerboseError<&[u8]>>(b"1800"),
+            Ok((&b""[..], MinSE::new(1800)))
+        );
     }
 
     #[test]
     fn test_parse_min_se_value_with_ows() {
         // OWS before EOF is consumed
-        assert_eq!(parse_min_se_value::<VerboseError<&[u8]>>(b"120  "), Ok((&b""[..], MinSE::new(120))));
+        assert_eq!(
+            parse_min_se_value::<VerboseError<&[u8]>>(b"120  "),
+            Ok((&b""[..], MinSE::new(120)))
+        );
     }
 
     #[test]
@@ -71,7 +80,10 @@ mod tests {
     #[test]
     fn test_parse_min_se_value_max() {
         let max_val_str = u32::MAX.to_string();
-        assert_eq!(parse_min_se_value::<VerboseError<&[u8]>>(max_val_str.as_bytes()), Ok((&b""[..], MinSE::new(u32::MAX))));
+        assert_eq!(
+            parse_min_se_value::<VerboseError<&[u8]>>(max_val_str.as_bytes()),
+            Ok((&b""[..], MinSE::new(u32::MAX)))
+        );
     }
 
     #[test]
@@ -80,4 +92,4 @@ mod tests {
         // parse_u32 should handle this gracefully and return an error.
         assert!(parse_min_se_value::<VerboseError<&[u8]>>(overflow_val_str.as_bytes()).is_err());
     }
-} 
+}

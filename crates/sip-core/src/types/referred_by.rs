@@ -47,21 +47,21 @@
 //! assert_eq!(referred_by.uri().scheme.to_string(), "sip");
 //! ```
 
-use crate::types::address::Address; 
-use crate::parser::headers::parse_referred_by;
 use crate::error::{Error, Result};
-use std::fmt;
-use std::str::FromStr;
+use crate::parser::headers::parse_referred_by;
+use crate::types::address::Address;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::fmt;
+use std::str::FromStr;
 
 /// Represents a Referred-By header as defined in RFC 3892
-/// 
-/// The Referred-By header field identifies the entity that requested the current 
-/// referral. It enables verification of the referrer's identity and provides 
+///
+/// The Referred-By header field identifies the entity that requested the current
+/// referral. It enables verification of the referrer's identity and provides
 /// context for the referral.
-/// 
+///
 /// Syntax (RFC 3892):
 /// Referred-By = "Referred-By" HCOLON (name-addr / addr-spec) *( SEMI referredby-param )
 /// referredby-param = generic-param / "cid" EQUAL token
@@ -333,10 +333,10 @@ impl ReferredBy {
     pub fn with_cid(self, cid_value: &str) -> Self {
         // Create a new Address with the same properties as the original
         let mut new_address = self.0.clone();
-        
+
         // Add/update the cid parameter
         new_address.set_param("cid", Some(cid_value));
-        
+
         // Return a new ReferredBy with the updated Address
         Self(new_address)
     }
@@ -367,7 +367,7 @@ impl fmt::Display for ReferredBy {
     /// let referred_by = ReferredBy::new(address);
     /// // Depending on the implementation, display names may be quoted or not
     /// let display_str = referred_by.to_string();
-    /// assert!(display_str == "Bob <sip:bob@example.com>" || 
+    /// assert!(display_str == "Bob <sip:bob@example.com>" ||
     ///        display_str == "\"Bob\" <sip:bob@example.com>");
     ///
     /// // In a complete header
@@ -396,9 +396,11 @@ impl TypedHeaderTrait for ReferredBy {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -407,14 +409,16 @@ impl TypedHeaderTrait for ReferredBy {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ReferredBy::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -474,9 +478,9 @@ impl FromStr for ReferredBy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::{Uri, Scheme};
     use crate::types::address::Address;
     use crate::types::param::Param;
+    use crate::types::uri::{Scheme, Uri};
     use std::str::FromStr;
 
     #[test]
@@ -499,9 +503,12 @@ mod tests {
         let address = Address::new_with_display_name("Bob", uri);
         let referred_by = ReferredBy::new(address);
         let display_str = referred_by.to_string();
-        assert!(display_str == "\"Bob\" <sip:bob@example.com>" || 
-                display_str == "Bob <sip:bob@example.com>",
-                "Expected either quoted or unquoted display name, got: {}", display_str);
+        assert!(
+            display_str == "\"Bob\" <sip:bob@example.com>"
+                || display_str == "Bob <sip:bob@example.com>",
+            "Expected either quoted or unquoted display name, got: {}",
+            display_str
+        );
     }
 
     #[test]
@@ -518,7 +525,8 @@ mod tests {
         assert_eq!(referred_by.uri().user, Some("bob".to_string()));
 
         // With parameters
-        let referred_by = ReferredBy::from_str("<sip:carol@example.com>;cid=12345@example.com").unwrap();
+        let referred_by =
+            ReferredBy::from_str("<sip:carol@example.com>;cid=12345@example.com").unwrap();
         assert_eq!(referred_by.params().len(), 1);
         assert!(referred_by.has_param("cid"));
         let param_value = referred_by.get_param("cid");
@@ -572,10 +580,10 @@ mod tests {
         // Create Address with parameters
         let uri = Uri::from_str("sip:alice@example.com").unwrap();
         let mut address = Address::new(uri);
-        
+
         // Add tag parameter to Address
         address.set_tag("1234");
-        
+
         let referred_by = ReferredBy::new(address);
 
         // The parameter should be in the Address params
@@ -587,8 +595,9 @@ mod tests {
     #[test]
     fn test_referred_by_with_cid_parameter() {
         // Parse a Referred-By header with cid parameter
-        let referred_by = ReferredBy::from_str("<sip:alice@example.com>;cid=12345@atlanta.example.com").unwrap();
-        
+        let referred_by =
+            ReferredBy::from_str("<sip:alice@example.com>;cid=12345@atlanta.example.com").unwrap();
+
         // Check the cid parameter
         assert!(referred_by.has_param("cid"));
         let param_value = referred_by.get_param("cid");
@@ -599,4 +608,4 @@ mod tests {
         assert!(value.contains("12345"));
         assert!(value.contains("atlanta.example.com"));
     }
-} 
+}

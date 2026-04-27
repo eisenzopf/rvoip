@@ -6,34 +6,34 @@ use thiserror::Error;
 pub enum AuthError {
     #[error("Invalid token: {0}")]
     InvalidToken(String),
-    
+
     #[error("Token expired")]
     TokenExpired,
-    
+
     #[error("Insufficient permissions: {0}")]
     InsufficientPermissions(String),
-    
+
     #[error("Authentication provider error: {0}")]
     ProviderError(String),
-    
+
     #[error("Configuration error: {0}")]
     ConfigError(String),
-    
+
     #[error("Network error: {0}")]
     NetworkError(String),
-    
+
     #[error("Cache error: {0}")]
     CacheError(String),
-    
+
     #[error("Internal error: {0}")]
     InternalError(String),
-    
+
     #[error("Invalid digest challenge: {0}")]
     InvalidChallenge(String),
-    
+
     #[error("Invalid digest response: {0}")]
     InvalidResponse(String),
-    
+
     #[error("Digest computation error: {0}")]
     DigestError(String),
 }

@@ -3,9 +3,7 @@
 //! Tests the DashMap-based SessionStore: create, get, update, remove,
 //! index lookups, and concurrent access.
 
-use rvoip_session_core::internals::{
-    SessionId, Role,
-};
+use rvoip_session_core::internals::{Role, SessionId};
 use rvoip_session_core::session_store::SessionStore;
 use rvoip_session_core::state_table::types::{DialogId, MediaSessionId};
 use rvoip_session_core::types::CallState;
@@ -32,8 +30,14 @@ async fn test_create_duplicate_fails() {
     let store = SessionStore::new();
     let id = SessionId::new();
 
-    assert!(store.create_session(id.clone(), Role::UAC, false).await.is_ok());
-    assert!(store.create_session(id.clone(), Role::UAC, false).await.is_err());
+    assert!(store
+        .create_session(id.clone(), Role::UAC, false)
+        .await
+        .is_ok());
+    assert!(store
+        .create_session(id.clone(), Role::UAC, false)
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -47,7 +51,10 @@ async fn test_get_nonexistent_returns_error() {
 async fn test_create_with_history() {
     let store = SessionStore::new();
     let id = SessionId::new();
-    let created = store.create_session(id.clone(), Role::UAC, true).await.unwrap();
+    let created = store
+        .create_session(id.clone(), Role::UAC, true)
+        .await
+        .unwrap();
     assert!(created.history.is_some());
 }
 
@@ -57,7 +64,10 @@ async fn test_create_with_history() {
 async fn test_update_session_state() {
     let store = SessionStore::new();
     let id = SessionId::new();
-    let mut s = store.create_session(id.clone(), Role::UAC, false).await.unwrap();
+    let mut s = store
+        .create_session(id.clone(), Role::UAC, false)
+        .await
+        .unwrap();
 
     s.call_state = CallState::Active;
     s.dialog_established = true;
@@ -74,7 +84,10 @@ async fn test_update_session_state() {
 async fn test_remove_session() {
     let store = SessionStore::new();
     let id = SessionId::new();
-    store.create_session(id.clone(), Role::UAC, false).await.unwrap();
+    store
+        .create_session(id.clone(), Role::UAC, false)
+        .await
+        .unwrap();
 
     assert!(store.remove_session(&id).await.is_ok());
     assert!(store.get_session(&id).await.is_err());
@@ -114,8 +127,14 @@ async fn test_has_session() {
 #[tokio::test]
 async fn test_clear() {
     let store = SessionStore::new();
-    store.create_session(SessionId::new(), Role::UAC, false).await.unwrap();
-    store.create_session(SessionId::new(), Role::UAS, false).await.unwrap();
+    store
+        .create_session(SessionId::new(), Role::UAC, false)
+        .await
+        .unwrap();
+    store
+        .create_session(SessionId::new(), Role::UAS, false)
+        .await
+        .unwrap();
 
     store.clear().await;
     assert!(!store.has_session().await);
@@ -130,7 +149,10 @@ async fn test_dialog_id_index() {
     let sid = SessionId::new();
     let did = DialogId(uuid::Uuid::new_v4());
 
-    let mut s = store.create_session(sid.clone(), Role::UAC, false).await.unwrap();
+    let mut s = store
+        .create_session(sid.clone(), Role::UAC, false)
+        .await
+        .unwrap();
     s.dialog_id = Some(did.clone());
     store.update_session(s).await.unwrap();
 
@@ -152,7 +174,10 @@ async fn test_call_id_index() {
     let sid = SessionId::new();
     let cid: String = "call-abc-123".into();
 
-    let mut s = store.create_session(sid.clone(), Role::UAC, false).await.unwrap();
+    let mut s = store
+        .create_session(sid.clone(), Role::UAC, false)
+        .await
+        .unwrap();
     s.call_id = Some(cid.clone());
     store.update_session(s).await.unwrap();
 
@@ -167,7 +192,10 @@ async fn test_media_id_index() {
     let sid = SessionId::new();
     let mid = MediaSessionId::new("media-xyz");
 
-    let mut s = store.create_session(sid.clone(), Role::UAC, false).await.unwrap();
+    let mut s = store
+        .create_session(sid.clone(), Role::UAC, false)
+        .await
+        .unwrap();
     s.media_session_id = Some(mid.clone());
     store.update_session(s).await.unwrap();
 
@@ -183,7 +211,10 @@ async fn test_index_updated_on_id_change() {
     let did1 = DialogId(uuid::Uuid::new_v4());
     let did2 = DialogId(uuid::Uuid::new_v4());
 
-    let mut s = store.create_session(sid.clone(), Role::UAC, false).await.unwrap();
+    let mut s = store
+        .create_session(sid.clone(), Role::UAC, false)
+        .await
+        .unwrap();
     s.dialog_id = Some(did1.clone());
     store.update_session(s.clone()).await.unwrap();
 
@@ -208,7 +239,10 @@ async fn test_remove_cleans_indexes() {
     let mid = MediaSessionId::new("m1");
     let cid: String = "c1".into();
 
-    let mut s = store.create_session(sid.clone(), Role::UAC, false).await.unwrap();
+    let mut s = store
+        .create_session(sid.clone(), Role::UAC, false)
+        .await
+        .unwrap();
     s.dialog_id = Some(did.clone());
     s.media_session_id = Some(mid.clone());
     s.call_id = Some(cid.clone());
@@ -235,17 +269,26 @@ async fn test_get_stats_counts_states() {
     let store = SessionStore::new();
 
     // Create an idle session
-    store.create_session(SessionId::new(), Role::UAC, false).await.unwrap();
+    store
+        .create_session(SessionId::new(), Role::UAC, false)
+        .await
+        .unwrap();
 
     // Create an active session
     let id2 = SessionId::new();
-    let mut s2 = store.create_session(id2.clone(), Role::UAC, false).await.unwrap();
+    let mut s2 = store
+        .create_session(id2.clone(), Role::UAC, false)
+        .await
+        .unwrap();
     s2.call_state = CallState::Active;
     store.update_session(s2).await.unwrap();
 
     // Create a terminated session
     let id3 = SessionId::new();
-    let mut s3 = store.create_session(id3.clone(), Role::UAS, false).await.unwrap();
+    let mut s3 = store
+        .create_session(id3.clone(), Role::UAS, false)
+        .await
+        .unwrap();
     s3.call_state = CallState::Terminated;
     store.update_session(s3).await.unwrap();
 
@@ -270,7 +313,10 @@ async fn test_concurrent_create_and_read() {
         let store = Arc::clone(&store);
         handles.push(tokio::spawn(async move {
             let id = SessionId::new();
-            store.create_session(id.clone(), Role::UAC, false).await.unwrap();
+            store
+                .create_session(id.clone(), Role::UAC, false)
+                .await
+                .unwrap();
             id
         }));
     }

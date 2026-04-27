@@ -7,11 +7,13 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, warn};
 
+use crate::api::common::config::SrtpProfile;
 use crate::api::common::error::SecurityError;
-use crate::api::common::config::{SrtpProfile};
 use crate::dtls::DtlsConnection;
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, SrtpCryptoKey};
-use crate::srtp::{SRTP_AES128_CM_SHA1_80, SRTP_AES128_CM_SHA1_32, SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM};
+use crate::srtp::{SrtpContext, SrtpCryptoKey, SrtpCryptoSuite};
+use crate::srtp::{
+    SRTP_AEAD_AES_128_GCM, SRTP_AEAD_AES_256_GCM, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
+};
 
 /// Extract SRTP keys from a DTLS connection
 pub async fn extract_srtp_keys(
@@ -20,28 +22,34 @@ pub async fn extract_srtp_keys(
     is_server: bool,
 ) -> Result<SrtpContext, SecurityError> {
     debug!("Extracting SRTP keys for {}", address);
-    
+
     match conn.extract_srtp_keys() {
         Ok(srtp_ctx) => {
             // Get the appropriate key based on role
             let key = srtp_ctx.get_key_for_role(is_server).clone();
             debug!("Successfully extracted SRTP keys for {}", address);
-            
+
             // Create SRTP context
             match SrtpContext::new(srtp_ctx.profile, key) {
                 Ok(ctx) => {
                     debug!("Created SRTP context for {}", address);
                     Ok(ctx)
-                },
+                }
                 Err(e) => {
                     error!("Failed to create SRTP context for {}: {}", address, e);
-                    Err(SecurityError::Internal(format!("Failed to create SRTP context: {}", e)))
+                    Err(SecurityError::Internal(format!(
+                        "Failed to create SRTP context: {}",
+                        e
+                    )))
                 }
             }
-        },
+        }
         Err(e) => {
             error!("Failed to extract SRTP keys for {}: {}", address, e);
-            Err(SecurityError::Internal(format!("Failed to extract SRTP keys: {}", e)))
+            Err(SecurityError::Internal(format!(
+                "Failed to extract SRTP keys: {}",
+                e
+            )))
         }
     }
 }
@@ -92,4 +100,4 @@ pub async fn store_srtp_context(
     *srtp_guard = Some(ctx);
     debug!("Stored SRTP context for {}", address);
     Ok(())
-} 
+}

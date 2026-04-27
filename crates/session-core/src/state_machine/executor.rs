@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use tracing::{info, error, debug};
 use crate::state_table::SessionId;
+use std::sync::Arc;
+use tracing::{debug, error, info};
 
 use crate::{
-    state_table::{MASTER_TABLE, StateKey, EventType, EventTemplate, Action, Transition},
-    session_store::{SessionStore, SessionState},
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
+    session_store::{SessionState, SessionStore},
+    state_table::{Action, EventTemplate, EventType, StateKey, Transition, MASTER_TABLE},
     types::CallState,
     // Event import removed - events handled by SessionCrossCrateEventHandler
 };
@@ -31,19 +31,18 @@ pub struct ProcessEventResult {
 pub struct StateMachine {
     /// The master state table (static rules)
     table: Arc<crate::state_table::MasterStateTable>,
-    
+
     /// Session state storage
     pub(crate) store: Arc<SessionStore>,
-    
+
     /// Adapter to dialog-core
     dialog_adapter: Arc<DialogAdapter>,
-    
+
     /// Adapter to media-core
     media_adapter: Arc<MediaAdapter>,
-    
+
     /// Event publisher (optional - for legacy compatibility)
     event_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
-    
     // SimplePeer events now handled by SessionCrossCrateEventHandler
 }
 
@@ -86,12 +85,12 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: None, // No event channel by default
-            // SimplePeer events handled by SessionCrossCrateEventHandler
+                            // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
-    
+
     // new_with_simple_peer_events removed - using SessionCrossCrateEventHandler for event forwarding
-    
+
     pub fn new_with_adapters(
         store: Arc<SessionStore>,
         dialog_adapter: Arc<DialogAdapter>,
@@ -107,7 +106,7 @@ impl StateMachine {
             // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
-    
+
     pub fn new_with_custom_table(
         table: Arc<crate::state_table::MasterStateTable>,
         store: Arc<SessionStore>,
@@ -124,41 +123,43 @@ impl StateMachine {
             // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
-    
+
     // Callback registry removed - using event-driven approach
-    
+
     /// Check if a transition exists for the given state key
     pub fn has_transition(&self, key: &StateKey) -> bool {
         self.table.has_transition(key)
     }
-    
+
     /// Process an event for a session
     pub async fn process_event(
         &self,
         session_id: &SessionId,
         event: EventType,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::session_store::{ActionRecord, GuardResult, TransitionRecord};
         use std::time::Instant;
-        use crate::session_store::{TransitionRecord, GuardResult, ActionRecord};
-        
+
         debug!("Processing event {:?} for session {}", event, session_id);
         let transition_start = Instant::now();
-        
+
         // 1. Get current session state
         let mut session = match self.store.get_session(session_id).await {
             Ok(s) => s,
             Err(e) => {
                 error!("Failed to get session {}: {}", session_id, e);
-                return Err(crate::errors::SessionError::SessionNotFound(session_id.to_string()).into());
+                return Err(
+                    crate::errors::SessionError::SessionNotFound(session_id.to_string()).into(),
+                );
             }
         };
         let old_state = session.call_state;
-        
+
         // Initialize tracking for history
         let mut guards_evaluated = Vec::new();
         let mut actions_executed_history = Vec::new();
         let mut errors = Vec::new();
-        
+
         // 1a. Store event-specific data in session state
         match &event {
             EventType::MakeCall { target } => {
@@ -184,7 +185,10 @@ impl StateMachine {
                     session.early_media_sdp = Some(sdp_data.clone());
                 }
             }
-            EventType::AuthRequired { status_code, challenge } => {
+            EventType::AuthRequired {
+                status_code,
+                challenge,
+            } => {
                 session.pending_auth = Some((*status_code, challenge.clone()));
             }
             EventType::SessionIntervalTooSmall { min_se_secs } => {
@@ -208,11 +212,18 @@ impl StateMachine {
                 }
             }
             // BlindTransfer event removed
-            EventType::TransferRequested { refer_to, transfer_type, transaction_id } => {
+            EventType::TransferRequested {
+                refer_to,
+                transfer_type,
+                transaction_id,
+            } => {
                 session.transfer_target = Some(refer_to.clone());
                 session.transfer_notify_dialog = session.dialog_id.clone();
                 session.refer_transaction_id = Some(transaction_id.clone());
-                debug!("Set transfer target from REFER: {}, type: {:?}, transaction: {}", refer_to, transfer_type, transaction_id);
+                debug!(
+                    "Set transfer target from REFER: {}, type: {:?}, transaction: {}",
+                    refer_to, transfer_type, transaction_id
+                );
             }
             // StartAttendedTransfer event removed
             EventType::ReinviteReceived { sdp } => {
@@ -237,20 +248,20 @@ impl StateMachine {
             }
             _ => {}
         }
-        
+
         // 2. Build state key for lookup
         let key = StateKey {
             role: session.role,
             state: session.call_state,
             event: event.clone(),
         };
-        
+
         // 3. Look up transition in table
         let transition = match self.table.get(&key) {
             Some(t) => t,
             None => {
                 debug!("No transition defined for {:?}", key);
-                
+
                 // Record failed transition attempt in history
                 if session.history.is_some() {
                     let now = Instant::now();
@@ -273,7 +284,7 @@ impl StateMachine {
                     session.record_transition(record);
                     self.store.update_session(session).await?;
                 }
-                
+
                 return Ok(ProcessEventResult {
                     old_state,
                     next_state: None,
@@ -283,22 +294,22 @@ impl StateMachine {
                 });
             }
         };
-        
+
         // 4. Check guards
         for guard in &transition.guards {
             let guard_start = Instant::now();
             let satisfied = guards::check_guard(guard, &session).await;
             let guard_duration = guard_start.elapsed().as_millis() as u64;
-            
+
             guards_evaluated.push(GuardResult {
                 guard: guard.clone(),
                 passed: satisfied,
                 evaluation_time_us: guard_duration * 1000,
             });
-            
+
             if !satisfied {
                 debug!("Guard {:?} not satisfied, skipping transition", guard);
-                
+
                 // Record guard failure in history
                 if session.history.is_some() {
                     let now = Instant::now();
@@ -321,7 +332,7 @@ impl StateMachine {
                     session.record_transition(record);
                     self.store.update_session(session).await?;
                 }
-                
+
                 return Ok(ProcessEventResult {
                     old_state,
                     next_state: None,
@@ -331,7 +342,7 @@ impl StateMachine {
                 });
             }
         }
-        
+
         info!("Executing transition for {:?} + {:?}", old_state, event);
 
         // Apply next_state and persist BEFORE executing actions so that any
@@ -362,9 +373,10 @@ impl StateMachine {
                 &self.media_adapter,
                 &self.store,
                 &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
-            ).await;
+            )
+            .await;
             let action_duration = action_start.elapsed().as_millis() as u64;
-            
+
             let (success, error_opt, exec_error) = match result {
                 Ok(_) => {
                     actions_executed.push(action.clone());
@@ -377,14 +389,14 @@ impl StateMachine {
                     (false, Some(error_msg), Some(e))
                 }
             };
-            
+
             actions_executed_history.push(ActionRecord {
                 action: action.clone(),
                 success,
                 execution_time_us: action_duration * 1000,
                 error: error_opt,
             });
-            
+
             if !success {
                 // Record failed action in history
                 if session.history.is_some() {
@@ -408,11 +420,11 @@ impl StateMachine {
                     session.record_transition(record);
                     self.store.update_session(session).await?;
                 }
-                
+
                 return Err(exec_error.unwrap());
             }
         }
-        
+
         // 6. Record successful transition in history (state already applied
         // above, before the action loop)
         let next_state = transition.next_state;
@@ -458,37 +470,44 @@ impl StateMachine {
 
         // 8. Save updated session state
         self.store.update_session(session.clone()).await?;
-        
+
         // 9. Publish events (if channel is available)
         if let Some(ref event_tx) = self.event_tx {
             for event_template in &transition.publish_events {
-                let event = self.instantiate_event(event_template, &session, old_state).await;
+                let event = self
+                    .instantiate_event(event_template, &session, old_state)
+                    .await;
                 if let Err(e) = event_tx.send(event).await {
                     error!("Failed to publish event: {}", e);
                 }
             }
         }
-        
+
         // 10. Reload session to pick up any changes made by actions
         // Actions like send_register may have updated the session (e.g., is_registered flag)
-        let session = self.store.get_session(session_id).await
+        let session = self
+            .store
+            .get_session(session_id)
+            .await
             .map_err(|e| format!("Failed to reload session after actions: {}", e))?;
-        
+
         // 11. Check if conditions trigger internal events
         let all_conditions_met = session.all_conditions_met();
         let call_established_triggered = session.call_established_triggered;
-        
+
         // 12. Save the updated session state back to the store
         // CRITICAL: Session changes during process_event must be persisted!
-        self.store.update_session(session).await
+        self.store
+            .update_session(session)
+            .await
             .map_err(|e| format!("Failed to save session state: {}", e))?;
-        
+
         // 12. Trigger internal events after saving
         if all_conditions_met && !call_established_triggered {
             debug!("All conditions met, triggering InternalCheckReady");
             Box::pin(self.process_event(session_id, EventType::InternalCheckReady)).await?;
         }
-        
+
         Ok(ProcessEventResult {
             old_state,
             next_state: transition.next_state,
@@ -497,7 +516,7 @@ impl StateMachine {
             events_published: transition.publish_events.clone(),
         })
     }
-    
+
     /// Convert event template to concrete event
     async fn instantiate_event(
         &self,
@@ -515,8 +534,12 @@ impl StateMachine {
                 let negotiated = session.negotiated_config.as_ref();
                 SessionEvent::MediaFlowEstablished {
                     session_id: session.session_id.clone(),
-                    local_addr: negotiated.map(|n| n.local_addr.to_string()).unwrap_or_default(),
-                    remote_addr: negotiated.map(|n| n.remote_addr.to_string()).unwrap_or_default(),
+                    local_addr: negotiated
+                        .map(|n| n.local_addr.to_string())
+                        .unwrap_or_default(),
+                    remote_addr: negotiated
+                        .map(|n| n.remote_addr.to_string())
+                        .unwrap_or_default(),
                     direction: crate::state_table::MediaFlowDirection::Both,
                 }
             }

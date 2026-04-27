@@ -9,23 +9,12 @@ use uuid::Uuid;
 
 // Re-export types from api::types for backwards compatibility
 pub use crate::api::types::{
-    AudioFrame,
-    AudioStreamConfig,
-    CallDecision,
-    CallDirection,
-    CallSession,
-    IncomingCall,
-    MediaInfo,
-    PreparedCall,
-    Session,
-    SessionRole,
-    SessionStats,
-    StatusCode,
-    TerminationReason,
+    AudioFrame, AudioStreamConfig, CallDecision, CallDirection, CallSession, IncomingCall,
+    MediaInfo, PreparedCall, Session, SessionRole, SessionStats, StatusCode, TerminationReason,
 };
 
 // Re-export the ID types from state_table::types for convenience
-pub use crate::state_table::types::{SessionId, DialogId, MediaSessionId};
+pub use crate::state_table::types::{DialogId, MediaSessionId, SessionId};
 
 /// Reasons for call failure
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq, Serialize, Deserialize)]
@@ -57,7 +46,7 @@ pub enum CallState {
     Idle,
     Initiating,
     Ringing,
-    Answering,        // UAS accepted call, sending 200 OK, waiting for ACK
+    Answering, // UAS accepted call, sending 200 OK, waiting for ACK
     EarlyMedia,
     Active,
     /// Sent a hold re-INVITE, awaiting 2xx (RFC 3261 §14.1). Session
@@ -66,56 +55,57 @@ pub enum CallState {
     OnHold,
     Resuming,
     Muted,
-    Bridged,           // Two endpoint calls bridged together
+    Bridged, // Two endpoint calls bridged together
     Transferring,
-    TransferringCall,  // Transfer recipient processing transfer
+    TransferringCall, // Transfer recipient processing transfer
     ConsultationCall,
     Terminating,
     Terminated,
     Cancelled,
     Failed(FailureReason),
-    
+
     // Registration states
     Registering,
     Registered,
     Unregistering,
-    
+
     // Subscription/Presence states
     Subscribing,
     Subscribed,
     Publishing,
-    
-    
+
     // Authentication flow
-    Authenticating,     // Processing authentication challenge
-    
-    
+    Authenticating, // Processing authentication challenge
+
     // Messaging
-    Messaging,         // Handling SIP MESSAGE requests
-    
+    Messaging, // Handling SIP MESSAGE requests
 }
 
 impl CallState {
     /// Check if this is a final state (call is over)
     pub fn is_final(&self) -> bool {
-        matches!(self, CallState::Terminated | CallState::Cancelled | CallState::Failed(_))
+        matches!(
+            self,
+            CallState::Terminated | CallState::Cancelled | CallState::Failed(_)
+        )
     }
 
     /// Check if the call is in progress
     pub fn is_in_progress(&self) -> bool {
-        matches!(self, 
-            CallState::Initiating |
-            CallState::Ringing |
-            CallState::Active |
-            CallState::HoldPending |
-            CallState::OnHold |
-            CallState::EarlyMedia |
-            CallState::Resuming |
-            CallState::Muted |
-            CallState::Bridged |
-            CallState::Transferring |
-            CallState::TransferringCall |
-            CallState::ConsultationCall
+        matches!(
+            self,
+            CallState::Initiating
+                | CallState::Ringing
+                | CallState::Active
+                | CallState::HoldPending
+                | CallState::OnHold
+                | CallState::EarlyMedia
+                | CallState::Resuming
+                | CallState::Muted
+                | CallState::Bridged
+                | CallState::Transferring
+                | CallState::TransferringCall
+                | CallState::ConsultationCall
         )
     }
 }
@@ -141,17 +131,17 @@ impl fmt::Display for CallState {
             CallState::Terminated => write!(f, "Terminated"),
             CallState::Cancelled => write!(f, "Cancelled"),
             CallState::Failed(reason) => write!(f, "Failed({})", reason),
-            
+
             // Registration states
             CallState::Registering => write!(f, "Registering"),
             CallState::Registered => write!(f, "Registered"),
             CallState::Unregistering => write!(f, "Unregistering"),
-            
+
             // Subscription/Presence states
             CallState::Subscribing => write!(f, "Subscribing"),
             CallState::Subscribed => write!(f, "Subscribed"),
             CallState::Publishing => write!(f, "Publishing"),
-            
+
             // Authentication and routing states
             CallState::Authenticating => write!(f, "Authenticating"),
             CallState::Messaging => write!(f, "Messaging"),
@@ -200,14 +190,16 @@ impl AudioFrameSubscriber {
             receiver,
         }
     }
-    
+
     /// Receive the next audio frame (async)
     pub async fn recv(&mut self) -> Option<rvoip_media_core::types::AudioFrame> {
         self.receiver.recv().await
     }
-    
+
     /// Try to receive an audio frame (non-blocking)
-    pub fn try_recv(&mut self) -> Result<rvoip_media_core::types::AudioFrame, tokio::sync::mpsc::error::TryRecvError> {
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<rvoip_media_core::types::AudioFrame, tokio::sync::mpsc::error::TryRecvError> {
         self.receiver.try_recv()
     }
 }
@@ -240,28 +232,18 @@ pub enum SessionEvent {
         reason: Option<String>,
     },
     /// Call failed
-    CallFailed {
-        dialog_id: DialogId,
-        reason: String,
-    },
+    CallFailed { dialog_id: DialogId, reason: String },
     /// Media state changed
     MediaStateChanged {
         media_id: MediaSessionId,
         state: MediaState,
     },
     /// DTMF digit received
-    DtmfReceived {
-        dialog_id: DialogId,
-        digit: char,
-    },
+    DtmfReceived { dialog_id: DialogId, digit: char },
     /// Hold request
-    HoldRequest {
-        dialog_id: DialogId,
-    },
+    HoldRequest { dialog_id: DialogId },
     /// Resume request
-    ResumeRequest {
-        dialog_id: DialogId,
-    },
+    ResumeRequest { dialog_id: DialogId },
     /// Transfer request
     TransferRequest {
         dialog_id: DialogId,
@@ -287,9 +269,7 @@ pub enum SessionEvent {
         status_code: u16,
     },
     /// Unregistration complete
-    UnregistrationComplete {
-        dialog_id: DialogId,
-    },
+    UnregistrationComplete { dialog_id: DialogId },
     /// Subscription started
     SubscriptionStarted {
         dialog_id: DialogId,
@@ -298,10 +278,7 @@ pub enum SessionEvent {
         expires: u32,
     },
     /// Subscription accepted
-    SubscriptionAccepted {
-        dialog_id: DialogId,
-        expires: u32,
-    },
+    SubscriptionAccepted { dialog_id: DialogId, expires: u32 },
     /// Subscription failed
     SubscriptionFailed {
         dialog_id: DialogId,
@@ -327,9 +304,7 @@ pub enum SessionEvent {
         body: String,
     },
     /// MESSAGE delivery confirmed
-    MessageDelivered {
-        dialog_id: DialogId,
-    },
+    MessageDelivered { dialog_id: DialogId },
     /// MESSAGE delivery failed
     MessageDeliveryFailed {
         dialog_id: DialogId,

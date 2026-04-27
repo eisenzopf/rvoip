@@ -1,14 +1,14 @@
 // RFC Compliance Torture Tests - Based on RFC 4475
 
+use rvoip_sip_core::{
+    error::Error as SipError,
+    parse_message, parse_message_with_mode,
+    parser::message::ParseMode,
+    types::{header::HeaderName, ContentLength, Message, Request, Response, TypedHeader},
+};
+use std::env;
 use std::fs;
 use std::path::Path;
-use std::env;
-use rvoip_sip_core::{
-    parse_message, parse_message_with_mode,
-    types::{Message, Request, Response, ContentLength, TypedHeader, header::HeaderName},
-    error::Error as SipError,
-    parser::message::ParseMode
-};
 
 /// Structure for tracking test results
 struct TestResults {
@@ -38,21 +38,29 @@ impl TestResults {
         }
 
         let action = if expected_to_fail { "succeed" } else { "fail" };
-        
-        eprintln!("\n{} files unexpectedly {}ed parsing:", 
-                 self.failures.len(), action);
-        
+
+        eprintln!(
+            "\n{} files unexpectedly {}ed parsing:",
+            self.failures.len(),
+            action
+        );
+
         for (i, (file, error, content)) in self.failures.iter().enumerate() {
-            eprintln!("\n{}. File '{}' - {}", i + 1, file, if expected_to_fail { 
-                "parsed successfully (expected to fail)" 
-            } else { 
-                "failed to parse" 
-            });
-            
+            eprintln!(
+                "\n{}. File '{}' - {}",
+                i + 1,
+                file,
+                if expected_to_fail {
+                    "parsed successfully (expected to fail)"
+                } else {
+                    "failed to parse"
+                }
+            );
+
             if !expected_to_fail {
                 eprintln!("   Error: {}", error);
             }
-            
+
             eprintln!("   --- Message Content ---");
             eprintln!("   {}", content);
             eprintln!("   --- End Content ---");
@@ -63,24 +71,23 @@ impl TestResults {
         let total = self.successes.len() + self.failures.len();
         let success_count = self.successes.len();
         let failure_count = self.failures.len();
-        
+
         let expected_result = if expected_to_fail { "fail" } else { "succeed" };
-        let unexpected_result = if expected_to_fail { "succeeded" } else { "failed" };
-        
+        let unexpected_result = if expected_to_fail {
+            "succeeded"
+        } else {
+            "failed"
+        };
+
         format!(
             "{} directory: {} files - {} {} as expected, {} unexpectedly {}",
-            dir_name,
-            total,
-            success_count,
-            expected_result,
-            failure_count,
-            unexpected_result
+            dir_name, total, success_count, expected_result, failure_count, unexpected_result
         )
     }
 }
 
 /// Normalizes SIP message content to ensure consistent formatting
-/// - Ensures proper CRLF line endings 
+/// - Ensures proper CRLF line endings
 /// - Fixes content length if needed
 pub fn normalize_sip_message(content: &str) -> String {
     // Split into headers and body
@@ -100,35 +107,37 @@ pub fn normalize_sip_message(content: &str) -> String {
 
     // Normalize line endings in headers
     let headers = headers.replace("\r\n", "\n").replace("\n", "\r\n");
-    
+
     // Calculate the actual body length
     let body_len = body.len();
-    
+
     // Rebuild the message with correct content length
     let mut normalized_headers = Vec::new();
     let mut found_content_length = false;
-    
+
     for line in headers.lines() {
-        if line.to_lowercase().starts_with("content-length:") || line.to_lowercase().starts_with("l:") {
+        if line.to_lowercase().starts_with("content-length:")
+            || line.to_lowercase().starts_with("l:")
+        {
             normalized_headers.push(format!("Content-Length: {}", body_len));
             found_content_length = true;
         } else {
             normalized_headers.push(line.to_string());
         }
     }
-    
+
     // If no Content-Length header was found, add one
     if !found_content_length && !body.is_empty() {
         normalized_headers.push(format!("Content-Length: {}", body_len));
     }
-    
+
     // Combine everything with proper line endings
     let normalized_message = if body.is_empty() {
         format!("{}\r\n\r\n", normalized_headers.join("\r\n"))
     } else {
         format!("{}\r\n\r\n{}", normalized_headers.join("\r\n"), body)
     };
-    
+
     normalized_message
 }
 
@@ -145,9 +154,9 @@ pub fn is_excluded_wellformed_test(filename: &str) -> bool {
         "4.10_ipv6-bug-abnf-3-colons.sip",
         // Has a Content-Length (150) that doesn't match the actual body length (142)
         // This is a deliberate part of the torture test to check lenient parsing
-        "3.1.1.1_wsinv.sip"
+        "3.1.1.1_wsinv.sip",
     ];
-    
+
     excluded_wellformed_tests.contains(&filename)
 }
 
@@ -160,7 +169,7 @@ fn is_excluded_malformed_test(filename: &str) -> bool {
     //
     // If specific tests still need to be excluded, they can be added back here.
     let excluded_malformed_tests: [&str; 0] = [];
-    
+
     excluded_malformed_tests.contains(&filename)
 }
 
@@ -168,9 +177,9 @@ fn is_excluded_malformed_test(filename: &str) -> bool {
 fn skip_content_length_validation(filename: &str) -> bool {
     let files_with_content_length_issues = [
         // Has a Content-Length (150) that doesn't match the actual body length (142)
-        "3.1.1.1_wsinv.sip"
+        "3.1.1.1_wsinv.sip",
     ];
-    
+
     files_with_content_length_issues.contains(&filename)
 }
 
@@ -179,7 +188,7 @@ fn skip_content_length_validation(filename: &str) -> bool {
 fn test_wellformed_messages() {
     let cargo_manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let wellformed_dir = Path::new(&cargo_manifest_dir).join("tests/rfc_compliance/wellformed");
-    
+
     if !wellformed_dir.exists() {
         panic!("Wellformed directory not found: {:?}", wellformed_dir);
     }
@@ -189,10 +198,15 @@ fn test_wellformed_messages() {
     for entry in fs::read_dir(&wellformed_dir).expect("Failed to read wellformed directory") {
         let entry = entry.expect("Failed to read directory entry");
         let path = entry.path();
-        
+
         if path.is_file() && path.extension().map_or(false, |ext| ext == "sip") {
-            let filename = path.file_name().unwrap_or_default().to_str().unwrap_or_default().to_string();
-            
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default()
+                .to_string();
+
             // Skip excluded tests
             if is_excluded_wellformed_test(&filename) {
                 println!("Skipping excluded wellformed test: {}", filename);
@@ -200,18 +214,19 @@ fn test_wellformed_messages() {
                 results.add_success(filename);
                 continue;
             }
-            
-            let content = fs::read_to_string(&path).expect(&format!("Failed to read file: {:?}", path));
-            
+
+            let content =
+                fs::read_to_string(&path).expect(&format!("Failed to read file: {:?}", path));
+
             // Normalize the SIP message before parsing
             let normalized_content = normalize_sip_message(&content);
-            
+
             match parse_message(normalized_content.as_bytes()) {
                 Ok(message) => {
                     // Do some additional validation on the parsed message
                     validate_message_structure(&message, &filename);
                     results.add_success(filename);
-                },
+                }
                 Err(e) => results.add_failure(filename, e, normalized_content),
             }
         }
@@ -219,10 +234,10 @@ fn test_wellformed_messages() {
 
     // Print summary
     println!("{}", results.summary("Wellformed", false));
-    
+
     // Detailed failure report
     results.report_failures(false);
-    
+
     // Fail test if any wellformed messages failed to parse
     if !results.failures.is_empty() {
         panic!("Some wellformed messages failed to parse. See details above.");
@@ -234,20 +249,25 @@ fn test_wellformed_messages() {
 fn test_malformed_messages() {
     let cargo_manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let malformed_dir = Path::new(&cargo_manifest_dir).join("tests/rfc_compliance/malformed");
-    
+
     if !malformed_dir.exists() {
         panic!("Malformed directory not found: {:?}", malformed_dir);
     }
 
     let mut results = TestResults::new();
-    
+
     for entry in fs::read_dir(&malformed_dir).expect("Failed to read malformed directory") {
         let entry = entry.expect("Failed to read directory entry");
         let path = entry.path();
-        
+
         if path.is_file() && path.extension().map_or(false, |ext| ext == "sip") {
-            let filename = path.file_name().unwrap_or_default().to_str().unwrap_or_default().to_string();
-            
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default()
+                .to_string();
+
             // Skip excluded tests
             if is_excluded_malformed_test(&filename) {
                 println!("Skipping excluded malformed test: {}", filename);
@@ -255,29 +275,34 @@ fn test_malformed_messages() {
                 results.add_success(filename);
                 continue;
             }
-            
-            let content = fs::read_to_string(&path).expect(&format!("Failed to read file: {:?}", path));
-            
+
+            let content =
+                fs::read_to_string(&path).expect(&format!("Failed to read file: {:?}", path));
+
             // For malformed messages, we still normalize but leave content lengths alone
             // since incorrect content length might be part of what makes it malformed
             let normalized_content = content.replace("\r\n", "\n").replace("\n", "\r\n");
-            
+
             match parse_message_with_mode(normalized_content.as_bytes(), ParseMode::Strict) {
                 Err(_) => results.add_success(filename),
                 Ok(_) => {
                     // For malformed messages that parse successfully, we capture the unexpected success
-                    results.add_failure(filename, SipError::Other("Parsed successfully but should have failed".to_string()), normalized_content)
+                    results.add_failure(
+                        filename,
+                        SipError::Other("Parsed successfully but should have failed".to_string()),
+                        normalized_content,
+                    )
                 }
             }
         }
     }
-    
+
     // Print summary
     println!("{}", results.summary("Malformed", true));
-    
+
     // Detailed failure report for unexpected successes
     results.report_failures(true);
-    
+
     // Fail test if any malformed messages were successfully parsed
     if !results.failures.is_empty() {
         panic!("Some malformed messages parsed successfully. See details above.");
@@ -293,41 +318,73 @@ fn validate_message_structure(message: &Message, filename: &str) {
             let has_to = request.header(&HeaderName::To).is_some();
             let has_cseq = request.header(&HeaderName::CSeq).is_some();
             let has_call_id = request.header(&HeaderName::CallId).is_some();
-            
+
             // Check if a body is present and Content-Length is correct
             // Skip validation for files with known Content-Length issues
             if !request.body.is_empty() && !skip_content_length_validation(filename) {
                 let content_length = ContentLength::from_request(request);
-                assert_eq!(content_length as usize, request.body.len(), 
-                    "In file {}: Content-Length header value doesn't match actual body length", filename);
+                assert_eq!(
+                    content_length as usize,
+                    request.body.len(),
+                    "In file {}: Content-Length header value doesn't match actual body length",
+                    filename
+                );
             }
-            
+
             // Verify required headers are present
-            assert!(has_from, "In file {}: Missing required From header", filename);
+            assert!(
+                has_from,
+                "In file {}: Missing required From header",
+                filename
+            );
             assert!(has_to, "In file {}: Missing required To header", filename);
-            assert!(has_cseq, "In file {}: Missing required CSeq header", filename);
-            assert!(has_call_id, "In file {}: Missing required Call-ID header", filename);
-        },
+            assert!(
+                has_cseq,
+                "In file {}: Missing required CSeq header",
+                filename
+            );
+            assert!(
+                has_call_id,
+                "In file {}: Missing required Call-ID header",
+                filename
+            );
+        }
         Message::Response(response) => {
             // Check that required headers for SIP responses exist
             let has_from = response.header(&HeaderName::From).is_some();
             let has_to = response.header(&HeaderName::To).is_some();
             let has_cseq = response.header(&HeaderName::CSeq).is_some();
             let has_call_id = response.header(&HeaderName::CallId).is_some();
-            
+
             // Check if a body is present and Content-Length is correct
             // Skip validation for files with known Content-Length issues
             if !response.body.is_empty() && !skip_content_length_validation(filename) {
                 let content_length = ContentLength::from_response(response);
-                assert_eq!(content_length as usize, response.body.len(), 
-                    "In file {}: Content-Length header value doesn't match actual body length", filename);
+                assert_eq!(
+                    content_length as usize,
+                    response.body.len(),
+                    "In file {}: Content-Length header value doesn't match actual body length",
+                    filename
+                );
             }
-            
+
             // Verify required headers are present
-            assert!(has_from, "In file {}: Missing required From header", filename);
+            assert!(
+                has_from,
+                "In file {}: Missing required From header",
+                filename
+            );
             assert!(has_to, "In file {}: Missing required To header", filename);
-            assert!(has_cseq, "In file {}: Missing required CSeq header", filename);
-            assert!(has_call_id, "In file {}: Missing required Call-ID header", filename);
+            assert!(
+                has_cseq,
+                "In file {}: Missing required CSeq header",
+                filename
+            );
+            assert!(
+                has_call_id,
+                "In file {}: Missing required Call-ID header",
+                filename
+            );
         }
     }
-} 
+}

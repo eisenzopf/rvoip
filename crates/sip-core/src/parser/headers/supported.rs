@@ -6,29 +6,24 @@ use nom::{
     branch::alt,
     bytes::complete::{tag, tag_no_case, take_while},
     character::complete::char,
-    combinator::{map, opt, all_consuming, recognize, value, eof},
+    combinator::{all_consuming, eof, map, opt, recognize, value},
+    error::ErrorKind,
     multi::separated_list0,
-    sequence::{preceded, terminated, delimited},
-    IResult, error::ErrorKind,
+    sequence::{delimited, preceded, terminated},
+    IResult,
 };
 use std::str;
 
 // Import from other modules
-use crate::parser::separators::{hcolon, comma};
-use crate::parser::token::token;
 use crate::parser::common::comma_separated_list0;
+use crate::parser::separators::{comma, hcolon};
+use crate::parser::token::token;
+use crate::parser::whitespace::{owsp, sws};
 use crate::parser::ParseResult;
-use crate::parser::whitespace::{sws, owsp};
 
 /// Parses optional whitespace followed by a comma and more whitespace
 fn ws_comma_ws(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(
-        delimited(
-            owsp,
-            char(','),
-            owsp
-        )
-    )(input)
+    recognize(delimited(owsp, char(','), owsp))(input)
 }
 
 /// Parses a list of option-tags (tokens) separated by commas,
@@ -39,28 +34,28 @@ pub fn parse_supported(input: &[u8]) -> ParseResult<Vec<String>> {
     if input.is_empty() {
         return Ok((input, Vec::new()));
     }
-    
+
     // First trim any leading or trailing whitespace
     let input = match owsp(input) {
         Ok((rest, _)) => rest,
         Err(_) => input,
     };
-    
+
     // If after whitespace trimming the input is empty, return empty Vec
     if input.is_empty() {
         return Ok((input, Vec::new()));
     }
-    
+
     // Parse tokens separated by commas, handling whitespace
     // Convert the tokens to strings, filtering out empty tokens
     let result = separated_list0(
         ws_comma_ws,
         alt((
-            token,                           // Normal token
-            value(&b""[..], tag(b""))        // Empty token (becomes empty string)
-        ))
+            token,                     // Normal token
+            value(&b""[..], tag(b"")), // Empty token (becomes empty string)
+        )),
     )(input);
-    
+
     match result {
         Ok((remaining, tokens)) => {
             // Handle any trailing whitespace or comma
@@ -68,27 +63,28 @@ pub fn parse_supported(input: &[u8]) -> ParseResult<Vec<String>> {
                 Ok((rest, _)) => rest,
                 Err(_) => remaining,
             };
-            
+
             // Handle trailing comma after tokens
             let remaining = match opt(ws_comma_ws)(remaining) {
                 Ok((rest, _)) => rest,
                 Err(_) => remaining,
             };
-            
+
             // Handle any final whitespace
             let remaining = match owsp(remaining) {
                 Ok((rest, _)) => rest,
                 Err(_) => remaining,
             };
-            
+
             // Convert tokens to strings, filtering out empty ones
-            let strings: Vec<String> = tokens.into_iter()
+            let strings: Vec<String> = tokens
+                .into_iter()
                 .filter(|&t| !t.is_empty())
                 .map(|t| str::from_utf8(t).unwrap_or("").to_string())
                 .collect();
-            
+
             Ok((remaining, strings))
-        },
+        }
         Err(e) => Err(e),
     }
 }
@@ -97,14 +93,8 @@ pub fn parse_supported(input: &[u8]) -> ParseResult<Vec<String>> {
 /// Handles both the standard "Supported:" form and the compact "k:" form.
 pub fn parse_supported_header(input: &[u8]) -> ParseResult<Vec<String>> {
     preceded(
-        terminated(
-            alt((
-                tag_no_case(b"Supported"),
-                tag_no_case(b"k")
-            )),
-            hcolon
-        ),
-        parse_supported
+        terminated(alt((tag_no_case(b"Supported"), tag_no_case(b"k"))), hcolon),
+        parse_supported,
     )(input)
 }
 
@@ -114,7 +104,9 @@ mod tests {
     use nom::combinator::all_consuming;
 
     // Helper function to test the parser with full input consumption
-    fn test_parse_supported(input: &[u8]) -> Result<Vec<String>, nom::Err<nom::error::Error<&[u8]>>> {
+    fn test_parse_supported(
+        input: &[u8],
+    ) -> Result<Vec<String>, nom::Err<nom::error::Error<&[u8]>>> {
         all_consuming(parse_supported)(input).map(|(_, output)| output)
     }
 
@@ -124,12 +116,12 @@ mod tests {
         let input = b"timer";
         let result = test_parse_supported(input).unwrap();
         assert_eq!(result, vec!["timer"]);
-        
+
         // Multiple option-tags
         let input = b"timer, 100rel";
         let result = test_parse_supported(input).unwrap();
         assert_eq!(result, vec!["timer", "100rel"]);
-        
+
         // Multiple option-tags with common extensions
         let input = b"timer, 100rel, path, outbound";
         let result = test_parse_supported(input).unwrap();
@@ -150,12 +142,12 @@ mod tests {
         let input = b"timer , 100rel, path , outbound";
         let result = test_parse_supported(input).unwrap();
         assert_eq!(result, vec!["timer", "100rel", "path", "outbound"]);
-        
+
         // Trailing whitespace
         let input = b"timer, 100rel ";
         let result = test_parse_supported(input).unwrap();
         assert_eq!(result, vec!["timer", "100rel"]);
-        
+
         // Leading whitespace
         let input = b" timer, 100rel";
         let result = test_parse_supported(input).unwrap();
@@ -192,7 +184,7 @@ mod tests {
         let input = b"SUPPORTED: timer, 100rel";
         let (_, supported) = parse_supported_header(input).unwrap();
         assert_eq!(supported, vec!["timer", "100rel"]);
-        
+
         // Compact form is also case-insensitive
         let input = b"K: timer, 100rel";
         let (_, supported) = parse_supported_header(input).unwrap();
@@ -213,7 +205,7 @@ mod tests {
         let input = b"Supported: 100rel";
         let (_, supported) = parse_supported_header(input).unwrap();
         assert_eq!(supported, vec!["100rel"]);
-        
+
         // Example with compact form
         let input = b"k: timer, 100rel";
         let (_, supported) = parse_supported_header(input).unwrap();
@@ -235,10 +227,10 @@ mod tests {
         let input = b"timer,,100rel";
         let result = test_parse_supported(input).unwrap();
         assert_eq!(result, vec!["timer", "100rel"]);
-        
+
         // Multiple commas
         let input = b"timer,,,100rel";
         let result = test_parse_supported(input).unwrap();
         assert_eq!(result, vec!["timer", "100rel"]);
     }
-} 
+}

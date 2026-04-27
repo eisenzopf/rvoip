@@ -8,7 +8,6 @@
 /// - Sending responses
 /// - Handling transaction state changes
 /// - Managing server transaction data
-
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -22,14 +21,13 @@ use rvoip_sip_transport::Transport;
 
 use async_trait::async_trait;
 
-use crate::transaction::server::{ServerTransaction, ServerTransactionData};
 use crate::transaction::error::{Error, Result};
-use crate::transaction::{
-    Transaction, TransactionState, TransactionKey, TransactionEvent,
-    InternalTransactionCommand
-};
-use crate::transaction::timer::{TimerType, TimerSettings};
+use crate::transaction::server::{ServerTransaction, ServerTransactionData};
+use crate::transaction::timer::{TimerSettings, TimerType};
 use crate::transaction::utils;
+use crate::transaction::{
+    InternalTransactionCommand, Transaction, TransactionEvent, TransactionKey, TransactionState,
+};
 
 /// Common functionality for all server transaction types.
 ///
@@ -42,7 +40,7 @@ pub trait CommonServerTransaction {
     ///
     /// A reference to the shared ServerTransactionData for this transaction.
     fn data(&self) -> &Arc<ServerTransactionData>;
-    
+
     /// Common implementation for processing requests.
     ///
     /// This method handles the common logic for processing incoming requests to a server
@@ -57,15 +55,22 @@ pub trait CommonServerTransaction {
     ///
     /// A Future that resolves to Ok(()) if the request was processed successfully,
     /// or an Error if there was a problem.
-    fn process_request_common(&self, request: Request) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn process_request_common(
+        &self,
+        request: Request,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data().clone();
-        
+
         Box::pin(async move {
-            data.cmd_tx.send(InternalTransactionCommand::ProcessMessage(Message::Request(request))).await
+            data.cmd_tx
+                .send(InternalTransactionCommand::ProcessMessage(
+                    Message::Request(request),
+                ))
+                .await
                 .map_err(|e| Error::Other(format!("Failed to send command: {}", e)))
         })
     }
-    
+
     /// Sends a command to this transaction's event loop.
     ///
     /// This helper method is used to send commands to the transaction's event loop
@@ -80,15 +85,20 @@ pub trait CommonServerTransaction {
     ///
     /// A Future that resolves to Ok(()) if the command was sent successfully,
     /// or an Error if there was a problem.
-    fn send_command_common(&self, cmd: InternalTransactionCommand) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn send_command_common(
+        &self,
+        cmd: InternalTransactionCommand,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
         let data = self.data().clone();
-        
+
         Box::pin(async move {
-            data.cmd_tx.send(cmd).await
+            data.cmd_tx
+                .send(cmd)
+                .await
                 .map_err(|e| Error::Other(format!("Failed to send command: {}", e)))
         })
     }
-    
+
     /// Returns the original request that initiated this transaction.
     ///
     /// This helper method is used to access the original request stored in the transaction data.
@@ -99,13 +109,13 @@ pub trait CommonServerTransaction {
     /// A Future that resolves to the original SIP request.
     fn original_request_common(&self) -> Pin<Box<dyn Future<Output = Request> + Send + '_>> {
         let data = self.data().clone();
-        
+
         Box::pin(async move {
             let request_guard = data.request.lock().await;
             request_guard.clone()
         })
     }
-    
+
     /// Returns the last response sent by this transaction.
     ///
     /// This helper method is used to access the last response stored in the transaction data.
@@ -118,10 +128,10 @@ pub trait CommonServerTransaction {
     /// has been sent yet.
     fn last_response_common(&self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + '_>> {
         let data = self.data().clone();
-        
+
         Box::pin(async move {
             let response_guard = data.last_response.lock().await;
             response_guard.clone()
         })
     }
-} 
+}

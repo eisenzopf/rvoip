@@ -1,5 +1,5 @@
 //! # SIP Address
-//! 
+//!
 //! This module provides an implementation of the SIP Address format as defined in
 //! [RFC 3261 Section 20.10](https://datatracker.ietf.org/doc/html/rfc3261#section-20.10).
 //!
@@ -36,7 +36,7 @@
 //! let addr = Address::from_str("\"John Doe\" <sip:john@example.com>").unwrap();
 //! assert_eq!(addr.display_name, Some("John Doe".to_string()));
 //! assert_eq!(addr.uri.to_string(), "sip:john@example.com");
-//! 
+//!
 //! // Add a tag parameter
 //! let mut addr2 = addr.clone();
 //! addr2.set_tag("1234");
@@ -48,14 +48,14 @@
 //! addr.set_tag("5678");
 //! ```
 
-use crate::types::uri::Uri;
-use crate::types::param::{Param, GenericValue};
 use crate::error::{Error, Result};
 use crate::parser::parse_address;
-use serde::{Serialize, Deserialize};
+use crate::types::param::{GenericValue, Param};
+use crate::types::uri::Uri;
+use ordered_float::NotNan;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use ordered_float::NotNan;
 
 /// Represents a SIP Name Address (Display Name <URI>; params).
 ///
@@ -64,7 +64,7 @@ use ordered_float::NotNan;
 /// - A mandatory URI (e.g., sip:john@example.com)
 /// - Optional parameters (e.g., tag=1234)
 ///
-/// The Address type is used in multiple SIP headers including From, To, 
+/// The Address type is used in multiple SIP headers including From, To,
 /// Contact, Route, and Record-Route headers.
 ///
 /// # Examples
@@ -112,7 +112,7 @@ pub fn needs_quoting(display_name: &str) -> bool {
     if display_name.is_empty() {
         return false; // Empty string should NOT be quoted
     }
-    
+
     // Check for characters that require quoting according to SIP RFC 3261
     // Space is not part of a token, so names with spaces need quoting
     display_name.chars().any(|c| {
@@ -137,10 +137,10 @@ impl fmt::Display for Address {
                 wrote_display_name = true;
             }
         }
-        
+
         if wrote_display_name {
-             write!(f, " ")?;
-        } 
+            write!(f, " ")?;
+        }
         // Revert: Always write URI in angle brackets for now for name-addr
         write!(f, "<{}>", self.uri)?;
 
@@ -171,7 +171,7 @@ impl Address {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// 
+    ///
     /// // Without display name
     /// let addr = Address::new(uri.clone());
     /// assert_eq!(addr.display_name, None);
@@ -183,7 +183,7 @@ impl Address {
             params: Vec::new(),
         }
     }
-    
+
     /// Returns a reference to the URI
     ///
     /// # Returns
@@ -198,13 +198,13 @@ impl Address {
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     /// let addr = Address::new(uri.clone());
-    /// 
+    ///
     /// assert_eq!(addr.uri(), &uri);
     /// ```
     pub fn uri(&self) -> &Uri {
         &self.uri
     }
-    
+
     /// Creates a new Address with both display name and URI.
     ///
     /// The display name will be normalized:
@@ -227,7 +227,7 @@ impl Address {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// 
+    ///
     /// // With display name
     /// let addr1 = Address::new_with_display_name("Alice Smith", uri.clone());
     /// assert_eq!(addr1.display_name, Some("Alice Smith".to_string()));
@@ -243,14 +243,14 @@ impl Address {
         } else {
             Some(name)
         };
-            
+
         Address {
             display_name: normalized_display_name,
             uri,
             params: Vec::new(),
         }
     }
-    
+
     /// Creates a new Address with the given display name and URI.
     ///
     /// This is an alias for `new_with_display_name` to maintain backward compatibility.
@@ -281,7 +281,7 @@ impl Address {
     /// use std::str::FromStr;
     ///
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
-    /// 
+    ///
     /// // With display name
     /// let addr1 = Address::new(uri.clone());
     /// assert_eq!(addr1.display_name(), None);
@@ -296,7 +296,7 @@ impl Address {
 
     /// Sets or replaces the tag parameter.
     ///
-    /// The tag parameter is used in From and To headers to uniquely 
+    /// The tag parameter is used in From and To headers to uniquely
     /// identify dialog participants and ensure dialog matching.
     ///
     /// # Parameters
@@ -326,7 +326,7 @@ impl Address {
         // Add the new one
         self.params.push(Param::Tag(tag.into()));
     }
-    
+
     /// Sets a tag parameter and returns self for method chaining.
     ///
     /// The tag parameter is used in From and To headers to uniquely
@@ -354,7 +354,7 @@ impl Address {
         self.set_tag(tag);
         self
     }
-    
+
     /// Gets the tag parameter value, if present.
     ///
     /// The tag parameter is used in From and To headers to uniquely
@@ -387,10 +387,10 @@ impl Address {
             _ => None,
         })
     }
-    
+
     /// Gets the expires parameter value, if present and valid.
     ///
-    /// The expires parameter is commonly used in Contact headers to 
+    /// The expires parameter is commonly used in Contact headers to
     /// indicate registration expiration time in seconds.
     ///
     /// # Returns
@@ -419,7 +419,7 @@ impl Address {
             Param::Expires(val) => Some(*val),
             Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("expires") => {
                 val.as_str().and_then(|s| s.parse().ok()) // Use helper
-            },
+            }
             _ => None,
         })
     }
@@ -451,7 +451,7 @@ impl Address {
             match p {
                 Param::Expires(_) => false, // Remove this variant
                 Param::Other(k, _) => !k.eq_ignore_ascii_case("expires"), // Keep if key doesn't match
-                _ => true, // Keep other variants
+                _ => true,                                                // Keep other variants
             }
         });
         self.params.push(Param::Expires(expires));
@@ -488,9 +488,12 @@ impl Address {
     pub fn q(&self) -> Option<NotNan<f32>> {
         self.params.iter().find_map(|p| match p {
             Param::Q(val) => Some(*val),
-            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("q") => { // Match GenericValue
-                val.as_str().and_then(|s| s.parse::<f32>().ok()).and_then(|f| NotNan::try_from(f).ok())
-            },
+            Param::Other(key, Some(val)) if key.eq_ignore_ascii_case("q") => {
+                // Match GenericValue
+                val.as_str()
+                    .and_then(|s| s.parse::<f32>().ok())
+                    .and_then(|f| NotNan::try_from(f).ok())
+            }
             _ => None,
         })
     }
@@ -529,7 +532,9 @@ impl Address {
         let clamped_q = q.max(0.0).min(1.0);
         // Remove existing q param before adding new one
         self.params.retain(|p| !matches!(p, Param::Q(_)));
-        self.params.push(Param::Q(NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN")));
+        self.params.push(Param::Q(
+            NotNan::try_from(clamped_q).expect("Clamped q value should not be NaN"),
+        ));
     }
 
     /// Check if a parameter exists (case-insensitive key).
@@ -553,7 +558,7 @@ impl Address {
     /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
     /// addr.set_expires(3600);
-    /// 
+    ///
     /// assert!(addr.has_param("tag"));
     /// assert!(addr.has_param("TAG")); // Case-insensitive
     /// assert!(addr.has_param("expires"));
@@ -561,25 +566,23 @@ impl Address {
     /// ```
     pub fn has_param(&self, name: &str) -> bool {
         let name_lower = name.to_lowercase();
-        self.params.iter().any(|p| {
-            match p {
-                Param::Branch(_) => name_lower == "branch",
-                Param::Tag(_) => name_lower == "tag",
-                Param::Expires(_) => name_lower == "expires",
-                Param::Received(_) => name_lower == "received",
-                Param::Maddr(_) => name_lower == "maddr",
-                Param::Ttl(_) => name_lower == "ttl",
-                Param::Lr => name_lower == "lr",
-                Param::Q(_) => name_lower == "q",
-                Param::Transport(_) => name_lower == "transport",
-                Param::User(_) => name_lower == "user",
-                Param::Method(_) => name_lower == "method",
-                Param::Handling(_) => name_lower == "handling",
-                Param::Duration(_) => name_lower == "duration",
-                Param::Rport(_) => name_lower == "rport",
-                Param::Other(key, _) => key.eq_ignore_ascii_case(&name_lower),
-                _ => false,
-            }
+        self.params.iter().any(|p| match p {
+            Param::Branch(_) => name_lower == "branch",
+            Param::Tag(_) => name_lower == "tag",
+            Param::Expires(_) => name_lower == "expires",
+            Param::Received(_) => name_lower == "received",
+            Param::Maddr(_) => name_lower == "maddr",
+            Param::Ttl(_) => name_lower == "ttl",
+            Param::Lr => name_lower == "lr",
+            Param::Q(_) => name_lower == "q",
+            Param::Transport(_) => name_lower == "transport",
+            Param::User(_) => name_lower == "user",
+            Param::Method(_) => name_lower == "method",
+            Param::Handling(_) => name_lower == "handling",
+            Param::Duration(_) => name_lower == "duration",
+            Param::Rport(_) => name_lower == "rport",
+            Param::Other(key, _) => key.eq_ignore_ascii_case(&name_lower),
+            _ => false,
         })
     }
 
@@ -607,43 +610,57 @@ impl Address {
     /// let uri = Uri::from_str("sip:alice@example.com").unwrap();
     /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
-    /// 
+    ///
     /// // Add a flag parameter (lr)
     /// addr.params.push(Param::Lr);
-    /// 
+    ///
     /// // Add a regular parameter with value
     /// addr.set_param("custom", Some("value"));
-    /// 
+    ///
     /// // Test parameter retrieval
     /// assert_eq!(addr.get_param("tag"), Some(Some("1234")));
     /// assert_eq!(addr.get_param("lr"), Some(None)); // Flag parameter
     /// assert_eq!(addr.get_param("custom"), Some(Some("value")));
     /// ```
     pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
-        self.params
-            .iter()
-            .find_map(|p| match p {
-                Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
-                Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
-                Param::Expires(val) if key.eq_ignore_ascii_case("expires") => Some(Some(Box::leak(val.to_string().into_boxed_str()))), // Inefficient leak!
-                Param::Received(val) if key.eq_ignore_ascii_case("received") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
-                Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Lr if key.eq_ignore_ascii_case("lr") => Some(None), // Keep as Some(None) for flag params
-                Param::Q(val) if key.eq_ignore_ascii_case("q") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Transport(val) if key.eq_ignore_ascii_case("transport") => Some(Some(val.as_str())),
-                Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
-                Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
-                // Wrap the Option<&str> in Some to match expected Option<Option<&str>>
-                Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => Some(v_opt.as_ref().and_then(|gv| gv.as_str())),
-                Param::Handling(val) if key.eq_ignore_ascii_case("handling") => Some(Some(val.as_str())),
-                Param::Duration(val) if key.eq_ignore_ascii_case("duration") => Some(Some(Box::leak(val.to_string().into_boxed_str()))),
-                Param::Rport(val) if key.eq_ignore_ascii_case("rport") => match val {
-                    Some(port) => Some(Some(Box::leak(port.to_string().into_boxed_str()))),
-                    None => Some(None) // Flag parameter
-                },
-                _ => None,
-            })
+        self.params.iter().find_map(|p| match p {
+            Param::Branch(val) if key.eq_ignore_ascii_case("branch") => Some(Some(val.as_str())),
+            Param::Tag(val) if key.eq_ignore_ascii_case("tag") => Some(Some(val.as_str())),
+            Param::Expires(val) if key.eq_ignore_ascii_case("expires") => {
+                Some(Some(Box::leak(val.to_string().into_boxed_str())))
+            } // Inefficient leak!
+            Param::Received(val) if key.eq_ignore_ascii_case("received") => {
+                Some(Some(Box::leak(val.to_string().into_boxed_str())))
+            }
+            Param::Maddr(val) if key.eq_ignore_ascii_case("maddr") => Some(Some(val.as_str())),
+            Param::Ttl(val) if key.eq_ignore_ascii_case("ttl") => {
+                Some(Some(Box::leak(val.to_string().into_boxed_str())))
+            }
+            Param::Lr if key.eq_ignore_ascii_case("lr") => Some(None), // Keep as Some(None) for flag params
+            Param::Q(val) if key.eq_ignore_ascii_case("q") => {
+                Some(Some(Box::leak(val.to_string().into_boxed_str())))
+            }
+            Param::Transport(val) if key.eq_ignore_ascii_case("transport") => {
+                Some(Some(val.as_str()))
+            }
+            Param::User(val) if key.eq_ignore_ascii_case("user") => Some(Some(val.as_str())),
+            Param::Method(val) if key.eq_ignore_ascii_case("method") => Some(Some(val.as_str())),
+            // Wrap the Option<&str> in Some to match expected Option<Option<&str>>
+            Param::Other(k, v_opt) if k.eq_ignore_ascii_case(key) => {
+                Some(v_opt.as_ref().and_then(|gv| gv.as_str()))
+            }
+            Param::Handling(val) if key.eq_ignore_ascii_case("handling") => {
+                Some(Some(val.as_str()))
+            }
+            Param::Duration(val) if key.eq_ignore_ascii_case("duration") => {
+                Some(Some(Box::leak(val.to_string().into_boxed_str())))
+            }
+            Param::Rport(val) if key.eq_ignore_ascii_case("rport") => match val {
+                Some(port) => Some(Some(Box::leak(port.to_string().into_boxed_str()))),
+                None => Some(None), // Flag parameter
+            },
+            _ => None,
+        })
     }
 
     /// Sets or replaces a parameter, storing it as Param::Other.
@@ -683,7 +700,7 @@ impl Address {
         let value_opt_string = value.map(|v| v.into());
 
         // Remove existing param with the same key
-         self.params.retain(|p| match p {
+        self.params.retain(|p| match p {
             Param::Branch(_) => !key_string.eq_ignore_ascii_case("branch"),
             Param::Tag(_) => !key_string.eq_ignore_ascii_case("tag"),
             Param::Expires(_) => !key_string.eq_ignore_ascii_case("expires"),
@@ -705,7 +722,10 @@ impl Address {
         if key_string.eq_ignore_ascii_case("lr") && value_opt_string.is_none() {
             self.params.push(Param::Lr);
         } else {
-            self.params.push(Param::Other(key_string, value_opt_string.map(GenericValue::Token)));
+            self.params.push(Param::Other(
+                key_string,
+                value_opt_string.map(GenericValue::Token),
+            ));
         }
     }
 
@@ -726,7 +746,7 @@ impl Address {
     /// let mut addr = Address::new(uri.clone());
     /// addr.set_tag("1234");
     /// addr.set_expires(3600);
-    /// 
+    ///
     /// // Remove a parameter
     /// addr.remove_param("tag");
     /// assert!(!addr.has_param("tag"));
@@ -742,27 +762,26 @@ impl Address {
     pub fn remove_param(&mut self, name: &str) {
         let name_lower = name.to_lowercase();
         let old_params = std::mem::take(&mut self.params);
-        
-        self.params = old_params.into_iter()
-            .filter(|p| {
-                match p {
-                    Param::Branch(_) => name_lower != "branch",
-                    Param::Tag(_) => name_lower != "tag",
-                    Param::Expires(_) => name_lower != "expires",
-                    Param::Received(_) => name_lower != "received",
-                    Param::Maddr(_) => name_lower != "maddr",
-                    Param::Ttl(_) => name_lower != "ttl",
-                    Param::Lr => name_lower != "lr",
-                    Param::Q(_) => name_lower != "q",
-                    Param::Transport(_) => name_lower != "transport",
-                    Param::User(_) => name_lower != "user",
-                    Param::Method(_) => name_lower != "method",
-                    Param::Handling(_) => name_lower != "handling",
-                    Param::Duration(_) => name_lower != "duration",
-                    Param::Rport(_) => name_lower != "rport",
-                    Param::Other(key, _) => !key.eq_ignore_ascii_case(&name_lower),
-                    _ => true,
-                }
+
+        self.params = old_params
+            .into_iter()
+            .filter(|p| match p {
+                Param::Branch(_) => name_lower != "branch",
+                Param::Tag(_) => name_lower != "tag",
+                Param::Expires(_) => name_lower != "expires",
+                Param::Received(_) => name_lower != "received",
+                Param::Maddr(_) => name_lower != "maddr",
+                Param::Ttl(_) => name_lower != "ttl",
+                Param::Lr => name_lower != "lr",
+                Param::Q(_) => name_lower != "q",
+                Param::Transport(_) => name_lower != "transport",
+                Param::User(_) => name_lower != "user",
+                Param::Method(_) => name_lower != "method",
+                Param::Handling(_) => name_lower != "handling",
+                Param::Duration(_) => name_lower != "duration",
+                Param::Rport(_) => name_lower != "rport",
+                Param::Other(key, _) => !key.eq_ignore_ascii_case(&name_lower),
+                _ => true,
             })
             .collect();
     }
@@ -808,7 +827,7 @@ impl FromStr for Address {
     /// let addr = Address::from_str("\"John Doe\" <sip:john@example.com>").unwrap();
     /// assert_eq!(addr.display_name, Some("John Doe".to_string()));
     /// assert_eq!(addr.uri.to_string(), "sip:john@example.com");
-    /// 
+    ///
     /// // Create an address with a tag parameter programmatically
     /// let uri = Uri::from_str("sip:john@example.com").unwrap();
     /// let mut addr = Address::new(uri.clone());
@@ -823,4 +842,4 @@ impl FromStr for Address {
     }
 }
 
-// TODO: Implement helper methods (e.g., new, tag(), set_tag(), etc.) 
+// TODO: Implement helper methods (e.g., new, tag(), set_tag(), etc.)

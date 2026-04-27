@@ -3,28 +3,28 @@
 pub mod rate_limit;
 pub mod security_headers;
 
-use axum::{
-    Router,
-    routing::{get, post, put, delete},
-    extract::{State, Path, Query, Json, FromRef},
-    http::{StatusCode, HeaderMap, header, Request},
-    response::{IntoResponse, Response},
-    middleware::{self, Next},
-};
-use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-use tower_http::cors::CorsLayer;
+use self::rate_limit::{EnhancedRateLimiter, RateLimitConfig};
 use crate::{
-    AuthenticationService, CreateUserRequest, UpdateUserRequest, UserFilter,
-    api_keys::CreateApiKeyRequest, UserClaims, Error as UsersError,
+    api_keys::CreateApiKeyRequest, AuthenticationService, CreateUserRequest, Error as UsersError,
+    UpdateUserRequest, UserClaims, UserFilter,
+};
+use axum::{
+    extract::{FromRef, Json, Path, Query, State},
+    http::{header, HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{delete, get, post, put},
+    Router,
 };
 use chrono::{DateTime, Utc};
-use jsonwebtoken::{decode, Algorithm, Validation, DecodingKey};
-use self::rate_limit::{EnhancedRateLimiter, RateLimitConfig};
-use std::path::PathBuf;
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tower_http::cors::CorsLayer;
 
 // API State
 #[derive(Clone)]
@@ -142,7 +142,7 @@ pub struct AuthContext {
     pub user_id: String,
     pub username: String,
     pub roles: Vec<String>,
-    pub permissions: Vec<String>,  // For API key auth
+    pub permissions: Vec<String>, // For API key auth
     pub auth_type: AuthType,
 }
 
@@ -160,11 +160,11 @@ impl AuthContext {
             true
         } else {
             // API keys need explicit permissions
-            self.permissions.contains(&permission.to_string()) || 
-            self.permissions.contains(&"*".to_string())  // Wildcard permission
+            self.permissions.contains(&permission.to_string())
+                || self.permissions.contains(&"*".to_string()) // Wildcard permission
         }
     }
-    
+
     /// Check if the user has admin role
     pub fn is_admin(&self) -> bool {
         self.roles.contains(&"admin".to_string())
@@ -173,7 +173,7 @@ impl AuthContext {
 
 /// Create the REST API router
 pub fn create_router(auth_service: Arc<AuthenticationService>) -> Router {
-    let state = ApiState { 
+    let state = ApiState {
         auth_service,
         rate_limiter: EnhancedRateLimiter::new(RateLimitConfig::default()),
         metrics: Arc::new(Mutex::new(Metrics {
@@ -181,7 +181,7 @@ pub fn create_router(auth_service: Arc<AuthenticationService>) -> Router {
             ..Default::default()
         })),
     };
-    
+
     create_router_with_state(state)
 }
 
@@ -193,7 +193,6 @@ pub fn create_router_with_state(state: ApiState) -> Router {
         .route("/auth/logout", post(logout))
         .route("/auth/refresh", post(refresh))
         .route("/auth/jwks.json", get(jwks))
-        
         // User management endpoints (protected)
         .route("/users", post(create_user))
         .route("/users", get(list_users))
@@ -202,20 +201,22 @@ pub fn create_router_with_state(state: ApiState) -> Router {
         .route("/users/:id", delete(delete_user))
         .route("/users/:id/password", post(change_password))
         .route("/users/:id/roles", post(update_roles))
-        
         // API key management (protected)
         .route("/users/:id/api-keys", post(create_api_key))
         .route("/users/:id/api-keys", get(list_api_keys))
         .route("/api-keys/:id", delete(revoke_api_key))
-        
         // Health and metrics
         .route("/health", get(health_check))
         .route("/metrics", get(metrics))
-        
         // Apply middleware (order matters - security headers should be outermost)
-        .layer(middleware::from_fn(security_headers::security_headers_middleware))
+        .layer(middleware::from_fn(
+            security_headers::security_headers_middleware,
+        ))
         .layer(CorsLayer::permissive())
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit::rate_limit_middleware))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
         .with_state(state)
 }
 
@@ -237,15 +238,15 @@ pub async fn create_server_with_tls(
         Some(tls) if tls.enabled => {
             // Use HTTPS with axum-server
             use axum_server::tls_rustls::RustlsConfig;
-            
+
             let config = RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load TLS config: {}", e))?;
-            
+
             tracing::info!("🔒 Starting HTTPS server on https://{}", addr);
             tracing::info!("   Certificate: {}", tls.cert_path.display());
             tracing::info!("   Private key: {}", tls.key_path.display());
-            
+
             axum_server::bind_rustls(addr, config)
                 .serve(app.into_make_service())
                 .await
@@ -261,10 +262,10 @@ pub async fn create_server_with_tls(
             tracing::warn!("  - Certificate file (cert_path)");
             tracing::warn!("  - Private key file (key_path)");
             tracing::warn!("  - Set enabled = true");
-            
+
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tracing::info!("Starting HTTP server on http://{}", addr);
-            
+
             axum::serve(listener, app)
                 .await
                 .map_err(|e| anyhow::anyhow!("Server error: {}", e))?;
@@ -285,20 +286,22 @@ async fn login(
         let mut metrics = state.metrics.lock().unwrap();
         metrics.authentication_attempts += 1;
     }
-    
+
     // Check if account is locked due to failed attempts
-    let auth_result = state.auth_service
+    let auth_result = state
+        .auth_service
         .authenticate_password(&req.username, &req.password)
         .await;
-    
+
     // Handle rate limiting for login attempts
     use self::rate_limit::{handle_login_rate_limit, RateLimitError};
     let rate_limit_result = handle_login_rate_limit(
         &state.rate_limiter,
         &req.username,
-        auth_result.as_ref().map(|_| ()).map_err(|_| ())
-    ).await;
-    
+        auth_result.as_ref().map(|_| ()).map_err(|_| ()),
+    )
+    .await;
+
     // Check rate limit first
     if let Err(e) = rate_limit_result {
         return match e {
@@ -308,17 +311,17 @@ async fn login(
             _ => Err(AppError::InvalidCredentials),
         };
     }
-    
+
     // Now handle the authentication result
     let auth_result = auth_result?;
-    
+
     // Track successful authentication
     {
         let mut metrics = state.metrics.lock().unwrap();
         metrics.authentication_successes += 1;
         metrics.tokens_issued += 2; // Access + refresh token
     }
-    
+
     Ok(Json(LoginResponse {
         access_token: auth_result.access_token,
         refresh_token: auth_result.refresh_token,
@@ -327,10 +330,7 @@ async fn login(
     }))
 }
 
-async fn logout(
-    State(state): State<ApiState>,
-    auth: AuthContext,
-) -> Result<StatusCode, AppError> {
+async fn logout(State(state): State<ApiState>, auth: AuthContext) -> Result<StatusCode, AppError> {
     state.auth_service.revoke_tokens(&auth.user_id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -339,10 +339,8 @@ async fn refresh(
     State(state): State<ApiState>,
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
-    let token_pair = state.auth_service
-        .refresh_token(&req.refresh_token)
-        .await?;
-    
+    let token_pair = state.auth_service.refresh_token(&req.refresh_token).await?;
+
     Ok(Json(LoginResponse {
         access_token: token_pair.access_token,
         refresh_token: token_pair.refresh_token,
@@ -351,9 +349,7 @@ async fn refresh(
     }))
 }
 
-async fn jwks(
-    State(state): State<ApiState>,
-) -> Result<Json<serde_json::Value>, AppError> {
+async fn jwks(State(state): State<ApiState>) -> Result<Json<serde_json::Value>, AppError> {
     let jwk = state.auth_service.jwt_issuer().public_key_jwk();
     Ok(Json(serde_json::json!({
         "keys": [jwk]
@@ -372,18 +368,21 @@ async fn create_user(
         return Err(AppError::Forbidden);
     }
     let user = state.auth_service.create_user(req).await?;
-    
-    Ok((StatusCode::CREATED, Json(UserResponse {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        display_name: user.display_name,
-        roles: user.roles,
-        active: user.active,
-        created_at: user.created_at,
-        updated_at: user.updated_at,
-        last_login: user.last_login,
-    })))
+
+    Ok((
+        StatusCode::CREATED,
+        Json(UserResponse {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+            display_name: user.display_name,
+            roles: user.roles,
+            active: user.active,
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+            last_login: user.last_login,
+        }),
+    ))
 }
 
 async fn list_users(
@@ -391,12 +390,10 @@ async fn list_users(
     _auth: AuthContext,
     Query(filter): Query<UserFilter>,
 ) -> Result<Json<Vec<UserResponse>>, AppError> {
-    let users = state.auth_service
-        .user_store()
-        .list_users(filter)
-        .await?;
-    
-    let responses: Vec<UserResponse> = users.into_iter()
+    let users = state.auth_service.user_store().list_users(filter).await?;
+
+    let responses: Vec<UserResponse> = users
+        .into_iter()
         .map(|u| UserResponse {
             id: u.id,
             username: u.username,
@@ -409,7 +406,7 @@ async fn list_users(
             last_login: u.last_login,
         })
         .collect();
-    
+
     Ok(Json(responses))
 }
 
@@ -422,13 +419,14 @@ async fn get_user(
     if auth.user_id != id && !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
-    let user = state.auth_service
+
+    let user = state
+        .auth_service
         .user_store()
         .get_user(&id)
         .await?
         .ok_or(AppError::NotFound)?;
-    
+
     Ok(Json(UserResponse {
         id: user.id,
         username: user.username,
@@ -452,12 +450,13 @@ async fn update_user(
     if auth.user_id != id && !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
-    let user = state.auth_service
+
+    let user = state
+        .auth_service
         .user_store()
         .update_user(&id, req)
         .await?;
-    
+
     Ok(Json(UserResponse {
         id: user.id,
         username: user.username,
@@ -480,11 +479,8 @@ async fn delete_user(
     if !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    state.auth_service
-        .user_store()
-        .delete_user(&id)
-        .await?;
-    
+    state.auth_service.user_store().delete_user(&id).await?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -498,11 +494,12 @@ async fn change_password(
     if auth.user_id != id {
         return Err(AppError::Forbidden);
     }
-    
-    state.auth_service
+
+    state
+        .auth_service
         .change_password(&id, &req.old_password, &req.new_password)
         .await?;
-    
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -516,7 +513,7 @@ async fn update_roles(
     if !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
+
     // Update the user's roles
     let update_req = UpdateUserRequest {
         email: None,
@@ -524,12 +521,13 @@ async fn update_roles(
         roles: Some(req.roles),
         active: None,
     };
-    
-    state.auth_service
+
+    state
+        .auth_service
         .user_store()
         .update_user(&id, update_req)
         .await?;
-    
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -545,29 +543,33 @@ async fn create_api_key(
     if auth.user_id != user_id && !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
-    let (key_info, raw_key) = state.auth_service
+
+    let (key_info, raw_key) = state
+        .auth_service
         .api_key_store()
         .create_api_key(req)
         .await?;
-    
+
     // Track API key creation
     {
         let mut metrics = state.metrics.lock().unwrap();
         metrics.total_api_keys += 1;
     }
-    
-    Ok((StatusCode::CREATED, Json(CreateApiKeyResponse {
-        key: raw_key,
-        key_info: ApiKeyResponse {
-            id: key_info.id,
-            name: key_info.name,
-            permissions: key_info.permissions,
-            expires_at: key_info.expires_at,
-            created_at: key_info.created_at,
-            last_used: key_info.last_used,
-        },
-    })))
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateApiKeyResponse {
+            key: raw_key,
+            key_info: ApiKeyResponse {
+                id: key_info.id,
+                name: key_info.name,
+                permissions: key_info.permissions,
+                expires_at: key_info.expires_at,
+                created_at: key_info.created_at,
+                last_used: key_info.last_used,
+            },
+        }),
+    ))
 }
 
 async fn list_api_keys(
@@ -579,13 +581,15 @@ async fn list_api_keys(
     if auth.user_id != user_id && !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
-    let keys = state.auth_service
+
+    let keys = state
+        .auth_service
         .api_key_store()
         .list_api_keys(&user_id)
         .await?;
-    
-    let responses: Vec<ApiKeyResponse> = keys.into_iter()
+
+    let responses: Vec<ApiKeyResponse> = keys
+        .into_iter()
         .map(|k| ApiKeyResponse {
             id: k.id,
             name: k.name,
@@ -595,7 +599,7 @@ async fn list_api_keys(
             last_used: k.last_used,
         })
         .collect();
-    
+
     Ok(Json(responses))
 }
 
@@ -605,22 +609,24 @@ async fn revoke_api_key(
     Path(id): Path<String>,
 ) -> Result<StatusCode, AppError> {
     // Get the API key to check ownership
-    let keys = state.auth_service
+    let keys = state
+        .auth_service
         .api_key_store()
         .list_api_keys(&auth.user_id)
         .await?;
-    
+
     // Check if user owns this key or is admin
     let owns_key = keys.iter().any(|k| k.id == id);
     if !owns_key && !auth.is_admin() {
         return Err(AppError::Forbidden);
     }
-    
-    state.auth_service
+
+    state
+        .auth_service
         .api_key_store()
         .revoke_api_key(&id)
         .await?;
-    
+
     // Track API key revocation
     {
         let mut metrics = state.metrics.lock().unwrap();
@@ -628,7 +634,7 @@ async fn revoke_api_key(
             metrics.total_api_keys -= 1;
         }
     }
-    
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -655,35 +661,40 @@ async fn metrics(State(state): State<ApiState>) -> Result<Json<serde_json::Value
             metrics.start_time,
         )
     };
-    
+
     let uptime = start_time.elapsed().as_secs();
-    
+
     // Query database for user and API key counts
-    let user_count = match state.auth_service
+    let user_count = match state
+        .auth_service
         .user_store()
         .list_users(UserFilter::default())
-        .await 
+        .await
     {
         Ok(users) => users.len(),
         Err(_) => 0,
     };
-    
-    let active_user_count = match state.auth_service
+
+    let active_user_count = match state
+        .auth_service
         .user_store()
-        .list_users(UserFilter { active: Some(true), ..Default::default() })
-        .await 
+        .list_users(UserFilter {
+            active: Some(true),
+            ..Default::default()
+        })
+        .await
     {
         Ok(users) => users.len(),
         Err(_) => 0,
     };
-    
+
     // Calculate success rate
     let success_rate = if auth_attempts > 0 {
         (auth_successes as f64 / auth_attempts as f64) * 100.0
     } else {
         0.0
     };
-    
+
     Ok(Json(serde_json::json!({
         "users": {
             "total": user_count,
@@ -741,7 +752,7 @@ impl IntoResponse for AppError {
                  Some(seconds))
             },
         };
-        
+
         let body = Json(ErrorResponse {
             error: ErrorDetail {
                 code: code.to_string(),
@@ -749,17 +760,16 @@ impl IntoResponse for AppError {
                 details: None,
             },
         });
-        
+
         let mut response = (status, body).into_response();
-        
+
         // Add Retry-After header if applicable
         if let Some(seconds) = retry_after {
-            response.headers_mut().insert(
-                header::RETRY_AFTER,
-                seconds.to_string().parse().unwrap()
-            );
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, seconds.to_string().parse().unwrap());
         }
-        
+
         response
     }
 }
@@ -769,7 +779,9 @@ impl From<UsersError> for AppError {
         match err {
             UsersError::InvalidCredentials => AppError::InvalidCredentials,
             UsersError::UserNotFound(_) => AppError::NotFound,
-            UsersError::UserAlreadyExists(_) => AppError::BadRequest("User already exists".to_string()),
+            UsersError::UserAlreadyExists(_) => {
+                AppError::BadRequest("User already exists".to_string())
+            }
             UsersError::InvalidPassword(msg) => AppError::BadRequest(msg),
             _ => AppError::Internal(err.into()),
         }
@@ -791,67 +803,74 @@ where
     ApiState: axum::extract::FromRef<S>,
 {
     type Rejection = AppError;
-    
+
     async fn from_request_parts(
         parts: &mut axum::http::request::Parts,
         state: &S,
     ) -> Result<Self, Self::Rejection> {
         // Check for Bearer token first
-        if let Some(auth_header) = parts.headers
+        if let Some(auth_header) = parts
+            .headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
         {
             if let Some(token) = auth_header.strip_prefix("Bearer ") {
                 let api_state = ApiState::from_ref(state);
-                
+
                 // Get public key and validate
-                let public_key = api_state.auth_service
+                let public_key = api_state
+                    .auth_service
                     .jwt_issuer()
                     .public_key_pem()
                     .map_err(|e| AppError::Internal(e.into()))?;
-                
-                let decoding_key = DecodingKey::from_rsa_pem(public_key.as_bytes())
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid public key: {}", e)))?;
-                
+
+                let decoding_key =
+                    DecodingKey::from_rsa_pem(public_key.as_bytes()).map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Invalid public key: {}", e))
+                    })?;
+
                 let mut validation = Validation::new(Algorithm::RS256);
                 validation.set_issuer(&["https://users.rvoip.local"]);
                 validation.set_audience(&["rvoip-api", "rvoip-sip"]);
-                
+
                 let token_data = decode::<crate::UserClaims>(token, &decoding_key, &validation)
                     .map_err(|_| AppError::Forbidden)?;
-                
+
                 return Ok(AuthContext {
                     user_id: token_data.claims.sub,
                     username: token_data.claims.username,
                     roles: token_data.claims.roles,
-                    permissions: vec![],  // JWT tokens don't have granular permissions
+                    permissions: vec![], // JWT tokens don't have granular permissions
                     auth_type: AuthType::Jwt,
                 });
             }
         }
-        
+
         // Check for API key
-        if let Some(api_key) = parts.headers
+        if let Some(api_key) = parts
+            .headers
             .get("X-API-Key")
             .and_then(|value| value.to_str().ok())
         {
             let api_state = ApiState::from_ref(state);
-            
-            let api_key_info = api_state.auth_service
+
+            let api_key_info = api_state
+                .auth_service
                 .api_key_store()
                 .validate_api_key(api_key)
                 .await
                 .map_err(|_| AppError::Forbidden)?
                 .ok_or(AppError::Forbidden)?;
-            
+
             // Get the user to construct AuthContext
-            let user = api_state.auth_service
+            let user = api_state
+                .auth_service
                 .user_store()
                 .get_user(&api_key_info.user_id)
                 .await
                 .map_err(|_| AppError::Forbidden)?
                 .ok_or(AppError::Forbidden)?;
-            
+
             return Ok(AuthContext {
                 user_id: user.id,
                 username: user.username,
@@ -860,9 +879,8 @@ where
                 auth_type: AuthType::ApiKey,
             });
         }
-        
+
         // No valid authentication found
         Err(AppError::Forbidden)
     }
 }
-

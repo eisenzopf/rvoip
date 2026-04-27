@@ -4,9 +4,9 @@
 //! including certificate generation, key pair management, and enterprise PKI support.
 
 use crate::Error;
-use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_RSA_SHA256};
-use rsa::{RsaPrivateKey, RsaPublicKey, pkcs8::EncodePrivateKey, pkcs1::EncodeRsaPublicKey};
 use rand::rngs::OsRng;
+use rcgen::{Certificate, CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_RSA_SHA256};
+use rsa::{pkcs1::EncodeRsaPublicKey, pkcs8::EncodePrivateKey, RsaPrivateKey, RsaPublicKey};
 use std::time::{Duration, SystemTime};
 use time::OffsetDateTime;
 
@@ -71,7 +71,7 @@ impl CertificateConfig {
             key_size: 2048,
         }
     }
-    
+
     /// Create configuration for enterprise client
     pub fn enterprise_client(user_id: &str) -> Self {
         Self {
@@ -85,7 +85,7 @@ impl CertificateConfig {
             key_size: 2048,
         }
     }
-    
+
     /// Create configuration for high-security environments
     pub fn high_security(entity_name: &str) -> Self {
         Self {
@@ -96,7 +96,7 @@ impl CertificateConfig {
             state: "Virginia".to_string(),
             locality: "Washington DC".to_string(),
             validity_duration: Duration::from_secs(90 * 24 * 60 * 60), // 90 days
-            key_size: 4096, // Higher security
+            key_size: 4096,                                            // Higher security
         }
     }
 }
@@ -107,19 +107,21 @@ pub fn generate_key_pair_and_certificate(config: CertificateConfig) -> Result<Mi
     let mut rng = OsRng;
     let rsa_private_key = RsaPrivateKey::new(&mut rng, config.key_size)
         .map_err(|_| Error::CryptoError("Failed to generate RSA private key".into()))?;
-    
+
     let rsa_public_key = RsaPublicKey::from(&rsa_private_key);
-    
+
     // Convert to DER formats
-    let private_key_der = rsa_private_key.to_pkcs8_der()
+    let private_key_der = rsa_private_key
+        .to_pkcs8_der()
         .map_err(|_| Error::CryptoError("Failed to encode private key to PKCS#8".into()))?;
-    
-    let public_key_der = rsa_public_key.to_pkcs1_der()
+
+    let public_key_der = rsa_public_key
+        .to_pkcs1_der()
         .map_err(|_| Error::CryptoError("Failed to encode public key to PKCS#1".into()))?;
-    
+
     // Create certificate parameters
     let mut params = CertificateParams::default();
-    
+
     // Set distinguished name
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, config.common_name);
@@ -129,26 +131,27 @@ pub fn generate_key_pair_and_certificate(config: CertificateConfig) -> Result<Mi
     dn.push(DnType::StateOrProvinceName, config.state);
     dn.push(DnType::LocalityName, config.locality);
     params.distinguished_name = dn;
-    
+
     // Set validity period (convert SystemTime to OffsetDateTime)
     params.not_before = OffsetDateTime::from(SystemTime::now());
     params.not_after = OffsetDateTime::from(SystemTime::now() + config.validity_duration);
-    
+
     // Set algorithm
     params.alg = &PKCS_RSA_SHA256;
-    
+
     // Use the generated key pair
     let key_pair = KeyPair::from_der(&private_key_der.as_bytes())
         .map_err(|_| Error::CryptoError("Failed to create KeyPair from private key".into()))?;
     params.key_pair = Some(key_pair);
-    
+
     // Generate certificate
     let cert = Certificate::from_params(params)
         .map_err(|_| Error::CryptoError("Failed to generate certificate".into()))?;
-    
-    let certificate_der = cert.serialize_der()
+
+    let certificate_der = cert
+        .serialize_der()
         .map_err(|_| Error::CryptoError("Failed to serialize certificate".into()))?;
-    
+
     Ok(MikeyKeyPair {
         private_key: private_key_der.as_bytes().to_vec(),
         public_key: public_key_der.as_bytes().to_vec(),
@@ -162,51 +165,57 @@ pub fn generate_ca_certificate(config: CertificateConfig) -> Result<MikeyKeyPair
     let mut rng = OsRng;
     let rsa_private_key = RsaPrivateKey::new(&mut rng, config.key_size)
         .map_err(|_| Error::CryptoError("Failed to generate CA RSA private key".into()))?;
-    
+
     let rsa_public_key = RsaPublicKey::from(&rsa_private_key);
-    
+
     // Convert to DER formats
-    let private_key_der = rsa_private_key.to_pkcs8_der()
+    let private_key_der = rsa_private_key
+        .to_pkcs8_der()
         .map_err(|_| Error::CryptoError("Failed to encode CA private key to PKCS#8".into()))?;
-    
-    let public_key_der = rsa_public_key.to_pkcs1_der()
+
+    let public_key_der = rsa_public_key
+        .to_pkcs1_der()
         .map_err(|_| Error::CryptoError("Failed to encode CA public key to PKCS#1".into()))?;
-    
+
     // Create CA certificate parameters
     let mut params = CertificateParams::default();
-    
+
     // Set distinguished name for CA
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, format!("{} CA", config.common_name));
     dn.push(DnType::OrganizationName, config.organization);
-    dn.push(DnType::OrganizationalUnitName, "Certificate Authority".to_string());
+    dn.push(
+        DnType::OrganizationalUnitName,
+        "Certificate Authority".to_string(),
+    );
     dn.push(DnType::CountryName, config.country);
     dn.push(DnType::StateOrProvinceName, config.state);
     dn.push(DnType::LocalityName, config.locality);
     params.distinguished_name = dn;
-    
+
     // Set validity period (CA typically has longer validity)
     params.not_before = OffsetDateTime::from(SystemTime::now());
     params.not_after = OffsetDateTime::from(SystemTime::now() + config.validity_duration * 2);
-    
+
     // Make it a CA certificate
     params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    
+
     // Set algorithm
     params.alg = &PKCS_RSA_SHA256;
-    
+
     // Use the generated key pair
     let key_pair = KeyPair::from_der(&private_key_der.as_bytes())
         .map_err(|_| Error::CryptoError("Failed to create KeyPair from CA private key".into()))?;
     params.key_pair = Some(key_pair);
-    
+
     // Generate CA certificate
     let cert = Certificate::from_params(params)
         .map_err(|_| Error::CryptoError("Failed to generate CA certificate".into()))?;
-    
-    let certificate_der = cert.serialize_der()
+
+    let certificate_der = cert
+        .serialize_der()
         .map_err(|_| Error::CryptoError("Failed to serialize CA certificate".into()))?;
-    
+
     Ok(MikeyKeyPair {
         private_key: private_key_der.as_bytes().to_vec(),
         public_key: public_key_der.as_bytes().to_vec(),
@@ -217,59 +226,66 @@ pub fn generate_ca_certificate(config: CertificateConfig) -> Result<MikeyKeyPair
 /// Sign a certificate with a CA
 pub fn sign_certificate_with_ca(
     ca_cert: &MikeyKeyPair,
-    subject_config: CertificateConfig
+    subject_config: CertificateConfig,
 ) -> Result<MikeyKeyPair, Error> {
     // Generate key pair for the subject
     let mut rng = OsRng;
     let rsa_private_key = RsaPrivateKey::new(&mut rng, subject_config.key_size)
         .map_err(|_| Error::CryptoError("Failed to generate subject RSA private key".into()))?;
-    
+
     let rsa_public_key = RsaPublicKey::from(&rsa_private_key);
-    
+
     // Convert to DER formats
-    let private_key_der = rsa_private_key.to_pkcs8_der()
+    let private_key_der = rsa_private_key
+        .to_pkcs8_der()
         .map_err(|_| Error::CryptoError("Failed to encode subject private key to PKCS#8".into()))?;
-    
-    let public_key_der = rsa_public_key.to_pkcs1_der()
+
+    let public_key_der = rsa_public_key
+        .to_pkcs1_der()
         .map_err(|_| Error::CryptoError("Failed to encode subject public key to PKCS#1".into()))?;
-    
+
     // Extract the CA's Common Name to set as issuer in the subject cert
     let ca_info = extract_certificate_info(&ca_cert.certificate)?;
-    
+
     // Create subject certificate parameters
     let mut params = CertificateParams::default();
-    
+
     // Set distinguished name
     let mut dn = DistinguishedName::new();
     dn.push(DnType::CommonName, subject_config.common_name);
     dn.push(DnType::OrganizationName, subject_config.organization);
-    dn.push(DnType::OrganizationalUnitName, subject_config.organizational_unit);
+    dn.push(
+        DnType::OrganizationalUnitName,
+        subject_config.organizational_unit,
+    );
     dn.push(DnType::CountryName, subject_config.country);
     dn.push(DnType::StateOrProvinceName, subject_config.state);
     dn.push(DnType::LocalityName, subject_config.locality);
     params.distinguished_name = dn;
-    
+
     // Set validity period
     params.not_before = OffsetDateTime::from(SystemTime::now());
     params.not_after = OffsetDateTime::from(SystemTime::now() + subject_config.validity_duration);
-    
+
     // Set algorithm
     params.alg = &PKCS_RSA_SHA256;
-    
+
     // Use the generated key pair
-    let key_pair = KeyPair::from_der(&private_key_der.as_bytes())
-        .map_err(|_| Error::CryptoError("Failed to create KeyPair from subject private key".into()))?;
+    let key_pair = KeyPair::from_der(&private_key_der.as_bytes()).map_err(|_| {
+        Error::CryptoError("Failed to create KeyPair from subject private key".into())
+    })?;
     params.key_pair = Some(key_pair);
-    
+
     // Note: rcgen doesn't support proper CA signing in the current version
     // For testing purposes, we'll create a self-signed cert and simulate CA signing
     // by modifying the issuer info in the test validation
     let cert = Certificate::from_params(params)
         .map_err(|_| Error::CryptoError("Failed to generate subject certificate".into()))?;
-    
-    let certificate_der = cert.serialize_der()
+
+    let certificate_der = cert
+        .serialize_der()
         .map_err(|_| Error::CryptoError("Failed to serialize subject certificate".into()))?;
-    
+
     Ok(MikeyKeyPair {
         private_key: private_key_der.as_bytes().to_vec(),
         public_key: public_key_der.as_bytes().to_vec(),
@@ -278,44 +294,45 @@ pub fn sign_certificate_with_ca(
 }
 
 /// Validate a certificate chain
-pub fn validate_certificate_chain(
-    subject_cert: &[u8],
-    ca_cert: &[u8]
-) -> Result<(), Error> {
+pub fn validate_certificate_chain(subject_cert: &[u8], ca_cert: &[u8]) -> Result<(), Error> {
     // Parse certificates using x509-parser
     let (_, subject) = x509_parser::parse_x509_certificate(subject_cert)
         .map_err(|_| Error::CryptoError("Failed to parse subject certificate".into()))?;
-    
+
     let (_, ca) = x509_parser::parse_x509_certificate(ca_cert)
         .map_err(|_| Error::CryptoError("Failed to parse CA certificate".into()))?;
-    
+
     // Basic validation checks
-    
+
     // Note: Since rcgen doesn't support proper CA signing in the current version,
     // we skip the issuer check. In a full implementation, this would verify:
     // if subject.issuer() != ca.subject() {
     //     return Err(Error::AuthenticationFailed("Certificate issuer does not match CA subject".into()));
     // }
-    
+
     // Check certificate validity periods
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    
+
     let not_before = subject.validity().not_before.timestamp();
     if now < not_before as u64 {
-        return Err(Error::AuthenticationFailed("Certificate not yet valid".into()));
+        return Err(Error::AuthenticationFailed(
+            "Certificate not yet valid".into(),
+        ));
     }
-    
+
     let not_after = subject.validity().not_after.timestamp();
     if now > not_after as u64 {
-        return Err(Error::AuthenticationFailed("Certificate has expired".into()));
+        return Err(Error::AuthenticationFailed(
+            "Certificate has expired".into(),
+        ));
     }
-    
+
     // TODO: Add signature verification when rcgen supports proper CA signing
     // This would require implementing RSA signature verification with the CA's public key
-    
+
     Ok(())
 }
 
@@ -323,10 +340,10 @@ pub fn validate_certificate_chain(
 pub fn extract_certificate_info(cert_der: &[u8]) -> Result<CertificateInfo, Error> {
     let (_, cert) = x509_parser::parse_x509_certificate(cert_der)
         .map_err(|_| Error::CryptoError("Failed to parse certificate".into()))?;
-    
+
     let subject = cert.subject();
     let issuer = cert.issuer();
-    
+
     Ok(CertificateInfo {
         subject_cn: extract_cn_from_name(subject),
         issuer_cn: extract_cn_from_name(issuer),
@@ -363,4 +380,4 @@ fn extract_cn_from_name(name: &x509_parser::x509::X509Name) -> String {
         }
     }
     "Unknown".to_string()
-} 
+}

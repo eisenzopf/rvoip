@@ -1,11 +1,8 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
-    ProxyRequire,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader, ProxyRequire,
 };
-use super::HeaderSetter;
 
 /// Proxy-Require header builder
 ///
@@ -42,8 +39,8 @@ use super::HeaderSetter;
 ///
 /// ## When to Use Proxy-Require
 ///
-/// The Proxy-Require header should be used carefully since it will cause the request to fail if 
-/// any proxy in the path doesn't support the required extensions. It's best used in controlled 
+/// The Proxy-Require header should be used carefully since it will cause the request to fail if
+/// any proxy in the path doesn't support the required extensions. It's best used in controlled
 /// environments where you know the capabilities of all proxies, or when an extension is absolutely
 /// necessary for proper operation.
 ///
@@ -160,7 +157,7 @@ pub trait ProxyRequireBuilderExt {
     /// // or reject the request with 420 Bad Extension
     /// ```
     fn proxy_require_tag(self, option_tag: impl Into<String>) -> Self;
-    
+
     /// Add a Proxy-Require header with multiple option tags
     ///
     /// This method adds a Proxy-Require header with multiple SIP extension option tags
@@ -199,7 +196,7 @@ pub trait ProxyRequireBuilderExt {
     /// // it must reject with 420 and list unsupported extensions
     /// ```
     fn proxy_require_tags(self, option_tags: Vec<impl Into<String>>) -> Self;
-    
+
     /// Add a Proxy-Require header for sec-agree (security agreement)
     ///
     /// This convenience method adds a Proxy-Require header with the sec-agree extension
@@ -236,7 +233,7 @@ pub trait ProxyRequireBuilderExt {
     /// // to properly negotiate security with this client
     /// ```
     fn proxy_require_sec_agree(self) -> Self;
-    
+
     /// Add a Proxy-Require header for precondition
     ///
     /// This convenience method adds a Proxy-Require header with the precondition extension
@@ -268,7 +265,7 @@ pub trait ProxyRequireBuilderExt {
     /// // to properly provision network resources for the call
     /// ```
     fn proxy_require_precondition(self) -> Self;
-    
+
     /// Add a Proxy-Require header for path
     ///
     /// This convenience method adds a Proxy-Require header with the path extension
@@ -300,7 +297,7 @@ pub trait ProxyRequireBuilderExt {
     /// // Path headers for this registration to work correctly
     /// ```
     fn proxy_require_path(self) -> Self;
-    
+
     /// Add a Proxy-Require header for resource priority
     ///
     /// This convenience method adds a Proxy-Require header with the resource-priority extension
@@ -339,33 +336,33 @@ pub trait ProxyRequireBuilderExt {
     fn proxy_require_resource_priority(self) -> Self;
 }
 
-impl<T> ProxyRequireBuilderExt for T 
-where 
+impl<T> ProxyRequireBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn proxy_require_tag(self, option_tag: impl Into<String>) -> Self {
         let proxy_require = ProxyRequire::single(&option_tag.into());
         self.set_header(proxy_require)
     }
-    
+
     fn proxy_require_tags(self, option_tags: Vec<impl Into<String>>) -> Self {
         let tags: Vec<String> = option_tags.into_iter().map(Into::into).collect();
         let proxy_require = ProxyRequire::with_options(&tags);
         self.set_header(proxy_require)
     }
-    
+
     fn proxy_require_sec_agree(self) -> Self {
         self.proxy_require_tag("sec-agree")
     }
-    
+
     fn proxy_require_precondition(self) -> Self {
         self.proxy_require_tag("precondition")
     }
-    
+
     fn proxy_require_path(self) -> Self {
         self.proxy_require_tag("path")
     }
-    
+
     fn proxy_require_resource_priority(self) -> Self {
         self.proxy_require_tag("resource-priority")
     }
@@ -380,14 +377,17 @@ mod tests {
 
     #[test]
     fn test_request_proxy_require_tag() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .proxy_require_tag("sec-agree")
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
-        if let Some(TypedHeader::ProxyRequire(proxy_require)) = request.header(&HeaderName::ProxyRequire) {
+
+        if let Some(TypedHeader::ProxyRequire(proxy_require)) =
+            request.header(&HeaderName::ProxyRequire)
+        {
             assert_eq!(proxy_require.options().len(), 1);
             assert!(proxy_require.has_option("sec-agree"));
         } else {
@@ -400,11 +400,13 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .proxy_require_tags(vec!["sec-agree", "precondition"])
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
-        if let Some(TypedHeader::ProxyRequire(proxy_require)) = response.header(&HeaderName::ProxyRequire) {
+
+        if let Some(TypedHeader::ProxyRequire(proxy_require)) =
+            response.header(&HeaderName::ProxyRequire)
+        {
             assert_eq!(proxy_require.options().len(), 2);
             assert!(proxy_require.has_option("sec-agree"));
             assert!(proxy_require.has_option("precondition"));
@@ -416,15 +418,18 @@ mod tests {
 
     #[test]
     fn test_proxy_require_convenience_methods() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .proxy_require_path()
             .build();
-            
-        if let Some(TypedHeader::ProxyRequire(proxy_require)) = request.header(&HeaderName::ProxyRequire) {
+
+        if let Some(TypedHeader::ProxyRequire(proxy_require)) =
+            request.header(&HeaderName::ProxyRequire)
+        {
             assert_eq!(proxy_require.options().len(), 1);
             assert!(proxy_require.has_option("path"));
         } else {
             panic!("Proxy-Require header not found or has wrong type");
         }
     }
-} 
+}

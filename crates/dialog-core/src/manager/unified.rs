@@ -54,7 +54,7 @@
 //! // Make outgoing calls
 //! let call = manager.make_call(
 //!     "sip:alice@example.com",
-//!     "sip:bob@example.com", 
+//!     "sip:bob@example.com",
 //!     Some("SDP offer".to_string())
 //! ).await?;
 //! # Ok(())
@@ -105,19 +105,22 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
-use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
-use rvoip_sip_core::{Request, Response, Method, StatusCode, Uri};
+use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
+use rvoip_sip_core::{Method, Request, Response, StatusCode, Uri};
 
+use crate::api::{
+    common::{CallHandle, DialogHandle},
+    ApiError, ApiResult,
+};
 use crate::config::DialogManagerConfig;
-use crate::dialog::{DialogId, Dialog, DialogState};
+use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
-use crate::events::{SessionCoordinationEvent, DialogEvent};
-use crate::api::{ApiResult, ApiError, common::{DialogHandle, CallHandle}};
+use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::subscription::SubscriptionManager;
 
 // Import the existing core DialogManager functionality
@@ -156,10 +159,10 @@ use super::core::DialogManager;
 pub struct UnifiedDialogManager {
     /// Core dialog manager (contains all the actual implementation)
     core: DialogManager,
-    
+
     /// Configuration determining behavior mode
     config: DialogManagerConfig,
-    
+
     /// Statistics for this manager instance
     stats: Arc<tokio::sync::RwLock<ManagerStats>>,
 }
@@ -169,28 +172,28 @@ pub struct UnifiedDialogManager {
 pub struct ManagerStats {
     /// Number of active dialogs
     pub active_dialogs: usize,
-    
+
     /// Total dialogs created
     pub total_dialogs: u64,
-    
+
     /// Successful calls (ended with BYE)
     pub successful_calls: u64,
-    
+
     /// Failed calls (ended with error)
     pub failed_calls: u64,
-    
+
     /// Total call duration in seconds
     pub total_call_duration: f64,
-    
+
     /// Outgoing calls made (client behavior)
     pub outgoing_calls: u64,
-    
+
     /// Incoming calls handled (server behavior)
     pub incoming_calls: u64,
-    
+
     /// Authentication challenges handled
     pub auth_challenges: u64,
-    
+
     /// Auto-responses sent (OPTIONS, REGISTER)
     pub auto_responses: u64,
 }
@@ -213,26 +216,30 @@ impl UnifiedDialogManager {
         config: DialogManagerConfig,
     ) -> DialogResult<Self> {
         // Validate configuration first
-        config.validate()
-            .map_err(|e| DialogError::internal_error(&format!("Invalid configuration: {}", e), None))?;
-        
+        config.validate().map_err(|e| {
+            DialogError::internal_error(&format!("Invalid configuration: {}", e), None)
+        })?;
+
         let local_address = config.local_address();
-        info!("Creating UnifiedDialogManager in {:?} mode at {}", 
-            Self::mode_name(&config), local_address);
-        
+        info!(
+            "Creating UnifiedDialogManager in {:?} mode at {}",
+            Self::mode_name(&config),
+            local_address
+        );
+
         // Create core dialog manager with the provided transaction manager
         let mut core = DialogManager::new(transaction_manager, local_address).await?;
-        
+
         // **NEW**: Inject the unified configuration into the core manager
         core.set_config(config.clone());
-        
+
         Ok(Self {
             core,
             config,
             stats: Arc::new(tokio::sync::RwLock::new(ManagerStats::default())),
         })
     }
-    
+
     /// Create a new unified dialog manager with global events (RECOMMENDED)
     ///
     /// # Arguments
@@ -249,41 +256,55 @@ impl UnifiedDialogManager {
     ) -> DialogResult<Self> {
         // Validate configuration first
         if let Err(e) = config.validate() {
-            error!("Failed to create UnifiedDialogManager: Invalid configuration - {}", e);
-            return Err(DialogError::internal_error(&format!("Invalid configuration: {}", e), None));
+            error!(
+                "Failed to create UnifiedDialogManager: Invalid configuration - {}",
+                e
+            );
+            return Err(DialogError::internal_error(
+                &format!("Invalid configuration: {}", e),
+                None,
+            ));
         }
-        
+
         let local_address = config.local_address();
-        info!("Creating UnifiedDialogManager with global events in {:?} mode at {}", 
-            Self::mode_name(&config), local_address);
-        
+        info!(
+            "Creating UnifiedDialogManager with global events in {:?} mode at {}",
+            Self::mode_name(&config),
+            local_address
+        );
+
         // Create core dialog manager with global events
-        let mut core = DialogManager::with_global_events(transaction_manager, transaction_events, local_address).await?;
-        
+        let mut core = DialogManager::with_global_events(
+            transaction_manager,
+            transaction_events,
+            local_address,
+        )
+        .await?;
+
         // **NEW**: Inject the unified configuration into the core manager
         core.set_config(config.clone());
-        
+
         Ok(Self {
             core,
             config,
             stats: Arc::new(tokio::sync::RwLock::new(ManagerStats::default())),
         })
     }
-    
+
     /// Get the configuration mode name for logging
     fn mode_name(config: &DialogManagerConfig) -> &'static str {
         match config {
             DialogManagerConfig::Client(_) => "Client",
-            DialogManagerConfig::Server(_) => "Server", 
+            DialogManagerConfig::Server(_) => "Server",
             DialogManagerConfig::Hybrid(_) => "Hybrid",
         }
     }
-    
+
     /// Get the current configuration
     pub fn config(&self) -> &DialogManagerConfig {
         &self.config
     }
-    
+
     /// Get the underlying core dialog manager
     ///
     /// Provides access to the core dialog management functionality.
@@ -291,63 +312,70 @@ impl UnifiedDialogManager {
     pub fn core(&self) -> &DialogManager {
         &self.core
     }
-    
+
     /// Get reference to the subscription manager if configured
     pub fn subscription_manager(&self) -> Option<&Arc<SubscriptionManager>> {
         self.core.subscription_manager()
     }
-    
+
     /// Start the unified dialog manager
     ///
     /// Initializes the manager for processing based on its configuration mode.
     pub async fn start(&self) -> DialogResult<()> {
-        info!("Starting UnifiedDialogManager in {:?} mode", Self::mode_name(&self.config));
-        
+        info!(
+            "Starting UnifiedDialogManager in {:?} mode",
+            Self::mode_name(&self.config)
+        );
+
         // Start the core dialog manager
         self.core.start().await?;
-        
+
         // Log mode-specific capabilities
         match &self.config {
             DialogManagerConfig::Client(client) => {
-                info!("Client mode active - from_uri: {:?}, auto_auth: {}", 
-                    client.from_uri, client.auto_auth);
-            },
+                info!(
+                    "Client mode active - from_uri: {:?}, auto_auth: {}",
+                    client.from_uri, client.auto_auth
+                );
+            }
             DialogManagerConfig::Server(server) => {
-                info!("Server mode active - domain: {:?}, auto_options: {}, auto_register: {}", 
-                    server.domain, server.auto_options_response, server.auto_register_response);
-            },
+                info!(
+                    "Server mode active - domain: {:?}, auto_options: {}, auto_register: {}",
+                    server.domain, server.auto_options_response, server.auto_register_response
+                );
+            }
             DialogManagerConfig::Hybrid(hybrid) => {
                 info!("Hybrid mode active - from_uri: {:?}, domain: {:?}, auto_auth: {}, auto_options: {}", 
                     hybrid.from_uri, hybrid.domain, hybrid.auto_auth, hybrid.auto_options_response);
-            },
+            }
         }
-        
+
         info!("UnifiedDialogManager started successfully");
         Ok(())
     }
-    
+
     /// Stop the unified dialog manager
     ///
     /// Gracefully shuts down the manager and all active dialogs.
     pub async fn stop(&self) -> DialogResult<()> {
         info!("Stopping UnifiedDialogManager");
-        
+
         // Stop the core dialog manager
         self.core.stop().await?;
-        
+
         info!("UnifiedDialogManager stopped successfully");
         Ok(())
     }
-    
+
     // REMOVED: Channel-based methods - use GlobalEventCoordinator instead
     // - set_session_coordinator()
     // - set_dialog_event_sender()
     // - subscribe_to_dialog_events()
-    
+
     // ========================================
     // CLIENT-MODE OPERATIONS
     // ========================================
-    
+
     /// Make an outgoing call (Client/Hybrid modes only)
     ///
     /// Creates a new dialog and sends an INVITE request to establish a call.
@@ -366,7 +394,8 @@ impl UnifiedDialogManager {
         to_uri: &str,
         sdp_offer: Option<String>,
     ) -> ApiResult<CallHandle> {
-        self.make_call_with_id(from_uri, to_uri, sdp_offer, None).await
+        self.make_call_with_id(from_uri, to_uri, sdp_offer, None)
+            .await
     }
 
     /// Make an outgoing call with specific Call-ID
@@ -400,7 +429,8 @@ impl UnifiedDialogManager {
         sdp_offer: Option<String>,
         call_id: Option<String>,
     ) -> ApiResult<CallHandle> {
-        self.make_call_inner(from_uri, to_uri, sdp_offer, call_id, None, Vec::new()).await
+        self.make_call_inner(from_uri, to_uri, sdp_offer, call_id, None, Vec::new())
+            .await
     }
 
     /// Like [`make_call`](Self::make_call) but appends caller-supplied
@@ -416,7 +446,8 @@ impl UnifiedDialogManager {
         sdp_offer: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<CallHandle> {
-        self.make_call_inner(from_uri, to_uri, sdp_offer, None, None, extra_headers).await
+        self.make_call_inner(from_uri, to_uri, sdp_offer, None, None, extra_headers)
+            .await
     }
 
     /// `make_call_for_session` + extra headers. Use this from session-core
@@ -453,33 +484,36 @@ impl UnifiedDialogManager {
     ) -> ApiResult<CallHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
-            error!("Cannot make outgoing call: Outgoing calls not supported in {:?} mode", 
-                Self::mode_name(&self.config));
-            return Err(ApiError::Configuration { 
-                message: "Outgoing calls not supported in Server mode".to_string() 
+            error!(
+                "Cannot make outgoing call: Outgoing calls not supported in {:?} mode",
+                Self::mode_name(&self.config)
+            );
+            return Err(ApiError::Configuration {
+                message: "Outgoing calls not supported in Server mode".to_string(),
             });
         }
-        
+
         info!("Making outgoing call from {} to {}", from_uri, to_uri);
-        
+
         // Parse URIs
-        let from_uri: Uri = from_uri.parse()
-            .map_err(|e| {
-                error!("Failed to parse from_uri '{}': {}", from_uri, e);
-                ApiError::Configuration { 
-                    message: format!("Invalid from_uri: {}", e) 
-                }
-            })?;
-        let to_uri: Uri = to_uri.parse()
-            .map_err(|e| {
-                error!("Failed to parse to_uri '{}': {}", to_uri, e);
-                ApiError::Configuration { 
-                    message: format!("Invalid to_uri: {}", e) 
-                }
-            })?;
-        
+        let from_uri: Uri = from_uri.parse().map_err(|e| {
+            error!("Failed to parse from_uri '{}': {}", from_uri, e);
+            ApiError::Configuration {
+                message: format!("Invalid from_uri: {}", e),
+            }
+        })?;
+        let to_uri: Uri = to_uri.parse().map_err(|e| {
+            error!("Failed to parse to_uri '{}': {}", to_uri, e);
+            ApiError::Configuration {
+                message: format!("Invalid to_uri: {}", e),
+            }
+        })?;
+
         // Create outgoing dialog
-        let dialog_id = self.core.create_outgoing_dialog(from_uri, to_uri, call_id).await
+        let dialog_id = self
+            .core
+            .create_outgoing_dialog(from_uri, to_uri, call_id)
+            .await
             .map_err(|e| {
                 error!("Failed to create outgoing dialog: {}", e);
                 ApiError::from(e)
@@ -493,8 +527,12 @@ impl UnifiedDialogManager {
         // processed. Pre-registering closes that window with a write that
         // is ordered-before the INVITE goes on the wire.
         if let Some(ref sid) = pre_register_session_id {
-            self.core.session_to_dialog.insert(sid.clone(), dialog_id.clone());
-            self.core.dialog_to_session.insert(dialog_id.clone(), sid.clone());
+            self.core
+                .session_to_dialog
+                .insert(sid.clone(), dialog_id.clone());
+            self.core
+                .dialog_to_session
+                .insert(dialog_id.clone(), sid.clone());
         }
 
         // Update stats
@@ -505,7 +543,11 @@ impl UnifiedDialogManager {
         }
 
         // Emit dialog creation event
-        self.core.emit_dialog_event(DialogEvent::Created { dialog_id: dialog_id.clone() }).await;
+        self.core
+            .emit_dialog_event(DialogEvent::Created {
+                dialog_id: dialog_id.clone(),
+            })
+            .await;
 
         // Send INVITE request. When the caller supplied extra headers
         // (P-Asserted-Identity etc.), route through the dedicated
@@ -513,7 +555,9 @@ impl UnifiedDialogManager {
         // on the very first wire INVITE; otherwise the generic path is fine.
         let body_bytes = sdp_offer.map(|s| bytes::Bytes::from(s));
         let send_result = if extra_headers.is_empty() {
-            self.core.send_request(&dialog_id, Method::Invite, body_bytes).await
+            self.core
+                .send_request(&dialog_id, Method::Invite, body_bytes)
+                .await
         } else {
             self.core
                 .send_initial_invite_with_extra_headers(&dialog_id, body_bytes, extra_headers)
@@ -522,33 +566,40 @@ impl UnifiedDialogManager {
         let _transaction_key = match send_result {
             Ok(tx_key) => tx_key,
             Err(e) => {
-                // RFC 3261 Section 17.1.1.3: INVITE client transactions terminate after 
+                // RFC 3261 Section 17.1.1.3: INVITE client transactions terminate after
                 // receiving 2xx responses and sending ACK. This is normal behavior, not an error.
                 let error_msg = e.to_string();
-                if error_msg.contains("Transaction terminated after timeout") || 
-                   error_msg.contains("Transaction terminated") {
+                if error_msg.contains("Transaction terminated after timeout")
+                    || error_msg.contains("Transaction terminated")
+                {
                     debug!("INVITE transaction terminated normally after 2xx response (RFC 3261 compliant): {}", e);
                     // This is expected behavior - the SIP call flow completed successfully
                     info!("Created outgoing call with dialog ID: {} (transaction completed per RFC 3261)", dialog_id);
-                    return Ok(CallHandle::new(dialog_id.clone(), Arc::new(self.core.clone())));
+                    return Ok(CallHandle::new(
+                        dialog_id.clone(),
+                        Arc::new(self.core.clone()),
+                    ));
                 }
-                
+
                 error!("Failed to send INVITE for call {}: {}", dialog_id, e);
                 return Err(ApiError::from(e));
             }
         };
-        
+
         // Create call handle
         let call_handle = CallHandle::new(dialog_id.clone(), Arc::new(self.core.clone()));
-        
-        info!("Created outgoing call with dialog ID: {} and sent INVITE", dialog_id);
-        
+
+        info!(
+            "Created outgoing call with dialog ID: {} and sent INVITE",
+            dialog_id
+        );
+
         Ok(call_handle)
     }
-    
+
     /// Create an outgoing dialog without sending INVITE (Client/Hybrid modes only)
     ///
-    /// Creates a dialog in preparation for sending requests. Useful for 
+    /// Creates a dialog in preparation for sending requests. Useful for
     /// scenarios where you want to create the dialog before sending the INVITE.
     ///
     /// # Arguments
@@ -560,49 +611,58 @@ impl UnifiedDialogManager {
     pub async fn create_dialog(&self, from_uri: &str, to_uri: &str) -> ApiResult<DialogHandle> {
         // Check if outgoing calls are supported
         if !self.config.supports_outgoing_calls() {
-            error!("Cannot create dialog: Dialog creation not supported in {:?} mode", 
-                Self::mode_name(&self.config));
-            return Err(ApiError::Configuration { 
-                message: "Dialog creation not supported in Server mode".to_string() 
+            error!(
+                "Cannot create dialog: Dialog creation not supported in {:?} mode",
+                Self::mode_name(&self.config)
+            );
+            return Err(ApiError::Configuration {
+                message: "Dialog creation not supported in Server mode".to_string(),
             });
         }
-        
+
         debug!("Creating outgoing dialog from {} to {}", from_uri, to_uri);
-        
+
         // Parse URIs
-        let from_uri: Uri = from_uri.parse()
-            .map_err(|e| {
-                error!("Failed to parse from_uri '{}' for dialog creation: {}", from_uri, e);
-                ApiError::Configuration { 
-                    message: format!("Invalid from_uri: {}", e) 
-                }
-            })?;
-        let to_uri: Uri = to_uri.parse()
-            .map_err(|e| {
-                error!("Failed to parse to_uri '{}' for dialog creation: {}", to_uri, e);
-                ApiError::Configuration { 
-                    message: format!("Invalid to_uri: {}", e) 
-                }
-            })?;
-        
+        let from_uri: Uri = from_uri.parse().map_err(|e| {
+            error!(
+                "Failed to parse from_uri '{}' for dialog creation: {}",
+                from_uri, e
+            );
+            ApiError::Configuration {
+                message: format!("Invalid from_uri: {}", e),
+            }
+        })?;
+        let to_uri: Uri = to_uri.parse().map_err(|e| {
+            error!(
+                "Failed to parse to_uri '{}' for dialog creation: {}",
+                to_uri, e
+            );
+            ApiError::Configuration {
+                message: format!("Invalid to_uri: {}", e),
+            }
+        })?;
+
         // Create outgoing dialog
-        let dialog_id = self.core.create_outgoing_dialog(from_uri, to_uri, None).await
+        let dialog_id = self
+            .core
+            .create_outgoing_dialog(from_uri, to_uri, None)
+            .await
             .map_err(|e| {
                 error!("Failed to create outgoing dialog: {}", e);
                 ApiError::from(e)
             })?;
-        
+
         // Create dialog handle
         let handle = DialogHandle::new(dialog_id.clone(), Arc::new(self.core.clone()));
-        
+
         debug!("Created dialog: {}", dialog_id);
         Ok(handle)
     }
-    
+
     // ========================================
     // SERVER-MODE OPERATIONS
     // ========================================
-    
+
     /// Handle incoming INVITE request (Server/Hybrid modes only)
     ///
     /// Processes an incoming INVITE to potentially establish a call.
@@ -614,48 +674,59 @@ impl UnifiedDialogManager {
     ///
     /// # Returns
     /// CallHandle for managing the incoming call
-    pub async fn handle_invite(&self, request: Request, source: SocketAddr) -> ApiResult<CallHandle> {
+    pub async fn handle_invite(
+        &self,
+        request: Request,
+        source: SocketAddr,
+    ) -> ApiResult<CallHandle> {
         // Check if incoming calls are supported
         if !self.config.supports_incoming_calls() {
-            error!("Cannot handle incoming INVITE: Incoming calls not supported in {:?} mode", 
-                Self::mode_name(&self.config));
-            return Err(ApiError::Configuration { 
-                message: "Incoming calls not supported in Client mode".to_string() 
+            error!(
+                "Cannot handle incoming INVITE: Incoming calls not supported in {:?} mode",
+                Self::mode_name(&self.config)
+            );
+            return Err(ApiError::Configuration {
+                message: "Incoming calls not supported in Client mode".to_string(),
             });
         }
-        
+
         info!("Handling incoming INVITE from {}", source);
-        
+
         // Process the INVITE through core dialog manager
-        self.core.handle_invite(request.clone(), source).await
+        self.core
+            .handle_invite(request.clone(), source)
+            .await
             .map_err(|e| {
                 error!("Failed to process incoming INVITE from {}: {}", source, e);
                 ApiError::from(e)
             })?;
-        
+
         // Find the dialog that was created for this INVITE
-        let dialog_id = self.core.find_dialog_for_request(&request).await
+        let dialog_id = self
+            .core
+            .find_dialog_for_request(&request)
+            .await
             .ok_or_else(|| {
                 error!("Failed to find dialog for INVITE request from {}", source);
-                ApiError::Dialog { 
-                    message: "Failed to find dialog for INVITE request".to_string() 
+                ApiError::Dialog {
+                    message: "Failed to find dialog for INVITE request".to_string(),
                 }
             })?;
-        
+
         // Update stats
         {
             let mut stats = self.stats.write().await;
             stats.incoming_calls += 1;
             stats.active_dialogs += 1;
         }
-        
+
         // Create call handle
         let call_handle = CallHandle::new(dialog_id.clone(), Arc::new(self.core.clone()));
-        
+
         info!("Created incoming call with dialog ID: {}", dialog_id);
         Ok(call_handle)
     }
-    
+
     /// Send automatic response to OPTIONS request (Server/Hybrid modes)
     ///
     /// Automatically responds to OPTIONS requests if auto_options is enabled.
@@ -665,26 +736,28 @@ impl UnifiedDialogManager {
         if !self.config.auto_options_enabled() {
             return Ok(()); // Not enabled, skip
         }
-        
+
         info!("Sending automatic OPTIONS response to {}", source);
-        
+
         // Process through core dialog manager
-        self.core.handle_options(request, source).await
+        self.core
+            .handle_options(request, source)
+            .await
             .map_err(ApiError::from)?;
-        
+
         // Update stats
         {
             let mut stats = self.stats.write().await;
             stats.auto_responses += 1;
         }
-        
+
         Ok(())
     }
-    
+
     // ========================================
     // SHARED OPERATIONS (ALL MODES)
     // ========================================
-    
+
     /// Send a request within an existing dialog
     ///
     /// Available in all modes for sending in-dialog requests.
@@ -700,18 +773,28 @@ impl UnifiedDialogManager {
         &self,
         dialog_id: &DialogId,
         method: Method,
-        body: Option<bytes::Bytes>
+        body: Option<bytes::Bytes>,
     ) -> ApiResult<TransactionKey> {
         debug!("Sending {} request in dialog {}", method, dialog_id);
 
         let method_str = method.to_string(); // Convert to string before move
-        self.core.send_request(dialog_id, method, body).await
+        self.core
+            .send_request(dialog_id, method, body)
+            .await
             .map_err(|e| {
                 // Log SIP protocol validation errors as WARN (not ERROR) since they're often expected
-                if e.to_string().contains("requires remote tag") || e.to_string().contains("protocol error") {
-                    warn!("SIP protocol validation failed for {} in dialog {}: {}", method_str, dialog_id, e);
+                if e.to_string().contains("requires remote tag")
+                    || e.to_string().contains("protocol error")
+                {
+                    warn!(
+                        "SIP protocol validation failed for {} in dialog {}: {}",
+                        method_str, dialog_id, e
+                    );
                 } else {
-                    error!("Failed to send {} request in dialog {}: {}", method_str, dialog_id, e);
+                    error!(
+                        "Failed to send {} request in dialog {}: {}",
+                        method_str, dialog_id, e
+                    );
                 }
                 ApiError::from(e)
             })
@@ -734,7 +817,7 @@ impl UnifiedDialogManager {
             .await
             .map_err(ApiError::from)
     }
-    
+
     /// Send a response to a transaction
     ///
     /// Available in all modes for sending responses to received requests.
@@ -745,17 +828,22 @@ impl UnifiedDialogManager {
     pub async fn send_response(
         &self,
         transaction_id: &TransactionKey,
-        response: Response
+        response: Response,
     ) -> ApiResult<()> {
         debug!("Sending response for transaction {}", transaction_id);
-        
-        self.core.send_response(transaction_id, response).await
+
+        self.core
+            .send_response(transaction_id, response)
+            .await
             .map_err(|e| {
-                error!("Failed to send response for transaction {}: {}", transaction_id, e);
+                error!(
+                    "Failed to send response for transaction {}: {}",
+                    transaction_id, e
+                );
                 ApiError::from(e)
             })
     }
-    
+
     /// Build a response for a transaction
     ///
     /// Constructs a properly formatted SIP response.
@@ -771,44 +859,49 @@ impl UnifiedDialogManager {
         &self,
         transaction_id: &TransactionKey,
         status_code: StatusCode,
-        body: Option<String>
+        body: Option<String>,
     ) -> ApiResult<Response> {
-        debug!("Building response for transaction {} with status {}", status_code, transaction_id);
-        
+        debug!(
+            "Building response for transaction {} with status {}",
+            status_code, transaction_id
+        );
+
         // Get the original request from the transaction manager to copy required headers
-        let original_request = self.core.transaction_manager()
+        let original_request = self
+            .core
+            .transaction_manager()
             .original_request(transaction_id)
             .await
-            .map_err(|e| ApiError::Internal { 
-                message: format!("Failed to get original request: {}", e) 
+            .map_err(|e| ApiError::Internal {
+                message: format!("Failed to get original request: {}", e),
             })?
-            .ok_or_else(|| ApiError::Internal { 
-                message: "No original request found for transaction".to_string() 
+            .ok_or_else(|| ApiError::Internal {
+                message: "No original request found for transaction".to_string(),
             })?;
-        
+
         // Use the proper response builder to create response with all required headers
         let mut response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
             &original_request,
             status_code,
-            None // No custom reason phrase
+            None, // No custom reason phrase
         );
-        
+
         // Add body if provided
         if let Some(body_content) = body {
             response = response.body(body_content.as_bytes().to_vec());
-            
+
             // Set content type for SDP content
             if body_content.trim_start().starts_with("v=") {
                 response = response.content_type("application/sdp");
             }
         }
-        
+
         let built_response = response.build();
-        
+
         debug!("Successfully built response for transaction {} using proper RFC 3261 compliant headers", transaction_id);
         Ok(built_response)
     }
-    
+
     /// Send a status response (convenience method)
     ///
     /// Builds and sends a simple status response.
@@ -821,48 +914,58 @@ impl UnifiedDialogManager {
         &self,
         transaction_id: &TransactionKey,
         status_code: StatusCode,
-        _reason: Option<String>
+        _reason: Option<String>,
     ) -> ApiResult<()> {
-        debug!("Sending status response {} for transaction {}", status_code, transaction_id);
-        
-        let response = self.build_response(transaction_id, status_code, None).await?;
+        debug!(
+            "Sending status response {} for transaction {}",
+            status_code, transaction_id
+        );
+
+        let response = self
+            .build_response(transaction_id, status_code, None)
+            .await?;
         self.send_response(transaction_id, response).await
     }
-    
+
     // ========================================
     // SIP METHOD HELPERS (ALL MODES)
     // ========================================
-    
+
     /// Send BYE request to terminate a dialog
     pub async fn send_bye(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
-        self.send_request_in_dialog(dialog_id, Method::Bye, None).await
+        self.send_request_in_dialog(dialog_id, Method::Bye, None)
+            .await
     }
-    
+
     /// Send REFER request for call transfer
     pub async fn send_refer(
         &self,
         dialog_id: &DialogId,
         target_uri: String,
-        refer_body: Option<String>
+        refer_body: Option<String>,
     ) -> ApiResult<TransactionKey> {
         let body = if let Some(custom_body) = refer_body {
             custom_body
         } else {
             format!("Refer-To: {}\r\n", target_uri)
         };
-        
-        self.send_request_in_dialog(dialog_id, Method::Refer, Some(bytes::Bytes::from(body))).await
+
+        self.send_request_in_dialog(dialog_id, Method::Refer, Some(bytes::Bytes::from(body)))
+            .await
     }
-    
+
     /// Send NOTIFY request for event notifications
     pub async fn send_notify(
         &self,
         dialog_id: &DialogId,
         event: String,
         body: Option<String>,
-        subscription_state: Option<String>
+        subscription_state: Option<String>,
     ) -> ApiResult<TransactionKey> {
-        debug!("Sending NOTIFY for event: {} with state: {:?}", event, subscription_state);
+        debug!(
+            "Sending NOTIFY for event: {} with state: {:?}",
+            event, subscription_state
+        );
 
         // Update dialog's event_package and subscription_state before building request
         {
@@ -875,7 +978,9 @@ impl UnifiedDialogManager {
 
             // Set subscription state if provided
             if let Some(state_str) = subscription_state {
-                use crate::dialog::subscription_state::{SubscriptionState, SubscriptionTerminationReason};
+                use crate::dialog::subscription_state::{
+                    SubscriptionState, SubscriptionTerminationReason,
+                };
                 use std::time::Duration;
 
                 // Parse simple subscription state strings to SubscriptionState enum
@@ -883,13 +988,17 @@ impl UnifiedDialogManager {
                     // Extract expires value if present
                     let expires = if let Some(pos) = state_str.find("expires=") {
                         let exp_str = &state_str[pos + 8..];
-                        exp_str.split(';').next().and_then(|s| s.parse::<u64>().ok()).unwrap_or(3600)
+                        exp_str
+                            .split(';')
+                            .next()
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(3600)
                     } else {
                         3600
                     };
                     SubscriptionState::Active {
                         remaining_duration: Duration::from_secs(expires),
-                        original_duration: Duration::from_secs(expires)
+                        original_duration: Duration::from_secs(expires),
                     }
                 } else if state_str.starts_with("pending") {
                     SubscriptionState::Pending
@@ -917,7 +1026,8 @@ impl UnifiedDialogManager {
         }
 
         let notify_body = body.map(|b| bytes::Bytes::from(b));
-        self.send_request_in_dialog(dialog_id, Method::Notify, notify_body).await
+        self.send_request_in_dialog(dialog_id, Method::Notify, notify_body)
+            .await
     }
 
     /// Send NOTIFY for REFER implicit subscription (RFC 3515)
@@ -932,13 +1042,13 @@ impl UnifiedDialogManager {
         &self,
         dialog_id: &DialogId,
         status_code: u16,
-        reason: &str
+        reason: &str,
     ) -> ApiResult<TransactionKey> {
         // RFC 3515: REFER creates implicit subscription that terminates after final response
         let subscription_state = if status_code >= 200 {
-            "terminated;reason=noresource".to_string()  // Final response terminates subscription
+            "terminated;reason=noresource".to_string() // Final response terminates subscription
         } else {
-            "active;expires=60".to_string()  // Provisional response keeps subscription active
+            "active;expires=60".to_string() // Provisional response keeps subscription active
         };
 
         // Body is sipfrag format per RFC 3515
@@ -948,18 +1058,20 @@ impl UnifiedDialogManager {
             dialog_id,
             "refer".to_string(),
             Some(sipfrag_body),
-            Some(subscription_state)
-        ).await
+            Some(subscription_state),
+        )
+        .await
     }
 
     /// Send UPDATE request for media modifications
     pub async fn send_update(
         &self,
         dialog_id: &DialogId,
-        sdp: Option<String>
+        sdp: Option<String>,
     ) -> ApiResult<TransactionKey> {
         let update_body = sdp.map(|s| bytes::Bytes::from(s));
-        self.send_request_in_dialog(dialog_id, Method::Update, update_body).await
+        self.send_request_in_dialog(dialog_id, Method::Update, update_body)
+            .await
     }
 
     /// Send PRACK for a reliable provisional response (RFC 3262).
@@ -967,24 +1079,24 @@ impl UnifiedDialogManager {
     /// `rseq` is the `RSeq` value of the 18x being acknowledged. The dialog
     /// must already have its `invite_cseq` recorded (set on initial INVITE)
     /// and must have a remote tag (established by the reliable 18x itself).
-    pub async fn send_prack(
-        &self,
-        dialog_id: &DialogId,
-        rseq: u32,
-    ) -> ApiResult<TransactionKey> {
+    pub async fn send_prack(&self, dialog_id: &DialogId, rseq: u32) -> ApiResult<TransactionKey> {
         self.core.send_prack(dialog_id, rseq).await.map_err(|e| {
-            error!("Failed to send PRACK for dialog {} (RSeq={}): {}", dialog_id, rseq, e);
+            error!(
+                "Failed to send PRACK for dialog {} (RSeq={}): {}",
+                dialog_id, rseq, e
+            );
             ApiError::from(e)
         })
     }
-    
+
     /// Send INFO request for application-specific information
     pub async fn send_info(
         &self,
         dialog_id: &DialogId,
-        info_body: String
+        info_body: String,
     ) -> ApiResult<TransactionKey> {
-        self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body))).await
+        self.send_request_in_dialog(dialog_id, Method::Info, Some(bytes::Bytes::from(info_body)))
+            .await
     }
 
     /// RFC 3261 §22.2 — resend an INVITE with a digest authorization header
@@ -1024,7 +1136,7 @@ impl UnifiedDialogManager {
             .await
             .map_err(ApiError::from)
     }
-    
+
     /// Send CANCEL request to cancel a pending INVITE
     ///
     /// This method cancels a pending INVITE transaction that hasn't received a final response.
@@ -1044,78 +1156,88 @@ impl UnifiedDialogManager {
     pub async fn send_cancel(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
         // Get the dialog state to verify it can be cancelled
         let dialog_state = self.get_dialog_state(dialog_id).await?;
-        
+
         match dialog_state {
             DialogState::Initial | DialogState::Early => {
-                info!("Sending CANCEL for dialog {} in state {:?}", dialog_id, dialog_state);
-            },
+                info!(
+                    "Sending CANCEL for dialog {} in state {:?}",
+                    dialog_id, dialog_state
+                );
+            }
             _ => {
                 error!("Cannot send CANCEL for dialog {} in state {:?} - must be in Initial or Early state", 
                       dialog_id, dialog_state);
-                return Err(ApiError::Protocol { 
-                    message: format!("Cannot cancel dialog in state {:?}", dialog_state) 
+                return Err(ApiError::Protocol {
+                    message: format!("Cannot cancel dialog in state {:?}", dialog_state),
                 });
             }
         }
-        
+
         // Find the INVITE transaction for this dialog
-        let invite_tx_id = self.core.find_invite_transaction_for_dialog(dialog_id)
+        let invite_tx_id = self
+            .core
+            .find_invite_transaction_for_dialog(dialog_id)
             .ok_or_else(|| {
                 error!("No INVITE transaction found for dialog {}", dialog_id);
-                ApiError::Protocol { 
-                    message: "No INVITE transaction found to cancel".to_string() 
+                ApiError::Protocol {
+                    message: "No INVITE transaction found to cancel".to_string(),
                 }
             })?;
-        
+
         // Cancel the INVITE transaction
-        let cancel_tx_id = self.core.cancel_invite_transaction_with_dialog(&invite_tx_id).await
+        let cancel_tx_id = self
+            .core
+            .cancel_invite_transaction_with_dialog(&invite_tx_id)
+            .await
             .map_err(|e| {
-                error!("Failed to cancel INVITE transaction {} for dialog {}: {}", 
-                      invite_tx_id, dialog_id, e);
+                error!(
+                    "Failed to cancel INVITE transaction {} for dialog {}: {}",
+                    invite_tx_id, dialog_id, e
+                );
                 ApiError::from(e)
             })?;
-        
-        info!("Successfully sent CANCEL (tx: {}) for dialog {}", cancel_tx_id, dialog_id);
+
+        info!(
+            "Successfully sent CANCEL (tx: {}) for dialog {}",
+            cancel_tx_id, dialog_id
+        );
         Ok(cancel_tx_id)
     }
-    
+
     // ========================================
     // DIALOG MANAGEMENT (ALL MODES)
     // ========================================
-    
+
     /// Get information about a dialog
     pub async fn get_dialog_info(&self, dialog_id: &DialogId) -> ApiResult<Dialog> {
-        self.core.get_dialog(dialog_id)
-            .map_err(|e| {
-                warn!("Failed to get dialog info for {}: {}", dialog_id, e);
-                ApiError::from(e)
-            })
+        self.core.get_dialog(dialog_id).map_err(|e| {
+            warn!("Failed to get dialog info for {}: {}", dialog_id, e);
+            ApiError::from(e)
+        })
     }
-    
+
     /// Get the current state of a dialog
     pub async fn get_dialog_state(&self, dialog_id: &DialogId) -> ApiResult<DialogState> {
-        self.core.get_dialog_state(dialog_id)
-            .map_err(|e| {
-                warn!("Failed to get dialog state for {}: {}", dialog_id, e);
-                ApiError::from(e)
-            })
+        self.core.get_dialog_state(dialog_id).map_err(|e| {
+            warn!("Failed to get dialog state for {}: {}", dialog_id, e);
+            ApiError::from(e)
+        })
     }
-    
+
     /// Terminate a dialog
     pub async fn terminate_dialog(&self, dialog_id: &DialogId) -> ApiResult<()> {
         info!("Terminating dialog {}", dialog_id);
-        self.core.terminate_dialog(dialog_id).await
-            .map_err(|e| {
-                error!("Failed to terminate dialog {}: {}", dialog_id, e);
-                ApiError::from(e)
-            })
+        self.core.terminate_dialog(dialog_id).await.map_err(|e| {
+            error!("Failed to terminate dialog {}: {}", dialog_id, e);
+            ApiError::from(e)
+        })
     }
-    
+
     /// List all active dialogs
     pub async fn list_active_dialogs(&self) -> Vec<DialogId> {
         self.core.list_dialogs()
     }
-    
+
     /// Get statistics for this manager
     pub async fn get_stats(&self) -> ManagerStats {
         let stats = self.stats.read().await;
@@ -1131,7 +1253,7 @@ impl UnifiedDialogManager {
             auto_responses: stats.auto_responses,
         }
     }
-    
+
     /// Send ACK for 2xx response to INVITE
     ///
     /// Handles the automatic ACK sending required by RFC 3261 for 200 OK responses to INVITE.
@@ -1148,13 +1270,21 @@ impl UnifiedDialogManager {
         &self,
         dialog_id: &DialogId,
         original_invite_tx_id: &TransactionKey,
-        response: &Response
+        response: &Response,
     ) -> ApiResult<()> {
-        debug!("Sending ACK for 2xx response for dialog {} via unified API", dialog_id);
-        
-        self.core.send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response).await
+        debug!(
+            "Sending ACK for 2xx response for dialog {} via unified API",
+            dialog_id
+        );
+
+        self.core
+            .send_ack_for_2xx_response(dialog_id, original_invite_tx_id, response)
+            .await
             .map_err(|e| {
-                error!("Failed to send ACK for 2xx response for dialog {}: {}", dialog_id, e);
+                error!(
+                    "Failed to send ACK for 2xx response for dialog {}: {}",
+                    dialog_id, e
+                );
                 ApiError::from(e)
             })
     }

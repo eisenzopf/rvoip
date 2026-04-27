@@ -4,7 +4,7 @@
 use nom::{
     branch::alt,
     bytes::complete::tag_no_case,
-    combinator::{map, opt, map_res, all_consuming},
+    combinator::{all_consuming, map, map_res, opt},
     sequence::{pair, preceded, terminated},
     IResult,
 };
@@ -12,8 +12,8 @@ use std::str;
 
 // Import from other modules
 use crate::parser::separators::hcolon;
-use crate::parser::values::text_utf8_trim;
 use crate::parser::utils::unfold_lws;
+use crate::parser::values::text_utf8_trim;
 use crate::parser::ParseResult;
 use crate::types::subject::Subject;
 
@@ -25,16 +25,19 @@ pub fn parse_subject(input: &[u8]) -> ParseResult<Subject> {
     if input.is_empty() {
         return Ok((input, Subject::new("")));
     }
-    
+
     // For Subject header, the entire input is considered valid text
     // Even if it's just whitespace, we'll process it as subject text
     // Apply UTF-8 validation and unfold any LWS according to RFC
     let unfolded = unfold_lws(input);
-    
+
     // Convert to UTF-8 string and create a Subject
     match str::from_utf8(&unfolded) {
         Ok(text) => Ok((&input[input.len()..], Subject::new(text))),
-        Err(_) => Err(nom::Err::Failure(nom::error::Error::new(input, nom::error::ErrorKind::Char)))
+        Err(_) => Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Char,
+        ))),
     }
 }
 
@@ -42,22 +45,16 @@ pub fn parse_subject(input: &[u8]) -> ParseResult<Subject> {
 /// This handles both the standard "Subject:" form and the compact "s:" form.
 pub fn parse_subject_header(input: &[u8]) -> ParseResult<Subject> {
     preceded(
-        terminated(
-            alt((
-                tag_no_case(b"Subject"),
-                tag_no_case(b"s")
-            )),
-            hcolon
-        ),
-        parse_subject
+        terminated(alt((tag_no_case(b"Subject"), tag_no_case(b"s"))), hcolon),
+        parse_subject,
     )(input)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nom::combinator::all_consuming;
     use crate::parser::utils::unfold_lws;
+    use nom::combinator::all_consuming;
 
     // Test helper for fully consuming the input
     fn test_parse_subject(input: &[u8]) -> Result<Subject, nom::Err<nom::error::Error<&[u8]>>> {
@@ -92,7 +89,7 @@ mod tests {
     #[test]
     fn test_parse_subject_utf8() {
         // Subject with UTF-8 characters
-        let input = b"Meeting about \xE2\x82\xAC currency";  // € symbol
+        let input = b"Meeting about \xE2\x82\xAC currency"; // € symbol
         let result = test_parse_subject(input).unwrap();
         assert_eq!(result.text(), "Meeting about € currency");
     }
@@ -104,7 +101,7 @@ mod tests {
         let input = b"This is a\r\n folded subject";
         let unfolded_bytes = unfold_lws(input);
         let expected = str::from_utf8(&unfolded_bytes).unwrap();
-        
+
         let result = parse_subject(input).unwrap().1;
         assert_eq!(result.text(), expected);
         assert_eq!(result.text(), "This is a folded subject");
@@ -116,7 +113,7 @@ mod tests {
         let input = b"Multi\r\n line\r\n\tfolded\r\n  text";
         let unfolded_bytes = unfold_lws(input);
         let expected = str::from_utf8(&unfolded_bytes).unwrap();
-        
+
         let result = parse_subject(input).unwrap().1;
         assert_eq!(result.text(), expected);
         assert_eq!(result.text(), "Multi line folded text");
@@ -177,7 +174,7 @@ mod tests {
         let input = b"Subject: Need more boxes";
         let (_, subject) = parse_subject_header(input).unwrap();
         assert_eq!(subject.text(), "Need more boxes");
-        
+
         // RFC example with compact form
         let input = b"s: Call me back";
         let (_, subject) = parse_subject_header(input).unwrap();
@@ -187,10 +184,10 @@ mod tests {
     #[test]
     fn test_rfc4475_examples() {
         // Torture test cases from RFC 4475
-        
+
         // Complex folding with extra whitespace
         let input = b"Subject: A \r\n  folded  \r\n   header\r\n   value";
         let (_, subject) = parse_subject_header(input).unwrap();
         assert_eq!(subject.text(), "A folded header value");
     }
-} 
+}

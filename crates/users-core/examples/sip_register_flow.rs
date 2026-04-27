@@ -1,14 +1,14 @@
 //! SIP REGISTER flow with JWT authentication
-//! 
+//!
 //! This example demonstrates how session-core-v2 would handle:
 //! - Extracting bearer tokens from SIP headers
 //! - Validating tokens
 //! - Creating SIP registrations
 
-use users_core::{init, UsersConfig, CreateUserRequest, UserClaims};
-use jsonwebtoken::{decode, Algorithm, Validation, DecodingKey};
 use anyhow::Result;
+use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use std::collections::HashMap;
+use users_core::{init, CreateUserRequest, UserClaims, UsersConfig};
 
 // Simulated SIP REGISTER message
 struct SipRegister {
@@ -35,37 +35,41 @@ async fn main() -> Result<()> {
         database_url: "sqlite://sip_example.db?mode=rwc".to_string(),
         ..Default::default()
     };
-    
+
     let auth_service = init(config).await?;
 
     // Create SIP users
     println!("📝 Creating SIP users...");
-    
-    let alice = auth_service.create_user(CreateUserRequest {
-        username: "alice".to_string(),
-        password: "SecurePass2024!".to_string(),
-        email: Some("alice@example.com".to_string()),
-        display_name: Some("Alice Smith".to_string()),
-        roles: vec!["user".to_string()],
-    }).await?;
 
-    let bob = auth_service.create_user(CreateUserRequest {
-        username: "bob".to_string(),
-        password: "SecurePass2024!".to_string(),
-        email: Some("bob@example.com".to_string()),
-        display_name: Some("Bob Jones".to_string()),
-        roles: vec!["user".to_string()],
-    }).await?;
+    let alice = auth_service
+        .create_user(CreateUserRequest {
+            username: "alice".to_string(),
+            password: "SecurePass2024!".to_string(),
+            email: Some("alice@example.com".to_string()),
+            display_name: Some("Alice Smith".to_string()),
+            roles: vec!["user".to_string()],
+        })
+        .await?;
+
+    let bob = auth_service
+        .create_user(CreateUserRequest {
+            username: "bob".to_string(),
+            password: "SecurePass2024!".to_string(),
+            email: Some("bob@example.com".to_string()),
+            display_name: Some("Bob Jones".to_string()),
+            roles: vec!["user".to_string()],
+        })
+        .await?;
 
     println!("✅ Created users: {} and {}", alice.username, bob.username);
 
     // Simulate SIP client authentication
     println!("\n🔐 SIP clients authenticate to get JWT tokens...");
-    
+
     let alice_auth = auth_service
         .authenticate_password("alice", "SecurePass2024!")
         .await?;
-    
+
     println!("✅ Alice authenticated, got JWT token");
 
     // Simulate SIP REGISTER request
@@ -79,7 +83,7 @@ async fn main() -> Result<()> {
 
     // This is what session-core-v2 would do:
     println!("\n🔍 Session-core-v2 processes REGISTER...");
-    
+
     // 1. Extract bearer token
     let token = extract_bearer_token(&register.authorization)?;
     println!("   ✓ Extracted bearer token");
@@ -107,7 +111,7 @@ async fn main() -> Result<()> {
         contact: register.contact.clone(),
         expires: 3600,
     };
-    
+
     registrations.insert(claims.sub.clone(), registration);
     println!("   ✓ Created SIP registration");
     println!("     - Contact: {}", register.contact);
@@ -115,7 +119,7 @@ async fn main() -> Result<()> {
 
     // Handle expired token scenario
     println!("\n⏰ Simulating expired token scenario...");
-    
+
     // Create a register with no auth header
     let register_no_auth = SipRegister {
         from: "sip:bob@voip.example.com".to_string(),
@@ -131,12 +135,12 @@ async fn main() -> Result<()> {
 
     // Handle multi-device registration
     println!("\n📱 Handling multi-device registration...");
-    
+
     // Alice registers from mobile device
     let alice_mobile_auth = auth_service
         .authenticate_password("alice", "SecurePass2024!")
         .await?;
-    
+
     let mobile_register = SipRegister {
         from: "sip:alice@voip.example.com".to_string(),
         to: "sip:alice@voip.example.com".to_string(),
@@ -146,7 +150,7 @@ async fn main() -> Result<()> {
 
     let mobile_token = extract_bearer_token(&mobile_register.authorization)?;
     let mobile_claims = validate_token(mobile_token, &public_key)?;
-    
+
     println!("✅ Alice registered from second device");
     println!("   - Desktop: sip:alice@192.168.1.100:5060");
     println!("   - Mobile:  {}", mobile_register.contact);
@@ -162,7 +166,7 @@ async fn main() -> Result<()> {
 
     // Clean up
     std::fs::remove_file("sip_example.db").ok();
-    
+
     println!("\n✨ SIP REGISTER example completed!");
     Ok(())
 }
@@ -177,12 +181,12 @@ fn extract_bearer_token(auth_header: &Option<String>) -> Result<&str> {
 
 fn validate_token(token: &str, public_key_pem: &str) -> Result<UserClaims> {
     let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
-    
+
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-api", "rvoip-sip"]);
-    
+
     let token_data = decode::<UserClaims>(token, &decoding_key, &validation)?;
-    
+
     Ok(token_data.claims)
 }

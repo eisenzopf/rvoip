@@ -4,10 +4,10 @@
 //! as part of the Transport/Media plane separation. These components handle
 //! media-specific operations like mixing, CSRC management, and header extensions.
 
-pub mod mixing;
 pub mod csrc;
 pub mod extensions;
+pub mod mixing;
 
-pub use mixing::*;
 pub use csrc::*;
 pub use extensions::*;
+pub use mixing::*;

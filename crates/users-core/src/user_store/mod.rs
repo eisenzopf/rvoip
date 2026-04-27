@@ -1,9 +1,9 @@
 //! User storage interface
 
+use crate::{CreateUserRequest, Error, Result, UpdateUserRequest, User, UserFilter};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::{SqlitePool, Row};
-use crate::{Result, Error, User, CreateUserRequest, UpdateUserRequest, UserFilter};
+use sqlx::{Row, SqlitePool};
 
 /// User storage trait
 #[async_trait]
@@ -28,17 +28,17 @@ impl SqliteUserStore {
         let pool = SqlitePool::connect(database_url)
             .await
             .map_err(|e| Error::Database(e))?;
-        
+
         // Run migrations
         let migration_sql = include_str!("../../migrations/001_initial_schema.sql");
         sqlx::raw_sql(migration_sql)
             .execute(&pool)
             .await
             .map_err(|e| Error::Database(e))?;
-        
+
         Ok(Self { pool })
     }
-    
+
     /// Get the underlying pool
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -54,22 +54,22 @@ impl UserStore for SqliteUserStore {
         if existing.is_some() {
             return Err(Error::UserAlreadyExists(request.username));
         }
-        
+
         let user = User {
             id: User::new_id(),
             username: request.username,
             email: request.email,
             display_name: request.display_name,
-            password_hash: request.password,  // Note: This should be hashed by AuthenticationService
+            password_hash: request.password, // Note: This should be hashed by AuthenticationService
             roles: request.roles,
             active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_login: None,
         };
-        
+
         let roles_json = serde_json::to_string(&user.roles).unwrap();
-        
+
         sqlx::query(
             "INSERT INTO users (id, username, email, display_name, password_hash, roles, active, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -85,10 +85,10 @@ impl UserStore for SqliteUserStore {
         .bind(&user.updated_at)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(user)
     }
-    
+
     async fn get_user(&self, id: &str) -> Result<Option<User>> {
         let row = sqlx::query(
             "SELECT id, username, email, display_name, password_hash, roles, active, created_at, updated_at, last_login
@@ -97,10 +97,10 @@ impl UserStore for SqliteUserStore {
         .bind(id)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row.map(|row| self.row_to_user(row)))
     }
-    
+
     async fn get_user_by_username(&self, username: &str) -> Result<Option<User>> {
         let row = sqlx::query(
             "SELECT id, username, email, display_name, password_hash, roles, active, created_at, updated_at, last_login
@@ -109,14 +109,16 @@ impl UserStore for SqliteUserStore {
         .bind(username)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         Ok(row.map(|row| self.row_to_user(row)))
     }
-    
+
     async fn update_user(&self, id: &str, updates: UpdateUserRequest) -> Result<User> {
-        let mut user = self.get_user(id).await?
+        let mut user = self
+            .get_user(id)
+            .await?
             .ok_or_else(|| Error::UserNotFound(id.to_string()))?;
-        
+
         // Apply updates
         if let Some(email) = updates.email {
             user.email = Some(email);
@@ -130,13 +132,13 @@ impl UserStore for SqliteUserStore {
         if let Some(active) = updates.active {
             user.active = active;
         }
-        
+
         user.updated_at = Utc::now();
         let roles_json = serde_json::to_string(&user.roles).unwrap();
-        
+
         sqlx::query(
             "UPDATE users SET email = ?, display_name = ?, roles = ?, active = ?, updated_at = ?
-             WHERE id = ?"
+             WHERE id = ?",
         )
         .bind(&user.email)
         .bind(&user.display_name)
@@ -146,23 +148,23 @@ impl UserStore for SqliteUserStore {
         .bind(id)
         .execute(&self.pool)
         .await?;
-        
+
         Ok(user)
     }
-    
+
     async fn delete_user(&self, id: &str) -> Result<()> {
         let result = sqlx::query("DELETE FROM users WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
-        
+
         if result.rows_affected() == 0 {
             return Err(Error::UserNotFound(id.to_string()));
         }
-        
+
         Ok(())
     }
-    
+
     async fn list_users(&self, filter: UserFilter) -> Result<Vec<User>> {
         // Base query with proper parameterization
         let mut query_str = String::from(
@@ -170,42 +172,42 @@ impl UserStore for SqliteUserStore {
              FROM users WHERE 1=1"
         );
         let mut params: Vec<String> = Vec::new();
-        
+
         // Build conditions safely
         if let Some(active) = filter.active {
             query_str.push_str(" AND active = ?");
             params.push(if active { "1" } else { "0" }.to_string());
         }
-        
+
         if let Some(role) = filter.role {
             // Sanitize role input - remove quotes and percent signs
             let safe_role = role.replace('"', "").replace('%', "").replace('\'', "");
             query_str.push_str(" AND roles LIKE ?");
             params.push(format!("%\"{}%", safe_role));
         }
-        
+
         if let Some(search) = filter.search {
             // Validate search length
             if search.len() > 100 {
                 return Err(Error::Validation("Search term too long".to_string()));
             }
-            
+
             // Escape special LIKE characters for SQL
             let safe_search = search
-                .replace('\\', "\\\\")  // Escape backslash first
-                .replace('%', "\\%")    // Escape percent
-                .replace('_', "\\_")    // Escape underscore
-                .replace('\'', "''");   // Escape single quote
-            
+                .replace('\\', "\\\\") // Escape backslash first
+                .replace('%', "\\%") // Escape percent
+                .replace('_', "\\_") // Escape underscore
+                .replace('\'', "''"); // Escape single quote
+
             query_str.push_str(" AND (username LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR display_name LIKE ? ESCAPE '\\')");
             let search_pattern = format!("%{}%", safe_search);
             params.push(search_pattern.clone());
             params.push(search_pattern.clone());
             params.push(search_pattern);
         }
-        
+
         query_str.push_str(" ORDER BY created_at DESC");
-        
+
         if let Some(limit) = filter.limit {
             // Validate limit
             if limit > 1000 {
@@ -214,7 +216,7 @@ impl UserStore for SqliteUserStore {
             query_str.push_str(" LIMIT ?");
             params.push(limit.to_string());
         }
-        
+
         if let Some(offset) = filter.offset {
             // Validate offset
             if offset > 100000 {
@@ -223,13 +225,13 @@ impl UserStore for SqliteUserStore {
             query_str.push_str(" OFFSET ?");
             params.push(offset.to_string());
         }
-        
+
         // Execute with proper parameter binding
         let mut query = sqlx::query(&query_str);
         for param in params {
             query = query.bind(param);
         }
-        
+
         let rows = query.fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(|row| self.row_to_user(row)).collect())
     }
@@ -255,27 +257,31 @@ impl SqliteUserStore {
 // Also implement ApiKeyStore trait
 #[async_trait]
 impl crate::ApiKeyStore for SqliteUserStore {
-    async fn create_api_key(&self, request: crate::api_keys::CreateApiKeyRequest) -> Result<(crate::ApiKey, String)> {
+    async fn create_api_key(
+        &self,
+        request: crate::api_keys::CreateApiKeyRequest,
+    ) -> Result<(crate::ApiKey, String)> {
         use rand::Rng;
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         // Validate the request first
         request.validate()?;
-        
+
         // Generate the actual API key
-        let raw_key = format!("rvoip_ak_live_{}", 
+        let raw_key = format!(
+            "rvoip_ak_live_{}",
             rand::thread_rng()
                 .sample_iter(&rand::distributions::Alphanumeric)
                 .take(32)
                 .map(char::from)
                 .collect::<String>()
         );
-        
+
         // Hash the key for storage
         let mut hasher = Sha256::new();
         hasher.update(raw_key.as_bytes());
         let key_hash = format!("{:x}", hasher.finalize());
-        
+
         let api_key = crate::ApiKey {
             id: crate::User::new_id(),
             user_id: request.user_id,
@@ -286,9 +292,9 @@ impl crate::ApiKeyStore for SqliteUserStore {
             last_used: None,
             created_at: Utc::now(),
         };
-        
+
         let permissions_json = serde_json::to_string(&api_key.permissions).unwrap();
-        
+
         sqlx::query(
             "INSERT INTO api_keys (id, user_id, name, key_hash, permissions, expires_at, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)"
@@ -302,26 +308,26 @@ impl crate::ApiKeyStore for SqliteUserStore {
         .bind(&api_key.created_at)
         .execute(&self.pool)
         .await?;
-        
+
         Ok((api_key, raw_key))
     }
-    
+
     async fn validate_api_key(&self, key: &str) -> Result<Option<crate::ApiKey>> {
-        use sha2::{Sha256, Digest};
-        
+        use sha2::{Digest, Sha256};
+
         // Hash the provided key
         let mut hasher = Sha256::new();
         hasher.update(key.as_bytes());
         let key_hash = format!("{:x}", hasher.finalize());
-        
+
         let row = sqlx::query(
             "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
-             FROM api_keys WHERE key_hash = ?"
+             FROM api_keys WHERE key_hash = ?",
         )
         .bind(&key_hash)
         .fetch_optional(&self.pool)
         .await?;
-        
+
         if let Some(row) = row {
             let mut api_key = crate::ApiKey {
                 id: row.get("id"),
@@ -333,14 +339,14 @@ impl crate::ApiKeyStore for SqliteUserStore {
                 last_used: row.get("last_used"),
                 created_at: row.get("created_at"),
             };
-            
+
             // Check if expired
             if let Some(expires_at) = api_key.expires_at {
                 if expires_at < Utc::now() {
                     return Err(Error::ApiKeyExpired);
                 }
             }
-            
+
             // Update last_used
             let now = Utc::now();
             sqlx::query("UPDATE api_keys SET last_used = ? WHERE id = ?")
@@ -348,47 +354,50 @@ impl crate::ApiKeyStore for SqliteUserStore {
                 .bind(&api_key.id)
                 .execute(&self.pool)
                 .await?;
-            
+
             // Update the returned object to reflect the change
             api_key.last_used = Some(now);
-            
+
             Ok(Some(api_key))
         } else {
             Ok(None)
         }
     }
-    
+
     async fn revoke_api_key(&self, id: &str) -> Result<()> {
         let result = sqlx::query("DELETE FROM api_keys WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await?;
-        
+
         if result.rows_affected() == 0 {
             return Err(Error::ApiKeyNotFound);
         }
-        
+
         Ok(())
     }
-    
+
     async fn list_api_keys(&self, user_id: &str) -> Result<Vec<crate::ApiKey>> {
         let rows = sqlx::query(
             "SELECT id, user_id, name, key_hash, permissions, expires_at, last_used, created_at
-             FROM api_keys WHERE user_id = ? ORDER BY created_at DESC"
+             FROM api_keys WHERE user_id = ? ORDER BY created_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
         .await?;
-        
-        Ok(rows.into_iter().map(|row| crate::ApiKey {
-            id: row.get("id"),
-            user_id: row.get("user_id"),
-            name: row.get("name"),
-            key_hash: row.get("key_hash"),
-            permissions: serde_json::from_str(row.get("permissions")).unwrap_or_default(),
-            expires_at: row.get("expires_at"),
-            last_used: row.get("last_used"),
-            created_at: row.get("created_at"),
-        }).collect())
+
+        Ok(rows
+            .into_iter()
+            .map(|row| crate::ApiKey {
+                id: row.get("id"),
+                user_id: row.get("user_id"),
+                name: row.get("name"),
+                key_hash: row.get("key_hash"),
+                permissions: serde_json::from_str(row.get("permissions")).unwrap_or_default(),
+                expires_at: row.get("expires_at"),
+                last_used: row.get("last_used"),
+                created_at: row.get("created_at"),
+            })
+            .collect())
     }
 }

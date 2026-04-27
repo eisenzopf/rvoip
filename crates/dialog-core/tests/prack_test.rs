@@ -16,8 +16,8 @@ use rvoip_dialog_core::manager::transaction_integration::{
 };
 use rvoip_dialog_core::transaction::dialog::prack_for_dialog;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
-use rvoip_sip_core::types::{HeaderName, Method, RSeq, Require, Supported, TypedHeader};
 use rvoip_sip_core::types::rack::RAck;
+use rvoip_sip_core::types::{HeaderName, Method, RSeq, Require, Supported, TypedHeader};
 use rvoip_sip_core::{Response, StatusCode, Uri, Version};
 use std::net::SocketAddr;
 use std::str::FromStr;
@@ -86,7 +86,13 @@ fn inject_supported_adds_100rel_when_absent() {
     let sup = req
         .headers
         .iter()
-        .find_map(|h| if let TypedHeader::Supported(s) = h { Some(s) } else { None })
+        .find_map(|h| {
+            if let TypedHeader::Supported(s) = h {
+                Some(s)
+            } else {
+                None
+            }
+        })
         .expect("Supported header should be present");
     assert!(sup.option_tags.iter().any(|t| t == "100rel"));
 }
@@ -95,7 +101,9 @@ fn inject_supported_adds_100rel_when_absent() {
 fn inject_supported_appends_to_existing() {
     let mut req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
         .unwrap()
-        .header(TypedHeader::Supported(Supported::new(vec!["timer".to_string()])))
+        .header(TypedHeader::Supported(Supported::new(vec![
+            "timer".to_string()
+        ])))
         .build();
     inject_100rel_policy(&mut req, RelUsage::Supported);
 
@@ -103,7 +111,13 @@ fn inject_supported_appends_to_existing() {
     let sups: Vec<_> = req
         .headers
         .iter()
-        .filter_map(|h| if let TypedHeader::Supported(s) = h { Some(s) } else { None })
+        .filter_map(|h| {
+            if let TypedHeader::Supported(s) = h {
+                Some(s)
+            } else {
+                None
+            }
+        })
         .collect();
     assert_eq!(sups.len(), 1);
     assert!(sups[0].option_tags.iter().any(|t| t == "timer"));
@@ -119,7 +133,13 @@ fn inject_required_adds_require_header() {
     let reqs: Vec<_> = req
         .headers
         .iter()
-        .filter_map(|h| if let TypedHeader::Require(r) = h { Some(r) } else { None })
+        .filter_map(|h| {
+            if let TypedHeader::Require(r) = h {
+                Some(r)
+            } else {
+                None
+            }
+        })
         .collect();
     assert_eq!(reqs.len(), 1);
     assert!(reqs[0].requires("100rel"));
@@ -143,13 +163,21 @@ fn inject_not_supported_is_noop() {
 fn inject_does_not_duplicate_100rel_in_supported() {
     let mut req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
         .unwrap()
-        .header(TypedHeader::Supported(Supported::new(vec!["100rel".to_string()])))
+        .header(TypedHeader::Supported(Supported::new(vec![
+            "100rel".to_string()
+        ])))
         .build();
     inject_100rel_policy(&mut req, RelUsage::Supported);
     let sup = req
         .headers
         .iter()
-        .find_map(|h| if let TypedHeader::Supported(s) = h { Some(s) } else { None })
+        .find_map(|h| {
+            if let TypedHeader::Supported(s) = h {
+                Some(s)
+            } else {
+                None
+            }
+        })
         .unwrap();
     assert_eq!(sup.option_tags.iter().filter(|t| *t == "100rel").count(), 1);
 }
@@ -196,7 +224,9 @@ fn prack_for_dialog_builds_valid_request() {
 fn detect_peer_100rel_support_via_supported_header() {
     let req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
         .unwrap()
-        .header(TypedHeader::Supported(Supported::new(vec!["100rel".to_string()])))
+        .header(TypedHeader::Supported(Supported::new(vec![
+            "100rel".to_string()
+        ])))
         .build();
     let (supports, requires) = detect_peer_100rel_support(&req);
     assert!(supports);
@@ -256,26 +286,51 @@ fn inject_reliable_provisional_headers_adds_both() {
     let mut r = Response::new(StatusCode::SessionProgress);
     inject_reliable_provisional_headers(&mut r, 42);
 
-    let require = r.headers.iter().find_map(|h| {
-        if let TypedHeader::Require(r) = h { Some(r) } else { None }
-    }).expect("Require header must be present");
+    let require = r
+        .headers
+        .iter()
+        .find_map(|h| {
+            if let TypedHeader::Require(r) = h {
+                Some(r)
+            } else {
+                None
+            }
+        })
+        .expect("Require header must be present");
     assert!(require.requires("100rel"));
 
-    let rseq = r.headers.iter().find_map(|h| {
-        if let TypedHeader::RSeq(r) = h { Some(r) } else { None }
-    }).expect("RSeq header must be present");
+    let rseq = r
+        .headers
+        .iter()
+        .find_map(|h| {
+            if let TypedHeader::RSeq(r) = h {
+                Some(r)
+            } else {
+                None
+            }
+        })
+        .expect("RSeq header must be present");
     assert_eq!(rseq.value, 42);
 }
 
 #[test]
 fn inject_reliable_provisional_headers_extends_existing_require() {
     let mut r = Response::new(StatusCode::SessionProgress);
-    r.headers.push(TypedHeader::Require(Require::with_tag("timer")));
+    r.headers
+        .push(TypedHeader::Require(Require::with_tag("timer")));
     inject_reliable_provisional_headers(&mut r, 1);
 
-    let requires: Vec<_> = r.headers.iter().filter_map(|h| {
-        if let TypedHeader::Require(r) = h { Some(r) } else { None }
-    }).collect();
+    let requires: Vec<_> = r
+        .headers
+        .iter()
+        .filter_map(|h| {
+            if let TypedHeader::Require(r) = h {
+                Some(r)
+            } else {
+                None
+            }
+        })
+        .collect();
     assert_eq!(requires.len(), 1, "Require header should not duplicate");
     assert!(requires[0].requires("timer"));
     assert!(requires[0].requires("100rel"));

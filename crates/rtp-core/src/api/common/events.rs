@@ -2,10 +2,10 @@
 //!
 //! This module defines common event types used by both client and server APIs.
 
-use std::net::SocketAddr;
-use crate::api::common::stats::QualityLevel;
-use std::time::Duration;
 use crate::api::client::transport::VoipMetrics;
+use crate::api::common::stats::QualityLevel;
+use std::net::SocketAddr;
+use std::time::Duration;
 
 /// Media transport event types for notifications
 #[derive(Debug, Clone)]
@@ -51,10 +51,10 @@ pub enum MediaTransportEvent {
     RtcpReport {
         /// Jitter in milliseconds
         jitter: f64,
-        
+
         /// Packet loss ratio (0.0 - 1.0)
         packet_loss: f64,
-        
+
         /// Round-trip time if available
         round_trip_time: Option<Duration>,
     },
@@ -62,10 +62,10 @@ pub enum MediaTransportEvent {
     RtcpAppReceived {
         /// SSRC of the sender
         ssrc: u32,
-        
+
         /// Name of the application (4 ASCII characters)
         name: String,
-        
+
         /// Application-specific data
         data: Vec<u8>,
     },
@@ -73,7 +73,7 @@ pub enum MediaTransportEvent {
     RtcpByeReceived {
         /// SSRC that is leaving
         ssrc: u32,
-        
+
         /// Optional reason for leaving
         reason: Option<String>,
     },
@@ -85,4 +85,4 @@ pub enum MediaTransportEvent {
 }
 
 /// Callback for receiving transport events
-pub type MediaEventCallback = Box<dyn Fn(MediaTransportEvent) + Send + Sync>; 
+pub type MediaEventCallback = Box<dyn Fn(MediaTransportEvent) + Send + Sync>;

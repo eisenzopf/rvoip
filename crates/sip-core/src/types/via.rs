@@ -1,5 +1,5 @@
 //! # SIP Via Header
-//! 
+//!
 //! This module provides an implementation of the SIP Via header as defined in
 //! [RFC 3261 Section 20.42](https://datatracker.ietf.org/doc/html/rfc3261#section-20.42).
 //!
@@ -60,17 +60,17 @@
 //! via.set_received(addr);
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::str::FromStr;
 use std::net::IpAddr;
-use serde::{Serialize, Deserialize};
+use std::str::FromStr;
 
 use crate::error::{Error, Result};
-use crate::types::Param;
-use crate::types::uri::Host;
 use crate::types::param::GenericValue;
-use std::net::Ipv4Addr;
+use crate::types::uri::Host;
+use crate::types::Param;
 use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::net::Ipv4Addr;
 
 /// A structured representation of a SIP Via header
 ///
@@ -158,7 +158,7 @@ impl Via {
     /// # Parameters
     ///
     /// - `protocol_name`: Protocol name (usually "SIP")
-    /// - `protocol_version`: Protocol version (usually "2.0") 
+    /// - `protocol_version`: Protocol version (usually "2.0")
     /// - `transport`: Transport protocol (e.g., "UDP", "TCP", "TLS")
     /// - `host`: Host or IP address
     /// - `port`: Optional port number
@@ -189,12 +189,15 @@ impl Via {
             let branch = format!("z9hG4bK{}", uuid::Uuid::new_v4().simple());
             all_params.push(Param::branch(branch));
         }
-        
+
         // Use the full constructor and propagate any errors
         Self::new(
-            protocol_name, protocol_version, transport,
-            host, port,
-            all_params
+            protocol_name,
+            protocol_version,
+            transport,
+            host,
+            port,
+            all_params,
         )
     }
 
@@ -202,7 +205,7 @@ impl Via {
     ///
     /// The branch parameter uniquely identifies a transaction in SIP
     /// and must be globally unique. In RFC 3261, it must start with
-    /// the magic cookie "z9hG4bK" to distinguish it from RFC 2543 
+    /// the magic cookie "z9hG4bK" to distinguish it from RFC 2543
     /// implementations.
     ///
     /// # Returns
@@ -296,18 +299,24 @@ impl Via {
     /// ```
     pub fn get(&self, name: &str) -> Option<Option<String>> {
         self.0.first().and_then(|v| {
-             v.params.iter().find_map(|p| match p {
-                 Param::Other(key, value) if key.eq_ignore_ascii_case(name) => {
+            v.params.iter().find_map(|p| match p {
+                Param::Other(key, value) if key.eq_ignore_ascii_case(name) => {
                     Some(value.as_ref().and_then(|gv| gv.as_str().map(String::from)))
-                 },
-                 // Add cases for known params if needed (e.g., Branch, Tag, etc.)
-                 Param::Branch(val) if "branch".eq_ignore_ascii_case(name) => Some(Some(val.to_string())),
-                 Param::Received(val) if "received".eq_ignore_ascii_case(name) => Some(Some(val.to_string())), // Return owned String
-                 Param::Maddr(val) if "maddr".eq_ignore_ascii_case(name) => Some(Some(val.to_string())),
-                 Param::Ttl(val) if "ttl".eq_ignore_ascii_case(name) => Some(Some(val.to_string())), // Return owned String
-                 Param::Lr if "lr".eq_ignore_ascii_case(name) => Some(None), // Flag parameter has no value
-                 _ => None,
-             })
+                }
+                // Add cases for known params if needed (e.g., Branch, Tag, etc.)
+                Param::Branch(val) if "branch".eq_ignore_ascii_case(name) => {
+                    Some(Some(val.to_string()))
+                }
+                Param::Received(val) if "received".eq_ignore_ascii_case(name) => {
+                    Some(Some(val.to_string()))
+                } // Return owned String
+                Param::Maddr(val) if "maddr".eq_ignore_ascii_case(name) => {
+                    Some(Some(val.to_string()))
+                }
+                Param::Ttl(val) if "ttl".eq_ignore_ascii_case(name) => Some(Some(val.to_string())), // Return owned String
+                Param::Lr if "lr".eq_ignore_ascii_case(name) => Some(None), // Flag parameter has no value
+                _ => None,
+            })
         })
     }
 
@@ -345,7 +354,11 @@ impl Via {
     /// via.set("lr", None::<String>);
     /// assert_eq!(via.get("lr"), Some(None));
     /// ```
-    pub fn set(&mut self, name: impl Into<String> + Clone, value: Option<impl Into<String> + Clone>) {
+    pub fn set(
+        &mut self,
+        name: impl Into<String> + Clone,
+        value: Option<impl Into<String> + Clone>,
+    ) {
         let name_string = name.into();
         let generic_value = value.map(|v| GenericValue::Token(v.into()));
 
@@ -362,21 +375,47 @@ impl Via {
             });
 
             let new_param = match name_lower.as_str() {
-                "branch" => Param::Branch(generic_value.as_ref().and_then(|gv| gv.as_str()).unwrap_or("").to_string()),
-                "received" => Param::Received(generic_value.as_ref().and_then(|gv| gv.as_str()).unwrap_or("").parse().unwrap_or_else(|_| IpAddr::V4(Ipv4Addr::UNSPECIFIED))),
-                "maddr" => Param::Maddr(generic_value.as_ref().and_then(|gv| gv.as_str()).unwrap_or("").to_string()),
-                "ttl" => Param::Ttl(generic_value.as_ref().and_then(|gv| gv.as_str()).unwrap_or("0").parse().unwrap_or(0)),
+                "branch" => Param::Branch(
+                    generic_value
+                        .as_ref()
+                        .and_then(|gv| gv.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                "received" => Param::Received(
+                    generic_value
+                        .as_ref()
+                        .and_then(|gv| gv.as_str())
+                        .unwrap_or("")
+                        .parse()
+                        .unwrap_or_else(|_| IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                ),
+                "maddr" => Param::Maddr(
+                    generic_value
+                        .as_ref()
+                        .and_then(|gv| gv.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+                "ttl" => Param::Ttl(
+                    generic_value
+                        .as_ref()
+                        .and_then(|gv| gv.as_str())
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap_or(0),
+                ),
                 "lr" => Param::Lr,
                 _ => Param::Other(name_string.clone(), generic_value.clone()),
             };
 
             if let Some(idx) = pos {
-                 // Replace if value is Some, remove if None (unless it's a flag like lr)
-                 if generic_value.is_some() || name_lower == "lr" {
+                // Replace if value is Some, remove if None (unless it's a flag like lr)
+                if generic_value.is_some() || name_lower == "lr" {
                     v.params[idx] = new_param;
-                 } else {
+                } else {
                     v.params.remove(idx);
-                 }
+                }
             } else if generic_value.is_some() || name_lower == "lr" {
                 // Add if not found and value is Some (or it's a flag)
                 v.params.push(new_param);
@@ -421,7 +460,7 @@ impl Via {
                 Param::Maddr(_) if name.eq_ignore_ascii_case("maddr") => true,
                 Param::Ttl(_) if name.eq_ignore_ascii_case("ttl") => true,
                 Param::Lr if name.eq_ignore_ascii_case("lr") => true,
-                 // Add more known params...
+                // Add more known params...
                 _ => false,
             })
         })
@@ -511,8 +550,12 @@ impl Via {
     /// assert_eq!(via.received(), Some(addr));
     /// ```
     pub fn set_received(&mut self, addr: IpAddr) {
-         for v in self.0.iter_mut() {
-            if let Some(pos) = v.params.iter().position(|p| matches!(p, Param::Received(_))) {
+        for v in self.0.iter_mut() {
+            if let Some(pos) = v
+                .params
+                .iter()
+                .position(|p| matches!(p, Param::Received(_)))
+            {
                 v.params[pos] = Param::Received(addr);
             } else {
                 v.params.push(Param::Received(addr));
@@ -574,7 +617,7 @@ impl Via {
     /// ```
     pub fn set_maddr(&mut self, maddr: impl Into<String> + Clone) {
         let maddr_string = maddr.into();
-         for v in self.0.iter_mut() {
+        for v in self.0.iter_mut() {
             if let Some(pos) = v.params.iter().position(|p| matches!(p, Param::Maddr(_))) {
                 v.params[pos] = Param::Maddr(maddr_string.clone());
             } else {
@@ -583,7 +626,7 @@ impl Via {
         }
     }
 
-     /// Get the ttl parameter value from the first Via entry.
+    /// Get the ttl parameter value from the first Via entry.
     ///
     /// The ttl (time-to-live) parameter specifies the number of hops a request
     /// can travel before being discarded. It's primarily used for multicast
@@ -637,7 +680,7 @@ impl Via {
     /// assert_eq!(via.ttl(), Some(5));
     /// ```
     pub fn set_ttl(&mut self, ttl: u8) {
-         for v in self.0.iter_mut() {
+        for v in self.0.iter_mut() {
             if let Some(pos) = v.params.iter().position(|p| matches!(p, Param::Ttl(_))) {
                 v.params[pos] = Param::Ttl(ttl);
             } else {
@@ -687,7 +730,7 @@ impl Via {
                     } else {
                         Some(None)
                     }
-                },
+                }
                 _ => None,
             })
         })
@@ -720,10 +763,10 @@ impl Via {
     /// ```
     pub fn set_rport(&mut self, port: Option<u16>) {
         for v in self.0.iter_mut() {
-            if let Some(pos) = v.params.iter().position(|p| 
-                matches!(p, Param::Rport(_)) || 
-                matches!(p, Param::Other(key, _) if key.eq_ignore_ascii_case("rport"))
-            ) {
+            if let Some(pos) = v.params.iter().position(|p| {
+                matches!(p, Param::Rport(_))
+                    || matches!(p, Param::Other(key, _) if key.eq_ignore_ascii_case("rport"))
+            }) {
                 v.params[pos] = Param::Rport(port);
             } else {
                 v.params.push(Param::Rport(port));
@@ -816,18 +859,18 @@ pub struct ViaHeader {
 impl fmt::Display for ViaHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} ", self.sent_protocol)?;
-        
+
         // Format sent-by (host:port or host)
         write!(f, "{}", self.sent_by_host)?;
         if let Some(port) = self.sent_by_port {
             write!(f, ":{}", port)?;
         }
-        
+
         // Format parameters
         for param in &self.params {
             write!(f, ";{}", param)?; // Add semicolon before each parameter
         }
-        
+
         Ok(())
     }
 }
@@ -861,7 +904,7 @@ impl ViaHeader {
     pub fn protocol(&self) -> String {
         format!("{}/{}", self.sent_protocol.name, self.sent_protocol.version)
     }
-    
+
     /// Returns the transport protocol (e.g., "UDP", "TCP")
     ///
     /// # Returns
@@ -890,7 +933,7 @@ impl ViaHeader {
     pub fn transport(&self) -> &str {
         &self.sent_protocol.transport
     }
-    
+
     /// Returns the host part of the Via header
     ///
     /// # Returns
@@ -919,7 +962,7 @@ impl ViaHeader {
     pub fn host(&self) -> &Host {
         &self.sent_by_host
     }
-    
+
     /// Returns the port in the Via header, if present
     ///
     /// # Returns
@@ -948,7 +991,7 @@ impl ViaHeader {
     pub fn port(&self) -> Option<u16> {
         self.sent_by_port
     }
-    
+
     /// Retrieves the branch parameter value, if present
     ///
     /// # Returns
@@ -981,7 +1024,7 @@ impl ViaHeader {
             _ => None,
         })
     }
-    
+
     /// Retrieves the received parameter as a string, if present
     ///
     /// # Returns
@@ -1016,7 +1059,7 @@ impl ViaHeader {
             _ => None,
         })
     }
-    
+
     /// Retrieves the ttl parameter value, if present
     pub fn ttl(&self) -> Option<u8> {
         self.params.iter().find_map(|p| match p {
@@ -1024,7 +1067,7 @@ impl ViaHeader {
             _ => None,
         })
     }
-    
+
     /// Retrieves the maddr parameter value, if present
     pub fn maddr(&self) -> Option<&str> {
         self.params.iter().find_map(|p| match p {
@@ -1032,7 +1075,7 @@ impl ViaHeader {
             _ => None,
         })
     }
-    
+
     /// Checks if the header has a specific parameter
     ///
     /// # Parameters
@@ -1132,13 +1175,18 @@ impl ViaHeader {
         self.params.iter().find_map(|p| match p {
             Param::Other(key, value) if key.eq_ignore_ascii_case(name) => {
                 Some(value.as_ref().and_then(|gv| gv.as_str().map(String::from)))
-            },
-            Param::Branch(val) if name.eq_ignore_ascii_case("branch") => Some(Some(val.to_string())),
-            Param::Received(val) if name.eq_ignore_ascii_case("received") => Some(Some(val.to_string())),
+            }
+            Param::Branch(val) if name.eq_ignore_ascii_case("branch") => {
+                Some(Some(val.to_string()))
+            }
+            Param::Received(val) if name.eq_ignore_ascii_case("received") => {
+                Some(Some(val.to_string()))
+            }
             Param::Maddr(val) if name.eq_ignore_ascii_case("maddr") => Some(Some(val.to_string())),
             Param::Ttl(val) if name.eq_ignore_ascii_case("ttl") => Some(Some(val.to_string())),
-            Param::Rport(val) if name.eq_ignore_ascii_case("rport") => 
-                Some(val.map(|v| v.to_string())),
+            Param::Rport(val) if name.eq_ignore_ascii_case("rport") => {
+                Some(val.map(|v| v.to_string()))
+            }
             Param::Lr if name.eq_ignore_ascii_case("lr") => Some(None),
             _ => None,
         })
@@ -1185,7 +1233,8 @@ impl TypedHeaderTrait for Via {
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::Via {
             return Err(Error::InvalidHeader(format!(
-                "Expected Via header, got {:?}", header.name
+                "Expected Via header, got {:?}",
+                header.name
             )));
         }
 
@@ -1202,9 +1251,10 @@ impl TypedHeaderTrait for Via {
                 } else {
                     Err(Error::ParseError("Invalid UTF-8 in Via header".to_string()))
                 }
-            },
+            }
             _ => Err(Error::InvalidHeader(format!(
-                "Unexpected value type for Via header: {:?}", header.value
+                "Unexpected value type for Via header: {:?}",
+                header.value
             ))),
         }
     }
@@ -1217,7 +1267,10 @@ impl FromStr for Via {
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match crate::parser::headers::via::parse_via_params_public(s.as_bytes()) {
             Ok((_, headers)) => Ok(Via(headers)),
-            Err(e) => Err(crate::error::Error::ParseError(format!("Failed to parse Via header: {:?}", e))),
+            Err(e) => Err(crate::error::Error::ParseError(format!(
+                "Failed to parse Via header: {:?}",
+                e
+            ))),
         }
     }
 }

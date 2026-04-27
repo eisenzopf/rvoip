@@ -2,13 +2,13 @@
 //!
 //! This module defines the Authentication-Info header used in responses after successful authentication.
 
-use std::fmt;
-use std::str::FromStr;
-use serde::{Deserialize, Serialize};
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
 use crate::types::auth::params::AuthenticationInfoParam;
 use crate::types::auth::scheme::Qop;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Typed Authentication-Info header.
 ///
@@ -21,7 +21,12 @@ pub struct AuthenticationInfo(pub Vec<AuthenticationInfoParam>); // Holds a list
 
 impl fmt::Display for AuthenticationInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let params_str = self.0.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", ");
+        let params_str = self
+            .0
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         write!(f, "{}", params_str)
     }
 }
@@ -50,7 +55,8 @@ impl AuthenticationInfo {
     ///
     /// The modified AuthenticationInfo header
     pub fn with_nextnonce(mut self, nextnonce: impl Into<String>) -> Self {
-        self.0.push(AuthenticationInfoParam::NextNonce(nextnonce.into()));
+        self.0
+            .push(AuthenticationInfoParam::NextNonce(nextnonce.into()));
         self
     }
 
@@ -83,7 +89,8 @@ impl AuthenticationInfo {
     ///
     /// The modified AuthenticationInfo header
     pub fn with_rspauth(mut self, rspauth: impl Into<String>) -> Self {
-        self.0.push(AuthenticationInfoParam::ResponseAuth(rspauth.into()));
+        self.0
+            .push(AuthenticationInfoParam::ResponseAuth(rspauth.into()));
         self
     }
 
@@ -123,8 +130,8 @@ impl AuthenticationInfo {
 impl FromStr for AuthenticationInfo {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
-         // Call the actual parser and map nom::Err to crate::error::Error
-         crate::parser::headers::parse_authentication_info(s.as_bytes())
+        // Call the actual parser and map nom::Err to crate::error::Error
+        crate::parser::headers::parse_authentication_info(s.as_bytes())
             .map(|(_, params)| AuthenticationInfo(params))
             .map_err(Error::from)
     }
@@ -138,32 +145,37 @@ impl TypedHeaderTrait for AuthenticationInfo {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::AuthenticationInfo(self.clone()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::AuthenticationInfo(self.clone()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
-            HeaderValue::AuthenticationInfo(auth_info) => {
-                Ok(auth_info.clone())
-            },
+            HeaderValue::AuthenticationInfo(auth_info) => Ok(auth_info.clone()),
             HeaderValue::Raw(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     AuthenticationInfo::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
-} 
+}

@@ -1,12 +1,12 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
     alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList},
-    uri::Uri,
+    headers::header_access::HeaderAccess,
     headers::HeaderName,
     headers::TypedHeader,
-    headers::header_access::HeaderAccess,
+    uri::Uri,
 };
-use super::HeaderSetter;
 use std::str::FromStr;
 
 /// Alert-Info header builder
@@ -114,7 +114,7 @@ pub trait AlertInfoBuilderExt {
     /// // The SIP message now includes the Alert-Info header with the specified URI
     /// ```
     fn alert_info(self, uri: Uri) -> Self;
-    
+
     /// Add an Alert-Info header with a URI parsed from a string
     ///
     /// This method adds an Alert-Info header by parsing the provided URI string.
@@ -126,7 +126,7 @@ pub trait AlertInfoBuilderExt {
     /// # Returns
     ///
     /// * `Self` - The builder with the Alert-Info header added
-    /// 
+    ///
     /// # Examples
     ///
     /// ```rust
@@ -143,7 +143,7 @@ pub trait AlertInfoBuilderExt {
     /// // The SIP message now includes the Alert-Info header with the specified URI
     /// ```
     fn alert_info_uri(self, uri_str: &str) -> Self;
-    
+
     /// Add an Alert-Info header with a URI and a single parameter
     ///
     /// This method adds an Alert-Info header with the given URI and a single parameter,
@@ -178,7 +178,7 @@ pub trait AlertInfoBuilderExt {
     /// // The SIP message now includes the Alert-Info header with the specified URI and parameter
     /// ```
     fn alert_info_with_param(self, uri: Uri, param_name: &str, param_value: &str) -> Self;
-    
+
     /// Add an Alert-Info header with a URI string and a single parameter
     ///
     /// This method adds an Alert-Info header by parsing the provided URI string and
@@ -210,7 +210,7 @@ pub trait AlertInfoBuilderExt {
     /// // The SIP message now includes the Alert-Info header with the specified URI and parameter
     /// ```
     fn alert_info_uri_with_param(self, uri_str: &str, param_name: &str, param_value: &str) -> Self;
-    
+
     /// Add an Alert-Info header with a URI and multiple parameters
     ///
     /// This method adds an Alert-Info header with the given URI and multiple parameters
@@ -239,7 +239,7 @@ pub trait AlertInfoBuilderExt {
     ///     .from("Alice", "sip:alice@example.com", Some("tag123"))
     ///     .to("Bob", "sip:bob@example.com", None)
     ///     .alert_info_with_params(
-    ///         uri, 
+    ///         uri,
     ///         vec![
     ///             ("appearance", "2"),
     ///             ("intensity", "high")
@@ -252,8 +252,8 @@ pub trait AlertInfoBuilderExt {
     fn alert_info_with_params(self, uri: Uri, params: Vec<(&str, &str)>) -> Self;
 }
 
-impl<T> AlertInfoBuilderExt for T 
-where 
+impl<T> AlertInfoBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn alert_info(self, uri: Uri) -> Self {
@@ -261,27 +261,27 @@ where
         let header = AlertInfoHeader::new().with_alert_info(alert_info);
         self.set_header(header)
     }
-    
+
     fn alert_info_uri(self, uri_str: &str) -> Self {
         match Uri::from_str(uri_str) {
             Ok(uri) => self.alert_info(uri),
-            Err(_) => self // Silently handle parsing errors for builder fluency
+            Err(_) => self, // Silently handle parsing errors for builder fluency
         }
     }
-    
+
     fn alert_info_with_param(self, uri: Uri, param_name: &str, param_value: &str) -> Self {
         let alert_info = AlertInfo::new(uri).with_param(param_name, param_value);
         let header = AlertInfoHeader::new().with_alert_info(alert_info);
         self.set_header(header)
     }
-    
+
     fn alert_info_uri_with_param(self, uri_str: &str, param_name: &str, param_value: &str) -> Self {
         match Uri::from_str(uri_str) {
             Ok(uri) => self.alert_info_with_param(uri, param_name, param_value),
-            Err(_) => self // Silently handle parsing errors for builder fluency
+            Err(_) => self, // Silently handle parsing errors for builder fluency
         }
     }
-    
+
     fn alert_info_with_params(self, uri: Uri, params: Vec<(&str, &str)>) -> Self {
         let mut alert_info = AlertInfo::new(uri);
         for (name, value) in params {
@@ -302,13 +302,14 @@ mod tests {
     #[test]
     fn test_alert_info_basic() {
         let uri = Uri::from_str("http://www.example.com/sounds/moo.wav").unwrap();
-        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
             .alert_info(uri.clone())
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::AlertInfo(header)) = request.header(&HeaderName::AlertInfo) {
             assert_eq!(header.alert_info_list.len(), 1);
             assert_eq!(header.alert_info_list.items[0].uri(), &uri);
@@ -319,10 +320,11 @@ mod tests {
 
     #[test]
     fn test_alert_info_uri() {
-        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
             .alert_info_uri("http://www.example.com/sounds/moo.wav")
             .build();
-            
+
         if let Some(TypedHeader::AlertInfo(header)) = request.header(&HeaderName::AlertInfo) {
             assert_eq!(header.alert_info_list.len(), 1);
             assert_eq!(
@@ -337,10 +339,11 @@ mod tests {
     #[test]
     fn test_alert_info_with_param() {
         let uri = Uri::from_str("http://www.example.com/sounds/moo.wav").unwrap();
-        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
             .alert_info_with_param(uri.clone(), "appearance", "2")
             .build();
-            
+
         if let Some(TypedHeader::AlertInfo(header)) = request.header(&HeaderName::AlertInfo) {
             assert_eq!(header.alert_info_list.len(), 1);
             assert_eq!(header.alert_info_list.items[0].uri(), &uri);
@@ -355,10 +358,11 @@ mod tests {
 
     #[test]
     fn test_alert_info_uri_with_param() {
-        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
             .alert_info_uri_with_param("http://www.example.com/sounds/moo.wav", "appearance", "2")
             .build();
-            
+
         if let Some(TypedHeader::AlertInfo(header)) = request.header(&HeaderName::AlertInfo) {
             assert_eq!(header.alert_info_list.len(), 1);
             assert_eq!(
@@ -377,16 +381,14 @@ mod tests {
     #[test]
     fn test_alert_info_with_params() {
         let uri = Uri::from_str("http://www.example.com/sounds/moo.wav").unwrap();
-        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
             .alert_info_with_params(
                 uri.clone(),
-                vec![
-                    ("appearance", "2"),
-                    ("intensity", "high")
-                ]
+                vec![("appearance", "2"), ("intensity", "high")],
             )
             .build();
-            
+
         if let Some(TypedHeader::AlertInfo(header)) = request.header(&HeaderName::AlertInfo) {
             assert_eq!(header.alert_info_list.len(), 1);
             assert_eq!(header.alert_info_list.items[0].uri(), &uri);
@@ -406,10 +408,11 @@ mod tests {
     #[test]
     fn test_invalid_uri() {
         // This should not add a header at all
-        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
             .alert_info_uri("not a valid uri")
             .build();
-            
+
         assert_eq!(request.headers.len(), 0);
     }
 
@@ -419,7 +422,7 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ringing, Some("Ringing"))
             .alert_info_with_param(uri.clone(), "appearance", "2")
             .build();
-            
+
         if let Some(TypedHeader::AlertInfo(header)) = response.header(&HeaderName::AlertInfo) {
             assert_eq!(header.alert_info_list.len(), 1);
             assert_eq!(header.alert_info_list.items[0].uri(), &uri);
@@ -431,4 +434,4 @@ mod tests {
             panic!("Alert-Info header not found or has wrong type");
         }
     }
-} 
+}

@@ -47,7 +47,7 @@
 //! # async fn legacy_example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Client for outgoing calls
 //! let client = DialogClient::new("127.0.0.1:0").await?;
-//! 
+//!
 //! // Server for incoming calls  
 //! let server = DialogServer::new("0.0.0.0:5060").await?;
 //! # Ok(())
@@ -80,8 +80,8 @@ pub use server::DialogServer;
 pub use unified::UnifiedDialogApi;
 
 // Re-export shared types
-pub use common::{DialogHandle, CallHandle, DialogEvent, CallInfo};
-pub use config::{ClientConfig, ServerConfig, DialogConfig, Credentials, RelUsage};
+pub use common::{CallHandle, CallInfo, DialogEvent, DialogHandle};
+pub use config::{ClientConfig, Credentials, DialogConfig, RelUsage, ServerConfig};
 
 // Re-export error types
 pub use errors::{ApiError, ApiResult};
@@ -98,19 +98,19 @@ pub trait DialogApi: Send + Sync {
     /// Provides access to the core DialogManager for advanced operations
     /// that aren't available through the high-level API.
     fn dialog_manager(&self) -> &Arc<DialogManager>;
-    
+
     // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
-    
+
     /// Start the dialog API
     ///
     /// Initializes the API for processing SIP messages and events.
     async fn start(&self) -> ApiResult<()>;
-    
+
     /// Stop the dialog API
     ///
     /// Gracefully shuts down the API and terminates all active dialogs.
     async fn stop(&self) -> ApiResult<()>;
-    
+
     /// Get statistics for this API instance
     ///
     /// Returns metrics about dialog counts, call success rates, and performance.
@@ -124,16 +124,16 @@ pub trait DialogApi: Send + Sync {
 pub struct DialogStats {
     /// Number of currently active dialogs
     pub active_dialogs: usize,
-    
+
     /// Total number of dialogs created
     pub total_dialogs: u64,
-    
+
     /// Number of successful calls (ended with BYE)
     pub successful_calls: u64,
-    
+
     /// Number of failed calls (ended with error)
     pub failed_calls: u64,
-    
+
     /// Average call duration in seconds
     pub avg_call_duration: f64,
-} 
+}

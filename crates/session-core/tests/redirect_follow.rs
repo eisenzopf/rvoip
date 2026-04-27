@@ -12,8 +12,8 @@
 //! INVITE and hangs up with 486 to bring the session to a clean terminal
 //! state so the test can exit.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
@@ -21,8 +21,8 @@ use tokio::time::{sleep, timeout};
 use rvoip_session_core::api::unified::Config;
 use rvoip_session_core::StreamPeer;
 
-use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::parser::parse_message;
+use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::HeaderValue;
 
@@ -68,8 +68,7 @@ async fn uac_follows_302_and_reissues_invite_to_new_contact() {
                     redirector_invites_task.fetch_add(1, Ordering::SeqCst);
                     let mut resp = create_response(&request, StatusCode::MovedTemporarily);
                     // Contact: <sip:bob@127.0.0.1:ACCEPTOR_PORT>
-                    let contact_val =
-                        format!("<sip:bob@127.0.0.1:{}>", ACCEPTOR_PORT);
+                    let contact_val = format!("<sip:bob@127.0.0.1:{}>", ACCEPTOR_PORT);
                     resp.headers.push(TypedHeader::Other(
                         HeaderName::Contact,
                         HeaderValue::Raw(contact_val.into_bytes()),
@@ -151,7 +150,8 @@ async fn uac_follows_302_and_reissues_invite_to_new_contact() {
         wait.is_ok(),
         "redirect follow did not happen within timeout \
          (redirector INVITEs = {}, acceptor INVITEs = {})",
-        r, a
+        r,
+        a
     );
 
     assert!(

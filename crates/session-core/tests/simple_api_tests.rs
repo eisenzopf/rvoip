@@ -7,11 +7,11 @@
 //! APIs.
 
 use rvoip_session_core::api::unified::Config;
-use rvoip_session_core::StreamPeer;
 use rvoip_session_core::SessionId;
+use rvoip_session_core::StreamPeer;
+use serial_test::serial;
 use std::time::Duration;
 use tokio::time::timeout;
-use serial_test::serial;
 
 /// Create a test configuration with unique ports
 fn test_config(base_port: u16) -> Config {
@@ -43,13 +43,15 @@ async fn test_make_outgoing_call() {
 async fn test_hold_resume_call_via_coordinator() {
     // Hold/resume is available via UnifiedCoordinator
     let config = test_config(15102);
-    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config).await.unwrap();
+    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config)
+        .await
+        .unwrap();
 
     // Make a call
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15103",
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15103")
+        .await
+        .unwrap();
 
     // Put on hold
     let hold_result = coordinator.hold(&session_id).await;
@@ -64,13 +66,15 @@ async fn test_hold_resume_call_via_coordinator() {
 #[serial]
 async fn test_send_dtmf_via_coordinator() {
     let config = test_config(15104);
-    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config).await.unwrap();
+    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config)
+        .await
+        .unwrap();
 
     // Make a call
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15105",
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15105")
+        .await
+        .unwrap();
 
     // Send DTMF digits
     assert!(coordinator.send_dtmf(&session_id, '1').await.is_ok());
@@ -89,13 +93,15 @@ async fn test_send_dtmf_via_coordinator() {
 #[serial]
 async fn test_recording_via_coordinator() {
     let config = test_config(15109);
-    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config).await.unwrap();
+    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config)
+        .await
+        .unwrap();
 
     // Make a call
-    let session_id = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15110",
-    ).await.unwrap();
+    let session_id = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15110")
+        .await
+        .unwrap();
 
     // Start recording
     assert!(coordinator.start_recording(&session_id).await.is_ok());
@@ -108,23 +114,27 @@ async fn test_recording_via_coordinator() {
 #[serial]
 async fn test_conference_creation_via_coordinator() {
     let config = test_config(15111);
-    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config).await.unwrap();
+    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config)
+        .await
+        .unwrap();
 
     // Make first call
-    let call1 = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:bob@localhost:15112",
-    ).await.unwrap();
+    let call1 = coordinator
+        .make_call("sip:alice@localhost", "sip:bob@localhost:15112")
+        .await
+        .unwrap();
 
     // Create conference from the call
-    let conf_result = coordinator.create_conference(&call1, "Test Conference").await;
+    let conf_result = coordinator
+        .create_conference(&call1, "Test Conference")
+        .await;
     assert!(conf_result.is_ok());
 
     // Make second call
-    let call2 = coordinator.make_call(
-        "sip:alice@localhost",
-        "sip:charlie@localhost:15113",
-    ).await.unwrap();
+    let call2 = coordinator
+        .make_call("sip:alice@localhost", "sip:charlie@localhost:15113")
+        .await
+        .unwrap();
 
     // Add second call to conference
     let add_result = coordinator.add_to_conference(&call1, &call2).await;
@@ -137,10 +147,7 @@ async fn test_wait_for_incoming_with_timeout() {
     let mut peer = StreamPeer::with_config(test_config(15115)).await.unwrap();
 
     // Wait for incoming call with timeout - should timeout since no caller
-    let wait_result = timeout(
-        Duration::from_millis(100),
-        peer.wait_for_incoming(),
-    ).await;
+    let wait_result = timeout(Duration::from_millis(100), peer.wait_for_incoming()).await;
 
     // Should timeout since no incoming call
     assert!(wait_result.is_err());
@@ -150,7 +157,9 @@ async fn test_wait_for_incoming_with_timeout() {
 #[serial]
 async fn test_accept_reject_incoming_via_coordinator() {
     let config = test_config(15116);
-    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config).await.unwrap();
+    let coordinator = rvoip_session_core::UnifiedCoordinator::new(config)
+        .await
+        .unwrap();
 
     // Simulate accepting a call (would need real session ID)
     let fake_session_id = SessionId::new();

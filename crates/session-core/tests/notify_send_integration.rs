@@ -102,10 +102,8 @@ fn send_notify_surfaces_as_notify_received_on_peer() {
     let bob_exit = poll(&mut bob.0);
     let alice_exit = poll(&mut alice.0);
 
-    let bob_status =
-        bob_exit.unwrap_or_else(|| panic!("Bob did not finish within 30s"));
-    let alice_status =
-        alice_exit.unwrap_or_else(|| panic!("Alice did not finish within 30s"));
+    let bob_status = bob_exit.unwrap_or_else(|| panic!("Bob did not finish within 30s"));
+    let alice_status = alice_exit.unwrap_or_else(|| panic!("Alice did not finish within 30s"));
 
     assert!(
         bob_status.success(),

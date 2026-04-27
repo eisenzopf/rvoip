@@ -82,7 +82,7 @@ pub enum TimerType {
     /// Value is T4 for unreliable transports. Defined in RFC 3261, Section 17.1.2.2.
     K,
     /// **Timer 100**: INVITE server transaction automatic 100 Trying timer (RFC 3261 Section 17.2.1)
-    /// 
+    ///
     /// RFC 3261 states: "If the TU does not send a provisional response within 200ms,
     /// the server transaction MUST send a 100 Trying response."
     Timer100,
@@ -224,7 +224,12 @@ impl Timer {
     /// * `max_interval` - The maximum [`Duration`] the interval can reach.
     ///
     /// The `timer_type` is set to [`TimerType::Custom`].
-    pub fn new_backoff(name: &str, transaction_id: TransactionKey, initial_interval: Duration, max_interval: Duration) -> Self {
+    pub fn new_backoff(
+        name: &str,
+        transaction_id: TransactionKey,
+        initial_interval: Duration,
+        max_interval: Duration,
+    ) -> Self {
         let now = Instant::now();
         Self {
             name: name.to_string(),
@@ -254,7 +259,12 @@ impl Timer {
     /// Note: The `repeating` and `current_interval` fields are set based on a simple match
     /// for `TimerType::Retransmission`. Other types default to non-repeating and no `current_interval`
     /// unless set otherwise after creation.
-    pub fn new_with_type(name: &str, transaction_id: TransactionKey, interval: Duration, timer_type: TimerType) -> Self {
+    pub fn new_with_type(
+        name: &str,
+        transaction_id: TransactionKey,
+        interval: Duration,
+        timer_type: TimerType,
+    ) -> Self {
         let now = Instant::now();
         Self {
             name: name.to_string(),
@@ -404,56 +414,56 @@ impl fmt::Display for Timer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)] // Added PartialEq, Eq for testing
 pub struct TimerSettings {
     /// **T1**: Base retransmission interval (RFC 3261 Section 17.1.1.1)
-    /// 
+    ///
     /// Default: 500ms. Used as the initial interval for Timer A and Timer E.
     /// Should be adjusted based on network round-trip time.
     pub t1: Duration,
 
     /// **T2**: Maximum retransmission interval (RFC 3261 Section 17.1.1.1)
-    /// 
+    ///
     /// Default: 4s. Maximum interval for exponential backoff in retransmissions.
     /// Must be >= T1.
     pub t2: Duration,
 
     /// **T4**: Maximum duration for messages to remain in network (RFC 3261 Section 17.1.1.1)
-    /// 
+    ///
     /// Default: 5s. Used for Timer K and other wait timers.
     pub t4: Duration,
 
     /// **Timer 100 Interval**: Automatic 100 Trying response timeout (RFC 3261 Section 17.2.1)
-    /// 
+    ///
     /// Default: 200ms. If the TU does not send a provisional response within this time,
     /// the server transaction MUST send a 100 Trying response automatically.
     pub timer_100_interval: Duration,
 
     /// **Transaction Timeout**: Overall transaction timeout
-    /// 
+    ///
     /// Default: 32s (64*T1). Maximum time a transaction can remain active.
     /// Used for Timer B and Timer F.
     pub transaction_timeout: Duration,
 
     /// **Wait Time D**: Time to wait in Terminated state for INVITE client transactions
-    /// 
+    ///
     /// Default: 32s. Used for Timer D.
     pub wait_time_d: Duration,
 
     /// **Wait Time H**: Time to wait for ACK in INVITE server transactions
-    /// 
+    ///
     /// Default: 32s. Used for Timer H.
     pub wait_time_h: Duration,
 
     /// **Wait Time I**: Time to wait in Confirmed state for INVITE server transactions
-    /// 
+    ///
     /// Default: 5s (T4). Used for Timer I.
     pub wait_time_i: Duration,
 
     /// **Wait Time J**: Time to wait in Completed state for non-INVITE server transactions
-    /// 
+    ///
     /// Default: 32s. Used for Timer J.
     pub wait_time_j: Duration,
 
     /// **Wait Time K**: Time to wait in Completed state for non-INVITE client transactions
-    /// 
+    ///
     /// Default: 5s (T4). Used for Timer K.
     pub wait_time_k: Duration,
 }
@@ -469,10 +479,10 @@ impl Default for TimerSettings {
             timer_100_interval: Duration::from_millis(200),
             transaction_timeout: Duration::from_secs(32), // 64 * T1
             wait_time_d: Duration::from_secs(32),
-            wait_time_h: Duration::from_secs(32),         // 64 * T1
-            wait_time_i: Duration::from_secs(5),          // T4
-            wait_time_j: Duration::from_secs(32),         // 64 * T1
-            wait_time_k: Duration::from_secs(5),          // T4
+            wait_time_h: Duration::from_secs(32), // 64 * T1
+            wait_time_i: Duration::from_secs(5),  // T4
+            wait_time_j: Duration::from_secs(32), // 64 * T1
+            wait_time_k: Duration::from_secs(5),  // T4
         }
     }
 }
@@ -502,12 +512,12 @@ mod tests {
         // Basic equality
         assert_eq!(TimerType::B, TimerType::B);
         assert_ne!(TimerType::B, TimerType::A); // Changed C to A
-        // Can be tested with a HashSet if more thoroughness is needed
+                                                // Can be tested with a HashSet if more thoroughness is needed
         let mut set = std::collections::HashSet::new();
         set.insert(TimerType::A);
         assert!(set.contains(&TimerType::A));
     }
-    
+
     #[tokio::test]
     async fn timer_new_one_shot() {
         let tx_key = dummy_tx_key("one_shot");
@@ -547,7 +557,12 @@ mod tests {
         let tx_key = dummy_tx_key("backoff");
         let initial_interval = Duration::from_millis(50);
         let max_interval = Duration::from_millis(200);
-        let timer = Timer::new_backoff("test_backoff", tx_key.clone(), initial_interval, max_interval);
+        let timer = Timer::new_backoff(
+            "test_backoff",
+            tx_key.clone(),
+            initial_interval,
+            max_interval,
+        );
 
         assert!(timer.repeating);
         assert_eq!(timer.interval, Some(initial_interval));
@@ -563,7 +578,12 @@ mod tests {
         let interval = Duration::from_millis(100);
 
         // Test Retransmission type
-        let timer_retransmit = Timer::new_with_type("retransmit_timer", tx_key.clone(), interval, TimerType::Retransmission);
+        let timer_retransmit = Timer::new_with_type(
+            "retransmit_timer",
+            tx_key.clone(),
+            interval,
+            TimerType::Retransmission,
+        );
         assert!(timer_retransmit.repeating);
         assert_eq!(timer_retransmit.current_interval, Some(interval));
         assert_eq!(timer_retransmit.timer_type, TimerType::Retransmission);
@@ -598,27 +618,34 @@ mod tests {
         let next3 = timer.next_backoff_interval();
         assert_eq!(next3, Duration::from_millis(300));
         assert_eq!(timer.current_interval, Some(Duration::from_millis(300)));
-        
+
         // 4th backoff: 300 * 2 = 600, capped at 300
         let next4 = timer.next_backoff_interval();
         assert_eq!(next4, Duration::from_millis(300));
         assert_eq!(timer.current_interval, Some(Duration::from_millis(300)));
-        
+
         // Test case where current_interval is None (should use interval then, if current logic holds)
-        let mut timer_no_current = Timer::new_one_shot("no_current", dummy_tx_key("nc"), Duration::from_millis(70));
+        let mut timer_no_current =
+            Timer::new_one_shot("no_current", dummy_tx_key("nc"), Duration::from_millis(70));
         timer_no_current.current_interval = None;
         timer_no_current.interval = Some(Duration::from_millis(70)); // Ensure interval is set
         timer_no_current.max_interval = Some(Duration::from_millis(500)); // Add max_interval for backoff test
-        
+
         // Current logic: interval.unwrap_or_else(|| Duration::from_millis(500)); (if current_interval is None, uses interval if present)
         // Then it doubles that. So, 70 * 2 = 140.
         let next_fallback = timer_no_current.next_backoff_interval();
         assert_eq!(next_fallback, Duration::from_millis(70)); // Oh, wait, the current logic IS: self.current_interval = Some(interval); interval. So it returns the base.
-                                                                // And sets current_interval to 70. The NEXT call would double it.
-        assert_eq!(timer_no_current.current_interval, Some(Duration::from_millis(70)));
+                                                              // And sets current_interval to 70. The NEXT call would double it.
+        assert_eq!(
+            timer_no_current.current_interval,
+            Some(Duration::from_millis(70))
+        );
         let next_fallback_2 = timer_no_current.next_backoff_interval();
         assert_eq!(next_fallback_2, Duration::from_millis(140));
-        assert_eq!(timer_no_current.current_interval, Some(Duration::from_millis(140)));
+        assert_eq!(
+            timer_no_current.current_interval,
+            Some(Duration::from_millis(140))
+        );
     }
 
     #[tokio::test]
@@ -626,26 +653,34 @@ mod tests {
         let tx_key = dummy_tx_key("reschedule");
         let interval = Duration::from_millis(50);
         let mut timer = Timer::new_repeating("test_reschedule", tx_key.clone(), interval);
-        
+
         let initial_scheduled_at = timer.scheduled_at;
         sleep(Duration::from_millis(10)).await; // Let some time pass
-        
+
         timer.reschedule();
         assert!(timer.scheduled_at > initial_scheduled_at);
         assert!(timer.scheduled_at > Instant::now() - Duration::from_millis(5)); // Check it's roughly now + interval
         assert!(timer.scheduled_at <= Instant::now() + interval);
 
         // Test with current_interval different from interval (e.g. after a backoff)
-        let mut backoff_timer = Timer::new_backoff("test_resched_backoff", tx_key, Duration::from_millis(20), Duration::from_millis(100));
+        let mut backoff_timer = Timer::new_backoff(
+            "test_resched_backoff",
+            tx_key,
+            Duration::from_millis(20),
+            Duration::from_millis(100),
+        );
         backoff_timer.next_backoff_interval(); // current_interval is now 40ms
-        assert_eq!(backoff_timer.current_interval, Some(Duration::from_millis(40)));
-        
+        assert_eq!(
+            backoff_timer.current_interval,
+            Some(Duration::from_millis(40))
+        );
+
         sleep(Duration::from_millis(5)).await;
         let now_before_reschedule = Instant::now();
         backoff_timer.reschedule();
         assert!(backoff_timer.scheduled_at >= now_before_reschedule + Duration::from_millis(40));
     }
-    
+
     #[tokio::test]
     async fn timer_reschedule_with_interval() {
         let tx_key = dummy_tx_key("reschedule_with");
@@ -656,10 +691,13 @@ mod tests {
         sleep(Duration::from_millis(10)).await; // Simulate some time passing
         let now_before_reschedule = Instant::now(); // Capture time just before
         timer.reschedule_with_interval(new_interval); // This calls Instant::now() internally
-        
+
         // Check that scheduled_at is roughly now_before_reschedule + new_interval
         // It should be slightly after due to Instant::now() call inside reschedule_with_interval
-        assert!(timer.scheduled_at >= now_before_reschedule + new_interval, "Scheduled_at should be at or after expected time");
+        assert!(
+            timer.scheduled_at >= now_before_reschedule + new_interval,
+            "Scheduled_at should be at or after expected time"
+        );
         // Add a small tolerance for the upper bound, e.g., 10 milliseconds
         let tolerance = Duration::from_millis(10);
         assert!(
@@ -673,13 +711,17 @@ mod tests {
         assert_eq!(timer.current_interval, None); // Should be None for non-repeating
 
         // Test with a repeating timer
-        let mut repeating_timer = Timer::new_repeating("test_res_int_rep", tx_key, initial_interval);
+        let mut repeating_timer =
+            Timer::new_repeating("test_res_int_rep", tx_key, initial_interval);
         sleep(Duration::from_millis(10)).await;
         let now_before_reschedule_rep = Instant::now();
         repeating_timer.reschedule_with_interval(new_interval);
 
         // Apply similar tolerance check for repeating timer
-        assert!(repeating_timer.scheduled_at >= now_before_reschedule_rep + new_interval, "Repeating: Scheduled_at should be at or after expected time");
+        assert!(
+            repeating_timer.scheduled_at >= now_before_reschedule_rep + new_interval,
+            "Repeating: Scheduled_at should be at or after expected time"
+        );
         assert!(
             repeating_timer.scheduled_at < now_before_reschedule_rep + new_interval + tolerance,
             "Repeating: Scheduled_at ({:?}) should be within tolerance of expected time + tolerance ({:?})",
@@ -704,7 +746,7 @@ mod tests {
         assert!(!timer.is_expired());
         assert!(timer.time_remaining() < interval);
         assert!(timer.time_remaining() > Duration::from_millis(0));
-        
+
         sleep(interval / 2 + Duration::from_millis(10)).await; // Sleep past expiry
         assert!(timer.is_expired());
         assert_eq!(timer.time_remaining(), Duration::from_secs(0));
@@ -717,7 +759,9 @@ mod tests {
         let timer = Timer::new_one_shot("display_timer", tx_key, interval);
         // Exact time_remaining can be tricky, so check for expected parts
         let display_str = timer.to_string();
-        assert!(display_str.starts_with("Timer(display_timer, tx=Key(branch-display:INVITE:client)"));
+        assert!(
+            display_str.starts_with("Timer(display_timer, tx=Key(branch-display:INVITE:client)")
+        );
         assert!(display_str.contains("repeating=false"));
         assert!(display_str.contains("scheduled=")); // e.g., scheduled=99ms) or scheduled=100ms)
         assert!(display_str.ends_with("ms)"));
@@ -755,4 +799,4 @@ mod tests {
         assert_eq!(settings.t1, Duration::from_millis(100));
         assert_eq!(settings.wait_time_k, Duration::from_secs(1));
     }
-} 
+}

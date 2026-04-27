@@ -1,12 +1,12 @@
+use crate::state_table::{CallId, DialogId, MediaSessionId, SessionId};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use serde::{Deserialize, Serialize};
-use crate::state_table::{SessionId, DialogId, MediaSessionId, CallId};
 
-use crate::state_table::{Role, ConditionUpdates};
+use super::history::{HistoryConfig, SessionHistory, TransitionRecord};
+use crate::state_table::{ConditionUpdates, Role};
 use crate::types::CallState;
-use super::history::{SessionHistory, HistoryConfig, TransitionRecord};
 
 /// Negotiated media configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,43 +43,43 @@ pub struct SessionState {
     // Identity
     pub session_id: SessionId,
     pub role: Role,
-    
+
     // Current state
     pub call_state: CallState,
     pub entered_state_at: Instant,
-    
+
     // Readiness conditions (the 3 flags)
     pub dialog_established: bool,
     pub media_session_ready: bool,
     pub sdp_negotiated: bool,
-    
+
     // Track if call established was triggered
     pub call_established_triggered: bool,
-    
+
     // SDP data
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub negotiated_config: Option<NegotiatedConfig>,
-    
+
     // Related IDs
     pub dialog_id: Option<DialogId>,
     pub media_session_id: Option<MediaSessionId>,
     pub call_id: Option<CallId>,
-    
+
     // SIP URIs
     pub local_uri: Option<String>,  // From URI for UAC, To URI for UAS
     pub remote_uri: Option<String>, // To URI for UAC, From URI for UAS
-    
+
     // Store last 200 OK response for ACK
     pub last_200_ok: Option<Vec<u8>>, // Serialized response
-    
+
     // Bridging information (for peer-to-peer conferencing)
     pub bridged_to: Option<SessionId>, // Session this is bridged to
 
     // Conference information
     pub conference_mixer_id: Option<MediaSessionId>, // Mixer ID if hosting conference
-    pub transfer_target: Option<String>, // Target for transfers
-    pub dtmf_digits: Option<String>, // DTMF digits to send
+    pub transfer_target: Option<String>,             // Target for transfers
+    pub dtmf_digits: Option<String>,                 // DTMF digits to send
 
     // Rejection details captured from RejectCall event for use by SendRejectResponse
     pub reject_status: Option<u16>,
@@ -138,7 +138,7 @@ pub struct SessionState {
 
     // Transfer coordination fields
     pub replaces_header: Option<String>, // Replaces header for attended transfer
-    pub referred_by: Option<String>, // Referred-By header from REFER request
+    pub referred_by: Option<String>,     // Referred-By header from REFER request
     pub refer_transaction_id: Option<String>, // Transaction ID for REFER request (for sending response)
     pub is_transfer_call: bool, // Flag indicating this session is a result of a transfer
     pub transferor_session_id: Option<SessionId>, // Session ID of who sent us the REFER (for NOTIFY messages)
@@ -147,6 +147,8 @@ pub struct SessionState {
     pub registrar_uri: Option<String>, // URI of the registrar server
     pub registration_expires: Option<u32>, // Registration expiry in seconds
     pub registration_contact: Option<String>, // Contact URI for registration
+    pub registration_call_id: Option<String>, // Stable Call-ID for this registration lifecycle
+    pub registration_cseq: u32,        // Last CSeq used for this registration lifecycle
     pub credentials: Option<crate::types::Credentials>, // User credentials for authentication
     /// Optional `P-Asserted-Identity` URI (RFC 3325 §9.1) to attach to the
     /// outgoing INVITE for this session. When `Some`, the `SendINVITE` action
@@ -169,7 +171,7 @@ pub struct SessionState {
 
     // Timestamps
     pub created_at: Instant,
-    
+
     // Optional history tracking
     pub history: Option<SessionHistory>,
 }
@@ -223,6 +225,8 @@ impl SessionState {
             registrar_uri: None,
             registration_expires: None,
             registration_contact: None,
+            registration_call_id: None,
+            registration_cseq: 0,
             credentials: None,
             pai_uri: None,
             is_registered: false,
@@ -233,21 +237,21 @@ impl SessionState {
             history: None,
         }
     }
-    
+
     /// Create with history tracking enabled
     pub fn with_history(session_id: SessionId, role: Role, config: HistoryConfig) -> Self {
         let mut state = Self::new(session_id, role);
         state.history = Some(SessionHistory::new(config));
         state
     }
-    
+
     /// Record a transition in history
     pub fn record_transition(&mut self, record: TransitionRecord) {
         if let Some(ref mut history) = self.history {
             history.record_transition(record);
         }
     }
-    
+
     /// Transition to a new state
     pub fn transition_to(&mut self, new_state: CallState) {
         if let Some(ref mut history) = self.history {
@@ -275,7 +279,7 @@ impl SessionState {
         self.call_state = new_state;
         self.entered_state_at = Instant::now();
     }
-    
+
     /// Apply condition updates from a transition
     pub fn apply_condition_updates(&mut self, updates: &ConditionUpdates) {
         if let Some(value) = updates.dialog_established {
@@ -288,17 +292,17 @@ impl SessionState {
             self.sdp_negotiated = value;
         }
     }
-    
+
     /// Check if all readiness conditions are met
     pub fn all_conditions_met(&self) -> bool {
         self.dialog_established && self.media_session_ready && self.sdp_negotiated
     }
-    
+
     /// Get time spent in current state
     pub fn time_in_state(&self) -> std::time::Duration {
         Instant::now() - self.entered_state_at
     }
-    
+
     /// Get total session duration
     pub fn session_duration(&self) -> std::time::Duration {
         Instant::now() - self.created_at

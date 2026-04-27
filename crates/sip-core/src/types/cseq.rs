@@ -22,9 +22,9 @@
 //!
 //! ## Usage in Dialog Management
 //!
-//! Within a dialog, the CSeq value for requests sent by the dialog initiator 
-//! increases by one for each new request. The CSeq for the dialog recipient 
-//! also increases by one for each new request, but uses a separate counter from 
+//! Within a dialog, the CSeq value for requests sent by the dialog initiator
+//! increases by one for each new request. The CSeq for the dialog recipient
+//! also increases by one for each new request, but uses a separate counter from
 //! the initiator.
 //!
 //! ## Examples
@@ -47,36 +47,36 @@
 //! assert_eq!(next_cseq.sequence(), 3);
 //! ```
 
-use crate::types::method::Method;
+use crate::error::{Error, Result};
 use crate::parser;
-use crate::error::{Result, Error};
+use crate::parser::headers::cseq::{full_parse_cseq, parse_cseq};
+use crate::types::header::Header;
+use crate::types::method::Method;
+use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use nom::combinator::all_consuming;
-use crate::parser::headers::cseq::{parse_cseq, full_parse_cseq};
-use serde::{Serialize, Deserialize};
-use crate::types::header::Header;
-use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 
 /// Represents the CSeq header field (RFC 3261 Section 8.1.1.5).
-/// 
+///
 /// The CSeq header field serves as a way to identify and order transactions.
 /// It consists of a sequence number and a method. The method name in the
 /// CSeq header field MUST match the method name in the start-line, and the
 /// sequence number value MUST be expressible as a 32-bit unsigned integer.
-/// 
+///
 /// The CSeq header is mandatory in all SIP requests and responses. It helps
 /// to identify retransmissions, match responses to requests, and maintain
 /// the order of transactions within a dialog.
-/// 
+///
 /// # Examples
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
-/// 
+///
 /// // Create from sequence number and Method enum
 /// let cseq = CSeq::new(101, Method::Invite);
 /// assert_eq!(cseq.to_string(), "101 INVITE");
-/// 
+///
 /// // Create from string value
 /// let cseq2: CSeq = "102 ACK".parse().unwrap();
 /// assert_eq!(cseq2.sequence(), 102);
@@ -118,12 +118,12 @@ impl CSeq {
     pub fn new(seq: u32, method: Method) -> Self {
         Self { seq, method }
     }
-    
+
     /// Creates a new CSeq header with the specified sequence number and method string.
-    /// 
+    ///
     /// This is a convenience method that parses a method string into a `Method` enum
     /// and creates a CSeq header.
-    /// 
+    ///
     /// # Parameters
     ///
     /// - `seq`: The sequence number, a 32-bit unsigned integer
@@ -135,7 +135,7 @@ impl CSeq {
     /// cannot be parsed
     ///
     /// # Errors
-    /// 
+    ///
     /// Returns an error if the method string is not a valid SIP method.
     ///
     /// # Examples
@@ -159,7 +159,7 @@ impl CSeq {
         let method = Method::from_str(method_str)?;
         Ok(Self::new(seq, method))
     }
-    
+
     /// Get the sequence number.
     ///
     /// # Returns
@@ -181,7 +181,7 @@ impl CSeq {
     pub fn sequence(&self) -> u32 {
         self.seq
     }
-    
+
     /// Get the method.
     ///
     /// # Returns
@@ -206,18 +206,18 @@ impl CSeq {
     pub fn method(&self) -> &Method {
         &self.method
     }
-    
+
     /// Increments the sequence number by 1 and returns a new CSeq with the same method.
     ///
     /// This is useful for creating a new CSeq for the next request in a dialog
     /// using the same method.
-    /// 
+    ///
     /// # Returns
     ///
     /// A new `CSeq` with the sequence number incremented by 1 and the same method
     ///
     /// # Panics
-    /// 
+    ///
     /// Panics if the sequence number would overflow (exceed u32::MAX).
     ///
     /// # Examples
@@ -236,16 +236,19 @@ impl CSeq {
     /// ```
     pub fn increment(&self) -> Self {
         Self {
-            seq: self.seq.checked_add(1).expect("CSeq sequence number overflow"),
+            seq: self
+                .seq
+                .checked_add(1)
+                .expect("CSeq sequence number overflow"),
             method: self.method.clone(),
         }
     }
-    
+
     /// Increments the sequence number by 1 and changes the method.
     ///
     /// This is useful for creating a new CSeq for the next request in a dialog
     /// with a different method.
-    /// 
+    ///
     /// # Parameters
     ///
     /// - `method`: The new method to use
@@ -253,9 +256,9 @@ impl CSeq {
     /// # Returns
     ///
     /// A new `CSeq` with the sequence number incremented by 1 and the specified method
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// Panics if the sequence number would overflow (exceed u32::MAX).
     ///
     /// # Examples
@@ -279,7 +282,10 @@ impl CSeq {
     /// ```
     pub fn increment_with_method(&self, method: Method) -> Self {
         Self {
-            seq: self.seq.checked_add(1).expect("CSeq sequence number overflow"),
+            seq: self
+                .seq
+                .checked_add(1)
+                .expect("CSeq sequence number overflow"),
             method,
         }
     }
@@ -347,13 +353,13 @@ impl FromStr for CSeq {
     /// ```
     fn from_str(s: &str) -> Result<Self> {
         let trimmed_s = s.trim();
-        
+
         // Try parsing as a full header first (with "CSeq:" prefix)
         let full_result = all_consuming(full_parse_cseq)(trimmed_s.as_bytes());
         if let Ok((_, cseq)) = full_result {
             return Ok(cseq);
         }
-        
+
         // If that fails, try parsing just the value part
         all_consuming(parse_cseq)(trimmed_s.as_bytes())
             .map(|(_, cseq)| cseq)
@@ -401,7 +407,8 @@ impl TypedHeaderTrait for CSeq {
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::CSeq {
             return Err(Error::InvalidHeader(format!(
-                "Expected CSeq header, got {:?}", header.name
+                "Expected CSeq header, got {:?}",
+                header.name
             )));
         }
 
@@ -416,11 +423,14 @@ impl TypedHeaderTrait for CSeq {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     s.parse::<CSeq>()
                 } else {
-                    Err(Error::ParseError("Invalid UTF-8 in CSeq header".to_string()))
+                    Err(Error::ParseError(
+                        "Invalid UTF-8 in CSeq header".to_string(),
+                    ))
                 }
-            },
+            }
             _ => Err(Error::InvalidHeader(format!(
-                "Unexpected value type for CSeq header: {:?}", header.value
+                "Unexpected value type for CSeq header: {:?}",
+                header.value
             ))),
         }
     }
@@ -429,7 +439,7 @@ impl TypedHeaderTrait for CSeq {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_from_str() {
         // Test parsing with just value
@@ -437,55 +447,64 @@ mod tests {
         let cseq: CSeq = value.parse().unwrap();
         assert_eq!(cseq.seq, 101);
         assert_eq!(cseq.method, Method::Invite);
-        
+
         // Test parsing with full header
         let header = "CSeq: 202 ACK";
         let cseq2: CSeq = header.parse().unwrap();
         assert_eq!(cseq2.seq, 202);
         assert_eq!(cseq2.method, Method::Ack);
-        
+
         // Test with lowercase header name
         let header_lower = "cseq: 303 BYE";
         let cseq3: CSeq = header_lower.parse().unwrap();
         assert_eq!(cseq3.seq, 303);
         assert_eq!(cseq3.method, Method::Bye);
     }
-    
+
     #[test]
     fn test_display() {
         let cseq = CSeq::new(101, Method::Invite);
         assert_eq!(cseq.to_string(), "101 INVITE");
     }
-    
+
     #[test]
     fn test_with_method_str() {
         // Standard method
         let cseq = CSeq::with_method_str(101, "INVITE").unwrap();
         assert_eq!(cseq.seq, 101);
         assert_eq!(cseq.method, Method::Invite);
-        
+
         // Lowercase methods are treated as extensions
         let lowercase_result = CSeq::with_method_str(101, "invite").unwrap();
-        assert_eq!(lowercase_result.method, Method::Extension("invite".into()),
-                   "Lowercase methods are treated as extensions, not standard methods");
-        
+        assert_eq!(
+            lowercase_result.method,
+            Method::Extension("invite".into()),
+            "Lowercase methods are treated as extensions, not standard methods"
+        );
+
         // Custom/invalid method names are accepted as extensions
         let custom_result = CSeq::with_method_str(101, "INVALID-METHOD-NAME").unwrap();
-        assert_eq!(custom_result.method, Method::Extension("INVALID-METHOD-NAME".into()),
-                  "Custom method names are accepted as extensions");
-        
+        assert_eq!(
+            custom_result.method,
+            Method::Extension("INVALID-METHOD-NAME".into()),
+            "Custom method names are accepted as extensions"
+        );
+
         // Test with empty method (should fail)
         let empty_result = CSeq::with_method_str(101, "");
-        assert!(empty_result.is_err(), "Empty method name should be rejected");
+        assert!(
+            empty_result.is_err(),
+            "Empty method name should be rejected"
+        );
     }
-    
+
     #[test]
     fn test_increment() {
         let cseq = CSeq::new(101, Method::Invite);
         let incremented = cseq.increment();
         assert_eq!(incremented.seq, 102);
         assert_eq!(incremented.method, Method::Invite);
-        
+
         // Test method change
         let with_new_method = cseq.increment_with_method(Method::Bye);
         assert_eq!(with_new_method.seq, 102);
@@ -508,4 +527,4 @@ mod tests {
         let round_trip = CSeq::from_header(&header).unwrap();
         assert_eq!(round_trip, cseq);
     }
-} 
+}

@@ -1,9 +1,9 @@
-pub mod types;
 pub mod builder;
+pub mod types;
 pub mod yaml_loader;
 
-pub use types::*;
 pub use builder::StateTableBuilder;
+pub use types::*;
 pub use yaml_loader::YamlTableLoader;
 
 use lazy_static::lazy_static;
@@ -27,19 +27,22 @@ fn build_master_table() -> MasterStateTable {
                 return table;
             }
         } else {
-            tracing::warn!("Failed to load custom state table from {}, falling back to default", custom_path);
+            tracing::warn!(
+                "Failed to load custom state table from {}, falling back to default",
+                custom_path
+            );
         }
     }
-    
+
     // 2. Load embedded default YAML (this should always succeed)
     let table = YamlTableLoader::load_embedded_default()
         .expect("Embedded default state table must be valid");
-    
+
     // Validate the table
     if let Err(errors) = table.validate() {
         panic!("Invalid default state table: {:?}", errors);
     }
-    
+
     tracing::debug!("Using embedded default state table");
     table
 }
@@ -63,10 +66,13 @@ pub fn load_state_table_with_config(config_path: Option<&str>) -> MasterStateTab
             tracing::warn!("Failed to load state table from config path: {}", path);
         }
     }
-    
+
     // 2. Try environment variable
     if let Ok(env_path) = std::env::var("RVOIP_STATE_TABLE") {
-        tracing::info!("Loading state table from environment variable: {}", env_path);
+        tracing::info!(
+            "Loading state table from environment variable: {}",
+            env_path
+        );
         if let Ok(table) = YamlTableLoader::load_from_file(&env_path) {
             if let Err(errors) = table.validate() {
                 tracing::error!("Environment state table validation failed: {:?}", errors);
@@ -78,16 +84,16 @@ pub fn load_state_table_with_config(config_path: Option<&str>) -> MasterStateTab
             tracing::warn!("Failed to load state table from environment: {}", env_path);
         }
     }
-    
+
     // 3. Load embedded default
     tracing::info!("Using embedded default state table");
     let table = YamlTableLoader::load_embedded_default()
         .expect("Embedded default state table must be valid");
-    
+
     // Validate the table
     if let Err(errors) = table.validate() {
         panic!("Invalid default state table: {:?}", errors);
     }
-    
+
     table
 }

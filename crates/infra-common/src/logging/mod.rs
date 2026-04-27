@@ -9,10 +9,10 @@ for the RVOIP stack. It includes:
 - Metrics collection and reporting
 */
 
-pub mod setup;
 pub mod context;
 pub mod metrics;
+pub mod setup;
 
+pub use context::{with_context, LogContext};
+pub use metrics::{Metric, MetricType, MetricsCollector};
 pub use setup::{setup_logging, LoggingConfig};
-pub use context::{LogContext, with_context};
-pub use metrics::{Metric, MetricType, MetricsCollector}; 

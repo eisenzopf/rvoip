@@ -1,3 +1,4 @@
+mod functions;
 /// # Transaction Manager for SIP Protocol
 ///
 /// This module implements the TransactionManager, which is the central component
@@ -35,11 +36,11 @@
 /// ```
 ///
 /// ## Transaction Manager Responsibilities
-/// 
+///
 /// The TransactionManager's primary responsibilities include:
 ///
 /// 1. **Transaction Creation**: Creating the appropriate transaction type for client or server operations
-/// 2. **Message Matching**: Matching incoming messages to existing transactions 
+/// 2. **Message Matching**: Matching incoming messages to existing transactions
 /// 3. **State Machine Management**: Managing transaction state transitions
 /// 4. **Timer Coordination**: Managing transaction timers (A, B, C, D, E, F, G, H, I, J, K)
 /// 5. **Message Retransmission**: Handling reliable delivery over unreliable transports
@@ -156,59 +157,58 @@
 ///      ↓        ↑
 ///   Transport Layer
 /// ```
-
 mod handlers;
-mod types;
-pub mod utils;
-mod functions;
 #[cfg(test)]
 mod tests;
+mod types;
+pub mod utils;
 
-pub use types::*;
-pub use handlers::*;
-pub use utils::*;
 use functions::*;
+pub use handlers::*;
+pub use types::*;
+pub use utils::*;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::str::FromStr;
-use std::pin::Pin;
-use std::future::Future;
 
-use tokio::sync::{Mutex, mpsc};
-use tokio::time::sleep;
-use tracing::{debug, error, info, warn, trace};
 use async_trait::async_trait;
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::sleep;
+use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{Host, TypedHeader};
-use rvoip_sip_transport::{Transport, TransportEvent};
 use rvoip_sip_transport::transport::TransportType;
+use rvoip_sip_transport::{Transport, TransportEvent};
 
+use crate::transaction::client::{
+    ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
+    CommonClientTransaction, TransactionExt,
+};
 use crate::transaction::error::{self, Error, Result};
-use crate::transaction::{
-    Transaction, TransactionAsync, TransactionState, TransactionKind, TransactionKey, TransactionEvent,
-    InternalTransactionCommand,
+use crate::transaction::method::{ack, cancel, update};
+use crate::transaction::runner::HasLifecycle;
+use crate::transaction::server::{
+    CommonServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction, ServerTransaction,
 };
 use crate::transaction::state::TransactionLifecycle;
-use crate::transaction::client::{
-    ClientTransaction, 
-    ClientInviteTransaction, 
-    ClientNonInviteTransaction,
-    TransactionExt,
-    CommonClientTransaction,
-};
-use crate::transaction::runner::HasLifecycle;
-use crate::transaction::server::{ServerTransaction, ServerInviteTransaction, ServerNonInviteTransaction, CommonServerTransaction};
-use crate::transaction::timer::{Timer, TimerManager, TimerFactory, TimerSettings};
-use crate::transaction::method::{cancel, update, ack};
-use crate::transaction::utils::{transaction_key_from_message, generate_branch, create_ack_from_invite};
+use crate::transaction::timer::{Timer, TimerFactory, TimerManager, TimerSettings};
 use crate::transaction::transport::{
-    TransportCapabilities, TransportInfo, 
-    NetworkInfoForSdp, WebSocketStatus, TransportCapabilitiesExt
+    NetworkInfoForSdp, TransportCapabilities, TransportCapabilitiesExt, TransportInfo,
+    WebSocketStatus,
+};
+use crate::transaction::utils::{
+    create_ack_from_invite, generate_branch, transaction_key_from_message,
+};
+use crate::transaction::{
+    InternalTransactionCommand, Transaction, TransactionAsync, TransactionEvent, TransactionKey,
+    TransactionKind, TransactionState,
 };
 
 // Type aliases without Sync requirement
@@ -267,8 +267,11 @@ pub struct TransactionManager {
     /// `DialogManager::with_global_events` at boot; `None` keeps the
     /// transaction manager transport-agnostic when no dialog layer is
     /// wired up (bare transaction tests, examples).
-    flow_event_sender:
-        Arc<tokio::sync::RwLock<Option<mpsc::Sender<crate::manager::outbound_flow::FlowTransportEvent>>>>,
+    flow_event_sender: Arc<
+        tokio::sync::RwLock<
+            Option<mpsc::Sender<crate::manager::outbound_flow::FlowTransportEvent>>,
+        >,
+    >,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -360,11 +363,11 @@ impl TransactionManager {
     pub async fn new(
         transport: Arc<dyn Transport>,
         transport_rx: mpsc::Receiver<TransportEvent>,
-        capacity: Option<usize>
+        capacity: Option<usize>,
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
-        
+
         let client_transactions = Arc::new(Mutex::new(HashMap::new()));
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
@@ -374,15 +377,15 @@ impl TransactionManager {
         let next_subscriber_id = Arc::new(Mutex::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
-        
+
         let timer_settings = build_timer_settings();
-        
+
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
-        
+
         // Create timer factory with the timer manager
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-        
+
         let manager = Self {
             transport,
             client_transactions,
@@ -400,10 +403,10 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
         };
-        
+
         // Start the message processing loop
         manager.start_message_loop();
-        
+
         Ok((manager, events_rx))
     }
 
@@ -417,7 +420,7 @@ impl TransactionManager {
     ///
     /// SIP transactions rely heavily on timers for reliability:
     /// - Timer A, B: Control INVITE retransmissions and timeouts
-    /// - Timer E, F: Control non-INVITE retransmissions and timeouts  
+    /// - Timer E, F: Control non-INVITE retransmissions and timeouts
     /// - Timer G, H: Control INVITE response retransmissions
     /// - Timer I, J, K: Control various cleanup behaviors
     ///
@@ -471,7 +474,7 @@ impl TransactionManager {
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
-        
+
         let client_transactions = Arc::new(Mutex::new(HashMap::new()));
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
@@ -481,14 +484,14 @@ impl TransactionManager {
         let next_subscriber_id = Arc::new(Mutex::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
-        
+
         // Create timer settings
         let timer_settings = timer_settings.unwrap_or_default();
-        
+
         // Create the timer manager with custom config
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-        
+
         let manager = Self {
             transport,
             client_transactions,
@@ -506,10 +509,10 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
         };
-        
+
         // Start the message processing loop
         manager.start_message_loop();
-        
+
         Ok((manager, events_rx))
     }
 
@@ -535,14 +538,14 @@ impl TransactionManager {
     /// # fn example(transport: Arc<dyn Transport>) {
     /// // Create a transaction manager without async
     /// let manager = TransactionManager::new_sync(transport);
-    /// 
+    ///
     /// // Manager can now be used or passed to an async context
     /// # }
     /// ```
     pub fn new_sync(transport: Arc<dyn Transport>) -> Self {
         Self::with_config(transport, None)
     }
-    
+
     /// Creates a new TransactionManager that uses a TransportManager for SIP transport.
     ///
     /// This method integrates the transaction layer with the transport manager, allowing
@@ -597,15 +600,20 @@ impl TransactionManager {
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
         // manager only has a single flavour registered (typical
         // UDP-only setup) the multiplexer transparently delegates to it.
-        let default_transport = transport_manager.build_multiplexed_transport().await
-            .map_err(|e| Error::Transport(
-                format!("Failed to build multiplexed transport from TransportManager: {}", e)
-            ))?;
-        
+        let default_transport = transport_manager
+            .build_multiplexed_transport()
+            .await
+            .map_err(|e| {
+                Error::Transport(format!(
+                    "Failed to build multiplexed transport from TransportManager: {}",
+                    e
+                ))
+            })?;
+
         // Create the transaction manager using the default transport and event channel
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
-        
+
         let client_transactions = Arc::new(Mutex::new(HashMap::new()));
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
@@ -615,15 +623,15 @@ impl TransactionManager {
         let next_subscriber_id = Arc::new(Mutex::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
-        
+
         let timer_settings = build_timer_settings();
-        
+
         // Setup timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
-        
+
         // Create timer factory with the timer manager
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-        
+
         let manager = Self {
             transport: default_transport,
             client_transactions,
@@ -641,13 +649,13 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
         };
-        
+
         // Start the message processing loop
         manager.start_message_loop();
-        
+
         Ok((manager, events_rx))
     }
-    
+
     /// Creates a transaction manager with custom timer configuration (sync version).
     ///
     /// This synchronous constructor allows customizing the timer settings
@@ -678,7 +686,7 @@ impl TransactionManager {
     /// // Create custom timer settings
     /// let mut timer_settings = TimerSettings::default();
     /// timer_settings.t1 = Duration::from_millis(1000);
-    /// 
+    ///
     /// // Create transaction manager with custom settings
     /// let manager = TransactionManager::with_config(
     ///     transport,
@@ -686,7 +694,10 @@ impl TransactionManager {
     /// );
     /// # }
     /// ```
-    pub fn with_config(transport: Arc<dyn Transport>, timer_settings_opt: Option<TimerSettings>) -> Self {
+    pub fn with_config(
+        transport: Arc<dyn Transport>,
+        timer_settings_opt: Option<TimerSettings>,
+    ) -> Self {
         let (events_tx, _) = mpsc::channel(100); // Dummy receiver, will be ignored
         let client_transactions = Arc::new(Mutex::new(HashMap::new()));
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
@@ -698,14 +709,14 @@ impl TransactionManager {
         let (_, transport_rx) = mpsc::channel(100); // Dummy channel
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(Mutex::new(false));
-        
+
         // Create timer settings
         let timer_settings = timer_settings_opt.unwrap_or_default();
-        
+
         // Create the timer manager
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-        
+
         Self {
             transport,
             client_transactions,
@@ -744,27 +755,27 @@ impl TransactionManager {
         // Setup basic channels
         let (events_tx, _) = mpsc::channel(10);
         let event_subscribers = Arc::new(Mutex::new(Vec::new()));
-        
+
         // Transaction registries
         let client_transactions = Arc::new(Mutex::new(HashMap::new()));
         let server_transactions = Arc::new(Mutex::new(HashMap::new()));
-        
+
         // Setup timer manager
         let timer_settings = build_timer_settings();
         let timer_manager = Arc::new(TimerManager::new(Some(timer_settings.clone())));
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
-        
+
         // Initialize running state
         let running = Arc::new(Mutex::new(false));
-        
+
         // Track destinations
         let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
-        
+
         // Initialize subscriber-related fields
         let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
         let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
         let next_subscriber_id = Arc::new(Mutex::new(0));
-        
+
         Self {
             transport,
             events_tx,
@@ -799,7 +810,7 @@ impl TransactionManager {
     ///
     /// ## RFC References
     /// - RFC 3261 Section 17.1.1.2: INVITE client transaction initiation
-    /// - RFC 3261 Section 17.1.2.2: Non-INVITE client transaction initiation 
+    /// - RFC 3261 Section 17.1.2.2: Non-INVITE client transaction initiation
     ///
     /// # Arguments
     /// * `transaction_id` - The ID of the client transaction to send
@@ -828,61 +839,66 @@ impl TransactionManager {
     /// ```
     pub async fn send_request(&self, transaction_id: &TransactionKey) -> Result<()> {
         debug!(%transaction_id, "TransactionManager::send_request - sending request");
-        
+
         // We need to get the transaction and clone only when needed
         let mut locked_txs = self.client_transactions.lock().await;
-        
+
         // Check if transaction exists
         if !locked_txs.contains_key(transaction_id) {
             debug!(%transaction_id, "TransactionManager::send_request - transaction not found");
-            return Err(Error::transaction_not_found(transaction_id.clone(), "send_request - transaction not found"));
+            return Err(Error::transaction_not_found(
+                transaction_id.clone(),
+                "send_request - transaction not found",
+            ));
         }
-        
+
         // Get a reference to the transaction to determine its type
         let tx = locked_txs.get_mut(transaction_id).unwrap();
         debug!(%transaction_id, kind=?tx.kind(), state=?tx.state(), "TransactionManager::send_request - found transaction");
-        
+
         // Remember initial state to detect quick state transitions
         let initial_state = tx.state();
-        
+
         // First subscribe to events BEFORE initiating the transaction
         // so we don't miss any events that happen during initiation
         let mut event_rx = self.subscribe();
-        
+
         // Use the TransactionExt trait to safely downcast
         use crate::transaction::client::TransactionExt;
-        
+
         if let Some(client_tx) = tx.as_client_transaction() {
             debug!(%transaction_id, "TransactionManager::send_request - initiating client transaction");
-            
+
             // Issue the initiate command
             let result = client_tx.initiate().await;
             debug!(%transaction_id, success=?result.is_ok(), "TransactionManager::send_request - initiate result");
-            
+
             // If initiate() returned an error, return it immediately
             if let Err(e) = result {
                 debug!(%transaction_id, error=%e, "TransactionManager::send_request - initiate failed immediately");
                 return Err(e);
             }
-            
+
             // Check transaction state immediately after initiate
             let current_state = tx.state();
             if current_state == TransactionState::Terminated {
                 // Transaction terminated immediately - likely due to transport error
                 debug!(%transaction_id, "Transaction terminated immediately during initiate - likely transport error");
                 return Err(Error::transport_error(
-                    rvoip_sip_transport::Error::ProtocolError("Transaction terminated immediately".into()),
-                    "Failed to send request - transaction terminated immediately"
+                    rvoip_sip_transport::Error::ProtocolError(
+                        "Transaction terminated immediately".into(),
+                    ),
+                    "Failed to send request - transaction terminated immediately",
                 ));
             }
-            
+
             // Release lock to allow transaction processing
             drop(locked_txs);
-            
+
             // Now wait for a short time to catch any asynchronous errors
             // We'll use a timeout to avoid hanging if no events are received
             let timeout_duration = tokio::time::Duration::from_millis(100);
-            
+
             match tokio::time::timeout(timeout_duration, async {
                 // Wait for events until timeout
                 while let Some(event) = event_rx.recv().await {
@@ -894,16 +910,16 @@ impl TransactionManager {
                                 "Failed to send request - transport error"
                             ));
                         },
-                        TransactionEvent::StateChanged { transaction_id: tx_id, previous_state, new_state } 
+                        TransactionEvent::StateChanged { transaction_id: tx_id, previous_state, new_state }
                             if tx_id == *transaction_id => {
                             debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
-                            
+
                             // If transaction moved directly to Terminated state
-                            if new_state == TransactionState::Terminated && 
-                               (previous_state == TransactionState::Initial || 
-                                previous_state == TransactionState::Calling || 
+                            if new_state == TransactionState::Terminated &&
+                               (previous_state == TransactionState::Initial ||
+                                previous_state == TransactionState::Calling ||
                                 previous_state == TransactionState::Trying) {
-                                
+
                                 debug!(%transaction_id, "Transaction moved to Terminated state - likely transport error");
                                 return Err(Error::transport_error(
                                     rvoip_sip_transport::Error::ProtocolError("Transaction terminated unexpectedly".into()),
@@ -914,7 +930,7 @@ impl TransactionManager {
                         _ => {} // Ignore other events
                     }
                 }
-                
+
                 // Check final transaction state
                 let locked_txs = self.client_transactions.lock().await;
                 if let Some(tx) = locked_txs.get(transaction_id) {
@@ -934,7 +950,7 @@ impl TransactionManager {
                         "Failed to send request - transaction removed"
                     ));
                 }
-                
+
                 Ok(())
             }).await {
                 // Timeout occurred
@@ -950,7 +966,7 @@ impl TransactionManager {
                                 "Failed to send request - transaction terminated"
                             ));
                         }
-                        
+
                         // If we still have a transaction and it's not terminated, assume it's okay
                         debug!(%transaction_id, state=?final_state, "Transaction still exists and is not terminated after timeout");
                         Ok(())
@@ -968,7 +984,9 @@ impl TransactionManager {
             }
         } else {
             debug!(%transaction_id, "TransactionManager::send_request - failed to downcast to client transaction");
-            Err(Error::Other("Failed to downcast to client transaction".to_string()))
+            Err(Error::Other(
+                "Failed to downcast to client transaction".to_string(),
+            ))
         }
     }
 
@@ -982,7 +1000,7 @@ impl TransactionManager {
     ///
     /// This method can trigger the following state transitions:
     /// - INVITE server with provisional response: Proceeding → Proceeding
-    /// - INVITE server with final response: Proceeding → Completed  
+    /// - INVITE server with final response: Proceeding → Completed
     /// - Non-INVITE server with provisional response: Trying/Proceeding → Proceeding
     /// - Non-INVITE server with final response: Trying/Proceeding → Completed
     ///
@@ -1020,25 +1038,36 @@ impl TransactionManager {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> Result<()> {
+    pub async fn send_response(
+        &self,
+        transaction_id: &TransactionKey,
+        response: Response,
+    ) -> Result<()> {
+        rvoip_sip_core::validation::validate_wire_response(&response)?;
+
         // We need to get the transaction and clone only when needed
         let mut locked_txs = self.server_transactions.lock().await;
-        
+
         // Check if transaction exists
         if !locked_txs.contains_key(transaction_id) {
-            return Err(Error::transaction_not_found(transaction_id.clone(), "send_response - transaction not found"));
+            return Err(Error::transaction_not_found(
+                transaction_id.clone(),
+                "send_response - transaction not found",
+            ));
         }
-        
+
         // Get a reference to the transaction to determine its type
         let tx = locked_txs.get_mut(transaction_id).unwrap();
-        
+
         // Use the TransactionExt trait to safely downcast
         use crate::transaction::server::TransactionExt;
-        
+
         if let Some(server_tx) = tx.as_server_transaction() {
             server_tx.send_response(response).await
         } else {
-            Err(Error::Other("Failed to downcast to server transaction".to_string()))
+            Err(Error::Other(
+                "Failed to downcast to server transaction".to_string(),
+            ))
         }
     }
 
@@ -1071,16 +1100,16 @@ impl TransactionManager {
             let client_txs = self.client_transactions.lock().await;
             client_txs.contains_key(transaction_id)
         };
-        
+
         if client_exists {
             return true;
         }
-        
+
         let server_exists = {
             let server_txs = self.server_transactions.lock().await;
             server_txs.contains_key(transaction_id)
         };
-        
+
         server_exists
     }
 
@@ -1118,7 +1147,7 @@ impl TransactionManager {
     /// # use rvoip_dialog_core::transaction::{TransactionKey, TransactionState};
     /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
     /// let state = manager.transaction_state(tx_id).await?;
-    /// 
+    ///
     /// match state {
     ///     TransactionState::Proceeding => println!("Transaction is in Proceeding state"),
     ///     TransactionState::Completed => println!("Transaction is in Completed state"),
@@ -1128,7 +1157,10 @@ impl TransactionManager {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn transaction_state(&self, transaction_id: &TransactionKey) -> Result<TransactionState> {
+    pub async fn transaction_state(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Result<TransactionState> {
         // Try client transactions first
         {
             let client_txs = self.client_transactions.lock().await;
@@ -1136,7 +1168,7 @@ impl TransactionManager {
                 return Ok(tx.state());
             }
         }
-        
+
         // Try server transactions
         {
             let server_txs = self.server_transactions.lock().await;
@@ -1144,9 +1176,12 @@ impl TransactionManager {
                 return Ok(tx.state());
             }
         }
-        
+
         // Transaction not found
-        Err(Error::transaction_not_found(transaction_id.clone(), "transaction_state - transaction not found"))
+        Err(Error::transaction_not_found(
+            transaction_id.clone(),
+            "transaction_state - transaction not found",
+        ))
     }
 
     /// Gets the transaction type (kind) for the specified transaction.
@@ -1154,7 +1189,7 @@ impl TransactionManager {
     /// This method returns the type of transaction as defined in RFC 3261:
     /// - INVITE client transaction (ICT)
     /// - Non-INVITE client transaction (NICT)
-    /// - INVITE server transaction (IST) 
+    /// - INVITE server transaction (IST)
     /// - Non-INVITE server transaction (NIST)
     ///
     /// Knowing the transaction kind is important because each type follows
@@ -1177,7 +1212,7 @@ impl TransactionManager {
     /// # use rvoip_dialog_core::transaction::{TransactionKey, TransactionKind};
     /// # async fn example(manager: &TransactionManager, tx_id: &TransactionKey) -> Result<(), Box<dyn std::error::Error>> {
     /// let kind = manager.transaction_kind(tx_id).await?;
-    /// 
+    ///
     /// match kind {
     ///     TransactionKind::InviteClient => println!("This is an INVITE client transaction"),
     ///     TransactionKind::NonInviteClient => println!("This is a non-INVITE client transaction"),
@@ -1187,7 +1222,10 @@ impl TransactionManager {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn transaction_kind(&self, transaction_id: &TransactionKey) -> Result<TransactionKind> {
+    pub async fn transaction_kind(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Result<TransactionKind> {
         let client_txs = self.client_transactions.lock().await;
         if let Some(tx) = client_txs.get(transaction_id) {
             return Ok(tx.kind());
@@ -1198,7 +1236,10 @@ impl TransactionManager {
             return Ok(tx.kind());
         }
 
-        Err(Error::transaction_not_found(transaction_id.clone(), "transaction kind lookup failed"))
+        Err(Error::transaction_not_found(
+            transaction_id.clone(),
+            "transaction kind lookup failed",
+        ))
     }
 
     /// Gets a list of all active transaction IDs.
@@ -1214,10 +1255,10 @@ impl TransactionManager {
     /// # use rvoip_dialog_core::transaction::TransactionManager;
     /// # async fn example(manager: &TransactionManager) {
     /// let (client_txs, server_txs) = manager.active_transactions().await;
-    /// 
+    ///
     /// println!("Active client transactions: {}", client_txs.len());
     /// println!("Active server transactions: {}", server_txs.len());
-    /// 
+    ///
     /// // Process each transaction ID
     /// for tx_id in client_txs {
     ///     println!("Client transaction: {}", tx_id);
@@ -1268,27 +1309,27 @@ impl TransactionManager {
     /// * `mpsc::Receiver<TransactionEvent>` - The event receiver
     pub fn subscribe(&self) -> mpsc::Receiver<TransactionEvent> {
         let (tx, rx) = mpsc::channel(100);
-        
+
         std::mem::drop(tokio::spawn({
             let subscribers = self.event_subscribers.clone();
             let next_subscriber_id = self.next_subscriber_id.clone();
-            
+
             async move {
                 let mut subscriber_id = next_subscriber_id.lock().await;
                 let id = *subscriber_id;
                 *subscriber_id += 1;
-                
+
                 // Add to global subscribers list
                 let mut subs = subscribers.lock().await;
                 subs.push(tx);
-                
+
                 debug!("Added global subscriber with ID {}", id);
             }
         }));
-        
+
         rx
     }
-    
+
     /// Subscribe to events from a specific transaction.
     ///
     /// This method creates a subscription to events from a single transaction.
@@ -1300,14 +1341,20 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<mpsc::Receiver<TransactionEvent>>` - The event receiver
-    pub async fn subscribe_to_transaction(&self, transaction_id: &TransactionKey) -> Result<mpsc::Receiver<TransactionEvent>> {
+    pub async fn subscribe_to_transaction(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Result<mpsc::Receiver<TransactionEvent>> {
         // Validate that transaction exists
         if !self.transaction_exists(transaction_id).await {
-            return Err(Error::transaction_not_found(transaction_id.clone(), "subscribe_to_transaction - transaction not found"));
+            return Err(Error::transaction_not_found(
+                transaction_id.clone(),
+                "subscribe_to_transaction - transaction not found",
+            ));
         }
-        
+
         let (tx, rx) = mpsc::channel(100);
-        
+
         // Register the subscription
         let subscriber_id = {
             let mut next_id = self.next_subscriber_id.lock().await;
@@ -1315,42 +1362,42 @@ impl TransactionManager {
             *next_id += 1;
             id
         };
-        
+
         // Add to global subscribers list
         {
             let mut subs = self.event_subscribers.lock().await;
             subs.push(tx);
         }
-        
+
         // Add to transaction-specific mapping
         {
             let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
-            
+
             // Create entry if it doesn't exist
-            let subscriber_list = tx_to_subs.entry(transaction_id.clone())
+            let subscriber_list = tx_to_subs
+                .entry(transaction_id.clone())
                 .or_insert_with(Vec::new);
-            
+
             // Add this subscriber
             subscriber_list.push(subscriber_id);
         }
-        
+
         // Add to subscriber-to-transactions mapping
         {
             let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-            
+
             // Create entry if it doesn't exist
-            let transaction_list = sub_to_txs.entry(subscriber_id)
-                .or_insert_with(Vec::new);
-            
+            let transaction_list = sub_to_txs.entry(subscriber_id).or_insert_with(Vec::new);
+
             // Add this transaction
             transaction_list.push(transaction_id.clone());
         }
-        
+
         debug!(%transaction_id, subscriber_id, "Added transaction-specific subscriber");
-        
+
         Ok(rx)
     }
-    
+
     /// Subscribe to events from multiple transactions.
     ///
     /// This method creates a subscription to events from multiple transactions.
@@ -1361,16 +1408,22 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<mpsc::Receiver<TransactionEvent>>` - The event receiver
-    pub async fn subscribe_to_transactions(&self, transaction_ids: &[TransactionKey]) -> Result<mpsc::Receiver<TransactionEvent>> {
+    pub async fn subscribe_to_transactions(
+        &self,
+        transaction_ids: &[TransactionKey],
+    ) -> Result<mpsc::Receiver<TransactionEvent>> {
         // Validate that all transactions exist
         for tx_id in transaction_ids {
             if !self.transaction_exists(tx_id).await {
-                return Err(Error::transaction_not_found(tx_id.clone(), "subscribe_to_transactions - transaction not found"));
+                return Err(Error::transaction_not_found(
+                    tx_id.clone(),
+                    "subscribe_to_transactions - transaction not found",
+                ));
             }
         }
-        
+
         let (tx, rx) = mpsc::channel(100);
-        
+
         // Register the subscription
         let subscriber_id = {
             let mut next_id = self.next_subscriber_id.lock().await;
@@ -1378,48 +1431,50 @@ impl TransactionManager {
             *next_id += 1;
             id
         };
-        
+
         // Add to global subscribers list
         {
             let mut subs = self.event_subscribers.lock().await;
             subs.push(tx);
         }
-        
+
         // Add to transaction-specific mapping
         {
             let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
-            
+
             for tx_id in transaction_ids {
                 // Create entry if it doesn't exist
-                let subscriber_list = tx_to_subs.entry(tx_id.clone())
-                    .or_insert_with(Vec::new);
-                
+                let subscriber_list = tx_to_subs.entry(tx_id.clone()).or_insert_with(Vec::new);
+
                 // Add this subscriber
                 subscriber_list.push(subscriber_id);
             }
         }
-        
+
         // Add to subscriber-to-transactions mapping
         {
             let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-            
+
             // Create entry if it doesn't exist
-            let transaction_list = sub_to_txs.entry(subscriber_id)
-                .or_insert_with(Vec::new);
-            
+            let transaction_list = sub_to_txs.entry(subscriber_id).or_insert_with(Vec::new);
+
             // Add these transactions
             for tx_id in transaction_ids {
                 transaction_list.push(tx_id.clone());
             }
         }
-        
-        debug!(subscriber_id, transaction_count = transaction_ids.len(), "Added multi-transaction subscriber");
-        
+
+        debug!(
+            subscriber_id,
+            transaction_count = transaction_ids.len(),
+            "Added multi-transaction subscriber"
+        );
+
         Ok(rx)
     }
 
     /// Shutdown the transaction manager gracefully - BOTTOM-UP
-    /// 
+    ///
     /// This performs a graceful shutdown in BOTTOM-UP order:
     /// 1. Close the transport layer (UDP) first
     /// 2. Stop the message processing loop
@@ -1428,7 +1483,7 @@ impl TransactionManager {
     /// 5. Clear event subscribers
     pub async fn shutdown(&self) {
         info!("TransactionManager shutting down gracefully");
-        
+
         // Step 1: Stop the message processing loop FIRST
         // This prevents new messages from being processed
         {
@@ -1436,28 +1491,31 @@ impl TransactionManager {
             *running = false;
         }
         debug!("Message processing loop signaled to stop");
-        
+
         // Step 2: Transport should already be closed by this point via events
         // But ensure it's closed just in case
         if let Err(e) = self.transport.close().await {
             debug!("Transport close during shutdown: {}", e);
         }
-        
+
         // Step 3: Small drain period for in-flight messages
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        
+
         // Step 4: Wait for all transactions to reach Destroyed lifecycle state
         let client_count = self.client_transactions.lock().await.len();
         let server_count = self.server_transactions.lock().await.len();
         if client_count > 0 || server_count > 0 {
-            debug!("Waiting for {} client and {} server transactions to reach Destroyed state", client_count, server_count);
-            
+            debug!(
+                "Waiting for {} client and {} server transactions to reach Destroyed state",
+                client_count, server_count
+            );
+
             // Give transactions time to process their lifecycle transitions
             let mut wait_iterations = 0;
             loop {
                 // Check if all transactions have reached Destroyed state
                 let mut all_destroyed = true;
-                
+
                 {
                     let client_txs = self.client_transactions.lock().await;
                     for tx in client_txs.values() {
@@ -1467,7 +1525,7 @@ impl TransactionManager {
                         }
                     }
                 }
-                
+
                 if all_destroyed {
                     let server_txs = self.server_transactions.lock().await;
                     for tx in server_txs.values() {
@@ -1477,27 +1535,28 @@ impl TransactionManager {
                         }
                     }
                 }
-                
+
                 if all_destroyed {
                     debug!("All transactions reached Destroyed state");
                     break;
                 }
-                
+
                 wait_iterations += 1;
-                if wait_iterations > 20 { // 2 second timeout
+                if wait_iterations > 20 {
+                    // 2 second timeout
                     warn!("Timeout waiting for transactions to reach Destroyed state, forcing cleanup");
                     break;
                 }
-                
+
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
-        
+
         // Now clear the transaction maps
         self.client_transactions.lock().await.clear();
         self.server_transactions.lock().await.clear();
         self.transaction_destinations.lock().await.clear();
-        
+
         // Step 5: Emit TransactionEvent::ShutdownComplete
         // Broadcast to all event subscribers
         Self::broadcast_event(
@@ -1506,13 +1565,14 @@ impl TransactionManager {
             &self.event_subscribers,
             Some(&self.transaction_to_subscribers),
             Some(self.clone()),
-        ).await;
-        
+        )
+        .await;
+
         // Step 5: Clear event subscribers
         self.event_subscribers.lock().await.clear();
         self.subscriber_to_transactions.lock().await.clear();
         self.transaction_to_subscribers.lock().await.clear();
-        
+
         info!("TransactionManager shutdown complete - BOTTOM-UP");
     }
 
@@ -1559,13 +1619,15 @@ impl TransactionManager {
         };
 
         // Get list of interested subscribers for this transaction
-        let interested_subscribers = if let (Some(tx_id), Some(tx_to_subs_map)) = (transaction_id, transaction_to_subscribers) {
+        let interested_subscribers = if let (Some(tx_id), Some(tx_to_subs_map)) =
+            (transaction_id, transaction_to_subscribers)
+        {
             let tx_to_subs = tx_to_subs_map.lock().await;
             tx_to_subs.get(tx_id).cloned().unwrap_or_default()
         } else {
             Vec::new() // No specific subscribers for this transaction or global event
         };
-        
+
         // Send to primary channel if it's available
         if let Err(e) = primary_tx.send(event.clone()).await {
             // During shutdown, channel closed errors are expected
@@ -1575,10 +1637,10 @@ impl TransactionManager {
                 warn!("Failed to send event to primary channel: {}", e);
             }
         }
-        
+
         // Send to interested subscribers only
         let mut subs = subscribers.lock().await;
-        
+
         // If we have transaction-specific subscribers, filter events
         if let Some(tx_to_subs_map) = transaction_to_subscribers {
             for (idx, sub) in subs.iter().enumerate() {
@@ -1586,16 +1648,19 @@ impl TransactionManager {
                 // 1. It's a global event (no transaction ID)
                 // 2. This subscriber is interested in this transaction
                 // 3. There are no interested subscribers specified (backward compatibility)
-                let should_send = transaction_id.is_none() || 
-                                 interested_subscribers.contains(&idx) ||
-                                 interested_subscribers.is_empty();
-                
+                let should_send = transaction_id.is_none()
+                    || interested_subscribers.contains(&idx)
+                    || interested_subscribers.is_empty();
+
                 if should_send {
                     if let Err(e) = sub.send(event.clone()).await {
                         // During shutdown, channel closed errors are expected - use debug level
                         // Check if this is a channel closed error during shutdown
                         if e.to_string().contains("channel closed") {
-                            debug!("Subscriber {} channel closed during shutdown (expected)", idx);
+                            debug!(
+                                "Subscriber {} channel closed during shutdown (expected)",
+                                idx
+                            );
                         } else {
                             warn!("Failed to send event to subscriber {}: {}", idx, e);
                         }
@@ -1608,14 +1673,17 @@ impl TransactionManager {
                 if let Err(e) = sub.send(event.clone()).await {
                     // During shutdown, channel closed errors are expected - use debug level
                     if e.to_string().contains("channel closed") {
-                        debug!("Subscriber {} channel closed during shutdown (expected)", idx);
+                        debug!(
+                            "Subscriber {} channel closed during shutdown (expected)",
+                            idx
+                        );
                     } else {
                         warn!("Failed to send event to subscriber {}: {}", idx, e);
                     }
                 }
             }
         }
-        
+
         // Special handling for transaction termination
         if let TransactionEvent::TransactionTerminated { transaction_id } = &event {
             if let Some(manager_instance) = manager {
@@ -1633,11 +1701,11 @@ impl TransactionManager {
     /// Uses lifecycle-based removal instead of immediate cleanup
     async fn process_transaction_terminated(&self, transaction_id: &TransactionKey) {
         debug!(%transaction_id, "Processing transaction termination - monitoring lifecycle for cleanup");
-        
+
         // Start monitoring lifecycle state for proper cleanup timing
         let manager = self.clone();
         let tx_id = transaction_id.clone();
-        
+
         tokio::spawn(async move {
             // Poll lifecycle state until Destroyed
             let mut cleanup_attempts = 0;
@@ -1647,42 +1715,45 @@ impl TransactionManager {
                     // Try both client and server transactions
                     let client_txs = manager.client_transactions.lock().await;
                     let server_txs = manager.server_transactions.lock().await;
-                    
-                    let client_ready = client_txs.get(&tx_id)
+
+                    let client_ready = client_txs
+                        .get(&tx_id)
                         .map(|tx| tx.data().get_lifecycle() == TransactionLifecycle::Destroyed)
                         .unwrap_or(false);
-                    let server_ready = server_txs.get(&tx_id)
-                        .map(|tx| tx.data().get_lifecycle() == TransactionLifecycle::Destroyed) 
+                    let server_ready = server_txs
+                        .get(&tx_id)
+                        .map(|tx| tx.data().get_lifecycle() == TransactionLifecycle::Destroyed)
                         .unwrap_or(false);
-                    
+
                     client_ready || server_ready
                 };
-                
+
                 if should_cleanup {
                     debug!(%tx_id, "Transaction lifecycle is Destroyed, performing cleanup");
                     manager.remove_terminated_transaction(&tx_id).await;
                     break;
-                } 
-                
+                }
+
                 cleanup_attempts += 1;
-                if cleanup_attempts > 50 { // 5 second timeout
+                if cleanup_attempts > 50 {
+                    // 5 second timeout
                     warn!(%tx_id, "Lifecycle cleanup timeout, forcing removal");
                     manager.remove_terminated_transaction(&tx_id).await;
                     break;
                 }
-                
+
                 // Check every 100ms
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         });
     }
-    
+
     /// Actually remove a terminated transaction from all maps
     async fn remove_terminated_transaction(&self, transaction_id: &TransactionKey) {
         debug!(%transaction_id, "Removing terminated transaction after grace period");
-        
+
         let mut terminated = false;
-        
+
         // Try to remove from client transactions
         {
             let mut client_txs = self.client_transactions.lock().await;
@@ -1691,7 +1762,7 @@ impl TransactionManager {
                 terminated = true;
             }
         }
-        
+
         // Try to remove from server transactions regardless of whether it was found in client transactions
         // This is a defensive approach in case the transaction was somehow duplicated
         {
@@ -1701,7 +1772,7 @@ impl TransactionManager {
                 terminated = true;
             }
         }
-        
+
         // Always remove from destinations map if present
         {
             let mut destinations = self.transaction_destinations.lock().await;
@@ -1709,21 +1780,21 @@ impl TransactionManager {
                 debug!(%transaction_id, "Removed transaction from destinations map");
             }
         }
-        
+
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
         {
             let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
             if let Some(subscriber_ids) = tx_to_subs.remove(transaction_id) {
                 debug!(%transaction_id, subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
-                
+
                 // Also clean up reverse mappings
                 drop(tx_to_subs); // Release lock before acquiring another
                 let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-                
+
                 for subscriber_id in subscriber_ids {
                     if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
                         tx_list.retain(|tx_id| tx_id != transaction_id);
-                        
+
                         // If subscriber has no more transactions, remove it entirely
                         if tx_list.is_empty() {
                             sub_to_txs.remove(&subscriber_id);
@@ -1733,17 +1804,19 @@ impl TransactionManager {
                 }
             }
         }
-        
+
         // Unregister from timer manager (defensive - it should auto-unregister)
-        self.timer_manager.unregister_transaction(transaction_id).await;
+        self.timer_manager
+            .unregister_transaction(transaction_id)
+            .await;
         debug!(%transaction_id, "Unregistered transaction from timer manager");
-        
+
         if terminated {
             debug!(%transaction_id, "Successfully cleaned up terminated transaction");
         } else {
             warn!(%transaction_id, "Transaction not found for termination - may have been already removed");
         }
-        
+
         // Run cleanup to catch any other terminated transactions
         // This is a defensive measure to prevent resource leaks
         // We use spawn to avoid blocking and make this a background task
@@ -1752,10 +1825,13 @@ impl TransactionManager {
             match manager_clone.cleanup_terminated_transactions().await {
                 Ok(count) if count > 0 => {
                     debug!("Cleaned up {} additional terminated transactions", count);
-                },
+                }
                 Err(e) => {
-                    error!("Error in background cleanup of terminated transactions: {}", e);
-                },
+                    error!(
+                        "Error in background cleanup of terminated transactions: {}",
+                        e
+                    );
+                }
                 _ => {}
             }
         });
@@ -1774,30 +1850,30 @@ impl TransactionManager {
 
         tokio::spawn(async move {
             debug!("Starting transaction message loop");
-            
+
             // Create a separate channel to receive events from transactions
             let (internal_tx, mut internal_rx) = mpsc::channel(100);
-            
+
             // Set running flag
             let mut running_guard = running.lock().await;
             *running_guard = true;
             drop(running_guard);
-            
+
             // Get the transport receiver
             let mut receiver = transport_rx.lock().await;
-            
+
             // Run the message processing loop
             loop {
                 // Check if we should continue running
                 let running_guard = running.lock().await;
                 let is_running = *running_guard;
                 drop(running_guard);
-                
+
                 if !is_running {
                     debug!("Transaction manager stopping message loop");
                     break;
                 }
-                
+
                 // Use tokio::select to wait for a message from either the transport or internal channel
                 tokio::select! {
                     Some(message_event) = receiver.recv() => {
@@ -1814,8 +1890,8 @@ impl TransactionManager {
                     Some(transaction_event) = internal_rx.recv() => {
                         // Handle transaction events, particularly termination events
                         Self::broadcast_event(
-                            transaction_event, 
-                            &events_tx, 
+                            transaction_event,
+                            &events_tx,
                             &event_subscribers,
                             Some(&manager_arc.transaction_to_subscribers),
                             Some(manager_arc.clone()),
@@ -1828,7 +1904,7 @@ impl TransactionManager {
                     }
                 }
             }
-            
+
             debug!("Transaction message loop exited");
         });
     }
@@ -1848,13 +1924,13 @@ impl TransactionManager {
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
         debug!(method=%request.method(), destination=%destination, "Creating client transaction");
-        
+
         // Debug the Via headers in the request
         tracing::trace!("Request Via headers before transaction creation:");
         for (i, via) in request.via_headers().iter().enumerate() {
             tracing::trace!("  Via[{}]: {}", i, via);
         }
-        
+
         // Extract branch parameter from the top Via header or generate a new one
         let branch = match request.first_via() {
             Some(via) => {
@@ -1862,24 +1938,32 @@ impl TransactionManager {
                     Some(b) => b.to_string(),
                     None => {
                         // Generate a branch parameter if none exists
-                        format!("{}{}", RFC3261_BRANCH_MAGIC_COOKIE, uuid::Uuid::new_v4().as_simple())
+                        format!(
+                            "{}{}",
+                            RFC3261_BRANCH_MAGIC_COOKIE,
+                            uuid::Uuid::new_v4().as_simple()
+                        )
                     }
                 }
-            },
+            }
             None => {
                 // No Via header - should not happen, but we'll handle it by generating a branch
                 // and a Via header will be added by the transaction
-                format!("{}{}", RFC3261_BRANCH_MAGIC_COOKIE, uuid::Uuid::new_v4().as_simple())
+                format!(
+                    "{}{}",
+                    RFC3261_BRANCH_MAGIC_COOKIE,
+                    uuid::Uuid::new_v4().as_simple()
+                )
             }
         };
-        
+
         // We'll create the transaction key directly
         let key = TransactionKey::new(branch.clone(), request.method().clone(), false);
-        
+
         // For CANCEL method, make sure we don't add a new Via header if one already exists
         // This is already checked in create_cancel_request, but we'll verify here as well
         let mut modified_request = request.clone();
-        
+
         // For CANCEL requests, the Via header should be preserved exactly as it was created
         // No need to add or modify it
         if request.method() == Method::Cancel {
@@ -1889,27 +1973,32 @@ impl TransactionManager {
         } else {
             // For other methods, ensure the request has a Via header with our branch
             // Create a Via header with the branch parameter
-            let local_addr = self.transport.local_addr()
-                .map_err(|e| Error::transport_error(e, "Failed to get local address for Via header"))?;
-            
+            let local_addr = self.transport.local_addr().map_err(|e| {
+                Error::transport_error(e, "Failed to get local address for Via header")
+            })?;
+
             let via_header = handlers::create_via_header(&local_addr, &branch)?;
-            
+
             // Check if there's already a Via header
             if request.first_via().is_some() {
                 // Replace it to ensure the branch is correct
-                modified_request.headers.retain(|h| !matches!(h, TypedHeader::Via(_)));
+                modified_request
+                    .headers
+                    .retain(|h| !matches!(h, TypedHeader::Via(_)));
                 modified_request = modified_request.with_header(via_header);
             } else {
                 // Add a new Via header
                 modified_request = modified_request.with_header(via_header);
             }
         }
-        
+
         tracing::trace!("Request Via headers after potential modification:");
         for (i, via) in modified_request.via_headers().iter().enumerate() {
             tracing::trace!("  Via[{}]: {}", i, via);
         }
-        
+
+        rvoip_sip_core::validation::validate_wire_request(&modified_request)?;
+
         // Create the appropriate transaction based on the request method
         let transaction: Box<dyn ClientTransaction + Send> = match modified_request.method() {
             Method::Invite => {
@@ -1920,43 +2009,43 @@ impl TransactionManager {
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request)
+                    self.timer_settings_for_request(&modified_request),
                 )?;
                 tracing::trace!("Created ClientInviteTransaction: {}", key);
                 Box::new(tx)
-            },
+            }
             Method::Cancel => {
                 // Validate the CANCEL request
                 if let Err(e) = cancel::validate_cancel_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
-                
+
                 let tx = ClientNonInviteTransaction::new(
                     key.clone(),
                     modified_request.clone(),
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request)
+                    self.timer_settings_for_request(&modified_request),
                 )?;
                 Box::new(tx)
-            },
+            }
             Method::Update => {
                 // Validate the UPDATE request
                 if let Err(e) = update::validate_update_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
                 }
-                
+
                 let tx = ClientNonInviteTransaction::new(
                     key.clone(),
                     modified_request.clone(),
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request)
+                    self.timer_settings_for_request(&modified_request),
                 )?;
                 Box::new(tx)
-            },
+            }
             _ => {
                 let tx = ClientNonInviteTransaction::new(
                     key.clone(),
@@ -1964,30 +2053,30 @@ impl TransactionManager {
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    self.timer_settings_for_request(&modified_request)
+                    self.timer_settings_for_request(&modified_request),
                 )?;
                 Box::new(tx)
             }
         };
-        
+
         // Store the transaction
         {
             let mut client_txs = self.client_transactions.lock().await;
             client_txs.insert(key.clone(), transaction);
         }
-        
+
         // Store the destination
         {
             let mut dest_map = self.transaction_destinations.lock().await;
             dest_map.insert(key.clone(), destination);
         }
-        
+
         debug!(id=%key, "Created client transaction");
-        
+
         if request.method() == Method::Cancel {
             debug!(id=%key, original_id=%branch, "Created CANCEL transaction");
         }
-        
+
         Ok(key)
     }
 
@@ -1999,23 +2088,24 @@ impl TransactionManager {
     ) -> Result<()> {
         // Create the ACK request
         let ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
-        
+
         // Try to get a destination from the Contact header first
-        let destination = if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
-            if let Some(contact_addr) = contact.addresses().next() {
-                // Try to parse the URI as a socket address
-                if let Some(addr) = utils::socket_addr_from_uri(&contact_addr.uri) {
-                    Some(addr)
+        let destination =
+            if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
+                if let Some(contact_addr) = contact.addresses().next() {
+                    // Try to parse the URI as a socket address
+                    if let Some(addr) = utils::socket_addr_from_uri(&contact_addr.uri) {
+                        Some(addr)
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
             } else {
                 None
-            }
-        } else {
-            None
-        };
-        
+            };
+
         // If we couldn't get a destination from the Contact header, use the original destination
         let destination = if let Some(dest) = destination {
             dest
@@ -2024,17 +2114,25 @@ impl TransactionManager {
             let dest_map = self.transaction_destinations.lock().await;
             match dest_map.get(invite_tx_id) {
                 Some(addr) => *addr,
-                None => return Err(Error::Other(format!("Destination for transaction {:?} not found", invite_tx_id))),
+                None => {
+                    return Err(Error::Other(format!(
+                        "Destination for transaction {:?} not found",
+                        invite_tx_id
+                    )))
+                }
             }
         };
-        
+
         // Send the ACK directly without creating a transaction
-        self.transport.send_message(Message::Request(ack_request), destination).await
+        rvoip_sip_core::validation::validate_wire_request(&ack_request)?;
+        self.transport
+            .send_message(Message::Request(ack_request), destination)
+            .await
             .map_err(|e| Error::transport_error(e, "Failed to send ACK"))?;
-        
+
         Ok(())
     }
-    
+
     /// Find transaction by message.
     ///
     /// This method tries to find a transaction that matches the given message.
@@ -2046,7 +2144,10 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<Option<TransactionKey>>` - The matching transaction key if found
-    pub async fn find_transaction_by_message(&self, message: &Message) -> Result<Option<TransactionKey>> {
+    pub async fn find_transaction_by_message(
+        &self,
+        message: &Message,
+    ) -> Result<Option<TransactionKey>> {
         match message {
             Message::Request(req) => {
                 // For requests, look for server transactions
@@ -2057,7 +2158,7 @@ impl TransactionManager {
                     }
                 }
                 Ok(None)
-            },
+            }
             Message::Response(resp) => {
                 // For responses, look for client transactions
                 let client_txs = self.client_transactions.lock().await;
@@ -2070,7 +2171,7 @@ impl TransactionManager {
             }
         }
     }
-    
+
     /// Find the matching client-side INVITE transaction for a CANCEL request.
     ///
     /// Used when *we* are sending CANCEL to cancel our outgoing INVITE.
@@ -2080,14 +2181,18 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<Option<TransactionKey>>` - The matching INVITE transaction key if found
-    pub async fn find_invite_transaction_for_cancel(&self, cancel_request: &Request) -> Result<Option<TransactionKey>> {
+    pub async fn find_invite_transaction_for_cancel(
+        &self,
+        cancel_request: &Request,
+    ) -> Result<Option<TransactionKey>> {
         if cancel_request.method() != Method::Cancel {
             return Err(Error::Other("Not a CANCEL request".to_string()));
         }
 
         // Get all client transactions
         let client_txs = self.client_transactions.lock().await;
-        let invite_tx_keys: Vec<TransactionKey> = client_txs.keys()
+        let invite_tx_keys: Vec<TransactionKey> = client_txs
+            .keys()
             .filter(|k| *k.method() == Method::Invite && !k.is_server)
             .cloned()
             .collect();
@@ -2096,7 +2201,7 @@ impl TransactionManager {
         // Use the utility to find the matching INVITE transaction
         let tx_id = crate::transaction::method::cancel::find_invite_transaction_for_cancel(
             cancel_request,
-            invite_tx_keys
+            invite_tx_keys,
         );
 
         Ok(tx_id)
@@ -2137,10 +2242,7 @@ impl TransactionManager {
     /// Mirrors the client-side `utils::get_transaction_request` helper.
     /// Needed so the CANCEL handler can generate a 487 response based on
     /// the pending INVITE.
-    pub async fn get_server_transaction_request(
-        &self,
-        tx_id: &TransactionKey,
-    ) -> Result<Request> {
+    pub async fn get_server_transaction_request(&self, tx_id: &TransactionKey) -> Result<Request> {
         let server_txs = self.server_transactions.lock().await;
         if let Some(tx) = server_txs.get(tx_id) {
             if let Some(req) = tx.original_request().await {
@@ -2161,27 +2263,33 @@ impl TransactionManager {
     ) -> Result<Request> {
         // Verify this is an INVITE client transaction
         if *invite_tx_id.method() != Method::Invite || invite_tx_id.is_server {
-            return Err(Error::Other("Can only create ACK for INVITE client transactions".to_string()));
+            return Err(Error::Other(
+                "Can only create ACK for INVITE client transactions".to_string(),
+            ));
         }
-        
+
         // Get the original INVITE request
-        let invite_request = utils::get_transaction_request(
-            &self.client_transactions, 
-            invite_tx_id
-        ).await?;
-        
+        let invite_request =
+            utils::get_transaction_request(&self.client_transactions, invite_tx_id).await?;
+
         // Get the local address for the Via header
-        let local_addr = self.transport.local_addr()
+        let local_addr = self
+            .transport
+            .local_addr()
             .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
-        
+
         // Create the ACK request using our utility
-        let ack_request = crate::transaction::method::ack::create_ack_for_2xx(&invite_request, response, &local_addr)?;
-        
+        let ack_request = crate::transaction::method::ack::create_ack_for_2xx(
+            &invite_request,
+            response,
+            &local_addr,
+        )?;
+
         Ok(ack_request)
     }
 
     /// Create a server transaction from an incoming request.
-    /// 
+    ///
     /// This is called when a new request is received from the transport layer.
     /// It creates an appropriate transaction based on the request method.
     pub async fn create_server_transaction(
@@ -2191,18 +2299,20 @@ impl TransactionManager {
     ) -> Result<Arc<dyn ServerTransaction>> {
         // Extract branch parameter from the top Via header
         let branch = match request.first_via() {
-            Some(via) => {
-                match via.branch() {
-                    Some(b) => b.to_string(),
-                    None => return Err(Error::Other("Missing branch parameter in Via header".to_string())),
+            Some(via) => match via.branch() {
+                Some(b) => b.to_string(),
+                None => {
+                    return Err(Error::Other(
+                        "Missing branch parameter in Via header".to_string(),
+                    ))
                 }
             },
             None => return Err(Error::Other("Missing Via header in request".to_string())),
         };
-        
+
         // Create the transaction key directly with is_server: true
         let key = TransactionKey::new(branch, request.method().clone(), true);
-        
+
         // Check if this is a retransmission of an existing transaction
         {
             let server_txs = self.server_transactions.lock().await;
@@ -2210,15 +2320,15 @@ impl TransactionManager {
                 // This is a retransmission, get the existing transaction
                 let transaction = server_txs.get(&key).unwrap().clone();
                 drop(server_txs); // Release lock
-                
+
                 // Process the request in the existing transaction
                 transaction.process_request(request.clone()).await?;
-                
+
                 debug!(id=%key, method=%request.method(), "Processed retransmitted request in existing transaction");
                 return Ok(transaction);
             }
         }
-        
+
         // Create a new transaction based on the request method
         let transaction: Arc<dyn ServerTransaction> = match request.method() {
             Method::Invite => {
@@ -2230,10 +2340,10 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);
-                
+
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerInviteTransaction");
                 tx
-            },
+            }
             Method::Cancel => {
                 // Validate the CANCEL request
                 if let Err(e) = cancel::validate_cancel_request(&request) {
@@ -2251,27 +2361,31 @@ impl TransactionManager {
 
                 let mut invite_tx_keys: Vec<TransactionKey> = {
                     let client_txs = self.client_transactions.lock().await;
-                    client_txs.keys()
+                    client_txs
+                        .keys()
                         .filter(|k| k.method() == &Method::Invite && !k.is_server)
                         .cloned()
                         .collect()
                 };
                 let server_invite_keys: Vec<TransactionKey> = {
                     let server_txs = self.server_transactions.lock().await;
-                    server_txs.keys()
+                    server_txs
+                        .keys()
                         .filter(|k| k.method() == &Method::Invite && k.is_server)
                         .cloned()
                         .collect()
                 };
                 invite_tx_keys.extend(server_invite_keys);
 
-                if let Some(invite_tx_id) = cancel::find_matching_invite_transaction(&request, invite_tx_keys) {
+                if let Some(invite_tx_id) =
+                    cancel::find_matching_invite_transaction(&request, invite_tx_keys)
+                {
                     target_invite_tx_id = Some(invite_tx_id);
                     debug!(method=%request.method(), "Found matching INVITE transaction for CANCEL");
                 } else {
                     debug!(method=%request.method(), "No matching INVITE transaction found for CANCEL");
                 }
-                
+
                 // Create a non-INVITE server transaction for CANCEL
                 let tx = Arc::new(ServerNonInviteTransaction::new(
                     key.clone(),
@@ -2281,27 +2395,30 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);
-                
+
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for CANCEL");
-                
+
                 // If we found a matching INVITE transaction, notify the TU
                 if let Some(invite_tx_id) = target_invite_tx_id {
-                    self.events_tx.send(TransactionEvent::CancelRequest {
-                        transaction_id: tx.id().clone(),
-                        target_transaction_id: invite_tx_id,
-                        request: request.clone(),
-                        source: remote_addr,
-                    }).await.ok();
+                    self.events_tx
+                        .send(TransactionEvent::CancelRequest {
+                            transaction_id: tx.id().clone(),
+                            target_transaction_id: invite_tx_id,
+                            request: request.clone(),
+                            source: remote_addr,
+                        })
+                        .await
+                        .ok();
                 }
-                
+
                 tx
-            },
+            }
             Method::Update => {
                 // Validate the UPDATE request
                 if let Err(e) = update::validate_update_request(&request) {
                     warn!(method = %request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
                 }
-                
+
                 // Create a non-INVITE server transaction for UPDATE
                 let tx = Arc::new(ServerNonInviteTransaction::new(
                     key.clone(),
@@ -2311,10 +2428,10 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);
-                
+
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for UPDATE");
                 tx
-            },
+            }
             _ => {
                 let tx = Arc::new(ServerNonInviteTransaction::new(
                     key.clone(),
@@ -2324,30 +2441,33 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     None, // No timer override
                 )?);
-                
+
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction");
                 tx
             }
         };
-        
+
         // Store the transaction
         {
             let mut server_txs = self.server_transactions.lock().await;
             server_txs.insert(transaction.id().clone(), transaction.clone());
         }
-        
+
         // Start the transaction in Trying state (for non-INVITE) or Proceeding (for INVITE)
         let initial_state = match transaction.kind() {
             TransactionKind::InviteServer => TransactionState::Proceeding,
             _ => TransactionState::Trying,
         };
-        
+
         // Transition to the initial active state
-        if let Err(e) = transaction.send_command(InternalTransactionCommand::TransitionTo(initial_state)).await {
+        if let Err(e) = transaction
+            .send_command(InternalTransactionCommand::TransitionTo(initial_state))
+            .await
+        {
             error!(id=%transaction.id(), error=%e, "Failed to initialize new server transaction");
             return Err(e);
         }
-        
+
         Ok(transaction)
     }
 
@@ -2362,56 +2482,59 @@ impl TransactionManager {
         invite_tx_id: &TransactionKey,
     ) -> Result<TransactionKey> {
         debug!(id=%invite_tx_id, "Canceling invite transaction");
-        
+
         // Check that this is an INVITE client transaction
         if invite_tx_id.method() != &Method::Invite || invite_tx_id.is_server() {
             return Err(Error::Other(format!(
-                "Transaction {} is not an INVITE client transaction", invite_tx_id
+                "Transaction {} is not an INVITE client transaction",
+                invite_tx_id
             )));
         }
-        
-        // Get the original INVITE request 
-        let invite_request = utils::get_transaction_request(
-            &self.client_transactions,
-            invite_tx_id
-        ).await?;
-        
+
+        // Get the original INVITE request
+        let invite_request =
+            utils::get_transaction_request(&self.client_transactions, invite_tx_id).await?;
+
         debug!(id=%invite_tx_id, "Got INVITE request for cancellation");
-        
+
         // Create a CANCEL request from the INVITE
-        let local_addr = self.transport.local_addr()
+        let local_addr = self
+            .transport
+            .local_addr()
             .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
-        
+
         // Use the method utility to create the CANCEL request
         let cancel_request = cancel::create_cancel_request(&invite_request, &local_addr)?;
-        
+
         // Log and validate the CANCEL request to help with debugging
         if let Err(e) = cancel::validate_cancel_request(&cancel_request) {
             warn!(method = %cancel_request.method(), error = %e, "CANCEL request validation issue - proceeding anyway");
         }
-        
+
         // Get the destination for the CANCEL request (same as the INVITE)
         let destination = {
             let dest_map = self.transaction_destinations.lock().await;
             match dest_map.get(invite_tx_id) {
                 Some(addr) => *addr,
-                None => return Err(Error::Other(format!(
-                    "No destination found for transaction {}", invite_tx_id
-                ))),
+                None => {
+                    return Err(Error::Other(format!(
+                        "No destination found for transaction {}",
+                        invite_tx_id
+                    )))
+                }
             }
         };
-        
+
         // Create a transaction for the CANCEL request
-        let cancel_tx_id = self.create_client_transaction(
-            cancel_request,
-            destination,
-        ).await?;
-        
+        let cancel_tx_id = self
+            .create_client_transaction(cancel_request, destination)
+            .await?;
+
         debug!(id=%cancel_tx_id, original_id=%invite_tx_id, "Created CANCEL transaction");
-        
+
         // Send the CANCEL request immediately
         self.send_request(&cancel_tx_id).await?;
-        
+
         Ok(cancel_tx_id)
     }
 
@@ -2429,9 +2552,11 @@ impl TransactionManager {
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
         if request.method() == Method::Invite {
-            return Err(Error::Other("Cannot create non-INVITE transaction for INVITE request".to_string()));
+            return Err(Error::Other(
+                "Cannot create non-INVITE transaction for INVITE request".to_string(),
+            ));
         }
-        
+
         self.create_client_transaction(request, destination).await
     }
 
@@ -2442,21 +2567,23 @@ impl TransactionManager {
     /// * `destination` - The destination address to send the request to
     ///
     /// # Returns
-    /// * `Result<TransactionKey>` - The transaction ID on success, or an error 
+    /// * `Result<TransactionKey>` - The transaction ID on success, or an error
     pub async fn create_invite_client_transaction(
         &self,
         request: Request,
         destination: SocketAddr,
     ) -> Result<TransactionKey> {
         if request.method() != Method::Invite {
-            return Err(Error::Other("Cannot create INVITE transaction for non-INVITE request".to_string()));
+            return Err(Error::Other(
+                "Cannot create INVITE transaction for non-INVITE request".to_string(),
+            ));
         }
-        
+
         self.create_client_transaction(request, destination).await
     }
 
     /// Get information about available transport types and their capabilities
-    /// 
+    ///
     /// This method returns information about which transport types are available
     /// and their capabilities. This is useful for session-level components that
     /// need to know what transport options are available.
@@ -2473,7 +2600,7 @@ impl TransactionManager {
     }
 
     /// Get detailed information about a specific transport type
-    /// 
+    ///
     /// This method returns detailed information about a specific transport type,
     /// such as connection status, local address, etc.
     pub fn get_transport_info(&self, transport_type: TransportType) -> Option<TransportInfo> {
@@ -2495,12 +2622,14 @@ impl TransactionManager {
     }
 
     /// Get network information for SDP generation
-    /// 
+    ///
     /// This method returns network information that can be used for SDP generation,
     /// such as the local IP address and ports for different media types.
     pub fn get_network_info_for_sdp(&self) -> NetworkInfoForSdp {
         NetworkInfoForSdp {
-            local_ip: self.transport.local_addr()
+            local_ip: self
+                .transport
+                .local_addr()
                 .map(|addr| addr.ip())
                 .unwrap_or_else(|_| std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
             rtp_port_range: (10000, 20000), // Default port range, could be configurable
@@ -2508,13 +2637,13 @@ impl TransactionManager {
     }
 
     /// Get the best transport type for a given URI
-    /// 
+    ///
     /// This method analyzes a URI and returns the best transport type to use
     /// based on the URI scheme and available transports.
     pub fn get_best_transport_for_uri(&self, uri: &rvoip_sip_core::Uri) -> TransportType {
         // Determine the best transport based on the URI scheme
         let scheme = uri.scheme().to_string();
-        
+
         match scheme.as_str() {
             "sips" => {
                 if self.transport.supports_tls() {
@@ -2528,14 +2657,14 @@ impl TransactionManager {
                         self.transport.default_transport_type()
                     }
                 }
-            },
+            }
             "ws" => {
                 if self.transport.supports_ws() {
                     TransportType::Ws
                 } else {
                     self.transport.default_transport_type()
                 }
-            },
+            }
             "wss" => {
                 if self.transport.supports_wss() {
                     TransportType::Wss
@@ -2544,14 +2673,14 @@ impl TransactionManager {
                 } else {
                     self.transport.default_transport_type()
                 }
-            },
+            }
             // Default for "sip:" and any other schemes
-            _ => self.transport.default_transport_type()
+            _ => self.transport.default_transport_type(),
         }
     }
 
     /// Get WebSocket connection status if available
-    /// 
+    ///
     /// This method returns information about WebSocket connections if WebSocket
     /// transport is supported and enabled.
     pub fn get_websocket_status(&self) -> Option<WebSocketStatus> {
@@ -2562,8 +2691,8 @@ impl TransactionManager {
         Some(WebSocketStatus {
             ws_connections: self.transport.get_connection_count(TransportType::Ws),
             wss_connections: self.transport.get_connection_count(TransportType::Wss),
-            has_active_connection: self.transport.is_transport_connected(TransportType::Ws) || 
-                                   self.transport.is_transport_connected(TransportType::Wss),
+            has_active_connection: self.transport.is_transport_connected(TransportType::Ws)
+                || self.transport.is_transport_connected(TransportType::Wss),
         })
     }
 }
@@ -2584,5 +2713,5 @@ impl fmt::Debug for TransactionManager {
             .field("timer_manager", &"Arc<TimerManager>")
             .field("timer_factory", &"TimerFactory")
             .finish()
-    } 
+    }
 }

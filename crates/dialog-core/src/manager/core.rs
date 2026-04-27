@@ -3,31 +3,30 @@
 //! This module contains the main DialogManager struct and its core lifecycle methods.
 //! It serves as the central coordinator for SIP dialog management.
 
-use std::sync::Arc;
-use std::net::SocketAddr;
 use dashmap::DashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
-use crate::transaction::{TransactionManager, TransactionKey, TransactionEvent};
-use rvoip_sip_core::{Request, Response, Method};
+use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
+use rvoip_sip_core::{Method, Request, Response};
 
-use crate::dialog::{DialogId, Dialog, DialogState};
+use crate::config::DialogManagerConfig;
+use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::{DialogEvent, FlowFailureReason, SessionCoordinationEvent};
-use crate::config::DialogManagerConfig;
 use crate::manager::outbound_flow::OutboundFlow;
 use crate::subscription::SubscriptionManager;
-
 
 #[derive(Debug, Clone)]
 pub struct DialogManager {
     /// Reference to transaction manager (handles transport for us)
     pub(crate) transaction_manager: Arc<TransactionManager>,
-    
+
     /// Local address for this dialog manager (used in Via headers)
     pub(crate) local_address: SocketAddr,
-    
+
     /// **NEW**: Optional unified configuration for behavioral modes
     /// When present, enables mode-specific behavior (auto-responses, etc.).
     ///
@@ -37,37 +36,38 @@ pub struct DialogManager {
     /// config set later by `UnifiedDialogManager` (RFC 3262 420 + RFC 4028
     /// negotiation both rely on this config on the incoming-request path).
     pub(crate) config: Arc<std::sync::RwLock<Option<DialogManagerConfig>>>,
-    
+
     /// Active dialogs by dialog ID
     pub(crate) dialogs: Arc<DashMap<DialogId, Dialog>>,
-    
+
     /// Dialog lookup by call-id + tags (key: "call-id:local-tag:remote-tag")
     pub(crate) dialog_lookup: Arc<DashMap<String, DialogId>>,
-    
+
     /// Transaction to dialog mapping
     pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
-    
+
     /// Session to dialog mapping for cross-crate coordination
     pub(crate) session_to_dialog: Arc<DashMap<String, DialogId>>,
-    
+
     /// Dialog to session mapping
     pub(crate) dialog_to_session: Arc<DashMap<DialogId, String>>,
-    
+
     /// Event hub for global event coordination
     pub(crate) event_hub: Arc<tokio::sync::RwLock<Option<Arc<crate::events::DialogEventHub>>>>,
-    
+
     /// Channel for sending session coordination events to session-core
-    pub(crate) session_coordinator: Arc<tokio::sync::RwLock<Option<mpsc::Sender<SessionCoordinationEvent>>>>,
-    
+    pub(crate) session_coordinator:
+        Arc<tokio::sync::RwLock<Option<mpsc::Sender<SessionCoordinationEvent>>>>,
+
     /// Channel for sending dialog events to external consumers (session-core)
     pub(crate) dialog_event_sender: Arc<tokio::sync::RwLock<Option<mpsc::Sender<DialogEvent>>>>,
-    
+
     /// Channel for receiving dialog events (for shutdown coordination)
     pub(crate) dialog_event_receiver: Arc<tokio::sync::RwLock<Option<mpsc::Receiver<DialogEvent>>>>,
-    
+
     /// Shutdown signal for global event processor
     pub(crate) shutdown_signal: Arc<tokio::sync::Notify>,
-    
+
     /// Subscription manager for handling SUBSCRIBE/NOTIFY
     pub(crate) subscription_manager: Option<Arc<SubscriptionManager>>,
 
@@ -75,14 +75,12 @@ pub struct DialogManager {
     /// (RFC 3262 §3). Keyed by `(dialog_id, rseq)`. On PRACK arrival the
     /// matching entry is removed and aborted so the 18x stops retransmitting;
     /// on dialog termination every entry for that dialog is aborted.
-    pub(crate) reliable_provisional_tasks:
-        Arc<DashMap<(DialogId, u32), tokio::task::AbortHandle>>,
+    pub(crate) reliable_provisional_tasks: Arc<DashMap<(DialogId, u32), tokio::task::AbortHandle>>,
 
     /// Abort handles for per-dialog RFC 4028 session-timer refresh tasks.
     /// Populated when the UAC or UAS is designated refresher; one entry per
     /// dialog. Aborted on dialog termination.
-    pub(crate) session_refresh_tasks:
-        Arc<DashMap<DialogId, tokio::task::AbortHandle>>,
+    pub(crate) session_refresh_tasks: Arc<DashMap<DialogId, tokio::task::AbortHandle>>,
 
     /// Discovered public address from RFC 3581 `received=` / `rport=`
     /// echoed back on responses.
@@ -115,8 +113,11 @@ pub struct DialogManager {
     /// saw a REGISTER 2xx without Service-Route" (distinct from "no
     /// registration yet"); callers that care about the distinction
     /// should use `service_route_for_aor` and match on `None`.
-    pub(crate) service_route_by_aor:
-        Arc<tokio::sync::RwLock<std::collections::HashMap<String, Vec<rvoip_sip_core::types::uri::Uri>>>>,
+    pub(crate) service_route_by_aor: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, Vec<rvoip_sip_core::types::uri::Uri>>,
+        >,
+    >,
 
     /// Registrar-assigned GRUU URIs (RFC 5627 §5.3) keyed by AoR.
     ///
@@ -129,8 +130,11 @@ pub struct DialogManager {
     /// "registrar didn't assign a GRUU on this binding"). A registrar
     /// may assign only `pub-gruu` or only `temp-gruu` — the cached
     /// `GruuContactParams` carries `Option`s for each independently.
-    pub(crate) gruu_by_aor:
-        Arc<tokio::sync::RwLock<std::collections::HashMap<String, rvoip_sip_core::types::outbound::GruuContactParams>>>,
+    pub(crate) gruu_by_aor: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, rvoip_sip_core::types::outbound::GruuContactParams>,
+        >,
+    >,
 
     /// RFC 5626 §3.5.1 outbound-flow state machines, keyed by
     /// `(AoR, reg-id, instance-id)` per RFC 5626 §4.2.
@@ -146,64 +150,60 @@ pub struct DialogManager {
     ///
     /// Idempotent: starting a flow for a key that already has one stops
     /// the prior flow first.
-    pub(crate) outbound_flows:
-        Arc<DashMap<(String, u32, String), Arc<OutboundFlow>>>,
+    pub(crate) outbound_flows: Arc<DashMap<(String, u32, String), Arc<OutboundFlow>>>,
 
     /// Abort handles for the spawned ping/monitor task of each entry in
     /// [`Self::outbound_flows`]. Split from the flow state so the state
     /// can be inspected (e.g. by pong/close handlers) without touching
     /// the task handle.
-    pub(crate) outbound_flow_tasks:
-        Arc<DashMap<(String, u32, String), tokio::task::AbortHandle>>,
+    pub(crate) outbound_flow_tasks: Arc<DashMap<(String, u32, String), tokio::task::AbortHandle>>,
 
     /// Secondary index mapping destination `SocketAddr` →
     /// `(aor, reg_id, instance)` flow keys, populated when
     /// `start_outbound_ping` installs a flow. Lets transport-side events
     /// (`KeepAlivePongReceived`, `ConnectionClosed`) — which arrive
     /// keyed only by IP:port — locate the flow(s) to update in O(1).
-    pub(crate) flow_by_destination:
-        Arc<DashMap<SocketAddr, Vec<(String, u32, String)>>>,
+    pub(crate) flow_by_destination: Arc<DashMap<SocketAddr, Vec<(String, u32, String)>>>,
 
     /// Keep-alive interval for RFC 5626 outbound flows, threaded from
     /// `session-core::Config::outbound_keepalive_interval_secs`. `None`
     /// disables keep-alive entirely — `start_outbound_ping` becomes a
     /// no-op.
-    pub(crate) outbound_keepalive_interval:
-        Arc<std::sync::RwLock<Option<std::time::Duration>>>,
+    pub(crate) outbound_keepalive_interval: Arc<std::sync::RwLock<Option<std::time::Duration>>>,
 }
 
 impl DialogManager {
     /// Create a new dialog manager
-    /// 
+    ///
     /// **ARCHITECTURE**: dialog-core receives TransactionManager via dependency injection.
     /// The application level is responsible for creating the transaction layer.
-    /// 
+    ///
     /// # Arguments
     /// * `transaction_manager` - The transaction manager to use for SIP message reliability
     /// * `local_address` - The local address to use in Via headers and Contact headers
-    /// 
+    ///
     /// # Returns
     /// A new DialogManager instance ready for use
     pub async fn new(
         transaction_manager: Arc<TransactionManager>,
         local_address: SocketAddr,
     ) -> DialogResult<Self> {
-        info!("Creating new DialogManager with local address {}", local_address);
-        
+        info!(
+            "Creating new DialogManager with local address {}",
+            local_address
+        );
+
         // Create shared stores
         let dialogs = Arc::new(DashMap::new());
         let dialog_lookup = Arc::new(DashMap::new());
-        
+
         // Create dialog event channel for subscription manager
         let (event_tx, _) = mpsc::channel(100);
-        
+
         // Create subscription manager with shared stores
-        let subscription_manager = SubscriptionManager::new(
-            dialogs.clone(),
-            dialog_lookup.clone(),
-            event_tx,
-        );
-        
+        let subscription_manager =
+            SubscriptionManager::new(dialogs.clone(), dialog_lookup.clone(), event_tx);
+
         Ok(Self {
             transaction_manager,
             local_address,
@@ -222,7 +222,9 @@ impl DialogManager {
             reliable_provisional_tasks: Arc::new(DashMap::new()),
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
-            service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            service_route_by_aor: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             gruu_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             outbound_flows: Arc::new(DashMap::new()),
             outbound_flow_tasks: Arc::new(DashMap::new()),
@@ -265,11 +267,7 @@ impl DialogManager {
     /// expiry.
     ///
     /// No-op when `outbound_keepalive_interval` is `None`.
-    pub fn start_outbound_ping(
-        &self,
-        flow_key: (String, u32, String),
-        destination: SocketAddr,
-    ) {
+    pub fn start_outbound_ping(&self, flow_key: (String, u32, String), destination: SocketAddr) {
         let Some(interval) = self.outbound_keepalive_interval() else {
             return;
         };
@@ -390,15 +388,15 @@ impl DialogManager {
     }
 
     /// Create a new dialog manager with global transaction events (RECOMMENDED)
-    /// 
+    ///
     /// This constructor follows the working pattern from transaction-core examples
     /// by receiving global transaction events for proper event consumption.
-    /// 
+    ///
     /// # Arguments
     /// * `transaction_manager` - The transaction manager to use for SIP message reliability
     /// * `transaction_events` - Global transaction event receiver
     /// * `local_address` - The local address to use in Via headers and Contact headers
-    /// 
+    ///
     /// # Returns
     /// A new DialogManager instance with proper event consumption
     pub async fn with_global_events(
@@ -406,22 +404,22 @@ impl DialogManager {
         transaction_events: mpsc::Receiver<TransactionEvent>,
         local_address: SocketAddr,
     ) -> DialogResult<Self> {
-        info!("Creating new DialogManager with global transaction events and local address {}", local_address);
-        
+        info!(
+            "Creating new DialogManager with global transaction events and local address {}",
+            local_address
+        );
+
         // Create shared stores
         let dialogs = Arc::new(DashMap::new());
         let dialog_lookup = Arc::new(DashMap::new());
-        
+
         // Create dialog event channel for subscription manager
         let (event_tx, _) = mpsc::channel(100);
-        
+
         // Create subscription manager with shared stores
-        let subscription_manager = SubscriptionManager::new(
-            dialogs.clone(),
-            dialog_lookup.clone(),
-            event_tx,
-        );
-        
+        let subscription_manager =
+            SubscriptionManager::new(dialogs.clone(), dialog_lookup.clone(), event_tx);
+
         let manager = Self {
             transaction_manager,
             local_address,
@@ -440,7 +438,9 @@ impl DialogManager {
             reliable_provisional_tasks: Arc::new(DashMap::new()),
             session_refresh_tasks: Arc::new(DashMap::new()),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
-            service_route_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+            service_route_by_aor: Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
             gruu_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
             outbound_flows: Arc::new(DashMap::new()),
             outbound_flow_tasks: Arc::new(DashMap::new()),
@@ -451,7 +451,9 @@ impl DialogManager {
         // Spawn global transaction event processor
         let event_processor = manager.clone();
         tokio::spawn(async move {
-            event_processor.process_global_transaction_events(transaction_events).await;
+            event_processor
+                .process_global_transaction_events(transaction_events)
+                .await;
         });
 
         // Wire up the RFC 5626 flow-event channel: the transaction
@@ -462,7 +464,10 @@ impl DialogManager {
         // close, and the consumer is lightweight.
         let (flow_tx, mut flow_rx) =
             mpsc::channel::<crate::manager::outbound_flow::FlowTransportEvent>(64);
-        manager.transaction_manager.set_flow_event_sender(flow_tx).await;
+        manager
+            .transaction_manager
+            .set_flow_event_sender(flow_tx)
+            .await;
         let flow_consumer = manager.clone();
         tokio::spawn(async move {
             while let Some(event) = flow_rx.recv().await {
@@ -482,14 +487,17 @@ impl DialogManager {
 
         Ok(manager)
     }
-    
+
     /// Process global transaction events (similar to working transaction-core examples)
-    /// 
+    ///
     /// This follows the exact pattern from working examples that use global event consumption
     /// instead of individual transaction subscriptions.
-    async fn process_global_transaction_events(&self, mut events: mpsc::Receiver<TransactionEvent>) {
+    async fn process_global_transaction_events(
+        &self,
+        mut events: mpsc::Receiver<TransactionEvent>,
+    ) {
         info!("🔄 Starting global transaction event processor for dialog-core");
-        
+
         loop {
             tokio::select! {
                 // Process transaction events
@@ -498,7 +506,7 @@ impl DialogManager {
                         Some(event) => {
                             // Extract transaction ID from the event
                             let transaction_id = self.extract_transaction_id(&event);
-                            
+
                             // Find the dialog associated with this transaction
                             if let Some(dialog_id) = self.find_dialog_for_transaction_event(&transaction_id) {
                                 if let Err(e) = self.process_transaction_event(&transaction_id, &dialog_id, event).await {
@@ -506,7 +514,7 @@ impl DialogManager {
                                 }
                             } else {
                                 // No dialog found using transaction-to-dialog mapping
-                                
+
                                 // Special handling for AckReceived events: use dialog-based matching
                                 if let TransactionEvent::AckReceived { request, .. } = &event {
                                     // Find dialog using Call-ID, From tag, To tag from the ACK request
@@ -536,7 +544,7 @@ impl DialogManager {
                         }
                     }
                 },
-                
+
                 // Wait for shutdown signal
                 _ = self.shutdown_signal.notified() => {
                     info!("🛑 Global transaction event processor received shutdown signal");
@@ -544,10 +552,10 @@ impl DialogManager {
                 }
             }
         }
-        
+
         info!("🏁 Global transaction event processor for dialog-core stopped");
     }
-    
+
     /// Extract transaction ID from any TransactionEvent variant
     fn extract_transaction_id(&self, event: &TransactionEvent) -> TransactionKey {
         match event {
@@ -556,14 +564,16 @@ impl DialogManager {
             TransactionEvent::ProvisionalResponse { transaction_id, .. } => transaction_id.clone(),
             TransactionEvent::SuccessResponse { transaction_id, .. } => transaction_id.clone(),
             TransactionEvent::FailureResponse { transaction_id, .. } => transaction_id.clone(),
-            TransactionEvent::ProvisionalResponseSent { transaction_id, .. } => transaction_id.clone(),
+            TransactionEvent::ProvisionalResponseSent { transaction_id, .. } => {
+                transaction_id.clone()
+            }
             TransactionEvent::FinalResponseSent { transaction_id, .. } => transaction_id.clone(),
             TransactionEvent::TransactionTimeout { transaction_id } => transaction_id.clone(),
             TransactionEvent::AckTimeout { transaction_id } => transaction_id.clone(),
             TransactionEvent::TransportError { transaction_id } => transaction_id.clone(),
-            TransactionEvent::Error { transaction_id, .. } => {
-                transaction_id.clone().unwrap_or_else(|| TransactionKey::new("unknown".to_string(), Method::Info, false))
-            },
+            TransactionEvent::Error { transaction_id, .. } => transaction_id
+                .clone()
+                .unwrap_or_else(|| TransactionKey::new("unknown".to_string(), Method::Info, false)),
             TransactionEvent::TransactionTerminated { transaction_id } => transaction_id.clone(),
             TransactionEvent::StateChanged { transaction_id, .. } => transaction_id.clone(),
             TransactionEvent::TimerTriggered { transaction_id, .. } => transaction_id.clone(),
@@ -571,31 +581,54 @@ impl DialogManager {
             TransactionEvent::AckRequest { transaction_id, .. } => transaction_id.clone(),
             TransactionEvent::InviteRequest { transaction_id, .. } => transaction_id.clone(),
             TransactionEvent::NonInviteRequest { transaction_id, .. } => transaction_id.clone(),
-            TransactionEvent::StrayRequest { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
-            TransactionEvent::StrayResponse { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
-            TransactionEvent::StrayAck { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
-            TransactionEvent::StrayCancel { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
-            TransactionEvent::StrayAckRequest { .. } => TransactionKey::new("stray".to_string(), Method::Info, false),
-            
+            TransactionEvent::StrayRequest { .. } => {
+                TransactionKey::new("stray".to_string(), Method::Info, false)
+            }
+            TransactionEvent::StrayResponse { .. } => {
+                TransactionKey::new("stray".to_string(), Method::Info, false)
+            }
+            TransactionEvent::StrayAck { .. } => {
+                TransactionKey::new("stray".to_string(), Method::Info, false)
+            }
+            TransactionEvent::StrayCancel { .. } => {
+                TransactionKey::new("stray".to_string(), Method::Info, false)
+            }
+            TransactionEvent::StrayAckRequest { .. } => {
+                TransactionKey::new("stray".to_string(), Method::Info, false)
+            }
+
             // Shutdown events don't have transaction IDs
-            TransactionEvent::ShutdownRequested |
-            TransactionEvent::ShutdownReady |
-            TransactionEvent::ShutdownNow |
-            TransactionEvent::ShutdownComplete => TransactionKey::new("shutdown".to_string(), Method::Info, false),
+            TransactionEvent::ShutdownRequested
+            | TransactionEvent::ShutdownReady
+            | TransactionEvent::ShutdownNow
+            | TransactionEvent::ShutdownComplete => {
+                TransactionKey::new("shutdown".to_string(), Method::Info, false)
+            }
         }
     }
-    
+
     /// Find dialog associated with a transaction event
-    fn find_dialog_for_transaction_event(&self, transaction_id: &TransactionKey) -> Option<DialogId> {
-        self.transaction_to_dialog.get(transaction_id).map(|entry| entry.clone())
+    fn find_dialog_for_transaction_event(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<DialogId> {
+        self.transaction_to_dialog
+            .get(transaction_id)
+            .map(|entry| entry.clone())
     }
-    
+
     /// Handle transaction events not associated with any existing dialog
-    /// 
+    ///
     /// This handles new incoming requests that should create dialogs.
-    async fn handle_unassociated_transaction_event(&self, transaction_id: &TransactionKey, event: TransactionEvent) -> DialogResult<()> {
+    async fn handle_unassociated_transaction_event(
+        &self,
+        transaction_id: &TransactionKey,
+        event: TransactionEvent,
+    ) -> DialogResult<()> {
         match event {
-            TransactionEvent::InviteRequest { request, source, .. } => {
+            TransactionEvent::InviteRequest {
+                request, source, ..
+            } => {
                 // RFC 3261 §14: an INVITE on an existing dialog is a
                 // re-INVITE. Every inbound INVITE spins up a fresh server
                 // transaction, so the transaction-to-dialog mapping is
@@ -604,23 +637,40 @@ impl DialogManager {
                 // initial INVITE handling. Same pattern as the REFER arm
                 // below.
                 if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
-                    debug!("INVITE request belongs to existing dialog {} — treating as re-INVITE", dialog_id);
-                    self.handle_reinvite(transaction_id.clone(), request, dialog_id).await?;
+                    debug!(
+                        "INVITE request belongs to existing dialog {} — treating as re-INVITE",
+                        dialog_id
+                    );
+                    self.handle_reinvite(transaction_id.clone(), request, dialog_id)
+                        .await?;
                     return Ok(());
                 }
 
-                tracing::debug!("🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from {}", source);
-                debug!("Processing new incoming INVITE request from transaction {}", transaction_id);
+                tracing::debug!(
+                    "🎯 FOUND UNASSOCIATED INVITE: Processing new incoming INVITE from {}",
+                    source
+                );
+                debug!(
+                    "Processing new incoming INVITE request from transaction {}",
+                    transaction_id
+                );
 
                 // This is a new incoming INVITE - create dialog and process it
-                self.handle_initial_invite(transaction_id.clone(), request, source).await?;
+                self.handle_initial_invite(transaction_id.clone(), request, source)
+                    .await?;
 
                 debug!("Successfully processed new incoming INVITE from {}", source);
                 Ok(())
-            },
-            
-            TransactionEvent::NonInviteRequest { request, source, .. } => {
-                debug!("Processing new incoming {} request from transaction {}", request.method(), transaction_id);
+            }
+
+            TransactionEvent::NonInviteRequest {
+                request, source, ..
+            } => {
+                debug!(
+                    "Processing new incoming {} request from transaction {}",
+                    request.method(),
+                    transaction_id
+                );
 
                 // For REFER requests, check if they belong to an existing dialog
                 if request.method() == Method::Refer {
@@ -629,7 +679,8 @@ impl DialogManager {
                         debug!("REFER request belongs to existing dialog {}", dialog_id);
 
                         // Store the transaction-to-dialog mapping
-                        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+                        self.transaction_to_dialog
+                            .insert(transaction_id.clone(), dialog_id.clone());
 
                         // REFER within a dialog should be handled by the protocol handler
                         // which will emit the TransferRequest event to session-core
@@ -641,7 +692,7 @@ impl DialogManager {
 
                 // Handle non-INVITE requests (REGISTER, OPTIONS, etc.) or REFER without dialog
                 self.handle_request(request, source).await
-            },
+            }
 
             // UAS-side CANCEL. The transaction manager emits this when an
             // inbound CANCEL finds a matching INVITE server transaction.
@@ -649,7 +700,9 @@ impl DialogManager {
             // so it arrives here as "unassociated" — route it to the
             // protocol handler so we send 200 OK to CANCEL, 487 to the
             // pending INVITE, and terminate the dialog.
-            TransactionEvent::CancelRequest { request, source, .. } => {
+            TransactionEvent::CancelRequest {
+                request, source, ..
+            } => {
                 debug!(
                     "Processing unassociated CANCEL request from transaction {}",
                     transaction_id
@@ -664,23 +717,23 @@ impl DialogManager {
             }
         }
     }
-    
+
     /// Get the configured local address
-    /// 
+    ///
     /// Returns the local address that this DialogManager uses for Via headers
     /// and Contact headers when creating SIP requests.
     pub fn local_address(&self) -> SocketAddr {
         self.local_address
     }
-    
+
     // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
     // REMOVED: set_dialog_event_sender() - Use GlobalEventCoordinator instead
     // REMOVED: setup_dialog_event_channel() - Use GlobalEventCoordinator instead
     // REMOVED: process_dialog_events() and handle_shutdown_requested() - Use GlobalEventCoordinator instead
     // REMOVED: subscribe_to_dialog_events() - Use GlobalEventCoordinator instead
-    
+
     /// Emit a dialog event to external consumers
-    /// 
+    ///
     /// Sends dialog events to session-core for high-level dialog state management.
     /// This maintains the proper architectural separation where dialog-core handles
     /// SIP protocol details and session-core handles session logic.
@@ -694,7 +747,7 @@ impl DialogManager {
                 return;
             }
         }
-        
+
         // Fall back to channel (legacy)
         if let Some(sender) = self.dialog_event_sender.read().await.as_ref() {
             if let Err(e) = sender.send(event.clone()).await {
@@ -704,21 +757,30 @@ impl DialogManager {
             }
         }
     }
-    
+
     /// Emit a session coordination event
-    /// 
+    ///
     /// Sends session coordination events for legacy compatibility and specific
     /// session management operations.
     pub async fn emit_session_coordination_event(&self, event: SessionCoordinationEvent) {
-        info!("📤 emit_session_coordination_event called with event: {:?}", event);
+        info!(
+            "📤 emit_session_coordination_event called with event: {:?}",
+            event
+        );
 
         // Try event hub first (new global event bus)
         if let Some(hub) = self.event_hub.read().await.as_ref() {
             info!("📤 Event hub exists, publishing to global bus");
             if let Err(e) = hub.publish_session_coordination_event(event.clone()).await {
-                warn!("Failed to publish session coordination event to global bus: {}", e);
+                warn!(
+                    "Failed to publish session coordination event to global bus: {}",
+                    e
+                );
             } else {
-                info!("📤 Published session coordination event to global bus: {:?}", event);
+                info!(
+                    "📤 Published session coordination event to global bus: {:?}",
+                    event
+                );
                 return;
             }
         } else {
@@ -731,50 +793,57 @@ impl DialogManager {
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send session coordination event: {}", e);
             } else {
-                info!("📤 Emitted session coordination event to legacy channel: {:?}", event);
+                info!(
+                    "📤 Emitted session coordination event to legacy channel: {:?}",
+                    event
+                );
             }
         } else {
             warn!("📤 Both event hub and legacy channel are None - event not sent!");
         }
     }
-    
+
     /// **CENTRAL DISPATCHER**: Handle incoming SIP messages
-    /// 
+    ///
     /// This is the main entry point for processing SIP messages in dialog-core.
     /// It routes messages to the appropriate method-specific handlers while maintaining
     /// RFC 3261 compliance for dialog state management.
-    /// 
+    ///
     /// # Arguments
     /// * `message` - The SIP message (Request or Response)
     /// * `source` - Source address of the message
-    /// 
+    ///
     /// # Returns
     /// Result indicating success or the specific error encountered
-    pub async fn handle_message(&self, message: rvoip_sip_core::Message, source: SocketAddr) -> DialogResult<()> {
+    pub async fn handle_message(
+        &self,
+        message: rvoip_sip_core::Message,
+        source: SocketAddr,
+    ) -> DialogResult<()> {
         match message {
-            rvoip_sip_core::Message::Request(request) => {
-                self.handle_request(request, source).await
-            },
+            rvoip_sip_core::Message::Request(request) => self.handle_request(request, source).await,
             rvoip_sip_core::Message::Response(_response) => {
                 // For responses, we need the transaction ID to route properly
                 // This would typically come from the transaction layer
                 warn!("Response handling requires transaction ID - use handle_response() directly");
-                Err(DialogError::protocol_error("Response handling requires transaction context"))
+                Err(DialogError::protocol_error(
+                    "Response handling requires transaction context",
+                ))
             }
         }
     }
-    
+
     /// Handle incoming SIP requests
-    /// 
+    ///
     /// Routes requests to appropriate method handlers based on the SIP method.
     /// Implements RFC 3261 Section 12 dialog handling requirements.
-    /// 
+    ///
     /// # Arguments
     /// * `request` - The SIP request to handle
     /// * `source` - Source address of the request
     async fn handle_request(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Handling {} request from {}", request.method(), source);
-        
+
         // Dispatch request to appropriate handler based on method
         match request.method() {
             Method::Invite => self.handle_invite(request, source).await,
@@ -791,33 +860,36 @@ impl DialogManager {
             Method::Prack => self.handle_prack(request).await,
             method => {
                 warn!("Unsupported SIP method: {}", method);
-                Err(DialogError::protocol_error(&format!("Unsupported method: {}", method)))
+                Err(DialogError::protocol_error(&format!(
+                    "Unsupported method: {}",
+                    method
+                )))
             }
         }
     }
-    
+
     /// Start the dialog manager
-    /// 
+    ///
     /// Initializes the dialog manager for processing. This can include starting
     /// background tasks for dialog cleanup, recovery, and maintenance.
     pub async fn start(&self) -> DialogResult<()> {
         info!("DialogManager starting");
-        
+
         // TODO: Start background processing tasks (cleanup, recovery, etc.)
         // - Dialog timeout monitoring
         // - Orphaned dialog cleanup
         // - Recovery coordination
         // - Statistics collection
-        
+
         info!("DialogManager started successfully");
         Ok(())
     }
-    
+
     /// Stop the dialog manager
-    /// 
+    ///
     /// Gracefully shuts down the dialog manager in BOTTOM-UP order
     /// This is called when receiving ShutdownNow("DialogManager") event
-    /// 
+    ///
     /// Shutdown order (bottom-up):
     /// 1. Shutdown transaction manager (which has already stopped transport)
     /// 2. Signal global event processor to stop
@@ -826,7 +898,7 @@ impl DialogManager {
     /// 5. Report completion via event
     pub async fn stop(&self) -> DialogResult<()> {
         info!("DialogManager stopping gracefully - responding to shutdown event");
-        
+
         // Step 0: Abort all RFC 5626 outbound-flow monitor tasks so
         // they don't try to emit `OutboundFlowFailed` against a
         // transport that's about to be torn down.
@@ -844,19 +916,21 @@ impl DialogManager {
         info!("Shutting down transaction manager...");
         self.transaction_manager.shutdown().await;
         debug!("Transaction manager shut down");
-        
+
         // Step 2: Signal shutdown to global event processor
         self.shutdown_signal.notify_one();
         debug!("Sent shutdown signal to global event processor");
-        
+
         // Give event processor time to process final messages
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        
+
         // Step 3: Now terminate any remaining dialogs
-        let dialog_ids: Vec<DialogId> = self.dialogs.iter()
+        let dialog_ids: Vec<DialogId> = self
+            .dialogs
+            .iter()
             .map(|entry| entry.key().clone())
             .collect();
-        
+
         if !dialog_ids.is_empty() {
             debug!("Found {} remaining dialogs to clean up", dialog_ids.len());
             for dialog_id in dialog_ids {
@@ -865,98 +939,110 @@ impl DialogManager {
                 }
             }
         }
-        
+
         // Step 4: Clear all mappings
         self.dialogs.clear();
         self.dialog_lookup.clear();
         self.transaction_to_dialog.clear();
-        
+
         // Step 5: Report completion
         // Since we're in dialog-core, we emit DialogEvent::ShutdownComplete
         self.emit_dialog_event(DialogEvent::ShutdownComplete).await;
-        
+
         info!("DialogManager stopped successfully");
         Ok(())
     }
-    
+
     /// Get the transaction manager reference
-    /// 
+    ///
     /// Provides access to the underlying transaction manager for cases where
     /// direct transaction operations are needed.
     pub fn transaction_manager(&self) -> &Arc<TransactionManager> {
         &self.transaction_manager
     }
-    
+
     /// Get dialog count
-    /// 
+    ///
     /// Returns the current number of active dialogs.
     pub fn dialog_count(&self) -> usize {
         self.dialogs.len()
     }
-    
+
     /// Check if a dialog exists
-    /// 
+    ///
     /// # Arguments
     /// * `dialog_id` - The dialog ID to check
-    /// 
+    ///
     /// # Returns
     /// true if the dialog exists, false otherwise
     pub fn has_dialog(&self, dialog_id: &DialogId) -> bool {
         self.dialogs.contains_key(dialog_id)
     }
-    
+
     /// Clean up completed transaction event receivers
-    /// 
+    ///
     /// This method removes transaction-to-dialog mappings for completed transactions.
-    /// 
+    ///
     /// # Arguments
     /// * `transaction_id` - The transaction ID to clean up
     pub fn cleanup_transaction_receiver(&self, transaction_id: &TransactionKey) {
         // Remove from transaction-to-dialog mapping if present
         if self.transaction_to_dialog.remove(transaction_id).is_some() {
-            debug!("Cleaned up transaction-dialog mapping for completed transaction {}", transaction_id);
+            debug!(
+                "Cleaned up transaction-dialog mapping for completed transaction {}",
+                transaction_id
+            );
         }
     }
-    
+
     /// Find the INVITE transaction associated with a dialog
-    /// 
+    ///
     /// This is used for CANCEL operations to find the pending INVITE transaction
     /// that needs to be cancelled.
-    /// 
+    ///
     /// # Arguments
     /// * `dialog_id` - The dialog ID to find the INVITE transaction for
-    /// 
+    ///
     /// # Returns
     /// The transaction key for the INVITE if found, None otherwise
-    pub fn find_invite_transaction_for_dialog(&self, dialog_id: &DialogId) -> Option<TransactionKey> {
+    pub fn find_invite_transaction_for_dialog(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Option<TransactionKey> {
         // Search through transaction-to-dialog mappings to find INVITE transaction
         for entry in self.transaction_to_dialog.iter() {
             let (tx_key, mapped_dialog_id) = entry.pair();
-            
+
             // Check if this transaction belongs to our dialog and is an INVITE
             if mapped_dialog_id == dialog_id && tx_key.method() == &Method::Invite {
-                debug!("Found INVITE transaction {} for dialog {}", tx_key, dialog_id);
+                debug!(
+                    "Found INVITE transaction {} for dialog {}",
+                    tx_key, dialog_id
+                );
                 return Some(tx_key.clone());
             }
         }
-        
+
         debug!("No INVITE transaction found for dialog {}", dialog_id);
         None
     }
-    
+
     // ========================================
     // **NEW**: UNIFIED CONFIGURATION SUPPORT
     // ========================================
-    
+
     /// Set the unified configuration for this DialogManager
-    /// 
+    ///
     /// Enables mode-specific behavior based on configuration.
     /// This method allows the UnifiedDialogManager to inject configuration.
-    /// 
+    ///
     /// # Arguments
     /// * `config` - Unified configuration determining behavior mode
     pub fn set_config(&mut self, config: DialogManagerConfig) {
-        debug!("Setting unified configuration to {:?} mode", Self::config_mode_name(&config));
+        debug!(
+            "Setting unified configuration to {:?} mode",
+            Self::config_mode_name(&config)
+        );
         if let Ok(mut guard) = self.config.write() {
             *guard = Some(config);
         }
@@ -1002,7 +1088,7 @@ impl DialogManager {
             .and_then(|g| g.as_ref().map(|c| c.supports_incoming_calls()))
             .unwrap_or(true)
     }
-    
+
     /// Get configuration mode name for logging
     fn config_mode_name(config: &DialogManagerConfig) -> &'static str {
         match config {
@@ -1019,56 +1105,76 @@ impl DialogManager {
     pub async fn create_dialog(&self, request: &Request) -> DialogResult<DialogId> {
         <Self as super::dialog_operations::DialogStore>::create_dialog(self, request).await
     }
-    
+
     pub async fn terminate_dialog(&self, dialog_id: &DialogId) -> DialogResult<()> {
         <Self as super::dialog_operations::DialogStore>::terminate_dialog(self, dialog_id).await
     }
-    
+
     pub fn get_dialog(&self, dialog_id: &DialogId) -> DialogResult<Dialog> {
         <Self as super::dialog_operations::DialogStore>::get_dialog(self, dialog_id)
     }
-    
-    pub fn get_dialog_mut(&self, dialog_id: &DialogId) -> DialogResult<dashmap::mapref::one::RefMut<DialogId, Dialog>> {
+
+    pub fn get_dialog_mut(
+        &self,
+        dialog_id: &DialogId,
+    ) -> DialogResult<dashmap::mapref::one::RefMut<DialogId, Dialog>> {
         <Self as super::dialog_operations::DialogStore>::get_dialog_mut(self, dialog_id)
     }
-    
+
     pub async fn store_dialog(&self, dialog: Dialog) -> DialogResult<()> {
         <Self as super::dialog_operations::DialogStore>::store_dialog(self, dialog).await
     }
-    
+
     pub fn list_dialogs(&self) -> Vec<DialogId> {
         <Self as super::dialog_operations::DialogStore>::list_dialogs(self)
     }
-    
+
     pub fn get_dialog_state(&self, dialog_id: &DialogId) -> DialogResult<DialogState> {
         <Self as super::dialog_operations::DialogStore>::get_dialog_state(self, dialog_id)
     }
-    
-    pub async fn update_dialog_state(&self, dialog_id: &DialogId, new_state: DialogState) -> DialogResult<()> {
-        <Self as super::dialog_operations::DialogStore>::update_dialog_state(self, dialog_id, new_state).await
+
+    pub async fn update_dialog_state(
+        &self,
+        dialog_id: &DialogId,
+        new_state: DialogState,
+    ) -> DialogResult<()> {
+        <Self as super::dialog_operations::DialogStore>::update_dialog_state(
+            self, dialog_id, new_state,
+        )
+        .await
     }
-    
-    pub async fn create_outgoing_dialog(&self, local_uri: rvoip_sip_core::Uri, remote_uri: rvoip_sip_core::Uri, call_id: Option<String>) -> DialogResult<DialogId> {
-        <Self as super::dialog_operations::DialogStore>::create_outgoing_dialog(self, local_uri, remote_uri, call_id).await
+
+    pub async fn create_outgoing_dialog(
+        &self,
+        local_uri: rvoip_sip_core::Uri,
+        remote_uri: rvoip_sip_core::Uri,
+        call_id: Option<String>,
+    ) -> DialogResult<DialogId> {
+        <Self as super::dialog_operations::DialogStore>::create_outgoing_dialog(
+            self, local_uri, remote_uri, call_id,
+        )
+        .await
     }
-    
+
     /// Get a reference to the subscription manager if configured
     pub fn subscription_manager(&self) -> Option<&Arc<SubscriptionManager>> {
         self.subscription_manager.as_ref()
     }
-    
+
     // ===== Event Hub Helper Methods =====
-    
+
     /// Set the event hub for global event coordination
     pub async fn set_event_hub(&self, event_hub: Arc<crate::events::DialogEventHub>) {
         *self.event_hub.write().await = Some(event_hub);
     }
-    
+
     /// Get session ID from dialog ID
     pub fn get_session_id(&self, dialog_id: &DialogId) -> Option<String> {
-        self.dialog_to_session.get(dialog_id).map(|e| e.value().clone())
+        self.dialog_to_session
+            .get(dialog_id)
+            .map(|e| e.value().clone())
     }
-    
+
     /// Store dialog mapping for incoming call
     pub fn store_dialog_mapping(
         &self,
@@ -1078,61 +1184,85 @@ impl DialogManager {
         request: rvoip_sip_core::Request,
         source: SocketAddr,
     ) {
-        self.session_to_dialog.insert(session_id.to_string(), dialog_id.clone());
-        self.dialog_to_session.insert(dialog_id.clone(), session_id.to_string());
+        self.session_to_dialog
+            .insert(session_id.to_string(), dialog_id.clone());
+        self.dialog_to_session
+            .insert(dialog_id.clone(), session_id.to_string());
         self.transaction_to_dialog.insert(transaction_id, dialog_id);
         // Store additional request data if needed
     }
-    
+
     // Protocol Handlers (delegated to protocol_handlers.rs)
     pub async fn handle_invite(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        <Self as super::protocol_handlers::ProtocolHandlers>::handle_invite_method(self, request, source).await
+        <Self as super::protocol_handlers::ProtocolHandlers>::handle_invite_method(
+            self, request, source,
+        )
+        .await
     }
-    
+
     pub async fn handle_bye(&self, request: Request) -> DialogResult<()> {
         <Self as super::protocol_handlers::ProtocolHandlers>::handle_bye_method(self, request).await
     }
-    
+
     pub async fn handle_cancel(&self, request: Request) -> DialogResult<()> {
-        <Self as super::protocol_handlers::ProtocolHandlers>::handle_cancel_method(self, request).await
+        <Self as super::protocol_handlers::ProtocolHandlers>::handle_cancel_method(self, request)
+            .await
     }
-    
+
     pub async fn handle_ack(&self, request: Request) -> DialogResult<()> {
         <Self as super::protocol_handlers::ProtocolHandlers>::handle_ack_method(self, request).await
     }
-    
+
     pub async fn handle_options(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        <Self as super::protocol_handlers::ProtocolHandlers>::handle_options_method(self, request, source).await
+        <Self as super::protocol_handlers::ProtocolHandlers>::handle_options_method(
+            self, request, source,
+        )
+        .await
     }
-    
+
     pub async fn handle_register(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        <Self as super::protocol_handlers::MethodHandler>::handle_register_method(self, request, source).await
+        <Self as super::protocol_handlers::MethodHandler>::handle_register_method(
+            self, request, source,
+        )
+        .await
     }
-    
+
     pub async fn handle_update(&self, request: Request) -> DialogResult<()> {
-        <Self as super::protocol_handlers::ProtocolHandlers>::handle_update_method(self, request).await
+        <Self as super::protocol_handlers::ProtocolHandlers>::handle_update_method(self, request)
+            .await
     }
 
     pub async fn handle_prack(&self, request: Request) -> DialogResult<()> {
-        <Self as super::protocol_handlers::ProtocolHandlers>::handle_prack_method(self, request).await
+        <Self as super::protocol_handlers::ProtocolHandlers>::handle_prack_method(self, request)
+            .await
     }
-    
+
     pub async fn handle_info(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        <Self as super::protocol_handlers::MethodHandler>::handle_info_method(self, request, source).await
+        <Self as super::protocol_handlers::MethodHandler>::handle_info_method(self, request, source)
+            .await
     }
-    
+
     pub async fn handle_refer(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        <Self as super::protocol_handlers::MethodHandler>::handle_refer_method(self, request, source).await
+        <Self as super::protocol_handlers::MethodHandler>::handle_refer_method(
+            self, request, source,
+        )
+        .await
     }
-    
+
     pub async fn handle_subscribe(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        <Self as super::protocol_handlers::MethodHandler>::handle_subscribe_method(self, request, source).await
+        <Self as super::protocol_handlers::MethodHandler>::handle_subscribe_method(
+            self, request, source,
+        )
+        .await
     }
-    
+
     pub async fn handle_notify(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
-        <Self as super::protocol_handlers::MethodHandler>::handle_notify_method(self, request, source).await
+        <Self as super::protocol_handlers::MethodHandler>::handle_notify_method(
+            self, request, source,
+        )
+        .await
     }
-    
+
     /// Snapshot of the externally-visible address most recently
     /// learned from an inbound response's `Via: …;received=…;rport=…`
     /// (RFC 3581). Returns `None` until the first qualifying response
@@ -1178,22 +1308,43 @@ impl DialogManager {
         self.gruu_by_aor.read().await.get(aor).cloned()
     }
 
-    pub async fn handle_response(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {
-        <Self as super::protocol_handlers::ProtocolHandlers>::handle_response_message(self, response, transaction_id).await
+    pub async fn handle_response(
+        &self,
+        response: Response,
+        transaction_id: TransactionKey,
+    ) -> DialogResult<()> {
+        <Self as super::protocol_handlers::ProtocolHandlers>::handle_response_message(
+            self,
+            response,
+            transaction_id,
+        )
+        .await
     }
-    
+
     // Message Routing (delegated to message_routing.rs)
     pub async fn find_dialog_for_request(&self, request: &Request) -> Option<DialogId> {
-        <Self as super::dialog_operations::DialogLookup>::find_dialog_for_request(self, request).await
+        <Self as super::dialog_operations::DialogLookup>::find_dialog_for_request(self, request)
+            .await
     }
-    
-    pub fn find_dialog_for_transaction(&self, transaction_id: &TransactionKey) -> DialogResult<DialogId> {
+
+    pub fn find_dialog_for_transaction(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> DialogResult<DialogId> {
         <Self as super::message_routing::DialogMatcher>::match_transaction(self, transaction_id)
     }
-    
+
     // Transaction Integration (delegated to transaction_integration.rs)
-    pub async fn send_request(&self, dialog_id: &DialogId, method: Method, body: Option<bytes::Bytes>) -> DialogResult<TransactionKey> {
-        <Self as super::transaction_integration::TransactionIntegration>::send_request_in_dialog(self, dialog_id, method, body).await
+    pub async fn send_request(
+        &self,
+        dialog_id: &DialogId,
+        method: Method,
+        body: Option<bytes::Bytes>,
+    ) -> DialogResult<TransactionKey> {
+        <Self as super::transaction_integration::TransactionIntegration>::send_request_in_dialog(
+            self, dialog_id, method, body,
+        )
+        .await
     }
 
     /// Send a BYE request carrying a `Reason:` header (RFC 3326).
@@ -1208,18 +1359,18 @@ impl DialogManager {
         dialog_id: &DialogId,
         reason: rvoip_sip_core::types::reason::Reason,
     ) -> DialogResult<TransactionKey> {
-        use rvoip_sip_core::types::TypedHeader;
         use crate::transaction::dialog::quick as dialog_quick;
+        use rvoip_sip_core::types::TypedHeader;
 
         debug!("Sending BYE with Reason header for dialog {}", dialog_id);
 
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await
-                .ok_or_else(|| DialogError::routing_error(
-                    "No remote target address available",
-                ))?;
+            let destination = dialog
+                .get_remote_target_address()
+                .await
+                .ok_or_else(|| DialogError::routing_error("No remote target address available"))?;
 
             let template = dialog.create_request_template(Method::Bye);
 
@@ -1232,11 +1383,12 @@ impl DialogManager {
                 }
             };
 
-            let remote_tag = template.remote_tag
+            let remote_tag = template
+                .remote_tag
                 .filter(|t| !t.is_empty())
-                .ok_or_else(|| DialogError::protocol_error(
-                    "BYE requires remote tag in established dialog",
-                ))?;
+                .ok_or_else(|| {
+                    DialogError::protocol_error("BYE requires remote tag in established dialog")
+                })?;
 
             let request = dialog_quick::bye_for_dialog(
                 &template.call_id,
@@ -1246,9 +1398,14 @@ impl DialogManager {
                 &remote_tag,
                 template.cseq_number,
                 self.local_address,
-                if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                if template.route_set.is_empty() {
+                    None
+                } else {
+                    Some(template.route_set.clone())
+                },
                 Some(vec![TypedHeader::Reason(reason)]),
-            ).map_err(|e| DialogError::InternalError {
+            )
+            .map_err(|e| DialogError::InternalError {
                 message: format!("Failed to build BYE request: {}", e),
                 context: None,
             })?;
@@ -1256,15 +1413,20 @@ impl DialogManager {
             (destination, request)
         };
 
-        let transaction_id = self.transaction_manager
+        let transaction_id = self
+            .transaction_manager
             .create_non_invite_client_transaction(request, destination)
             .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to create BYE transaction: {}", e),
             })?;
 
-        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
-        debug!("Associated BYE-with-Reason transaction {} with dialog {}", transaction_id, dialog_id);
+        self.transaction_to_dialog
+            .insert(transaction_id.clone(), dialog_id.clone());
+        debug!(
+            "Associated BYE-with-Reason transaction {} with dialog {}",
+            transaction_id, dialog_id
+        );
 
         self.transaction_manager
             .send_request(&transaction_id)
@@ -1275,7 +1437,7 @@ impl DialogManager {
 
         Ok(transaction_id)
     }
-    
+
     /// Send an INFO request carrying a caller-chosen `Content-Type` (RFC 6086).
     ///
     /// The generic [`send_request_in_dialog`](Self::send_request) path always
@@ -1298,10 +1460,10 @@ impl DialogManager {
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await
-                .ok_or_else(|| DialogError::routing_error(
-                    "No remote target address available",
-                ))?;
+            let destination = dialog
+                .get_remote_target_address()
+                .await
+                .ok_or_else(|| DialogError::routing_error("No remote target address available"))?;
 
             let template = dialog.create_request_template(Method::Info);
 
@@ -1314,11 +1476,12 @@ impl DialogManager {
                 }
             };
 
-            let remote_tag = template.remote_tag
+            let remote_tag = template
+                .remote_tag
                 .filter(|t| !t.is_empty())
-                .ok_or_else(|| DialogError::protocol_error(
-                    "INFO requires remote tag in established dialog",
-                ))?;
+                .ok_or_else(|| {
+                    DialogError::protocol_error("INFO requires remote tag in established dialog")
+                })?;
 
             let body_str = String::from_utf8_lossy(&body).into_owned();
             let request = dialog_quick::info_for_dialog(
@@ -1331,8 +1494,13 @@ impl DialogManager {
                 Some(content_type),
                 template.cseq_number,
                 self.local_address,
-                if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
-            ).map_err(|e| DialogError::InternalError {
+                if template.route_set.is_empty() {
+                    None
+                } else {
+                    Some(template.route_set.clone())
+                },
+            )
+            .map_err(|e| DialogError::InternalError {
                 message: format!("Failed to build INFO request: {}", e),
                 context: None,
             })?;
@@ -1340,14 +1508,16 @@ impl DialogManager {
             (destination, request)
         };
 
-        let transaction_id = self.transaction_manager
+        let transaction_id = self
+            .transaction_manager
             .create_non_invite_client_transaction(request, destination)
             .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to create INFO transaction: {}", e),
             })?;
 
-        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
+        self.transaction_to_dialog
+            .insert(transaction_id.clone(), dialog_id.clone());
 
         self.transaction_manager
             .send_request(&transaction_id)
@@ -1359,17 +1529,39 @@ impl DialogManager {
         Ok(transaction_id)
     }
 
-    pub async fn send_response(&self, transaction_id: &TransactionKey, response: Response) -> DialogResult<()> {
-        <Self as super::transaction_integration::TransactionIntegration>::send_transaction_response(self, transaction_id, response).await
+    pub async fn send_response(
+        &self,
+        transaction_id: &TransactionKey,
+        response: Response,
+    ) -> DialogResult<()> {
+        <Self as super::transaction_integration::TransactionIntegration>::send_transaction_response(
+            self,
+            transaction_id,
+            response,
+        )
+        .await
     }
-    
-    pub fn associate_transaction_with_dialog(&self, transaction_id: &TransactionKey, dialog_id: &DialogId) {
-        <Self as super::transaction_integration::TransactionHelpers>::link_transaction_to_dialog(self, transaction_id, dialog_id)
+
+    pub fn associate_transaction_with_dialog(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: &DialogId,
+    ) {
+        <Self as super::transaction_integration::TransactionHelpers>::link_transaction_to_dialog(
+            self,
+            transaction_id,
+            dialog_id,
+        )
     }
-    
-    pub async fn send_ack_for_2xx_response(&self, dialog_id: &DialogId, original_invite_tx_id: &TransactionKey, response: &Response) -> DialogResult<()> {
+
+    pub async fn send_ack_for_2xx_response(
+        &self,
+        dialog_id: &DialogId,
+        original_invite_tx_id: &TransactionKey,
+        response: &Response,
+    ) -> DialogResult<()> {
         debug!("Sending ACK for 2xx response for dialog {}", dialog_id);
-        
+
         // Use transaction-core's send_ack_for_2xx method to actually send the ACK
         self.transaction_manager
             .send_ack_for_2xx(original_invite_tx_id, response)
@@ -1377,19 +1569,31 @@ impl DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to send ACK for 2xx response: {}", e),
             })?;
-        
-        debug!("Successfully sent ACK for 2xx response for dialog {}", dialog_id);
+
+        debug!(
+            "Successfully sent ACK for 2xx response for dialog {}",
+            dialog_id
+        );
         Ok(())
     }
-    
-    pub async fn create_ack_for_2xx_response(&self, original_invite_tx_id: &TransactionKey, response: &Response) -> DialogResult<Request> {
+
+    pub async fn create_ack_for_2xx_response(
+        &self,
+        original_invite_tx_id: &TransactionKey,
+        response: &Response,
+    ) -> DialogResult<Request> {
         <Self as super::transaction_integration::TransactionHelpers>::create_ack_for_success_response(self, original_invite_tx_id, response).await
     }
-    
-    pub async fn find_transaction_by_message(&self, message: &rvoip_sip_core::Message) -> DialogResult<Option<TransactionKey>> {
+
+    pub async fn find_transaction_by_message(
+        &self,
+        message: &rvoip_sip_core::Message,
+    ) -> DialogResult<Option<TransactionKey>> {
         debug!("Finding transaction for message using transaction-core");
 
-        self.transaction_manager.find_transaction_by_message(message).await
+        self.transaction_manager
+            .find_transaction_by_message(message)
+            .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to find transaction by message: {}", e),
             })
@@ -1427,7 +1631,8 @@ async fn run_outbound_flow_loop(
     //
     // 365 days is well below `Instant` overflow on every platform we
     // support and low enough that pinning it here is harmless.
-    let far_future = || tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600);
+    let far_future =
+        || tokio::time::Instant::now() + std::time::Duration::from_secs(365 * 24 * 3600);
     let sleep = tokio::time::sleep_until(far_future());
     tokio::pin!(sleep);
     let mut deadline_armed = false;
@@ -1583,7 +1788,11 @@ mod outbound_flow_handler_tests {
         key: (String, u32, String),
         dest: SocketAddr,
     ) -> Arc<OutboundFlow> {
-        let flow = Arc::new(OutboundFlow::new(key.clone(), dest, Duration::from_secs(25)));
+        let flow = Arc::new(OutboundFlow::new(
+            key.clone(),
+            dest,
+            Duration::from_secs(25),
+        ));
         manager.outbound_flows.insert(key.clone(), flow.clone());
         manager
             .flow_by_destination

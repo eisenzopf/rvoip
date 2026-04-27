@@ -111,7 +111,7 @@
 //! assert_eq!(uri.user, Some("alice".to_string()));
 //! assert_eq!(uri.host.to_string(), "example.com");
 //! assert_eq!(uri.port, Some(5060));
-//! 
+//!
 //! // Get parameters from the URI
 //! let transport_param = uri.parameters.iter()
 //!     .find(|p| p.key() == "transport")
@@ -146,15 +146,15 @@
 //! let mut address = Address::new_with_display_name("Alice Smith", uri);
 //! address.params.push(Param::tag("1234abcd"));
 //! let from = From::new(address);
-//! 
+//!
 //! // Access the address components
 //! let addr = from.address();
 //! assert_eq!(addr.display_name(), Some("Alice Smith"));
 //! assert_eq!(addr.uri.to_string(), "sip:alice@example.com");
-//! 
+//!
 //! // Access the tag parameter
 //! assert_eq!(from.tag(), Some("1234abcd"));
-//! 
+//!
 //! // Serialize the header to a string
 //! let header_str = from.to_string();
 //! assert!(header_str.contains("Alice Smith"));
@@ -177,10 +177,10 @@
 //!     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
 //!     .max_forwards(70)
 //!     .build();
-//! 
+//!
 //! assert_eq!(request.method(), Method::Invite);
 //! assert_eq!(request.uri().to_string(), "sip:bob@example.com");
-//! 
+//!
 //! // Access specific headers
 //! let from = request.from().unwrap();
 //! assert_eq!(from.address().display_name(), Some("Alice"));
@@ -201,10 +201,10 @@
 //!     .cseq(314159, Method::Invite)
 //!     .via("pc33.atlanta.com", "UDP", Some("z9hG4bK776asdhds"))
 //!     .build();
-//! 
+//!
 //! assert_eq!(response.status_code(), 200);
 //! assert_eq!(response.reason_phrase(), "OK");
-//! 
+//!
 //! // Access specific headers
 //! let to = response.to().unwrap();
 //! assert_eq!(to.address().display_name(), Some("Bob"));
@@ -222,9 +222,9 @@
 //! let uri = Uri::from_str("sip:bob@example.com").unwrap();
 //! let auth = Authorization::new(
 //!     AuthScheme::Digest,
-//!     "alice", 
+//!     "alice",
 //!     "example.com",
-//!     "dcd98b7102dd2f0e8b11d0f600bfb0c093", 
+//!     "dcd98b7102dd2f0e8b11d0f600bfb0c093",
 //!     uri,
 //!     "a2ea68c230e5fea1ca715740fb14db97"
 //! );
@@ -280,7 +280,7 @@
 //! let mut proxy_addr = Address::new(proxy_uri);
 //! proxy_addr.params.push(Param::new("lr", None::<String>));
 //!
-//! // Create and add the Route header 
+//! // Create and add the Route header
 //! let route = Route::with_address(proxy_addr);
 //! let req_with_route = request.header(TypedHeader::Route(route)).build();
 //!
@@ -333,7 +333,7 @@ pub use param::Param;
 
 // Add new URI module
 pub mod uri;
-pub use uri::{Uri, Host, Scheme};
+pub use uri::{Host, Scheme, Uri};
 
 // Add Version module
 pub mod version;
@@ -352,57 +352,58 @@ pub mod contact;
 pub mod content_disposition;
 pub mod content_length;
 pub mod content_type;
-pub mod media_type;
 pub mod cseq;
 pub mod expires;
 pub mod from;
 pub mod header;
+pub mod media_type;
 pub use header::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 pub mod headers;
 pub mod in_reply_to;
 pub mod max_forwards;
+pub mod multipart;
 pub mod organization;
+pub mod outbound;
+pub mod path;
+pub mod proxy_require;
+pub mod rack;
 pub mod record_route;
-pub mod reply_to;
 pub mod refer_to;
 pub mod referred_by;
+pub mod reply_to;
 pub mod require;
 pub mod route;
+pub mod rseq;
 pub mod sdp;
+pub mod service_route;
 pub mod subject;
 pub mod to;
 pub mod warning;
-pub mod multipart;
-pub mod path;
-pub mod service_route;
-pub mod outbound;
-pub mod proxy_require;
-pub mod rack;
-pub mod rseq;
 
 // Modules missing re-exports - Add them
-pub mod priority;
-pub mod server;
-pub mod retry_after;
-pub mod error_info;
-pub mod supported;
-pub mod unsupported;
+pub mod accept_encoding;
+pub mod alert_info;
+pub mod allow_events;
 pub mod content_encoding;
 pub mod content_language;
-pub mod accept_encoding;
-pub mod reason;
-pub mod alert_info;
-pub mod session_expires;
 pub mod date;
+pub mod error_info;
 pub mod event;
-pub mod timestamp;
-pub mod subscription_state;
+pub mod p_asserted_identity;
+pub mod pidf;
+pub mod priority;
+pub mod reason;
+pub mod retry_after;
+pub mod server;
+pub mod session_expires;
 pub mod sip_etag;
 pub mod sip_if_match;
-pub mod allow_events;
-pub mod pidf;
-pub mod p_asserted_identity;
+pub mod subscription_state;
+pub mod supported;
+pub mod timestamp;
+pub mod unsupported;
 pub use accept::Accept;
+pub use accept_encoding::AcceptEncoding;
 pub use accept_language::AcceptLanguage;
 pub use address::Address;
 pub use allow::Allow;
@@ -412,53 +413,52 @@ pub use call_info::{CallInfo, CallInfoValue, InfoPurpose};
 pub use contact::Contact;
 pub use contact::ContactParamInfo;
 pub use content_disposition::*;
+pub use content_encoding::ContentEncoding;
+pub use content_language::ContentLanguage;
 pub use content_length::ContentLength;
 pub use content_type::ContentType;
-pub use media_type::MediaType;
 pub use cseq::CSeq;
 pub use expires::Expires;
 pub use from::From;
 pub use in_reply_to::InReplyTo;
 pub use max_forwards::MaxForwards;
+pub use media_type::MediaType;
+pub use multipart::{MimePart, MultipartBody, ParsedBody};
 pub use organization::Organization;
+pub use outbound::{
+    mark_uri_as_outbound, read_gruu_contact_params, read_outbound_contact_params,
+    set_gruu_contact_params, set_outbound_contact_params, GruuContactParams, OutboundContactParams,
+};
+pub use path::Path;
+pub use proxy_require::ProxyRequire;
+pub use refer_to::ReferTo;
 pub use require::Require;
+pub use service_route::ServiceRoute;
 pub use subject::Subject;
 pub use warning::Warning;
-pub use multipart::{MultipartBody, MimePart, ParsedBody};
-pub use refer_to::ReferTo;
-pub use content_encoding::ContentEncoding;
-pub use content_language::ContentLanguage;
-pub use accept_encoding::AcceptEncoding;
-pub use path::Path;
-pub use service_route::ServiceRoute;
-pub use outbound::{
-    GruuContactParams, OutboundContactParams, mark_uri_as_outbound, read_gruu_contact_params,
-    read_outbound_contact_params, set_gruu_contact_params, set_outbound_contact_params,
-};
-pub use proxy_require::ProxyRequire;
 
 // Add missing pub use * directives
-pub use priority::*;
-pub use server::*;
-pub use retry_after::*;
-pub use error_info::*;
-pub use supported::{Supported};
-pub use unsupported::Unsupported;
-pub use reason::Reason;
 pub use alert_info::{AlertInfo, AlertInfoHeader, AlertInfoList};
-pub use session_expires::{SessionExpires, Refresher};
+pub use allow_events::AllowEvents;
 pub use date::Date;
+pub use error_info::*;
 pub use event::{Event, EventType};
-pub use timestamp::Timestamp;
-pub use to::To;
-pub use subscription_state::{SubscriptionState, SubState, TerminationReason};
+pub use p_asserted_identity::{PAssertedIdentity, PPreferredIdentity};
+pub use pidf::{BasicStatus, PidfDocument, Presence, Status, Tuple};
+pub use priority::*;
+pub use rack::RAck;
+pub use reason::Reason;
+pub use retry_after::*;
+pub use rseq::RSeq;
+pub use server::*;
+pub use session_expires::{Refresher, SessionExpires};
 pub use sip_etag::SipETag;
 pub use sip_if_match::SipIfMatch;
-pub use allow_events::AllowEvents;
-pub use rseq::RSeq;
-pub use rack::RAck;
-pub use pidf::{PidfDocument, BasicStatus, Status, Tuple, Presence};
-pub use p_asserted_identity::{PAssertedIdentity, PPreferredIdentity};
+pub use subscription_state::{SubState, SubscriptionState, TerminationReason};
+pub use supported::Supported;
+pub use timestamp::Timestamp;
+pub use to::To;
+pub use unsupported::Unsupported;
 
 // Add AsRef implementations for Message
 impl AsRef<Message> for Message {

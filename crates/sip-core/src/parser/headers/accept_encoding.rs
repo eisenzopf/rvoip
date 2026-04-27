@@ -13,16 +13,16 @@ use nom::{
     sequence::{pair, preceded},
     IResult,
 };
-use std::str;
-use std::collections::HashMap;
 use ordered_float::NotNan;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::str;
 
 // Import from base parser modules
-use crate::parser::separators::{hcolon, semi, comma};
-use crate::parser::token::token;
-use crate::parser::common_params::accept_param; // Reuses generic_param, qvalue
 use crate::parser::common::comma_separated_list0;
+use crate::parser::common_params::accept_param; // Reuses generic_param, qvalue
+use crate::parser::separators::{comma, hcolon, semi};
+use crate::parser::token::token;
 use crate::parser::ParseResult;
 
 use crate::types::param::Param;
@@ -50,26 +50,29 @@ impl EncodingInfo {
 impl std::fmt::Display for EncodingInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.coding)?;
-        
+
         for param in &self.params {
             match param {
                 Param::Q(q_not_nan) => {
                     let q_val: f32 = q_not_nan.into_inner();
-                    if q_val.fract() == 0.0 && q_val >= 0.0 { // Ensure it's a whole number like 0.0, 1.0
+                    if q_val.fract() == 0.0 && q_val >= 0.0 {
+                        // Ensure it's a whole number like 0.0, 1.0
                         write!(f, ";q={}", q_val as i32)?;
                     } else {
                         write!(f, ";q={:.3}", q_val)?;
                     }
                 }
                 Param::Other(name, None) => write!(f, ";{}", name)?,
-                Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) => 
-                    write!(f, ";{}={}", name, value)?,
-                Param::Other(name, Some(crate::types::param::GenericValue::Quoted(value))) => 
-                    write!(f, ";{}=\"{}\"", name, value)?,
+                Param::Other(name, Some(crate::types::param::GenericValue::Token(value))) => {
+                    write!(f, ";{}={}", name, value)?
+                }
+                Param::Other(name, Some(crate::types::param::GenericValue::Quoted(value))) => {
+                    write!(f, ";{}=\"{}\"", name, value)?
+                }
                 _ => {} // Other param types not expected in Accept-Encoding
             }
         }
-        
+
         Ok(())
     }
 }
@@ -77,7 +80,9 @@ impl std::fmt::Display for EncodingInfo {
 impl std::cmp::Ord for EncodingInfo {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // Sort by q-value (highest first), then by coding string for stable ordering
-        other.q_value().partial_cmp(&self.q_value())
+        other
+            .q_value()
+            .partial_cmp(&self.q_value())
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| self.coding.cmp(&other.coding))
     }
@@ -93,10 +98,9 @@ impl std::cmp::PartialOrd for EncodingInfo {
 // content-coding = token
 // Returns coding as String
 fn codings(input: &[u8]) -> ParseResult<String> {
-    map(
-        alt((token, tag("*"))),
-        |bytes| String::from_utf8_lossy(bytes).to_string()
-    )(input)
+    map(alt((token, tag("*"))), |bytes| {
+        String::from_utf8_lossy(bytes).to_string()
+    })(input)
 }
 
 // accept-param = ("q" EQUAL qvalue) / generic-param
@@ -106,11 +110,11 @@ fn codings(input: &[u8]) -> ParseResult<String> {
 // Returns EncodingInfo { coding: String, params: Vec<Param> }
 fn encoding(input: &[u8]) -> ParseResult<EncodingInfo> {
     map(
-        pair(
-            codings,
-            many0(preceded(semi, accept_param))
-        ),
-        |(coding_str, params_vec)| EncodingInfo { coding: coding_str, params: params_vec }
+        pair(codings, many0(preceded(semi, accept_param))),
+        |(coding_str, params_vec)| EncodingInfo {
+            coding: coding_str,
+            params: params_vec,
+        },
     )(input)
 }
 
@@ -131,13 +135,13 @@ pub struct AcceptEncodingValue {
 // It should return ParseResult<Vec<EncodingInfo>> , empty Vec if header value is empty
 pub fn parse_accept_encoding(input: &[u8]) -> ParseResult<Vec<EncodingInfo>> {
     // Use separated_list0 to allow an empty list if the input is empty or just whitespace
-    separated_list0(comma, encoding)(input) 
+    separated_list0(comma, encoding)(input)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::param::{Param, GenericValue};
+    use crate::types::param::{GenericValue, Param};
     use ordered_float::NotNan;
 
     #[test]
@@ -162,7 +166,7 @@ mod tests {
         let (rem, encodings) = result.unwrap();
         assert!(rem.is_empty());
         assert_eq!(encodings.len(), 3);
-        
+
         assert_eq!(encodings[0].coding, "compress");
         assert!(encodings[0].params.is_empty());
 
@@ -173,7 +177,7 @@ mod tests {
         assert_eq!(encodings[2].params.len(), 1);
         assert!(matches!(encodings[2].params[0], Param::Q(q) if q == NotNan::new(0.5).unwrap()));
     }
-    
+
     #[test]
     fn test_parse_accept_encoding_empty() {
         let input = b""; // Empty value allowed
@@ -183,4 +187,4 @@ mod tests {
         assert!(rem.is_empty()); // Should consume empty input
         assert!(encodings.is_empty()); // Should result in an empty Vec
     }
-} 
+}

@@ -1,11 +1,9 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader,
     require::Require,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 
 /// Require header builder
 ///
@@ -155,7 +153,7 @@ pub trait RequireBuilderExt {
     /// // behavior or reject the request with 420 Bad Extension
     /// ```
     fn require_tag(self, option_tag: impl Into<String>) -> Self;
-    
+
     /// Add a Require header with multiple option tags
     ///
     /// This method adds a Require header with multiple SIP extension option tags
@@ -195,7 +193,7 @@ pub trait RequireBuilderExt {
     /// // it must reject with 420 and list the unsupported ones
     /// ```
     fn require_tags(self, option_tags: Vec<impl Into<String>>) -> Self;
-    
+
     /// Add a Require header for 100rel (reliable provisional responses)
     ///
     /// This convenience method adds a Require header with the 100rel extension
@@ -227,7 +225,7 @@ pub trait RequireBuilderExt {
     /// // to confirm media is being negotiated reliably
     /// ```
     fn require_100rel(self) -> Self;
-    
+
     /// Add a Require header for timer (session timers)
     ///
     /// This convenience method adds a Require header with the timer extension
@@ -265,7 +263,7 @@ pub trait RequireBuilderExt {
     /// // to properly monitor the call state
     /// ```
     fn require_timer(self) -> Self;
-    
+
     /// Add a Require header for path
     ///
     /// This convenience method adds a Require header with the path extension
@@ -297,7 +295,7 @@ pub trait RequireBuilderExt {
     /// // for this registration to succeed
     /// ```
     fn require_path(self) -> Self;
-    
+
     /// Add a Require header for ICE negotiation
     ///
     /// This convenience method adds a Require header with the ice extension.
@@ -329,7 +327,7 @@ pub trait RequireBuilderExt {
     /// // or reject the call with 420 Bad Extension
     /// ```
     fn require_ice(self) -> Self;
-    
+
     /// Add a Require header with common WebRTC-related option tags
     ///
     /// This convenience method adds a Require header with the common WebRTC-related
@@ -364,15 +362,15 @@ pub trait RequireBuilderExt {
     fn require_webrtc(self) -> Self;
 }
 
-impl<T> RequireBuilderExt for T 
-where 
+impl<T> RequireBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn require_tag(self, option_tag: impl Into<String>) -> Self {
         let require = Require::with_tag(option_tag);
         self.set_header(require)
     }
-    
+
     fn require_tags(self, option_tags: Vec<impl Into<String>>) -> Self {
         let mut tags = Vec::with_capacity(option_tags.len());
         for tag in option_tags {
@@ -381,23 +379,23 @@ where
         let require = Require::new(tags);
         self.set_header(require)
     }
-    
+
     fn require_100rel(self) -> Self {
         self.require_tag("100rel")
     }
-    
+
     fn require_timer(self) -> Self {
         self.require_tag("timer")
     }
-    
+
     fn require_path(self) -> Self {
         self.require_tag("path")
     }
-    
+
     fn require_ice(self) -> Self {
         self.require_tag("ice")
     }
-    
+
     fn require_webrtc(self) -> Self {
         self.require_tags(vec!["ice", "replaces"])
     }
@@ -412,13 +410,14 @@ mod tests {
 
     #[test]
     fn test_request_require_tag() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .require_tag("100rel")
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Require(require)) = request.header(&HeaderName::Require) {
             assert_eq!(require.option_tags.len(), 1);
             assert!(require.requires("100rel"));
@@ -432,10 +431,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .require_tags(vec!["100rel", "timer"])
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Require(require)) = response.header(&HeaderName::Require) {
             assert_eq!(require.option_tags.len(), 2);
             assert!(require.requires("100rel"));
@@ -448,10 +447,11 @@ mod tests {
 
     #[test]
     fn test_require_convenience_methods() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .require_path()
             .build();
-            
+
         if let Some(TypedHeader::Require(require)) = request.header(&HeaderName::Require) {
             assert_eq!(require.option_tags.len(), 1);
             assert!(require.requires("path"));
@@ -462,10 +462,11 @@ mod tests {
 
     #[test]
     fn test_require_webrtc() {
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .require_webrtc()
             .build();
-            
+
         if let Some(TypedHeader::Require(require)) = request.header(&HeaderName::Require) {
             assert!(require.requires("ice"));
             assert!(require.requires("replaces"));
@@ -473,4 +474,4 @@ mod tests {
             panic!("Require header not found or has wrong type");
         }
     }
-} 
+}

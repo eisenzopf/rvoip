@@ -3,8 +3,8 @@
 //! Simple in-memory user database for storing and retrieving user credentials.
 //! In production, this should be backed by a persistent database.
 
-use dashmap::DashMap;
 use crate::error::{RegistrarError, Result};
+use dashmap::DashMap;
 
 /// User credentials for authentication
 #[derive(Debug, Clone)]
@@ -40,14 +40,14 @@ impl UserStore {
     pub fn add_user(&self, username: impl Into<String>, password: impl Into<String>) -> Result<()> {
         let username = username.into();
         let password = password.into();
-        
+
         let credentials = UserCredentials {
             username: username.clone(),
             password,
             realm: self.default_realm.clone(),
             display_name: None,
         };
-        
+
         self.users.insert(username, credentials);
         Ok(())
     }
@@ -124,7 +124,7 @@ mod tests {
     fn test_add_and_get_user() {
         let store = UserStore::new("test.realm");
         store.add_user("alice", "password123").unwrap();
-        
+
         assert!(store.user_exists("alice"));
         assert_eq!(store.get_password("alice"), Some("password123".to_string()));
     }
@@ -133,7 +133,7 @@ mod tests {
     fn test_remove_user() {
         let store = UserStore::new("test.realm");
         store.add_user("bob", "secret").unwrap();
-        
+
         assert!(store.user_exists("bob"));
         store.remove_user("bob").unwrap();
         assert!(!store.user_exists("bob"));
@@ -143,7 +143,7 @@ mod tests {
     fn test_update_password() {
         let store = UserStore::new("test.realm");
         store.add_user("charlie", "old_pass").unwrap();
-        
+
         store.update_password("charlie", "new_pass").unwrap();
         assert_eq!(store.get_password("charlie"), Some("new_pass".to_string()));
     }
@@ -152,10 +152,9 @@ mod tests {
     fn test_user_count() {
         let store = UserStore::new("test.realm");
         assert_eq!(store.user_count(), 0);
-        
+
         store.add_user("user1", "pass1").unwrap();
         store.add_user("user2", "pass2").unwrap();
         assert_eq!(store.user_count(), 2);
     }
 }
-

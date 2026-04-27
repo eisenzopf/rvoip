@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::pin::Pin;
 /// # SIP Transaction Layer
 ///
 /// This module implements the SIP transaction layer as defined in RFC 3261 Section 17.
@@ -78,10 +80,7 @@
 ///
 /// This architecture separates the transaction-specific behavior from the common
 /// event loop machinery, making the code more maintainable and extensible.
-
 use std::{fmt, net::SocketAddr, sync::Arc, time::Duration};
-use std::future::Future;
-use std::pin::Pin;
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
@@ -89,8 +88,8 @@ use rvoip_sip_transport::Transport;
 use self::error::{Error, Result};
 
 // Core submodules
-pub mod error;
 pub mod common_logic;
+pub mod error;
 pub mod event;
 pub mod key;
 pub mod logic;
@@ -111,10 +110,10 @@ pub mod transport;
 pub mod utils;
 
 // Re-export core types
-pub use state::*;
-pub use key::*;
-pub use event::*;
 pub use error::{Error as TransactionError, Result as TransactionResult};
+pub use event::*;
+pub use key::*;
+pub use state::*;
 
 // Re-export manager
 pub use manager::TransactionManager;
@@ -208,22 +207,22 @@ pub trait Transaction: Send + Sync + fmt::Debug {
     /// Returns the unique key identifying this transaction.
     /// The key is typically derived from the branch parameter of the Via header, the method, and directionality.
     fn id(&self) -> &TransactionKey;
-    
+
     /// Returns the [`TransactionKind`] of this transaction (e.g., InviteClient, InviteServer).
     fn kind(&self) -> TransactionKind;
-    
+
     /// Returns the current [`TransactionState`] of this transaction (e.g., Trying, Proceeding, Completed).
     fn state(&self) -> TransactionState;
-    
+
     /// Returns the network [`SocketAddr`] of the remote party involved in this transaction.
     /// For client transactions, this is the destination address. For server transactions, it's the source address.
     fn remote_addr(&self) -> SocketAddr;
-    
+
     /// Checks if the given SIP `Message` (request or response) matches this transaction
     /// according to the rules in RFC 3261, Section 17.1.3 (client) and 17.2.3 (server).
     /// This involves comparing Via branch, CSeq method and number, From/To tags, Call-ID, etc.
     fn matches(&self, message: &Message) -> bool;
-    
+
     /// Provides a way to downcast this transaction object to its concrete type if needed.
     /// This is a standard Rust pattern for trait objects.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -251,9 +250,9 @@ pub trait TransactionAsync: Transaction {
     /// A pinned, boxed future that resolves to `Ok(())` on successful processing, or an `Error`
     /// if processing fails. The future must be `Send` to allow it to be spawned on a runtime.
     fn process_event<'a>(
-        &'a self, 
+        &'a self,
         event_type: &'a str, // Consider an enum for event_type for better type safety
-        message: Option<Message> // Message is owned, implies it might be consumed or stored.
+        message: Option<Message>, // Message is owned, implies it might be consumed or stored.
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     /// Sends an [`InternalTransactionCommand`] to this transaction for asynchronous processing.
@@ -269,7 +268,7 @@ pub trait TransactionAsync: Transaction {
     /// or an `Error` otherwise.
     fn send_command<'a>(
         &'a self,
-        cmd: InternalTransactionCommand // Command is owned.
+        cmd: InternalTransactionCommand, // Command is owned.
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     /// Asynchronously retrieves the original SIP request that initiated this transaction.
@@ -280,9 +279,8 @@ pub trait TransactionAsync: Transaction {
     /// # Returns
     /// A pinned, boxed future that resolves to `Some(Request)` if the original request is available,
     /// or `None` otherwise (e.g., if the transaction state is such that it's no longer stored).
-    fn original_request<'a>(
-        &'a self
-    ) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>>;
+    fn original_request<'a>(&'a self)
+        -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>>;
 
     /// Asynchronously retrieves the last SIP response that was either sent (for server transactions)
     /// or received (for client transactions) by this transaction.
@@ -290,9 +288,7 @@ pub trait TransactionAsync: Transaction {
     /// # Returns
     /// A pinned, boxed future that resolves to `Some(Response)` if a last response is available,
     /// or `None` otherwise.
-    fn last_response<'a>(
-        &'a self
-    ) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>>;
+    fn last_response<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>>;
 }
 
 /// Configuration for standard SIP transaction timer durations, primarily based on RFC 3261.
@@ -351,8 +347,8 @@ impl Default for TimerConfig {
 /// Currently uses `Method::Register`. Let's assume it's generic enough or update if specific to INVITE.
 pub(crate) fn create_empty_request() -> Request {
     let uri = Uri::sip("example.com"); // Creates sip:example.com
-    // Corrected: Request::new in sip-core only takes method and uri. 
-    // Version, headers, body are set via builder or other means if needed.
+                                       // Corrected: Request::new in sip-core only takes method and uri.
+                                       // Version, headers, body are set via builder or other means if needed.
     Request::new(Method::Register, uri)
 }
 
@@ -372,7 +368,8 @@ mod tests {
     #[test]
     fn internal_transaction_command_creation() {
         let _cmd1 = InternalTransactionCommand::TransitionTo(TransactionState::Completed);
-        let _cmd2 = InternalTransactionCommand::ProcessMessage(Message::Request(create_empty_request()));
+        let _cmd2 =
+            InternalTransactionCommand::ProcessMessage(Message::Request(create_empty_request()));
         let _cmd3 = InternalTransactionCommand::Timer("Timer_A".to_string());
         let _cmd4 = InternalTransactionCommand::TransportError;
         let _cmd5 = InternalTransactionCommand::Terminate;

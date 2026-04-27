@@ -61,11 +61,11 @@
 //! use rvoip_sip_core::prelude::*;
 //! use rvoip_sip_core::{sip_request, sip_response};
 //!
-//! // Create a SIP request with the sip_request! macro 
+//! // Create a SIP request with the sip_request! macro
 //! let request = sip_request! {
 //!     method: Method::Invite,
 //!     uri: "sip:bob@example.com",
-//!     from_name: "Alice", 
+//!     from_name: "Alice",
 //!     from_uri: "sip:alice@example.com",
 //!     from_tag: "1928301774",
 //!     call_id: "a84b4c76e66710",
@@ -76,12 +76,12 @@
 //! let response = sip_response! {
 //!     status: StatusCode::Ok,
 //!     reason: "OK",
-//!     from_name: "Alice", 
-//!     from_uri: "sip:alice@example.com", 
-//!     to_name: "Bob", 
+//!     from_name: "Alice",
+//!     from_uri: "sip:alice@example.com",
+//!     to_name: "Bob",
 //!     to_uri: "sip:bob@example.com",
 //!     call_id: "a84b4c76e66710",
-//!     cseq: 1, 
+//!     cseq: 1,
 //!     cseq_method: Method::Invite
 //! };
 //! ```
@@ -197,84 +197,79 @@
 // Re-export core types and parsers
 
 // Declare modules
-pub mod error;
-pub mod types;
 pub mod builder;
-pub mod parser;
-pub mod macros;
-pub mod validation;
-#[cfg(feature = "sdp")]
-pub mod sdp;
+pub mod error;
 /// JSON representation and access layer for SIP types
 pub mod json;
+pub mod macros;
+pub mod parser;
 /// Prelude module that exports commonly used types and traits
 pub mod prelude;
+#[cfg(feature = "sdp")]
+pub mod sdp;
 /// SDP prelude module that exports SDP-related types and traits
 #[cfg(feature = "sdp")]
 pub mod sdp_prelude;
+pub mod types;
+pub mod validation;
 
 // Re-export key public items
+pub use builder::{
+    SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder,
+};
 pub use error::{Error, Result};
-pub use types::header::{Header, HeaderValue, TypedHeader, TypedHeaderTrait};
-pub use types::headers::HeaderName;
-pub use types::Method;
-pub use parser::parse_message;
+pub use macros::*;
 pub use parser::message::parse_message_with_mode;
 pub use parser::message::ParseMode;
-pub use types::StatusCode;
-pub use types::{
-    Address, 
-    CallId, 
-    Contact, 
-    ContentDisposition, 
-    ContentLength, 
-    ContentType, 
-    CSeq, 
-    Expires, 
-    From, 
-    MaxForwards, 
-    MediaType, 
-    sip_message::Message,
-    sip_request::Request,
-    sip_response::Response,
-    sdp::SdpSession,
-    Via,  // Changed from via::Via
-    Warning,
-    warning::{WarnAgent, WarningValue},
-    sdp::MediaDescription,
-    sdp::Origin,
-    sdp::ConnectionData,
-    sdp::TimeDescription,
-    auth::*,
-    sdp::ParsedAttribute,
-    sdp::RtpMapAttribute,
-    sdp::FmtpAttribute,
-    sdp::CandidateAttribute,
-    sdp::SsrcAttribute,
-    sdp::RepeatTime,
-    Version,
-    Allow,
-    Accept,
-    Subject,
-    CallInfo,
-};
-pub use types::uri::{Uri, Host};
+pub use parser::parse_message;
 #[cfg(feature = "sdp")]
 pub use sdp::attributes::MediaDirection;
 #[cfg(feature = "sdp")]
 pub use sdp::parser::{
-    validate_sdp,
-    validate_network_type,
-    validate_address_type,
-    is_valid_address,
-    is_valid_ipv4,
-    is_valid_ipv6,
-    is_valid_hostname,
-    parse_bandwidth_line,
-    parse_sdp
+    is_valid_address, is_valid_hostname, is_valid_ipv4, is_valid_ipv6, parse_bandwidth_line,
+    parse_sdp, validate_address_type, validate_network_type, validate_sdp,
 };
-pub use builder::{SimpleRequestBuilder as RequestBuilder, SimpleResponseBuilder as ResponseBuilder};
-pub use macros::*;
+pub use types::header::{Header, HeaderValue, TypedHeader, TypedHeaderTrait};
+pub use types::headers::HeaderName;
+pub use types::uri::{Host, Uri};
+pub use types::Method;
+pub use types::StatusCode;
+pub use types::{
+    auth::*,
+    sdp::CandidateAttribute,
+    sdp::ConnectionData,
+    sdp::FmtpAttribute,
+    sdp::MediaDescription,
+    sdp::Origin,
+    sdp::ParsedAttribute,
+    sdp::RepeatTime,
+    sdp::RtpMapAttribute,
+    sdp::SdpSession,
+    sdp::SsrcAttribute,
+    sdp::TimeDescription,
+    sip_message::Message,
+    sip_request::Request,
+    sip_response::Response,
+    warning::{WarnAgent, WarningValue},
+    Accept,
+    Address,
+    Allow,
+    CSeq,
+    CallId,
+    CallInfo,
+    Contact,
+    ContentDisposition,
+    ContentLength,
+    ContentType,
+    Expires,
+    From,
+    MaxForwards,
+    MediaType,
+    Subject,
+    Version,
+    Via, // Changed from via::Via
+    Warning,
+};
 
 #[cfg(test)]
 mod tests {

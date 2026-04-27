@@ -1,26 +1,22 @@
-use std::str::FromStr;
 use bytes::Bytes;
+use std::str::FromStr;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    Method, 
-    Version,
-    sip_request::Request,
-    uri::{Uri, Host, Scheme},
-    to::To,
-    from::From,
     call_id::CallId,
-    cseq::CSeq,
     contact::{Contact, ContactParamInfo, ContactValue},
-    content_type::ContentType,
     content_length::ContentLength,
-    via::{Via, ViaHeader, SentProtocol},
-    Address,
-    TypedHeader,
-    Param,
-    max_forwards::MaxForwards,
-    user_agent::UserAgent,
+    content_type::ContentType,
+    cseq::CSeq,
+    from::From,
     header::{HeaderName, HeaderValue},
+    max_forwards::MaxForwards,
+    sip_request::Request,
+    to::To,
+    uri::{Host, Scheme, Uri},
+    user_agent::UserAgent,
+    via::{SentProtocol, Via, ViaHeader},
+    Address, Method, Param, TypedHeader, Version,
 };
 
 /// # SIP Request Builder
@@ -31,7 +27,7 @@ use crate::types::{
 /// ## SIP Request Overview
 ///
 /// SIP (Session Initiation Protocol) requests are messages sent by clients to servers to initiate
-/// actions or transactions. Each request contains a method indicating the desired action, a 
+/// actions or transactions. Each request contains a method indicating the desired action, a
 /// Request-URI identifying the resource, and various headers providing additional information.
 ///
 /// A typical SIP request looks like:
@@ -116,7 +112,7 @@ pub struct SimpleRequestBuilder {
 impl SimpleRequestBuilder {
     /// Create a new SimpleRequestBuilder with the specified method and URI
     ///
-    /// This is the main entry point for creating a SIP request builder. The URI must be 
+    /// This is the main entry point for creating a SIP request builder. The URI must be
     /// syntactically valid according to [RFC 3261 Section 19.1.1](https://datatracker.ietf.org/doc/html/rfc3261#section-19.1.1).
     ///
     /// # Parameters
@@ -144,11 +140,11 @@ impl SimpleRequestBuilder {
             Ok(uri) => {
                 let request = Request::new(method, uri);
                 Ok(Self { request })
-            },
+            }
             Err(e) => Err(Error::InvalidUri(format!("Invalid URI: {}", e))),
         }
     }
-    
+
     /// Create a builder from an existing Request object
     ///
     /// This allows you to modify an existing request by using the builder pattern.
@@ -175,7 +171,7 @@ impl SimpleRequestBuilder {
     pub fn from_request(request: Request) -> Self {
         Self { request }
     }
-    
+
     /// Create an INVITE request builder
     ///
     /// This is a convenience constructor for creating an INVITE request as specified
@@ -235,9 +231,9 @@ impl SimpleRequestBuilder {
     ///     .body(sdp_body.to_string())
     ///     .build();
     /// ```
-    /// 
+    ///
     /// ## INVITE Request with Audio and Video
-    /// 
+    ///
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// use rvoip_sip_core::sdp::SdpBuilder;
@@ -296,7 +292,7 @@ impl SimpleRequestBuilder {
     pub fn invite(uri: &str) -> Result<Self> {
         Self::new(Method::Invite, uri)
     }
-    
+
     /// Create a REGISTER request builder
     ///
     /// This is a convenience constructor for creating a REGISTER request as specified
@@ -325,7 +321,7 @@ impl SimpleRequestBuilder {
     /// use rvoip_sip_core::builder::SimpleRequestBuilder;
     /// use rvoip_sip_core::types::TypedHeader;
     /// use rvoip_sip_core::types::expires::Expires;
-    /// 
+    ///
     /// // Create a REGISTER request with a 1-hour expiration
     /// let register_request = SimpleRequestBuilder::register("sip:registrar.example.com").unwrap()
     ///     // Add required headers for registration
@@ -354,7 +350,7 @@ impl SimpleRequestBuilder {
     ///
     /// // Create a URI for the authorization header
     /// let reg_uri = Uri::from_str("sip:registrar.example.com").unwrap();
-    /// 
+    ///
     /// // Create an Authorization header with digest authentication
     /// let auth = Authorization::new(
     ///     AuthScheme::Digest,
@@ -381,7 +377,7 @@ impl SimpleRequestBuilder {
     pub fn register(uri: &str) -> Result<Self> {
         Self::new(Method::Register, uri)
     }
-    
+
     /// Create a BYE request builder
     ///
     /// This is a convenience constructor for creating a BYE request as specified
@@ -444,7 +440,7 @@ impl SimpleRequestBuilder {
     pub fn bye(uri: &str) -> Result<Self> {
         Self::new(Method::Bye, uri)
     }
-    
+
     /// Create an OPTIONS request builder
     ///
     /// This is a convenience constructor for creating an OPTIONS request as specified
@@ -535,7 +531,7 @@ impl SimpleRequestBuilder {
     pub fn options(uri: &str) -> Result<Self> {
         Self::new(Method::Options, uri)
     }
-    
+
     /// Create an ACK request builder
     ///
     /// This is a convenience constructor for creating an ACK request as specified
@@ -588,7 +584,7 @@ impl SimpleRequestBuilder {
     /// // Create route URIs from Record-Route headers received in the INVITE transaction
     /// let route1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
     /// let route2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
-    /// 
+    ///
     /// // Create route for proxies - simplified for doc test
     /// let mut route = Route::new(vec![]);
     /// route.add_uri(route2);
@@ -609,7 +605,7 @@ impl SimpleRequestBuilder {
     pub fn ack(uri: &str) -> Result<Self> {
         Self::new(Method::Ack, uri)
     }
-    
+
     /// Create a CANCEL request builder
     ///
     /// This is a convenience constructor for creating a CANCEL request as specified
@@ -707,7 +703,7 @@ impl SimpleRequestBuilder {
     pub fn cancel(uri: &str) -> Result<Self> {
         Self::new(Method::Cancel, uri)
     }
-    
+
     /// Create a PUBLISH request builder
     ///
     /// This is a convenience constructor for creating a PUBLISH request as specified
@@ -764,7 +760,7 @@ impl SimpleRequestBuilder {
         builder = builder.event(event);
         Ok(builder)
     }
-    
+
     /// Create a SUBSCRIBE request builder
     ///
     /// This is a convenience constructor for creating a SUBSCRIBE request as specified
@@ -801,7 +797,7 @@ impl SimpleRequestBuilder {
         builder = builder.event(event).expires(expires);
         Ok(builder)
     }
-    
+
     /// Create a NOTIFY request builder
     ///
     /// This is a convenience constructor for creating a NOTIFY request as specified
@@ -852,7 +848,7 @@ impl SimpleRequestBuilder {
     pub fn method(&self) -> &Method {
         &self.request.method
     }
-    
+
     /// Add a From header with optional tag parameter
     ///
     /// Creates and adds a From header as specified in [RFC 3261 Section 20.20](https://datatracker.ietf.org/doc/html/rfc3261#section-20.20).
@@ -879,7 +875,7 @@ impl SimpleRequestBuilder {
         use crate::builder::headers::FromBuilderExt;
         FromBuilderExt::from(self, display_name, uri, tag)
     }
-    
+
     /// Add a To header with optional tag parameter
     ///
     /// Creates and adds a To header as specified in [RFC 3261 Section 20.39](https://datatracker.ietf.org/doc/html/rfc3261#section-20.39).
@@ -906,7 +902,7 @@ impl SimpleRequestBuilder {
         use crate::builder::headers::ToBuilderExt;
         ToBuilderExt::to(self, display_name, uri, tag)
     }
-    
+
     /// Add a Call-ID header
     ///
     /// Creates and adds a Call-ID header as specified in [RFC 3261 Section 20.8](https://datatracker.ietf.org/doc/html/rfc3261#section-20.8).
@@ -931,7 +927,7 @@ impl SimpleRequestBuilder {
         use crate::builder::headers::CallIdBuilderExt;
         CallIdBuilderExt::call_id(self, call_id)
     }
-    
+
     /// Add a CSeq header for requests
     ///
     /// Creates and adds a CSeq header as specified in [RFC 3261 Section 20.16](https://datatracker.ietf.org/doc/html/rfc3261#section-20.16).
@@ -956,7 +952,7 @@ impl SimpleRequestBuilder {
         use crate::builder::headers::CSeqBuilderExt;
         CSeqBuilderExt::cseq(self, seq)
     }
-    
+
     /// Add a Via header with optional branch parameter
     ///
     /// Creates and adds a Via header as specified in [RFC 3261 Section 20.42](https://datatracker.ietf.org/doc/html/rfc3261#section-20.42).
@@ -983,7 +979,7 @@ impl SimpleRequestBuilder {
         use crate::builder::headers::ViaBuilderExt;
         ViaBuilderExt::via(self, host, transport, branch)
     }
-    
+
     /// Add a Max-Forwards header
     ///
     /// Creates and adds a Max-Forwards header as specified in [RFC 3261 Section 20.22](https://datatracker.ietf.org/doc/html/rfc3261#section-20.22).
@@ -1008,7 +1004,7 @@ impl SimpleRequestBuilder {
         use crate::builder::headers::MaxForwardsBuilderExt;
         MaxForwardsBuilderExt::max_forwards(self, value)
     }
-    
+
     /// Add a Contact header
     ///
     /// Creates and adds a Contact header as specified in [RFC 3261 Section 20.10](https://datatracker.ietf.org/doc/html/rfc3261#section-20.10).
@@ -1034,7 +1030,7 @@ impl SimpleRequestBuilder {
         use crate::builder::headers::ContactBuilderExt;
         ContactBuilderExt::contact(self, uri, display_name)
     }
-    
+
     /// Add a Content-Type header
     ///
     /// Creates and adds a Content-Type header as specified in [RFC 3261 Section 20.15](https://datatracker.ietf.org/doc/html/rfc3261#section-20.15).
@@ -1059,14 +1055,14 @@ impl SimpleRequestBuilder {
         match ContentType::from_str(content_type) {
             Ok(ct) => {
                 self.request = self.request.with_header(TypedHeader::ContentType(ct));
-            },
+            }
             Err(_) => {
                 // Silently fail - content-type is not critical
             }
         }
         self
     }
-    
+
     /// Add an Event header
     ///
     /// Sets the Event header for SUBSCRIBE, NOTIFY, and PUBLISH requests as specified
@@ -1093,7 +1089,7 @@ impl SimpleRequestBuilder {
         self.request = self.request.with_header(TypedHeader::Event(event));
         self
     }
-    
+
     /// Add a SIP-If-Match header
     ///
     /// Sets the SIP-If-Match header for conditional PUBLISH requests as specified
@@ -1117,10 +1113,12 @@ impl SimpleRequestBuilder {
     /// ```
     pub fn sip_if_match(mut self, etag: &str) -> Self {
         use crate::types::sip_if_match::SipIfMatch;
-        self.request = self.request.with_header(TypedHeader::SipIfMatch(SipIfMatch::new(etag)));
+        self.request = self
+            .request
+            .with_header(TypedHeader::SipIfMatch(SipIfMatch::new(etag)));
         self
     }
-    
+
     /// Add a Subscription-State header
     ///
     /// Sets the Subscription-State header for NOTIFY requests as specified
@@ -1143,15 +1141,17 @@ impl SimpleRequestBuilder {
     ///     .subscription_state("active;expires=3599");
     /// ```
     pub fn subscription_state(mut self, state: &str) -> Self {
-        use std::str::FromStr;
         use crate::types::subscription_state::SubscriptionState as SubscriptionStateType;
+        use std::str::FromStr;
 
         if let Ok(sub_state) = SubscriptionStateType::from_str(state) {
-            self.request = self.request.with_header(TypedHeader::SubscriptionState(sub_state));
+            self.request = self
+                .request
+                .with_header(TypedHeader::SubscriptionState(sub_state));
         }
         self
     }
-    
+
     /// Add an Expires header
     ///
     /// Sets the Expires header for REGISTER, SUBSCRIBE, and PUBLISH requests.
@@ -1177,7 +1177,7 @@ impl SimpleRequestBuilder {
         // Use the builder's header method which properly handles single-value headers
         self.header(TypedHeader::Expires(Expires::new(seconds)))
     }
-    
+
     /// Add a generic header
     ///
     /// Allows adding any supported SIP header type using the [`TypedHeader`][`crate::types::TypedHeader`] enum.
@@ -1198,7 +1198,7 @@ impl SimpleRequestBuilder {
     ///
     /// let user_agent = UserAgent::single("RVOIP/1.0");
     /// let products = vec!["RVOIP/1.0".to_string()]; // Convert to Vec<String> for TypedHeader::UserAgent
-    /// 
+    ///
     /// let builder = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .header(TypedHeader::UserAgent(products));
     /// ```
@@ -1300,7 +1300,7 @@ impl SimpleRequestBuilder {
         self.request.headers.push(header); // Removed .clone()
         self
     }
-    
+
     /// Add body content and update Content-Length
     ///
     /// Adds a message body to the request and automatically sets the Content-Length header
@@ -1328,7 +1328,7 @@ impl SimpleRequestBuilder {
         self.request = self.request.with_body(body);
         self
     }
-    
+
     /// Build the final Request
     ///
     /// Finalizes the request construction and returns the complete SIP request.
@@ -1354,4 +1354,4 @@ impl SimpleRequestBuilder {
     pub fn build(self) -> Request {
         self.request
     }
-} 
+}

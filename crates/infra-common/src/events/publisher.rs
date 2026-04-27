@@ -1,9 +1,9 @@
 use crate::events::bus::EventBus;
+use crate::events::registry::{GlobalTypeRegistry, TypedBroadcastReceiver, TypedBroadcastSender};
 use crate::events::types::{Event, EventResult, StaticEvent};
-use crate::events::registry::{TypedBroadcastSender, TypedBroadcastReceiver, GlobalTypeRegistry};
 use std::marker::PhantomData;
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Publisher for a specific event type
 pub struct Publisher<E: Event> {
@@ -24,7 +24,7 @@ impl<E: Event> Publisher<E> {
             typed_sender,
         }
     }
-    
+
     /// Create a new publisher with a custom timeout
     pub fn with_timeout(event_bus: EventBus, timeout: Duration) -> Self {
         let typed_sender = event_bus.type_registry().get_or_create::<E>();
@@ -35,7 +35,7 @@ impl<E: Event> Publisher<E> {
             typed_sender,
         }
     }
-    
+
     /// Publish an event using zero-copy when possible
     pub async fn publish(&self, event: E) -> EventResult<()> {
         let arc_event = Arc::new(event.clone());
@@ -50,22 +50,22 @@ impl<E: Event> Publisher<E> {
             }
         }
     }
-    
+
     /// Publish a batch of events for high throughput
     pub async fn publish_batch(&self, events: Vec<E>) -> EventResult<()> {
         self.event_bus.publish_batch(events).await
     }
-    
+
     /// Create a channel for sending events
     pub fn create_channel(&self) -> tokio::sync::mpsc::Sender<E> {
         self.event_bus.create_channel()
     }
-    
+
     /// Get a channel subscription for this event type
     pub async fn subscribe_broadcast(&self) -> EventResult<TypedBroadcastReceiver<E>> {
         self.event_bus.subscribe_broadcast().await
     }
-    
+
     /// Get a direct broadcast sender for this event type
     pub fn get_broadcast_sender(&self) -> TypedBroadcastSender<E> {
         self.event_bus.type_registry().get_or_create::<E>()
@@ -83,64 +83,69 @@ impl<E: StaticEvent> FastPublisher<E> {
     pub fn new() -> Self {
         // Register this type as a StaticEvent if not already registered
         GlobalTypeRegistry::register_static_event_type::<E>();
-        
+
         // Get the sender from registry
         let sender = GlobalTypeRegistry::get_sender::<E>();
-        
+
         // Log for debugging
-        tracing::debug!("Created FastPublisher for {} with {} receivers", 
-                       std::any::type_name::<E>(), 
-                       sender.receiver_count());
-        
+        tracing::debug!(
+            "Created FastPublisher for {} with {} receivers",
+            std::any::type_name::<E>(),
+            sender.receiver_count()
+        );
+
         Self {
             _phantom: PhantomData,
             sender,
         }
     }
-    
+
     /// Create a new fast publisher with custom channel capacity
     pub fn with_capacity(capacity: usize) -> Self {
         // Register this type as a StaticEvent
         GlobalTypeRegistry::register_static_event_type::<E>();
-        
+
         // Register with custom capacity
         let sender = GlobalTypeRegistry::register_with_capacity::<E>(capacity);
-        
+
         // Log for debugging
-        tracing::debug!("Created FastPublisher with capacity {} for {} with {} receivers", 
-                       capacity,
-                       std::any::type_name::<E>(), 
-                       sender.receiver_count());
-        
+        tracing::debug!(
+            "Created FastPublisher with capacity {} for {} with {} receivers",
+            capacity,
+            std::any::type_name::<E>(),
+            sender.receiver_count()
+        );
+
         Self {
             _phantom: PhantomData,
             sender,
         }
     }
-    
+
     /// Publish an event using the global type registry
     pub async fn publish(&self, event: E) -> EventResult<()> {
         let arc_event = Arc::new(event);
-        
+
         match self.sender.send(arc_event) {
             Ok(receiver_count) => {
                 tracing::trace!("FastPublisher sent message to {} receivers", receiver_count);
                 Ok(())
-            },
+            }
             Err(err) => {
                 tracing::warn!("FastPublisher broadcast failed: {}", err);
-                Err(crate::events::types::EventError::ChannelError(
-                    format!("Fast broadcast failed: {}", err)
-                ))
-            },
+                Err(crate::events::types::EventError::ChannelError(format!(
+                    "Fast broadcast failed: {}",
+                    err
+                )))
+            }
         }
     }
-    
+
     /// Publish a batch of events for high throughput
     pub async fn publish_batch(&self, events: Vec<E>) -> EventResult<()> {
         let mut last_error = None;
         let mut success_count = 0;
-        
+
         for event in events {
             match self.publish(event).await {
                 Ok(_) => success_count += 1,
@@ -150,7 +155,7 @@ impl<E: StaticEvent> FastPublisher<E> {
                 }
             }
         }
-        
+
         if success_count > 0 {
             if let Some(ref e) = last_error {
                 tracing::warn!(
@@ -168,18 +173,21 @@ impl<E: StaticEvent> FastPublisher<E> {
         } else {
             // This should never happen - empty batch or all events failed but no error?
             Err(crate::events::types::EventError::Other(
-                "Batch publish failed with no specific error".into()
+                "Batch publish failed with no specific error".into(),
             ))
         }
     }
-    
+
     /// Get a broadcast receiver for this event type
     pub fn subscribe(&self) -> TypedBroadcastReceiver<E> {
         let receiver = self.sender.subscribe();
-        tracing::debug!("FastPublisher created new subscriber for {}", std::any::type_name::<E>());
+        tracing::debug!(
+            "FastPublisher created new subscriber for {}",
+            std::any::type_name::<E>()
+        );
         TypedBroadcastReceiver::new(receiver)
     }
-    
+
     /// Get the number of receivers for this event type
     pub fn receiver_count(&self) -> usize {
         self.sender.receiver_count()
@@ -196,20 +204,20 @@ pub struct PublisherFactory {
 impl PublisherFactory {
     /// Create a new publisher factory
     pub fn new(event_bus: EventBus) -> Self {
-        PublisherFactory { 
+        PublisherFactory {
             event_bus,
             default_timeout: None,
         }
     }
-    
+
     /// Create a new publisher factory with a default timeout
     pub fn with_timeout(event_bus: EventBus, timeout: Duration) -> Self {
-        PublisherFactory { 
+        PublisherFactory {
             event_bus,
             default_timeout: Some(timeout),
         }
     }
-    
+
     /// Create a publisher for a specific event type
     pub fn create_publisher<E: Event>(&self) -> Publisher<E> {
         if let Some(timeout) = self.default_timeout {
@@ -218,9 +226,9 @@ impl PublisherFactory {
             Publisher::new(self.event_bus.clone())
         }
     }
-    
+
     /// Create a fast publisher for a static event type
     pub fn create_fast_publisher<E: StaticEvent>(&self) -> FastPublisher<E> {
         FastPublisher::new()
     }
-} 
+}

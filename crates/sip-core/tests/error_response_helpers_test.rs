@@ -13,7 +13,7 @@ fn test_unauthorized_helper() {
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .www_authenticate_digest("example.com", "abc123xyz")
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("401 Unauthorized"));
     assert!(response_str.contains("WWW-Authenticate: Digest"));
@@ -28,7 +28,7 @@ fn test_forbidden_helper() {
         .cseq(1, Method::Subscribe)
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("403 Forbidden"));
 }
@@ -43,7 +43,7 @@ fn test_interval_too_brief_helper() {
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .min_expires(3600)
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("423 Interval Too Brief"));
     assert!(response_str.contains("Min-Expires: 3600"));
@@ -59,7 +59,7 @@ fn test_bad_event_helper() {
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .allow_events(&["presence", "dialog"])
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("489 Bad Event"));
     assert!(response_str.contains("Allow-Events: presence, dialog"));
@@ -75,7 +75,7 @@ fn test_bad_request_helper() {
         .cseq(1, Method::Publish)
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("400 Bad Request"));
 }
@@ -90,7 +90,7 @@ fn test_not_found_helper() {
         .cseq(1, Method::Subscribe)
         .via("192.168.1.10:5060", "UDP", Some("z9hG4bK776asdhds"))
         .build();
-    
+
     let response_str = response.to_string();
     assert!(response_str.contains("404 Not Found"));
 }

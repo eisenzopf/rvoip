@@ -1,6 +1,19 @@
+use crate::error::{Error, Result};
+#[cfg(feature = "sdp")]
+use crate::sdp::attributes;
+#[cfg(feature = "sdp")]
+use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
+#[cfg(feature = "sdp")]
+use crate::sdp::attributes::MediaDirection;
+#[cfg(feature = "sdp")]
+use crate::sdp::parser::parse_sdp;
+use crate::types::param::Param;
+use crate::types::uri::Uri;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 /// SDP (Session Description Protocol) module implements RFC 4566 for creating, parsing,
 /// and manipulating SDP messages used in SIP (Session Initiation Protocol) communications.
-/// 
+///
 /// This module provides a complete implementation for working with SDP, including:
 /// - Parsing SDP text into structured data
 /// - Representing SDP sessions, media descriptions, and attributes
@@ -12,20 +25,7 @@
 /// - [RFC 5576: Source-Specific Media Attributes](https://tools.ietf.org/html/rfc5576) (for SSRC)
 use std::collections::HashMap;
 use std::fmt;
-use bytes::Bytes;
 use std::str::FromStr;
-use crate::types::uri::Uri;
-use crate::types::param::Param;
-use serde::{Serialize, Deserialize};
-use crate::error::{Error, Result};
-#[cfg(feature = "sdp")]
-use crate::sdp::parser::parse_sdp;
-#[cfg(feature = "sdp")]
-use crate::sdp::attributes;
-#[cfg(feature = "sdp")]
-use crate::sdp::attributes::MediaDirection;
-#[cfg(feature = "sdp")]
-use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
 
 // Provide local definitions of types used from sdp module when the feature is not enabled
 #[cfg(not(feature = "sdp"))]
@@ -67,9 +67,9 @@ pub struct RidAttribute {
 
 // Now all references to these types should work regardless of whether the sdp feature is enabled
 
-// --- Placeholder Attribute Structs --- 
+// --- Placeholder Attribute Structs ---
 /// Represents an RTP Map attribute (a=rtpmap)
-/// 
+///
 /// Maps RTP payload types to media encoding names, clock rates, and encoding parameters.
 /// Format: `a=rtpmap:<payload type> <encoding name>/<clock rate>[/<encoding parameters>]`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,13 +93,13 @@ pub struct FmtpAttribute {
     /// Format identifier (typically the payload type from rtpmap)
     pub format: String,
     /// Format-specific parameters as a raw string
-    pub parameters: String, 
+    pub parameters: String,
 }
 
 /// Represents a parsed ICE Candidate attribute (RFC 5245 / 8445 / 8839).
 ///
-/// Format: `a=candidate:<foundation> <component-id> <transport> <priority> 
-/// <connection-address> <port> typ <candidate-type> 
+/// Format: `a=candidate:<foundation> <component-id> <transport> <priority>
+/// <connection-address> <port> typ <candidate-type>
 /// [raddr <related-address>] [rport <related-port>] [...]`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CandidateAttribute {
@@ -122,7 +122,7 @@ pub struct CandidateAttribute {
     /// Related port for reflexive/relay candidates
     pub related_port: Option<u16>,
     /// Additional extension attributes as key-value pairs
-    pub extensions: Vec<(String, Option<String>)>, 
+    pub extensions: Vec<(String, Option<String>)>,
 }
 
 /// Represents a parsed SSRC attribute (RFC 5576).
@@ -250,7 +250,11 @@ impl CryptoAttribute {
 impl std::fmt::Display for CryptoAttribute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Wire format: a=crypto:<tag> <suite> inline:<key>[|<lifetime>][|<mki>:<mki_len>] [params...]
-        write!(f, "a=crypto:{} {} inline:{}", self.tag, self.suite, self.key_inline)?;
+        write!(
+            f,
+            "a=crypto:{} {} inline:{}",
+            self.tag, self.suite, self.key_inline
+        )?;
         if let Some(lifetime) = &self.key_lifetime {
             write!(f, "|{}", lifetime)?;
         }
@@ -396,14 +400,14 @@ pub struct RepeatTime {
 ///
 /// An SDP session defines a multimedia session including connection information,
 /// timing, and media descriptions for audio, video, and other streams.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SdpSession {
     /// SDP protocol version (v=)
-    pub version: String, 
+    pub version: String,
     /// Session origin information (o=)
     pub origin: Origin,
     /// Session name (s=)
-    pub session_name: String, 
+    pub session_name: String,
     /// Session information/description (i=)
     pub session_info: Option<String>,
     /// Session URI (u=)
@@ -482,7 +486,7 @@ impl SdpSession {
     pub fn add_media(&mut self, media: MediaDescription) {
         self.media_descriptions.push(media);
     }
-    
+
     /// Sets session-level connection data.
     ///
     /// # Examples
@@ -511,7 +515,7 @@ impl SdpSession {
         self.connection_info = Some(conn);
         self
     }
-    
+
     /// Adds a session-level attribute.
     ///
     /// # Examples
@@ -529,7 +533,7 @@ impl SdpSession {
     /// # let session = SdpSession::new(origin, "SIP Call");
     /// let session = session.with_attribute(ParsedAttribute::Flag("ice-lite".to_string()));
     /// ```
-     pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
+    pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
         // TODO: Handle setting dedicated fields vs adding to generic?
         self.generic_attributes.push(attr);
         self
@@ -564,7 +568,7 @@ impl SdpSession {
     /// #        net_type: "IN".to_string(),
     /// #        addr_type: "IP4".to_string(),
     /// #        unicast_address: "192.168.1.100".to_string(),
-    /// #    }, 
+    /// #    },
     /// #    "SIP Call"
     /// # );
     /// // Get the rtpmap for PCMU (payload type 0)
@@ -575,7 +579,7 @@ impl SdpSession {
     pub fn get_rtpmap(&self, payload_type: u8) -> Option<&RtpMapAttribute> {
         self.rtpmaps().find(|r| r.payload_type == payload_type)
     }
-    
+
     /// Finds all session-level fmtp attributes.
     ///
     /// Returns an iterator over references to all FmtpAttribute values.
@@ -600,7 +604,7 @@ impl SdpSession {
     /// #        net_type: "IN".to_string(),
     /// #        addr_type: "IP4".to_string(),
     /// #        unicast_address: "192.168.1.100".to_string(),
-    /// #    }, 
+    /// #    },
     /// #    "SIP Call"
     /// # );
     /// // Get fmtp parameters for payload type 96
@@ -611,7 +615,7 @@ impl SdpSession {
     pub fn get_fmtp(&self, format: &str) -> Option<&FmtpAttribute> {
         self.fmtps().find(|f| f.format == format)
     }
-    
+
     /// Gets the value of a generic session-level attribute by key.
     ///
     /// Returns:
@@ -631,7 +635,7 @@ impl SdpSession {
     /// #        net_type: "IN".to_string(),
     /// #        addr_type: "IP4".to_string(),
     /// #        unicast_address: "192.168.1.100".to_string(),
-    /// #    }, 
+    /// #    },
     /// #    "SIP Call"
     /// # );
     /// # session = session.with_attribute(ParsedAttribute::Value("group".to_string(), "BUNDLE audio video".to_string()));
@@ -644,9 +648,18 @@ impl SdpSession {
             ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
             ParsedAttribute::Flag(k) if k.eq_ignore_ascii_case(key) => Some(None),
             ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.as_deref()),
-             // Add checks for dedicated fields if applicable at session level
-             ParsedAttribute::Direction(_) if key.eq_ignore_ascii_case(self.direction.map(|d| d.to_string()).as_deref().unwrap_or("")) => Some(None),
-            _ => None
+            // Add checks for dedicated fields if applicable at session level
+            ParsedAttribute::Direction(_)
+                if key.eq_ignore_ascii_case(
+                    self.direction
+                        .map(|d| d.to_string())
+                        .as_deref()
+                        .unwrap_or(""),
+                ) =>
+            {
+                Some(None)
+            }
+            _ => None,
         })
     }
 }
@@ -655,16 +668,16 @@ impl SdpSession {
 ///
 /// A media description defines a single media stream (audio, video, etc.)
 /// with its transport information and attributes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MediaDescription {
     /// Media type (e.g., "audio", "video", "application")
-    pub media: String, 
+    pub media: String,
     /// Transport port number
     pub port: u16,
     /// Transport protocol (e.g., "RTP/AVP", "RTP/SAVP", "UDP/TLS/RTP/SAVP")
-    pub protocol: String, 
+    pub protocol: String,
     /// Media format descriptions (payload types or format identifiers)
-    pub formats: Vec<String>, 
+    pub formats: Vec<String>,
     /// Media-specific connection information (overrides session-level)
     pub connection_info: Option<ConnectionData>,
 
@@ -674,7 +687,6 @@ pub struct MediaDescription {
     /// Media direction attribute
     pub direction: Option<MediaDirection>,
     // Add others like: pub rtcp_port: Option<u16>, pub mid: Option<String>, etc.
-    
     /// Other media-level attributes
     pub generic_attributes: Vec<ParsedAttribute>,
 }
@@ -688,9 +700,9 @@ impl MediaDescription {
     /// # use rvoip_sip_core::types::sdp::MediaDescription;
     /// // Create an audio media section for RTP/AVP with PCMU (0) and PCMA (8)
     /// let audio = MediaDescription::new(
-    ///     "audio", 
-    ///     49170, 
-    ///     "RTP/AVP", 
+    ///     "audio",
+    ///     49170,
+    ///     "RTP/AVP",
     ///     vec!["0".to_string(), "8".to_string()]
     /// );
     ///
@@ -703,10 +715,10 @@ impl MediaDescription {
     /// );
     /// ```
     pub fn new(
-        media: impl Into<String>, 
-        port: u16, 
-        protocol: impl Into<String>, 
-        formats: Vec<String>
+        media: impl Into<String>,
+        port: u16,
+        protocol: impl Into<String>,
+        formats: Vec<String>,
     ) -> Self {
         Self {
             media: media.into(),
@@ -740,7 +752,7 @@ impl MediaDescription {
         self.connection_info = Some(conn);
         self
     }
-    
+
     /// Adds a media-level attribute.
     ///
     /// Certain attribute types (ptime, direction) will be stored in dedicated fields.
@@ -762,8 +774,12 @@ impl MediaDescription {
     pub fn with_attribute(mut self, attr: ParsedAttribute) -> Self {
         // Handle setting dedicated fields vs adding to generic collection
         match attr {
-            ParsedAttribute::Ptime(v) => { self.ptime = Some(v as u32); }
-            ParsedAttribute::Direction(d) => { self.direction = Some(d); }
+            ParsedAttribute::Ptime(v) => {
+                self.ptime = Some(v as u32);
+            }
+            ParsedAttribute::Direction(d) => {
+                self.direction = Some(d);
+            }
             _ => self.generic_attributes.push(attr),
         }
         self
@@ -773,7 +789,7 @@ impl MediaDescription {
     pub fn get_direction(&self) -> Option<MediaDirection> {
         self.direction.clone()
     }
-    
+
     /// Gets the media-level ptime attribute, if set.
     pub fn get_ptime(&self) -> Option<u32> {
         self.ptime
@@ -788,7 +804,7 @@ impl MediaDescription {
             _ => None,
         })
     }
-    
+
     /// Finds the first media-level rtpmap attribute for a given payload type.
     ///
     /// # Examples
@@ -830,7 +846,7 @@ impl MediaDescription {
     pub fn get_fmtp(&self, format: &str) -> Option<&FmtpAttribute> {
         self.fmtps().find(|f| f.format == format)
     }
-    
+
     /// Finds all media-level ICE candidate attributes.
     ///
     /// Returns an iterator over references to all CandidateAttribute values.
@@ -840,7 +856,7 @@ impl MediaDescription {
             _ => None,
         })
     }
-    
+
     /// Finds all media-level SSRC attributes.
     ///
     /// Returns an iterator over references to all SsrcAttribute values.
@@ -850,7 +866,7 @@ impl MediaDescription {
             _ => None,
         })
     }
-    
+
     /// Gets the value of a generic media-level attribute by key.
     ///
     /// Returns:
@@ -873,10 +889,21 @@ impl MediaDescription {
             ParsedAttribute::Value(k, v) if k.eq_ignore_ascii_case(key) => Some(Some(v.as_str())),
             ParsedAttribute::Flag(k) if k.eq_ignore_ascii_case(key) => Some(None),
             ParsedAttribute::Other(k, v) if k.eq_ignore_ascii_case(key) => Some(v.as_deref()),
-             // Add checks for dedicated fields
-             ParsedAttribute::Ptime(v) if key.eq_ignore_ascii_case("ptime") => Some(Some(Box::leak(v.to_string().into_boxed_str()))), // Leak! Needs better way
-             ParsedAttribute::Direction(_) if key.eq_ignore_ascii_case(self.direction.map(|d| d.to_string()).as_deref().unwrap_or("")) => Some(None),
-            _ => None
+            // Add checks for dedicated fields
+            ParsedAttribute::Ptime(v) if key.eq_ignore_ascii_case("ptime") => {
+                Some(Some(Box::leak(v.to_string().into_boxed_str())))
+            } // Leak! Needs better way
+            ParsedAttribute::Direction(_)
+                if key.eq_ignore_ascii_case(
+                    self.direction
+                        .map(|d| d.to_string())
+                        .as_deref()
+                        .unwrap_or(""),
+                ) =>
+            {
+                Some(None)
+            }
+            _ => None,
         })
     }
 }
@@ -890,20 +917,25 @@ impl FromStr for SdpSession {
         // Use the actual parser when the sdp feature is enabled
         parse_sdp(&Bytes::copy_from_slice(s.as_bytes()))
     }
-    
+
     #[cfg(not(feature = "sdp"))]
     fn from_str(s: &str) -> Result<Self> {
         // Create an empty session when the feature is not enabled
-        Err(Error::SdpError("SDP parsing requires the 'sdp' feature".to_string()))
+        Err(Error::SdpError(
+            "SDP parsing requires the 'sdp' feature".to_string(),
+        ))
     }
 }
-
 
 impl fmt::Display for ParsedAttribute {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ParsedAttribute::RtpMap(rtpmap) => {
-                write!(f, "a=rtpmap:{} {}/{}", rtpmap.payload_type, rtpmap.encoding_name, rtpmap.clock_rate)?;
+                write!(
+                    f,
+                    "a=rtpmap:{} {}/{}",
+                    rtpmap.payload_type, rtpmap.encoding_name, rtpmap.clock_rate
+                )?;
                 if let Some(params) = &rtpmap.encoding_params {
                     write!(f, "/{}", params)?;
                 }
@@ -912,14 +944,12 @@ impl fmt::Display for ParsedAttribute {
             ParsedAttribute::Fmtp(fmtp) => {
                 write!(f, "a=fmtp:{} {}", fmtp.format, fmtp.parameters)
             }
-            ParsedAttribute::Direction(dir) => {
-                match dir {
-                    MediaDirection::SendRecv => write!(f, "sendrecv"),
-                    MediaDirection::SendOnly => write!(f, "sendonly"),
-                    MediaDirection::RecvOnly => write!(f, "recvonly"),
-                    MediaDirection::Inactive => write!(f, "inactive"),
-                }
-            }
+            ParsedAttribute::Direction(dir) => match dir {
+                MediaDirection::SendRecv => write!(f, "sendrecv"),
+                MediaDirection::SendOnly => write!(f, "sendonly"),
+                MediaDirection::RecvOnly => write!(f, "recvonly"),
+                MediaDirection::Inactive => write!(f, "inactive"),
+            },
             ParsedAttribute::Ptime(ptime) => write!(f, "a=ptime:{}", ptime),
             ParsedAttribute::MaxPtime(maxptime) => write!(f, "a=maxptime:{}", maxptime),
             ParsedAttribute::Candidate(candidate) => {
@@ -999,23 +1029,28 @@ impl fmt::Display for ParsedAttribute {
                 Ok(())
             }
             ParsedAttribute::Rid(rid) => {
-                write!(f, "a=rid:{} {}", rid.id, match rid.direction {
-                    RidDirection::Send => "send",
-                    RidDirection::Recv => "recv",
-                })?;
-                
+                write!(
+                    f,
+                    "a=rid:{} {}",
+                    rid.id,
+                    match rid.direction {
+                        RidDirection::Send => "send",
+                        RidDirection::Recv => "recv",
+                    }
+                )?;
+
                 // Format payload types
                 if !rid.formats.is_empty() {
                     write!(f, " pt={}", rid.formats.join(","))?;
                 }
-                
+
                 // Format restrictions
                 if !rid.restrictions.is_empty() {
                     for (key, value) in &rid.restrictions {
                         write!(f, ";{}={}", key, value)?;
                     }
                 }
-                
+
                 Ok(())
             }
             ParsedAttribute::Simulcast(send, recv) => {
@@ -1063,42 +1098,55 @@ impl fmt::Display for ParsedAttribute {
 
 impl fmt::Display for Origin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} {} {} {} {} {}", 
-            self.username, self.sess_id, self.sess_version, 
-            self.net_type, self.addr_type, self.unicast_address)
+        write!(
+            f,
+            "{} {} {} {} {} {}",
+            self.username,
+            self.sess_id,
+            self.sess_version,
+            self.net_type,
+            self.addr_type,
+            self.unicast_address
+        )
     }
 }
 
 impl fmt::Display for ConnectionData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut address = self.connection_address.clone();
-        
+
         // Add TTL if present
         if let Some(ttl) = self.ttl {
             address.push_str(&format!("/{}", ttl));
-            
+
             // Add multicast count if present
             if let Some(count) = self.multicast_count {
                 address.push_str(&format!("/{}", count));
             }
         }
-        
+
         write!(f, "{} {} {}", self.net_type, self.addr_type, address)
     }
 }
 
 impl fmt::Display for TimeDescription {
-     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-         write!(f, "{} {}", self.start_time, self.stop_time)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.start_time, self.stop_time)
     }
 }
 
 impl fmt::Display for MediaDescription {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // m=
-        write!(f, "m={} {} {} {}\r\n", 
-            self.media, self.port, self.protocol, self.formats.join(" "))?;
-        
+        write!(
+            f,
+            "m={} {} {} {}\r\n",
+            self.media,
+            self.port,
+            self.protocol,
+            self.formats.join(" ")
+        )?;
+
         // Optional c=
         if let Some(conn) = &self.connection_info {
             write!(f, "c={}\r\n", conn)?;
@@ -1108,7 +1156,7 @@ impl fmt::Display for MediaDescription {
         if let Some(ptime) = self.ptime {
             write!(f, "a=ptime:{}\r\n", ptime)?;
         }
-         if let Some(ref direction) = self.direction {
+        if let Some(ref direction) = self.direction {
             // RFC 8866 §5 requires CRLF between SDP lines; `writeln!`
             // would emit LF only, so use explicit `\r\n`.
             match direction {
@@ -1122,10 +1170,13 @@ impl fmt::Display for MediaDescription {
         // Other attributes for this media
         for attr in &self.generic_attributes {
             // Avoid re-printing attributes handled by dedicated fields
-            if matches!(attr, ParsedAttribute::Ptime(_) | ParsedAttribute::Direction(_)) {
+            if matches!(
+                attr,
+                ParsedAttribute::Ptime(_) | ParsedAttribute::Direction(_)
+            ) {
                 continue;
             }
-            write!(f, "{}\r\n", attr)?; 
+            write!(f, "{}\r\n", attr)?;
         }
         Ok(())
     }
@@ -1137,21 +1188,21 @@ impl fmt::Display for SdpSession {
         write!(f, "v={}\r\n", self.version)?;
         write!(f, "o={}\r\n", self.origin)?;
         write!(f, "s={}\r\n", self.session_name)?;
-        
+
         // Optional session c=
         if let Some(conn) = &self.connection_info {
             write!(f, "c={}\r\n", conn)?;
         }
-        
+
         // t=
         for time in &self.time_descriptions {
-             write!(f, "t={}\r\n", time)?;
+            write!(f, "t={}\r\n", time)?;
         }
-        
+
         // Dedicated Session Attributes
-         if let Some(ref direction) = self.direction {
+        if let Some(ref direction) = self.direction {
             // RFC 8866 §5 — see note in MediaDescription's Display.
-             match direction {
+            match direction {
                 MediaDirection::SendRecv => write!(f, "a=sendrecv\r\n")?,
                 MediaDirection::SendOnly => write!(f, "a=sendonly\r\n")?,
                 MediaDirection::RecvOnly => write!(f, "a=recvonly\r\n")?,
@@ -1162,10 +1213,10 @@ impl fmt::Display for SdpSession {
 
         // Other session-level attributes
         for attr in &self.generic_attributes {
-             // Avoid re-printing attributes handled by dedicated fields
-             if matches!(attr, ParsedAttribute::Direction(_)) {
-                 continue;
-             }
+            // Avoid re-printing attributes handled by dedicated fields
+            if matches!(attr, ParsedAttribute::Direction(_)) {
+                continue;
+            }
             write!(f, "{}\r\n", attr)?;
         }
 
@@ -1199,4 +1250,4 @@ impl std::fmt::Display for RidDirection {
             RidDirection::Recv => write!(f, "recv"),
         }
     }
-} 
+}

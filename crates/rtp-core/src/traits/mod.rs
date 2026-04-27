@@ -3,9 +3,9 @@
 //! This module provides trait definitions that allow rtp-core to be integrated
 //! with other components of the rVOIP stack, such as media-core.
 
-use std::net::SocketAddr;
 use async_trait::async_trait;
 use bytes::Bytes;
+use std::net::SocketAddr;
 
 use crate::error::Error;
 use crate::Result;
@@ -21,7 +21,7 @@ pub use media_transport::RtpMediaTransport;
 pub trait MediaTransport: Send + Sync {
     /// Get the local address for media transport
     async fn local_addr(&self) -> Result<SocketAddr>;
-    
+
     /// Send media data with the given payload type, timestamp, and marker bit
     async fn send_media(
         &self,
@@ -30,7 +30,7 @@ pub trait MediaTransport: Send + Sync {
         payload: Bytes,
         marker: bool,
     ) -> Result<()>;
-    
+
     /// Close the transport
     async fn close(&self) -> Result<()>;
 }
@@ -42,23 +42,23 @@ pub enum RtpEvent {
     MediaReceived {
         /// Payload type
         payload_type: u8,
-        
+
         /// RTP timestamp
         timestamp: u32,
-        
+
         /// Marker bit
         marker: bool,
-        
+
         /// Payload data
         payload: Bytes,
-        
+
         /// Source address
         source: SocketAddr,
-        
+
         /// SSRC (Synchronization Source)
         ssrc: u32,
     },
-    
+
     /// RTCP packet received (raw bytes for now)
     RtcpReceived {
         /// RTCP data
@@ -109,4 +109,4 @@ pub enum RtpEvent {
 pub trait RtpEventConsumer: Send + Sync {
     /// Process an RTP event
     async fn process_event(&self, event: RtpEvent) -> Result<()>;
-} 
+}

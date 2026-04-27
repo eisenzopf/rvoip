@@ -1,10 +1,8 @@
-use crate::types::{
-    headers::HeaderName,
-    TypedHeader,
-    mime_version::MimeVersion as MimeVersionType,
-};
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::types::{
+    headers::HeaderName, mime_version::MimeVersion as MimeVersionType, TypedHeader,
+};
 use bytes::Bytes;
 
 /// # MIME-Version Header Builder Extension
@@ -41,11 +39,11 @@ use bytes::Bytes;
 ///
 /// ## Relationship with other headers
 ///
-/// - **MIME-Version vs Content-Type**: MIME-Version indicates the MIME protocol version, while Content-Type 
+/// - **MIME-Version vs Content-Type**: MIME-Version indicates the MIME protocol version, while Content-Type
 ///   specifies the media type of the message body. Both are typically required for proper MIME handling.
 /// - **MIME-Version vs Content-Disposition**: Content-Disposition provides additional information about
 ///   how to present the body, while MIME-Version indicates the overall MIME compliance.
-/// - **MIME-Version with multipart/mixed**: When using multipart bodies, the MIME-Version header is 
+/// - **MIME-Version with multipart/mixed**: When using multipart bodies, the MIME-Version header is
 ///   required along with Content-Type boundaries to correctly parse the body parts.
 ///
 /// ## Common Values
@@ -88,7 +86,7 @@ use bytes::Bytes;
 ///     .add_text_part("This is the text part")
 ///     .add_html_part("<html><body><p>This is the HTML part</p></body></html>")
 ///     .build();
-/// 
+///
 /// // Create a SIP message with the multipart body and MIME-Version header
 /// let message = SimpleRequestBuilder::new(Method::Message, "sip:bob@example.com").unwrap()
 ///     .mime_version_1_0()  // Add MIME-Version: 1.0 header
@@ -226,7 +224,7 @@ pub trait MimeVersionBuilderExt {
     ///     .build();
     /// ```
     fn mime_version_1_0(self) -> Self;
-    
+
     /// Add a MIME-Version header with custom version numbers
     ///
     /// This method allows you to set a MIME-Version header with any major and minor
@@ -258,7 +256,7 @@ impl MimeVersionBuilderExt for SimpleRequestBuilder {
     fn mime_version_1_0(self) -> Self {
         self.header(TypedHeader::MimeVersion(MimeVersionType::new(1, 0)))
     }
-    
+
     fn mime_version(self, major: u32, minor: u32) -> Self {
         self.header(TypedHeader::MimeVersion(MimeVersionType::new(major, minor)))
     }
@@ -268,7 +266,7 @@ impl MimeVersionBuilderExt for SimpleResponseBuilder {
     fn mime_version_1_0(self) -> Self {
         self.header(TypedHeader::MimeVersion(MimeVersionType::new(1, 0)))
     }
-    
+
     fn mime_version(self, major: u32, minor: u32) -> Self {
         self.header(TypedHeader::MimeVersion(MimeVersionType::new(major, minor)))
     }
@@ -277,17 +275,18 @@ impl MimeVersionBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode, mime_version::MimeVersion as MimeVersionType};
     use crate::types::headers::HeaderAccess;
-    
+    use crate::types::{mime_version::MimeVersion as MimeVersionType, Method, StatusCode};
+
     #[test]
     fn test_request_mime_version_1_0() {
-        let request = SimpleRequestBuilder::new(Method::Message, "sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::new(Method::Message, "sip:example.com")
+            .unwrap()
             .mime_version_1_0()
             .build();
-            
+
         let mime_version_headers = request.headers(&HeaderName::MimeVersion);
-            
+
         assert_eq!(mime_version_headers.len(), 1);
         if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
             assert_eq!(version_struct.major(), 1);
@@ -296,15 +295,16 @@ mod tests {
             panic!("Expected MimeVersion header");
         }
     }
-    
+
     #[test]
     fn test_request_custom_mime_version() {
-        let request = SimpleRequestBuilder::new(Method::Message, "sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::new(Method::Message, "sip:example.com")
+            .unwrap()
             .mime_version(2, 1)
             .build();
-            
+
         let mime_version_headers = request.headers(&HeaderName::MimeVersion);
-            
+
         assert_eq!(mime_version_headers.len(), 1);
         if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
             assert_eq!(version_struct.major(), 2);
@@ -313,15 +313,15 @@ mod tests {
             panic!("Expected MimeVersion header");
         }
     }
-    
+
     #[test]
     fn test_response_mime_version_1_0() {
         let response = SimpleResponseBuilder::new(StatusCode::Ok, None)
             .mime_version_1_0()
             .build();
-            
+
         let mime_version_headers = response.headers(&HeaderName::MimeVersion);
-            
+
         assert_eq!(mime_version_headers.len(), 1);
         if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
             assert_eq!(version_struct.major(), 1);
@@ -330,15 +330,15 @@ mod tests {
             panic!("Expected MimeVersion header");
         }
     }
-    
+
     #[test]
     fn test_response_custom_mime_version() {
         let response = SimpleResponseBuilder::new(StatusCode::Ok, None)
             .mime_version(2, 1)
             .build();
-            
+
         let mime_version_headers = response.headers(&HeaderName::MimeVersion);
-            
+
         assert_eq!(mime_version_headers.len(), 1);
         if let TypedHeader::MimeVersion(version_struct) = mime_version_headers[0] {
             assert_eq!(version_struct.major(), 2);
@@ -347,4 +347,4 @@ mod tests {
             panic!("Expected MimeVersion header");
         }
     }
-} 
+}

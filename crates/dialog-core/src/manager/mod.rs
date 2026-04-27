@@ -11,14 +11,14 @@ pub mod unified;
 
 // Helper modules for dialog operations
 pub mod dialog_operations;
-pub mod protocol_handlers;
-pub mod transaction_integration;
-pub mod response_lifecycle;
 pub mod event_processing;
-pub mod session_coordination;
 pub mod message_routing;
-pub mod session_timer;
 pub mod outbound_flow;
+pub mod protocol_handlers;
+pub mod response_lifecycle;
+pub mod session_coordination;
+pub mod session_timer;
+pub mod transaction_integration;
 pub mod utils;
 
 // Transaction integration (organized by module)
@@ -30,13 +30,13 @@ pub mod transaction {
 pub use core::DialogManager;
 
 // Re-export commonly used types from submodules
-pub use dialog_operations::{DialogStore, DialogLookup};
-pub use protocol_handlers::{ProtocolHandlers, MethodHandler};
-pub use message_routing::{MessageRouter, DialogMatcher};
-pub use transaction_integration::{TransactionIntegration, TransactionHelpers};
+pub use dialog_operations::{DialogLookup, DialogStore};
+pub use message_routing::{DialogMatcher, MessageRouter};
+pub use protocol_handlers::{MethodHandler, ProtocolHandlers};
 pub use response_lifecycle::ResponseLifecycle;
-pub use session_coordination::{SessionCoordinator, EventSender};
+pub use session_coordination::{EventSender, SessionCoordinator};
+pub use transaction_integration::{TransactionHelpers, TransactionIntegration};
 pub use utils::{MessageExtensions, SourceExtractor};
 
 // Re-export main types
-pub use unified::UnifiedDialogManager; 
+pub use unified::UnifiedDialogManager;

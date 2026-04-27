@@ -19,17 +19,17 @@
 //! - Implementation of the trait for DialogManager
 //! - Helper methods for specific processing logic
 
-pub mod invite_handler;
 pub mod bye_handler;
-pub mod register_handler;
-pub mod update_handler;
-pub mod response_handler;
+pub mod invite_handler;
 pub mod prack_handler;
+pub mod register_handler;
+pub mod response_handler;
+pub mod update_handler;
 
 // Re-export handler traits for external use
-pub use invite_handler::InviteHandler;
 pub use bye_handler::ByeHandler;
+pub use invite_handler::InviteHandler;
+pub use prack_handler::PrackHandler;
+pub use register_handler::RegisterHandler;
 pub use response_handler::ResponseHandler;
 pub use update_handler::UpdateHandler;
-pub use register_handler::RegisterHandler;
-pub use prack_handler::PrackHandler;

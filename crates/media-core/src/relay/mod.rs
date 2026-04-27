@@ -13,15 +13,11 @@ use crate::error::Result;
 pub mod controller;
 
 // Re-export controller types for convenience
-pub use controller::{
-    DtmfNotification,
-    MediaSessionController,
-    MediaConfig,
-    MediaSessionStatus,
-    MediaSessionInfo,
-    MediaSessionEvent,
-};
 pub use crate::types::DialogId;
+pub use controller::{
+    DtmfNotification, MediaConfig, MediaSessionController, MediaSessionEvent, MediaSessionInfo,
+    MediaSessionStatus,
+};
 
 /// Simple G.711 PCMU codec implementation
 #[derive(Debug, Clone)]

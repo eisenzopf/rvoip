@@ -1,17 +1,17 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
-use crate::types::uri::Uri;
 use crate::types::address::Address;
 use crate::types::headers::header::Header;
 use crate::types::headers::header_name::HeaderName;
-use crate::types::referred_by::ReferredBy;
 use crate::types::headers::typed_header::TypedHeaderTrait;
 use crate::types::headers::TypedHeader;
-use super::HeaderSetter;
+use crate::types::referred_by::ReferredBy;
+use crate::types::uri::Uri;
 
 /// # Referred-By Header Extension
 ///
 /// This module provides extension traits for easily adding Referred-By headers
-/// to SIP requests and responses. The Referred-By header is defined in 
+/// to SIP requests and responses. The Referred-By header is defined in
 /// [RFC 3892](https://datatracker.ietf.org/doc/html/rfc3892) and is used
 /// to identify the entity that requested the current referral.
 ///
@@ -42,19 +42,19 @@ use super::HeaderSetter;
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
 /// use std::str::FromStr;
-/// 
+///
 /// // Create a new request builder
 /// let mut request = RequestBuilder::new(Method::Refer, "sip:alice@example.com").unwrap();
-/// 
+///
 /// // Add a Referred-By header with a URI
 /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
 /// request = request.referred_by_uri(uri);
-/// 
+///
 /// // Or add a Referred-By header with Address (display name + URI)
 /// let uri = Uri::from_str("sip:carol@example.com").unwrap();
 /// let address = Address::new_with_display_name("Carol", uri);
 /// request = request.referred_by(address);
-/// 
+///
 /// // Build the request
 /// let refer_request = request.build();
 /// ```
@@ -76,9 +76,9 @@ use super::HeaderSetter;
 ///
 /// ## Relationship with other headers
 ///
-/// - **Referred-By** vs **Refer-To**: Referred-By identifies who initiated the referral, 
+/// - **Referred-By** vs **Refer-To**: Referred-By identifies who initiated the referral,
 ///   while Refer-To specifies the target of the referral
-/// - **Referred-By** vs **From**: When a REFER is sent, From identifies the sender, 
+/// - **Referred-By** vs **From**: When a REFER is sent, From identifies the sender,
 ///   while Referred-By may identify a third party on whose behalf the referral is made
 ///
 /// # Examples
@@ -122,7 +122,7 @@ use super::HeaderSetter;
 pub trait ReferredByExt {
     /// Add a Referred-By header with the given Address.
     ///
-    /// This method adds a Referred-By header containing both URI and optional 
+    /// This method adds a Referred-By header containing both URI and optional
     /// display name to identify the referring party.
     ///
     /// # Parameters
@@ -192,7 +192,7 @@ pub trait ReferredByExt {
     /// # use rvoip_sip_core::prelude::*;
     /// let result = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
     ///     .referred_by_str("<sip:alice@example.com>");
-    /// 
+    ///
     /// match result {
     ///     Ok(builder) => {
     ///         let request = builder.build();
@@ -201,8 +201,10 @@ pub trait ReferredByExt {
     ///     Err(e) => eprintln!("Failed to parse Referred-By header: {}", e),
     /// }
     /// ```
-    fn referred_by_str(self, value: &str) -> Result<Self> where Self: Sized;
-    
+    fn referred_by_str(self, value: &str) -> Result<Self>
+    where
+        Self: Sized;
+
     /// Add a Referred-By header with URI and optional cid parameter.
     ///
     /// This method adds a Referred-By header with a URI and optionally specifies
@@ -230,7 +232,7 @@ pub trait ReferredByExt {
     ///     .build();
     /// ```
     fn referred_by_uri_with_cid(self, uri: Uri, cid: Option<&str>) -> Self;
-    
+
     /// Add a Referred-By header with Address and optional cid parameter.
     ///
     /// This method adds a Referred-By header with an Address (URI and optional display name)
@@ -260,8 +262,8 @@ pub trait ReferredByExt {
     fn referred_by_with_cid(self, address: Address, cid: Option<&str>) -> Self;
 }
 
-impl<T> ReferredByExt for T 
-where 
+impl<T> ReferredByExt for T
+where
     T: HeaderSetter,
 {
     fn referred_by(self, address: Address) -> Self {
@@ -274,23 +276,26 @@ where
         self.referred_by(address)
     }
 
-    fn referred_by_str(self, value: &str) -> Result<Self> where Self: Sized {
+    fn referred_by_str(self, value: &str) -> Result<Self>
+    where
+        Self: Sized,
+    {
         let referred_by = value.parse::<ReferredBy>()?;
         Ok(self.set_header(referred_by))
     }
-    
+
     fn referred_by_uri_with_cid(self, uri: Uri, cid: Option<&str>) -> Self {
         let address = Address::new(uri);
         self.referred_by_with_cid(address, cid)
     }
-    
+
     fn referred_by_with_cid(self, address: Address, cid: Option<&str>) -> Self {
         let mut referred_by = ReferredBy::new(address);
-        
+
         if let Some(cid_value) = cid {
             referred_by = referred_by.with_cid(cid_value);
         }
-        
+
         self.set_header(referred_by)
     }
 }
@@ -306,17 +311,22 @@ mod tests {
     fn test_request_with_referred_by() {
         let uri = Uri::from_str("sip:alice@example.com").unwrap();
         let address = Address::new_with_display_name("Alice", uri);
-        
-        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
+
+        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+            .unwrap()
             .referred_by(address)
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
-        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy) {
+
+        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy)
+        {
             assert_eq!(referred_by.address().display_name().unwrap(), "Alice");
-            assert_eq!(referred_by.address().uri().to_string(), "sip:alice@example.com");
+            assert_eq!(
+                referred_by.address().uri().to_string(),
+                "sip:alice@example.com"
+            );
         } else {
             panic!("ReferredBy header not found or has wrong type");
         }
@@ -325,14 +335,19 @@ mod tests {
     #[test]
     fn test_request_with_referred_by_uri() {
         let uri = Uri::from_str("sip:alice@example.com").unwrap();
-        
-        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
+
+        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+            .unwrap()
             .referred_by_uri(uri)
             .build();
-            
-        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy) {
+
+        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy)
+        {
             assert!(referred_by.address().display_name().is_none());
-            assert_eq!(referred_by.address().uri().to_string(), "sip:alice@example.com");
+            assert_eq!(
+                referred_by.address().uri().to_string(),
+                "sip:alice@example.com"
+            );
         } else {
             panic!("ReferredBy header not found or has wrong type");
         }
@@ -340,85 +355,102 @@ mod tests {
 
     #[test]
     fn test_request_with_referred_by_str() {
-        let result = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
+        let result = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+            .unwrap()
             .referred_by_str("<sip:alice@example.com>");
-        
+
         let request = match result {
             Ok(builder) => builder.build(),
             Err(e) => panic!("Failed to parse ReferredBy: {}", e),
         };
-            
-        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy) {
+
+        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy)
+        {
             assert!(referred_by.address().display_name().is_none());
-            assert_eq!(referred_by.address().uri().to_string(), "sip:alice@example.com");
+            assert_eq!(
+                referred_by.address().uri().to_string(),
+                "sip:alice@example.com"
+            );
         } else {
             panic!("ReferredBy header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_request_with_referred_by_and_cid() {
         let uri = Uri::from_str("sip:alice@example.com").unwrap();
         let address = Address::new_with_display_name("Alice", uri);
-        
-        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
+
+        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+            .unwrap()
             .referred_by_with_cid(address, Some("12345@example.com"))
             .build();
-            
-        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy) {
+
+        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy)
+        {
             assert_eq!(referred_by.address().display_name().unwrap(), "Alice");
-            assert_eq!(referred_by.address().uri().to_string(), "sip:alice@example.com");
+            assert_eq!(
+                referred_by.address().uri().to_string(),
+                "sip:alice@example.com"
+            );
             assert_eq!(referred_by.cid().unwrap(), "12345@example.com");
         } else {
             panic!("ReferredBy header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_request_with_referred_by_uri_and_cid() {
         let uri = Uri::from_str("sip:alice@example.com").unwrap();
-        
-        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
+
+        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+            .unwrap()
             .referred_by_uri_with_cid(uri, Some("12345@example.com"))
             .build();
-            
-        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy) {
+
+        if let Some(TypedHeader::ReferredBy(referred_by)) = request.header(&HeaderName::ReferredBy)
+        {
             assert!(referred_by.address().display_name().is_none());
-            assert_eq!(referred_by.address().uri().to_string(), "sip:alice@example.com");
+            assert_eq!(
+                referred_by.address().uri().to_string(),
+                "sip:alice@example.com"
+            );
             assert_eq!(referred_by.cid().unwrap(), "12345@example.com");
         } else {
             panic!("ReferredBy header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_response_with_referred_by() {
         let uri = Uri::from_str("sip:alice@example.com").unwrap();
         let address = Address::new_with_display_name("Alice", uri);
-        
+
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .referred_by(address)
             .build();
-            
-        if let Some(TypedHeader::ReferredBy(referred_by)) = response.header(&HeaderName::ReferredBy) {
+
+        if let Some(TypedHeader::ReferredBy(referred_by)) = response.header(&HeaderName::ReferredBy)
+        {
             assert_eq!(referred_by.address().display_name().unwrap(), "Alice");
         } else {
             panic!("ReferredBy header not found or has wrong type");
         }
     }
-    
+
     #[test]
     fn test_chained_header_operations() {
         // Test that the ReferredByExt methods can be chained with other header operations
         let uri = Uri::from_str("sip:alice@example.com").unwrap();
-        
-        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com").unwrap()
+
+        let request = RequestBuilder::new(Method::Refer, "sip:bob@example.com")
+            .unwrap()
             .referred_by_uri(uri)
             .max_forwards(70) // Add another header
             .build();
-        
+
         // Verify both headers are present
         assert!(request.header(&HeaderName::ReferredBy).is_some());
         assert!(request.header(&HeaderName::MaxForwards).is_some());
     }
-} 
+}

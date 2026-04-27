@@ -10,11 +10,11 @@ for the RVOIP stack. It includes:
 */
 
 pub mod component;
-pub mod manager;
 pub mod dependency;
 pub mod health;
+pub mod manager;
 
 pub use component::{Component, ComponentState};
-pub use manager::{LifecycleManager, LifecycleError};
-pub use dependency::{DependencyGraph, DependencyError};
-pub use health::{HealthCheck, HealthStatus}; 
+pub use dependency::{DependencyError, DependencyGraph};
+pub use health::{HealthCheck, HealthStatus};
+pub use manager::{LifecycleError, LifecycleManager};

@@ -6,11 +6,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, warn, info, error};
+use tracing::{debug, error, info, warn};
 
-use crate::api::common::error::MediaTransportError;
-use crate::api::common::config::SecurityInfo;
 use crate::api::client::security::ClientSecurityContext;
+use crate::api::common::config::SecurityInfo;
+use crate::api::common::error::MediaTransportError;
 use crate::api::server::security::SocketHandle;
 
 /// Initialize security context with socket
@@ -25,13 +25,19 @@ pub async fn initialize_security(
     // Placeholder for the extracted initialize_security functionality
     if let Some(security) = security {
         // Set remote address
-        security.set_remote_address(remote_address).await
-            .map_err(|e| MediaTransportError::Security(format!("Failed to set remote address: {}", e)))?;
-            
+        security
+            .set_remote_address(remote_address)
+            .await
+            .map_err(|e| {
+                MediaTransportError::Security(format!("Failed to set remote address: {}", e))
+            })?;
+
         // Set socket
-        security.set_socket(socket_handle).await
+        security
+            .set_socket(socket_handle)
+            .await
             .map_err(|e| MediaTransportError::Security(format!("Failed to set socket: {}", e)))?;
-            
+
         debug!("Initialized security context");
         Ok(())
     } else {
@@ -55,8 +61,9 @@ pub async fn get_security_info(
 ) -> Result<SecurityInfo, MediaTransportError> {
     // Placeholder for the extracted get_security_info functionality
     if let Some(security) = security {
-        security.get_security_info().await
-            .map_err(|e| MediaTransportError::Security(format!("Failed to get security info: {}", e)))
+        security.get_security_info().await.map_err(|e| {
+            MediaTransportError::Security(format!("Failed to get security info: {}", e))
+        })
     } else {
         // If security is not enabled, return empty info
         Ok(SecurityInfo {
@@ -79,7 +86,9 @@ pub async fn start_handshake(
     // Placeholder for the extracted start_handshake functionality
     if let Some(security) = security {
         debug!("Starting DTLS handshake with remote: {}", remote_address);
-        security.start_handshake().await
+        security
+            .start_handshake()
+            .await
             .map_err(|e| MediaTransportError::Security(format!("Failed to start handshake: {}", e)))
     } else {
         debug!("No security context for handshake");
@@ -94,8 +103,9 @@ pub async fn wait_for_handshake(
     // Placeholder for the extracted wait_for_handshake functionality
     if let Some(security) = security {
         debug!("Waiting for DTLS handshake to complete");
-        while !security.is_handshake_complete().await
-            .map_err(|e| MediaTransportError::Security(format!("Failed to check handshake status: {}", e)))? {
+        while !security.is_handshake_complete().await.map_err(|e| {
+            MediaTransportError::Security(format!("Failed to check handshake status: {}", e))
+        })? {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         debug!("DTLS handshake completed successfully");
@@ -112,8 +122,9 @@ pub async fn is_handshake_complete(
 ) -> Result<bool, MediaTransportError> {
     // Placeholder for the extracted is_handshake_complete functionality
     if let Some(security) = security {
-        security.is_handshake_complete().await
-            .map_err(|e| MediaTransportError::Security(format!("Failed to check handshake status: {}", e)))
+        security.is_handshake_complete().await.map_err(|e| {
+            MediaTransportError::Security(format!("Failed to check handshake status: {}", e))
+        })
     } else {
         // If no security, consider handshake "complete"
         Ok(true)
@@ -128,8 +139,12 @@ pub async fn set_remote_fingerprint(
 ) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted set_remote_fingerprint functionality
     if let Some(security) = security {
-        security.set_remote_fingerprint(fingerprint, algorithm).await
-            .map_err(|e| MediaTransportError::Security(format!("Failed to set remote fingerprint: {}", e)))
+        security
+            .set_remote_fingerprint(fingerprint, algorithm)
+            .await
+            .map_err(|e| {
+                MediaTransportError::Security(format!("Failed to set remote fingerprint: {}", e))
+            })
     } else {
         debug!("No security context to set remote fingerprint");
         Ok(())
@@ -142,10 +157,11 @@ pub async fn close_security(
 ) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted close_security functionality
     if let Some(security) = security {
-        security.close().await
-            .map_err(|e| MediaTransportError::Security(format!("Failed to close security context: {}", e)))
+        security.close().await.map_err(|e| {
+            MediaTransportError::Security(format!("Failed to close security context: {}", e))
+        })
     } else {
         debug!("No security context to close");
         Ok(())
     }
-} 
+}

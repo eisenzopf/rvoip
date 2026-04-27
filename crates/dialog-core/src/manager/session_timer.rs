@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-use rvoip_sip_core::Method;
 use rvoip_sip_core::types::reason::Reason;
+use rvoip_sip_core::Method;
 
 use crate::dialog::DialogId;
 use crate::events::SessionCoordinationEvent;
@@ -72,9 +72,7 @@ async fn await_tx_outcome(
         Ok(rx) => rx,
         Err(_) => {
             return match tx_mgr.last_response(key).await {
-                Ok(Some(resp)) if (resp.status().as_u16() / 100) == 2 => {
-                    RefreshOutcome::Success
-                }
+                Ok(Some(resp)) if (resp.status().as_u16() / 100) == 2 => RefreshOutcome::Success,
                 Ok(Some(resp)) => RefreshOutcome::FailureStatus(resp.status().as_u16()),
                 _ => RefreshOutcome::Terminated,
             };
@@ -160,8 +158,11 @@ pub fn spawn_refresh_task(
     // Budget for awaiting the refresh transaction's final outcome. Timer F
     // drives the transaction timeout; add a small slack so the subscription
     // path definitely sees the TransactionTimeout event before we bail.
-    let tx_deadline =
-        manager.transaction_manager.timer_settings().transaction_timeout + Duration::from_secs(2);
+    let tx_deadline = manager
+        .transaction_manager
+        .timer_settings()
+        .transaction_timeout
+        + Duration::from_secs(2);
 
     let handle = tokio::spawn(async move {
         loop {
@@ -257,7 +258,10 @@ pub fn spawn_refresh_task(
             let _ = manager
                 .notify_session_layer(SessionCoordinationEvent::SessionRefreshFailed {
                     dialog_id: dialog_for_task.clone(),
-                    reason: format!("Session expired (RFC 4028 §10 — cause=408): {}", failure_reason),
+                    reason: format!(
+                        "Session expired (RFC 4028 §10 — cause=408): {}",
+                        failure_reason
+                    ),
                 })
                 .await;
             break;

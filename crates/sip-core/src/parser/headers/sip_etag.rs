@@ -25,18 +25,18 @@ use nom::sequence::terminated;
 pub fn parse_sip_etag(input: &[u8]) -> ParseResult<SipETag> {
     // Parse any leading whitespace
     let (input, _) = sws(input)?;
-    
+
     // Parse the entity tag as a token
     let (input, tag_bytes) = token(input)?;
-    
+
     // Convert to string
     let tag = std::str::from_utf8(tag_bytes)
         .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Char)))?
         .to_string();
-    
+
     // Parse any trailing whitespace
     let (input, _) = sws(input)?;
-    
+
     Ok((input, SipETag::new(tag)))
 }
 
@@ -51,7 +51,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(etag.tag(), "dx200xyz");
     }
-    
+
     #[test]
     fn test_parse_sip_etag_with_spaces() {
         let input = b"  abc123  ";
@@ -59,7 +59,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(etag.tag(), "abc123");
     }
-    
+
     #[test]
     fn test_parse_sip_etag_alphanumeric() {
         let input = b"Tag-123.456_xyz";
@@ -67,7 +67,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(etag.tag(), "Tag-123.456_xyz");
     }
-    
+
     #[test]
     fn test_parse_sip_etag_empty_fails() {
         let input = b"";

@@ -14,22 +14,22 @@ pub enum Error {
 
     /// Error originating from the sip-transport crate.
     #[error("SIP transport error: {source}")]
-    TransportError { 
+    TransportError {
         #[source]
         source: TransportErrorWrapper,
-        context: Option<String>, 
+        context: Option<String>,
     },
 
     /// Transaction not found for the given key.
     #[error("Transaction not found: {key} (context: {context})")]
-    TransactionNotFound { 
+    TransactionNotFound {
         key: TransactionKey,
         context: String,
     },
 
     /// Transaction with the given key already exists.
     #[error("Transaction already exists: {key} (kind: {kind:?})")]
-    TransactionExists { 
+    TransactionExists {
         key: TransactionKey,
         kind: TransactionKind,
     },
@@ -45,16 +45,11 @@ pub enum Error {
 
     /// Transaction timed out (specific timers T_B, T_F, T_H).
     #[error("Transaction timed out: {key} (timer: {timer})")]
-    TransactionTimeout {
-        key: TransactionKey,
-        timer: String,
-    },
-    
+    TransactionTimeout { key: TransactionKey, timer: String },
+
     /// Timer error
     #[error("Timer error: {message}")]
-    TimerError {
-        message: String,
-    },
+    TimerError { message: String },
 
     /// I/O error.
     #[error("I/O error: {0}")]
@@ -62,16 +57,12 @@ pub enum Error {
 
     /// Internal channel error (e.g., receiver dropped).
     #[error("Channel error: {context}")]
-    ChannelError {
-        context: String,
-    },
-    
+    ChannelError { context: String },
+
     /// Transaction creation error
     #[error("Failed to create transaction: {message}")]
-    TransactionCreationError {
-        message: String,
-    },
-    
+    TransactionCreationError { message: String },
+
     /// Transaction message processing error
     #[error("Failed to process message: {message} for transaction {transaction_id:?}")]
     MessageProcessingError {
@@ -103,7 +94,7 @@ impl std::error::Error for TransportErrorWrapper {}
 // Manual From impl for transport errors
 impl From<rvoip_sip_transport::Error> for Error {
     fn from(e: rvoip_sip_transport::Error) -> Self {
-        Error::TransportError { 
+        Error::TransportError {
             source: TransportErrorWrapper(e.to_string()),
             context: None,
         }
@@ -126,7 +117,10 @@ impl From<String> for Error {
 impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
     fn from(e: tokio::sync::mpsc::error::SendError<T>) -> Self {
         Error::ChannelError {
-            context: format!("Send error: channel closed while sending {:?}", std::any::type_name::<T>()),
+            context: format!(
+                "Send error: channel closed while sending {:?}",
+                std::any::type_name::<T>()
+            ),
         }
     }
 }
@@ -135,20 +129,20 @@ impl<T> From<tokio::sync::mpsc::error::SendError<T>> for Error {
 impl Error {
     /// Create a new TransactionNotFound error with context
     pub fn transaction_not_found(key: TransactionKey, context: impl Into<String>) -> Self {
-        Error::TransactionNotFound { 
-            key, 
+        Error::TransactionNotFound {
+            key,
             context: context.into(),
         }
     }
-    
+
     /// Create a new TransportError with context
     pub fn transport_error(source: rvoip_sip_transport::Error, context: impl Into<String>) -> Self {
-        Error::TransportError { 
+        Error::TransportError {
             source: TransportErrorWrapper(source.to_string()),
             context: Some(context.into()),
         }
     }
-    
+
     /// Create a new InvalidStateTransition error
     pub fn invalid_state_transition(
         transaction_kind: TransactionKind,
@@ -163,14 +157,14 @@ impl Error {
             transaction_id,
         }
     }
-    
+
     /// Create a new ChannelError with context
     pub fn channel_error(context: impl Into<String>) -> Self {
         Error::ChannelError {
             context: context.into(),
         }
     }
-    
+
     /// Create a new TransactionTimeout error
     pub fn transaction_timeout(key: TransactionKey, timer: impl Into<String>) -> Self {
         Error::TransactionTimeout {
@@ -178,4 +172,4 @@ impl Error {
             timer: timer.into(),
         }
     }
-} 
+}

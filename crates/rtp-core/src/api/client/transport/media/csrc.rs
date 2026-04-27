@@ -3,18 +3,16 @@
 //! This module handles CSRC (Contributing Source) management for RTP packets,
 //! including mapping between original SSRCs and CSRCs, and metadata tracking.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
 use crate::api::common::error::MediaTransportError;
-use crate::{CsrcManager, CsrcMapping, RtpSsrc, RtpCsrc, MAX_CSRC_COUNT};
+use crate::{CsrcManager, CsrcMapping, RtpCsrc, RtpSsrc, MAX_CSRC_COUNT};
 
 /// Check if CSRC management is enabled
-pub fn is_csrc_management_enabled(
-    csrc_management_enabled: &Arc<AtomicBool>,
-) -> bool {
+pub fn is_csrc_management_enabled(csrc_management_enabled: &Arc<AtomicBool>) -> bool {
     csrc_management_enabled.load(Ordering::SeqCst)
 }
 
@@ -27,10 +25,10 @@ pub async fn enable_csrc_management(
     if csrc_management_enabled.load(Ordering::SeqCst) {
         return Ok(true);
     }
-    
+
     // Set enabled flag
     csrc_management_enabled.store(true, Ordering::SeqCst);
-    
+
     debug!("Enabled CSRC management");
     Ok(true)
 }
@@ -44,14 +42,16 @@ pub async fn add_csrc_mapping(
     // Placeholder for the extracted add_csrc_mapping functionality
     // Check if CSRC management is enabled
     if !csrc_management_enabled.load(Ordering::SeqCst) {
-        return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        return Err(MediaTransportError::ConfigError(
+            "CSRC management is not enabled".to_string(),
+        ));
     }
-    
+
     // Add mapping to the manager
     let mut csrc_manager = csrc_manager.lock().await;
     let mapping_clone = mapping.clone(); // Clone before adding
     csrc_manager.add_mapping(mapping);
-    
+
     debug!("Added CSRC mapping: {:?}", mapping_clone);
     Ok(())
 }
@@ -66,14 +66,19 @@ pub async fn add_simple_csrc_mapping(
     // Placeholder for the extracted add_simple_csrc_mapping functionality
     // Check if CSRC management is enabled
     if !csrc_management_enabled.load(Ordering::SeqCst) {
-        return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        return Err(MediaTransportError::ConfigError(
+            "CSRC management is not enabled".to_string(),
+        ));
     }
-    
+
     // Add simple mapping to the manager
     let mut csrc_manager = csrc_manager.lock().await;
     csrc_manager.add_simple_mapping(original_ssrc, csrc);
-    
-    debug!("Added simple CSRC mapping: {:08x} -> {:08x}", original_ssrc, csrc);
+
+    debug!(
+        "Added simple CSRC mapping: {:08x} -> {:08x}",
+        original_ssrc, csrc
+    );
     Ok(())
 }
 
@@ -86,17 +91,19 @@ pub async fn remove_csrc_mapping_by_ssrc(
     // Placeholder for the extracted remove_csrc_mapping_by_ssrc functionality
     // Check if CSRC management is enabled
     if !csrc_management_enabled.load(Ordering::SeqCst) {
-        return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        return Err(MediaTransportError::ConfigError(
+            "CSRC management is not enabled".to_string(),
+        ));
     }
-    
+
     // Remove mapping from the manager
     let mut csrc_manager = csrc_manager.lock().await;
     let removed = csrc_manager.remove_by_ssrc(original_ssrc);
-    
+
     if removed.is_some() {
         debug!("Removed CSRC mapping for SSRC: {:08x}", original_ssrc);
     }
-    
+
     Ok(removed)
 }
 
@@ -109,13 +116,15 @@ pub async fn get_csrc_mapping_by_ssrc(
     // Placeholder for the extracted get_csrc_mapping_by_ssrc functionality
     // Check if CSRC management is enabled
     if !csrc_management_enabled.load(Ordering::SeqCst) {
-        return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        return Err(MediaTransportError::ConfigError(
+            "CSRC management is not enabled".to_string(),
+        ));
     }
-    
+
     // Get mapping from the manager
     let csrc_manager = csrc_manager.lock().await;
     let mapping = csrc_manager.get_by_ssrc(original_ssrc).cloned();
-    
+
     Ok(mapping)
 }
 
@@ -127,13 +136,15 @@ pub async fn get_all_csrc_mappings(
     // Placeholder for the extracted get_all_csrc_mappings functionality
     // Check if CSRC management is enabled
     if !csrc_management_enabled.load(Ordering::SeqCst) {
-        return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        return Err(MediaTransportError::ConfigError(
+            "CSRC management is not enabled".to_string(),
+        ));
     }
-    
+
     // Get all mappings from the manager
     let csrc_manager = csrc_manager.lock().await;
     let mappings = csrc_manager.get_all_mappings().to_vec();
-    
+
     Ok(mappings)
 }
 
@@ -146,14 +157,20 @@ pub async fn get_active_csrcs(
     // Placeholder for the extracted get_active_csrcs functionality
     // Check if CSRC management is enabled
     if !csrc_management_enabled.load(Ordering::SeqCst) {
-        return Err(MediaTransportError::ConfigError("CSRC management is not enabled".to_string()));
+        return Err(MediaTransportError::ConfigError(
+            "CSRC management is not enabled".to_string(),
+        ));
     }
-    
+
     // Get active CSRCs from the manager
     let csrc_manager = csrc_manager.lock().await;
     let csrcs = csrc_manager.get_active_csrcs(active_ssrcs);
-    
-    debug!("Got {} active CSRCs for {} active SSRCs", csrcs.len(), active_ssrcs.len());
-    
+
+    debug!(
+        "Got {} active CSRCs for {} active SSRCs",
+        csrcs.len(),
+        active_ssrcs.len()
+    );
+
     Ok(csrcs)
-} 
+}

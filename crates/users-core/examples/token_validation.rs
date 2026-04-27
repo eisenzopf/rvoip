@@ -1,13 +1,13 @@
 //! Token validation example
-//! 
+//!
 //! This demonstrates how auth-core would validate JWT tokens issued by users-core
 //! and extract user context for session-core-v2
 
-use users_core::{init, UsersConfig, CreateUserRequest, UserClaims};
-use jsonwebtoken::{decode, encode, Algorithm, Validation, DecodingKey, EncodingKey, Header};
-use serde::{Deserialize, Serialize};
 use anyhow::Result;
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use users_core::{init, CreateUserRequest, UserClaims, UsersConfig};
 
 // Simulated auth-core UserContext
 #[derive(Debug, Clone)]
@@ -36,19 +36,21 @@ async fn main() -> Result<()> {
         database_url: "sqlite://token_validation.db?mode=rwc".to_string(),
         ..Default::default()
     };
-    
+
     let auth_service = init(config).await?;
 
     // Create and authenticate a user
     println!("📝 Setting up test user...");
-    
-    let user = auth_service.create_user(CreateUserRequest {
-        username: "validator".to_string(),
-        password: "SecureValidate2024!".to_string(),
-        email: Some("validator@example.com".to_string()),
-        display_name: Some("Token Validator".to_string()),
-        roles: vec!["user".to_string(), "admin".to_string()],
-    }).await?;
+
+    let user = auth_service
+        .create_user(CreateUserRequest {
+            username: "validator".to_string(),
+            password: "SecureValidate2024!".to_string(),
+            email: Some("validator@example.com".to_string()),
+            display_name: Some("Token Validator".to_string()),
+            roles: vec!["user".to_string(), "admin".to_string()],
+        })
+        .await?;
 
     let auth_result = auth_service
         .authenticate_password("validator", "SecureValidate2024!")
@@ -58,10 +60,10 @@ async fn main() -> Result<()> {
 
     // Simulate auth-core validation
     println!("\n🔐 Auth-core validates the token...");
-    
+
     let public_key = auth_service.jwt_issuer().public_key_pem()?;
     let user_context = validate_and_extract_context(&auth_result.access_token, &public_key)?;
-    
+
     println!("✅ Token validated successfully!");
     println!("   User Context:");
     println!("   - User ID: {}", user_context.user_id);
@@ -84,14 +86,17 @@ async fn main() -> Result<()> {
     println!("   Scope: {}", introspection.scope);
     println!("   Username: {}", introspection.username);
     if introspection.active && introspection.exp > 0 {
-        println!("   Expires in: {} seconds", introspection.exp - current_timestamp());
+        println!(
+            "   Expires in: {} seconds",
+            introspection.exp - current_timestamp()
+        );
     } else {
         println!("   Expires in: N/A (token inactive or invalid)");
     }
 
     // Show different token sources
     println!("\n🌐 Handling different token sources...");
-    
+
     // Simulate OAuth2 token (for comparison)
     let oauth2_token = simulate_oauth2_token();
     println!("   OAuth2 token would be validated against provider's endpoint");
@@ -109,7 +114,7 @@ async fn main() -> Result<()> {
 
     // Show error handling
     println!("\n❌ Error handling examples...");
-    
+
     // Expired token
     let expired_token = create_expired_token(&auth_service)?;
     match validate_and_extract_context(&expired_token, &public_key) {
@@ -126,21 +131,21 @@ async fn main() -> Result<()> {
 
     // Clean up
     std::fs::remove_file("token_validation.db").ok();
-    
+
     println!("\n✨ Token validation example completed!");
     Ok(())
 }
 
 fn validate_and_extract_context(token: &str, public_key_pem: &str) -> Result<UserContext> {
     let decoding_key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())?;
-    
+
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-api", "rvoip-sip"]);
-    
+
     let token_data = decode::<UserClaims>(token, &decoding_key, &validation)?;
     let claims = token_data.claims;
-    
+
     Ok(UserContext {
         user_id: claims.sub,
         username: claims.username,
@@ -167,7 +172,9 @@ struct Jwk {
     e: String,
 }
 
-fn simulate_jwks_endpoint(auth_service: &users_core::AuthenticationService) -> Result<JwksResponse> {
+fn simulate_jwks_endpoint(
+    auth_service: &users_core::AuthenticationService,
+) -> Result<JwksResponse> {
     // In reality, this would extract the actual RSA components
     Ok(JwksResponse {
         keys: vec![Jwk {
@@ -194,7 +201,7 @@ fn introspect_token(token: &str, public_key_pem: &str) -> Result<TokenIntrospect
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&["https://users.rvoip.local"]);
     validation.set_audience(&["rvoip-api", "rvoip-sip"]);
-    
+
     match decode::<UserClaims>(token, &decoding_key, &validation) {
         Ok(token_data) => {
             let claims = token_data.claims;
@@ -204,7 +211,7 @@ fn introspect_token(token: &str, public_key_pem: &str) -> Result<TokenIntrospect
                 username: claims.username,
                 exp: claims.exp,
             })
-        },
+        }
         Err(_) => Ok(TokenIntrospection {
             active: false,
             scope: String::new(),
@@ -233,7 +240,7 @@ fn create_expired_token(auth_service: &users_core::AuthenticationService) -> Res
         roles: vec![],
         scope: "test".to_string(),
     };
-    
+
     // For this example, we'll just return a dummy token
     Ok("eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImtpZCI6InVzZXJzLWNvcmUtMjAyNCJ9.expired".to_string())
 }

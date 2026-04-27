@@ -6,15 +6,15 @@
 //! - Key lifecycle management with expiration and cleanup
 //! - Security policy enforcement
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
 use tokio::sync::RwLock;
-use tracing::{info, debug, warn, error};
+use tracing::{debug, error, info, warn};
 
 use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SrtpProfile};
 use crate::api::common::error::SecurityError;
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, crypto::SrtpCryptoKey};
+use crate::srtp::{crypto::SrtpCryptoKey, SrtpContext, SrtpCryptoSuite};
 
 /// Key rotation policy defines when keys should be rotated
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,9 +39,9 @@ impl KeyRotationPolicy {
             KeyRotationPolicy::PacketCount(threshold) => packet_count >= *threshold,
             KeyRotationPolicy::Manual => false,
             KeyRotationPolicy::Never => false,
-            KeyRotationPolicy::Combined(policies) => {
-                policies.iter().any(|policy| policy.should_rotate(elapsed, packet_count))
-            }
+            KeyRotationPolicy::Combined(policies) => policies
+                .iter()
+                .any(|policy| policy.should_rotate(elapsed, packet_count)),
         }
     }
 
@@ -50,16 +50,14 @@ impl KeyRotationPolicy {
         match self {
             KeyRotationPolicy::TimeInterval(duration) => {
                 format!("Time interval: {:?}", duration)
-            },
+            }
             KeyRotationPolicy::PacketCount(count) => {
                 format!("Packet count: {}", count)
-            },
+            }
             KeyRotationPolicy::Manual => "Manual rotation".to_string(),
             KeyRotationPolicy::Never => "No rotation".to_string(),
             KeyRotationPolicy::Combined(policies) => {
-                let descriptions: Vec<String> = policies.iter()
-                    .map(|p| p.description())
-                    .collect();
+                let descriptions: Vec<String> = policies.iter().map(|p| p.description()).collect();
                 format!("Combined: [{}]", descriptions.join(", "))
             }
         }
@@ -69,14 +67,14 @@ impl KeyRotationPolicy {
     pub fn enterprise_standard() -> Self {
         Self::Combined(vec![
             Self::TimeInterval(Duration::from_secs(3600)), // 1 hour
-            Self::PacketCount(1_000_000), // 1M packets
+            Self::PacketCount(1_000_000),                  // 1M packets
         ])
     }
 
     pub fn high_security() -> Self {
         Self::Combined(vec![
             Self::TimeInterval(Duration::from_secs(900)), // 15 minutes
-            Self::PacketCount(100_000), // 100K packets
+            Self::PacketCount(100_000),                   // 100K packets
         ])
     }
 
@@ -99,7 +97,7 @@ impl StreamType {
     pub fn derivation_label(&self) -> &'static str {
         match self {
             StreamType::Audio => "SRTP_AUDIO",
-            StreamType::Video => "SRTP_VIDEO", 
+            StreamType::Video => "SRTP_VIDEO",
             StreamType::Data => "SRTP_DATA",
             StreamType::Control => "SRTP_CONTROL",
         }
@@ -136,7 +134,9 @@ impl KeyStore {
     /// Create a new key store with master key material
     pub fn new(master_key: Vec<u8>) -> Result<Self, SecurityError> {
         if master_key.len() < 32 {
-            return Err(SecurityError::Configuration("Master key too short".to_string()));
+            return Err(SecurityError::Configuration(
+                "Master key too short".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -150,14 +150,17 @@ impl KeyStore {
     }
 
     /// Derive a key for a specific stream type
-    pub fn derive_stream_key(&self, stream_type: StreamType) -> Result<SrtpCryptoKey, SecurityError> {
+    pub fn derive_stream_key(
+        &self,
+        stream_type: StreamType,
+    ) -> Result<SrtpCryptoKey, SecurityError> {
         // Use HKDF-like key derivation (simplified for this implementation)
         let label = stream_type.derivation_label();
         let mut derived_key = Vec::with_capacity(30); // 16 bytes key + 14 bytes salt
 
         // Simple key derivation: master_key || label || generation
         derived_key.extend_from_slice(&self.master_key[0..16.min(self.master_key.len())]);
-        
+
         // XOR with stream label hash for differentiation
         let label_hash = self.hash_label(label);
         for (i, &byte) in label_hash.iter().take(16).enumerate() {
@@ -180,7 +183,9 @@ impl KeyStore {
             salt.copy_from_slice(&self.master_key[16..30]);
         } else {
             // Use a default salt if master key is too short
-            salt = vec![0x9e, 0x7c, 0xa4, 0xf0, 0x85, 0x2d, 0x1c, 0x22, 0xf9, 0x8a, 0x1b, 0x5e, 0x6c, 0x3d];
+            salt = vec![
+                0x9e, 0x7c, 0xa4, 0xf0, 0x85, 0x2d, 0x1c, 0x22, 0xf9, 0x8a, 0x1b, 0x5e, 0x6c, 0x3d,
+            ];
         }
 
         // XOR salt with generation for uniqueness
@@ -196,12 +201,12 @@ impl KeyStore {
         // Simple hash: just use the bytes of the label with some mixing
         let mut hash = vec![0u8; 16];
         let label_bytes = label.as_bytes();
-        
+
         for (i, &byte) in label_bytes.iter().enumerate() {
             let hash_len = hash.len();
             hash[i % hash_len] ^= byte.wrapping_add(i as u8);
         }
-        
+
         hash
     }
 
@@ -211,14 +216,22 @@ impl KeyStore {
         let crypto_suite = match stream_type.default_srtp_profile() {
             SrtpProfile::AesCm128HmacSha1_80 => crate::srtp::SRTP_AES128_CM_SHA1_80,
             SrtpProfile::AesCm128HmacSha1_32 => crate::srtp::SRTP_AES128_CM_SHA1_32,
-            _ => return Err(SecurityError::Configuration("Unsupported SRTP profile".to_string())),
+            _ => {
+                return Err(SecurityError::Configuration(
+                    "Unsupported SRTP profile".to_string(),
+                ))
+            }
         };
 
-        let srtp_context = SrtpContext::new(crypto_suite, stream_key)
-            .map_err(|e| SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e)))?;
+        let srtp_context = SrtpContext::new(crypto_suite, stream_key).map_err(|e| {
+            SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e))
+        })?;
 
         self.stream_contexts.insert(stream_type, srtp_context);
-        debug!("Set up SRTP context for {:?} stream (generation {})", stream_type, self.generation);
+        debug!(
+            "Set up SRTP context for {:?} stream (generation {})",
+            stream_type, self.generation
+        );
 
         Ok(())
     }
@@ -317,7 +330,12 @@ impl KeySyndicationConfig {
     /// Configuration for full control scenarios
     pub fn full_control() -> Self {
         Self {
-            stream_types: vec![StreamType::Audio, StreamType::Video, StreamType::Data, StreamType::Control],
+            stream_types: vec![
+                StreamType::Audio,
+                StreamType::Video,
+                StreamType::Data,
+                StreamType::Control,
+            ],
             auto_setup_streams: true,
             synchronized_rotation: true,
         }
@@ -342,7 +360,11 @@ impl KeySyndication {
     }
 
     /// Create a session with master key material
-    pub fn create_session(&mut self, session_id: String, master_key: Vec<u8>) -> Result<(), SecurityError> {
+    pub fn create_session(
+        &mut self,
+        session_id: String,
+        master_key: Vec<u8>,
+    ) -> Result<(), SecurityError> {
         let mut key_store = KeyStore::new(master_key)?;
 
         // Auto-setup streams if configured
@@ -364,8 +386,14 @@ impl KeySyndication {
     }
 
     /// Add a stream to an existing session
-    pub fn add_stream(&mut self, session_id: &str, stream_type: StreamType) -> Result<(), SecurityError> {
-        let key_store = self.sessions.get_mut(session_id)
+    pub fn add_stream(
+        &mut self,
+        session_id: &str,
+        stream_type: StreamType,
+    ) -> Result<(), SecurityError> {
+        let key_store = self
+            .sessions
+            .get_mut(session_id)
             .ok_or_else(|| SecurityError::NotFound(format!("Session not found: {}", session_id)))?;
 
         key_store.setup_stream(stream_type)?;
@@ -416,7 +444,7 @@ impl Default for SecurityPolicy {
         Self {
             required_methods: vec![KeyExchangeMethod::Sdes, KeyExchangeMethod::DtlsSrtp],
             min_rotation_interval: Some(Duration::from_secs(3600)), // 1 hour
-            max_key_lifetime: Some(Duration::from_secs(86400)), // 24 hours
+            max_key_lifetime: Some(Duration::from_secs(86400)),     // 24 hours
             required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             strict_validation: true,
             require_pfs: false,
@@ -430,7 +458,7 @@ impl SecurityPolicy {
         Self {
             required_methods: vec![KeyExchangeMethod::Mikey, KeyExchangeMethod::Sdes],
             min_rotation_interval: Some(Duration::from_secs(1800)), // 30 minutes
-            max_key_lifetime: Some(Duration::from_secs(7200)), // 2 hours
+            max_key_lifetime: Some(Duration::from_secs(7200)),      // 2 hours
             required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80],
             strict_validation: true,
             require_pfs: true,
@@ -442,7 +470,7 @@ impl SecurityPolicy {
         Self {
             required_methods: vec![KeyExchangeMethod::Zrtp, KeyExchangeMethod::Mikey],
             min_rotation_interval: Some(Duration::from_secs(900)), // 15 minutes
-            max_key_lifetime: Some(Duration::from_secs(3600)), // 1 hour
+            max_key_lifetime: Some(Duration::from_secs(3600)),     // 1 hour
             required_srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
             strict_validation: true,
             require_pfs: true,
@@ -471,21 +499,24 @@ impl SecurityPolicy {
     /// Validate a security configuration against this policy
     pub fn validate_config(&self, config: &SecurityConfig) -> Result<(), SecurityError> {
         // Check if the configured method is allowed
-        let method = config.mode.key_exchange_method()
-            .ok_or_else(|| SecurityError::PolicyViolation("No key exchange method configured".to_string()))?;
+        let method = config.mode.key_exchange_method().ok_or_else(|| {
+            SecurityError::PolicyViolation("No key exchange method configured".to_string())
+        })?;
 
         if !self.required_methods.contains(&method) {
-            return Err(SecurityError::PolicyViolation(
-                format!("Key exchange method {:?} not allowed by policy", method)
-            ));
+            return Err(SecurityError::PolicyViolation(format!(
+                "Key exchange method {:?} not allowed by policy",
+                method
+            )));
         }
 
         // Check SRTP profiles
         for profile in &config.srtp_profiles {
             if !self.required_srtp_profiles.contains(profile) {
-                return Err(SecurityError::PolicyViolation(
-                    format!("SRTP profile {:?} not allowed by policy", profile)
-                ));
+                return Err(SecurityError::PolicyViolation(format!(
+                    "SRTP profile {:?} not allowed by policy",
+                    profile
+                )));
             }
         }
 
@@ -495,26 +526,30 @@ impl SecurityPolicy {
     }
 
     /// Check if a rotation policy complies with this security policy
-    pub fn validate_rotation_policy(&self, policy: &KeyRotationPolicy) -> Result<(), SecurityError> {
+    pub fn validate_rotation_policy(
+        &self,
+        policy: &KeyRotationPolicy,
+    ) -> Result<(), SecurityError> {
         if let Some(min_interval) = self.min_rotation_interval {
             match policy {
                 KeyRotationPolicy::TimeInterval(interval) => {
                     if *interval < min_interval {
-                        return Err(SecurityError::PolicyViolation(
-                            format!("Rotation interval {:?} is less than minimum {:?}", interval, min_interval)
-                        ));
+                        return Err(SecurityError::PolicyViolation(format!(
+                            "Rotation interval {:?} is less than minimum {:?}",
+                            interval, min_interval
+                        )));
                     }
-                },
+                }
                 KeyRotationPolicy::Never => {
                     return Err(SecurityError::PolicyViolation(
-                        "Policy requires key rotation but 'Never' policy specified".to_string()
+                        "Policy requires key rotation but 'Never' policy specified".to_string(),
                     ));
-                },
+                }
                 KeyRotationPolicy::Combined(policies) => {
                     for sub_policy in policies {
                         self.validate_rotation_policy(sub_policy)?;
                     }
-                },
+                }
                 _ => {} // Other policies might be acceptable
             }
         }
@@ -567,32 +602,39 @@ impl KeyManager {
     /// Start automatic key rotation task
     async fn start_rotation_task(&self) {
         let policy = self.rotation_policy.read().await.clone();
-        
+
         match policy {
             KeyRotationPolicy::TimeInterval(interval) => {
                 let key_store = self.key_store.clone();
                 let rotation_policy = self.rotation_policy.clone();
-                
+
                 let handle = tokio::spawn(async move {
                     let mut rotation_interval = tokio::time::interval(interval);
-                    rotation_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                    
+                    rotation_interval
+                        .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
                     loop {
                         rotation_interval.tick().await;
-                        
+
                         if let Some(mut store) = key_store.write().await.as_mut() {
                             if let Err(e) = store.rotate_keys() {
                                 error!("Automatic key rotation failed: {}", e);
                             } else {
-                                info!("Automatic key rotation completed (generation {})", store.generation());
+                                info!(
+                                    "Automatic key rotation completed (generation {})",
+                                    store.generation()
+                                );
                             }
                         }
                     }
                 });
-                
+
                 *self.rotation_task.write().await = Some(handle);
-                info!("Started automatic key rotation task with interval {:?}", interval);
-            },
+                info!(
+                    "Started automatic key rotation task with interval {:?}",
+                    interval
+                );
+            }
             _ => {
                 debug!("No automatic rotation task needed for policy: {:?}", policy);
             }
@@ -611,7 +653,10 @@ impl KeyManager {
     pub async fn rotate_keys(&self) -> Result<(), SecurityError> {
         if let Some(key_store) = self.key_store.write().await.as_mut() {
             key_store.rotate_keys()?;
-            info!("Manual key rotation completed (generation {})", key_store.generation());
+            info!(
+                "Manual key rotation completed (generation {})",
+                key_store.generation()
+            );
         }
 
         Ok(())
@@ -620,11 +665,11 @@ impl KeyManager {
     /// Check if rotation is needed and perform it
     pub async fn check_and_rotate(&self) -> Result<bool, SecurityError> {
         let policy = self.rotation_policy.read().await.clone();
-        
+
         if let Some(key_store) = self.key_store.write().await.as_mut() {
             let elapsed = key_store.elapsed_time();
             let packet_count = key_store.packet_count();
-            
+
             if policy.should_rotate(elapsed, packet_count) {
                 key_store.rotate_keys()?;
                 info!("Key rotation triggered by policy: {}", policy.description());
@@ -654,7 +699,7 @@ impl KeyManager {
     /// Get current key statistics
     pub async fn get_statistics(&self) -> KeyManagerStatistics {
         let mut stats = KeyManagerStatistics::default();
-        
+
         if let Some(key_store) = self.key_store.read().await.as_ref() {
             stats.current_generation = key_store.generation();
             stats.elapsed_time = key_store.elapsed_time();
@@ -685,4 +730,4 @@ impl Drop for KeyManager {
         // In practice, you'd call stop_rotation_task() before dropping
         debug!("KeyManager dropped");
     }
-} 
+}

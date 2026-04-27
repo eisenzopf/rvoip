@@ -1,7 +1,7 @@
 //! # Registrar Core
-//! 
+//!
 //! A high-performance SIP Registrar and Presence Server for the rvoip ecosystem.
-//! 
+//!
 //! This crate provides:
 //! - User registration management (REGISTER)
 //! - Location services (contact bindings)  
@@ -9,23 +9,22 @@
 //! - Subscription handling (SUBSCRIBE/NOTIFY)
 //! - Automatic buddy lists for registered users
 
-pub mod registrar;
-pub mod presence;
 pub mod api;
-pub mod types;
 pub mod error;
 pub mod events;
+pub mod presence;
+pub mod registrar;
+pub mod types;
 
 // Re-exports for convenience
 pub use api::RegistrarService;
-pub use types::{
-    UserRegistration, ContactInfo, Transport,
-    PresenceState, PresenceStatus, BasicStatus, ExtendedStatus,
-    Subscription, SubscriptionState,
-};
 pub use error::{RegistrarError, Result};
-pub use events::{RegistrarEvent, PresenceEvent};
-pub use registrar::{UserStore, UserCredentials};
+pub use events::{PresenceEvent, RegistrarEvent};
+pub use registrar::{UserCredentials, UserStore};
+pub use types::{
+    BasicStatus, ContactInfo, ExtendedStatus, PresenceState, PresenceStatus, Subscription,
+    SubscriptionState, Transport, UserRegistration,
+};
 
 // Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

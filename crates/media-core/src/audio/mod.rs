@@ -6,10 +6,4 @@
 
 pub mod wav_loader;
 
-pub use wav_loader::{
-    WavAudio,
-    load_wav_file,
-    wav_to_ulaw,
-    load_music_on_hold,
-    MusicOnHoldCache,
-};
+pub use wav_loader::{load_music_on_hold, load_wav_file, wav_to_ulaw, MusicOnHoldCache, WavAudio};

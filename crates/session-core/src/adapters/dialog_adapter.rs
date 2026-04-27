@@ -4,58 +4,56 @@
 //! Focuses only on essential dialog operations and events.
 //!
 //! ## API Design
-//! 
+//!
 //! This adapter provides a clean interface for dialog operations:
-//! 
+//!
 //! ### Primary Methods
 //! - `send_invite_with_details()` - Creates dialog and sends INVITE in one atomic operation
 //! - `send_response()` - Sends SIP responses for incoming calls
 //! - `send_bye()` - Terminates calls
 //! - `send_ack()` - Acknowledges responses
-//! 
+//!
 //! ### Removed Methods
 //! The following methods were removed to avoid confusion:
 //! - `create_dialog()` - Did not actually create a dialog in dialog-core
 //! - `send_invite()` - Did not actually send an INVITE
-//! 
+//!
 //! All dialog creation is now done through `send_invite_with_details()` which
 //! properly creates the dialog in dialog-core and sends the INVITE.
 
-use std::sync::Arc;
+use crate::api::types::DialogIdentity;
+use crate::errors::{Result, SessionError};
+use crate::session_store::SessionStore;
+use crate::state_table::types::{DialogId, SessionId};
 use dashmap::DashMap;
 use rvoip_dialog_core::{
-    api::unified::UnifiedDialogApi,
-    DialogId as RvoipDialogId,
-    transaction::TransactionKey,
+    api::unified::UnifiedDialogApi, transaction::TransactionKey, DialogId as RvoipDialogId,
 };
-use rvoip_sip_core::{Response, StatusCode};
 use rvoip_infra_common::events::{
     coordinator::GlobalEventCoordinator,
     cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent},
 };
-use crate::state_table::types::{SessionId, DialogId};
-use crate::errors::{Result, SessionError};
-use crate::session_store::SessionStore;
-use crate::api::types::DialogIdentity;
+use rvoip_sip_core::{Response, StatusCode};
+use std::sync::Arc;
 
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
     pub(crate) dialog_api: Arc<UnifiedDialogApi>,
-    
+
     /// Session store for updating IDs
     pub(crate) store: Arc<SessionStore>,
-    
+
     /// Simple mapping of session IDs to dialog IDs
     pub(crate) session_to_dialog: Arc<DashMap<SessionId, RvoipDialogId>>,
     pub(crate) dialog_to_session: Arc<DashMap<RvoipDialogId, SessionId>>,
-    
+
     /// Store Call-ID to session mapping for correlation
     pub(crate) callid_to_session: Arc<DashMap<String, SessionId>>,
-    
+
     /// Store outgoing INVITE transaction IDs for UAC ACK sending
     pub(crate) outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
-    
+
     /// Global event coordinator for publishing events
     pub(crate) global_coordinator: Arc<GlobalEventCoordinator>,
 
@@ -79,7 +77,8 @@ pub struct DialogAdapter {
     /// `;ob` URI flag. `None` → pre-5626 behaviour. Populated at
     /// construction from
     /// [`crate::Config::sip_outbound_enabled`]+[`crate::Config::sip_instance`].
-    pub(crate) outbound_contact_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
+    pub(crate) outbound_contact_params:
+        Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
 }
 
 impl DialogAdapter {
@@ -122,98 +121,117 @@ impl DialogAdapter {
     ) -> std::result::Result<(), Arc<crate::state_machine::StateMachine>> {
         self.state_machine.set(state_machine)
     }
-    
+
     // ===== Direct Dialog Operations =====
     // NOTE: Removed confusing create_dialog() and send_invite() methods
     // Use send_invite_with_details() to create a dialog and send INVITE in one operation
-    
+
     /// Send a response
-    pub async fn send_response_by_dialog(&self, _dialog_id: DialogId, status_code: u16, _reason: &str) -> Result<()> {
+    pub async fn send_response_by_dialog(
+        &self,
+        _dialog_id: DialogId,
+        status_code: u16,
+        _reason: &str,
+    ) -> Result<()> {
         // We can't really convert a string to RvoipDialogId which wraps a UUID
         // This method needs to be rethought - for now just return Ok
         // since this is called from places where we have only our DialogId
-        tracing::warn!("send_response_by_dialog called but conversion not implemented - status: {}", status_code);
+        tracing::warn!(
+            "send_response_by_dialog called but conversion not implemented - status: {}",
+            status_code
+        );
         Ok(())
     }
-    
+
     /// Send BYE for a specific dialog
     pub async fn send_bye(&self, dialog_id: crate::types::DialogId) -> Result<()> {
         // Convert our DialogId to RvoipDialogId
         let rvoip_dialog_id: RvoipDialogId = dialog_id.into();
-        
+
         // Find session ID from dialog
         if let Some(entry) = self.dialog_to_session.get(&rvoip_dialog_id) {
             let session_id = entry.value().clone();
             drop(entry);
-            
+
             // Send BYE through dialog API
             self.dialog_api
                 .send_bye(&rvoip_dialog_id)
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
-            
+
             tracing::info!("Sent BYE for session {}", session_id.0);
         } else {
             tracing::warn!("No session found for dialog {}", dialog_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Send re-INVITE with new SDP
-    pub async fn send_reinvite(&self, dialog_id: crate::types::DialogId, sdp: String) -> Result<()> {
+    pub async fn send_reinvite(
+        &self,
+        dialog_id: crate::types::DialogId,
+        sdp: String,
+    ) -> Result<()> {
         // Convert our DialogId to RvoipDialogId
         let rvoip_dialog_id: RvoipDialogId = dialog_id.into();
-        
+
         // Find session ID from dialog
         if let Some(entry) = self.dialog_to_session.get(&rvoip_dialog_id) {
             let session_id = entry.value().clone();
             drop(entry);
-            
+
             // Use UPDATE method for re-INVITE
             self.dialog_api
                 .send_update(&rvoip_dialog_id, Some(sdp))
                 .await
-                .map_err(|e| SessionError::DialogError(format!("Failed to send re-INVITE: {}", e)))?;
-                
+                .map_err(|e| {
+                    SessionError::DialogError(format!("Failed to send re-INVITE: {}", e))
+                })?;
+
             tracing::info!("Sent re-INVITE for session {}", session_id.0);
         } else {
             tracing::warn!("No session found for dialog {}", dialog_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Send REFER for transfers
-    pub async fn send_refer(&self, dialog_id: crate::types::DialogId, target: &str, attended: bool) -> Result<()> {
+    pub async fn send_refer(
+        &self,
+        dialog_id: crate::types::DialogId,
+        target: &str,
+        attended: bool,
+    ) -> Result<()> {
         // Convert our DialogId to RvoipDialogId
         let rvoip_dialog_id: RvoipDialogId = dialog_id.into();
-        
+
         // Find session ID from dialog
         if let Some(entry) = self.dialog_to_session.get(&rvoip_dialog_id) {
             let session_id = entry.value().clone();
             drop(entry);
-            
+
             // Send REFER through dialog API
             let transfer_info = if attended {
                 Some("attended".to_string()) // Or use proper transfer info structure
             } else {
                 None
             };
-            
+
             self.dialog_api
                 .send_refer(&rvoip_dialog_id, target.to_string(), transfer_info)
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
-            
+
             tracing::info!("Sent REFER to {} for session {}", target, session_id.0);
         } else {
             tracing::warn!("No session found for dialog {}", dialog_id);
         }
-        
+
         Ok(())
     }
-    
+
     /// Get remote URI for a dialog
     pub async fn get_remote_uri(&self, _dialog_id: crate::types::DialogId) -> Result<String> {
         // For now, return a placeholder
@@ -313,23 +331,25 @@ impl DialogAdapter {
             .dialog_api
             .get_dialog_info(&dialog_id)
             .await
-            .map_err(|e| SessionError::DialogError(format!(
-                "peer_supports_100rel: failed to read dialog {}: {}",
-                dialog_id, e
-            )))?;
+            .map_err(|e| {
+                SessionError::DialogError(format!(
+                    "peer_supports_100rel: failed to read dialog {}: {}",
+                    dialog_id, e
+                ))
+            })?;
 
         Ok(dialog.peer_supports_100rel)
     }
-    
+
     // ===== Outbound Actions (from state machine) =====
-    
+
     /// Send INVITE for UAC - this is the primary method for initiating calls
-    /// 
+    ///
     /// This method:
     /// 1. Creates a dialog in dialog-core
     /// 2. Sends the INVITE request
     /// 3. Stores the session-to-dialog mapping
-    /// 
+    ///
     /// # Arguments
     /// * `session_id` - The session ID from the state machine
     /// * `from` - The From URI (e.g., "sip:alice@example.com")
@@ -347,7 +367,8 @@ impl DialogAdapter {
 
         // Store Call-ID mapping BEFORE making the call to avoid race condition
         // This ensures any events that come back immediately can find the session
-        self.callid_to_session.insert(call_id.clone(), session_id.clone());
+        self.callid_to_session
+            .insert(call_id.clone(), session_id.clone());
 
         // Use `make_call_for_session` so the session↔dialog mapping is
         // installed on dialog-core *before* the INVITE goes on the wire.
@@ -356,7 +377,8 @@ impl DialogAdapter {
         // the async `StoreDialogMapping` below has populated the lookup
         // tables — which would otherwise cause the CallFailed event to be
         // silently dropped by `event_hub::convert_coordination_to_cross_crate`.
-        let call_handle = self.dialog_api
+        let call_handle = self
+            .dialog_api
             .make_call_for_session(&session_id.0, from, to, sdp, Some(call_id.clone()))
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to make call: {}", e)))?;
@@ -364,26 +386,38 @@ impl DialogAdapter {
         let dialog_id = call_handle.call_id().clone();
 
         // Store remaining mappings on session-core side
-        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+        self.session_to_dialog
+            .insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session
+            .insert(dialog_id.clone(), session_id.clone());
 
         // Publish StoreDialogMapping event to inform dialog-core about the session-dialog mapping
         let event = SessionToDialogEvent::StoreDialogMapping {
             session_id: session_id.0.clone(),
             dialog_id: dialog_id.to_string(),
         };
-        self.global_coordinator.publish(Arc::new(
-            RvoipCrossCrateEvent::SessionToDialog(event)
-        )).await
-        .map_err(|e| SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e)))?;
-        
-        tracing::info!("Published StoreDialogMapping for session {} -> dialog {}", session_id.0, dialog_id);
-        
+        self.global_coordinator
+            .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
+            .await
+            .map_err(|e| {
+                SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e))
+            })?;
+
+        tracing::info!(
+            "Published StoreDialogMapping for session {} -> dialog {}",
+            session_id.0,
+            dialog_id
+        );
+
         // Store the transaction ID for later ACK sending
         // Note: CallHandle might not expose transaction_id directly
         // For now, we'll rely on dialog-core to handle ACKs internally
-        tracing::debug!("Dialog {} created for session {} - ACK will be handled by dialog-core", dialog_id, session_id.0);
-        
+        tracing::debug!(
+            "Dialog {} created for session {} - ACK will be handled by dialog-core",
+            dialog_id,
+            session_id.0
+        );
+
         // Don't update session store here - the state machine will handle updating the dialog ID
         tracing::debug!("Dialog {} created for session {}", dialog_id, session_id.0);
 
@@ -409,15 +443,15 @@ impl DialogAdapter {
     ) -> Result<()> {
         let call_id = format!("{}@session-core", session_id.0);
 
-        self.callid_to_session.insert(call_id.clone(), session_id.clone());
+        self.callid_to_session
+            .insert(call_id.clone(), session_id.clone());
 
         // E4 / RFC 3261 §8.1.2: when an outbound proxy is configured, pre-load
         // it as the first Route header on the INVITE so the request traverses
         // the proxy regardless of the Request-URI target. We preserve caller-
         // supplied extras (e.g. `P-Asserted-Identity` from B1) by prepending,
         // not replacing.
-        let headers =
-            prepend_outbound_proxy_route(extra_headers, self.outbound_proxy_uri.as_ref());
+        let headers = prepend_outbound_proxy_route(extra_headers, self.outbound_proxy_uri.as_ref());
         if self.outbound_proxy_uri.is_some() {
             tracing::debug!(
                 "E4 outbound proxy: prepended Route to INVITE for session {}",
@@ -436,14 +470,16 @@ impl DialogAdapter {
                 headers,
             )
             .await
-            .map_err(|e| SessionError::DialogError(format!(
-                "Failed to make call with extra headers: {}", e
-            )))?;
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to make call with extra headers: {}", e))
+            })?;
 
         let dialog_id = call_handle.call_id().clone();
 
-        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
+        self.session_to_dialog
+            .insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session
+            .insert(dialog_id.clone(), session_id.clone());
 
         let event = SessionToDialogEvent::StoreDialogMapping {
             session_id: session_id.0.clone(),
@@ -452,9 +488,9 @@ impl DialogAdapter {
         self.global_coordinator
             .publish(Arc::new(RvoipCrossCrateEvent::SessionToDialog(event)))
             .await
-            .map_err(|e| SessionError::InternalError(format!(
-                "Failed to publish StoreDialogMapping: {}", e
-            )))?;
+            .map_err(|e| {
+                SessionError::InternalError(format!("Failed to publish StoreDialogMapping: {}", e))
+            })?;
 
         tracing::info!(
             "send_invite_with_extra_headers: published StoreDialogMapping for session {} -> dialog {} ({} extra header(s))",
@@ -473,22 +509,39 @@ impl DialogAdapter {
     pub async fn send_200_ok(&self, session_id: &SessionId, sdp: Option<String>) -> Result<()> {
         self.send_response(session_id, 200, sdp).await
     }
-    
+
     /// Send response with SDP
-    pub async fn send_response_with_sdp(&self, session_id: &SessionId, code: u16, _reason: &str, sdp: &str) -> Result<()> {
-        self.send_response(session_id, code, Some(sdp.to_string())).await
+    pub async fn send_response_with_sdp(
+        &self,
+        session_id: &SessionId,
+        code: u16,
+        _reason: &str,
+        sdp: &str,
+    ) -> Result<()> {
+        self.send_response(session_id, code, Some(sdp.to_string()))
+            .await
     }
-    
+
     /// Send response without SDP
-    pub async fn send_response_session(&self, session_id: &SessionId, code: u16, _reason: &str) -> Result<()> {
+    pub async fn send_response_session(
+        &self,
+        session_id: &SessionId,
+        code: u16,
+        _reason: &str,
+    ) -> Result<()> {
         self.send_response(session_id, code, None).await
     }
-    
+
     /// Send error response
-    pub async fn send_error_response(&self, session_id: &SessionId, code: StatusCode, _reason: &str) -> Result<()> {
+    pub async fn send_error_response(
+        &self,
+        session_id: &SessionId,
+        code: StatusCode,
+        _reason: &str,
+    ) -> Result<()> {
         self.send_response(session_id, code.as_u16(), None).await
     }
-    
+
     /// Send a 3xx redirect response with one or more `Contact:` URIs
     /// (RFC 3261 §8.1.3.4). Thin wrapper over
     /// `UnifiedDialogApi::send_redirect_response_for_session`.
@@ -508,7 +561,11 @@ impl DialogAdapter {
             .send_redirect_response_for_session(&session_id.0, status, contacts)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to send redirect for session {}: {}", session_id.0, e);
+                tracing::error!(
+                    "Failed to send redirect for session {}: {}",
+                    session_id.0,
+                    e
+                );
                 SessionError::DialogError(format!("Failed to send redirect: {}", e))
             })
     }
@@ -520,26 +577,36 @@ impl DialogAdapter {
         code: u16,
         sdp: Option<String>,
     ) -> Result<()> {
-        tracing::info!("DialogAdapter sending {} response for session {} with SDP: {}", 
-            code, session_id.0, sdp.is_some());
-        
+        tracing::info!(
+            "DialogAdapter sending {} response for session {} with SDP: {}",
+            code,
+            session_id.0,
+            sdp.is_some()
+        );
+
         // Use dialog-core's session-based response method
         self.dialog_api
             .send_response_for_session(&session_id.0, code, sdp)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to send response for session {}: {}", session_id.0, e);
+                tracing::error!(
+                    "Failed to send response for session {}: {}",
+                    session_id.0,
+                    e
+                );
                 SessionError::DialogError(format!("Failed to send response: {}", e))
             })
     }
-    
+
     /// Send ACK (for UAC after 200 OK)
     pub async fn send_ack(&self, session_id: &SessionId, response: &Response) -> Result<()> {
         // Get the dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        
+
         // Check if we have the original INVITE transaction ID stored
         if let Some(tx_id) = self.outgoing_invite_tx.get(session_id) {
             // Use the proper ACK method with transaction ID
@@ -547,47 +614,54 @@ impl DialogAdapter {
                 .send_ack_for_2xx_response(&dialog_id, &tx_id, response)
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send ACK: {}", e)))?;
-            
+
             // Clean up the stored transaction ID after successful ACK
             self.outgoing_invite_tx.remove(session_id);
         } else {
             // Fallback: Try to send ACK without transaction ID (may not work properly)
-            tracing::debug!("No transaction ID stored for session {}, ACK may fail", session_id.0);
+            tracing::debug!(
+                "No transaction ID stored for session {}, ACK may fail",
+                session_id.0
+            );
             // The dialog-core API doesn't have a direct send_ack without transaction ID
             // so we'll need to handle this case differently in production
         }
-        
+
         Ok(())
     }
-    
+
     /// Send BYE to terminate call (for state machine)
     pub async fn send_bye_session(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        
+
         self.dialog_api
             .send_bye(&dialog_id)
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
-        
+
         Ok(())
     }
-    
+
     /// Send CANCEL to cancel pending INVITE
     pub async fn send_cancel(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        
+
         self.dialog_api
             .send_cancel(&dialog_id)
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send CANCEL: {}", e)))?;
-        
+
         Ok(())
     }
-    
+
     /// Send an in-dialog INFO request (RFC 6086) with a caller-chosen
     /// `Content-Type`. Used for SIP-INFO DTMF (`application/dtmf-relay`),
     /// fax flow control (`application/sipfrag`), and other application-level
@@ -624,20 +698,22 @@ impl DialogAdapter {
 
     /// Send REFER for blind transfer (for state machine)
     pub async fn send_refer_session(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
-        
+
         // Send REFER through dialog API
         self.dialog_api
             .send_refer(&dialog_id, refer_to.to_string(), None)
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
-        
+
         tracing::info!("Sent REFER to {} for session {}", refer_to, session_id.0);
         Ok(())
     }
-    
+
     /// Send REFER with a pre-built `Replaces` header value (RFC 3891).
     ///
     /// This is the attended-transfer primitive: the caller is responsible for
@@ -654,7 +730,9 @@ impl DialogAdapter {
         target_uri: &str,
         replaces: &str,
     ) -> Result<()> {
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
 
@@ -667,7 +745,9 @@ impl DialogAdapter {
         self.dialog_api
             .send_refer(&dialog_id, refer_to, None)
             .await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send REFER with Replaces: {}", e)))?;
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send REFER with Replaces: {}", e))
+            })?;
 
         tracing::info!(
             session = %session_id.0,
@@ -700,7 +780,7 @@ impl DialogAdapter {
             remote_tag: dialog.remote_tag,
         }))
     }
-    
+
     /// Send a re-INVITE for hold/resume or mid-call SDP updates.
     ///
     /// RFC 3261 §14 — re-INVITE is the standard mechanism for modifying an
@@ -712,7 +792,9 @@ impl DialogAdapter {
     pub async fn send_reinvite_session(&self, session_id: &SessionId, sdp: String) -> Result<()> {
         use rvoip_sip_core::Method;
 
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
             .clone();
 
@@ -723,7 +805,7 @@ impl DialogAdapter {
 
         Ok(())
     }
-    
+
     /// Clean up all mappings and resources for a session
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
         // Remove from all mappings
@@ -731,8 +813,11 @@ impl DialogAdapter {
             self.dialog_to_session.remove(&dialog_id.1);
         }
 
-        if let Some(entry) = self.callid_to_session.iter()
-            .find(|entry| entry.value() == session_id) {
+        if let Some(entry) = self
+            .callid_to_session
+            .iter()
+            .find(|entry| entry.value() == session_id)
+        {
             let call_id = entry.key().clone();
             drop(entry); // Release the reference before removing
             self.callid_to_session.remove(&call_id);
@@ -740,7 +825,10 @@ impl DialogAdapter {
 
         self.outgoing_invite_tx.remove(session_id);
 
-        tracing::debug!("Cleaned up dialog adapter mappings for session {}", session_id.0);
+        tracing::debug!(
+            "Cleaned up dialog adapter mappings for session {}",
+            session_id.0
+        );
         Ok(())
     }
 
@@ -756,65 +844,72 @@ impl DialogAdapter {
         expires: u32,
         credentials: Option<&crate::types::Credentials>,
     ) -> Result<()> {
-        tracing::info!("Sending REGISTER for session {} to {} (expires={})",
-            session_id.0, registrar_uri, expires);
+        tracing::info!(
+            "Sending REGISTER for session {} to {} (expires={})",
+            session_id.0,
+            registrar_uri,
+            expires
+        );
 
         // Build authorization header if credentials provided
-        let authorization = if let Some(creds) = credentials {
-            // Get challenge from session
-            let mut session = self.store.get_session(session_id).await?;
-            if let Some(challenge) = session.auth_challenge.clone() {
-                // RFC 7616 §3.4.5 — bump the per-(realm, nonce) NC
-                // counter before computing. REGISTER reuses one nonce
-                // across many refreshes, so this is exactly the path
-                // where carriers reject `nc=00000001` repeats.
-                let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
-                let nc_value = *session
-                    .digest_nc
-                    .entry(nc_key)
-                    .and_modify(|n| *n += 1)
-                    .or_insert(1);
-                self.store.update_session(session.clone()).await?;
+        let authorization =
+            if let Some(creds) = credentials {
+                // Get challenge from session
+                let mut session = self.store.get_session(session_id).await?;
+                if let Some(challenge) = session.auth_challenge.clone() {
+                    // RFC 7616 §3.4.5 — bump the per-(realm, nonce) NC
+                    // counter before computing. REGISTER reuses one nonce
+                    // across many refreshes, so this is exactly the path
+                    // where carriers reject `nc=00000001` repeats.
+                    let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                    let nc_value = *session
+                        .digest_nc
+                        .entry(nc_key)
+                        .and_modify(|n| *n += 1)
+                        .or_insert(1);
+                    self.store.update_session(session.clone()).await?;
 
-                tracing::info!(
+                    tracing::info!(
                     "🔍 CLIENT: Computing digest for user={}, realm={}, nonce={}, uri={}, nc={}",
                     creds.username, challenge.realm, challenge.nonce, registrar_uri, nc_value
                 );
 
-                // REGISTER body is empty; pass `None` so the qop
-                // selector picks `auth` (or legacy if no qop offered)
-                // rather than `auth-int`.
-                let computed = crate::auth::DigestAuth::compute_response_with_state(
-                    &creds.username,
-                    &creds.password,
-                    &challenge,
-                    "REGISTER",
-                    registrar_uri,
-                    nc_value,
-                    None,
-                )?;
+                    // REGISTER body is empty; pass `None` so the qop
+                    // selector picks `auth` (or legacy if no qop offered)
+                    // rather than `auth-int`.
+                    let computed = crate::auth::DigestAuth::compute_response_with_state(
+                        &creds.username,
+                        &creds.password,
+                        &challenge,
+                        "REGISTER",
+                        registrar_uri,
+                        nc_value,
+                        None,
+                    )?;
 
-                tracing::info!(
-                    "🔍 CLIENT: Computed response hash: {} (cnonce: {:?}, qop: {:?})",
-                    computed.response, computed.cnonce, computed.qop
-                );
+                    tracing::info!(
+                        "🔍 CLIENT: Computed response hash: {} (cnonce: {:?}, qop: {:?})",
+                        computed.response,
+                        computed.cnonce,
+                        computed.qop
+                    );
 
-                let auth_header = crate::auth::DigestAuth::format_authorization_with_state(
-                    &creds.username,
-                    &challenge,
-                    registrar_uri,
-                    &computed,
-                );
+                    let auth_header = crate::auth::DigestAuth::format_authorization_with_state(
+                        &creds.username,
+                        &challenge,
+                        registrar_uri,
+                        &computed,
+                    );
 
-                tracing::debug!("Computed digest auth for user {}", creds.username);
-                Some(auth_header)
+                    tracing::debug!("Computed digest auth for user {}", creds.username);
+                    Some(auth_header)
+                } else {
+                    tracing::debug!("No challenge stored, sending without auth");
+                    None
+                }
             } else {
-                tracing::debug!("No challenge stored, sending without auth");
                 None
-            }
-        } else {
-            None
-        };
+            };
 
         // RFC 3581 NAT discovery: if the dialog manager has learned a
         // public address from a prior response's `Via:
@@ -825,12 +920,14 @@ impl DialogAdapter {
         // response carries `received=`/`rport=` which populates the
         // discovery cache; subsequent REGISTERs (refresh, auth retry)
         // use the discovered address.
-        let rewritten_contact = if let Some(public) = self.dialog_api.discovered_public_addr().await {
+        let rewritten_contact = if let Some(public) = self.dialog_api.discovered_public_addr().await
+        {
             let rewritten = rewrite_contact_host(contact_uri, public);
             if rewritten != contact_uri {
                 tracing::info!(
                     "RFC 3581/5626: rewriting REGISTER Contact {} → {} (NAT-discovered)",
-                    contact_uri, rewritten
+                    contact_uri,
+                    rewritten
                 );
             }
             rewritten
@@ -838,31 +935,47 @@ impl DialogAdapter {
             contact_uri.to_string()
         };
 
+        // Reserve registration identity for this new logical REGISTER
+        // transaction. This is registration-scoped only; dialog-core still owns
+        // all in-dialog CSeq state and transaction-layer retransmissions reuse
+        // the request created below.
+        let (registration_call_id, registration_cseq) = {
+            let mut session = self.store.get_session(session_id).await?;
+            let call_id = session
+                .registration_call_id
+                .get_or_insert_with(|| format!("reg-{}", uuid::Uuid::new_v4()))
+                .clone();
+            session.registration_cseq = session.registration_cseq.saturating_add(1);
+            let cseq = session.registration_cseq;
+            self.store.update_session(session).await?;
+            (call_id, cseq)
+        };
+
         // Send REGISTER through dialog-core API and get response.
-        // dialog-core handles CSeq incrementing automatically.
         // A5 Phase 2a: when the coordinator is configured for RFC 5626 SIP
         // Outbound, route through the outbound-aware REGISTER so the Contact
         // carries `+sip.instance` + `reg-id` + `;ob`.
-        let response = if let Some(ref outbound) = self.outbound_contact_params {
-            self.dialog_api
-                .send_register_with_outbound_contact(
-                    registrar_uri,
-                    from_uri,
-                    &rewritten_contact,
-                    outbound,
-                    expires,
-                    authorization,
-                )
-                .await
-        } else {
-            self.dialog_api
-                .send_register(registrar_uri, from_uri, &rewritten_contact, expires, authorization)
-                .await
-        }
-        .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
-        
-        tracing::info!("REGISTER response received: {} for session {}", response.status_code(), session_id.0);
-        
+        let response = self
+            .dialog_api
+            .send_register_with_options(rvoip_dialog_core::api::unified::RegisterRequestOptions {
+                registrar_uri: registrar_uri.to_string(),
+                aor_uri: from_uri.to_string(),
+                contact_uri: rewritten_contact,
+                expires,
+                authorization,
+                call_id: Some(registration_call_id),
+                cseq: Some(registration_cseq),
+                outbound_contact: self.outbound_contact_params.clone(),
+            })
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
+
+        tracing::info!(
+            "REGISTER response received: {} for session {}",
+            response.status_code(),
+            session_id.0
+        );
+
         // Just update session state based on response - don't trigger events (avoids recursion)
         // The state machine will query the session state to determine next transition
         match response.status_code() {
@@ -871,11 +984,16 @@ impl DialogAdapter {
                 let mut session = self.store.get_session(session_id).await?;
                 session.is_registered = true;
                 self.store.update_session(session).await?;
-                tracing::info!("✅ Registration successful - session {} marked as registered", session_id.0);
-                
+                tracing::info!(
+                    "✅ Registration successful - session {} marked as registered",
+                    session_id.0
+                );
+
                 // Don't trigger state machine events here to avoid recursion
                 // State machine can query is_registered flag if needed
-                tracing::debug!("Session marked as registered, state machine can check is_registered flag");
+                tracing::debug!(
+                    "Session marked as registered, state machine can check is_registered flag"
+                );
             }
             401 | 407 => {
                 // RFC 3261 §22.2 — auth challenge on REGISTER. Unified with the
@@ -934,10 +1052,12 @@ impl DialogAdapter {
                             },
                         ))
                         .await
-                        .map_err(|e| SessionError::InternalError(format!(
-                            "REGISTER AuthRequired dispatch failed: {}",
-                            e
-                        )))?;
+                        .map_err(|e| {
+                            SessionError::InternalError(format!(
+                                "REGISTER AuthRequired dispatch failed: {}",
+                                e
+                            ))
+                        })?;
                     } else {
                         tracing::warn!(
                             "No state_machine wired into DialogAdapter; REGISTER auth cannot retry"
@@ -979,11 +1099,16 @@ impl DialogAdapter {
                 let new_expires = match min_expires {
                     Some(min) if min > 0 && min <= 7200 => min,
                     Some(min) => {
-                        tracing::warn!("423 Min-Expires={} out of sane range; clamping to 3600", min);
+                        tracing::warn!(
+                            "423 Min-Expires={} out of sane range; clamping to 3600",
+                            min
+                        );
                         min.min(3600)
                     }
                     None => {
-                        tracing::error!("423 Interval Too Brief without Min-Expires header — cannot retry");
+                        tracing::error!(
+                            "423 Interval Too Brief without Min-Expires header — cannot retry"
+                        );
                         let mut session = self.store.get_session(session_id).await?;
                         session.is_registered = false;
                         self.store.update_session(session).await?;
@@ -1013,11 +1138,15 @@ impl DialogAdapter {
                     contact_uri,
                     new_expires,
                     credentials,
-                )).await?;
+                ))
+                .await?;
             }
             _ => {
                 // Registration failed
-                tracing::warn!("❌ Registration failed with status {}", response.status_code());
+                tracing::warn!(
+                    "❌ Registration failed with status {}",
+                    response.status_code()
+                );
                 let mut session = self.store.get_session(session_id).await?;
                 session.is_registered = false;
                 self.store.update_session(session).await?;
@@ -1035,28 +1164,27 @@ impl DialogAdapter {
         event_package: &str,
         expires: u32,
     ) -> Result<()> {
-        tracing::info!("Sending SUBSCRIBE for session {} from {} to {} for event {}",
-            session_id.0, from_uri, to_uri, event_package);
+        tracing::info!(
+            "Sending SUBSCRIBE for session {} from {} to {} for event {}",
+            session_id.0,
+            from_uri,
+            to_uri,
+            event_package
+        );
 
-        // Build SUBSCRIBE request
-        let request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(to_uri, event_package, expires)
-            .map_err(|e| SessionError::DialogError(format!("Failed to create SUBSCRIBE builder: {}", e)))?
-            .from("", from_uri, None)
-            .to("", to_uri, None)
-            .build();
-
-        // Parse destination address
-        let destination = self.parse_sip_uri_to_socket_addr(to_uri)?;
-
-        // Send as non-dialog request (creates dialog on 2xx)
-        let response = self.dialog_api.send_non_dialog_request(
-            request,
-            destination,
-            std::time::Duration::from_secs(30),
-        ).await
+        // Send as non-dialog request (creates dialog on 2xx). dialog-core
+        // owns the wire-ready SIP request construction.
+        let response = self
+            .dialog_api
+            .send_subscribe_out_of_dialog(to_uri, from_uri, from_uri, event_package, expires)
+            .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send SUBSCRIBE: {}", e)))?;
 
-        tracing::info!("SUBSCRIBE response: {} for session {}", response.status_code(), session_id.0);
+        tracing::info!(
+            "SUBSCRIBE response: {} for session {}",
+            response.status_code(),
+            session_id.0
+        );
 
         // Handle response and potentially store dialog ID
         if response.status_code() == 200 || response.status_code() == 202 {
@@ -1074,7 +1202,7 @@ impl DialogAdapter {
                 rvoip_infra_common::events::cross_crate::DialogToSessionEvent::SubscriptionFailed {
                     session_id: session_id.0.clone(),
                     status_code: response.status_code(),
-                }
+                },
             );
             let _ = self.global_coordinator.publish(Arc::new(event)).await;
         }
@@ -1088,18 +1216,31 @@ impl DialogAdapter {
         session_id: &SessionId,
         event_package: &str,
         body: Option<String>,
-        subscription_state: Option<String>
+        subscription_state: Option<String>,
     ) -> Result<()> {
-        tracing::info!("Sending NOTIFY for session {} with event {} and state {:?}",
-            session_id.0, event_package, subscription_state);
+        tracing::info!(
+            "Sending NOTIFY for session {} with event {} and state {:?}",
+            session_id.0,
+            event_package,
+            subscription_state
+        );
 
         // Get dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::DialogError("No dialog for session".to_string()))?
             .clone();
 
         // Send NOTIFY within the dialog
-        self.dialog_api.send_notify(&dialog_id, event_package.to_string(), body, subscription_state).await
+        self.dialog_api
+            .send_notify(
+                &dialog_id,
+                event_package.to_string(),
+                body,
+                subscription_state,
+            )
+            .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send NOTIFY: {}", e)))?;
 
         tracing::info!("NOTIFY sent successfully for session {}", session_id.0);
@@ -1113,21 +1254,34 @@ impl DialogAdapter {
         &self,
         session_id: &SessionId,
         status_code: u16,
-        reason: &str
+        reason: &str,
     ) -> Result<()> {
-        tracing::info!("Sending REFER NOTIFY for session {} with status {} {}",
-            session_id.0, status_code, reason);
+        tracing::info!(
+            "Sending REFER NOTIFY for session {} with status {} {}",
+            session_id.0,
+            status_code,
+            reason
+        );
 
         // Get dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
             .ok_or_else(|| SessionError::DialogError("No dialog for session".to_string()))?
             .clone();
 
         // Send REFER NOTIFY using dialog-core convenience method
-        self.dialog_api.send_refer_notify(&dialog_id, status_code, reason).await
-            .map_err(|e| SessionError::DialogError(format!("Failed to send REFER NOTIFY: {}", e)))?;
+        self.dialog_api
+            .send_refer_notify(&dialog_id, status_code, reason)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send REFER NOTIFY: {}", e))
+            })?;
 
-        tracing::info!("REFER NOTIFY sent successfully for session {}", session_id.0);
+        tracing::info!(
+            "REFER NOTIFY sent successfully for session {}",
+            session_id.0
+        );
         Ok(())
     }
 
@@ -1142,39 +1296,39 @@ impl DialogAdapter {
         body: String,
         in_dialog: bool,
     ) -> Result<()> {
-        tracing::info!("Sending MESSAGE for session {} from {} to {} (in_dialog: {})",
-            session_id.0, from_uri, to_uri, in_dialog);
+        tracing::info!(
+            "Sending MESSAGE for session {} from {} to {} (in_dialog: {})",
+            session_id.0,
+            from_uri,
+            to_uri,
+            in_dialog
+        );
 
         if in_dialog {
             // Send MESSAGE within existing dialog
-            let dialog_id = self.session_to_dialog.get(session_id)
+            let dialog_id = self
+                .session_to_dialog
+                .get(session_id)
                 .ok_or_else(|| SessionError::DialogError("No dialog for session".to_string()))?
                 .clone();
 
-            self.dialog_api.send_request_in_dialog(
-                &dialog_id,
-                rvoip_sip_core::Method::Message,
-                Some(bytes::Bytes::from(body)),
-            ).await
-                .map_err(|e| SessionError::DialogError(format!("Failed to send MESSAGE in dialog: {}", e)))?;
+            self.dialog_api
+                .send_request_in_dialog(
+                    &dialog_id,
+                    rvoip_sip_core::Method::Message,
+                    Some(bytes::Bytes::from(body)),
+                )
+                .await
+                .map_err(|e| {
+                    SessionError::DialogError(format!("Failed to send MESSAGE in dialog: {}", e))
+                })?;
         } else {
-            // Send MESSAGE as standalone (no dialog)
-            let request = rvoip_sip_core::builder::SimpleRequestBuilder::new(
-                rvoip_sip_core::Method::Message,
-                to_uri
-            ).map_err(|e| SessionError::DialogError(format!("Failed to create MESSAGE builder: {}", e)))?
-                .from("", from_uri, None)
-                .to("", to_uri, None)
-                .body(bytes::Bytes::from(body))
-                .build();
-
-            let destination = self.parse_sip_uri_to_socket_addr(to_uri)?;
-
-            let response = self.dialog_api.send_non_dialog_request(
-                request,
-                destination,
-                std::time::Duration::from_secs(10),
-            ).await
+            // Send MESSAGE as standalone (no dialog). dialog-core owns the
+            // wire-ready SIP request construction.
+            let response = self
+                .dialog_api
+                .send_message_out_of_dialog(to_uri, from_uri, body)
+                .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send MESSAGE: {}", e)))?;
 
             // Handle response
@@ -1190,7 +1344,7 @@ impl DialogAdapter {
                     rvoip_infra_common::events::cross_crate::DialogToSessionEvent::MessageFailed {
                         session_id: session_id.0.clone(),
                         status_code: response.status_code(),
-                    }
+                    },
                 );
                 let _ = self.global_coordinator.publish(Arc::new(event)).await;
             }
@@ -1202,27 +1356,8 @@ impl DialogAdapter {
 
     // ===== Helper Methods =====
 
-    /// Parse SIP URI to SocketAddr
-    fn parse_sip_uri_to_socket_addr(&self, uri: &str) -> Result<std::net::SocketAddr> {
-        // Simple parsing - in production would use proper SIP URI parser
-        // Expected format: sip:user@host:port or sip:user@host (default port 5060)
-        let parts: Vec<&str> = uri.split('@').collect();
-        if parts.len() != 2 {
-            return Err(SessionError::DialogError(format!("Invalid SIP URI: {}", uri)));
-        }
-
-        let host_part = parts[1];
-        let addr = if host_part.contains(':') {
-            host_part.parse()
-        } else {
-            format!("{}:5060", host_part).parse()
-        };
-
-        addr.map_err(|e| SessionError::DialogError(format!("Failed to parse address from {}: {}", uri, e)))
-    }
-    
     // ===== Inbound Events (from dialog-core) =====
-    
+
     /// Start the dialog API (no event handling here)
     pub async fn start(&self) -> Result<()> {
         // Start the dialog API
@@ -1230,7 +1365,7 @@ impl DialogAdapter {
             .start()
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to start dialog API: {}", e)))?;
-        
+
         Ok(())
     }
 }

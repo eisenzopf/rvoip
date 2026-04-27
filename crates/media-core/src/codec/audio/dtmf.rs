@@ -177,7 +177,11 @@ mod tests {
     #[test]
     fn non_dtmf_characters_rejected() {
         for ch in ['x', 'y', ' ', '+', '-', 'E', 'e', 'F', 'f'] {
-            assert!(DtmfEvent::from_digit(ch).is_none(), "unexpected accept of {:?}", ch);
+            assert!(
+                DtmfEvent::from_digit(ch).is_none(),
+                "unexpected accept of {:?}",
+                ch
+            );
         }
     }
 

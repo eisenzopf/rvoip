@@ -4,18 +4,18 @@
 //! as defined in RFC 3551 and other RFCs. Moved from rtp-core as part
 //! of the Transport/Media plane separation.
 
-pub mod registry;
-pub mod traits;
 pub mod g711;
 pub mod g722;
 pub mod opus;
+pub mod registry;
+pub mod traits;
 pub mod vp8;
 pub mod vp9;
 
-pub use traits::{PayloadFormat, PayloadFormatFactory};
-pub use g711::{G711UPayloadFormat, G711APayloadFormat};
+pub use g711::{G711APayloadFormat, G711UPayloadFormat};
 pub use g722::G722PayloadFormat;
-pub use opus::{OpusPayloadFormat, OpusBandwidth};
+pub use opus::{OpusBandwidth, OpusPayloadFormat};
+pub use traits::{PayloadFormat, PayloadFormatFactory};
 pub use vp8::Vp8PayloadFormat;
 pub use vp9::Vp9PayloadFormat;
 
@@ -80,7 +80,7 @@ impl PayloadType {
             _ => Self::Dynamic(value),
         }
     }
-    
+
     /// Get the default clock rate for this payload type
     pub fn default_clock_rate(&self) -> u32 {
         match self {
@@ -102,7 +102,7 @@ impl PayloadType {
             Self::Dynamic(_) => 8000, // Default to 8kHz for dynamic types
         }
     }
-    
+
     /// Get a human-readable name for this payload type
     pub fn name(&self) -> &'static str {
         match self {
@@ -124,7 +124,7 @@ impl PayloadType {
             Self::Dynamic(_) => "Dynamic",
         }
     }
-    
+
     /// Convert to a u8
     pub fn to_u8(&self) -> u8 {
         match self {
@@ -150,19 +150,19 @@ impl PayloadType {
 
 /// Create a payload format handler for the given payload type
 pub fn create_payload_format(
-    payload_type: PayloadType, 
+    payload_type: PayloadType,
     channels: Option<u32>,
 ) -> Option<Box<dyn PayloadFormat>> {
     let clock_rate = payload_type.default_clock_rate();
-    
+
     match payload_type {
         PayloadType::PCMU => Some(Box::new(G711UPayloadFormat::new(clock_rate))),
         PayloadType::PCMA => Some(Box::new(G711APayloadFormat::new(clock_rate))),
         PayloadType::G722 => Some(Box::new(G722PayloadFormat::new(clock_rate))),
         PayloadType::Opus => {
-            let ch = channels.unwrap_or(2);  // Default to stereo for Opus
+            let ch = channels.unwrap_or(2); // Default to stereo for Opus
             Some(Box::new(OpusPayloadFormat::new(96, ch as u8)))
-        },
+        }
         PayloadType::VP8 => Some(Box::new(Vp8PayloadFormat::new(97))),
         PayloadType::VP9 => Some(Box::new(Vp9PayloadFormat::new(98))),
         PayloadType::Dynamic(pt) if pt >= 96 && pt <= 127 => {
@@ -170,9 +170,9 @@ pub fn create_payload_format(
             // This would typically come from SDP, but for now we'll use some defaults:
             match pt {
                 96 => {
-                    let ch = channels.unwrap_or(1);  // Default to mono for dynamic PT 96
+                    let ch = channels.unwrap_or(1); // Default to mono for dynamic PT 96
                     Some(Box::new(OpusPayloadFormat::new(pt, ch as u8)))
-                },
+                }
                 97 => Some(Box::new(Vp8PayloadFormat::new(pt))),
                 98 => Some(Box::new(Vp9PayloadFormat::new(pt))),
                 _ => {
@@ -180,7 +180,7 @@ pub fn create_payload_format(
                     Some(Box::new(OpusPayloadFormat::new(pt, ch as u8)))
                 }
             }
-        },
+        }
         // Add other payload formats as they are implemented
         _ => None,
     }

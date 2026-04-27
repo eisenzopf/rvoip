@@ -1,10 +1,7 @@
-use crate::types::{
-    content_type::ContentType,
-    TypedHeader,
-};
-use crate::parser::headers::content_type::ContentTypeValue;
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::parser::headers::content_type::ContentTypeValue;
+use crate::types::{content_type::ContentType, TypedHeader};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -16,7 +13,7 @@ use std::str::FromStr;
 /// ## SIP Content-Type Header Overview
 ///
 /// The Content-Type header is defined in [RFC 3261 Section 20.15](https://datatracker.ietf.org/doc/html/rfc3261#section-20.15)
-/// as part of the core SIP protocol. It follows the syntax and semantics defined in 
+/// as part of the core SIP protocol. It follows the syntax and semantics defined in
 /// [RFC 2045](https://datatracker.ietf.org/doc/html/rfc2045) for MIME media types.
 ///
 /// ## Purpose of Content-Type Header
@@ -117,7 +114,7 @@ use std::str::FromStr;
 ///         "  <soap:Body>\r\n",
 ///         "    <registerRequest xmlns=\"http://example.org/register\">\r\n",
 ///         "      <username>alice</username>\r\n",
-///         "      <password>secret</password>\r\n", 
+///         "      <password>secret</password>\r\n",
 ///         "    </registerRequest>\r\n",
 ///         "  </soap:Body>\r\n",
 ///         "</soap:Envelope>\r\n"
@@ -476,7 +473,7 @@ pub trait ContentTypeBuilderExt {
     ///     .build();
     /// ```
     fn content_type_sdp(self) -> Self;
-    
+
     /// Add a Content-Type header specifying 'text/plain'
     ///
     /// This is a convenience method for setting the Content-Type to plain text.
@@ -498,7 +495,7 @@ pub trait ContentTypeBuilderExt {
     ///     .build();
     /// ```
     fn content_type_text(self) -> Self;
-    
+
     /// Add a Content-Type header specifying 'application/xml'
     ///
     /// This is a convenience method for setting the Content-Type to XML.
@@ -527,7 +524,7 @@ pub trait ContentTypeBuilderExt {
     ///     .build();
     /// ```
     fn content_type_xml(self) -> Self;
-    
+
     /// Add a Content-Type header specifying 'application/json'
     ///
     /// This is a convenience method for setting the Content-Type to JSON.
@@ -558,7 +555,7 @@ pub trait ContentTypeBuilderExt {
     ///     .build();
     /// ```
     fn content_type_json(self) -> Self;
-    
+
     /// Add a Content-Type header specifying 'message/sipfrag'
     ///
     /// This is a convenience method for setting the Content-Type to SIP fragments,
@@ -588,7 +585,7 @@ pub trait ContentTypeBuilderExt {
     ///     .build();
     /// ```
     fn content_type_sipfrag(self) -> Self;
-    
+
     /// Add a Content-Type header with a custom media type
     ///
     /// # Parameters
@@ -639,7 +636,7 @@ pub trait ContentTypeBuilderExt {
     ///     .build();
     /// ```
     fn content_type_custom(self, media_type: &str, media_subtype: &str) -> Self;
-    
+
     /// Add a Content-Type header
     ///
     /// Creates and adds a Content-Type header as specified in [RFC 3261 Section 20.15](https://datatracker.ietf.org/doc/html/rfc3261#section-20.15).
@@ -716,7 +713,7 @@ impl ContentTypeBuilderExt for SimpleRequestBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_text(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "text".to_string(),
@@ -725,7 +722,7 @@ impl ContentTypeBuilderExt for SimpleRequestBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_xml(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "application".to_string(),
@@ -734,7 +731,7 @@ impl ContentTypeBuilderExt for SimpleRequestBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_json(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "application".to_string(),
@@ -743,7 +740,7 @@ impl ContentTypeBuilderExt for SimpleRequestBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_sipfrag(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "message".to_string(),
@@ -752,7 +749,7 @@ impl ContentTypeBuilderExt for SimpleRequestBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_custom(self, media_type: &str, media_subtype: &str) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: media_type.to_string(),
@@ -761,13 +758,11 @@ impl ContentTypeBuilderExt for SimpleRequestBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type(self, content_type: &str) -> Self {
         match ContentType::from_str(content_type) {
-            Ok(ct) => {
-                self.header(TypedHeader::ContentType(ct))
-            },
-            Err(_) => self // Silently fail if content type is invalid
+            Ok(ct) => self.header(TypedHeader::ContentType(ct)),
+            Err(_) => self, // Silently fail if content type is invalid
         }
     }
 }
@@ -781,7 +776,7 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_text(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "text".to_string(),
@@ -790,7 +785,7 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_xml(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "application".to_string(),
@@ -799,7 +794,7 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_json(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "application".to_string(),
@@ -808,7 +803,7 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_sipfrag(self) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: "message".to_string(),
@@ -817,7 +812,7 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type_custom(self, media_type: &str, media_subtype: &str) -> Self {
         let ct = ContentType::new(ContentTypeValue {
             m_type: media_type.to_string(),
@@ -826,13 +821,11 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
         });
         self.header(TypedHeader::ContentType(ct))
     }
-    
+
     fn content_type(self, content_type: &str) -> Self {
         match ContentType::from_str(content_type) {
-            Ok(ct) => {
-                self.header(TypedHeader::ContentType(ct))
-            },
-            Err(_) => self // Silently fail if content type is invalid
+            Ok(ct) => self.header(TypedHeader::ContentType(ct)),
+            Err(_) => self, // Silently fail if content type is invalid
         }
     }
 }
@@ -840,51 +833,69 @@ impl ContentTypeBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
-    use crate::types::headers::HeaderAccess;
     use crate::builder::headers::cseq::CSeqBuilderExt;
     use crate::builder::headers::from::FromBuilderExt;
     use crate::builder::headers::to::ToBuilderExt;
+    use crate::types::headers::HeaderAccess;
+    use crate::types::{Method, StatusCode};
     use std::str::FromStr;
 
     #[test]
     fn test_request_content_type_shortcuts() {
         // Test SDP content type
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .content_type_sdp()
             .body(concat!(
                 "v=0\r\n",
                 "o=alice 2890844526 2890844526 IN IP4 192.0.2.1\r\n",
                 "s=Call with Alice\r\n",
-                "c=IN IP4 192.0.2.1\r\n",  // Connection info required by SDP
+                "c=IN IP4 192.0.2.1\r\n", // Connection info required by SDP
                 "t=0 0\r\n",
                 "m=audio 49170 RTP/AVP 0 8\r\n",
                 "a=rtpmap:0 PCMU/8000\r\n",
                 "a=rtpmap:8 PCMA/8000\r\n"
             ))
             .build();
-            
-        let content_type_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
         assert_eq!(content_type_headers[0].to_string(), "application/sdp");
-        
+
         // Test text content type
-        let request = SimpleRequestBuilder::new(Method::Message, "sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::new(Method::Message, "sip:bob@example.com")
+            .unwrap()
             .content_type_text()
             .body("Hello, this is a text message sent via SIP")
             .build();
-            
-        let content_type_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
         assert_eq!(content_type_headers[0].to_string(), "text/plain");
     }
-    
+
     #[test]
     fn test_response_content_type_shortcuts() {
         // Test XML content type
@@ -894,14 +905,22 @@ mod tests {
             .cseq_with_method(101, Method::Invite)
             .content_type_xml()
             .build();
-            
-        let content_type_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
         assert_eq!(content_type_headers[0].to_string(), "application/xml");
-        
+
         // Test JSON content type
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
@@ -909,19 +928,28 @@ mod tests {
             .cseq_with_method(101, Method::Invite)
             .content_type_json()
             .build();
-            
-        let content_type_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
         assert_eq!(content_type_headers[0].to_string(), "application/json");
     }
-    
+
     #[test]
     fn test_content_type_string() {
         // Test content_type method with valid content type
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .content_type("application/sdp")
             .body(concat!(
                 "v=0\r\n",
@@ -934,16 +962,25 @@ mod tests {
                 "a=rtpmap:8 PCMA/8000\r\n"
             ))
             .build();
-            
-        let content_type_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
         assert_eq!(content_type_headers[0].to_string(), "application/sdp");
-        
+
         // Test content_type method with parameters
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .content_type("application/sdp; charset=UTF-8")
             .body(concat!(
                 "v=0\r\n",
@@ -956,44 +993,68 @@ mod tests {
                 "a=rtpmap:8 PCMA/8000\r\n"
             ))
             .build();
-            
-        let content_type_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
-        assert_eq!(content_type_headers[0].to_string(), "application/sdp;charset=\"UTF-8\"");
+        assert_eq!(
+            content_type_headers[0].to_string(),
+            "application/sdp;charset=\"UTF-8\""
+        );
     }
-    
+
     #[test]
     fn test_custom_content_type() {
         // Test custom content type
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .content_type_custom("application", "vnd.3gpp.sms")
             .body(concat!(
                 "<soap:Envelope xmlns:soap=\"http://schemas.xmlsoap.org/soap/envelope/\">\r\n",
                 "  <soap:Body>\r\n",
                 "    <registerRequest xmlns=\"http://example.org/register\">\r\n",
                 "      <username>alice</username>\r\n",
-                "      <password>secret</password>\r\n", 
+                "      <password>secret</password>\r\n",
                 "    </registerRequest>\r\n",
                 "  </soap:Body>\r\n",
                 "</soap:Envelope>\r\n"
             ))
             .build();
-            
-        let content_type_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
-        assert_eq!(content_type_headers[0].to_string(), "application/vnd.3gpp.sms");
+        assert_eq!(
+            content_type_headers[0].to_string(),
+            "application/vnd.3gpp.sms"
+        );
     }
-    
+
     #[test]
     fn test_content_type_sipfrag() {
         // Test sipfrag content type for request
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .content_type_sipfrag()
             .body(concat!(
                 "SIP/2.0 200 OK\r\n",
@@ -1003,14 +1064,22 @@ mod tests {
                 "Content-Length: 0\r\n"
             ))
             .build();
-            
-        let content_type_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
         assert_eq!(content_type_headers[0].to_string(), "message/sipfrag");
-        
+
         // Test sipfrag content type for response
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
@@ -1018,12 +1087,20 @@ mod tests {
             .cseq_with_method(101, Method::Invite)
             .content_type_sipfrag()
             .build();
-            
-        let content_type_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentType(c) = h { Some(c) } else { None })
+
+        let content_type_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentType(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
         assert_eq!(content_type_headers[0].to_string(), "message/sipfrag");
     }
-} 
+}

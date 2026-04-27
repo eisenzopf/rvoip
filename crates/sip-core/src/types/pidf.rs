@@ -28,10 +28,10 @@
 //! </presence>
 //! ```
 
-use std::fmt;
-use serde::{Serialize, Deserialize};
-use chrono::{DateTime, Utc};
 use crate::{Error, Result};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Basic presence status values as defined in RFC 3863
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -53,7 +53,7 @@ impl fmt::Display for BasicStatus {
 
 impl std::str::FromStr for BasicStatus {
     type Err = Error;
-    
+
     fn from_str(s: &str) -> Result<Self> {
         match s.to_lowercase().as_str() {
             "open" => Ok(BasicStatus::Open),
@@ -75,12 +75,12 @@ impl Status {
     pub fn new(basic: BasicStatus) -> Self {
         Self { basic }
     }
-    
+
     /// Create an "open" status
     pub fn open() -> Self {
         Self::new(BasicStatus::Open)
     }
-    
+
     /// Create a "closed" status
     pub fn closed() -> Self {
         Self::new(BasicStatus::Closed)
@@ -113,19 +113,19 @@ impl Tuple {
             priority: None,
         }
     }
-    
+
     /// Set the contact URI for this tuple
     pub fn with_contact(mut self, contact: impl Into<String>) -> Self {
         self.contact = Some(contact.into());
         self
     }
-    
+
     /// Set the timestamp for this tuple
     pub fn with_timestamp(mut self, timestamp: DateTime<Utc>) -> Self {
         self.timestamp = Some(timestamp);
         self
     }
-    
+
     /// Set the priority for this tuple
     pub fn with_priority(mut self, priority: f32) -> Self {
         self.priority = Some(priority);
@@ -153,69 +153,63 @@ impl PidfDocument {
             notes: Vec::new(),
         }
     }
-    
+
     /// Add a tuple to this document
     pub fn add_tuple(mut self, tuple: Tuple) -> Self {
         self.tuples.push(tuple);
         self
     }
-    
+
     /// Add a note to this document
     pub fn add_note(mut self, note: impl Into<String>) -> Self {
         self.notes.push(note.into());
         self
     }
-    
+
     /// Create a simple "available" presence document
     pub fn available(entity: impl Into<String>) -> Self {
         let entity_str = entity.into();
         Self::new(entity_str.clone())
-            .add_tuple(
-                Tuple::new("t1", Status::open())
-                    .with_timestamp(Utc::now())
-            )
+            .add_tuple(Tuple::new("t1", Status::open()).with_timestamp(Utc::now()))
     }
-    
+
     /// Create a simple "unavailable" presence document
     pub fn unavailable(entity: impl Into<String>) -> Self {
         let entity_str = entity.into();
         Self::new(entity_str.clone())
-            .add_tuple(
-                Tuple::new("t1", Status::closed())
-                    .with_timestamp(Utc::now())
-            )
+            .add_tuple(Tuple::new("t1", Status::closed()).with_timestamp(Utc::now()))
     }
-    
+
     /// Serialize this PIDF document to XML string
     ///
     /// This produces a simplified but RFC-compliant PIDF XML document.
     /// For full XML features, consider using a dedicated XML library.
     pub fn to_xml(&self) -> String {
         let mut xml = String::new();
-        
+
         // XML declaration
         xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
-        
+
         // Presence element with namespace and entity
         xml.push_str(&format!(
             "<presence xmlns=\"urn:ietf:params:xml:ns:pidf\" entity=\"{}\">\n",
             escape_xml(&self.entity)
         ));
-        
+
         // Tuples
         for tuple in &self.tuples {
             xml.push_str(&format!("  <tuple id=\"{}\">\n", escape_xml(&tuple.id)));
-            
+
             // Status
             xml.push_str("    <status>\n");
             xml.push_str(&format!("      <basic>{}</basic>\n", tuple.status.basic));
             xml.push_str("    </status>\n");
-            
+
             // Optional contact
             if let Some(contact) = &tuple.contact {
                 xml.push_str(&format!("    <contact>{}</contact>\n", escape_xml(contact)));
             }
-            
+
             // Optional timestamp
             if let Some(timestamp) = &tuple.timestamp {
                 xml.push_str(&format!(
@@ -223,24 +217,24 @@ impl PidfDocument {
                     timestamp.to_rfc3339()
                 ));
             }
-            
+
             // Optional priority
             if let Some(priority) = &tuple.priority {
                 xml.push_str(&format!("    <priority>{}</priority>\n", priority));
             }
-            
+
             xml.push_str("  </tuple>\n");
         }
-        
+
         // Notes
         for note in &self.notes {
             xml.push_str(&format!("  <note>{}</note>\n", escape_xml(note)));
         }
-        
+
         xml.push_str("</presence>");
         xml
     }
-    
+
     /// Parse a PIDF document from XML string
     ///
     /// This is a minimal parser that handles basic PIDF documents.
@@ -248,12 +242,12 @@ impl PidfDocument {
     pub fn from_xml(xml: &str) -> Result<Self> {
         // This is a very basic parser for demonstration
         // In production, you would use a proper XML parser
-        
+
         // Extract entity attribute
         let entity = extract_attribute(xml, "entity")?;
-        
+
         let mut doc = Self::new(entity);
-        
+
         // Extract tuples
         let mut tuple_start = 0;
         while let Some(start) = xml[tuple_start..].find("<tuple") {
@@ -261,47 +255,49 @@ impl PidfDocument {
             if let Some(end) = xml[start..].find("</tuple>") {
                 let end = start + end + 8; // Include </tuple>
                 let tuple_xml = &xml[start..end];
-                
+
                 // Extract tuple ID
                 let id = extract_attribute(tuple_xml, "id")?;
-                
+
                 // Extract basic status
                 let basic = if tuple_xml.contains("<basic>open</basic>") {
                     BasicStatus::Open
                 } else if tuple_xml.contains("<basic>closed</basic>") {
                     BasicStatus::Closed
                 } else {
-                    return Err(Error::ParseError("Missing or invalid basic status".to_string()));
+                    return Err(Error::ParseError(
+                        "Missing or invalid basic status".to_string(),
+                    ));
                 };
-                
+
                 let mut tuple = Tuple::new(id, Status::new(basic));
-                
+
                 // Extract optional contact
                 if let Ok(contact) = extract_element(tuple_xml, "contact") {
                     tuple.contact = Some(contact);
                 }
-                
+
                 // Extract optional timestamp
                 if let Ok(timestamp_str) = extract_element(tuple_xml, "timestamp") {
                     if let Ok(timestamp) = DateTime::parse_from_rfc3339(&timestamp_str) {
                         tuple.timestamp = Some(timestamp.with_timezone(&Utc));
                     }
                 }
-                
+
                 // Extract optional priority
                 if let Ok(priority_str) = extract_element(tuple_xml, "priority") {
                     if let Ok(priority) = priority_str.parse::<f32>() {
                         tuple.priority = Some(priority);
                     }
                 }
-                
+
                 doc.tuples.push(tuple);
                 tuple_start = end;
             } else {
                 break;
             }
         }
-        
+
         // Extract notes
         let mut note_start = 0;
         while let Some(start) = xml[note_start..].find("<note>") {
@@ -314,7 +310,7 @@ impl PidfDocument {
                 break;
             }
         }
-        
+
         Ok(doc)
     }
 }
@@ -358,7 +354,7 @@ fn extract_attribute(xml: &str, attr: &str) -> Result<String> {
 fn extract_element(xml: &str, element: &str) -> Result<String> {
     let start_tag = format!("<{}>", element);
     let end_tag = format!("</{}>", element);
-    
+
     if let Some(start) = xml.find(&start_tag) {
         let start = start + start_tag.len();
         if let Some(end) = xml[start..].find(&end_tag) {
@@ -371,17 +367,20 @@ fn extract_element(xml: &str, element: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_basic_status() {
         assert_eq!(BasicStatus::Open.to_string(), "open");
         assert_eq!(BasicStatus::Closed.to_string(), "closed");
-        
+
         assert_eq!("open".parse::<BasicStatus>().unwrap(), BasicStatus::Open);
-        assert_eq!("closed".parse::<BasicStatus>().unwrap(), BasicStatus::Closed);
+        assert_eq!(
+            "closed".parse::<BasicStatus>().unwrap(),
+            BasicStatus::Closed
+        );
         assert!("invalid".parse::<BasicStatus>().is_err());
     }
-    
+
     #[test]
     fn test_pidf_available() {
         let doc = PidfDocument::available("pres:alice@example.com");
@@ -389,7 +388,7 @@ mod tests {
         assert_eq!(doc.tuples.len(), 1);
         assert_eq!(doc.tuples[0].status.basic, BasicStatus::Open);
     }
-    
+
     #[test]
     fn test_pidf_unavailable() {
         let doc = PidfDocument::unavailable("pres:bob@example.com");
@@ -397,16 +396,13 @@ mod tests {
         assert_eq!(doc.tuples.len(), 1);
         assert_eq!(doc.tuples[0].status.basic, BasicStatus::Closed);
     }
-    
+
     #[test]
     fn test_pidf_to_xml() {
         let doc = PidfDocument::new("pres:alice@example.com")
-            .add_tuple(
-                Tuple::new("t1", Status::open())
-                    .with_contact("sip:alice@192.168.1.10")
-            )
+            .add_tuple(Tuple::new("t1", Status::open()).with_contact("sip:alice@192.168.1.10"))
             .add_note("Available for calls");
-        
+
         let xml = doc.to_xml();
         assert!(xml.contains("entity=\"pres:alice@example.com\""));
         assert!(xml.contains("<tuple id=\"t1\">"));
@@ -414,7 +410,7 @@ mod tests {
         assert!(xml.contains("<contact>sip:alice@192.168.1.10</contact>"));
         assert!(xml.contains("<note>Available for calls</note>"));
     }
-    
+
     #[test]
     fn test_pidf_from_xml() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -427,21 +423,24 @@ mod tests {
   </tuple>
   <note>Available</note>
 </presence>"#;
-        
+
         let doc = PidfDocument::from_xml(xml).unwrap();
         assert_eq!(doc.entity, "pres:alice@example.com");
         assert_eq!(doc.tuples.len(), 1);
         assert_eq!(doc.tuples[0].id, "t1");
         assert_eq!(doc.tuples[0].status.basic, BasicStatus::Open);
-        assert_eq!(doc.tuples[0].contact, Some("sip:alice@192.168.1.10".to_string()));
+        assert_eq!(
+            doc.tuples[0].contact,
+            Some("sip:alice@192.168.1.10".to_string())
+        );
         assert_eq!(doc.notes, vec!["Available"]);
     }
-    
+
     #[test]
     fn test_xml_escaping() {
-        let doc = PidfDocument::new("pres:alice@example.com")
-            .add_note("Status: <available> & busy");
-        
+        let doc =
+            PidfDocument::new("pres:alice@example.com").add_note("Status: <available> & busy");
+
         let xml = doc.to_xml();
         assert!(xml.contains("&lt;available&gt;"));
         assert!(xml.contains("&amp;"));

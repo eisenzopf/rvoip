@@ -63,10 +63,7 @@ fn build_examples() {
         .output()
         .expect("failed to invoke cargo build");
     if !output.status.success() {
-        let _ = std::io::Write::write_all(
-            &mut std::io::stderr(),
-            &output.stderr,
-        );
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), &output.stderr);
         panic!(
             "cargo build failed (exit={:?}); stderr printed above",
             output.status.code()
@@ -118,8 +115,7 @@ fn glare_retry_converges_to_on_hold() {
         }
     };
 
-    let alice_status =
-        alice_status.unwrap_or_else(|| panic!("Alice did not finish within 30s"));
+    let alice_status = alice_status.unwrap_or_else(|| panic!("Alice did not finish within 30s"));
     assert!(
         alice_status.success(),
         "Alice exited with {:?} (expected 0 = saw stable OnHold)",

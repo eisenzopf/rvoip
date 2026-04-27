@@ -2,15 +2,15 @@
 //!
 //! This module defines the Authorization header used by clients to provide authentication credentials.
 
-use std::fmt;
-use std::str::FromStr;
-use serde::{Deserialize, Serialize};
-use crate::error::{Result, Error};
-use crate::types::uri::Uri;
+use crate::error::{Error, Result};
 use crate::types::auth::credentials::Credentials;
 use crate::types::auth::params::DigestParam;
-use crate::types::auth::scheme::{AuthScheme, Algorithm, Qop};
+use crate::types::auth::scheme::{Algorithm, AuthScheme, Qop};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::uri::Uri;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Typed Authorization header.
 ///
@@ -21,7 +21,7 @@ use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 pub struct Authorization(pub Credentials); // Holds the Credentials enum directly
 
 impl fmt::Display for Authorization {
-     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0) // Delegate to Credentials' Display
     }
 }
@@ -47,17 +47,19 @@ impl Authorization {
         realm: impl Into<String>,
         nonce: impl Into<String>,
         uri: Uri,
-        response: impl Into<String>
+        response: impl Into<String>,
     ) -> Self {
-        Self(Credentials::Digest { params: vec![
-            DigestParam::Username(username.into()),
-            DigestParam::Realm(realm.into()),
-            DigestParam::Nonce(nonce.into()),
-            DigestParam::Uri(uri),
-            DigestParam::Response(response.into()),
-        ] })
+        Self(Credentials::Digest {
+            params: vec![
+                DigestParam::Username(username.into()),
+                DigestParam::Realm(realm.into()),
+                DigestParam::Nonce(nonce.into()),
+                DigestParam::Uri(uri),
+                DigestParam::Response(response.into()),
+            ],
+        })
     }
-    
+
     /// Creates a new Authorization header with Bearer token (RFC 8898).
     ///
     /// # Parameters
@@ -72,7 +74,7 @@ impl Authorization {
     ///
     /// ```rust
     /// use rvoip_sip_core::types::auth::Authorization;
-    /// 
+    ///
     /// let auth = Authorization::bearer("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9...");
     /// ```
     pub fn bearer(token: impl Into<String>) -> Self {
@@ -189,14 +191,19 @@ impl TypedHeaderTrait for Authorization {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Authorization(self.clone()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Authorization(self.clone()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -204,14 +211,16 @@ impl TypedHeaderTrait for Authorization {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Authorization::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
-} 
+}

@@ -1,14 +1,8 @@
 use std::str::FromStr;
 
-use crate::types::{
-    uri::Uri,
-    from::From,
-    Address,
-    TypedHeader,
-    Param,
-};
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::types::{from::From, uri::Uri, Address, Param, TypedHeader};
 
 /// From header builder
 ///
@@ -149,24 +143,25 @@ impl FromBuilderExt for SimpleRequestBuilder {
         match Uri::from_str(uri) {
             Ok(uri) => {
                 let mut address = Address::new_with_display_name(display_name, uri);
-                
+
                 // Add tag if provided
                 if let Some(tag_value) = tag {
                     address.params.push(Param::tag(tag_value));
                 }
-                
+
                 self.header(TypedHeader::From(From::new(address)))
-            },
+            }
             Err(_) => {
                 // Best effort - if URI parsing fails, still try to continue with a simple string
                 let uri_str = uri.to_string();
-                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
-                
+                let mut address =
+                    Address::new_with_display_name(display_name, Uri::custom(&uri_str));
+
                 // Add tag if provided
                 if let Some(tag_value) = tag {
                     address.params.push(Param::tag(tag_value));
                 }
-                
+
                 self.header(TypedHeader::From(From::new(address)))
             }
         }
@@ -178,24 +173,25 @@ impl FromBuilderExt for SimpleResponseBuilder {
         match Uri::from_str(uri) {
             Ok(uri) => {
                 let mut address = Address::new_with_display_name(display_name, uri);
-                
+
                 // Add tag if provided
                 if let Some(tag_value) = tag {
                     address.params.push(Param::tag(tag_value));
                 }
-                
+
                 self.header(TypedHeader::From(From::new(address)))
-            },
+            }
             Err(_) => {
                 // Best effort - if URI parsing fails, still try to continue with a simple string
                 let uri_str = uri.to_string();
-                let mut address = Address::new_with_display_name(display_name, Uri::custom(&uri_str));
-                
+                let mut address =
+                    Address::new_with_display_name(display_name, Uri::custom(&uri_str));
+
                 // Add tag if provided
                 if let Some(tag_value) = tag {
                     address.params.push(Param::tag(tag_value));
                 }
-                
+
                 self.header(TypedHeader::From(From::new(address)))
             }
         }
@@ -206,37 +202,47 @@ impl FromBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::types::{Method, StatusCode};
-    
+
     #[test]
     fn test_request_from_header() {
         // Test with valid URI
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
             .build();
-            
+
         let from_header = request.from().unwrap();
         assert_eq!(from_header.address().display_name(), Some("Alice"));
-        assert_eq!(from_header.address().uri().to_string(), "sip:alice@example.com");
+        assert_eq!(
+            from_header.address().uri().to_string(),
+            "sip:alice@example.com"
+        );
         assert_eq!(from_header.tag(), Some("tag1234"));
-        
+
         // Test without tag
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .build();
-            
+
         let from_header = request.from().unwrap();
         assert_eq!(from_header.tag(), None);
-        
+
         // Test with invalid URI (should create a custom URI)
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .from("Alice", "invalid-uri", Some("tag1234"))
             .build();
-            
+
         let from_header = request.from().unwrap();
         assert_eq!(from_header.address().display_name(), Some("Alice"));
-        assert!(from_header.address().uri().to_string().contains("invalid-uri"));
+        assert!(from_header
+            .address()
+            .uri()
+            .to_string()
+            .contains("invalid-uri"));
     }
-    
+
     #[test]
     fn test_response_from_header() {
         // Test with valid URI
@@ -246,12 +252,15 @@ mod tests {
             .call_id("test-call-id")
             .cseq(1, Method::Invite)
             .build();
-            
+
         let from_header = response.from().unwrap();
         assert_eq!(from_header.address().display_name(), Some("Alice"));
-        assert_eq!(from_header.address().uri().to_string(), "sip:alice@example.com");
+        assert_eq!(
+            from_header.address().uri().to_string(),
+            "sip:alice@example.com"
+        );
         assert_eq!(from_header.tag(), Some("tag1234"));
-        
+
         // Test without tag
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", None)
@@ -259,10 +268,10 @@ mod tests {
             .call_id("test-call-id")
             .cseq(1, Method::Invite)
             .build();
-            
+
         let from_header = response.from().unwrap();
         assert_eq!(from_header.tag(), None);
-        
+
         // Test with invalid URI (should create a custom URI)
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "invalid-uri", Some("tag1234"))
@@ -270,9 +279,13 @@ mod tests {
             .call_id("test-call-id")
             .cseq(1, Method::Invite)
             .build();
-            
+
         let from_header = response.from().unwrap();
         assert_eq!(from_header.address().display_name(), Some("Alice"));
-        assert!(from_header.address().uri().to_string().contains("invalid-uri"));
+        assert!(from_header
+            .address()
+            .uri()
+            .to_string()
+            .contains("invalid-uri"));
     }
-} 
+}

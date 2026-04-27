@@ -7,4 +7,4 @@ pub mod keys;
 pub mod verify;
 
 // Re-export key types
-pub use keys::DtlsKeyingMaterial; 
+pub use keys::DtlsKeyingMaterial;

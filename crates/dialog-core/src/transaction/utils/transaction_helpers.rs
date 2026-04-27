@@ -1,12 +1,12 @@
 //! Transaction helper utilities for transaction-core
-//! 
+//!
 //! This module provides utilities for working with SIP transactions,
 //! including transaction key extraction and classification.
 
-use rvoip_sip_core::prelude::*;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::{TransactionKey, TransactionKind};
-use tracing::{debug, info, error};
+use rvoip_sip_core::prelude::*;
+use tracing::{debug, error, info};
 
 use super::message_extractors::{extract_branch, extract_cseq};
 
@@ -19,15 +19,16 @@ pub fn extract_transaction_parts(message: &Message) -> Result<(TransactionKind, 
     let kind = match message {
         Message::Request(req) => {
             match req.method() {
-                 Method::Invite => TransactionKind::InviteServer,
-                 Method::Ack => TransactionKind::InviteServer, // Matches existing IST
-                 Method::Cancel => TransactionKind::InviteServer, // Matches existing IST
-                 _ => TransactionKind::NonInviteServer,
-             }
+                Method::Invite => TransactionKind::InviteServer,
+                Method::Ack => TransactionKind::InviteServer, // Matches existing IST
+                Method::Cancel => TransactionKind::InviteServer, // Matches existing IST
+                _ => TransactionKind::NonInviteServer,
+            }
         }
         Message::Response(_) => {
-            let (_, cseq_method) = extract_cseq(message)
-                .ok_or_else(|| Error::Other("Missing or invalid CSeq header in Response".to_string()))?;
+            let (_, cseq_method) = extract_cseq(message).ok_or_else(|| {
+                Error::Other("Missing or invalid CSeq header in Response".to_string())
+            })?;
 
             if cseq_method == Method::Invite {
                 TransactionKind::InviteClient
@@ -50,7 +51,10 @@ pub fn transaction_key_from_message(message: &Message) -> Option<TransactionKey>
                     if let Some(branch) = first_via.branch() {
                         let method = request.method();
                         let key = TransactionKey::new(branch.to_string(), method.clone(), true);
-                        debug!("🔍 TX_KEY: Generated server key from request {}: {}", method, key);
+                        debug!(
+                            "🔍 TX_KEY: Generated server key from request {}: {}",
+                            method, key
+                        );
                         return Some(key);
                     }
                 }
@@ -65,9 +69,20 @@ pub fn transaction_key_from_message(message: &Message) -> Option<TransactionKey>
                     if let Some(branch) = first_via.branch() {
                         // Get method from CSeq header
                         if let Some(cseq) = response.typed_header::<CSeq>() {
-                            let key = TransactionKey::new(branch.to_string(), cseq.method.clone(), false);
-                            info!("🔍 TX_KEY: Generated client key from response {} {}: {}", response.status(), cseq.method, key);
-                            debug!("🔍 TX_KEY: Generated client key from response {} {}: {}", response.status(), cseq.method, key);
+                            let key =
+                                TransactionKey::new(branch.to_string(), cseq.method.clone(), false);
+                            info!(
+                                "🔍 TX_KEY: Generated client key from response {} {}: {}",
+                                response.status(),
+                                cseq.method,
+                                key
+                            );
+                            debug!(
+                                "🔍 TX_KEY: Generated client key from response {} {}: {}",
+                                response.status(),
+                                cseq.method,
+                                key
+                            );
                             return Some(key);
                         } else {
                             error!("🔍 TX_KEY: Response missing CSeq header!");
@@ -98,4 +113,4 @@ pub fn determine_transaction_kind(request: &Request, is_server: bool) -> Transac
         (_, true) => TransactionKind::NonInviteServer,
         (_, false) => TransactionKind::NonInviteClient,
     }
-} 
+}

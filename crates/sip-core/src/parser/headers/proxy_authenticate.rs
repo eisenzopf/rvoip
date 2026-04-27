@@ -1,13 +1,13 @@
 // RFC 3261 Section 22.3 Proxy-Authenticate
 //
-// The Proxy-Authenticate header field is used by a proxy server to challenge 
+// The Proxy-Authenticate header field is used by a proxy server to challenge
 // the authorization of a client. It has the same grammar as WWW-Authenticate
 // and follows the same challenge response model.
 //
 // ABNF:
 // Proxy-Authenticate = "Proxy-Authenticate" HCOLON challenge
 //                      *(COMMA challenge)
-// challenge          = ("Digest" LWS digest-cln *(COMMA digest-cln)) / 
+// challenge          = ("Digest" LWS digest-cln *(COMMA digest-cln)) /
 //                      ("Basic" LWS realm) / other-challenge
 // other-challenge    = auth-scheme LWS auth-param *(COMMA auth-param)
 //
@@ -21,18 +21,18 @@
 //                     algorithm=MD5
 
 use nom::{
-    IResult,
+    branch::alt,
     bytes::complete::{tag, tag_no_case, take_while, take_while1},
     character::complete::{char, multispace0, multispace1},
-    combinator::{opt, map, verify},
-    sequence::{preceded, terminated, tuple, delimited},
+    combinator::{map, opt, verify},
     error::{Error, ErrorKind, ParseError},
-    branch::alt,
     multi::separated_list0,
+    sequence::{delimited, preceded, terminated, tuple},
+    IResult,
 };
 
-use crate::types::auth::{Challenge, DigestParam, Qop, Algorithm, AuthParam};
 use crate::parser::utils::unfold_lws;
+use crate::types::auth::{Algorithm, AuthParam, Challenge, DigestParam, Qop};
 
 type ParseResult<'a, T> = IResult<&'a [u8], T, Error<&'a [u8]>>;
 
@@ -42,13 +42,13 @@ type ParseResult<'a, T> = IResult<&'a [u8], T, Error<&'a [u8]>>;
 fn parse_lws(input: &[u8]) -> ParseResult<()> {
     // Handle whitespace followed by optional CRLF followed by whitespace
     let (input, _) = multispace0::<&[u8], Error<&[u8]>>(input)?;
-    
+
     // Handle line folding (CRLF + WSP)
     let (input, _) = opt(tuple((
         tag::<_, &[u8], Error<&[u8]>>("\r\n"),
-        multispace1::<&[u8], Error<&[u8]>>
+        multispace1::<&[u8], Error<&[u8]>>,
     )))(input)?;
-    
+
     Ok((input, ()))
 }
 
@@ -57,8 +57,11 @@ fn parse_lws(input: &[u8]) -> ParseResult<()> {
 fn parse_token(input: &[u8]) -> ParseResult<&[u8]> {
     let (input, _) = parse_lws(input)?;
     take_while1(|c: u8| {
-        c.is_ascii_alphanumeric() || 
-        matches!(c, b'-' | b'.' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~')
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                b'-' | b'.' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~'
+            )
     })(input)
 }
 
@@ -69,7 +72,7 @@ fn parse_quoted_string(input: &[u8]) -> ParseResult<&[u8]> {
     delimited(
         char::<&[u8], Error<&[u8]>>('"'),
         take_while(|c| c != b'"' && c != b'\\'),
-        char::<&[u8], Error<&[u8]>>('"')
+        char::<&[u8], Error<&[u8]>>('"'),
     )(input)
 }
 
@@ -81,23 +84,23 @@ fn parse_auth_param(input: &[u8]) -> ParseResult<AuthParam> {
     let (input, _) = parse_lws(input)?;
     let (input, _) = char::<&[u8], Error<&[u8]>>('=')(input)?;
     let (input, _) = parse_lws(input)?;
-    
+
     let name_str = std::str::from_utf8(name).unwrap_or("");
-    
+
     // Some parameters can have unquoted values according to RFC 2617
     // algorithm, qop, and stale can be tokens rather than quoted-strings
     let (input, value) = match name_str.to_ascii_lowercase().as_str() {
-        "algorithm" | "stale" | "qop" => alt((
-            parse_quoted_string,
-            parse_token
-        ))(input)?,
+        "algorithm" | "stale" | "qop" => alt((parse_quoted_string, parse_token))(input)?,
         _ => parse_quoted_string(input)?,
     };
-    
-    Ok((input, AuthParam {
-        name: name_str.to_string(),
-        value: std::str::from_utf8(value).unwrap_or("").to_string(),
-    }))
+
+    Ok((
+        input,
+        AuthParam {
+            name: name_str.to_string(),
+            value: std::str::from_utf8(value).unwrap_or("").to_string(),
+        },
+    ))
 }
 
 /// Parse a comma-separated list of auth-params according to RFC 2617
@@ -106,24 +109,20 @@ fn parse_auth_params(input: &[u8]) -> ParseResult<Vec<AuthParam>> {
     let (input, first) = parse_auth_param(input)?;
     let mut params = vec![first];
     let mut current_input = input;
-    
+
     loop {
         // Handle commas with optional line folding
-        let comma_parser = delimited(
-            parse_lws,
-            char::<&[u8], Error<&[u8]>>(','),
-            parse_lws
-        );
-        
+        let comma_parser = delimited(parse_lws, char::<&[u8], Error<&[u8]>>(','), parse_lws);
+
         match preceded(comma_parser, parse_auth_param)(current_input) {
             Ok((remaining, param)) => {
                 params.push(param);
                 current_input = remaining;
-            },
+            }
             Err(_) => break,
         }
     }
-    
+
     Ok((current_input, params))
 }
 
@@ -133,17 +132,17 @@ fn parse_scheme(input: &[u8]) -> ParseResult<&[u8]> {
     let (input, _) = parse_lws(input)?;
     let (input, scheme) = parse_token(input)?;
     let scheme_str = std::str::from_utf8(scheme).unwrap_or("");
-    
+
     // Only allow Digest and Basic schemes as per RFC 3261
     if !scheme_str.eq_ignore_ascii_case("digest") && !scheme_str.eq_ignore_ascii_case("basic") {
         return Err(nom::Err::Error(Error::new(input, ErrorKind::Tag)));
     }
-    
+
     Ok((input, scheme))
 }
 
 /// Parse a challenge according to RFC 3261 Section 22.3
-/// challenge = ("Digest" LWS digest-cln *(COMMA digest-cln)) / 
+/// challenge = ("Digest" LWS digest-cln *(COMMA digest-cln)) /
 ///             ("Basic" LWS realm) / other-challenge
 fn parse_challenge(input: &[u8]) -> ParseResult<Challenge> {
     let (input, scheme) = parse_scheme(input)?;
@@ -177,9 +176,11 @@ fn parse_challenge(input: &[u8]) -> ParseResult<Challenge> {
                             _ => Algorithm::Other(param.value),
                         };
                         digest_params.push(DigestParam::Algorithm(algorithm));
-                    },
+                    }
                     "qop" => {
-                        let qops = param.value.split(',')
+                        let qops = param
+                            .value
+                            .split(',')
                             .map(|s| match s.trim().to_ascii_lowercase().as_str() {
                                 "auth" => Qop::Auth,
                                 "auth-int" => Qop::AuthInt,
@@ -187,29 +188,33 @@ fn parse_challenge(input: &[u8]) -> ParseResult<Challenge> {
                             })
                             .collect();
                         digest_params.push(DigestParam::Qop(qops));
-                    },
+                    }
                     "stale" => {
                         let stale = param.value.eq_ignore_ascii_case("true");
                         digest_params.push(DigestParam::Stale(stale));
-                    },
+                    }
                     "domain" => {
-                        let domains = param.value.split(' ')
+                        let domains = param
+                            .value
+                            .split(' ')
                             .map(|s| s.trim().to_string())
                             .collect();
                         digest_params.push(DigestParam::Domain(domains));
-                    },
+                    }
                     _ => (),
                 }
             }
-            Challenge::Digest { params: digest_params }
-        },
+            Challenge::Digest {
+                params: digest_params,
+            }
+        }
         "basic" => {
             // Basic auth requires realm parameter according to RFC 2617 Section 2
             if !params.iter().any(|p| p.name.eq_ignore_ascii_case("realm")) {
                 return Err(nom::Err::Error(Error::new(input, ErrorKind::Verify)));
             }
             Challenge::Basic { params }
-        },
+        }
         _ => unreachable!(), // parse_scheme already validated the scheme
     };
 
@@ -227,30 +232,27 @@ pub fn parse_proxy_authenticate(input: &[u8]) -> ParseResult<'_, Vec<Challenge>>
     match parse_challenge(input) {
         Ok((remaining, challenge)) => {
             let mut challenges = vec![challenge];
-            
+
             // Try to parse more challenges if there are any
             // Multiple challenges are separated by commas
             let mut current_input = remaining;
-            
+
             while !current_input.is_empty() {
                 match preceded(
-                    delimited(
-                        parse_lws,
-                        char::<&[u8], Error<&[u8]>>(','),
-                        parse_lws
-                    ),
-                    parse_challenge
-                )(current_input) {
+                    delimited(parse_lws, char::<&[u8], Error<&[u8]>>(','), parse_lws),
+                    parse_challenge,
+                )(current_input)
+                {
                     Ok((new_remaining, challenge)) => {
                         challenges.push(challenge);
                         current_input = new_remaining;
-                    },
+                    }
                     Err(_) => break,
                 }
             }
 
             Ok((current_input, challenges))
-        },
+        }
         Err(e) => Err(e),
     }
 }
@@ -260,9 +262,9 @@ pub fn proxy_authenticate_header(input: &[u8]) -> ParseResult<Vec<Challenge>> {
     preceded(
         terminated(
             tag_no_case(b"Proxy-Authenticate"),
-            crate::parser::separators::hcolon
+            crate::parser::separators::hcolon,
         ),
-        parse_proxy_authenticate
+        parse_proxy_authenticate,
     )(input)
 }
 
@@ -275,7 +277,7 @@ mod tests {
         let input = "Basic realm=\"proxy.example.com\"";
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 1);
-        
+
         if let Challenge::Basic { params } = &challenges[0] {
             assert_eq!(params.len(), 1);
             assert_eq!(params[0].name, "realm");
@@ -290,13 +292,15 @@ mod tests {
         let input = r#"Digest realm="proxy.example.com", nonce="dcd98b7102dd2f0e8b11d0f600bfb0c093", algorithm=MD5, qop="auth,auth-int""#;
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 1);
-        
+
         if let Challenge::Digest { params } = &challenges[0] {
             assert_eq!(params.len(), 4);
             assert!(params.contains(&DigestParam::Realm("proxy.example.com".to_string())));
-            assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())));
+            assert!(params.contains(&DigestParam::Nonce(
+                "dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string()
+            )));
             assert!(params.contains(&DigestParam::Algorithm(Algorithm::Md5)));
-            
+
             let qop = params.iter().find(|p| matches!(p, DigestParam::Qop(_)));
             assert!(qop.is_some());
             if let DigestParam::Qop(qops) = qop.unwrap() {
@@ -314,7 +318,7 @@ mod tests {
         let input = r#"Digest realm="proxy.example.com", nonce="nonce123", Basic realm="proxy.example.com""#;
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 2);
-        
+
         // Check Digest challenge
         if let Challenge::Digest { params } = &challenges[0] {
             assert_eq!(params.len(), 2);
@@ -323,7 +327,7 @@ mod tests {
         } else {
             panic!("Expected first challenge to be Digest");
         }
-        
+
         // Check Basic challenge
         if let Challenge::Basic { params } = &challenges[1] {
             assert_eq!(params.len(), 1);
@@ -339,7 +343,7 @@ mod tests {
         let input = r#"Digest realm="proxy.example.com", nonce="nonce123", Basic realm="proxy.example.com""#;
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 2);
-        
+
         // Check Digest challenge
         if let Challenge::Digest { params } = &challenges[0] {
             assert_eq!(params.len(), 2);
@@ -348,7 +352,7 @@ mod tests {
         } else {
             panic!("Expected first challenge to be Digest");
         }
-        
+
         // Check Basic challenge
         if let Challenge::Basic { params } = &challenges[1] {
             assert_eq!(params.len(), 1);
@@ -361,10 +365,11 @@ mod tests {
 
     #[test]
     fn test_parse_proxy_authenticate_line_folding() {
-        let input = "Digest realm=\"proxy.example.com\",\r\n nonce=\"nonce123\",\r\n algorithm=SHA-256";
+        let input =
+            "Digest realm=\"proxy.example.com\",\r\n nonce=\"nonce123\",\r\n algorithm=SHA-256";
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 1);
-        
+
         if let Challenge::Digest { params } = &challenges[0] {
             assert_eq!(params.len(), 3);
             assert!(params.contains(&DigestParam::Realm("proxy.example.com".to_string())));
@@ -379,16 +384,16 @@ mod tests {
     fn test_parse_proxy_authenticate_errors() {
         // Test empty input
         assert!(parse_proxy_authenticate(b"").is_err());
-        
+
         // Test invalid scheme
         assert!(parse_proxy_authenticate(b"Invalid realm=\"test\"").is_err());
-        
+
         // Test missing realm
         assert!(parse_proxy_authenticate(b"Digest nonce=\"test\"").is_err());
-        
+
         // Test missing nonce in Digest
         assert!(parse_proxy_authenticate(b"Digest realm=\"test\"").is_err());
-        
+
         // Test invalid parameter format
         assert!(parse_proxy_authenticate(b"Digest realm=test").is_err());
     }
@@ -399,20 +404,20 @@ mod tests {
         let input = "  Digest  realm=\"test\"  ,  nonce=\"test\"  ";
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 1);
-        
+
         // Test empty parameter value
         let input = "Digest realm=\"test\", nonce=\"\"";
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 1);
-        
+
         // Test special characters in values
         let input = "Digest realm=\"test@example.com\", nonce=\"test!@#$%^&*()\"";
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 1);
-        
+
         // Test multiple spaces in parameter names
         let input = "Digest realm=\"test\", nonce=\"test\", algorithm = SHA-256";
         let (_, challenges) = parse_proxy_authenticate(input.as_bytes()).unwrap();
         assert_eq!(challenges.len(), 1);
     }
-} 
+}

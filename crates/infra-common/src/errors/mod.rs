@@ -9,8 +9,8 @@ for the RVOIP stack. It includes:
 - Error conversion traits
 */
 
-pub mod types;
 mod context;
+pub mod types;
 
+pub use context::{ErrorContext, ErrorExt};
 pub use types::{Error, Result};
-pub use context::{ErrorContext, ErrorExt}; 

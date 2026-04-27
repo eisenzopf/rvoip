@@ -1,5 +1,5 @@
 //! # SIP Allow Header
-//! 
+//!
 //! This module provides an implementation of the SIP Allow header as defined in
 //! [RFC 3261 Section 20.5](https://datatracker.ietf.org/doc/html/rfc3261#section-20.5).
 //!
@@ -38,14 +38,14 @@
 //! allow.add_method(Method::Bye);
 //! ```
 
-use crate::types::Method;
+use crate::error::{Error, Result};
 use crate::parser::headers::parse_allow;
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::Method;
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::fmt;
+use std::str::FromStr;
 
 /// Represents the Allow header field (RFC 3261 Section 20.5).
 /// Lists the SIP methods supported by the User Agent.
@@ -62,7 +62,7 @@ use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 ///
 /// // Create an Allow header from a string
 /// let allow = Allow::from_str("INVITE, ACK, BYE, CANCEL, OPTIONS").unwrap();
-/// 
+///
 /// // Check if a method is allowed
 /// assert!(allow.allows(&Method::Invite));
 /// assert!(!allow.allows(&Method::Refer));
@@ -154,7 +154,7 @@ impl Allow {
     /// ```
     pub fn from_methods<I>(methods: I) -> Self
     where
-        I: IntoIterator<Item = Method>
+        I: IntoIterator<Item = Method>,
     {
         Self(methods.into_iter().collect())
     }
@@ -201,7 +201,7 @@ impl Allow {
     /// use rvoip_sip_core::types::Allow;
     ///
     /// let mut allow = Allow::new();
-    /// 
+    ///
     /// // Add methods
     /// allow.add_method(Method::Invite);
     /// allow.add_method(Method::Ack);
@@ -209,7 +209,7 @@ impl Allow {
     ///
     /// // Adding the same method twice has no effect
     /// allow.add_method(Method::Invite);
-    /// 
+    ///
     /// // The string representation shows each method only once
     /// assert_eq!(allow.to_string(), "INVITE, ACK");
     /// ```
@@ -268,7 +268,7 @@ impl FromStr for Allow {
     }
 }
 
-// TODO: Implement methods (e.g., allows(Method)) 
+// TODO: Implement methods (e.g., allows(Method))
 
 // Implement IntoIterator for Allow
 impl IntoIterator for Allow {
@@ -315,24 +315,31 @@ impl TypedHeaderTrait for Allow {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::Allow {
-            return Err(Error::InvalidHeader(format!("Expected Allow header, got {}", header.name)));
+            return Err(Error::InvalidHeader(format!(
+                "Expected Allow header, got {}",
+                header.name
+            )));
         }
-        
+
         // Use the parser to convert the header value into an Allow header
         use crate::parser::headers::allow::parse_allow;
         use nom::combinator::all_consuming;
-        
+
         // Get the raw bytes from the header value
         let bytes = match &header.value {
             crate::types::headers::HeaderValue::Raw(bytes) => bytes,
-            _ => return Err(Error::InvalidHeader("Expected raw header value".to_string())),
+            _ => {
+                return Err(Error::InvalidHeader(
+                    "Expected raw header value".to_string(),
+                ))
+            }
         };
-        
+
         // Parse the header value
         let allow = all_consuming(parse_allow)(bytes)
             .map_err(Error::from)
             .map(|(_, v)| v)?;
-        
+
         Ok(allow)
     }
-} 
+}

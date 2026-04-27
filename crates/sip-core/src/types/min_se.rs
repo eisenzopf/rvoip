@@ -48,9 +48,9 @@
 //! This informs the UAC that the UAS requires a session timer of at least 90 seconds.
 
 use crate::{
-    Error, Result,
     parser::headers::parse_min_se_value,
     types::headers::{Header, HeaderName, HeaderValue, TypedHeaderTrait},
+    Error, Result,
 };
 use std::{convert::TryFrom, fmt, str::FromStr};
 
@@ -96,12 +96,14 @@ impl TypedHeaderTrait for MinSE {
 
         match &header.value {
             HeaderValue::Raw(raw_value) => {
-                let text_value = std::str::from_utf8(raw_value)
-                    .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in MinSE raw value: {}", e)))?;
+                let text_value = std::str::from_utf8(raw_value).map_err(|e| {
+                    Error::ParseError(format!("Invalid UTF-8 in MinSE raw value: {}", e))
+                })?;
                 MinSE::from_str(text_value.trim())
             }
             hv => Err(Error::Parser(format!(
-                "Cannot parse Min-SE from HeaderValue variant: {:?}. Expected Raw for FromStr.", hv
+                "Cannot parse Min-SE from HeaderValue variant: {:?}. Expected Raw for FromStr.",
+                hv
             ))),
         }
     }
@@ -125,12 +127,17 @@ impl TryFrom<HeaderValue> for MinSE {
     fn try_from(value: HeaderValue) -> Result<Self> {
         match value {
             HeaderValue::Raw(raw) => {
-                let text = std::str::from_utf8(&raw)
-                    .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in MinSE raw value for TryFrom: {}", e)))?;
+                let text = std::str::from_utf8(&raw).map_err(|e| {
+                    Error::ParseError(format!(
+                        "Invalid UTF-8 in MinSE raw value for TryFrom: {}",
+                        e
+                    ))
+                })?;
                 MinSE::from_str(text.trim())
             }
             hv => Err(Error::Parser(format!(
-                "Cannot convert HeaderValue variant {:?} to MinSE. Expected Raw for FromStr.", hv
+                "Cannot convert HeaderValue variant {:?} to MinSE. Expected Raw for FromStr.",
+                hv
             ))),
         }
     }
@@ -151,12 +158,11 @@ impl std::str::FromStr for MinSE {
                     Ok(min_se_val)
                 }
             }
-            Err(nom_err) => {
-                Err(Error::Parser(format!(
-                    "Failed to parse Min-SE value string '{}': {}",
-                    s, nom_err.to_string()
-                )))
-            }
+            Err(nom_err) => Err(Error::Parser(format!(
+                "Failed to parse Min-SE value string '{}': {}",
+                s,
+                nom_err.to_string()
+            ))),
         }
     }
 }
@@ -192,28 +198,45 @@ mod tests {
     fn test_min_se_from_str_invalid() {
         // Test cases that should fail FromStr parsing
         assert!(MinSE::from_str("abc").is_err(), "'abc' should be an error");
-        assert!(MinSE::from_str("").is_err(), "Empty string should be an error");
-        assert!(MinSE::from_str("90abc").is_err(), "'90abc' (trailing non-digits) should be an error");
+        assert!(
+            MinSE::from_str("").is_err(),
+            "Empty string should be an error"
+        );
+        assert!(
+            MinSE::from_str("90abc").is_err(),
+            "'90abc' (trailing non-digits) should be an error"
+        );
         assert!(MinSE::from_str("90;").is_err(), "'90;' (trailing semicolon) should be an error, params not supported by current FromStr");
-        assert!(MinSE::from_str("90;id=1").is_err(), "'90;id=1' (with param) should be an error, params not supported by current FromStr");
+        assert!(
+            MinSE::from_str("90;id=1").is_err(),
+            "'90;id=1' (with param) should be an error, params not supported by current FromStr"
+        );
         // The parser for MinSE (parse_min_se_value) uses terminated(u32, tuple((multispace0, eof))).
         // This means it consumes optional whitespace before EOF.
         // Therefore, FromStr which calls this parser will also succeed for "90 ".
-        assert!(MinSE::from_str("90 ").is_ok(), "'90 ' (with trailing space) should be OK due to parser consuming OWS before EOF");
+        assert!(
+            MinSE::from_str("90 ").is_ok(),
+            "'90 ' (with trailing space) should be OK due to parser consuming OWS before EOF"
+        );
         assert!(MinSE::from_str(" 90").is_err(), "' 90' (with leading space) should be an ERROR because FromStr does not trim before byte parsing");
     }
-    
+
     #[test]
     fn test_min_se_from_str_with_params_not_supported_yet() {
         let result = MinSE::from_str("120;refresher=uac");
         assert!(result.is_err());
         if let Err(Error::Parser(msg)) = result {
-            assert!(msg.contains("Unexpected trailing characters") || msg.contains("Failed to parse Min-SE value string"));
+            assert!(
+                msg.contains("Unexpected trailing characters")
+                    || msg.contains("Failed to parse Min-SE value string")
+            );
         } else {
-            panic!("Expected a Parser error for Min-SE with parameters, got {:?}", result);
+            panic!(
+                "Expected a Parser error for Min-SE with parameters, got {:?}",
+                result
+            );
         }
     }
-
 
     #[test]
     fn test_typed_header_trait_for_min_se() {
@@ -245,13 +268,13 @@ mod tests {
         let header = Header::new(HeaderName::MinSE, HeaderValue::text("invalid".to_string()));
         let result = MinSE::from_header(&header);
         assert!(result.is_err());
-         if let Err(Error::Parser(msg)) = result {
+        if let Err(Error::Parser(msg)) = result {
             assert!(msg.contains("Failed to parse Min-SE value string 'invalid'"));
         } else {
             panic!("Expected Parser error, got {:?}", result);
         }
     }
-    
+
     #[test]
     fn test_typed_header_trait_parse_from_raw_valid() {
         let raw_value = b"180".to_vec();
@@ -267,7 +290,11 @@ mod tests {
         let result = MinSE::from_header(&header);
         assert!(result.is_err());
         if let Err(Error::Parser(msg)) = result {
-            assert!(msg.contains("Failed to parse Min-SE value string 'not-a-number'"), "Actual message: {}", msg);
+            assert!(
+                msg.contains("Failed to parse Min-SE value string 'not-a-number'"),
+                "Actual message: {}",
+                msg
+            );
         } else {
             panic!("Expected Parser error for raw bytes, got {:?}", result);
         }
@@ -280,9 +307,16 @@ mod tests {
         let result = MinSE::from_header(&header);
         assert!(result.is_err());
         if let Err(Error::Parser(msg)) = result {
-            assert!(msg.contains("Failed to parse Min-SE value string '90rubbish'"), "Actual message: {}", msg);
+            assert!(
+                msg.contains("Failed to parse Min-SE value string '90rubbish'"),
+                "Actual message: {}",
+                msg
+            );
         } else {
-            panic!("Expected Parser error for raw bytes with trailing data, got {:?}", result);
+            panic!(
+                "Expected Parser error for raw bytes with trailing data, got {:?}",
+                result
+            );
         }
     }
 
@@ -302,14 +336,20 @@ mod tests {
 
     #[test]
     fn test_try_from_header_value_invalid_type() {
-        let header_value = HeaderValue::CSeq(crate::types::cseq::CSeq::new(1, crate::types::Method::Invite));
+        let header_value = HeaderValue::CSeq(crate::types::cseq::CSeq::new(
+            1,
+            crate::types::Method::Invite,
+        ));
         let result = MinSE::try_from(header_value);
         assert!(result.is_err());
-         match result {
+        match result {
             Err(Error::Parser(msg)) => {
                 assert!(msg.contains("Cannot convert HeaderValue variant"));
             }
-            _ => panic!("Expected Parser error for invalid HeaderValue conversion, got {:?}", result),
+            _ => panic!(
+                "Expected Parser error for invalid HeaderValue conversion, got {:?}",
+                result
+            ),
         }
     }
-} 
+}

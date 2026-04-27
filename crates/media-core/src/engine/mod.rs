@@ -4,11 +4,11 @@
 //! activities including codec management, session management, and integration
 //! with other crates.
 
-pub mod media_engine;
 pub mod config;
 pub mod lifecycle;
+pub mod media_engine;
 
 // Re-export main types for convenience
-pub use media_engine::{MediaEngine, MediaSessionParams, MediaSessionHandle};
-pub use config::{MediaEngineConfig, EngineCapabilities};
-pub use lifecycle::{EngineState, LifecycleManager}; 
+pub use config::{EngineCapabilities, MediaEngineConfig};
+pub use lifecycle::{EngineState, LifecycleManager};
+pub use media_engine::{MediaEngine, MediaSessionHandle, MediaSessionParams};

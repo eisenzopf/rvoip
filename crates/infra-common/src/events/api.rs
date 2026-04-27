@@ -4,10 +4,10 @@
 //! These traits provide a common abstraction layer over different event system implementations
 //! while allowing specialized optimizations for each implementation.
 
+use crate::events::types::{Event, EventFilter, EventResult};
+use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::events::types::{Event, EventResult, EventFilter};
-use async_trait::async_trait;
 
 /// Core trait representing an event system.
 ///
@@ -20,12 +20,12 @@ pub trait EventSystem: Send + Sync + Clone {
     /// This method initializes any resources needed for event processing.
     /// The specific behavior depends on the implementation.
     async fn start(&self) -> EventResult<()>;
-    
+
     /// Shuts down the event system.
     ///
     /// This method gracefully terminates event processing and releases resources.
     async fn shutdown(&self) -> EventResult<()>;
-    
+
     /// Creates a publisher for events of type `E`.
     ///
     /// # Type Parameters
@@ -36,7 +36,7 @@ pub trait EventSystem: Send + Sync + Clone {
     ///
     /// A boxed publisher that can publish events of type `E`
     fn create_publisher<E: Event + 'static>(&self) -> Box<dyn EventPublisher<E>>;
-    
+
     /// Subscribes to events of type `E`.
     ///
     /// # Type Parameters
@@ -86,7 +86,10 @@ pub trait EventSystem: Send + Sync + Clone {
     ///
     /// A boxed subscriber that can receive filtered events of type `E`, or an error if
     /// subscription fails
-    async fn subscribe_with_filter<E>(&self, filter: EventFilter<E>) -> EventResult<Box<dyn EventSubscriber<E>>>
+    async fn subscribe_with_filter<E>(
+        &self,
+        filter: EventFilter<E>,
+    ) -> EventResult<Box<dyn EventSubscriber<E>>>
     where
         E: Event + 'static;
 }
@@ -107,7 +110,7 @@ pub trait EventPublisher<E: Event>: Send + Sync {
     ///
     /// `Ok(())` if the event was published successfully, or an error if publication fails
     async fn publish(&self, event: E) -> EventResult<()>;
-    
+
     /// Publishes a batch of events.
     ///
     /// This method may be optimized for batch operation in some implementations.
@@ -136,7 +139,7 @@ pub trait EventSubscriber<E: Event>: Send {
     ///
     /// The next event, or an error if receiving fails
     async fn receive(&mut self) -> EventResult<Arc<E>>;
-    
+
     /// Receives the next event with a timeout.
     ///
     /// This method waits up to the specified duration for an event to become available.
@@ -149,7 +152,7 @@ pub trait EventSubscriber<E: Event>: Send {
     ///
     /// The next event, or an error if receiving fails or the timeout expires
     async fn receive_timeout(&mut self, timeout: Duration) -> EventResult<Arc<E>>;
-    
+
     /// Tries to receive an event without blocking.
     ///
     /// This method returns immediately with `None` if no event is available.
@@ -184,7 +187,7 @@ pub trait FilterableSubscriber<E: Event>: Send {
 pub mod filters {
     use super::*;
     use std::sync::Arc;
-    
+
     /// Creates a filter that accepts events with a specific field value
     pub fn field_equals<E: Event, T, F>(field_extractor: F, value: T) -> EventFilter<E>
     where
@@ -193,7 +196,7 @@ pub mod filters {
     {
         Arc::new(move |event: &E| *field_extractor(event) == value)
     }
-    
+
     /// Creates a filter that accepts events where a field satisfies a predicate
     pub fn field_matches<E: Event, T, F, P>(field_extractor: F, predicate: P) -> EventFilter<E>
     where
@@ -202,17 +205,17 @@ pub mod filters {
     {
         Arc::new(move |event: &E| predicate(field_extractor(event)))
     }
-    
+
     /// Creates a filter that combines two filters with logical AND
     pub fn and<E: Event>(filter1: EventFilter<E>, filter2: EventFilter<E>) -> EventFilter<E> {
         Arc::new(move |event: &E| filter1(event) && filter2(event))
     }
-    
+
     /// Creates a filter that combines two filters with logical OR
     pub fn or<E: Event>(filter1: EventFilter<E>, filter2: EventFilter<E>) -> EventFilter<E> {
         Arc::new(move |event: &E| filter1(event) || filter2(event))
     }
-    
+
     /// Creates a filter that negates another filter
     pub fn not<E: Event>(filter: EventFilter<E>) -> EventFilter<E> {
         Arc::new(move |event: &E| !filter(event))
@@ -228,9 +231,9 @@ pub const FEATURE_ZERO_COPY_EVENT_SYSTEM: &str = "zero_copy_event_system";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Serialize, Deserialize};
-    use std::any::Any;
     use crate::events::types::EventPriority;
+    use serde::{Deserialize, Serialize};
+    use std::any::Any;
 
     #[derive(Clone, Debug, Serialize, Deserialize)]
     struct TestFilterEvent {
@@ -244,11 +247,11 @@ mod tests {
         fn event_type() -> &'static str {
             "test_filter_event"
         }
-        
+
         fn priority() -> EventPriority {
             EventPriority::Normal
         }
-        
+
         fn as_any(&self) -> &dyn Any {
             self
         }
@@ -258,7 +261,7 @@ mod tests {
     fn test_field_equals_filter() {
         // Create a filter that matches events with id = 5
         let id_filter = filters::field_equals(|e: &TestFilterEvent| &e.id, 5);
-        
+
         // Create some test events
         let event1 = TestFilterEvent {
             id: 5,
@@ -266,34 +269,41 @@ mod tests {
             score: 10.0,
             tags: vec!["important".to_string()],
         };
-        
+
         let event2 = TestFilterEvent {
             id: 10,
             name: "No Match".to_string(),
             score: 5.0,
             tags: vec!["important".to_string()],
         };
-        
+
         // Test the filter
         assert!(id_filter(&event1), "Filter should match event with id=5");
-        assert!(!id_filter(&event2), "Filter should not match event with id=10");
-        
+        assert!(
+            !id_filter(&event2),
+            "Filter should not match event with id=10"
+        );
+
         // Create a filter for string field
         let name_filter = filters::field_equals(|e: &TestFilterEvent| &e.name, "Match".to_string());
-        
+
         // Test string filter
-        assert!(name_filter(&event1), "Filter should match event with name='Match'");
-        assert!(!name_filter(&event2), "Filter should not match event with name='No Match'");
+        assert!(
+            name_filter(&event1),
+            "Filter should match event with name='Match'"
+        );
+        assert!(
+            !name_filter(&event2),
+            "Filter should not match event with name='No Match'"
+        );
     }
-    
+
     #[test]
     fn test_field_matches_filter() {
         // Create a filter that matches events with score > 7.0
-        let score_filter = filters::field_matches(
-            |e: &TestFilterEvent| &e.score,
-            |score| *score > 7.0
-        );
-        
+        let score_filter =
+            filters::field_matches(|e: &TestFilterEvent| &e.score, |score| *score > 7.0);
+
         // Create some test events
         let event1 = TestFilterEvent {
             id: 1,
@@ -301,24 +311,30 @@ mod tests {
             score: 9.5,
             tags: vec![],
         };
-        
+
         let event2 = TestFilterEvent {
             id: 2,
             name: "Low Score".to_string(),
             score: 3.2,
             tags: vec![],
         };
-        
+
         // Test the filter
-        assert!(score_filter(&event1), "Filter should match event with score > 7.0");
-        assert!(!score_filter(&event2), "Filter should not match event with score <= 7.0");
-        
+        assert!(
+            score_filter(&event1),
+            "Filter should match event with score > 7.0"
+        );
+        assert!(
+            !score_filter(&event2),
+            "Filter should not match event with score <= 7.0"
+        );
+
         // Create a filter that checks if tags contain "urgent"
         let tag_filter = filters::field_matches(
             |e: &TestFilterEvent| &e.tags,
-            |tags| tags.contains(&"urgent".to_string())
+            |tags| tags.contains(&"urgent".to_string()),
         );
-        
+
         // Create events with different tags
         let event3 = TestFilterEvent {
             id: 3,
@@ -326,78 +342,122 @@ mod tests {
             score: 5.0,
             tags: vec!["important".to_string(), "urgent".to_string()],
         };
-        
+
         let event4 = TestFilterEvent {
             id: 4,
             name: "Not Urgent".to_string(),
             score: 5.0,
             tags: vec!["normal".to_string()],
         };
-        
+
         // Test the tag filter
-        assert!(tag_filter(&event3), "Filter should match event with 'urgent' tag");
-        assert!(!tag_filter(&event4), "Filter should not match event without 'urgent' tag");
+        assert!(
+            tag_filter(&event3),
+            "Filter should match event with 'urgent' tag"
+        );
+        assert!(
+            !tag_filter(&event4),
+            "Filter should not match event without 'urgent' tag"
+        );
     }
-    
+
     #[test]
     fn test_logical_filter_operations() {
         // Create two simple filters
         let id_filter = filters::field_equals(|e: &TestFilterEvent| &e.id, 5);
-        let score_filter = filters::field_matches(
-            |e: &TestFilterEvent| &e.score,
-            |score| *score > 7.0
-        );
-        
+        let score_filter =
+            filters::field_matches(|e: &TestFilterEvent| &e.score, |score| *score > 7.0);
+
         // Create composite filters
         let and_filter = filters::and(id_filter.clone(), score_filter.clone());
         let or_filter = filters::or(id_filter.clone(), score_filter.clone());
         let not_id_filter = filters::not(id_filter.clone());
-        
+
         // Create test events
-        let event1 = TestFilterEvent {  // Matches both filters
+        let event1 = TestFilterEvent {
+            // Matches both filters
             id: 5,
             name: "Both".to_string(),
             score: 9.0,
             tags: vec![],
         };
-        
-        let event2 = TestFilterEvent {  // Matches id_filter only
+
+        let event2 = TestFilterEvent {
+            // Matches id_filter only
             id: 5,
             name: "Id Only".to_string(),
             score: 5.0,
             tags: vec![],
         };
-        
-        let event3 = TestFilterEvent {  // Matches score_filter only
+
+        let event3 = TestFilterEvent {
+            // Matches score_filter only
             id: 10,
             name: "Score Only".to_string(),
             score: 8.0,
             tags: vec![],
         };
-        
-        let event4 = TestFilterEvent {  // Matches neither filter
+
+        let event4 = TestFilterEvent {
+            // Matches neither filter
             id: 1,
             name: "Neither".to_string(),
             score: 3.0,
             tags: vec![],
         };
-        
+
         // Test AND filter
-        assert!(and_filter(&event1), "AND filter should match when both conditions are true");
-        assert!(!and_filter(&event2), "AND filter should not match when only id condition is true");
-        assert!(!and_filter(&event3), "AND filter should not match when only score condition is true");
-        assert!(!and_filter(&event4), "AND filter should not match when neither condition is true");
-        
+        assert!(
+            and_filter(&event1),
+            "AND filter should match when both conditions are true"
+        );
+        assert!(
+            !and_filter(&event2),
+            "AND filter should not match when only id condition is true"
+        );
+        assert!(
+            !and_filter(&event3),
+            "AND filter should not match when only score condition is true"
+        );
+        assert!(
+            !and_filter(&event4),
+            "AND filter should not match when neither condition is true"
+        );
+
         // Test OR filter
-        assert!(or_filter(&event1), "OR filter should match when both conditions are true");
-        assert!(or_filter(&event2), "OR filter should match when only id condition is true");
-        assert!(or_filter(&event3), "OR filter should match when only score condition is true");
-        assert!(!or_filter(&event4), "OR filter should not match when neither condition is true");
-        
+        assert!(
+            or_filter(&event1),
+            "OR filter should match when both conditions are true"
+        );
+        assert!(
+            or_filter(&event2),
+            "OR filter should match when only id condition is true"
+        );
+        assert!(
+            or_filter(&event3),
+            "OR filter should match when only score condition is true"
+        );
+        assert!(
+            !or_filter(&event4),
+            "OR filter should not match when neither condition is true"
+        );
+
         // Test NOT filter
-        assert!(!not_id_filter(&event1), "NOT filter should not match when original filter matches");
-        assert!(!not_id_filter(&event2), "NOT filter should not match when original filter matches");
-        assert!(not_id_filter(&event3), "NOT filter should match when original filter doesn't match");
-        assert!(not_id_filter(&event4), "NOT filter should match when original filter doesn't match");
+        assert!(
+            !not_id_filter(&event1),
+            "NOT filter should not match when original filter matches"
+        );
+        assert!(
+            !not_id_filter(&event2),
+            "NOT filter should not match when original filter matches"
+        );
+        assert!(
+            not_id_filter(&event3),
+            "NOT filter should match when original filter doesn't match"
+        );
+        assert!(
+            not_id_filter(&event4),
+            "NOT filter should match when original filter doesn't match"
+        );
     }
-} 
+}

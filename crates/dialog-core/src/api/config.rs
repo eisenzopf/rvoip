@@ -111,9 +111,9 @@
 //!     .with_timeout(Duration::from_secs(30));        // Fast timeout for tests
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration;
-use serde::{Deserialize, Serialize};
 
 /// Policy for the SIP `100rel` reliable-provisional-response extension
 /// (RFC 3262).
@@ -188,14 +188,14 @@ pub struct DialogConfig {
     /// that should accept connections from any interface, or specific
     /// addresses like "192.168.1.100:5060" for targeted binding.
     pub local_address: SocketAddr,
-    
+
     /// User agent string to include in SIP messages
     ///
     /// This appears in the User-Agent header of outgoing SIP requests
     /// and Server header of outgoing responses. Useful for debugging
     /// and identifying your application in SIP traces.
     pub user_agent: Option<String>,
-    
+
     /// Default timeout for dialog operations
     ///
     /// Maximum time to wait for dialog-related operations to complete.
@@ -203,21 +203,21 @@ pub struct DialogConfig {
     /// establishment timeouts. Shorter timeouts free up resources faster
     /// but may cause premature failures on slow networks.
     pub dialog_timeout: Duration,
-    
+
     /// Maximum number of concurrent dialogs
     ///
     /// Limits the total number of dialogs that can be active simultaneously.
     /// This prevents resource exhaustion attacks and helps manage memory
     /// usage. Set to None for unlimited dialogs (not recommended for production).
     pub max_dialogs: Option<usize>,
-    
+
     /// Enable automatic dialog cleanup
     ///
     /// When true, terminated dialogs are automatically cleaned up at
     /// regular intervals. When false, cleanup must be performed manually
     /// which gives more control but requires careful resource management.
     pub auto_cleanup: bool,
-    
+
     /// Cleanup interval for terminated dialogs
     ///
     /// How often to run the automatic cleanup process for terminated
@@ -294,7 +294,7 @@ impl DialogConfig {
             ..Default::default()
         }
     }
-    
+
     /// Set the user agent string
     ///
     /// Configures the User-Agent header that will be included in outgoing
@@ -321,7 +321,7 @@ impl DialogConfig {
         self.user_agent = Some(user_agent.into());
         self
     }
-    
+
     /// Set the dialog timeout
     ///
     /// Configures how long to wait for dialog operations to complete.
@@ -349,7 +349,7 @@ impl DialogConfig {
         self.dialog_timeout = timeout;
         self
     }
-    
+
     /// Set the maximum number of dialogs
     ///
     /// Limits the total number of simultaneous dialogs to prevent
@@ -375,7 +375,7 @@ impl DialogConfig {
         self.max_dialogs = Some(max);
         self
     }
-    
+
     /// Set the 100rel (reliable provisional) policy (RFC 3262).
     ///
     /// # Examples
@@ -428,7 +428,7 @@ impl DialogConfig {
         self.auto_cleanup = false;
         self
     }
-    
+
     /// Validate the configuration
     ///
     /// Checks that all configuration values are valid and consistent.
@@ -455,17 +455,17 @@ impl DialogConfig {
         if self.dialog_timeout.as_secs() == 0 {
             return Err("Dialog timeout must be greater than 0".to_string());
         }
-        
+
         if let Some(max) = self.max_dialogs {
             if max == 0 {
                 return Err("Max dialogs must be greater than 0".to_string());
             }
         }
-        
+
         if self.cleanup_interval.as_secs() == 0 {
             return Err("Cleanup interval must be greater than 0".to_string());
         }
-        
+
         Ok(())
     }
 }
@@ -514,21 +514,21 @@ impl DialogConfig {
 pub struct ServerConfig {
     /// Base dialog configuration
     pub dialog: DialogConfig,
-    
+
     /// Enable automatic response to OPTIONS requests
     ///
     /// When true, the server automatically responds to OPTIONS requests
     /// with a 200 OK including supported methods. When false, OPTIONS
     /// requests are forwarded to the application for custom handling.
     pub auto_options_response: bool,
-    
+
     /// Enable automatic response to REGISTER requests
     ///
     /// When true, the server automatically handles REGISTER requests
     /// for basic registration functionality. When false, REGISTER
     /// requests are forwarded to the application.
     pub auto_register_response: bool,
-    
+
     /// Server domain name
     ///
     /// The domain name this server represents. Used in Contact headers
@@ -575,7 +575,7 @@ impl ServerConfig {
             ..Default::default()
         }
     }
-    
+
     /// Set the server domain
     ///
     /// Configures the domain name that this server represents.
@@ -601,7 +601,7 @@ impl ServerConfig {
         self.domain = Some(domain.into());
         self
     }
-    
+
     /// Enable automatic OPTIONS response
     ///
     /// Configures the server to automatically respond to OPTIONS requests
@@ -625,7 +625,7 @@ impl ServerConfig {
         self.auto_options_response = true;
         self
     }
-    
+
     /// Enable automatic REGISTER response
     ///
     /// Configures the server to automatically handle REGISTER requests
@@ -649,7 +649,7 @@ impl ServerConfig {
         self.auto_register_response = true;
         self
     }
-    
+
     /// Validate the server configuration
     ///
     /// Validates both the server-specific settings and the underlying
@@ -710,21 +710,21 @@ impl ServerConfig {
 pub struct ClientConfig {
     /// Base dialog configuration
     pub dialog: DialogConfig,
-    
+
     /// Default from URI for outgoing requests
     ///
     /// The URI that will be used in the From header of outgoing requests
     /// when not explicitly specified. Should represent the client's
     /// SIP identity (e.g., "sip:alice@example.com").
     pub from_uri: Option<String>,
-    
+
     /// Enable automatic authentication
     ///
     /// When true, the client automatically handles 401/407 authentication
     /// challenges using the configured credentials. When false,
     /// authentication challenges are forwarded to the application.
     pub auto_auth: bool,
-    
+
     /// Default credentials for authentication
     ///
     /// Username and password used for automatic authentication when
@@ -770,7 +770,7 @@ impl ClientConfig {
             ..Default::default()
         }
     }
-    
+
     /// Set the default from URI
     ///
     /// Configures the default From header URI for outgoing requests.
@@ -796,7 +796,7 @@ impl ClientConfig {
         self.from_uri = Some(from_uri.into());
         self
     }
-    
+
     /// Enable automatic authentication with credentials
     ///
     /// Configures the client to automatically handle SIP authentication
@@ -830,7 +830,7 @@ impl ClientConfig {
         });
         self
     }
-    
+
     /// Validate the client configuration
     ///
     /// Validates both the client-specific settings and the underlying
@@ -856,11 +856,11 @@ impl ClientConfig {
     /// ```
     pub fn validate(&self) -> Result<(), String> {
         self.dialog.validate()?;
-        
+
         if self.auto_auth && self.credentials.is_none() {
             return Err("Auto auth enabled but no credentials provided".to_string());
         }
-        
+
         Ok(())
     }
 }
@@ -897,10 +897,10 @@ impl ClientConfig {
 pub struct Credentials {
     /// Username for authentication
     pub username: String,
-    
+
     /// Password for authentication  
     pub password: String,
-    
+
     /// Realm (optional, will be extracted from challenge if not provided)
     ///
     /// The authentication realm. If not provided, it will be extracted
@@ -938,7 +938,7 @@ impl Credentials {
             realm: None,
         }
     }
-    
+
     /// Set the realm
     ///
     /// Configures a specific realm for authentication. Useful when you
@@ -964,4 +964,4 @@ impl Credentials {
         self.realm = Some(realm.into());
         self
     }
-} 
+}

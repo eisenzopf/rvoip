@@ -31,11 +31,11 @@
 //! assert_eq!(mime_version.to_string(), "1.0");
 //! ```
 
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the MIME-Version header field (RFC 3261 Section 20.24).
 ///
@@ -171,25 +171,33 @@ impl FromStr for MimeVersion {
             // Strip the "MIME-Version:" prefix
             let parts: Vec<&str> = s.splitn(2, ':').collect();
             if parts.len() != 2 {
-                return Err(Error::ParseError("Invalid MIME-Version header format".to_string()));
+                return Err(Error::ParseError(
+                    "Invalid MIME-Version header format".to_string(),
+                ));
             }
             parts[1].trim()
         } else {
             s.trim()
         };
-        
+
         // Parse the version number in format "major.minor"
         let version_parts: Vec<&str> = value_str.split('.').collect();
         if version_parts.len() != 2 {
-            return Err(Error::ParseError("Invalid MIME-Version format, expected major.minor".to_string()));
+            return Err(Error::ParseError(
+                "Invalid MIME-Version format, expected major.minor".to_string(),
+            ));
         }
-        
-        let major = version_parts[0].trim().parse::<u32>()
+
+        let major = version_parts[0]
+            .trim()
+            .parse::<u32>()
             .map_err(|e| Error::ParseError(format!("Invalid MIME-Version major: {}", e)))?;
-            
-        let minor = version_parts[1].trim().parse::<u32>()
+
+        let minor = version_parts[1]
+            .trim()
+            .parse::<u32>()
             .map_err(|e| Error::ParseError(format!("Invalid MIME-Version minor: {}", e)))?;
-            
+
         Ok(MimeVersion { major, minor })
     }
 }
@@ -203,14 +211,19 @@ impl TypedHeaderTrait for MimeVersion {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -218,17 +231,20 @@ impl TypedHeaderTrait for MimeVersion {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     MimeVersion::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name().as_str())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name().as_str()
+                    )))
                 }
-            },
+            }
             HeaderValue::MimeVersion((major, minor)) => {
                 Ok(MimeVersion::new(*major as u32, *minor as u32))
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}: {:?}", Self::header_name().as_str(), header.value)
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}: {:?}",
+                Self::header_name().as_str(),
+                header.value
+            ))),
         }
     }
 }
@@ -243,58 +259,58 @@ mod tests {
         assert_eq!(mime_version.major(), 1);
         assert_eq!(mime_version.minor(), 0);
     }
-    
+
     #[test]
     fn test_v1_0() {
         let mime_version = MimeVersion::v1_0();
         assert_eq!(mime_version.major(), 1);
         assert_eq!(mime_version.minor(), 0);
     }
-    
+
     #[test]
     fn test_default() {
         let mime_version = MimeVersion::default();
         assert_eq!(mime_version.major(), 1);
         assert_eq!(mime_version.minor(), 0);
     }
-    
+
     #[test]
     fn test_display() {
         let mime_version = MimeVersion::new(1, 0);
         assert_eq!(mime_version.to_string(), "1.0");
-        
+
         let mime_version = MimeVersion::new(2, 1);
         assert_eq!(mime_version.to_string(), "2.1");
     }
-    
+
     #[test]
     fn test_from_str() {
         // Simple case
         let mime_version: MimeVersion = "1.0".parse().unwrap();
         assert_eq!(mime_version.major(), 1);
         assert_eq!(mime_version.minor(), 0);
-        
+
         // With header name
         let mime_version: MimeVersion = "MIME-Version: 1.0".parse().unwrap();
         assert_eq!(mime_version.major(), 1);
         assert_eq!(mime_version.minor(), 0);
-        
+
         // With spaces
         let mime_version: MimeVersion = "  1 . 0  ".parse().unwrap();
         assert_eq!(mime_version.major(), 1);
         assert_eq!(mime_version.minor(), 0);
-        
+
         // Invalid format
         let result: Result<MimeVersion> = "1".parse();
         assert!(result.is_err());
-        
+
         let result: Result<MimeVersion> = "1.0.0".parse();
         assert!(result.is_err());
-        
+
         let result: Result<MimeVersion> = "not_a_number".parse();
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         let version = MimeVersion::new(1, 0);
@@ -317,11 +333,11 @@ mod tests {
         assert_eq!(parsed_from_raw, version);
 
         // Example from previous error log (line 312)
-        let version_header = Header::new(HeaderName::MimeVersion, HeaderValue::MimeVersion((1,0)));
+        let version_header = Header::new(HeaderName::MimeVersion, HeaderValue::MimeVersion((1, 0)));
         let parsed_version_header = MimeVersion::from_header(&version_header).unwrap();
-        assert_eq!(parsed_version_header, MimeVersion::new(1,0));
+        assert_eq!(parsed_version_header, MimeVersion::new(1, 0));
 
         let invalid_header = Header::new(HeaderName::ContentType, HeaderValue::text("text/plain"));
         assert!(MimeVersion::from_header(&invalid_header).is_err());
     }
-} 
+}

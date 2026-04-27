@@ -33,4 +33,4 @@ pub use dialog_id::DialogId;
 pub use dialog_impl::Dialog;
 pub use dialog_state::DialogState;
 pub use dialog_utils::*;
-pub use subscription_state::{SubscriptionState, SubscriptionTerminationReason}; 
+pub use subscription_state::{SubscriptionState, SubscriptionTerminationReason};

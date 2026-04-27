@@ -106,8 +106,12 @@ fn run_scenario(
         }
     };
 
-    let status = exit
-        .unwrap_or_else(|| panic!("Alice did not finish within {}s (mode={})", alice_wait_secs, mode));
+    let status = exit.unwrap_or_else(|| {
+        panic!(
+            "Alice did not finish within {}s (mode={})",
+            alice_wait_secs, mode
+        )
+    });
 
     assert!(
         status.success(),

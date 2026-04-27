@@ -1,9 +1,6 @@
-use crate::types::{
-    max_forwards::MaxForwards,
-    TypedHeader,
-};
+use crate::builder::headers::{cseq::CSeqBuilderExt, HeaderSetter};
 use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-use crate::builder::headers::{HeaderSetter, cseq::CSeqBuilderExt};
+use crate::types::{max_forwards::MaxForwards, TypedHeader};
 
 /// Extension trait for adding Max-Forwards headers to SIP message builders.
 ///
@@ -19,8 +16,8 @@ use crate::builder::headers::{HeaderSetter, cseq::CSeqBuilderExt};
 /// - **Troubleshooting Aid**: Useful for debugging routing issues with controlled request propagation
 /// - **Mandatory Header**: Required in all SIP requests (though not in responses)
 ///
-/// Each proxy that forwards a request decrements the Max-Forwards value by 1. If a proxy 
-/// receives a request with Max-Forwards of 0, it MUST NOT forward the request and should 
+/// Each proxy that forwards a request decrements the Max-Forwards value by 1. If a proxy
+/// receives a request with Max-Forwards of 0, it MUST NOT forward the request and should
 /// typically return a 483 (Too Many Hops) response.
 ///
 /// ## Recommended Values
@@ -52,7 +49,7 @@ use crate::builder::headers::{HeaderSetter, cseq::CSeqBuilderExt};
 ///
 /// ## Troubleshooting with Limited Scope
 ///
-/// Setting a low Max-Forwards value can help isolate routing problems by 
+/// Setting a low Max-Forwards value can help isolate routing problems by
 /// limiting how far a request can travel:
 ///
 /// ```rust
@@ -148,7 +145,7 @@ use crate::builder::headers::{HeaderSetter, cseq::CSeqBuilderExt};
 /// let register = SimpleRequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
 ///     .max_forwards(10) // Lower value for controlled routing
 ///     .build();
-/// 
+///
 /// // Or for direct server-to-server communication
 /// let notify = SimpleRequestBuilder::new(Method::Notify, "sip:server1.example.com").unwrap()
 ///     .max_forwards(1) // Direct delivery with no intermediate hops
@@ -217,31 +214,44 @@ impl MaxForwardsBuilderExt for SimpleResponseBuilder {
 mod tests {
     use super::*;
     use crate::types::{Method, StatusCode};
-    
+
     #[test]
     fn test_request_max_forwards_header() {
         let max_value = 70_u8;
-        
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .max_forwards(max_value as u32)
             .build();
-            
-        let max_forwards_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::MaxForwards(m) = h { Some(m) } else { None })
+
+        let max_forwards_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::MaxForwards(m) = h {
+                    Some(m)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(max_forwards_headers.len(), 1);
         // Check that the header exists, don't rely on a specific method of MaxForwards
         // Different MaxForwards types might have different API
-        assert!(matches!(request.all_headers().iter().find(|h| 
-            matches!(h, TypedHeader::MaxForwards(_))), 
-            Some(_)));
+        assert!(matches!(
+            request
+                .all_headers()
+                .iter()
+                .find(|h| matches!(h, TypedHeader::MaxForwards(_))),
+            Some(_)
+        ));
     }
-    
+
     #[test]
     fn test_response_max_forwards_header() {
         let max_value = 70_u8;
-        
+
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
             .to("Bob", "sip:bob@example.com", Some("tag5678"))
@@ -249,15 +259,27 @@ mod tests {
             .cseq_with_method(101, Method::Invite)
             .max_forwards(max_value as u32)
             .build();
-            
-        let max_forwards_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::MaxForwards(m) = h { Some(m) } else { None })
+
+        let max_forwards_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::MaxForwards(m) = h {
+                    Some(m)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(max_forwards_headers.len(), 1);
         // Check that the header exists, don't rely on a specific method of MaxForwards
-        assert!(matches!(response.all_headers().iter().find(|h| 
-            matches!(h, TypedHeader::MaxForwards(_))), 
-            Some(_)));
+        assert!(matches!(
+            response
+                .all_headers()
+                .iter()
+                .find(|h| matches!(h, TypedHeader::MaxForwards(_))),
+            Some(_)
+        ));
     }
-} 
+}

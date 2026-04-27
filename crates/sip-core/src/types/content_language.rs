@@ -34,11 +34,11 @@
 //! assert!(content_language.has_language("fr-CA"));
 //! ```
 
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Content-Language header field (RFC 3261 Section 20.13).
 ///
@@ -204,7 +204,9 @@ impl ContentLanguage {
     /// assert!(!content_language.has_language("de"));
     /// ```
     pub fn has_language(&self, language: &str) -> bool {
-        self.languages.iter().any(|e| e.eq_ignore_ascii_case(language))
+        self.languages
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(language))
     }
 
     /// Returns the list of language tags.
@@ -271,25 +273,27 @@ impl FromStr for ContentLanguage {
             // Strip the "Content-Language:" prefix
             let parts: Vec<&str> = s.splitn(2, ':').collect();
             if parts.len() != 2 {
-                return Err(Error::ParseError("Invalid Content-Language header format".to_string()));
+                return Err(Error::ParseError(
+                    "Invalid Content-Language header format".to_string(),
+                ));
             }
             parts[1].trim()
         } else {
             s.trim()
         };
-        
+
         // Empty string is a valid Content-Language (means no specific language)
         if value_str.is_empty() {
             return Ok(ContentLanguage::new());
         }
-        
+
         // Split the string by commas and collect language tags
         let languages = value_str
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-            
+
         Ok(ContentLanguage { languages })
     }
 }
@@ -303,14 +307,19 @@ impl TypedHeaderTrait for ContentLanguage {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -318,23 +327,23 @@ impl TypedHeaderTrait for ContentLanguage {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ContentLanguage::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::ContentLanguage(tokens) => {
                 let languages = tokens
                     .iter()
-                    .filter_map(|token| {
-                        std::str::from_utf8(token).ok().map(|s| s.to_string())
-                    })
+                    .filter_map(|token| std::str::from_utf8(token).ok().map(|s| s.to_string()))
                     .collect();
                 Ok(ContentLanguage { languages })
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -349,7 +358,7 @@ mod tests {
         assert!(content_language.is_empty());
         assert_eq!(content_language.to_string(), "");
     }
-    
+
     #[test]
     fn test_single() {
         let content_language = ContentLanguage::single("en-US");
@@ -357,7 +366,7 @@ mod tests {
         assert_eq!(content_language.languages()[0], "en-US");
         assert_eq!(content_language.to_string(), "en-US");
     }
-    
+
     #[test]
     fn test_with_languages() {
         let content_language = ContentLanguage::with_languages(&["en-US", "fr-CA"]);
@@ -366,84 +375,93 @@ mod tests {
         assert_eq!(content_language.languages()[1], "fr-CA");
         assert_eq!(content_language.to_string(), "en-US, fr-CA");
     }
-    
+
     #[test]
     fn test_add_remove_language() {
         let mut content_language = ContentLanguage::new();
-        
+
         // Add languages
         content_language.add_language("en-US");
         content_language.add_language("fr-CA");
-        
+
         assert_eq!(content_language.languages().len(), 2);
         assert!(content_language.has_language("en-US"));
         assert!(content_language.has_language("fr-CA"));
-        
+
         // Remove a language
         content_language.remove_language("en-US");
-        
+
         assert_eq!(content_language.languages().len(), 1);
         assert!(!content_language.has_language("en-US"));
         assert!(content_language.has_language("fr-CA"));
     }
-    
+
     #[test]
     fn test_has_language() {
         let content_language = ContentLanguage::with_languages(&["en-US", "fr-CA"]);
-        
+
         // Check case-insensitive matching
         assert!(content_language.has_language("en-US"));
         assert!(content_language.has_language("EN-us"));
         assert!(content_language.has_language("fr-CA"));
-        
+
         // Check non-existent language
         assert!(!content_language.has_language("de"));
     }
-    
+
     #[test]
     fn test_from_str() {
         // Simple case
         let content_language: ContentLanguage = "en-US".parse().unwrap();
         assert_eq!(content_language.languages().len(), 1);
         assert_eq!(content_language.languages()[0], "en-US");
-        
+
         // Multiple languages
         let content_language: ContentLanguage = "en-US, fr-CA".parse().unwrap();
         assert_eq!(content_language.languages().len(), 2);
         assert_eq!(content_language.languages()[0], "en-US");
         assert_eq!(content_language.languages()[1], "fr-CA");
-        
+
         // With header name
         let content_language: ContentLanguage = "Content-Language: en-US, fr-CA".parse().unwrap();
         assert_eq!(content_language.languages().len(), 2);
         assert_eq!(content_language.languages()[0], "en-US");
         assert_eq!(content_language.languages()[1], "fr-CA");
-        
+
         // Empty
         let content_language: ContentLanguage = "".parse().unwrap();
         assert!(content_language.is_empty());
-        
+
         // Empty with header name
         let content_language: ContentLanguage = "Content-Language:".parse().unwrap();
         assert!(content_language.is_empty());
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         // Create a header
         let content_language = ContentLanguage::with_languages(&["en-US", "fr-CA"]);
         let header = content_language.to_header();
-        
+
         assert_eq!(header.name, HeaderName::ContentLanguage);
-        
+
         // Convert back from Header
         let content_language2 = ContentLanguage::from_header(&header).unwrap();
-        assert_eq!(content_language.languages().len(), content_language2.languages().len());
-        assert_eq!(content_language.languages()[0], content_language2.languages()[0]);
-        assert_eq!(content_language.languages()[1], content_language2.languages()[1]);
-        
+        assert_eq!(
+            content_language.languages().len(),
+            content_language2.languages().len()
+        );
+        assert_eq!(
+            content_language.languages()[0],
+            content_language2.languages()[0]
+        );
+        assert_eq!(
+            content_language.languages()[1],
+            content_language2.languages()[1]
+        );
+
         // Test invalid header name
         let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
         assert!(ContentLanguage::from_header(&wrong_header).is_err());
     }
-} 
+}

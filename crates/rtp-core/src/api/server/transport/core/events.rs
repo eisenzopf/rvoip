@@ -2,11 +2,11 @@
 //!
 //! This module handles event subscription and callback management.
 
+use crate::api::common::error::MediaTransportError;
+use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
+use crate::api::server::transport::ClientInfo;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::api::common::events::{MediaEventCallback, MediaTransportEvent};
-use crate::api::common::error::MediaTransportError;
-use crate::api::server::transport::ClientInfo;
 
 /// Register a callback for media transport events
 pub async fn on_event(
@@ -36,4 +36,4 @@ pub async fn on_client_disconnected(
     let mut callbacks = client_disconnected_callbacks.write().await;
     callbacks.push(callback);
     Ok(())
-} 
+}

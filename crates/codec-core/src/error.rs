@@ -161,7 +161,7 @@ impl CodecError {
     pub fn is_recoverable(&self) -> bool {
         match self {
             // Configuration errors are not recoverable
-            Self::InvalidConfig { .. } 
+            Self::InvalidConfig { .. }
             | Self::UnsupportedCodec { .. }
             | Self::InvalidFormat { .. }
             | Self::InvalidSampleRate { .. }
@@ -184,8 +184,7 @@ impl CodecError {
             | Self::ExternalLibraryError { .. } => true,
 
             // Reset and initialization errors depend on the specific cause
-            Self::InitializationFailed { .. }
-            | Self::ResetFailed { .. } => false,
+            Self::InitializationFailed { .. } | Self::ResetFailed { .. } => false,
         }
     }
 
@@ -206,14 +205,13 @@ impl CodecError {
             | Self::InvalidFrameSize { .. }
             | Self::InvalidPayload { .. } => ErrorCategory::Processing,
 
-            Self::BufferTooSmall { .. }
-            | Self::BufferOverflow { .. } => ErrorCategory::Memory,
+            Self::BufferTooSmall { .. } | Self::BufferOverflow { .. } => ErrorCategory::Memory,
 
-            Self::InitializationFailed { .. }
-            | Self::ResetFailed { .. } => ErrorCategory::Initialization,
+            Self::InitializationFailed { .. } | Self::ResetFailed { .. } => {
+                ErrorCategory::Initialization
+            }
 
-            Self::SimdFailed { .. }
-            | Self::MathError { .. } => ErrorCategory::Computation,
+            Self::SimdFailed { .. } | Self::MathError { .. } => ErrorCategory::Computation,
 
             Self::IoError { .. } => ErrorCategory::Io,
 
@@ -299,9 +297,7 @@ impl From<&str> for CodecError {
 
 impl From<String> for CodecError {
     fn from(s: String) -> Self {
-        Self::InvalidConfig {
-            details: s,
-        }
+        Self::InvalidConfig { details: s }
     }
 }
 
@@ -340,7 +336,11 @@ mod tests {
             ErrorCategory::Processing
         );
         assert_eq!(
-            CodecError::BufferTooSmall { needed: 100, actual: 50 }.category(),
+            CodecError::BufferTooSmall {
+                needed: 100,
+                actual: 50
+            }
+            .category(),
             ErrorCategory::Memory
         );
     }
@@ -362,4 +362,4 @@ mod tests {
         let codec_err: CodecError = io_err.into();
         assert!(matches!(codec_err, CodecError::IoError { .. }));
     }
-} 
+}

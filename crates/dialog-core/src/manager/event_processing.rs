@@ -26,4 +26,4 @@
 //! All event processing follows RFC 3261 requirements for dialog state transitions
 //! and proper SIP transaction handling.
 
-// TODO: Implement event processing logic 
+// TODO: Implement event processing logic

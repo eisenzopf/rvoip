@@ -45,28 +45,28 @@
 //! let route = Route::from_str("<sip:proxy1.example.com;lr>, <sip:proxy2.example.com;lr>").unwrap();
 //! ```
 
+use crate::error::{Error, Result};
 use crate::parser::headers::parse_route;
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
-use std::ops::Deref;
-use nom::combinator::all_consuming;
-use crate::types::Address;
 use crate::parser::headers::route::RouteEntry as ParserRouteValue;
-use serde::{Deserialize, Serialize};
 use crate::parser::ParseResult;
+use crate::types::header::Header;
 use crate::types::param::Param;
 use crate::types::uri::Uri;
-use crate::types::header::Header;
+use crate::types::Address;
 use crate::types::{HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 /// Represents the Route header field (RFC 3261 Section 20.34).
 /// Contains a list of route entries (typically Addresses).
-/// 
+///
 /// The Route header field is used to force routing for a request through a list
 /// of proxies. Each proxy in the route set is represented with a URI.
 ///
-/// The Route header contains an ordered list of URIs. Each URI in the list represents 
+/// The Route header contains an ordered list of URIs. Each URI in the list represents
 /// a proxy server that the request must visit on its way to the final destination.
 /// The leftmost URI in the list represents the next hop server.
 ///
@@ -119,10 +119,10 @@ impl Route {
     /// let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
     /// let addr1 = Address::new(uri1);
     /// let addr2 = Address::new(uri2);
-    /// 
+    ///
     /// // Use parser route value type
     /// let entries = vec![
-    ///     ParserRouteValue(addr1), 
+    ///     ParserRouteValue(addr1),
     ///     ParserRouteValue(addr2)
     /// ];
     ///
@@ -133,7 +133,7 @@ impl Route {
     pub fn new(list: Vec<ParserRouteValue>) -> Self {
         Self(list)
     }
-    
+
     /// Creates a new empty Route header.
     ///
     /// Initializes a Route header with no route entries.
@@ -155,7 +155,7 @@ impl Route {
     pub fn empty() -> Self {
         Self(Vec::new())
     }
-    
+
     /// Creates a new Route header with a single address.
     ///
     /// Initializes a Route header with a single entry representing the given address.
@@ -187,7 +187,7 @@ impl Route {
     pub fn with_address(address: Address) -> Self {
         Self(vec![ParserRouteValue(address)])
     }
-    
+
     /// Creates a new Route header with a single URI.
     ///
     /// Initializes a Route header with a single entry representing the given URI.
@@ -207,7 +207,7 @@ impl Route {
     /// use rvoip_sip_core::prelude::*;
     /// use std::str::FromStr;
     ///
-    /// // Create a URI 
+    /// // Create a URI
     /// let uri = Uri::from_str("sip:proxy.example.com;lr").unwrap();
     ///
     /// // Create a Route header with this URI
@@ -218,7 +218,7 @@ impl Route {
     pub fn with_uri(uri: Uri) -> Self {
         Self(vec![ParserRouteValue(Address::new(uri))])
     }
-    
+
     /// Checks if the route list is empty.
     ///
     /// # Returns
@@ -240,7 +240,7 @@ impl Route {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
-    
+
     /// Returns the number of route entries.
     ///
     /// # Returns
@@ -263,7 +263,7 @@ impl Route {
     pub fn len(&self) -> usize {
         self.0.len()
     }
-    
+
     /// Returns a reference to the first route entry, if any.
     ///
     /// # Returns
@@ -287,7 +287,7 @@ impl Route {
     pub fn first(&self) -> Option<&ParserRouteValue> {
         self.0.first()
     }
-    
+
     /// Returns a reference to the last route entry, if any.
     ///
     /// # Returns
@@ -305,7 +305,7 @@ impl Route {
     ///
     /// let mut route = Route::empty();
     /// let uri1 = Uri::from_str("sip:proxy1.example.com;lr").unwrap();
-    /// let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap(); 
+    /// let uri2 = Uri::from_str("sip:proxy2.example.com;lr").unwrap();
     /// route.add_uri(uri1);
     /// route.add_uri(uri2.clone());
     ///
@@ -315,7 +315,7 @@ impl Route {
     pub fn last(&self) -> Option<&ParserRouteValue> {
         self.0.last()
     }
-    
+
     /// Adds a route entry to the end of the list.
     ///
     /// # Parameters
@@ -346,7 +346,7 @@ impl Route {
         self.0.push(entry);
         self
     }
-    
+
     /// Adds an address as a route entry to the end of the list.
     ///
     /// # Parameters
@@ -377,7 +377,7 @@ impl Route {
         self.0.push(ParserRouteValue(address));
         self
     }
-    
+
     /// Adds a URI as a route entry to the end of the list.
     ///
     /// Creates a route entry from the URI without a display name.
@@ -412,7 +412,7 @@ impl Route {
         self.0.push(ParserRouteValue(Address::new(uri)));
         self
     }
-    
+
     /// Returns an iterator over the route entries.
     ///
     /// # Returns
@@ -467,7 +467,15 @@ impl fmt::Display for Route {
     /// assert_eq!(route_str, "<sip:proxy1.example.com;lr>, <sip:proxy2.example.com;lr>");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.iter().map(|r| r.to_string()).collect::<Vec<String>>().join(", "))
+        write!(
+            f,
+            "{}",
+            self.0
+                .iter()
+                .map(|r| r.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        )
     }
 }
 
@@ -511,9 +519,10 @@ impl FromStr for Route {
 
         match all_consuming(parse_route)(s.as_bytes()) {
             Ok((_, route_header)) => Ok(route_header),
-            Err(e) => Err(Error::ParseError( 
-                format!("Failed to parse Route header: {:?}", e)
-            ))
+            Err(e) => Err(Error::ParseError(format!(
+                "Failed to parse Route header: {:?}",
+                e
+            ))),
         }
     }
 }
@@ -536,7 +545,7 @@ impl Deref for Route {
     ///
     /// // Use Vec methods directly on Route
     /// assert_eq!(route.len(), 2);
-    /// 
+    ///
     /// // Use the iter() method instead of direct iteration
     /// for entry in route.iter() {
     ///     // Access each entry
@@ -664,24 +673,31 @@ impl TypedHeaderTrait for Route {
     /// A Result containing the parsed Route header if successful, or an error otherwise
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::Route {
-            return Err(Error::InvalidHeader(format!("Expected Route header, got {}", header.name)));
+            return Err(Error::InvalidHeader(format!(
+                "Expected Route header, got {}",
+                header.name
+            )));
         }
-        
+
         // Use the parser to convert the header value into a Route
         use crate::parser::headers::parse_route;
         use nom::combinator::all_consuming;
-        
+
         // Get the raw bytes from the header value
         let bytes = match &header.value {
             crate::types::headers::HeaderValue::Raw(bytes) => bytes,
-            _ => return Err(Error::InvalidHeader("Expected raw header value".to_string())),
+            _ => {
+                return Err(Error::InvalidHeader(
+                    "Expected raw header value".to_string(),
+                ))
+            }
         };
-        
+
         // Parse the header value
         let route = all_consuming(parse_route)(bytes)
             .map_err(Error::from)
             .map(|(_, v)| v)?;
-        
+
         Ok(route)
     }
 }
@@ -689,9 +705,9 @@ impl TypedHeaderTrait for Route {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::{Uri, Scheme, Host};
     use crate::types::param::Param;
-    
+    use crate::types::uri::{Host, Scheme, Uri};
+
     #[test]
     fn test_route_empty() {
         let route = Route::empty();
@@ -700,7 +716,7 @@ mod tests {
         assert!(route.first().is_none());
         assert!(route.last().is_none());
     }
-    
+
     #[test]
     fn test_route_with_uri() {
         let uri = Uri::sip("example.com");
@@ -709,7 +725,7 @@ mod tests {
         assert_eq!(route.len(), 1);
         assert_eq!(route.first().unwrap().0.uri, uri);
     }
-    
+
     #[test]
     fn test_route_with_address() {
         let uri = Uri::sip("example.com");
@@ -717,35 +733,38 @@ mod tests {
         let route = Route::with_address(address.clone());
         assert_eq!(route.len(), 1);
         assert_eq!(route.first().unwrap().0, address);
-        assert_eq!(route.first().unwrap().0.display_name, Some("Test Proxy".to_string()));
+        assert_eq!(
+            route.first().unwrap().0.display_name,
+            Some("Test Proxy".to_string())
+        );
     }
-    
+
     #[test]
     fn test_route_add_methods() {
         let mut route = Route::empty();
-        
+
         // Add a URI
         let uri1 = Uri::sip("proxy1.example.com");
         route.add_uri(uri1.clone());
         assert_eq!(route.len(), 1);
-        
+
         // Add an address
         let uri2 = Uri::sip("proxy2.example.com");
         let address = Address::new_with_display_name("Proxy 2", uri2.clone());
         route.add_address(address.clone());
         assert_eq!(route.len(), 2);
-        
+
         // Add a route entry
         let uri3 = Uri::sips("secure.example.com");
         let address3 = Address::new(uri3.clone());
         let entry = ParserRouteValue(address3.clone());
         route.add(entry);
         assert_eq!(route.len(), 3);
-        
+
         // Check first and last
         assert_eq!(route.first().unwrap().0.uri, uri1);
         assert_eq!(route.last().unwrap().0.uri, uri3);
-        
+
         // Check iteration
         let uris: Vec<_> = route.iter().map(|e| &e.0.uri).collect();
         assert_eq!(uris.len(), 3);
@@ -753,7 +772,7 @@ mod tests {
         assert_eq!(uris[1], &uri2);
         assert_eq!(uris[2], &uri3);
     }
-    
+
     #[test]
     fn test_route_from_impls() {
         // From Vec<ParserRouteValue>
@@ -764,33 +783,33 @@ mod tests {
         let entries = vec![ParserRouteValue(addr1), ParserRouteValue(addr2)];
         let route = Route::from(entries);
         assert_eq!(route.len(), 2);
-        
+
         // From ParserRouteValue
         let uri = Uri::sip("proxy.example.com");
         let addr = Address::new(uri);
         let entry = ParserRouteValue(addr);
         let route = Route::from(entry);
         assert_eq!(route.len(), 1);
-        
+
         // From Address
         let uri = Uri::sip("proxy.example.com");
         let addr = Address::new(uri);
         let route = Route::from(addr);
         assert_eq!(route.len(), 1);
     }
-    
+
     #[test]
     fn test_route_fromstr_and_display() {
         let route_str = "<sip:proxy1.example.com;lr>, <sip:proxy2.example.com;transport=tcp>";
         let route = Route::from_str(route_str).unwrap();
-        
+
         assert_eq!(route.len(), 2);
         assert_eq!(route.first().unwrap().0.uri.scheme(), &Scheme::Sip);
-        
+
         // Test Display implementation
         let route_displayed = route.to_string();
         assert_eq!(route_displayed, route_str);
-        
+
         // Test round-trip
         let route2 = Route::from_str(&route_displayed).unwrap();
         assert_eq!(route, route2);
@@ -817,4 +836,4 @@ mod tests {
         assert_eq!(round_trip.0.len(), route.0.len());
         assert_eq!(round_trip.to_string(), route.to_string());
     }
-} 
+}

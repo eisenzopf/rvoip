@@ -4,7 +4,7 @@
 //! [RFC 3261 Section 20.4](https://datatracker.ietf.org/doc/html/rfc3261#section-20.4).
 //!
 //! The Alert-Info header field allows a server to provide information about alternative
-//! ring tones to be used by the user agent. The header field can appear in INVITE requests 
+//! ring tones to be used by the user agent. The header field can appear in INVITE requests
 //! or in provisional (1xx) responses.
 //!
 //! When received in an INVITE request, the Alert-Info header field specifies an alternative
@@ -35,17 +35,16 @@
 //! assert_eq!(header.get_param("appearance"), Some("2"));
 //! ```
 
-use crate::parser::headers::alert_info::{AlertInfoValue, parse_alert_info, AlertInfoUri};
-use crate::error::{Result, Error};
-use crate::types::uri::Uri;
-use crate::types::param::Param;
+use crate::error::{Error, Result};
+use crate::parser::headers::alert_info::{parse_alert_info, AlertInfoUri, AlertInfoValue};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::param::Param;
+use crate::types::uri::Uri;
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use nom::combinator::all_consuming;
-use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
-
 
 /// Represents a SIP Alert-Info header as defined in RFC 3261 Section 20.4.
 ///
@@ -227,16 +226,19 @@ impl AlertInfo {
 impl fmt::Display for AlertInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "<{}>", self.uri)?;
-        
+
         for (name, value) in &self.params {
             // Check if we need to quote the value
-            if value.chars().any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '.') {
+            if value
+                .chars()
+                .any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '.')
+            {
                 write!(f, ";{}=\"{}\"", name, value)?;
             } else {
                 write!(f, ";{}={}", name, value)?;
             }
         }
-        
+
         Ok(())
     }
 }
@@ -286,9 +288,7 @@ impl AlertInfoList {
     /// assert!(list.is_empty());
     /// ```
     pub fn new() -> Self {
-        AlertInfoList {
-            items: Vec::new(),
-        }
+        AlertInfoList { items: Vec::new() }
     }
 
     /// Adds an Alert-Info entry to the list.
@@ -410,31 +410,32 @@ fn convert_from_parser_value(value: &AlertInfoValue) -> Result<AlertInfo> {
         AlertInfoUri::Sip(uri) => uri.clone(),
         AlertInfoUri::Other { uri, .. } => {
             // For non-SIP URIs, create a new Uri
-            Uri::from_str(uri)
-                .map_err(|e| Error::ParseError(format!("Could not convert AlertInfoUri to Uri: {}", e)))?
+            Uri::from_str(uri).map_err(|e| {
+                Error::ParseError(format!("Could not convert AlertInfoUri to Uri: {}", e))
+            })?
         }
     };
-    
+
     // Convert parameters
     let mut params = HashMap::new();
     for param in &value.params {
         match param {
             Param::Other(name, Some(crate::types::param::GenericValue::Token(value_str))) => {
                 params.insert(name.clone(), value_str.clone());
-            },
+            }
             Param::Other(name, Some(crate::types::param::GenericValue::Quoted(value_str))) => {
                 params.insert(name.clone(), value_str.clone());
-            },
+            }
             Param::Other(name, None) => {
                 // Flag parameter without value
                 params.insert(name.clone(), "".to_string());
-            },
+            }
             _ => {
                 // Skip other parameter types
             }
         }
     }
-    
+
     Ok(AlertInfo { uri, params })
 }
 
@@ -445,12 +446,15 @@ impl FromStr for AlertInfo {
         // Parse as a single Alert-Info value
         let parsed = parse_alert_info(s.as_bytes())
             .map_err(|e| Error::ParseError(format!("Invalid Alert-Info format: {:?}", e)))?;
-        
+
         // We expect only one value when parsing a single AlertInfo
         if parsed.1.len() != 1 {
-            return Err(Error::ParseError(format!("Expected a single Alert-Info value, got {}", parsed.1.len())));
+            return Err(Error::ParseError(format!(
+                "Expected a single Alert-Info value, got {}",
+                parsed.1.len()
+            )));
         }
-        
+
         convert_from_parser_value(&parsed.1[0])
     }
 }
@@ -557,20 +561,21 @@ impl FromStr for AlertInfoHeader {
         } else {
             s
         };
-        
+
         // Parse the header
-        let result = parse_alert_info(input.as_bytes())
-            .map_err(|e| Error::ParseError(format!("Failed to parse Alert-Info header: {:?}", e)))?;
-            
+        let result = parse_alert_info(input.as_bytes()).map_err(|e| {
+            Error::ParseError(format!("Failed to parse Alert-Info header: {:?}", e))
+        })?;
+
         let parsed_values = result.1;
-        
+
         // Convert the parsed values to our AlertInfo type
         let mut alert_info_list = AlertInfoList::new();
         for value in parsed_values {
             let alert_info = Self::from_alert_info_value(&value)?;
             alert_info_list.add(alert_info);
         }
-        
+
         Ok(AlertInfoHeader { alert_info_list })
     }
 }
@@ -589,14 +594,19 @@ impl TypedHeaderTrait for AlertInfoHeader {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -604,11 +614,12 @@ impl TypedHeaderTrait for AlertInfoHeader {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     AlertInfoHeader::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::AlertInfo(values) => {
                 let mut alert_info_list = AlertInfoList::new();
                 for value in values {
@@ -616,10 +627,11 @@ impl TypedHeaderTrait for AlertInfoHeader {
                     alert_info_list.add(alert_info);
                 }
                 Ok(AlertInfoHeader { alert_info_list })
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -632,77 +644,93 @@ mod tests {
     fn test_from_str_basic() {
         let s = "<http://www.example.com/sounds/moo.wav>";
         let alert_info: AlertInfo = s.parse().unwrap();
-        
-        assert_eq!(alert_info.uri().to_string(), "http://www.example.com/sounds/moo.wav");
+
+        assert_eq!(
+            alert_info.uri().to_string(),
+            "http://www.example.com/sounds/moo.wav"
+        );
         assert!(alert_info.params.is_empty());
     }
-    
+
     #[test]
     fn test_from_str_with_params() {
         let s = "<http://www.example.com/sounds/moo.wav>;appearance=2;intensity=high";
         let alert_info: AlertInfo = s.parse().unwrap();
-        
-        assert_eq!(alert_info.uri().to_string(), "http://www.example.com/sounds/moo.wav");
+
+        assert_eq!(
+            alert_info.uri().to_string(),
+            "http://www.example.com/sounds/moo.wav"
+        );
         assert_eq!(alert_info.get_param("appearance"), Some("2"));
         assert_eq!(alert_info.get_param("intensity"), Some("high"));
     }
-    
+
     #[test]
     fn test_display() {
         let uri = Uri::from_str("http://www.example.com/sounds/moo.wav").unwrap();
         let alert_info = AlertInfo::new(uri)
             .with_param("appearance", "2")
             .with_param("intensity", "high");
-            
+
         // Note: HashMap doesn't guarantee order, so we can't check the exact string
         let s = alert_info.to_string();
         assert!(s.starts_with("<http://www.example.com/sounds/moo.wav>"));
         assert!(s.contains(";appearance=2"));
         assert!(s.contains(";intensity=high"));
     }
-    
+
     #[test]
     fn test_alert_info_list() {
         let uri1 = Uri::from_str("http://www.example.com/sounds/moo.wav").unwrap();
         let uri2 = Uri::from_str("http://www.example.com/sounds/ring.wav").unwrap();
-        
+
         let alert_info1 = AlertInfo::new(uri1);
         let alert_info2 = AlertInfo::new(uri2).with_param("appearance", "2");
-        
-        let list = AlertInfoList::new()
-            .with(alert_info1)
-            .with(alert_info2);
-            
+
+        let list = AlertInfoList::new().with(alert_info1).with(alert_info2);
+
         assert_eq!(list.len(), 2);
-        
+
         let s = list.to_string();
         assert!(s.contains("http://www.example.com/sounds/moo.wav"));
         assert!(s.contains("http://www.example.com/sounds/ring.wav"));
         assert!(s.contains("appearance=2"));
     }
-    
+
     #[test]
     fn test_header_from_str() {
         let s = "Alert-Info: <http://www.example.com/sounds/moo.wav>;appearance=2, <http://www.example.com/sounds/ring.wav>";
         let header: AlertInfoHeader = s.parse().unwrap();
-        
+
         assert_eq!(header.alert_info_list.len(), 2);
-        assert_eq!(header.alert_info_list.items[0].uri().to_string(), "http://www.example.com/sounds/moo.wav");
-        assert_eq!(header.alert_info_list.items[0].get_param("appearance"), Some("2"));
-        assert_eq!(header.alert_info_list.items[1].uri().to_string(), "http://www.example.com/sounds/ring.wav");
+        assert_eq!(
+            header.alert_info_list.items[0].uri().to_string(),
+            "http://www.example.com/sounds/moo.wav"
+        );
+        assert_eq!(
+            header.alert_info_list.items[0].get_param("appearance"),
+            Some("2")
+        );
+        assert_eq!(
+            header.alert_info_list.items[1].uri().to_string(),
+            "http://www.example.com/sounds/ring.wav"
+        );
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         let uri = Uri::from_str("http://www.example.com/sounds/moo.wav").unwrap();
         let alert_info = AlertInfo::new(uri);
         let header = AlertInfoHeader::new().with_alert_info(alert_info);
-        
+
         let sip_header = header.to_header();
         assert_eq!(sip_header.name, HeaderName::AlertInfo);
-        
+
         let parsed_header = AlertInfoHeader::from_header(&sip_header).unwrap();
         assert_eq!(parsed_header.alert_info_list.len(), 1);
-        assert_eq!(parsed_header.alert_info_list.items[0].uri().to_string(), "http://www.example.com/sounds/moo.wav");
+        assert_eq!(
+            parsed_header.alert_info_list.items[0].uri().to_string(),
+            "http://www.example.com/sounds/moo.wav"
+        );
     }
-} 
+}

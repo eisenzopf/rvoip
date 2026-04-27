@@ -3,10 +3,13 @@
 //! This module provides a centralized registry for payload format handlers
 //! focused on media processing capabilities.
 
+use super::traits::{PayloadFormat, PayloadFormatFactory};
+use super::{
+    G711APayloadFormat, G711UPayloadFormat, G722PayloadFormat, OpusPayloadFormat, Vp8PayloadFormat,
+    Vp9PayloadFormat,
+};
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use super::traits::{PayloadFormat, PayloadFormatFactory};
-use super::{G711UPayloadFormat, G711APayloadFormat, G722PayloadFormat, OpusPayloadFormat, Vp8PayloadFormat, Vp9PayloadFormat};
 
 /// Global payload format registry
 static PAYLOAD_REGISTRY: OnceLock<PayloadFormatRegistry> = OnceLock::new();
@@ -59,7 +62,7 @@ impl PayloadFormatFactory for StandardPayloadFormatFactory {
             _ => None,
         }
     }
-    
+
     fn can_handle(&self, payload_type: u8) -> bool {
         matches!(payload_type, 0 | 8 | 9 | 96..=127)
     }
@@ -80,12 +83,12 @@ impl PayloadFormatRegistry {
             payload_info: HashMap::new(),
             factories: HashMap::new(),
         };
-        
+
         registry.populate_standard_types();
         registry.register_standard_factories();
         registry
     }
-    
+
     /// Populate standard RFC 3551 payload types relevant to media processing
     fn populate_standard_types(&mut self) {
         // Audio payload types
@@ -100,18 +103,21 @@ impl PayloadFormatRegistry {
             (15, "G728", 8000, Some(1)),
             (18, "G729", 8000, Some(1)),
         ];
-        
+
         for (pt, name, clock_rate, channels) in audio_types {
-            self.payload_info.insert(pt, PayloadTypeInfo {
-                payload_type: pt,
-                media_type: MediaType::Audio,
-                codec_name: name.to_string(),
-                clock_rate,
-                channels,
-                is_static: true,
-            });
+            self.payload_info.insert(
+                pt,
+                PayloadTypeInfo {
+                    payload_type: pt,
+                    media_type: MediaType::Audio,
+                    codec_name: name.to_string(),
+                    clock_rate,
+                    channels,
+                    is_static: true,
+                },
+            );
         }
-        
+
         // Video payload types
         let video_types = [
             (26, "JPEG", 90000, None),
@@ -119,18 +125,21 @@ impl PayloadFormatRegistry {
             (32, "MPV", 90000, None),
             (34, "H263", 90000, None),
         ];
-        
+
         for (pt, name, clock_rate, channels) in video_types {
-            self.payload_info.insert(pt, PayloadTypeInfo {
-                payload_type: pt,
-                media_type: MediaType::Video,
-                codec_name: name.to_string(),
-                clock_rate,
-                channels,
-                is_static: true,
-            });
+            self.payload_info.insert(
+                pt,
+                PayloadTypeInfo {
+                    payload_type: pt,
+                    media_type: MediaType::Video,
+                    codec_name: name.to_string(),
+                    clock_rate,
+                    channels,
+                    is_static: true,
+                },
+            );
         }
-        
+
         // Common dynamic payload types
         let dynamic_types = [
             (96, "H264", MediaType::Video, 90000, None),
@@ -138,35 +147,39 @@ impl PayloadFormatRegistry {
             (98, "VP9", MediaType::Video, 90000, None),
             (111, "OPUS", MediaType::Audio, 48000, Some(2)),
         ];
-        
+
         for (pt, name, media_type, clock_rate, channels) in dynamic_types {
-            self.payload_info.insert(pt, PayloadTypeInfo {
-                payload_type: pt,
-                media_type,
-                codec_name: name.to_string(),
-                clock_rate,
-                channels,
-                is_static: false,
-            });
+            self.payload_info.insert(
+                pt,
+                PayloadTypeInfo {
+                    payload_type: pt,
+                    media_type,
+                    codec_name: name.to_string(),
+                    clock_rate,
+                    channels,
+                    is_static: false,
+                },
+            );
         }
     }
-    
+
     /// Register standard format factories
     fn register_standard_factories(&mut self) {
         let factory = Box::new(StandardPayloadFormatFactory) as Box<dyn PayloadFormatFactory>;
-        
+
         // Register for payload types we can handle
         for pt in [0, 8, 9] {
             // Each factory needs to be separately boxed since Box<dyn Trait> isn't Clone
-            self.factories.insert(pt, Box::new(StandardPayloadFormatFactory));
+            self.factories
+                .insert(pt, Box::new(StandardPayloadFormatFactory));
         }
     }
-    
+
     /// Get payload type information
     pub fn get_payload_info(&self, payload_type: u8) -> Option<&PayloadTypeInfo> {
         self.payload_info.get(&payload_type)
     }
-    
+
     /// Get media type for payload type
     pub fn get_media_type(&self, payload_type: u8) -> MediaType {
         if let Some(info) = self.get_payload_info(payload_type) {
@@ -180,7 +193,7 @@ impl PayloadFormatRegistry {
             }
         }
     }
-    
+
     /// Get codec name for payload type
     pub fn get_codec_name(&self, payload_type: u8) -> String {
         if let Some(info) = self.get_payload_info(payload_type) {
@@ -189,31 +202,38 @@ impl PayloadFormatRegistry {
             format!("Unknown-{}", payload_type)
         }
     }
-    
+
     /// Create a payload format handler
-    pub fn create_format(&self, payload_type: u8, clock_rate: Option<u32>) -> Option<Box<dyn PayloadFormat>> {
+    pub fn create_format(
+        &self,
+        payload_type: u8,
+        clock_rate: Option<u32>,
+    ) -> Option<Box<dyn PayloadFormat>> {
         let clock_rate = clock_rate.or_else(|| {
-            self.get_payload_info(payload_type).map(|info| info.clock_rate)
+            self.get_payload_info(payload_type)
+                .map(|info| info.clock_rate)
         })?;
-        
-        self.factories.get(&payload_type)?.create_format(payload_type, clock_rate)
+
+        self.factories
+            .get(&payload_type)?
+            .create_format(payload_type, clock_rate)
     }
-    
+
     /// Register a custom payload type
     pub fn register_payload_type(&mut self, info: PayloadTypeInfo) {
         self.payload_info.insert(info.payload_type, info);
     }
-    
+
     /// Register a custom format factory
     pub fn register_factory(&mut self, payload_type: u8, factory: Box<dyn PayloadFormatFactory>) {
         self.factories.insert(payload_type, factory);
     }
-    
+
     /// Check if payload type is dynamic (96-127)
     pub fn is_dynamic_payload_type(payload_type: u8) -> bool {
         payload_type >= 96 && payload_type <= 127
     }
-    
+
     /// List all supported payload types
     pub fn supported_payload_types(&self) -> Vec<u8> {
         let mut types: Vec<u8> = self.factories.keys().copied().collect();
@@ -228,7 +248,10 @@ pub fn get_global_registry() -> &'static PayloadFormatRegistry {
 }
 
 /// Create a payload format handler (convenience function)
-pub fn create_payload_format(payload_type: u8, clock_rate: Option<u32>) -> Option<Box<dyn PayloadFormat>> {
+pub fn create_payload_format(
+    payload_type: u8,
+    clock_rate: Option<u32>,
+) -> Option<Box<dyn PayloadFormat>> {
     get_global_registry().create_format(payload_type, clock_rate)
 }
 
@@ -245,33 +268,33 @@ pub fn get_codec_name(payload_type: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_standard_audio_types() {
         let registry = PayloadFormatRegistry::new();
-        
+
         // Test PCMU
         let pcmu_info = registry.get_payload_info(0).unwrap();
         assert_eq!(pcmu_info.codec_name, "PCMU");
         assert_eq!(pcmu_info.media_type, MediaType::Audio);
         assert_eq!(pcmu_info.clock_rate, 8000);
-        
+
         // Test format creation
         let pcmu_format = registry.create_format(0, None).unwrap();
         assert_eq!(pcmu_format.payload_type(), 0);
         assert_eq!(pcmu_format.clock_rate(), 8000);
     }
-    
+
     #[test]
     fn test_media_type_fallback() {
         let registry = PayloadFormatRegistry::new();
-        
+
         // Test fallback for unregistered types
         assert_eq!(registry.get_media_type(1), MediaType::Audio); // Audio range
         assert_eq!(registry.get_media_type(27), MediaType::Video); // Video range
-        assert_eq!(registry.get_media_type(50), MediaType::Data);  // Other
+        assert_eq!(registry.get_media_type(50), MediaType::Data); // Other
     }
-    
+
     #[test]
     fn test_dynamic_payload_detection() {
         assert!(PayloadFormatRegistry::is_dynamic_payload_type(96));

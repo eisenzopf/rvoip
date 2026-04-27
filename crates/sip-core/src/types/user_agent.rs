@@ -31,11 +31,11 @@
 //! assert_eq!(user_agent.products()[1], "(Platform/OS Version)");
 //! ```
 
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the User-Agent header field (RFC 3261 Section 20.41).
 ///
@@ -227,23 +227,25 @@ impl FromStr for UserAgent {
             // Strip the "User-Agent:" prefix
             let parts: Vec<&str> = s.splitn(2, ':').collect();
             if parts.len() != 2 {
-                return Err(Error::ParseError("Invalid User-Agent header format".to_string()));
+                return Err(Error::ParseError(
+                    "Invalid User-Agent header format".to_string(),
+                ));
             }
             parts[1].trim()
         } else {
             s.trim()
         };
-        
+
         // Empty string is a valid User-Agent (means no agent information)
         if value_str.is_empty() {
             return Ok(UserAgent::new());
         }
-        
+
         // Parse product tokens (with special handling for tokens in parentheses)
         let mut products = Vec::new();
         let mut current_product = String::new();
         let mut in_parentheses = false;
-        
+
         for ch in value_str.chars() {
             match ch {
                 '(' => {
@@ -262,7 +264,7 @@ impl FromStr for UserAgent {
                         in_parentheses = true;
                         current_product.push(ch);
                     }
-                },
+                }
                 ')' => {
                     current_product.push(ch);
                     if in_parentheses {
@@ -273,7 +275,7 @@ impl FromStr for UserAgent {
                             current_product = String::new();
                         }
                     }
-                },
+                }
                 ' ' => {
                     if in_parentheses {
                         // Space inside parentheses, keep it
@@ -288,14 +290,14 @@ impl FromStr for UserAgent {
                             current_product = String::new();
                         }
                     }
-                },
+                }
                 _ => {
                     // Add to current product
                     current_product.push(ch);
                 }
             }
         }
-        
+
         // Add the last product, if any
         if !current_product.is_empty() {
             current_product = current_product.trim().to_string();
@@ -303,7 +305,7 @@ impl FromStr for UserAgent {
                 products.push(current_product);
             }
         }
-            
+
         Ok(UserAgent { products })
     }
 }
@@ -317,14 +319,19 @@ impl TypedHeaderTrait for UserAgent {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -332,24 +339,25 @@ impl TypedHeaderTrait for UserAgent {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     UserAgent::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::UserAgent(server_vals) => {
                 // Convert the complex server values into strings
                 let mut products = Vec::new();
-                
+
                 for val in server_vals {
                     let (product_opt, comment_opt) = val;
-                    
+
                     // Handle product if present
                     if let Some(product) = product_opt {
                         let (name_bytes, version_opt) = product;
                         if let Ok(name) = std::str::from_utf8(name_bytes) {
                             let mut product_str = name.to_string();
-                            
+
                             // Add version if present
                             if let Some(version_bytes) = version_opt {
                                 if let Ok(version) = std::str::from_utf8(version_bytes) {
@@ -357,11 +365,11 @@ impl TypedHeaderTrait for UserAgent {
                                     product_str.push_str(version);
                                 }
                             }
-                            
+
                             products.push(product_str);
                         }
                     }
-                    
+
                     // Handle comment if present
                     if let Some(comment_bytes) = comment_opt {
                         if let Ok(comment) = std::str::from_utf8(comment_bytes) {
@@ -369,12 +377,13 @@ impl TypedHeaderTrait for UserAgent {
                         }
                     }
                 }
-                
+
                 Ok(UserAgent { products })
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -389,7 +398,7 @@ mod tests {
         assert!(user_agent.is_empty());
         assert_eq!(user_agent.to_string(), "");
     }
-    
+
     #[test]
     fn test_single() {
         let user_agent = UserAgent::single("Example-SIP-Client/1.0");
@@ -397,87 +406,92 @@ mod tests {
         assert_eq!(user_agent.products()[0], "Example-SIP-Client/1.0");
         assert_eq!(user_agent.to_string(), "Example-SIP-Client/1.0");
     }
-    
+
     #[test]
     fn test_with_products() {
-        let user_agent = UserAgent::with_products(&[
-            "Example-SIP-Client/1.0",
-            "(Platform/OS Version)"
-        ]);
+        let user_agent =
+            UserAgent::with_products(&["Example-SIP-Client/1.0", "(Platform/OS Version)"]);
         assert_eq!(user_agent.products().len(), 2);
         assert_eq!(user_agent.products()[0], "Example-SIP-Client/1.0");
         assert_eq!(user_agent.products()[1], "(Platform/OS Version)");
-        assert_eq!(user_agent.to_string(), "Example-SIP-Client/1.0 (Platform/OS Version)");
+        assert_eq!(
+            user_agent.to_string(),
+            "Example-SIP-Client/1.0 (Platform/OS Version)"
+        );
     }
-    
+
     #[test]
     fn test_add_product() {
         let mut user_agent = UserAgent::new();
-        
+
         // Add products
         user_agent.add_product("Example-SIP-Client/1.0");
         user_agent.add_product("(Platform/OS Version)");
-        
+
         assert_eq!(user_agent.products().len(), 2);
         assert_eq!(user_agent.products()[0], "Example-SIP-Client/1.0");
         assert_eq!(user_agent.products()[1], "(Platform/OS Version)");
     }
-    
+
     #[test]
     fn test_from_str() {
         // Simple case
         let user_agent: UserAgent = "Example-SIP-Client/1.0".parse().unwrap();
         assert_eq!(user_agent.products().len(), 1);
         assert_eq!(user_agent.products()[0], "Example-SIP-Client/1.0");
-        
+
         // Multiple products
-        let user_agent: UserAgent = "Example-SIP-Client/1.0 (Platform/OS Version)".parse().unwrap();
+        let user_agent: UserAgent = "Example-SIP-Client/1.0 (Platform/OS Version)"
+            .parse()
+            .unwrap();
         assert_eq!(user_agent.products().len(), 2);
         assert_eq!(user_agent.products()[0], "Example-SIP-Client/1.0");
         assert_eq!(user_agent.products()[1], "(Platform/OS Version)");
-        
+
         // With header name
-        let user_agent: UserAgent = "User-Agent: Example-SIP-Client/1.0 (Platform/OS Version)".parse().unwrap();
+        let user_agent: UserAgent = "User-Agent: Example-SIP-Client/1.0 (Platform/OS Version)"
+            .parse()
+            .unwrap();
         assert_eq!(user_agent.products().len(), 2);
         assert_eq!(user_agent.products()[0], "Example-SIP-Client/1.0");
         assert_eq!(user_agent.products()[1], "(Platform/OS Version)");
-        
+
         // Complex with multiple products and comments
-        let user_agent: UserAgent = "ExamplePhone/2.0 ExampleBrowser/1.5 (OS/2.6) ExampleLib/1.1".parse().unwrap();
+        let user_agent: UserAgent = "ExamplePhone/2.0 ExampleBrowser/1.5 (OS/2.6) ExampleLib/1.1"
+            .parse()
+            .unwrap();
         assert_eq!(user_agent.products().len(), 4);
         assert_eq!(user_agent.products()[0], "ExamplePhone/2.0");
         assert_eq!(user_agent.products()[1], "ExampleBrowser/1.5");
         assert_eq!(user_agent.products()[2], "(OS/2.6)");
         assert_eq!(user_agent.products()[3], "ExampleLib/1.1");
-        
+
         // Empty
         let user_agent: UserAgent = "".parse().unwrap();
         assert!(user_agent.is_empty());
-        
+
         // Empty with header name
         let user_agent: UserAgent = "User-Agent:".parse().unwrap();
         assert!(user_agent.is_empty());
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         // Create a header
-        let user_agent = UserAgent::with_products(&[
-            "Example-SIP-Client/1.0",
-            "(Platform/OS Version)"
-        ]);
+        let user_agent =
+            UserAgent::with_products(&["Example-SIP-Client/1.0", "(Platform/OS Version)"]);
         let header = user_agent.to_header();
-        
+
         assert_eq!(header.name, HeaderName::UserAgent);
-        
+
         // Convert back from Header
         let user_agent2 = UserAgent::from_header(&header).unwrap();
         assert_eq!(user_agent.products().len(), user_agent2.products().len());
         assert_eq!(user_agent.products()[0], user_agent2.products()[0]);
         assert_eq!(user_agent.products()[1], user_agent2.products()[1]);
-        
+
         // Test invalid header name
         let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
         assert!(UserAgent::from_header(&wrong_header).is_err());
     }
-} 
+}

@@ -4,11 +4,11 @@ use super::auth::common::auth_scheme;
 use super::auth::credentials::credentials;
 use crate::parser::whitespace::{lws, owsp, sws};
 use crate::parser::ParseResult;
-use crate::types::auth::{Credentials, Authorization as AuthorizationHeader};
-use nom::IResult;
-use nom::sequence::{pair, preceded};
+use crate::types::auth::{Authorization as AuthorizationHeader, Credentials};
 use nom::combinator::{map, opt};
-use nom::error::{ErrorKind, Error as NomError};
+use nom::error::{Error as NomError, ErrorKind};
+use nom::sequence::{pair, preceded};
+use nom::IResult;
 
 // Authorization = "Authorization" HCOLON credentials
 // Note: HCOLON is handled by the top-level message_header parser.
@@ -17,30 +17,30 @@ use nom::error::{ErrorKind, Error as NomError};
 pub fn parse_authorization(input: &[u8]) -> ParseResult<AuthorizationHeader> {
     // Handle any leading whitespace, including line folding
     let (input, _) = opt(lws)(input)?;
-    
+
     // Check for empty input
     if input.is_empty() {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
     }
-    
+
     // Parse credentials and map to AuthorizationHeader
     let (remaining, creds) = credentials(input)?;
-    
+
     // Handle any trailing whitespace
     let (remaining, _) = sws(remaining)?;
-    
+
     // Make sure there's nothing left after parsing
     if !remaining.is_empty() {
         return Err(nom::Err::Error(NomError::new(remaining, ErrorKind::Eof)));
     }
-    
+
     Ok((remaining, AuthorizationHeader(creds)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{DigestParam as DigestRespParam, Qop, Algorithm, AuthParam};
+    use crate::types::auth::{Algorithm, AuthParam, DigestParam as DigestRespParam, Qop};
     use crate::types::Uri;
 
     #[test]
@@ -60,7 +60,7 @@ mod tests {
             panic!("Expected Digest credentials");
         }
     }
-    
+
     #[test]
     fn test_parse_authorization_basic() {
         let input = br#"Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=="#;
@@ -74,7 +74,7 @@ mod tests {
             panic!("Expected Basic credentials");
         }
     }
-    
+
     #[test]
     fn test_parse_authorization_bearer() {
         let input = br#"Bearer eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsImV4cCI6MTczNDU1NTU1NX0.signature"#;
@@ -88,7 +88,7 @@ mod tests {
             panic!("Expected Bearer credentials");
         }
     }
-    
+
     #[test]
     fn test_parse_authorization_other_scheme() {
         let input = br#"Custom some-param=value"#;
@@ -103,7 +103,7 @@ mod tests {
             panic!("Expected Other credentials");
         }
     }
-    
+
     #[test]
     fn test_parse_authorization_with_whitespace() {
         // Test with extra whitespace
@@ -120,14 +120,14 @@ mod tests {
         } else {
             panic!("Expected Digest credentials");
         }
-        
+
         // Test with tabs
         let input = br#"Digest	username="Alice",	realm="atlanta.com",	nonce="xyz",	uri="sip:ss1.example.com",	response="abc""#;
         let result = parse_authorization(input);
         assert!(result.is_ok());
-        assert!(result.unwrap().1.0.is_digest());
+        assert!(result.unwrap().1 .0.is_digest());
     }
-    
+
     #[test]
     fn test_parse_authorization_with_line_folding() {
         // Test with line folding after credentials scheme
@@ -142,7 +142,7 @@ mod tests {
         } else {
             panic!("Expected Digest credentials");
         }
-        
+
         // Test with line folding between parameters
         let input = br#"Digest username="Alice",
  realm="atlanta.com", 
@@ -162,7 +162,7 @@ mod tests {
             panic!("Expected Digest credentials");
         }
     }
-    
+
     #[test]
     fn test_parse_authorization_case_sensitivity() {
         // Test with different case for scheme and parameters
@@ -179,13 +179,13 @@ mod tests {
         } else {
             panic!("Expected Digest credentials");
         }
-        
+
         // Test with all uppercase scheme
         let input = br#"DIGEST username="Alice", realm="atlanta.com", nonce="xyz", uri="sip:ss1.example.com", response="abc""#;
         let result = parse_authorization(input);
         assert!(result.is_ok());
-        assert!(result.unwrap().1.0.is_digest());
-        
+        assert!(result.unwrap().1 .0.is_digest());
+
         // Test with Basic in mixed case
         let input = br#"bAsIc QWxhZGRpbjpvcGVuIHNlc2FtZQ=="#;
         let result = parse_authorization(input);
@@ -196,7 +196,7 @@ mod tests {
             panic!("Expected Basic credentials");
         }
     }
-    
+
     #[test]
     fn test_parse_authorization_full_digest_params() {
         // Test with all possible Digest parameters
@@ -217,10 +217,10 @@ mod tests {
             assert!(params.contains(&DigestRespParam::Opaque("someopaque".to_string())));
             assert!(params.contains(&DigestRespParam::MsgQop(Qop::Auth)));
             assert!(params.contains(&DigestRespParam::NonceCount(1)));
-            
+
             // Check URI using a more flexible approach (matches! pattern)
             assert!(params.iter().any(|p| matches!(p, DigestRespParam::Uri(_))));
-            
+
             // Response is being parsed as a generic AuthParam, so check for it that way
             assert!(params.iter().any(|p| {
                 if let DigestRespParam::Param(auth_param) = p {
@@ -233,21 +233,21 @@ mod tests {
             panic!("Expected Digest credentials");
         }
     }
-    
+
     #[test]
     fn test_parse_authorization_error_cases() {
         // Empty input
         let input = b"";
         assert!(parse_authorization(input).is_err());
-        
+
         // Missing required parameters
         let input = br#"Digest username="Alice""#; // Missing realm, nonce, uri, response
         assert!(parse_authorization(input).is_ok()); // Parser accepts incomplete credentials, validation happens at a higher level
-        
+
         // Malformed parameter format
         let input = br#"Digest username="Alice, realm="atlanta.com""#; // Unclosed quote
         assert!(parse_authorization(input).is_err());
-        
+
         // Unknown scheme
         let input = br#"Unknown username="Alice""#;
         let result = parse_authorization(input);
@@ -257,18 +257,18 @@ mod tests {
         } else {
             panic!("Expected Other credentials type");
         }
-        
+
         // Trailing comma
         let input = br#"Digest username="Alice", "#;
         let result = parse_authorization(input);
         assert!(result.is_err());
-        
+
         // Invalid algorithm
         let input = br#"Digest username="Alice", realm="atlanta.com", nonce="xyz", uri="sip:ss1.example.com", response="abc", algorithm=INVALID"#;
         let result = parse_authorization(input);
         assert!(result.is_ok()); // Parser accepts unknown algorithms as "Other"
     }
-    
+
     #[test]
     fn test_parse_authorization_rfc_example() {
         // Example from RFC 3261 Section 22.4
@@ -280,10 +280,14 @@ mod tests {
         if let AuthorizationHeader(Credentials::Digest { params }) = creds {
             assert!(params.contains(&DigestRespParam::Username("bob".to_string())));
             assert!(params.contains(&DigestRespParam::Realm("atlanta.example.com".to_string())));
-            assert!(params.contains(&DigestRespParam::Nonce("ea9c8e88df84f1cec4341ae6cbe5a359".to_string())));
+            assert!(params.contains(&DigestRespParam::Nonce(
+                "ea9c8e88df84f1cec4341ae6cbe5a359".to_string()
+            )));
             assert!(params.contains(&DigestRespParam::Opaque("".to_string())));
-            assert!(params.contains(&DigestRespParam::Response("dfe56131d1958046689d83306477ecc".to_string())));
-            
+            assert!(params.contains(&DigestRespParam::Response(
+                "dfe56131d1958046689d83306477ecc".to_string()
+            )));
+
             // Verify URI matches the one in the RFC example
             let uri_param = params.iter().find_map(|p| {
                 if let DigestRespParam::Uri(u) = p {
@@ -297,4 +301,4 @@ mod tests {
             panic!("Expected Digest credentials");
         }
     }
-} 
+}

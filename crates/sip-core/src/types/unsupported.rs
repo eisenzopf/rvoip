@@ -40,12 +40,10 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::parser;
+use crate::types::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::Error;
-use crate::types::{
-    Header, HeaderName, HeaderValue, TypedHeaderTrait
-};
-use serde::{Serialize, Deserialize};
 use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
 
 /// Represents an Unsupported header as defined in RFC 3261 Section 20.41
 ///
@@ -64,34 +62,34 @@ use nom::combinator::all_consuming;
 ///
 /// ```rust
 /// use rvoip_sip_core::prelude::*;
-/// 
+///
 /// // Create an empty Unsupported header
 /// let mut unsupported = Unsupported::new();
-/// 
+///
 /// // Add unsupported option tags
 /// unsupported.add_option_tag("timer");
 /// unsupported.add_option_tag("100rel");
-/// 
+///
 /// // Check for specific unsupported features
 /// assert!(unsupported.has_option_tag("timer"));
 /// assert!(unsupported.has_option_tag("100rel"));
 /// assert!(!unsupported.has_option_tag("path"));
-/// 
+///
 /// // Get all unsupported tags
 /// let tags = unsupported.option_tags();
 /// assert_eq!(tags.len(), 2);
-/// 
+///
 /// // Convert to a string for a SIP message
 /// assert_eq!(unsupported.to_string(), "timer, 100rel");
 /// ```
 ///
 /// ```
 /// use rvoip_sip_core::prelude::*;
-/// 
+///
 /// let mut unsupported = Unsupported::new();
 /// unsupported.add_option_tag("timer");
 /// unsupported.add_option_tag("100rel");
-/// 
+///
 /// assert!(unsupported.has_option_tag("timer"));
 /// assert!(unsupported.has_option_tag("100rel"));
 /// assert!(!unsupported.has_option_tag("path"));
@@ -151,9 +149,7 @@ impl Unsupported {
     /// assert!(unsupported.has_option_tag("100rel"));
     /// ```
     pub fn with_tags(tags: Vec<String>) -> Self {
-        Self {
-            option_tags: tags,
-        }
+        Self { option_tags: tags }
     }
 
     /// Check if this Unsupported header contains a specific option tag
@@ -384,7 +380,7 @@ impl FromStr for Unsupported {
 
 impl TypedHeaderTrait for Unsupported {
     type Name = HeaderName;
-    
+
     /// Returns the header name for this header type.
     ///
     /// # Returns
@@ -454,24 +450,31 @@ impl TypedHeaderTrait for Unsupported {
     /// ```
     fn from_header(header: &Header) -> crate::error::Result<Self> {
         if header.name != HeaderName::Unsupported {
-            return Err(Error::InvalidHeader(format!("Expected Unsupported header, got {}", header.name)));
+            return Err(Error::InvalidHeader(format!(
+                "Expected Unsupported header, got {}",
+                header.name
+            )));
         }
-        
+
         // Use the parser to convert the header value into an Unsupported header
         use crate::parser::headers::unsupported::parse_unsupported;
         use nom::combinator::all_consuming;
-        
+
         // Get the raw bytes from the header value
         let bytes = match &header.value {
             crate::types::headers::HeaderValue::Raw(bytes) => bytes,
-            _ => return Err(Error::InvalidHeader("Expected raw header value".to_string())),
+            _ => {
+                return Err(Error::InvalidHeader(
+                    "Expected raw header value".to_string(),
+                ))
+            }
         };
-        
+
         // Parse the header value
         let option_tags = all_consuming(parse_unsupported)(bytes)
             .map_err(Error::from)
             .map(|(_, v)| v)?;
-            
+
         Ok(Unsupported::with_tags(option_tags))
     }
 }
@@ -497,7 +500,7 @@ mod tests {
     fn test_unsupported_has_option_tag() {
         let mut unsupported = Unsupported::new();
         unsupported.add_option_tag("timer");
-        
+
         assert!(unsupported.has_option_tag("timer"));
         assert!(!unsupported.has_option_tag("100rel"));
     }
@@ -507,21 +510,28 @@ mod tests {
         let mut unsupported = Unsupported::new();
         unsupported.add_option_tag("timer");
         unsupported.add_option_tag("100rel");
-        
-        assert_eq!(unsupported.option_tags(), &["timer".to_string(), "100rel".to_string()]);
+
+        assert_eq!(
+            unsupported.option_tags(),
+            &["timer".to_string(), "100rel".to_string()]
+        );
 
         // Adding duplicate should not change anything
         unsupported.add_option_tag("timer");
-        assert_eq!(unsupported.option_tags(), &["timer".to_string(), "100rel".to_string()]);
+        assert_eq!(
+            unsupported.option_tags(),
+            &["timer".to_string(), "100rel".to_string()]
+        );
     }
 
     #[test]
     fn test_unsupported_remove_option_tag() {
-        let mut unsupported = Unsupported::with_tags(vec!["timer".to_string(), "100rel".to_string()]);
+        let mut unsupported =
+            Unsupported::with_tags(vec!["timer".to_string(), "100rel".to_string()]);
         unsupported.remove_option_tag("timer");
-        
+
         assert_eq!(unsupported.option_tags(), &["100rel".to_string()]);
-        
+
         // Removing non-existent tag should not change anything
         unsupported.remove_option_tag("path");
         assert_eq!(unsupported.option_tags(), &["100rel".to_string()]);
@@ -531,10 +541,10 @@ mod tests {
     fn test_unsupported_display() {
         let mut unsupported = Unsupported::new();
         assert_eq!(unsupported.to_string(), "");
-        
+
         unsupported.add_option_tag("timer");
         assert_eq!(unsupported.to_string(), "timer");
-        
+
         unsupported.add_option_tag("100rel");
         assert_eq!(unsupported.to_string(), "timer, 100rel");
     }
@@ -542,20 +552,23 @@ mod tests {
     #[test]
     fn test_unsupported_from_str() {
         let unsupported: Unsupported = "timer, 100rel".parse().unwrap();
-        assert_eq!(unsupported.option_tags(), &["timer".to_string(), "100rel".to_string()]);
+        assert_eq!(
+            unsupported.option_tags(),
+            &["timer".to_string(), "100rel".to_string()]
+        );
     }
 
     #[test]
     fn test_unsupported_to_header() {
         let unsupported = Unsupported::with_tags(vec!["timer".to_string(), "100rel".to_string()]);
         let header = unsupported.to_header();
-        
+
         assert_eq!(header.name, HeaderName::Unsupported);
         match &header.value {
             crate::types::headers::HeaderValue::Raw(bytes) => {
                 let value_string = String::from_utf8_lossy(bytes).to_string();
                 assert_eq!(value_string, "timer, 100rel");
-            },
+            }
             _ => panic!("Expected HeaderValue::Raw"),
         }
     }
@@ -568,19 +581,22 @@ mod tests {
             name: HeaderName::Unsupported,
             value: crate::types::headers::HeaderValue::Raw(raw_value),
         };
-        
+
         let unsupported = Unsupported::from_header(&header).unwrap();
-        assert_eq!(unsupported.option_tags(), &["timer".to_string(), "100rel".to_string()]);
+        assert_eq!(
+            unsupported.option_tags(),
+            &["timer".to_string(), "100rel".to_string()]
+        );
     }
 
     #[test]
     fn test_unsupported_roundtrip() {
         let tags = vec!["timer".to_string(), "100rel".to_string()];
         let original = Unsupported::with_tags(tags);
-        
+
         let header = original.to_header();
         let roundtrip = Unsupported::from_header(&header).unwrap();
-        
+
         assert_eq!(original, roundtrip);
     }
 
@@ -589,9 +605,9 @@ mod tests {
     fn test_serialization() {
         let unsupported = Unsupported::with_tags(vec!["timer".to_string(), "100rel".to_string()]);
         let json = serde_json::to_string(&unsupported).unwrap();
-        
+
         // Convert to header
         let header = unsupported.to_header();
         let header = unsupported.to_header(); // Just for the test, don't need to manipulate raw value
     }
-} 
+}

@@ -2,18 +2,32 @@
 //
 // Common utilities and helper functions for session-level parsing.
 
-use crate::types::sdp::{SdpSession, Origin, ParsedAttribute};
-use nom::{
-    IResult,
-    bytes::complete::take_while1,
-};
+use crate::types::sdp::{Origin, ParsedAttribute, SdpSession};
+use nom::{bytes::complete::take_while1, IResult};
 
 /// Parse a token (alphanumeric and certain safe symbols) using nom
 pub fn parse_token(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| {
-        c.is_ascii_alphanumeric() || 
-        matches!(c, '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' |
-                     '^' | '_' | '`' | '{' | '|' | '}' | '~')
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '!' | '#'
+                    | '$'
+                    | '%'
+                    | '&'
+                    | '\''
+                    | '*'
+                    | '+'
+                    | '-'
+                    | '.'
+                    | '^'
+                    | '_'
+                    | '`'
+                    | '{'
+                    | '|'
+                    | '}'
+                    | '~'
+            )
     })(input)
 }
 
@@ -44,8 +58,17 @@ pub fn init_session_description() -> SdpSession {
 
 /// Checks if the given attribute is a session-level attribute
 pub fn is_session_level_attribute(attribute: &str) -> bool {
-    matches!(attribute,
-        "ice-lite" | "ice-options" | "ice-pwd" | "ice-ufrag" | "fingerprint" | "setup" |
-        "identity" | "group" | "msid-semantic" | "extmap-allow-mixed"
+    matches!(
+        attribute,
+        "ice-lite"
+            | "ice-options"
+            | "ice-pwd"
+            | "ice-ufrag"
+            | "fingerprint"
+            | "setup"
+            | "identity"
+            | "group"
+            | "msid-semantic"
+            | "extmap-allow-mixed"
     )
-} 
+}

@@ -19,17 +19,17 @@
 //! Service-Route: <sip:orig-proxy.example.com;lr>, <sip:core.example.com;lr>
 //! ```
 
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
-use std::ops::Deref;
-use nom::combinator::all_consuming;
-use crate::types::Address;
+use crate::error::{Error, Result};
 use crate::parser::headers::route::RouteEntry as ServiceRouteEntry;
-use serde::{Deserialize, Serialize};
-use crate::types::uri::Uri;
 use crate::types::header::Header;
+use crate::types::uri::Uri;
+use crate::types::Address;
 use crate::types::{HeaderName, HeaderValue, TypedHeaderTrait};
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 /// Represents the Service-Route header field (RFC 3608).
 ///
@@ -129,7 +129,10 @@ impl FromStr for ServiceRoute {
 
         match parse_result {
             Ok((_, route)) => Ok(ServiceRoute(route.0)),
-            Err(_) => Err(Error::ParseError(format!("Failed to parse Service-Route header: {}", s)))
+            Err(_) => Err(Error::ParseError(format!(
+                "Failed to parse Service-Route header: {}",
+                s
+            ))),
         }
     }
 }
@@ -182,9 +185,11 @@ impl TypedHeaderTrait for ServiceRoute {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -192,18 +197,18 @@ impl TypedHeaderTrait for ServiceRoute {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ServiceRoute::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             // Service-Route shares the Route grammar, so HeaderValue::Route is acceptable.
-            HeaderValue::Route(entries) => {
-                Ok(ServiceRoute(entries.clone()))
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            HeaderValue::Route(entries) => Ok(ServiceRoute(entries.clone())),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }

@@ -12,9 +12,9 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
-use rvoip_sip_core::Message;
 use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent};
+use rvoip_sip_core::Message;
 
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 100;
@@ -44,18 +44,18 @@ impl UdpTransport {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
-        
+
         // Create the UDP listener
         let listener = UdpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
         info!("SIP UDP transport bound to {}", local_addr);
-        
+
         // Create the UDP sender (shares same socket)
         let sender = UdpSender::new(listener.clone_socket())?;
-        
+
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        
+
         // Create the transport
         let transport = UdpTransport {
             inner: Arc::new(UdpTransportInner {
@@ -81,14 +81,14 @@ impl UdpTransport {
     pub fn default() -> Self {
         // Create a dummy event channel
         let (events_tx, _) = mpsc::channel(1);
-        
+
         // Create a dummy listener and sender
         let listener = UdpListener::default();
         let sender = UdpSender::default();
-        
+
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        
+
         // Create and return the transport with closed=true so it won't be used
         UdpTransport {
             inner: Arc::new(UdpTransportInner {
@@ -107,11 +107,11 @@ impl UdpTransport {
     async fn spawn_receive_loop(&self) {
         let transport = self.clone();
         let mut shutdown_rx = self.inner.shutdown_rx.clone();
-        
+
         let handle = tokio::spawn(async move {
             let inner = &transport.inner;
             let listener_clone = inner.listener.clone();
-            
+
             loop {
                 // Use select to listen for both packets and shutdown signal
                 tokio::select! {
@@ -122,14 +122,14 @@ impl UdpTransport {
                             break;
                         }
                     }
-                    
+
                     // Receive packets
                     result = listener_clone.receive() => {
-                
+
                         match result {
                             Ok((packet, src, local_addr)) => {
                                 debug!("Received SIP message from {}", src);
-                                
+
                                 match rvoip_sip_core::parse_message(&packet) {
                                     Ok(message) => {
                                         let event = TransportEvent::MessageReceived {
@@ -137,7 +137,7 @@ impl UdpTransport {
                                             source: src,
                                             destination: local_addr,
                                         };
-                                        
+
                                         if let Err(e) = inner.events_tx.send(event).await {
                                             error!("Error sending event: {}", e);
                                             break;
@@ -161,12 +161,12 @@ impl UdpTransport {
                     }
                 }
             }
-            
+
             // Send closed event when the loop exits
             let _ = inner.events_tx.send(TransportEvent::Closed).await;
             info!("UDP receive loop terminated");
         });
-        
+
         // Store the task handle
         let mut task_guard = self.inner.receive_task.lock().await;
         *task_guard = Some(handle);
@@ -178,44 +178,43 @@ impl Transport for UdpTransport {
     fn local_addr(&self) -> Result<SocketAddr> {
         self.inner.listener.local_addr()
     }
-    
+
     async fn send_message(&self, message: Message, destination: SocketAddr) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
-        
+
         // Convert message to bytes
         let bytes = message.to_bytes();
-        
+
         debug!("Sending {} byte message to {}", bytes.len(), destination);
-        info!("Sending {} message to {}", 
-            if let Message::Request(ref req) = message { 
-                format!("{}", req.method) 
-            } else { 
-                "response".to_string() 
-            }, 
-            destination);
-        
+        info!(
+            "Sending {} message to {}",
+            if let Message::Request(ref req) = message {
+                format!("{}", req.method)
+            } else {
+                "response".to_string()
+            },
+            destination
+        );
+
         // Send the message using the sender
         self.inner.sender.send(&bytes, destination).await
     }
-    
+
     async fn close(&self) -> Result<()> {
         debug!("UDP transport closing...");
-        
+
         // Step 1: Signal shutdown to receive loop via watch channel
         let _ = self.inner.shutdown_tx.send(true);
         self.inner.closed.store(true, Ordering::Relaxed);
-        
+
         // Step 2: Take the receive task handle and wait for it to finish
         let mut task_guard = self.inner.receive_task.lock().await;
         if let Some(handle) = task_guard.take() {
             debug!("Waiting for UDP receive loop to terminate...");
             // Wait for the task to finish (with timeout to prevent hanging)
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                handle
-            ).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), handle).await {
                 Ok(Ok(())) => {
                     debug!("UDP receive loop terminated cleanly");
                 }
@@ -228,15 +227,15 @@ impl Transport for UdpTransport {
             }
         }
         drop(task_guard);
-        
+
         // Step 3: Send a final closed event to notify upper layers
         // But check if the channel is still open
         let _ = self.inner.events_tx.try_send(TransportEvent::Closed);
-        
+
         info!("UDP transport closed successfully");
         Ok(())
     }
-    
+
     fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Relaxed)
     }
@@ -250,4 +249,4 @@ impl fmt::Debug for UdpTransport {
             write!(f, "UdpTransport(<e>)")
         }
     }
-} 
+}

@@ -1,8 +1,8 @@
 //! # SDP Parser
-//! 
+//!
 //! Session Description Protocol (SDP) parsing and validation according to [RFC 8866](https://tools.ietf.org/html/rfc8866).
 //!
-//! SDP is a format for describing multimedia communication sessions for the purposes of 
+//! SDP is a format for describing multimedia communication sessions for the purposes of
 //! session announcement, session invitation, and parameter negotiation. SDP is widely
 //! used in SIP-based VoIP applications and WebRTC.
 //!
@@ -108,36 +108,34 @@
 //! assert!(found_fingerprint);
 //! ```
 
-mod line_parser;
-pub mod validation;
-mod session_parser;
 mod attribute_parser;
+mod line_parser;
 mod media_parser;
-pub mod time_parser;
 mod sdp_parser;
+mod session_parser;
+pub mod time_parser;
+pub mod validation;
 
-// Re-export the parsing functions 
-pub use self::line_parser::parse_sdp_line;
-pub use self::line_parser::parse_bandwidth_line;
-pub use self::validation::{
-    validate_sdp,
-    validate_network_type,
-    validate_address_type,
-    is_valid_address,
-    is_valid_ipv4,
-    is_valid_ipv6,
-    is_valid_hostname
-};
+// Re-export the parsing functions
 pub use self::attribute_parser::parse_attribute;
+pub use self::line_parser::parse_bandwidth_line;
+pub use self::line_parser::parse_sdp_line;
 pub use self::media_parser::parse_media_description_line;
-pub use self::time_parser::{parse_time_description_line, parse_repeat_time_line, parse_time_with_unit};
 pub use self::sdp_parser::parse_sdp;
+pub use self::time_parser::{
+    parse_repeat_time_line, parse_time_description_line, parse_time_with_unit,
+};
+pub use self::validation::{
+    is_valid_address, is_valid_hostname, is_valid_ipv4, is_valid_ipv6, validate_address_type,
+    validate_network_type, validate_sdp,
+};
 
 use crate::error::{Error, Result};
-use crate::types::sdp::{SdpSession, Origin, ConnectionData, MediaDescription, 
-                      TimeDescription, ParsedAttribute};
-use crate::types::MediaType;
 use crate::sdp::attributes::MediaDirection;
+use crate::types::sdp::{
+    ConnectionData, MediaDescription, Origin, ParsedAttribute, SdpSession, TimeDescription,
+};
+use crate::types::MediaType;
 use bytes::Bytes;
 use std::str;
 
@@ -158,13 +156,16 @@ t=0 0
 m=audio 49170 RTP/AVP 0
 ";
         let result = parse_sdp(&Bytes::from(sdp_str)).unwrap();
-        
+
         // Verify session-level information
         assert_eq!(result.origin.username, "jdoe");
         assert_eq!(result.origin.unicast_address, "10.47.16.5");
         assert_eq!(result.session_name, "SDP Test");
-        assert_eq!(result.connection_info.unwrap().connection_address, "224.2.17.12");
-        
+        assert_eq!(
+            result.connection_info.unwrap().connection_address,
+            "224.2.17.12"
+        );
+
         // Verify media section
         assert_eq!(result.media_descriptions.len(), 1);
         let media = &result.media_descriptions[0];
@@ -196,36 +197,42 @@ a=rtpmap:99 h263-1998/90000
         // Verify session-level information
         assert_eq!(result.origin.username, "jdoe");
         assert_eq!(result.session_name, "SDP Seminar");
-        assert_eq!(result.session_info.unwrap(), "A Seminar on the session description protocol");
-        assert_eq!(result.uri.unwrap(), "http://www.example.com/seminars/sdp.pdf");
+        assert_eq!(
+            result.session_info.unwrap(),
+            "A Seminar on the session description protocol"
+        );
+        assert_eq!(
+            result.uri.unwrap(),
+            "http://www.example.com/seminars/sdp.pdf"
+        );
         assert_eq!(result.email.unwrap(), "j.doe@example.com (Jane Doe)");
-        
+
         // Verify connection information
         let conn = result.connection_info.unwrap();
         assert_eq!(conn.net_type, "IN");
         assert_eq!(conn.addr_type, "IP4");
         assert_eq!(conn.connection_address, "224.2.17.12");
         assert_eq!(conn.ttl, Some(127));
-        
+
         // Verify time information
         assert_eq!(result.time_descriptions.len(), 1);
         let time = &result.time_descriptions[0];
         assert_eq!(time.start_time, "2873397496");
         assert_eq!(time.stop_time, "2873404696");
-        
+
         // Verify session attribute
         assert!(matches!(result.direction, Some(MediaDirection::RecvOnly)));
-        
+
         // Verify media sections
         assert_eq!(result.media_descriptions.len(), 2);
-        
+
         // Audio media
         let audio = &result.media_descriptions[0];
         assert_eq!(audio.media, "audio");
         assert_eq!(audio.port, 49170);
         assert_eq!(audio.protocol, "RTP/AVP");
         assert_eq!(audio.formats, vec!["0"]);
-        
+
         // Video media
         let video = &result.media_descriptions[1];
         assert_eq!(video.media, "video");
@@ -234,7 +241,7 @@ a=rtpmap:99 h263-1998/90000
         assert_eq!(video.formats, vec!["99"]);
         assert_eq!(video.generic_attributes.len(), 1);
     }
-    
+
     #[test]
     fn test_parse_webrtc_sdp() {
         // A simplified WebRTC SDP offer example
@@ -264,22 +271,22 @@ a=fmtp:97 apt=96
 a=rtpmap:98 VP9/90000
 ";
         let result = parse_sdp(&Bytes::from(sdp_str)).unwrap();
-        
+
         // Verify session-level information
         assert_eq!(result.origin.username, "-");
         assert_eq!(result.origin.sess_id, "20518");
         assert_eq!(result.origin.unicast_address, "0.0.0.0");
-        
+
         // Verify media sections
         assert_eq!(result.media_descriptions.len(), 2);
-        
+
         // Audio media
         let audio = &result.media_descriptions[0];
         assert_eq!(audio.media, "audio");
         assert_eq!(audio.port, 54400);
         assert_eq!(audio.protocol, "UDP/TLS/RTP/SAVPF");
         assert_eq!(audio.formats, vec!["111", "103", "104"]);
-        
+
         // Check audio attributes
         let mut found_opus = false;
         for attr in &audio.generic_attributes {
@@ -293,14 +300,14 @@ a=rtpmap:98 VP9/90000
             }
         }
         assert!(found_opus, "Opus rtpmap attribute not found");
-        
+
         // Video media
         let video = &result.media_descriptions[1];
         assert_eq!(video.media, "video");
         assert_eq!(video.port, 55400);
         assert_eq!(video.protocol, "UDP/TLS/RTP/SAVPF");
         assert_eq!(video.formats, vec!["96", "97", "98"]);
-        
+
         // Check video attributes
         let mut found_vp8 = false;
         let mut found_rtx = false;
@@ -480,8 +487,11 @@ m=audio 49170 RTP/AVP 0
 c=IN IP4 192.168.1.1
 ";
         let result = parse_sdp(&Bytes::from(sdp_str)).unwrap();
-        assert!(result.connection_info.is_none(), "Session should not have connection info");
-        
+        assert!(
+            result.connection_info.is_none(),
+            "Session should not have connection info"
+        );
+
         let media = &result.media_descriptions[0];
         let conn = media.connection_info.as_ref().unwrap();
         assert_eq!(conn.connection_address, "192.168.1.1");
@@ -507,71 +517,71 @@ a=sendrecv
 a=rtpmap:0 PCMU/8000
 ";
         let result = parse_sdp(&Bytes::from(sdp_str)).unwrap();
-        
+
         // Check session-level attributes
         assert_eq!(result.generic_attributes.len(), 5);
-        
+
         let mut found_ice_ufrag = false;
         let mut found_fingerprint = false;
         let mut found_rtcp_mux = false;
-        
+
         for attr in &result.generic_attributes {
             match attr {
                 ParsedAttribute::IceUfrag(ufrag) => {
                     assert_eq!(ufrag, "F7gI");
                     found_ice_ufrag = true;
-                },
+                }
                 ParsedAttribute::Fingerprint(algo, value) => {
                     assert_eq!(algo, "sha-256");
                     assert!(value.starts_with("D1:2C:74:A7"));
                     found_fingerprint = true;
-                },
+                }
                 ParsedAttribute::RtcpMux => {
                     found_rtcp_mux = true;
-                },
+                }
                 _ => {}
             }
         }
-        
+
         assert!(found_ice_ufrag, "ice-ufrag attribute not found");
         assert!(found_fingerprint, "fingerprint attribute not found");
         assert!(found_rtcp_mux, "rtcp-mux attribute not found");
-        
+
         // Check media-level attributes
         let media = &result.media_descriptions[0];
-        
+
         // Print all media attributes for debugging
         println!("Media attributes count: {}", media.generic_attributes.len());
         for (i, attr) in media.generic_attributes.iter().enumerate() {
             println!("Attribute {}: {:?}", i, attr);
         }
-        
+
         // The actual count is 2 (mid and rtpmap), not 3 as we initially expected
         // This may be because the sendrecv attribute is handled specially
         assert_eq!(media.generic_attributes.len(), 2);
-        
+
         // Check if sendrecv is set on the media direction
         assert!(matches!(media.direction, Some(MediaDirection::SendRecv)));
-        
+
         let mut found_mid = false;
         let mut found_rtpmap = false;
-        
+
         for attr in &media.generic_attributes {
             match attr {
                 ParsedAttribute::Mid(mid) => {
                     assert_eq!(mid, "audio");
                     found_mid = true;
-                },
+                }
                 ParsedAttribute::RtpMap(rtpmap) => {
                     assert_eq!(rtpmap.payload_type, 0);
                     assert_eq!(rtpmap.encoding_name, "PCMU");
                     assert_eq!(rtpmap.clock_rate, 8000);
                     found_rtpmap = true;
-                },
+                }
                 _ => {}
             }
         }
-        
+
         assert!(found_mid, "mid attribute not found");
         assert!(found_rtpmap, "rtpmap attribute not found");
     }

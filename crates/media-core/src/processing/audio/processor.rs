@@ -5,25 +5,25 @@
 
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, warn, error};
+use tracing::{debug, error, warn};
 
-use crate::error::{Result, AudioProcessingError};
+use super::agc::{AgcConfig, AgcResult, AutomaticGainControl};
+use super::vad::{VadConfig, VadResult, VoiceActivityDetector};
+use crate::error::{AudioProcessingError, Result};
 use crate::types::{AudioFrame, SampleRate};
-use super::vad::{VoiceActivityDetector, VadConfig, VadResult};
-use super::agc::{AutomaticGainControl, AgcConfig, AgcResult};
 
 // NEW: Performance library imports
 use crate::performance::{
+    metrics::{BenchmarkResults, PerformanceMetrics},
     pool::{AudioFramePool, PooledAudioFrame},
-    zero_copy::{ZeroCopyAudioFrame, SharedAudioBuffer},
     simd::SimdProcessor,
-    metrics::{PerformanceMetrics, BenchmarkResults},
+    zero_copy::{SharedAudioBuffer, ZeroCopyAudioFrame},
 };
 
 // NEW: Advanced v2 processor imports
-use super::vad_v2::{AdvancedVoiceActivityDetector, AdvancedVadConfig, AdvancedVadResult};
-use super::agc_v2::{AdvancedAutomaticGainControl, AdvancedAgcConfig, AdvancedAgcResult};
 use super::aec_v2::{AdvancedAcousticEchoCanceller, AdvancedAecConfig, AdvancedAecResult};
+use super::agc_v2::{AdvancedAgcConfig, AdvancedAgcResult, AdvancedAutomaticGainControl};
+use super::vad_v2::{AdvancedVadConfig, AdvancedVadResult, AdvancedVoiceActivityDetector};
 
 /// Configuration for audio processing
 #[derive(Debug, Clone)]
@@ -42,7 +42,7 @@ pub struct AudioProcessingConfig {
     pub enable_aec: bool,
     /// Enable noise suppression (future)
     pub enable_noise_suppression: bool,
-    
+
     // NEW: Advanced v2 processor options
     /// Use advanced VAD instead of basic VAD
     pub use_advanced_vad: bool,
@@ -56,7 +56,7 @@ pub struct AudioProcessingConfig {
     pub use_advanced_aec: bool,
     /// Advanced AEC configuration
     pub advanced_aec_config: AdvancedAecConfig,
-    
+
     // NEW: Performance optimization options
     /// Enable SIMD optimizations for audio operations
     pub enable_simd_optimizations: bool,
@@ -73,20 +73,20 @@ impl Default for AudioProcessingConfig {
         Self {
             enable_vad: true,
             vad_config: VadConfig::default(),
-            enable_agc: false,  // Disabled by default (can be aggressive)
+            enable_agc: false, // Disabled by default (can be aggressive)
             agc_config: AgcConfig::default(),
             target_sample_rate: SampleRate::Rate8000,
-            enable_aec: false,  // Disabled for Phase 2
-            enable_noise_suppression: false,  // Disabled for Phase 2
-            
+            enable_aec: false,               // Disabled for Phase 2
+            enable_noise_suppression: false, // Disabled for Phase 2
+
             // NEW: Default to advanced processors for better quality
             use_advanced_vad: true,
             advanced_vad_config: AdvancedVadConfig::default(),
-            use_advanced_agc: false,  // Disabled by default until tuned
+            use_advanced_agc: false, // Disabled by default until tuned
             advanced_agc_config: AdvancedAgcConfig::default(),
-            use_advanced_aec: false,  // Disabled until far-end reference implemented
+            use_advanced_aec: false, // Disabled until far-end reference implemented
             advanced_aec_config: AdvancedAecConfig::default(),
-            
+
             // NEW: Default performance settings
             enable_simd_optimizations: true,
             use_zero_copy_frames: true,
@@ -136,13 +136,13 @@ pub struct AudioProcessingMetrics {
 pub struct AudioProcessor {
     /// Processing configuration
     config: AudioProcessingConfig,
-    
+
     // V1 processors (legacy support)
     /// Voice activity detector (v1)
     vad: Option<Arc<RwLock<VoiceActivityDetector>>>,
     /// Automatic gain control (v1)
     agc: Option<Arc<RwLock<AutomaticGainControl>>>,
-    
+
     // NEW: Advanced v2 processors
     /// Advanced voice activity detector (v2)
     advanced_vad: Option<Arc<RwLock<AdvancedVoiceActivityDetector>>>,
@@ -150,7 +150,7 @@ pub struct AudioProcessor {
     advanced_agc: Option<Arc<RwLock<AdvancedAutomaticGainControl>>>,
     /// Advanced acoustic echo canceller (v2)
     advanced_aec: Option<Arc<RwLock<AdvancedAcousticEchoCanceller>>>,
-    
+
     // NEW: Performance components
     /// Frame pool for efficient audio frame allocation
     frame_pool: Arc<AudioFramePool>,
@@ -158,7 +158,7 @@ pub struct AudioProcessor {
     simd_processor: SimdProcessor,
     /// Performance metrics collector
     performance_metrics: RwLock<PerformanceMetrics>,
-    
+
     /// Processing statistics
     stats: RwLock<AudioProcessingStats>,
 }
@@ -184,7 +184,7 @@ impl AudioProcessor {
     /// Create a new audio processor with the given configuration
     pub fn new(config: AudioProcessingConfig) -> Result<Self> {
         debug!("Creating AudioProcessor with config: {:?}", config);
-        
+
         // Initialize frame pool for performance optimization
         let pool_config = crate::performance::pool::PoolConfig {
             initial_size: config.frame_pool_size,
@@ -204,11 +204,14 @@ impl AudioProcessor {
             },
         };
         let frame_pool = AudioFramePool::new(pool_config);
-        
+
         // Initialize SIMD processor with platform detection
         let simd_processor = SimdProcessor::new();
-        debug!("SIMD support available: {}", simd_processor.is_simd_available());
-        
+        debug!(
+            "SIMD support available: {}",
+            simd_processor.is_simd_available()
+        );
+
         // Initialize V1 processors (legacy support)
         let vad = if config.enable_vad && !config.use_advanced_vad {
             let vad_detector = VoiceActivityDetector::new(config.vad_config.clone())?;
@@ -216,14 +219,14 @@ impl AudioProcessor {
         } else {
             None
         };
-        
+
         let agc = if config.enable_agc && !config.use_advanced_agc {
             let agc_processor = AutomaticGainControl::new(config.agc_config.clone())?;
             Some(Arc::new(RwLock::new(agc_processor)))
         } else {
             None
         };
-        
+
         // Initialize advanced V2 processors
         let advanced_vad = if config.enable_vad && config.use_advanced_vad {
             let sample_rate = match config.target_sample_rate {
@@ -240,7 +243,7 @@ impl AudioProcessor {
         } else {
             None
         };
-        
+
         let advanced_agc = if config.enable_agc && config.use_advanced_agc {
             let sample_rate = match config.target_sample_rate {
                 SampleRate::Rate8000 => 8000.0,
@@ -248,33 +251,30 @@ impl AudioProcessor {
                 SampleRate::Rate32000 => 32000.0,
                 SampleRate::Rate48000 => 48000.0,
             };
-            let agc_processor = AdvancedAutomaticGainControl::new(
-                config.advanced_agc_config.clone(),
-                sample_rate,
-            )?;
+            let agc_processor =
+                AdvancedAutomaticGainControl::new(config.advanced_agc_config.clone(), sample_rate)?;
             Some(Arc::new(RwLock::new(agc_processor)))
         } else {
             None
         };
-        
+
         let advanced_aec = if config.enable_aec && config.use_advanced_aec {
-            let aec_processor = AdvancedAcousticEchoCanceller::new(
-                config.advanced_aec_config.clone(),
-            )?;
+            let aec_processor =
+                AdvancedAcousticEchoCanceller::new(config.advanced_aec_config.clone())?;
             Some(Arc::new(RwLock::new(aec_processor)))
         } else {
             None
         };
-        
+
         debug!("AudioProcessor created with processors: VAD v1={}, VAD v2={}, AGC v1={}, AGC v2={}, AEC v2={}",
                vad.is_some(), advanced_vad.is_some(), agc.is_some(), advanced_agc.is_some(), advanced_aec.is_some());
-        
+
         Ok(Self {
             config,
             // V1 processors
             vad,
             agc,
-            // V2 processors  
+            // V2 processors
             advanced_vad,
             advanced_agc,
             advanced_aec,
@@ -285,46 +285,47 @@ impl AudioProcessor {
             stats: RwLock::new(AudioProcessingStats::default()),
         })
     }
-    
+
     /// Process capture audio (from microphone/input) - Legacy v1 method
     pub async fn process_capture_audio(&self, input: &AudioFrame) -> Result<AudioProcessingResult> {
         let start_time = std::time::Instant::now();
-        
+
         // Validate input frame
         self.validate_audio_frame(input)?;
-        
+
         // Start with a copy of the input frame
         let mut processed_frame = input.clone();
         let mut frame_modified = false;
         let mut vad_result = None;
         let mut agc_result = None;
-        
+
         // Step 1: Run AGC first (on capture path, process before VAD for better detection)
         if let Some(agc) = &self.agc {
             let mut agc_processor = agc.write().await;
             let result = agc_processor.process_frame(&processed_frame)?;
-            
+
             // Apply the gain to the samples
             agc_processor.apply_gain(&mut processed_frame.samples, result.applied_gain);
             agc_result = Some(result);
             frame_modified = true;
         }
-        
+
         // Step 2: Run VAD on the processed audio
         if let Some(vad) = &self.vad {
             let mut vad_detector = vad.write().await;
             vad_result = Some(vad_detector.analyze_frame(&processed_frame)?);
         }
-        
+
         // TODO: Add more processing stages in Phase 3:
         // - Echo Cancellation (AEC) reference signal processing
         // - Noise Suppression (NS)
-        
+
         let processing_time = start_time.elapsed();
-        
+
         // Update statistics
-        self.update_stats(&processed_frame, &vad_result, &agc_result, processing_time).await;
-        
+        self.update_stats(&processed_frame, &vad_result, &agc_result, processing_time)
+            .await;
+
         Ok(AudioProcessingResult {
             frame: processed_frame,
             vad_result,
@@ -342,60 +343,64 @@ impl AudioProcessor {
             },
         })
     }
-    
+
     /// Process capture audio with advanced v2 processors and performance optimizations
-    pub async fn process_capture_audio_v2(&self, input: &AudioFrame) -> Result<AudioProcessingResult> {
+    pub async fn process_capture_audio_v2(
+        &self,
+        input: &AudioFrame,
+    ) -> Result<AudioProcessingResult> {
         let start_time = std::time::Instant::now();
-        
+
         // Validate input frame
         self.validate_audio_frame(input)?;
-        
+
         // Performance optimizations
         let mut simd_used = false;
         let mut zero_copy_used = false;
         let mut frame_modified = false;
-        
+
         // Initialize result containers
         let mut vad_result = None;
         let mut agc_result = None;
         let mut advanced_vad_result = None;
         let mut advanced_agc_result = None;
         let mut advanced_aec_result = None;
-        
+
         // Step 1: Get optimized frame for processing
         let mut processed_frame = if self.config.use_zero_copy_frames {
             // Use pooled frame for zero-copy optimization
             let pooled_frame = self.frame_pool.get_frame();
-            
+
             // Copy input data to pooled frame
             if self.config.enable_simd_optimizations {
                 // Use SIMD for efficient copying
                 let input_samples = &input.samples;
                 let mut output_samples = vec![0i16; input_samples.len()];
-                self.simd_processor.apply_gain(input_samples, 1.0, &mut output_samples);
+                self.simd_processor
+                    .apply_gain(input_samples, 1.0, &mut output_samples);
                 simd_used = true;
             }
             zero_copy_used = true;
-            
+
             // Create regular AudioFrame from pooled data for now
             // TODO: Update entire pipeline to use ZeroCopyAudioFrame
             input.clone()
         } else {
             input.clone()
         };
-        
+
         // Step 2: Advanced Echo Cancellation (AEC v2) - if enabled with far-end reference
         if let Some(aec) = &self.advanced_aec {
             // TODO: AEC requires far-end reference signal
             // For now, skip AEC processing until far-end reference is available
             debug!("AEC v2 enabled but far-end reference not available, skipping");
         }
-        
+
         // Step 3: Advanced Automatic Gain Control (AGC v2) - multi-band processing
         if let Some(agc) = &self.advanced_agc {
             let mut agc_processor = agc.write().await;
             let result = agc_processor.process_frame(&processed_frame)?;
-            
+
             // Apply processed samples
             // TODO: Update AGC v2 to modify frame in-place for efficiency
             advanced_agc_result = Some(result);
@@ -404,10 +409,14 @@ impl AudioProcessor {
             // Fallback to v1 AGC
             let mut agc_processor = agc.write().await;
             let result = agc_processor.process_frame(&processed_frame)?;
-            
+
             // Apply the gain to the samples
             if self.config.enable_simd_optimizations {
-                self.simd_processor.apply_gain(&input.samples, result.applied_gain, &mut processed_frame.samples);
+                self.simd_processor.apply_gain(
+                    &input.samples,
+                    result.applied_gain,
+                    &mut processed_frame.samples,
+                );
                 simd_used = true;
             } else {
                 agc_processor.apply_gain(&mut processed_frame.samples, result.applied_gain);
@@ -415,7 +424,7 @@ impl AudioProcessor {
             agc_result = Some(result);
             frame_modified = true;
         }
-        
+
         // Step 4: Advanced Voice Activity Detection (VAD v2) - spectral analysis
         if let Some(vad) = &self.advanced_vad {
             let mut vad_detector = vad.write().await;
@@ -426,26 +435,35 @@ impl AudioProcessor {
             let mut vad_detector = vad.write().await;
             vad_result = Some(vad_detector.analyze_frame(&processed_frame)?);
         }
-        
+
         let processing_time = start_time.elapsed();
-        
+
         // Collect performance metrics if enabled
         let performance_metrics = if self.config.enable_performance_metrics {
             let mut metrics = self.performance_metrics.write().await;
             metrics.add_timing(processing_time);
             if frame_modified {
-                let allocation_size = (processed_frame.samples.len() * std::mem::size_of::<i16>()) as u64;
+                let allocation_size =
+                    (processed_frame.samples.len() * std::mem::size_of::<i16>()) as u64;
                 metrics.add_allocation(allocation_size);
             }
             Some(metrics.clone())
         } else {
             None
         };
-        
+
         // Update statistics with advanced results
-        self.update_stats_v2(&processed_frame, &vad_result, &agc_result, 
-                           &advanced_vad_result, &advanced_agc_result, &advanced_aec_result, processing_time).await;
-        
+        self.update_stats_v2(
+            &processed_frame,
+            &vad_result,
+            &agc_result,
+            &advanced_vad_result,
+            &advanced_agc_result,
+            &advanced_aec_result,
+            processing_time,
+        )
+        .await;
+
         Ok(AudioProcessingResult {
             frame: processed_frame,
             vad_result,
@@ -463,37 +481,40 @@ impl AudioProcessor {
             },
         })
     }
-    
+
     /// Process playback audio (to speaker/output)
-    pub async fn process_playback_audio(&self, input: &AudioFrame) -> Result<AudioProcessingResult> {
+    pub async fn process_playback_audio(
+        &self,
+        input: &AudioFrame,
+    ) -> Result<AudioProcessingResult> {
         let start_time = std::time::Instant::now();
-        
+
         // Validate input frame
         self.validate_audio_frame(input)?;
-        
+
         // For playback, we mainly do format conversion and output processing
         let mut processed_frame = input.clone();
         let mut frame_modified = false;
         let mut agc_result = None;
-        
+
         // Apply AGC on playback path for output level control
         if let Some(agc) = &self.agc {
             let mut agc_processor = agc.write().await;
             let result = agc_processor.process_frame(&processed_frame)?;
-            
+
             // Apply the gain to the samples
             agc_processor.apply_gain(&mut processed_frame.samples, result.applied_gain);
             agc_result = Some(result);
             frame_modified = true;
         }
-        
+
         // TODO: Add playback processing in Phase 3:
         // - Echo Cancellation (AEC) playback signal processing
         // - Output gain control
         // - Packet Loss Concealment (PLC)
-        
+
         let processing_time = start_time.elapsed();
-        
+
         Ok(AudioProcessingResult {
             frame: processed_frame,
             vad_result: None, // No VAD on playback
@@ -511,72 +532,75 @@ impl AudioProcessor {
             },
         })
     }
-    
+
     /// Get current processing statistics
     pub async fn get_stats(&self) -> AudioProcessingStats {
         self.stats.read().await.clone()
     }
-    
+
     /// Reset processing statistics
     pub async fn reset_stats(&self) {
         let mut stats = self.stats.write().await;
         *stats = AudioProcessingStats::default();
     }
-    
+
     /// Get current performance metrics
     pub async fn get_performance_metrics(&self) -> PerformanceMetrics {
         self.performance_metrics.read().await.clone()
     }
-    
+
     /// Reset performance metrics
     pub async fn reset_performance_metrics(&self) {
         let mut metrics = self.performance_metrics.write().await;
         *metrics = PerformanceMetrics::new();
     }
-    
+
     /// Get frame pool statistics
     pub fn get_pool_stats(&self) -> crate::performance::pool::PoolStats {
         self.frame_pool.get_stats()
     }
-    
+
     /// Check if SIMD optimizations are available
     pub fn is_simd_available(&self) -> bool {
         self.simd_processor.is_simd_available()
     }
-    
+
     /// Get processing configuration
     pub fn get_config(&self) -> &AudioProcessingConfig {
         &self.config
     }
-    
+
     /// Check if advanced processors are enabled
     pub fn are_advanced_processors_enabled(&self) -> bool {
         self.advanced_vad.is_some() || self.advanced_agc.is_some() || self.advanced_aec.is_some()
     }
-    
+
     /// Validate audio frame parameters
     fn validate_audio_frame(&self, frame: &AudioFrame) -> Result<()> {
         if frame.samples.is_empty() {
             return Err(AudioProcessingError::InvalidFormat {
                 details: "Audio frame has no samples".to_string(),
-            }.into());
+            }
+            .into());
         }
-        
+
         if frame.channels == 0 {
             return Err(AudioProcessingError::InvalidFormat {
                 details: "Audio frame has zero channels".to_string(),
-            }.into());
+            }
+            .into());
         }
-        
+
         if frame.sample_rate == 0 {
             return Err(AudioProcessingError::InvalidFormat {
                 details: "Audio frame has zero sample rate".to_string(),
-            }.into());
+            }
+            .into());
         }
-        
+
         Ok(())
     }
-    
+
     /// Update processing statistics (v1 legacy)
     async fn update_stats(
         &self,
@@ -588,7 +612,7 @@ impl AudioProcessor {
         let mut stats = self.stats.write().await;
         stats.frames_processed += 1;
         stats.total_processing_time_us += processing_time.as_micros() as u64;
-        
+
         if let Some(vad) = vad_result {
             if vad.is_voice {
                 stats.voice_frames += 1;
@@ -596,15 +620,16 @@ impl AudioProcessor {
                 stats.silence_frames += 1;
             }
         }
-        
+
         if let Some(agc) = agc_result {
             stats.agc_processed_frames += 1;
             // Update running average of AGC gain
             let frame_count = stats.agc_processed_frames as f32;
-            stats.avg_agc_gain = ((stats.avg_agc_gain * (frame_count - 1.0)) + agc.applied_gain) / frame_count;
+            stats.avg_agc_gain =
+                ((stats.avg_agc_gain * (frame_count - 1.0)) + agc.applied_gain) / frame_count;
         }
     }
-    
+
     /// Update processing statistics with v2 advanced processors
     async fn update_stats_v2(
         &self,
@@ -619,7 +644,7 @@ impl AudioProcessor {
         let mut stats = self.stats.write().await;
         stats.frames_processed += 1;
         stats.total_processing_time_us += processing_time.as_micros() as u64;
-        
+
         // Handle VAD results (v1 or v2)
         if let Some(vad) = advanced_vad_result {
             if vad.is_voice {
@@ -634,27 +659,35 @@ impl AudioProcessor {
                 stats.silence_frames += 1;
             }
         }
-        
+
         // Handle AGC results (v1 or v2)
         if let Some(agc) = advanced_agc_result {
             stats.agc_processed_frames += 1;
             // Use first band gain as representative for now
             let representative_gain = agc.band_gains_db.get(0).unwrap_or(&0.0);
             let frame_count = stats.agc_processed_frames as f32;
-            stats.avg_agc_gain = ((stats.avg_agc_gain * (frame_count - 1.0)) + representative_gain) / frame_count;
+            stats.avg_agc_gain =
+                ((stats.avg_agc_gain * (frame_count - 1.0)) + representative_gain) / frame_count;
         } else if let Some(agc) = agc_result {
             stats.agc_processed_frames += 1;
             let frame_count = stats.agc_processed_frames as f32;
-            stats.avg_agc_gain = ((stats.avg_agc_gain * (frame_count - 1.0)) + agc.applied_gain) / frame_count;
+            stats.avg_agc_gain =
+                ((stats.avg_agc_gain * (frame_count - 1.0)) + agc.applied_gain) / frame_count;
         }
-        
+
         // Log advanced processor performance if enabled
         if self.config.enable_performance_metrics {
             if let Some(aec) = advanced_aec_result {
-                debug!("AEC v2 ERLE: {:.1}dB, coherence: {:.2}", aec.erle_db, aec.coherence);
+                debug!(
+                    "AEC v2 ERLE: {:.1}dB, coherence: {:.2}",
+                    aec.erle_db, aec.coherence
+                );
             }
             if let Some(vad) = advanced_vad_result {
-                debug!("VAD v2 confidence: {:.2}, spectral centroid: {:.0}Hz", vad.confidence, vad.spectral_centroid);
+                debug!(
+                    "VAD v2 confidence: {:.2}, spectral centroid: {:.0}Hz",
+                    vad.confidence, vad.spectral_centroid
+                );
             }
         }
     }
@@ -672,4 +705,4 @@ impl std::fmt::Debug for AudioProcessor {
             .field("simd_available", &self.simd_processor.is_simd_available())
             .finish()
     }
-} 
+}

@@ -1,9 +1,9 @@
-use crate::types::multipart::{MultipartBody, MimePart, ParsedBody};
 use crate::types::header::{Header, HeaderName};
+use crate::types::multipart::{MimePart, MultipartBody, ParsedBody};
 use crate::types::TypedHeader;
 use bytes::Bytes;
-use rand::{thread_rng, Rng};
 use rand::distributions::Alphanumeric;
+use rand::{thread_rng, Rng};
 use std::iter;
 
 /// # Multipart MIME Builder for SIP Messages
@@ -14,15 +14,15 @@ use std::iter;
 ///
 /// ## What is Multipart MIME?
 ///
-/// Multipart MIME allows a SIP message to include multiple content parts with different 
+/// Multipart MIME allows a SIP message to include multiple content parts with different
 /// Content-Types in a single message body. Each part has its own headers and content,
 /// and the parts are separated by a boundary string. This is particularly useful in SIP for:
 ///
-/// - **Multiple related contents**: Combining SDP (Session Description Protocol) with 
+/// - **Multiple related contents**: Combining SDP (Session Description Protocol) with
 ///   other content types such as XML metadata or application data
 /// - **Alternative representations**: Providing the same content in different formats
 ///   (e.g., plain text and HTML)
-/// - **Mixed content**: Including different types of content like text, images, and 
+/// - **Mixed content**: Including different types of content like text, images, and
 ///   application data in a single message
 /// - **Rich media sharing**: Attaching files, images, or multimedia content to SIP messages
 ///
@@ -132,7 +132,7 @@ use std::iter;
 /// ## Handling Boundaries
 ///
 /// The `MultipartBodyBuilder` automatically generates a random boundary string, but you can
-/// specify your own if needed using the `boundary()` method. Boundaries must be chosen to 
+/// specify your own if needed using the `boundary()` method. Boundaries must be chosen to
 /// not appear in any of the part contents.
 ///
 /// ## Best Practices
@@ -205,7 +205,7 @@ use std::iter;
 ///     .epilogue("End of multipart message.")
 ///     .build();
 /// ```
-/// 
+///
 /// ## SIP INVITE with SDP and Additional Information
 ///
 /// ```rust
@@ -561,13 +561,16 @@ impl MultipartBodyBuilder {
         content_id: Option<impl Into<String>>,
     ) -> Self {
         let mut headers = vec![Header::text(HeaderName::ContentType, image_type.into())];
-        
+
         // Create a content-id header if needed
         if let Some(id) = content_id {
-            let content_id_header = Header::text(HeaderName::Other("Content-ID".to_string()), format!("<{}>", id.into()));
+            let content_id_header = Header::text(
+                HeaderName::Other("Content-ID".to_string()),
+                format!("<{}>", id.into()),
+            );
             headers.push(content_id_header);
         }
-        
+
         self.add_part(headers, image_data)
     }
 
@@ -586,7 +589,7 @@ impl MultipartBodyBuilder {
         self.parts.push(part);
         self
     }
-    
+
     /// Adds multiple MIME parts from a vector.
     ///
     /// Internal helper method for converting between builder types.
@@ -615,13 +618,13 @@ impl MultipartBodyBuilder {
         if let Some(boundary) = &self.boundary {
             return boundary.clone();
         }
-        
+
         let random_suffix: String = iter::repeat(())
             .map(|()| thread_rng().sample(Alphanumeric))
             .map(char::from)
             .take(16)
             .collect();
-            
+
         format!("boundary-{}", random_suffix)
     }
 
@@ -645,7 +648,7 @@ impl MultipartBodyBuilder {
     /// ```
     pub fn build(self) -> MultipartBody {
         let boundary = self.generate_boundary();
-        
+
         MultipartBody {
             boundary,
             parts: self.parts,
@@ -683,7 +686,7 @@ impl MultipartBody {
     /// ```
     pub fn to_string(&self) -> String {
         let mut result = String::new();
-        
+
         // Add preamble if present
         if let Some(preamble) = &self.preamble {
             if let Ok(text) = std::str::from_utf8(preamble) {
@@ -691,23 +694,23 @@ impl MultipartBody {
                 result.push_str("\r\n");
             }
         }
-        
+
         // Add each part
         for part in &self.parts {
             // Add boundary
             result.push_str("--");
             result.push_str(&self.boundary);
             result.push_str("\r\n");
-            
+
             // Add headers
             for header in &part.headers {
                 result.push_str(&header.to_string());
                 result.push_str("\r\n");
             }
-            
+
             // Empty line between headers and content
             result.push_str("\r\n");
-            
+
             // Add content
             if let Ok(text) = std::str::from_utf8(&part.raw_content) {
                 result.push_str(text);
@@ -716,22 +719,22 @@ impl MultipartBody {
                 // but for simplicity we'll just skip it in this example
                 result.push_str("[Binary data not shown]");
             }
-            
+
             result.push_str("\r\n");
         }
-        
+
         // Add final boundary
         result.push_str("--");
         result.push_str(&self.boundary);
         result.push_str("--\r\n");
-        
+
         // Add epilogue if present
         if let Some(epilogue) = &self.epilogue {
             if let Ok(text) = std::str::from_utf8(epilogue) {
                 result.push_str(text);
             }
         }
-        
+
         result
     }
 }
@@ -740,7 +743,7 @@ impl MultipartBody {
 ///
 /// This builder provides a fluent API for constructing individual parts of a multipart MIME
 /// message. Each part can have its own set of headers and content, allowing for complex
-/// structured messages that follow the MIME specification described in 
+/// structured messages that follow the MIME specification described in
 /// [RFC 2045](https://tools.ietf.org/html/rfc2045) and [RFC 2046](https://tools.ietf.org/html/rfc2046).
 ///
 /// ## Key Headers for MIME Parts
@@ -880,7 +883,8 @@ impl MultipartPartBuilder {
     ///     .content_type("text/plain");
     /// ```
     pub fn content_type(mut self, content_type: impl Into<String>) -> Self {
-        self.headers.push(Header::text(HeaderName::ContentType, content_type.into()));
+        self.headers
+            .push(Header::text(HeaderName::ContentType, content_type.into()));
         self
     }
 
@@ -913,7 +917,10 @@ impl MultipartPartBuilder {
         } else {
             format!("<{}>", id)
         };
-        self.headers.push(Header::text(HeaderName::Other("Content-ID".to_string()), formatted_id));
+        self.headers.push(Header::text(
+            HeaderName::Other("Content-ID".to_string()),
+            formatted_id,
+        ));
         self
     }
 
@@ -939,7 +946,10 @@ impl MultipartPartBuilder {
     ///     .content_disposition("attachment; filename=document.pdf");
     /// ```
     pub fn content_disposition(mut self, disposition: impl Into<String>) -> Self {
-        self.headers.push(Header::text(HeaderName::ContentDisposition, disposition.into()));
+        self.headers.push(Header::text(
+            HeaderName::ContentDisposition,
+            disposition.into(),
+        ));
         self
     }
 
@@ -966,8 +976,8 @@ impl MultipartPartBuilder {
     /// ```
     pub fn content_transfer_encoding(mut self, encoding: impl Into<String>) -> Self {
         self.headers.push(Header::text(
-            HeaderName::Other("Content-Transfer-Encoding".to_string()), 
-            encoding.into()
+            HeaderName::Other("Content-Transfer-Encoding".to_string()),
+            encoding.into(),
         ));
         self
     }
@@ -1013,7 +1023,7 @@ impl MultipartPartBuilder {
     /// ```
     pub fn build(self) -> MimePart {
         let content = self.content.unwrap_or_default();
-        
+
         MimePart {
             headers: self.headers,
             raw_content: Bytes::from(content),
@@ -1425,17 +1435,17 @@ impl MultipartBuilder {
     /// ```
     pub fn content_type(&self) -> String {
         let mut content_type = format!("multipart/{}", self.subtype);
-        
+
         // Add boundary parameter
         if let Some(boundary) = &self.boundary {
             content_type.push_str(&format!("; boundary=\"{}\"", boundary));
         }
-        
+
         // Add type parameter for multipart/related
         if let Some(type_param) = &self.type_param {
             content_type.push_str(&format!("; type=\"{}\"", type_param));
         }
-        
+
         content_type
     }
 
@@ -1470,28 +1480,27 @@ impl MultipartBuilder {
                 .map(char::from)
                 .take(16)
                 .collect();
-                
+
             format!("boundary-{}", random_suffix)
         });
 
-        let mut body_builder = MultipartBodyBuilder::new()
-            .boundary(boundary);
-            
+        let mut body_builder = MultipartBodyBuilder::new().boundary(boundary);
+
         // Add all parts
         let mut builder = body_builder;
         for part in &self.parts {
             builder = builder.add_mime_part(part.clone());
         }
-        
+
         // Add preamble and epilogue if present
         if let Some(preamble) = &self.preamble {
             builder = builder.preamble(preamble);
         }
-        
+
         if let Some(epilogue) = &self.epilogue {
             builder = builder.epilogue(epilogue);
         }
-        
+
         builder.build().to_string()
     }
 
@@ -1522,7 +1531,7 @@ impl MultipartBuilder {
                 .map(char::from)
                 .take(16)
                 .collect();
-                
+
             format!("boundary-{}", random_suffix)
         });
 
@@ -1562,15 +1571,15 @@ impl MultipartBuilt {
     /// A string containing the Content-Type value
     pub fn content_type(&self) -> String {
         let mut content_type = format!("multipart/{}", self.subtype);
-        
+
         // Add boundary parameter
         content_type.push_str(&format!("; boundary=\"{}\"", self.boundary));
-        
+
         // Add type parameter for multipart/related
         if let Some(type_param) = &self.type_param {
             content_type.push_str(&format!("; type=\"{}\"", type_param));
         }
-        
+
         content_type
     }
 
@@ -1587,28 +1596,28 @@ impl MultipartBuilt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builder::SimpleRequestBuilder;
     use crate::builder::headers::ContentTypeBuilderExt;
-    use crate::types::Method;
+    use crate::builder::SimpleRequestBuilder;
     use crate::sdp::SdpBuilder;
-    
+    use crate::types::Method;
+
     #[test]
     fn test_basic_builder() {
         let multipart = MultipartBodyBuilder::new()
             .add_text_part("Text content")
             .add_html_part("<html><body><p>HTML content</p></body></html>")
             .build();
-            
+
         assert_eq!(multipart.parts.len(), 2);
         assert!(multipart.boundary.starts_with("boundary-"));
-        
+
         // Check first part (text)
         assert_eq!(multipart.parts[0].content_type().unwrap(), "text/plain");
         assert_eq!(
             std::str::from_utf8(&multipart.parts[0].raw_content).unwrap(),
             "Text content"
         );
-        
+
         // Check second part (HTML)
         assert_eq!(multipart.parts[1].content_type().unwrap(), "text/html");
         assert_eq!(
@@ -1616,17 +1625,17 @@ mod tests {
             "<html><body><p>HTML content</p></body></html>"
         );
     }
-    
+
     #[test]
     fn test_custom_boundary() {
         let multipart = MultipartBodyBuilder::new()
             .boundary("custom-test-boundary")
             .add_text_part("Content")
             .build();
-            
+
         assert_eq!(multipart.boundary, "custom-test-boundary");
     }
-    
+
     #[test]
     fn test_preamble_epilogue() {
         let multipart = MultipartBodyBuilder::new()
@@ -1634,7 +1643,7 @@ mod tests {
             .epilogue("This is the epilogue")
             .add_text_part("Content")
             .build();
-            
+
         assert_eq!(
             std::str::from_utf8(&multipart.preamble.unwrap()).unwrap(),
             "This is the preamble"
@@ -1644,37 +1653,39 @@ mod tests {
             "This is the epilogue"
         );
     }
-    
+
     #[test]
     fn test_json_part() {
         let json = r#"{"name":"Alice","age":30}"#;
-        let multipart = MultipartBodyBuilder::new()
-            .add_json_part(json)
-            .build();
-            
+        let multipart = MultipartBodyBuilder::new().add_json_part(json).build();
+
         assert_eq!(multipart.parts.len(), 1);
-        assert_eq!(multipart.parts[0].content_type().unwrap(), "application/json");
+        assert_eq!(
+            multipart.parts[0].content_type().unwrap(),
+            "application/json"
+        );
         assert_eq!(
             std::str::from_utf8(&multipart.parts[0].raw_content).unwrap(),
             json
         );
     }
-    
+
     #[test]
     fn test_xml_part() {
         let xml = r#"<?xml version="1.0"?><root><node>value</node></root>"#;
-        let multipart = MultipartBodyBuilder::new()
-            .add_xml_part(xml)
-            .build();
-            
+        let multipart = MultipartBodyBuilder::new().add_xml_part(xml).build();
+
         assert_eq!(multipart.parts.len(), 1);
-        assert_eq!(multipart.parts[0].content_type().unwrap(), "application/xml");
+        assert_eq!(
+            multipart.parts[0].content_type().unwrap(),
+            "application/xml"
+        );
         assert_eq!(
             std::str::from_utf8(&multipart.parts[0].raw_content).unwrap(),
             xml
         );
     }
-    
+
     #[test]
     fn test_sdp_part() {
         let sdp = SdpBuilder::new("Test Session")
@@ -1682,63 +1693,70 @@ mod tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(49170, "RTP/AVP")
-                .formats(&["0", "8"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .done()
+            .formats(&["0", "8"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .done()
             .build()
             .unwrap();
-            
+
         let multipart = MultipartBodyBuilder::new()
             .add_sdp_part(sdp.to_string())
             .build();
-            
+
         assert_eq!(multipart.parts.len(), 1);
-        assert_eq!(multipart.parts[0].content_type().unwrap(), "application/sdp");
+        assert_eq!(
+            multipart.parts[0].content_type().unwrap(),
+            "application/sdp"
+        );
         assert_eq!(
             std::str::from_utf8(&multipart.parts[0].raw_content).unwrap(),
             sdp.to_string()
         );
     }
-    
+
     #[test]
     fn test_image_part() {
         let image_data = Bytes::from_static(&[0xFF, 0xD8, 0xFF, 0xE0]); // Fake JPEG header
         let multipart = MultipartBodyBuilder::new()
             .add_image_part("image/jpeg", image_data.clone(), Some("img1@example.com"))
             .build();
-            
+
         assert_eq!(multipart.parts.len(), 1);
         assert_eq!(multipart.parts[0].content_type().unwrap(), "image/jpeg");
-        
+
         // Check Content-ID header
-        let content_id_headers = multipart.parts[0].headers.iter()
+        let content_id_headers = multipart.parts[0]
+            .headers
+            .iter()
             .filter(|h| h.name == HeaderName::Other("Content-ID".to_string()))
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_id_headers.len(), 1);
-        assert!(content_id_headers[0].to_string().contains("<img1@example.com>"));
-            
+        assert!(content_id_headers[0]
+            .to_string()
+            .contains("<img1@example.com>"));
+
         // Check image data
         assert_eq!(multipart.parts[0].raw_content, image_data);
     }
-    
+
     #[test]
     fn test_to_string() {
         let multipart = MultipartBodyBuilder::new()
             .boundary("simple-boundary")
             .add_text_part("Text content")
             .build();
-            
+
         let body_string = multipart.to_string();
-        
+
         // Check basic structure
         assert!(body_string.contains("--simple-boundary\r\n"));
         assert!(body_string.contains("Content-Type: text/plain\r\n"));
         assert!(body_string.contains("\r\nText content\r\n"));
         assert!(body_string.contains("--simple-boundary--\r\n"));
     }
-    
+
     #[test]
     fn test_sip_message_integration() {
         let multipart = MultipartBodyBuilder::new()
@@ -1746,33 +1764,51 @@ mod tests {
             .add_text_part("Plain text")
             .add_html_part("<html><body>HTML</body></html>")
             .build();
-            
-        let message = SimpleRequestBuilder::new(Method::Message, "sip:bob@example.com").unwrap()
-            .content_type(format!("multipart/alternative; boundary={}", multipart.boundary).as_str())
+
+        let message = SimpleRequestBuilder::new(Method::Message, "sip:bob@example.com")
+            .unwrap()
+            .content_type(
+                format!("multipart/alternative; boundary={}", multipart.boundary).as_str(),
+            )
             .body(multipart.to_string())
             .build();
-            
+
         let headers = message.all_headers();
-        let content_type_headers = headers.iter()
+        let content_type_headers = headers
+            .iter()
             .filter(|h| match h {
                 crate::types::TypedHeader::ContentType(_) => true,
                 _ => false,
             })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_type_headers.len(), 1);
-        assert!(content_type_headers[0].to_string().contains("multipart/alternative"));
-        assert!(content_type_headers[0].to_string().contains("boundary=\"test-boundary\""));
-        
+        assert!(content_type_headers[0]
+            .to_string()
+            .contains("multipart/alternative"));
+        assert!(content_type_headers[0]
+            .to_string()
+            .contains("boundary=\"test-boundary\""));
+
         // Check body
         let body_str = message.body();
-        assert!(std::str::from_utf8(body_str).unwrap().contains("--test-boundary"));
-        assert!(std::str::from_utf8(body_str).unwrap().contains("Content-Type: text/plain"));
-        assert!(std::str::from_utf8(body_str).unwrap().contains("Plain text"));
-        assert!(std::str::from_utf8(body_str).unwrap().contains("Content-Type: text/html"));
-        assert!(std::str::from_utf8(body_str).unwrap().contains("<html><body>HTML</body></html>"));
+        assert!(std::str::from_utf8(body_str)
+            .unwrap()
+            .contains("--test-boundary"));
+        assert!(std::str::from_utf8(body_str)
+            .unwrap()
+            .contains("Content-Type: text/plain"));
+        assert!(std::str::from_utf8(body_str)
+            .unwrap()
+            .contains("Plain text"));
+        assert!(std::str::from_utf8(body_str)
+            .unwrap()
+            .contains("Content-Type: text/html"));
+        assert!(std::str::from_utf8(body_str)
+            .unwrap()
+            .contains("<html><body>HTML</body></html>"));
     }
-    
+
     #[test]
     fn test_multipart_part_builder() {
         // Basic part with content-type and body
@@ -1780,53 +1816,54 @@ mod tests {
             .content_type("text/plain")
             .body("This is text content")
             .build();
-            
+
         assert_eq!(part.content_type().unwrap(), "text/plain");
         assert_eq!(
             std::str::from_utf8(&part.raw_content).unwrap(),
             "This is text content"
         );
-        
+
         // Part with content-id
         let part = MultipartPartBuilder::new()
             .content_type("text/plain")
             .content_id("<text123@example.com>")
             .body("This is text content with ID")
             .build();
-            
+
         assert_eq!(part.content_type().unwrap(), "text/plain");
-        assert!(part.headers.iter().any(|h| 
-            h.name == HeaderName::Other("Content-ID".to_string()) && 
-            h.value.as_text() == Some("<text123@example.com>")
-        ));
-        
+        assert!(part
+            .headers
+            .iter()
+            .any(|h| h.name == HeaderName::Other("Content-ID".to_string())
+                && h.value.as_text() == Some("<text123@example.com>")));
+
         // Part with content-disposition
         let part = MultipartPartBuilder::new()
             .content_type("application/sdp")
             .content_disposition("session")
             .body("v=0\r\no=- 1234 1234 IN IP4 127.0.0.1\r\ns=Test\r\n")
             .build();
-            
+
         assert_eq!(part.content_type().unwrap(), "application/sdp");
-        assert!(part.headers.iter().any(|h| 
-            h.name == HeaderName::ContentDisposition && 
-            h.value.as_text() == Some("session")
-        ));
-        
+        assert!(part
+            .headers
+            .iter()
+            .any(|h| h.name == HeaderName::ContentDisposition
+                && h.value.as_text() == Some("session")));
+
         // Part with content-transfer-encoding
         let part = MultipartPartBuilder::new()
             .content_type("image/png")
             .content_transfer_encoding("base64")
             .body("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
             .build();
-            
+
         assert_eq!(part.content_type().unwrap(), "image/png");
-        assert!(part.headers.iter().any(|h| 
-            h.name == HeaderName::Other("Content-Transfer-Encoding".to_string()) && 
-            h.value.as_text() == Some("base64")
-        ));
+        assert!(part.headers.iter().any(|h| h.name
+            == HeaderName::Other("Content-Transfer-Encoding".to_string())
+            && h.value.as_text() == Some("base64")));
     }
-    
+
     #[test]
     fn test_multipart_builder_mixed() {
         let multipart = MultipartBuilder::mixed()
@@ -1834,38 +1871,38 @@ mod tests {
                 MultipartPartBuilder::new()
                     .content_type("text/plain")
                     .body("Plain text part")
-                    .build()
+                    .build(),
             )
             .add_part(
                 MultipartPartBuilder::new()
                     .content_type("application/json")
                     .body(r#"{"key":"value"}"#)
-                    .build()
+                    .build(),
             )
             .build();
-            
+
         // Check content type
         let content_type = multipart.content_type();
         assert!(content_type.starts_with("multipart/mixed; boundary="));
-        
+
         // Get boundary, handling both quoted and unquoted formats
         let boundary_part = content_type.split("boundary=").nth(1).unwrap_or("");
         let boundary = boundary_part.trim_matches('"');
-        
+
         // Check body
         let body = multipart.body();
         assert!(body.contains("Content-Type: text/plain"));
         assert!(body.contains("Plain text part"));
         assert!(body.contains("Content-Type: application/json"));
         assert!(body.contains(r#"{"key":"value"}"#));
-        
+
         // Body should contain the boundary
         assert!(body.contains(&format!("--{}", boundary)));
-        
+
         // Body should end with boundary--
         assert!(body.contains(&format!("--{}--", boundary)));
     }
-    
+
     #[test]
     fn test_multipart_builder_alternative() {
         let multipart = MultipartBuilder::alternative()
@@ -1873,26 +1910,26 @@ mod tests {
                 MultipartPartBuilder::new()
                     .content_type("text/plain")
                     .body("This is plain text")
-                    .build()
+                    .build(),
             )
             .add_part(
                 MultipartPartBuilder::new()
                     .content_type("text/html")
                     .body("<html><body><p>This is HTML</p></body></html>")
-                    .build()
+                    .build(),
             )
             .build();
-            
+
         let content_type = multipart.content_type();
         assert!(content_type.starts_with("multipart/alternative; boundary="));
-        
+
         let body = multipart.body();
         assert!(body.contains("Content-Type: text/plain"));
         assert!(body.contains("This is plain text"));
         assert!(body.contains("Content-Type: text/html"));
         assert!(body.contains("<html><body><p>This is HTML</p></body></html>"));
     }
-    
+
     #[test]
     fn test_multipart_builder_related() {
         let multipart = MultipartBuilder::related()
@@ -1914,12 +1951,12 @@ mod tests {
                     .build()
             )
             .build();
-            
+
         // Check content type - should contain both multipart/related and text/html
         let content_type = multipart.content_type();
         assert!(content_type.contains("multipart/related"));
         assert!(content_type.contains("text/html"));
-        
+
         let body = multipart.body();
         assert!(body.contains("Content-Type: text/html"));
         assert!(body.contains("Content-ID: <main@example.com>"));
@@ -1928,12 +1965,12 @@ mod tests {
         assert!(body.contains("Content-ID: <image@example.com>"));
         assert!(body.contains("Content-Transfer-Encoding: base64"));
     }
-    
+
     #[test]
     fn test_multipart_builder_preamble_epilogue() {
         let preamble = "This is a multipart message in MIME format.";
         let epilogue = "This is the epilogue. It is also ignored.";
-        
+
         let multipart = MultipartBuilder::mixed()
             .preamble(preamble)
             .epilogue(epilogue)
@@ -1941,12 +1978,12 @@ mod tests {
                 MultipartPartBuilder::new()
                     .content_type("text/plain")
                     .body("Test content")
-                    .build()
+                    .build(),
             )
             .build();
-            
+
         let body = multipart.body();
-        
+
         // Preamble should be before the first boundary
         let content_type_str = multipart.content_type();
         let boundary_part = content_type_str.split("boundary=").nth(1).unwrap_or("");
@@ -1954,37 +1991,40 @@ mod tests {
         let first_boundary_pos = body.find(&format!("--{}", boundary)).unwrap_or(0);
         let preamble_in_body = &body[0..first_boundary_pos];
         assert_eq!(preamble_in_body.trim(), preamble);
-        
+
         // Epilogue should be after the last boundary
-        let last_boundary_pos = body.rfind(&format!("--{}--", boundary)).map(|pos| pos + boundary.len() + 4).unwrap_or(body.len()); // +4 for "--" and "--"
+        let last_boundary_pos = body
+            .rfind(&format!("--{}--", boundary))
+            .map(|pos| pos + boundary.len() + 4)
+            .unwrap_or(body.len()); // +4 for "--" and "--"
         let epilogue_in_body = &body[last_boundary_pos..].trim().to_string();
         assert_eq!(epilogue_in_body, epilogue);
     }
-    
+
     #[test]
     fn test_multipart_builder_custom_boundary() {
         let custom_boundary = "a-custom-boundary-string";
-        
+
         let multipart = MultipartBuilder::mixed()
             .boundary(custom_boundary.to_string())
             .add_part(
                 MultipartPartBuilder::new()
                     .content_type("text/plain")
                     .body("Test with custom boundary")
-                    .build()
+                    .build(),
             )
             .build();
-            
+
         // Check content type has our custom boundary
         let content_type = multipart.content_type();
         assert!(content_type.contains(&format!("boundary=\"{}\"", custom_boundary)));
-        
+
         // Check body uses our custom boundary
         let body = multipart.body();
         assert!(body.contains(&format!("--{}", custom_boundary)));
         assert!(body.contains(&format!("--{}--", custom_boundary)));
     }
-    
+
     #[test]
     fn test_integration_with_sip_message() {
         let multipart = MultipartBuilder::mixed()
@@ -1992,37 +2032,40 @@ mod tests {
                 MultipartPartBuilder::new()
                     .content_type("text/plain")
                     .body("Hello SIP world!")
-                    .build()
+                    .build(),
             )
             .add_part(
                 MultipartPartBuilder::new()
                     .content_type("application/json")
                     .body(r#"{"greeting":"Hello JSON world!"}"#)
-                    .build()
+                    .build(),
             )
             .build();
-            
-        let request = SimpleRequestBuilder::new(Method::Message, "sip:test@example.com").unwrap()
+
+        let request = SimpleRequestBuilder::new(Method::Message, "sip:test@example.com")
+            .unwrap()
             .content_type(&multipart.content_type())
             .body(multipart.body())
             .build();
-            
+
         // Check the request has proper Content-Type header
-        let content_type_header = request.all_headers().iter()
+        let content_type_header = request
+            .all_headers()
+            .iter()
             .find(|h| match h {
                 TypedHeader::ContentType(_) => true,
                 _ => false,
             })
             .unwrap();
-        
+
         // Check the body is set correctly
         let header_str = content_type_header.to_string();
         assert!(header_str.contains("multipart/mixed") && header_str.contains("boundary="));
-        
+
         // Check the body is set correctly
         assert_eq!(request.body(), multipart.body().as_bytes());
     }
-    
+
     #[test]
     fn test_multipart_with_sdp() {
         let sdp = SdpBuilder::new("Test SDP")
@@ -2030,39 +2073,41 @@ mod tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(49170, "RTP/AVP")
-                .formats(&["0", "8"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .done()
+            .formats(&["0", "8"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .done()
             .build()
             .unwrap();
-            
+
         let multipart = MultipartBuilder::mixed()
             .add_part(
                 MultipartPartBuilder::new()
                     .content_type("application/sdp")
                     .content_disposition("session")
                     .body(sdp.to_string())
-                    .build()
+                    .build(),
             )
             .add_part(
                 MultipartPartBuilder::new()
                     .content_type("application/xml")
                     .body("<metadata><session-id>12345</session-id></metadata>")
-                    .build()
+                    .build(),
             )
             .build();
-            
+
         // Check content type
-        assert!(multipart.content_type().starts_with("multipart/mixed; boundary="));
-        
+        assert!(multipart
+            .content_type()
+            .starts_with("multipart/mixed; boundary="));
+
         // Check body contains SDP
         let body = multipart.body();
         assert!(body.contains("v=0"));
         assert!(body.contains("m=audio 49170 RTP/AVP 0 8"));
         assert!(body.contains("a=rtpmap:0 PCMU/8000"));
-        
+
         // Check body contains XML
         assert!(body.contains("<metadata><session-id>12345</session-id></metadata>"));
     }
-} 
+}

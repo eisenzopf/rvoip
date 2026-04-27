@@ -22,19 +22,19 @@
 //! See `crates/session-core/docs/PRE_B2BUA_ROADMAP.md` Item 2 for the
 //! b2bua use case driving this primitive.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use thiserror::Error;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{broadcast, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::error::Error;
 use crate::types::DialogId;
-use rvoip_rtp_core::RtpSession;
 use rvoip_rtp_core::session::RtpSessionEvent;
+use rvoip_rtp_core::RtpSession;
 
 use super::MediaSessionController;
 
@@ -50,9 +50,7 @@ pub enum BridgeError {
     SessionNotActive(String),
 
     /// Negotiated payload types differ. Transparent relay can't re-encode.
-    #[error(
-        "codec payload-type mismatch: session {a} uses PT={a_pt}, session {b} uses PT={b_pt}"
-    )]
+    #[error("codec payload-type mismatch: session {a} uses PT={a_pt}, session {b} uses PT={b_pt}")]
     CodecMismatch {
         a: String,
         b: String,
@@ -213,7 +211,10 @@ impl MediaSessionController {
     pub(super) fn clear_bridge_partner(&self, dialog: &DialogId) {
         if let Some((_, partner)) = self.bridge_partners.remove(dialog) {
             self.bridge_partners.remove(&partner);
-            debug!("🔗 Cleared bridge partnership for stopped session: {}", dialog);
+            debug!(
+                "🔗 Cleared bridge partnership for stopped session: {}",
+                dialog
+            );
         }
     }
 
@@ -328,7 +329,10 @@ mod tests {
     async fn bridge_same_session_errors() {
         let controller = MediaSessionController::new();
         let id = DialogId::new("same");
-        controller.start_media(id.clone(), test_config("PCMU")).await.unwrap();
+        controller
+            .start_media(id.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
 
         let err = expect_err(controller.bridge_sessions(id.clone(), id).await);
         assert!(matches!(err, BridgeError::SameSession(_)));
@@ -339,7 +343,10 @@ mod tests {
         let controller = MediaSessionController::new();
         let a = DialogId::new("a");
         let b = DialogId::new("b");
-        controller.start_media(a.clone(), test_config("PCMU")).await.unwrap();
+        controller
+            .start_media(a.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
 
         let err = expect_err(controller.bridge_sessions(a, b).await);
         assert!(matches!(err, BridgeError::SessionNotFound(_)));
@@ -350,8 +357,14 @@ mod tests {
         let controller = MediaSessionController::new();
         let a = DialogId::new("a");
         let b = DialogId::new("b");
-        controller.start_media(a.clone(), test_config("PCMU")).await.unwrap();
-        controller.start_media(b.clone(), test_config("PCMA")).await.unwrap();
+        controller
+            .start_media(a.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
+        controller
+            .start_media(b.clone(), test_config("PCMA"))
+            .await
+            .unwrap();
 
         let err = expect_err(controller.bridge_sessions(a, b).await);
         match err {
@@ -368,8 +381,14 @@ mod tests {
         let controller = MediaSessionController::new();
         let a = DialogId::new("a");
         let b = DialogId::new("b");
-        controller.start_media(a.clone(), test_config("PCMU")).await.unwrap();
-        controller.start_media(b.clone(), test_config("PCMU")).await.unwrap();
+        controller
+            .start_media(a.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
+        controller
+            .start_media(b.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
 
         let handle = expect_ok(controller.bridge_sessions(a.clone(), b.clone()).await);
         assert!(controller.is_bridged(&a));
@@ -390,9 +409,18 @@ mod tests {
         let a = DialogId::new("a");
         let b = DialogId::new("b");
         let c = DialogId::new("c");
-        controller.start_media(a.clone(), test_config("PCMU")).await.unwrap();
-        controller.start_media(b.clone(), test_config("PCMU")).await.unwrap();
-        controller.start_media(c.clone(), test_config("PCMU")).await.unwrap();
+        controller
+            .start_media(a.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
+        controller
+            .start_media(b.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
+        controller
+            .start_media(c.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
 
         let _first = expect_ok(controller.bridge_sessions(a.clone(), b.clone()).await);
         let err = expect_err(controller.bridge_sessions(a, c).await);
@@ -404,8 +432,14 @@ mod tests {
         let controller = MediaSessionController::new();
         let a = DialogId::new("a");
         let b = DialogId::new("b");
-        controller.start_media(a.clone(), test_config("PCMU")).await.unwrap();
-        controller.start_media(b.clone(), test_config("PCMU")).await.unwrap();
+        controller
+            .start_media(a.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
+        controller
+            .start_media(b.clone(), test_config("PCMU"))
+            .await
+            .unwrap();
 
         let _handle = expect_ok(controller.bridge_sessions(a.clone(), b.clone()).await);
         assert!(controller.is_bridged(&a));

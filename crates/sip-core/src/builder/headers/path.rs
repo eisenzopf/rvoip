@@ -1,49 +1,45 @@
-use std::str::FromStr;
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
-    path::Path,
-    uri::Uri,
-    Address
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader, path::Path,
+    uri::Uri, Address,
 };
-use super::HeaderSetter;
+use std::str::FromStr;
 /// Path header builder
 ///
 /// This module provides builder methods for the Path header in SIP messages.
-/// 
+///
 /// ## SIP Path Header Overview
-/// 
-/// The Path header is defined in [RFC 3327](https://datatracker.ietf.org/doc/html/rfc3327) 
+///
+/// The Path header is defined in [RFC 3327](https://datatracker.ietf.org/doc/html/rfc3327)
 /// as an extension to the base SIP protocol. It solves the "SIP registration behind NAT" problem
 /// by allowing registrations to traverse edge proxies while maintaining proper routing information.
-/// 
+///
 /// ## Purpose of Path Header
-/// 
+///
 /// The Path header serves as a "breadcrumb trail" for outbound proxies during registration:
-/// 
+///
 /// 1. Edge proxies insert Path headers into REGISTER requests to indicate they must be traversed
 ///    for future requests toward the registered user agent
 /// 2. The registrar collects these Path headers and associates them with the registered contact
 /// 3. When someone sends a request to the registered user, the registrar adds the stored
 ///    Path URIs as Route headers, ensuring the request traverses the same edge proxies
-/// 
+///
 /// ## Relationship with Service-Route and Record-Route
-/// 
+///
 /// - **Path**: Used in REGISTER requests to indicate outbound proxies for future inbound requests
 /// - **Service-Route**: Used by registrars in 200 OK responses to REGISTER to indicate service
 ///   proxies for future outbound requests from the client
 /// - **Record-Route**: Used in dialog-forming requests to stay in path for future requests in that dialog
-/// 
+///
 /// ## Common Use Cases
-/// 
+///
 /// - **NAT traversal**: Edge proxies that maintain NAT bindings must stay in the signaling path
 /// - **Topology hiding**: Core network elements remain hidden while edge proxies handle external communications
 /// - **Network boundary traversal**: When SIP traffic must cross network boundaries through specific gateways
 /// - **Load balancing**: Routing registrations through appropriate load balancing proxies
 /// - **SIP trunking**: Provider edge proxies ensure proper routing between enterprises and service providers
-/// 
+///
 /// # Examples
 ///
 /// ## Complete Edge Proxy Registration Flow
@@ -145,8 +141,10 @@ pub trait PathBuilderExt {
     ///     .path("sip:edge.example.com;lr;transport=tcp;maddr=203.0.113.1").unwrap()
     ///     .build();
     /// ```
-    fn path(self, uri: impl AsRef<str>) -> Result<Self> where Self: Sized;
-    
+    fn path(self, uri: impl AsRef<str>) -> Result<Self>
+    where
+        Self: Sized;
+
     /// Add a Path header with multiple URIs
     ///
     /// This method adds a Path header with multiple URIs to the SIP message. This is used
@@ -184,26 +182,28 @@ pub trait PathBuilderExt {
     /// // Route: <sip:main-proxy.example.com;lr;transport=tcp>
     /// // Route: <sip:branch-proxy.example.com;lr>
     /// ```
-    fn path_addresses(self, uris: Vec<impl AsRef<str>>) -> Result<Self> where Self: Sized;
+    fn path_addresses(self, uris: Vec<impl AsRef<str>>) -> Result<Self>
+    where
+        Self: Sized;
 }
 
-impl<T> PathBuilderExt for T 
-where 
+impl<T> PathBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn path(self, uri: impl AsRef<str>) -> Result<Self> {
         let uri = Uri::from_str(uri.as_ref())?;
         Ok(self.set_header(Path::with_uri(uri)))
     }
-    
+
     fn path_addresses(self, uris: Vec<impl AsRef<str>>) -> Result<Self> {
         let mut path = Path::empty();
-        
+
         for uri_str in uris {
             let uri = Uri::from_str(uri_str.as_ref())?;
             path.add_uri(uri);
         }
-        
+
         Ok(self.set_header(path))
     }
 }
@@ -217,13 +217,15 @@ mod tests {
 
     #[test]
     fn test_request_path() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
-            .path("sip:proxy.example.com;lr").unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
+            .path("sip:proxy.example.com;lr")
+            .unwrap()
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Path(path)) = request.header(&HeaderName::Path) {
             assert_eq!(path.len(), 1);
             assert_eq!(path[0].0.uri.to_string(), "sip:proxy.example.com;lr");
@@ -234,13 +236,15 @@ mod tests {
 
     #[test]
     fn test_request_path_addresses() {
-        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
-            .path_addresses(vec!["sip:p1.example.com;lr", "sip:p2.example.com;lr"]).unwrap()
+        let request = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
+            .path_addresses(vec!["sip:p1.example.com;lr", "sip:p2.example.com;lr"])
+            .unwrap()
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Path(path)) = request.header(&HeaderName::Path) {
             assert_eq!(path.len(), 2);
             assert_eq!(path[0].0.uri.to_string(), "sip:p1.example.com;lr");
@@ -253,9 +257,10 @@ mod tests {
     #[test]
     fn test_error_handling() {
         // Invalid URI
-        let result = RequestBuilder::new(Method::Register, "sip:registrar.example.com").unwrap()
+        let result = RequestBuilder::new(Method::Register, "sip:registrar.example.com")
+            .unwrap()
             .path("invalid uri");
-            
+
         assert!(result.is_err());
     }
-} 
+}

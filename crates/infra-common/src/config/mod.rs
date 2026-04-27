@@ -10,12 +10,12 @@ It includes:
 - Support for dynamic configuration updates
 */
 
+pub mod dynamic;
 pub mod loader;
 pub mod provider;
 pub mod schema;
-pub mod dynamic;
 
+pub use dynamic::DynamicConfig;
 pub use loader::ConfigLoader;
 pub use provider::{ConfigProvider, ConfigSource};
 pub use schema::SchemaValidator;
-pub use dynamic::DynamicConfig; 

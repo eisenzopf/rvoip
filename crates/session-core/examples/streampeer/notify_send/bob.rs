@@ -8,15 +8,17 @@ use rvoip_session_core::{Config, Event, StreamPeer};
 use tokio::time::{timeout, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
         )
         .init();
 
@@ -50,10 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         body.as_deref().map(str::len).unwrap_or(0)
                     );
                     if event_package != "dialog" {
-                        return Err(format!(
-                            "unexpected event_package: {}",
-                            event_package
-                        ));
+                        return Err(format!("unexpected event_package: {}", event_package));
                     }
                     let sub = subscription_state.unwrap_or_default();
                     if !sub.contains("active") {

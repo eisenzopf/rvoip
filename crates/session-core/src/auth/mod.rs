@@ -5,8 +5,5 @@
 
 // Re-export client-side digest authentication from auth-core
 pub use rvoip_auth_core::{
-    DigestAlgorithm,
-    DigestChallenge,
-    DigestClient as DigestAuth,
-    DigestComputed,
+    DigestAlgorithm, DigestChallenge, DigestClient as DigestAuth, DigestComputed,
 };

@@ -80,7 +80,10 @@ impl IncomingCall {
     pub async fn accept(mut self) -> Result<SessionHandle> {
         self.resolved = true;
         self.coordinator.accept_call(&self.call_id).await?;
-        Ok(SessionHandle::new(self.call_id.clone(), self.coordinator.clone()))
+        Ok(SessionHandle::new(
+            self.call_id.clone(),
+            self.coordinator.clone(),
+        ))
     }
 
     /// Accept the call with a custom SDP answer.
@@ -88,7 +91,10 @@ impl IncomingCall {
         // TODO: pass custom SDP through the state machine
         self.resolved = true;
         self.coordinator.accept_call(&self.call_id).await?;
-        Ok(SessionHandle::new(self.call_id.clone(), self.coordinator.clone()))
+        Ok(SessionHandle::new(
+            self.call_id.clone(),
+            self.coordinator.clone(),
+        ))
     }
 
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
@@ -148,8 +154,12 @@ impl IncomingCall {
         sdp: Option<String>,
         source: crate::api::unified::AudioSource,
     ) -> Result<()> {
-        self.coordinator.send_early_media(&self.call_id, sdp).await?;
-        self.coordinator.set_audio_source(&self.call_id, source).await
+        self.coordinator
+            .send_early_media(&self.call_id, sdp)
+            .await?;
+        self.coordinator
+            .set_audio_source(&self.call_id, source)
+            .await
     }
 
     /// Reject the call immediately with an explicit SIP status code and reason.
@@ -233,7 +243,8 @@ impl Drop for IncomingCall {
             {
                 tracing::error!(
                     "[IncomingCall] panic-path reject_call failed for {}: {}",
-                    call_id, e
+                    call_id,
+                    e
                 );
             }
         });
@@ -300,7 +311,10 @@ impl IncomingCallGuard {
         }
         self.resolved = true;
         self.coordinator.accept_call(&self.call_id).await?;
-        Ok(SessionHandle::new(self.call_id.clone(), self.coordinator.clone()))
+        Ok(SessionHandle::new(
+            self.call_id.clone(),
+            self.coordinator.clone(),
+        ))
     }
 
     /// Reject the call now with the given SIP status code and reason phrase.

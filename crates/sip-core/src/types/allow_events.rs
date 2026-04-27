@@ -30,13 +30,13 @@
 //! assert!(parsed.supports("presence"));
 //! ```
 
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use nom::combinator::all_consuming;
 
-use crate::types::headers::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::parser::headers::parse_allow_events;
+use crate::types::headers::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::{Error, Result};
 
 /// Represents the Allow-Events header value
@@ -64,12 +64,12 @@ impl AllowEvents {
             events: events.into_iter().map(|e| e.into()).collect(),
         }
     }
-    
+
     /// Returns the list of supported event packages
     pub fn events(&self) -> &[String] {
         &self.events
     }
-    
+
     /// Checks if a specific event package is supported
     ///
     /// # Parameters
@@ -82,7 +82,7 @@ impl AllowEvents {
     pub fn supports(&self, event: &str) -> bool {
         self.events.iter().any(|e| e.eq_ignore_ascii_case(event))
     }
-    
+
     /// Adds an event package to the list of supported events
     ///
     /// # Parameters
@@ -104,20 +104,21 @@ impl fmt::Display for AllowEvents {
 
 impl FromStr for AllowEvents {
     type Err = Error;
-    
+
     fn from_str(s: &str) -> Result<Self> {
-        let (_, allow_events) = all_consuming(parse_allow_events)(s.as_bytes()).map_err(Error::from)?;
+        let (_, allow_events) =
+            all_consuming(parse_allow_events)(s.as_bytes()).map_err(Error::from)?;
         Ok(allow_events)
     }
 }
 
 impl TypedHeaderTrait for AllowEvents {
     type Name = HeaderName;
-    
+
     fn header_name() -> Self::Name {
         HeaderName::AllowEvents
     }
-    
+
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
             return Err(Error::InvalidHeader(format!(
@@ -126,18 +127,18 @@ impl TypedHeaderTrait for AllowEvents {
                 header.name
             )));
         }
-        
+
         match &header.value {
             HeaderValue::Raw(bytes) => {
                 let value = String::from_utf8_lossy(bytes);
                 Self::from_str(&value)
             }
             _ => Err(Error::InvalidHeader(
-                "Allow-Events header value must be raw text".to_string()
+                "Allow-Events header value must be raw text".to_string(),
             )),
         }
     }
-    
+
     fn to_header(&self) -> Header {
         Header::new(Self::header_name(), HeaderValue::text(self.to_string()))
     }
@@ -153,7 +154,7 @@ impl Default for AllowEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_allow_events_creation() {
         let allow = AllowEvents::new(vec!["presence", "dialog"]);
@@ -162,7 +163,7 @@ mod tests {
         assert!(allow.supports("dialog"));
         assert!(!allow.supports("conference"));
     }
-    
+
     #[test]
     fn test_allow_events_from_str() {
         let allow = AllowEvents::from_str("presence, message-summary, dialog").unwrap();
@@ -170,35 +171,35 @@ mod tests {
         assert!(allow.supports("presence"));
         assert!(allow.supports("message-summary"));
         assert!(allow.supports("dialog"));
-        
+
         // Empty string should fail
         assert!(AllowEvents::from_str("").is_err());
-        
+
         // Whitespace handling
         let allow2 = AllowEvents::from_str("  presence  ,  dialog  ").unwrap();
         assert_eq!(allow2.events().len(), 2);
     }
-    
+
     #[test]
     fn test_allow_events_add() {
         let mut allow = AllowEvents::new(vec!["presence"]);
         assert_eq!(allow.events().len(), 1);
-        
+
         allow.add_event("dialog");
         assert_eq!(allow.events().len(), 2);
-        
+
         // Adding duplicate should not increase count
         allow.add_event("presence");
         assert_eq!(allow.events().len(), 2);
     }
-    
+
     #[test]
     fn test_allow_events_header_conversion() {
         let allow = AllowEvents::new(vec!["presence", "dialog"]);
         let header = allow.to_header();
-        
+
         assert_eq!(header.name, HeaderName::AllowEvents);
-        
+
         let parsed = AllowEvents::from_header(&header).unwrap();
         assert_eq!(parsed, allow);
     }

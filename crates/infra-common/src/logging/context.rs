@@ -22,7 +22,7 @@ impl LogContext {
             fields: HashMap::new(),
         }
     }
-    
+
     /// Create a new log context with component and operation
     pub fn with_operation<S: Into<String>, T: Into<String>>(component: S, operation: T) -> Self {
         LogContext {
@@ -31,13 +31,13 @@ impl LogContext {
             fields: HashMap::new(),
         }
     }
-    
+
     /// Add a field to the context
     pub fn with_field<S: Into<String>, T: Into<String>>(mut self, key: S, value: T) -> Self {
         self.fields.insert(key.into(), value.into());
         self
     }
-    
+
     /// Add multiple fields to the context
     pub fn with_fields<S: Into<String>, T: Into<String>>(mut self, fields: Vec<(S, T)>) -> Self {
         for (key, value) in fields {
@@ -45,7 +45,7 @@ impl LogContext {
         }
         self
     }
-    
+
     /// Create a span with this context's information
     pub fn span(&self, level: Level) -> Span {
         // Use a constant level to avoid the compile error
@@ -56,35 +56,35 @@ impl LogContext {
                 } else {
                     tracing::trace_span!("rvoip", component = %self.component)
                 }
-            },
+            }
             Level::DEBUG => {
                 if let Some(op) = &self.operation {
                     tracing::debug_span!("rvoip", component = %self.component, operation = %op)
                 } else {
                     tracing::debug_span!("rvoip", component = %self.component)
                 }
-            },
+            }
             Level::INFO => {
                 if let Some(op) = &self.operation {
                     tracing::info_span!("rvoip", component = %self.component, operation = %op)
                 } else {
                     tracing::info_span!("rvoip", component = %self.component)
                 }
-            },
+            }
             Level::WARN => {
                 if let Some(op) = &self.operation {
                     tracing::warn_span!("rvoip", component = %self.component, operation = %op)
                 } else {
                     tracing::warn_span!("rvoip", component = %self.component)
                 }
-            },
+            }
             Level::ERROR => {
                 if let Some(op) = &self.operation {
                     tracing::error_span!("rvoip", component = %self.component, operation = %op)
                 } else {
                     tracing::error_span!("rvoip", component = %self.component)
                 }
-            },
+            }
         }
     }
 }
@@ -92,15 +92,15 @@ impl LogContext {
 impl fmt::Display for LogContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[{}]", self.component)?;
-        
+
         if let Some(op) = &self.operation {
             write!(f, "[{}]", op)?;
         }
-        
+
         for (key, value) in &self.fields {
             write!(f, "[{}={}]", key, value)?;
         }
-        
+
         Ok(())
     }
 }
@@ -132,4 +132,4 @@ macro_rules! log_ctx {
         let ctx = $crate::logging::context::LogContext::with_operation($component, $operation);
         $crate::log_with_context!($level, &ctx, $($arg)+);
     };
-} 
+}

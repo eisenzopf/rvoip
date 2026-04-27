@@ -6,7 +6,7 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while1},
-    combinator::{map, map_res, verify, all_consuming},
+    combinator::{all_consuming, map, map_res, verify},
     sequence::{pair, preceded},
     IResult,
 };
@@ -24,28 +24,30 @@ use crate::types::Priority;
 // other-priority = token
 fn priority_value(input: &[u8]) -> ParseResult<Priority> {
     // Use all_consuming to ensure we don't accept any trailing content
-    all_consuming(
-        map_res(
-            token, // Any token is valid per RFC 3261
-            |bytes| {
-                let s = str::from_utf8(bytes)
-                    .map_err(|_| nom::Err::Failure(nom::error::Error::new(bytes, nom::error::ErrorKind::Char)))?;
-                
-                // Check if it's a numeric string and verify it's within u8 range
-                if s.chars().all(|c| c.is_ascii_digit()) {
-                    // Try to parse as a number
-                    match s.parse::<u8>() {
-                        Ok(val) => Ok(Priority::Other(val)),
-                        // If parsing fails, it's likely too large for u8
-                        Err(_) => Err(nom::Err::Failure(nom::error::Error::new(bytes, nom::error::ErrorKind::Digit)))
-                    }
-                } else {
-                    // Use the from_token method for non-numeric tokens
-                    Ok(Priority::from_token(s))
+    all_consuming(map_res(
+        token, // Any token is valid per RFC 3261
+        |bytes| {
+            let s = str::from_utf8(bytes).map_err(|_| {
+                nom::Err::Failure(nom::error::Error::new(bytes, nom::error::ErrorKind::Char))
+            })?;
+
+            // Check if it's a numeric string and verify it's within u8 range
+            if s.chars().all(|c| c.is_ascii_digit()) {
+                // Try to parse as a number
+                match s.parse::<u8>() {
+                    Ok(val) => Ok(Priority::Other(val)),
+                    // If parsing fails, it's likely too large for u8
+                    Err(_) => Err(nom::Err::Failure(nom::error::Error::new(
+                        bytes,
+                        nom::error::ErrorKind::Digit,
+                    ))),
                 }
+            } else {
+                // Use the from_token method for non-numeric tokens
+                Ok(Priority::from_token(s))
             }
-        )
-    )(input)
+        },
+    ))(input)
 }
 
 pub fn parse_priority(input: &[u8]) -> ParseResult<Priority> {
@@ -76,7 +78,11 @@ mod tests {
 
         for (input, expected) in test_cases {
             let (rem, val) = parse_priority(input).unwrap();
-            assert!(rem.is_empty(), "Remaining input should be empty for {:?}", input);
+            assert!(
+                rem.is_empty(),
+                "Remaining input should be empty for {:?}",
+                input
+            );
             assert_eq!(val, *expected, "Failed to parse priority value {:?}", input);
         }
     }
@@ -95,8 +101,17 @@ mod tests {
 
         for (input, expected) in numeric_cases {
             let (rem, val) = parse_priority(input).unwrap();
-            assert!(rem.is_empty(), "Remaining input should be empty for {:?}", input);
-            assert_eq!(val, Priority::Other(*expected), "Failed to parse numeric priority {:?}", input);
+            assert!(
+                rem.is_empty(),
+                "Remaining input should be empty for {:?}",
+                input
+            );
+            assert_eq!(
+                val,
+                Priority::Other(*expected),
+                "Failed to parse numeric priority {:?}",
+                input
+            );
         }
     }
 
@@ -104,7 +119,7 @@ mod tests {
     fn test_token_priority() {
         // Test token-based priority values
         let token_cases = &[
-            &b"high"[..], 
+            &b"high"[..],
             &b"low"[..],
             &b"critical"[..],
             &b"non_critical"[..],   // With underscore
@@ -117,10 +132,18 @@ mod tests {
 
         for input in token_cases {
             let (rem, val) = parse_priority(input).unwrap();
-            assert!(rem.is_empty(), "Remaining input should be empty for {:?}", input);
+            assert!(
+                rem.is_empty(),
+                "Remaining input should be empty for {:?}",
+                input
+            );
             let expected_str = str::from_utf8(input).unwrap();
-            assert_eq!(val, Priority::Token(expected_str.to_string()), 
-                       "Failed to parse token priority {:?}", input);
+            assert_eq!(
+                val,
+                Priority::Token(expected_str.to_string()),
+                "Failed to parse token priority {:?}",
+                input
+            );
         }
     }
 
@@ -128,18 +151,22 @@ mod tests {
     fn test_invalid_priority() {
         // Test invalid priority values
         let invalid_cases = &[
-            &b""[..],                  // Empty input
-            &b" "[..],                 // Just whitespace
-            &b"emergency "[..],        // Trailing whitespace
-            &b" emergency"[..],        // Leading whitespace
-            &b"emergency;param"[..],   // With parameter
-            &b"256"[..],               // Numeric value too large for u8
-            &b"1000"[..],              // Numeric value too large for u8
-            &b"emergency\r\n"[..],     // With line ending
+            &b""[..],                // Empty input
+            &b" "[..],               // Just whitespace
+            &b"emergency "[..],      // Trailing whitespace
+            &b" emergency"[..],      // Leading whitespace
+            &b"emergency;param"[..], // With parameter
+            &b"256"[..],             // Numeric value too large for u8
+            &b"1000"[..],            // Numeric value too large for u8
+            &b"emergency\r\n"[..],   // With line ending
         ];
 
         for input in invalid_cases {
-            assert!(parse_priority(input).is_err(), "Should reject invalid input {:?}", input);
+            assert!(
+                parse_priority(input).is_err(),
+                "Should reject invalid input {:?}",
+                input
+            );
         }
     }
 
@@ -149,39 +176,39 @@ mod tests {
         // RFC 3261 states: Priority = "Priority" HCOLON priority-value
         // priority-value = "emergency" / "urgent" / "normal" / "non-urgent" / other-priority
         // other-priority = token
-        
+
         // This test checks the compliance with the ABNF for priority-value
-        
+
         // Test that we can handle all examples from RFC 3261
-        
+
         // Standard priority values
         let (_, val) = parse_priority(b"emergency").unwrap();
         assert_eq!(val, Priority::Emergency);
-        
+
         let (_, val) = parse_priority(b"urgent").unwrap();
         assert_eq!(val, Priority::Urgent);
-        
+
         let (_, val) = parse_priority(b"normal").unwrap();
         assert_eq!(val, Priority::Normal);
-        
+
         let (_, val) = parse_priority(b"non-urgent").unwrap();
         assert_eq!(val, Priority::NonUrgent);
-        
+
         // Numeric other-priority
         let (_, val) = parse_priority(b"0").unwrap();
         assert_eq!(val, Priority::Other(0));
-        
+
         // Token other-priority
         // token = 1*(alphanum / "-" / "." / "!" / "%" / "*" / "_" / "+" / "`" / "'" / "~")
         let (_, val) = parse_priority(b"high-priority").unwrap();
         assert_eq!(val, Priority::Token("high-priority".to_string()));
-        
+
         let (_, val) = parse_priority(b"non_urgent").unwrap();
         assert_eq!(val, Priority::Token("non_urgent".to_string()));
-        
+
         // Ensure we reject invalid inputs
-        assert!(parse_priority(b"").is_err());         // Empty
-        assert!(parse_priority(b" ").is_err());        // Space
+        assert!(parse_priority(b"").is_err()); // Empty
+        assert!(parse_priority(b" ").is_err()); // Space
         assert!(parse_priority(b"urgent;q=0.8").is_err()); // With parameter
     }
-} 
+}

@@ -3,11 +3,11 @@
 //! This module provides functionality to load WAV files and convert them
 //! to G.711 µ-law format suitable for RTP transmission during hold.
 
-use std::path::Path;
+use crate::codec::audio::{AudioCodec, G711Codec};
 use crate::error::{Error, Result};
-use crate::codec::audio::{G711Codec, AudioCodec};
 use crate::types::{AudioFrame, SampleRate};
 use hound::{WavReader, WavSpec};
+use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// Loaded WAV audio data
@@ -26,7 +26,7 @@ impl WavAudio {
     pub fn duration_secs(&self) -> f32 {
         self.samples.len() as f32 / (self.sample_rate as f32 * self.channels as f32)
     }
-    
+
     /// Get total number of frames (samples per channel)
     pub fn frame_count(&self) -> usize {
         self.samples.len() / self.channels as usize
@@ -36,31 +36,36 @@ impl WavAudio {
 /// Load a WAV file from disk
 pub fn load_wav_file(path: &Path) -> Result<WavAudio> {
     info!("Loading WAV file: {}", path.display());
-    
+
     let reader = WavReader::open(path)
         .map_err(|e| Error::config(format!("Failed to open WAV file: {}", e)))?;
-    
+
     let spec = reader.spec();
-    debug!("WAV spec: {} Hz, {} channels, {} bits", 
-           spec.sample_rate, spec.channels, spec.bits_per_sample);
-    
+    debug!(
+        "WAV spec: {} Hz, {} channels, {} bits",
+        spec.sample_rate, spec.channels, spec.bits_per_sample
+    );
+
     // We need 16-bit samples for processing
     if spec.bits_per_sample != 16 {
         return Err(Error::config(format!(
-            "Unsupported bit depth: {} (only 16-bit supported)", 
+            "Unsupported bit depth: {} (only 16-bit supported)",
             spec.bits_per_sample
         )));
     }
-    
+
     // Collect samples
-    let samples: Vec<i16> = reader.into_samples::<i16>()
+    let samples: Vec<i16> = reader
+        .into_samples::<i16>()
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| Error::config(format!("Failed to read WAV samples: {}", e)))?;
-    
-    info!("Loaded {} samples ({:.1}s) from WAV file", 
-          samples.len(), 
-          samples.len() as f32 / (spec.sample_rate as f32 * spec.channels as f32));
-    
+
+    info!(
+        "Loaded {} samples ({:.1}s) from WAV file",
+        samples.len(),
+        samples.len() as f32 / (spec.sample_rate as f32 * spec.channels as f32)
+    );
+
     Ok(WavAudio {
         samples,
         sample_rate: spec.sample_rate,
@@ -71,18 +76,18 @@ pub fn load_wav_file(path: &Path) -> Result<WavAudio> {
 /// Convert WAV audio to G.711 µ-law format for RTP transmission
 pub fn wav_to_ulaw(wav: &WavAudio) -> Result<Vec<u8>> {
     info!("Converting WAV to G.711 µ-law");
-    
+
     // First, convert to 8kHz mono if needed
     let mono_8khz_samples = if wav.sample_rate != 8000 || wav.channels != 1 {
         resample_to_8khz_mono(wav)?
     } else {
         wav.samples.clone()
     };
-    
+
     // Create G.711 codec
     let mut codec = G711Codec::mu_law(8000, 1)
         .map_err(|e| Error::config(format!("Failed to create G.711 codec: {}", e)))?;
-    
+
     // Encode to µ-law
     let audio_frame = AudioFrame {
         samples: mono_8khz_samples.clone(),
@@ -91,19 +96,22 @@ pub fn wav_to_ulaw(wav: &WavAudio) -> Result<Vec<u8>> {
         duration: std::time::Duration::from_secs_f32(mono_8khz_samples.len() as f32 / 8000.0),
         timestamp: 0, // timestamp not used for encoding
     };
-    
-    let encoded = codec.encode(&audio_frame)
+
+    let encoded = codec
+        .encode(&audio_frame)
         .map_err(|e| Error::config(format!("Failed to encode to µ-law: {}", e)))?;
-    
+
     info!("Converted to {} bytes of µ-law audio", encoded.len());
     Ok(encoded)
 }
 
 /// Resample audio to 8kHz mono
 fn resample_to_8khz_mono(wav: &WavAudio) -> Result<Vec<i16>> {
-    info!("Resampling from {}Hz {} channels to 8kHz mono", 
-          wav.sample_rate, wav.channels);
-    
+    info!(
+        "Resampling from {}Hz {} channels to 8kHz mono",
+        wav.sample_rate, wav.channels
+    );
+
     // First, convert to mono if stereo
     let mono_samples = if wav.channels == 2 {
         stereo_to_mono(&wav.samples)
@@ -111,10 +119,11 @@ fn resample_to_8khz_mono(wav: &WavAudio) -> Result<Vec<i16>> {
         wav.samples.clone()
     } else {
         return Err(Error::config(format!(
-            "Unsupported channel count: {}", wav.channels
+            "Unsupported channel count: {}",
+            wav.channels
         )));
     };
-    
+
     // Then resample to 8kHz if needed
     if wav.sample_rate == 8000 {
         Ok(mono_samples)
@@ -139,11 +148,11 @@ fn simple_resample(samples: &[i16], from_rate: u32, to_rate: u32) -> Result<Vec<
     let ratio = from_rate as f64 / to_rate as f64;
     let output_len = (samples.len() as f64 / ratio).ceil() as usize;
     let mut output = Vec::with_capacity(output_len);
-    
+
     for i in 0..output_len {
         let src_idx = i as f64 * ratio;
         let idx = src_idx as usize;
-        
+
         if idx + 1 < samples.len() {
             // Linear interpolation between samples
             let frac = src_idx - idx as f64;
@@ -156,8 +165,12 @@ fn simple_resample(samples: &[i16], from_rate: u32, to_rate: u32) -> Result<Vec<
             output.push(samples[idx]);
         }
     }
-    
-    debug!("Resampled from {} to {} samples", samples.len(), output.len());
+
+    debug!(
+        "Resampled from {} to {} samples",
+        samples.len(),
+        output.len()
+    );
     Ok(output)
 }
 
@@ -166,7 +179,7 @@ fn simple_resample(samples: &[i16], from_rate: u32, to_rate: u32) -> Result<Vec<
 pub async fn load_music_on_hold(path: &Path) -> Result<Vec<u8>> {
     // Load WAV file
     let wav = load_wav_file(path)?;
-    
+
     // Convert to µ-law
     wav_to_ulaw(&wav)
 }
@@ -182,7 +195,7 @@ impl MusicOnHoldCache {
             cache: std::sync::RwLock::new(std::collections::HashMap::new()),
         }
     }
-    
+
     /// Get or load music-on-hold audio
     pub async fn get_or_load(&self, path: &Path) -> Result<Vec<u8>> {
         // Check cache first
@@ -193,19 +206,19 @@ impl MusicOnHoldCache {
                 return Ok(cached.clone());
             }
         }
-        
+
         // Load and cache
         let ulaw_audio = load_music_on_hold(path).await?;
-        
+
         {
             let mut cache = self.cache.write().unwrap();
             cache.insert(path.to_path_buf(), ulaw_audio.clone());
             info!("Cached MoH audio for: {}", path.display());
         }
-        
+
         Ok(ulaw_audio)
     }
-    
+
     /// Clear the cache
     pub fn clear(&self) {
         let mut cache = self.cache.write().unwrap();
@@ -219,14 +232,14 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
-    
+
     #[test]
     fn test_stereo_to_mono() {
         let stereo = vec![100, 200, 300, 400, 500, 600];
         let mono = stereo_to_mono(&stereo);
         assert_eq!(mono, vec![150, 350, 550]); // Average of pairs
     }
-    
+
     #[test]
     fn test_simple_resample_downsample() {
         // 16kHz to 8kHz (2:1 ratio)
@@ -234,7 +247,7 @@ mod tests {
         let resampled = simple_resample(&samples, 16000, 8000).unwrap();
         assert_eq!(resampled.len(), 4);
     }
-    
+
     #[test]
     fn test_simple_resample_upsample() {
         // 8kHz to 16kHz (1:2 ratio)
@@ -242,7 +255,7 @@ mod tests {
         let resampled = simple_resample(&samples, 8000, 16000).unwrap();
         assert_eq!(resampled.len(), 8);
     }
-    
+
     #[test]
     fn test_wav_duration() {
         let wav = WavAudio {
@@ -251,7 +264,7 @@ mod tests {
             channels: 1,
         };
         assert_eq!(wav.duration_secs(), 1.0);
-        
+
         let wav_stereo = WavAudio {
             samples: vec![0; 16000], // 1 second at 8kHz stereo
             sample_rate: 8000,

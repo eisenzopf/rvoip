@@ -15,19 +15,18 @@
 use std::net::SocketAddr;
 use tracing::debug;
 
-use rvoip_sip_core::{Request, Response, Method, StatusCode};
-use rvoip_sip_core::types::refer_to::ReferTo;
-use rvoip_sip_core::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
-use crate::transaction::TransactionKey;
-use crate::errors::{DialogError, DialogResult};
 use super::core::DialogManager;
 use super::session_coordination::SessionCoordinator;
 use super::utils::SourceExtractor;
+use crate::errors::{DialogError, DialogResult};
+use crate::transaction::TransactionKey;
+use rvoip_sip_core::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
+use rvoip_sip_core::types::refer_to::ReferTo;
+use rvoip_sip_core::{Method, Request, Response, StatusCode};
 
 // Import all the specialized protocol handlers
 use crate::protocol::{
-    InviteHandler, ByeHandler, ResponseHandler,
-    UpdateHandler, RegisterHandler, PrackHandler,
+    ByeHandler, InviteHandler, PrackHandler, RegisterHandler, ResponseHandler, UpdateHandler,
 };
 
 /// Trait for SIP method handling (main protocol coordination)
@@ -38,32 +37,32 @@ pub trait ProtocolHandlers {
         request: Request,
         source: SocketAddr,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle BYE requests (dialog-terminating)
     fn handle_bye_method(
         &self,
         request: Request,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle CANCEL requests (transaction-cancelling)
     fn handle_cancel_method(
         &self,
         request: Request,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle ACK requests (transaction-completing)
     fn handle_ack_method(
         &self,
         request: Request,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle OPTIONS requests (capability discovery)
     fn handle_options_method(
         &self,
         request: Request,
         source: SocketAddr,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle UPDATE requests (session modification)
     fn handle_update_method(
         &self,
@@ -92,28 +91,28 @@ pub trait MethodHandler {
         request: Request,
         source: SocketAddr,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle INFO requests (mid-dialog)
     fn handle_info_method(
         &self,
         request: Request,
         source: SocketAddr,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle REFER requests (call transfer)
     fn handle_refer_method(
         &self,
         request: Request,
         source: SocketAddr,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle SUBSCRIBE requests (event subscription)
     fn handle_subscribe_method(
         &self,
         request: Request,
         source: SocketAddr,
     ) -> impl std::future::Future<Output = DialogResult<()>> + Send;
-    
+
     /// Handle NOTIFY requests (event notification)
     fn handle_notify_method(
         &self,
@@ -128,12 +127,12 @@ impl ProtocolHandlers for DialogManager {
     async fn handle_invite_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         InviteHandler::handle_invite_method(self, request, source).await
     }
-    
+
     /// Delegate BYE handling to the specialized bye_handler module
     async fn handle_bye_method(&self, request: Request) -> DialogResult<()> {
         ByeHandler::handle_bye_method(self, request).await
     }
-    
+
     /// UAS-side CANCEL handler (RFC 3261 §9.2).
     ///
     /// An inbound CANCEL targets a pending *server* INVITE transaction. We
@@ -153,7 +152,8 @@ impl ProtocolHandlers for DialogManager {
         // Always create a server transaction for the CANCEL first so we
         // have a handle to respond on (either 200 OK or 481).
         let source = SourceExtractor::extract_from_request(&request);
-        let cancel_tx = self.transaction_manager
+        let cancel_tx = self
+            .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
             .map_err(|e| DialogError::TransactionError {
@@ -162,7 +162,8 @@ impl ProtocolHandlers for DialogManager {
         let cancel_tx_id = cancel_tx.id().clone();
 
         // Look up the matching INVITE server transaction.
-        let invite_tx_id = self.transaction_manager
+        let invite_tx_id = self
+            .transaction_manager
             .find_invite_server_transaction_for_cancel(&request)
             .await
             .map_err(|e| DialogError::TransactionError {
@@ -175,7 +176,9 @@ impl ProtocolHandlers for DialogManager {
                 &request,
                 StatusCode::CallOrTransactionDoesNotExist,
             );
-            self.transaction_manager.send_response(&cancel_tx_id, response).await
+            self.transaction_manager
+                .send_response(&cancel_tx_id, response)
+                .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to CANCEL: {}", e),
                 })?;
@@ -184,11 +187,11 @@ impl ProtocolHandlers for DialogManager {
         };
 
         // 200 OK to the CANCEL transaction.
-        let ok = crate::transaction::utils::response_builders::create_response(
-            &request,
-            StatusCode::Ok,
-        );
-        self.transaction_manager.send_response(&cancel_tx_id, ok).await
+        let ok =
+            crate::transaction::utils::response_builders::create_response(&request, StatusCode::Ok);
+        self.transaction_manager
+            .send_response(&cancel_tx_id, ok)
+            .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 OK to CANCEL: {}", e),
             })?;
@@ -196,7 +199,8 @@ impl ProtocolHandlers for DialogManager {
         // 487 Request Terminated to the pending INVITE server transaction.
         // Fetch the original INVITE so `create_response` can copy its From,
         // To, Call-ID, CSeq, and Via headers.
-        let original_invite = self.transaction_manager
+        let original_invite = self
+            .transaction_manager
             .get_server_transaction_request(&invite_tx_id)
             .await
             .map_err(|e| DialogError::TransactionError {
@@ -206,13 +210,16 @@ impl ProtocolHandlers for DialogManager {
             &original_invite,
             StatusCode::RequestTerminated,
         );
-        self.transaction_manager.send_response(&invite_tx_id, terminated).await
+        self.transaction_manager
+            .send_response(&invite_tx_id, terminated)
+            .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 487 Request Terminated: {}", e),
             })?;
 
         // Terminate the dialog and notify the session layer.
-        self.terminate_dialog_for_tx(&invite_tx_id, "CANCEL received").await;
+        self.terminate_dialog_for_tx(&invite_tx_id, "CANCEL received")
+            .await;
 
         debug!(
             "CANCEL processed for INVITE server transaction {} (200 CANCEL, 487 INVITE sent)",
@@ -220,11 +227,11 @@ impl ProtocolHandlers for DialogManager {
         );
         Ok(())
     }
-    
+
     /// Handle ACK requests (related to INVITE processing)
     async fn handle_ack_method(&self, request: Request) -> DialogResult<()> {
         debug!("Processing ACK request");
-        
+
         // ACK can be for 2xx response (goes to dialog) or non-2xx response (goes to transaction)
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
             // Dialog-level ACK (for 2xx responses) - delegate to invite handler
@@ -236,49 +243,59 @@ impl ProtocolHandlers for DialogManager {
             Ok(())
         }
     }
-    
+
     /// Handle OPTIONS requests with unified configuration support
-    async fn handle_options_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+    async fn handle_options_method(
+        &self,
+        request: Request,
+        source: SocketAddr,
+    ) -> DialogResult<()> {
         debug!("Processing OPTIONS request from {}", source);
-        
+
         // Create server transaction
-        let server_transaction = self.transaction_manager
+        let server_transaction = self
+            .transaction_manager
             .create_server_transaction(request.clone(), source)
             .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to create server transaction for OPTIONS: {}", e),
             })?;
-        
+
         let transaction_id = server_transaction.id().clone();
-        
+
         // **NEW**: Check unified configuration for auto-response behavior
         // If the manager is configured for auto-OPTIONS response, send immediate response
         // Otherwise, forward to session layer for application handling
         if self.should_auto_respond_to_options() {
             debug!("Auto-responding to OPTIONS request (configured for auto-response)");
-            self.send_basic_options_response(&transaction_id, &request).await?;
+            self.send_basic_options_response(&transaction_id, &request)
+                .await?;
         } else {
             debug!("Forwarding OPTIONS request to session layer (auto-response disabled)");
-            
+
             // Send session coordination event for capability query
             let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
                 transaction_id: transaction_id.clone(),
                 request: request.clone(),
                 source,
             };
-            
+
             if let Err(e) = self.notify_session_layer(event).await {
-                debug!("Failed to notify session layer of OPTIONS: {}, sending fallback response", e);
-                
+                debug!(
+                    "Failed to notify session layer of OPTIONS: {}, sending fallback response",
+                    e
+                );
+
                 // Fallback: send basic 200 OK with supported methods
-                self.send_basic_options_response(&transaction_id, &request).await?;
+                self.send_basic_options_response(&transaction_id, &request)
+                    .await?;
             }
         }
-        
+
         debug!("OPTIONS request processed");
         Ok(())
     }
-    
+
     /// Delegate UPDATE handling to the specialized update_handler module
     async fn handle_update_method(&self, request: Request) -> DialogResult<()> {
         UpdateHandler::handle_update_method(self, request).await
@@ -290,7 +307,11 @@ impl ProtocolHandlers for DialogManager {
     }
 
     /// Delegate response handling to the specialized response_handler module
-    async fn handle_response_message(&self, response: Response, transaction_id: TransactionKey) -> DialogResult<()> {
+    async fn handle_response_message(
+        &self,
+        response: Response,
+        transaction_id: TransactionKey,
+    ) -> DialogResult<()> {
         ResponseHandler::handle_response_message(self, response, transaction_id).await
     }
 }
@@ -298,95 +319,112 @@ impl ProtocolHandlers for DialogManager {
 /// Implementation of MethodHandler for DialogManager
 impl MethodHandler for DialogManager {
     /// Delegate REGISTER handling to the specialized register_handler module
-    async fn handle_register_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+    async fn handle_register_method(
+        &self,
+        request: Request,
+        source: SocketAddr,
+    ) -> DialogResult<()> {
         RegisterHandler::handle_register_method(self, request, source).await
     }
-    
+
     /// Handle INFO requests (simple forwarding to session layer)
     async fn handle_info_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing INFO request from {}", source);
-        
+
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
             // Forward to session layer for application-specific handling
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for INFO: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            
+
             let event = crate::events::SessionCoordinationEvent::ReInvite {
                 dialog_id: dialog_id.clone(),
                 transaction_id,
                 request: request.clone(),
             };
-            
+
             self.notify_session_layer(event).await?;
-            debug!("INFO request forwarded to session layer for dialog {}", dialog_id);
+            debug!(
+                "INFO request forwarded to session layer for dialog {}",
+                dialog_id
+            );
             Ok(())
         } else {
             // Send 481 Call/Transaction Does Not Exist
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for INFO: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
-            self.transaction_manager.send_response(&transaction_id, response).await
+            let response = crate::transaction::utils::response_builders::create_response(
+                &request,
+                StatusCode::CallOrTransactionDoesNotExist,
+            );
+
+            self.transaction_manager
+                .send_response(&transaction_id, response)
+                .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to INFO: {}", e),
                 })?;
-            
+
             debug!("INFO processed with 481 response (no dialog found)");
             Ok(())
         }
     }
-    
+
     /// Handle REFER requests (call transfer)
     async fn handle_refer_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing REFER request from {}", source);
-        
+
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
             // Create server transaction
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for REFER: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            
+
             // Parse Refer-To header using sip-core's ReferTo type
-            let refer_to = request.typed_header::<ReferTo>()
+            let refer_to = request
+                .typed_header::<ReferTo>()
                 .ok_or_else(|| DialogError::ProtocolError {
                     message: "Missing or invalid Refer-To header".to_string(),
                 })?
                 .clone();
-            
+
             // Extract optional Referred-By header
-            let referred_by = request.get_header_value(&rvoip_sip_core::HeaderName::ReferredBy)
+            let referred_by = request
+                .get_header_value(&rvoip_sip_core::HeaderName::ReferredBy)
                 .map(|s| s.to_string());
-            
+
             // Extract optional Replaces header (for attended transfer)
-            // Note: Replaces is not a standard HeaderName in sip-core yet, 
+            // Note: Replaces is not a standard HeaderName in sip-core yet,
             // so we'll look for it as a raw header
-            let replaces = request.all_headers().iter()
+            let replaces = request
+                .all_headers()
+                .iter()
                 .find(|h| h.name().to_string().eq_ignore_ascii_case("replaces"))
                 .map(|h| {
                     let header_str = h.to_string();
-                    header_str.split(':')
-                        .nth(1)
-                        .map(|s| s.trim().to_string())
+                    header_str.split(':').nth(1).map(|s| s.trim().to_string())
                 })
                 .flatten();
-            
+
             // Forward to session layer FIRST - let session-core decide Accept/Reject
             // Session-core will send the appropriate response (202 Accepted or 4xx/5xx rejection)
             // via the transaction_id that we include in the event
@@ -397,94 +435,111 @@ impl MethodHandler for DialogManager {
                 referred_by,
                 replaces,
             };
-            
+
             self.notify_session_layer(event).await?;
-            debug!("REFER request forwarded to session layer as TransferRequest for dialog {}", dialog_id);
+            debug!(
+                "REFER request forwarded to session layer as TransferRequest for dialog {}",
+                dialog_id
+            );
             Ok(())
         } else {
             // REFER outside dialog - send 481
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for REFER: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
-            
-            self.transaction_manager.send_response(&transaction_id, response).await
+            let response = crate::transaction::utils::response_builders::create_response(
+                &request,
+                StatusCode::CallOrTransactionDoesNotExist,
+            );
+
+            self.transaction_manager
+                .send_response(&transaction_id, response)
+                .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to REFER: {}", e),
                 })?;
-            
+
             debug!("REFER processed with 481 response (no dialog found)");
             Ok(())
         }
     }
-    
+
     /// Handle SUBSCRIBE requests using SubscriptionManager
-    async fn handle_subscribe_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
+    async fn handle_subscribe_method(
+        &self,
+        request: Request,
+        source: SocketAddr,
+    ) -> DialogResult<()> {
         debug!("Processing SUBSCRIBE request from {}", source);
-        
+
         // Use SubscriptionManager if available
         if let Some(ref subscription_manager) = self.subscription_manager {
             // Get local address - use configured or dialog manager's local address
             let local_addr = self.local_address;
-            
+
             // Handle subscription with SubscriptionManager
             let (response, dialog_id) = subscription_manager
                 .handle_subscribe(request.clone(), source, local_addr)
                 .await?;
-            
+
             // Create server transaction for the response
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            
+
             // Send the response
-            self.transaction_manager.send_response(&transaction_id, response).await
+            self.transaction_manager
+                .send_response(&transaction_id, response)
+                .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send SUBSCRIBE response: {}", e),
                 })?;
-            
+
             // If a dialog was created, store it
             if let Some(dialog_id) = dialog_id {
                 debug!("SUBSCRIBE created subscription dialog {}", dialog_id);
                 // Note: The actual dialog creation happens in SubscriptionManager
                 // We might want to sync this with DialogManager's dialog store later
             }
-            
+
             debug!("SUBSCRIBE request handled by SubscriptionManager");
             Ok(())
         } else {
             // Fallback to forwarding to session layer
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to create server transaction for SUBSCRIBE: {}", e),
                 })?;
-            
+
             let transaction_id = server_transaction.id().clone();
-            
+
             let event = crate::events::SessionCoordinationEvent::CapabilityQuery {
                 transaction_id,
                 request: request.clone(),
                 source,
             };
-            
+
             self.notify_session_layer(event).await?;
             debug!("SUBSCRIBE request forwarded to session layer");
             Ok(())
         }
     }
-    
+
     /// Handle NOTIFY requests using SubscriptionManager
     async fn handle_notify_method(&self, request: Request, source: SocketAddr) -> DialogResult<()> {
         debug!("Processing NOTIFY request from {}", source);
@@ -507,7 +562,8 @@ impl MethodHandler for DialogManager {
                 .await?;
 
             // Create server transaction for the response
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
@@ -517,7 +573,9 @@ impl MethodHandler for DialogManager {
             let transaction_id = server_transaction.id().clone();
 
             // Send the response (always 200 OK per RFC 6665)
-            self.transaction_manager.send_response(&transaction_id, response).await
+            self.transaction_manager
+                .send_response(&transaction_id, response)
+                .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send NOTIFY response: {}", e),
                 })?;
@@ -525,13 +583,15 @@ impl MethodHandler for DialogManager {
             debug!("NOTIFY request handled by SubscriptionManager");
 
             if let Some(dialog_id) = dialog_id {
-                self.publish_notify_received(&dialog_id, notify_fields).await;
+                self.publish_notify_received(&dialog_id, notify_fields)
+                    .await;
             }
 
             Ok(())
         } else if let Some(dialog_id) = dialog_id {
             // Fallback: NOTIFY in an existing dialog without SubscriptionManager.
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
@@ -547,17 +607,21 @@ impl MethodHandler for DialogManager {
                 &request,
                 StatusCode::Ok,
             );
-            self.transaction_manager.send_response(&transaction_id, response).await
+            self.transaction_manager
+                .send_response(&transaction_id, response)
+                .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 200 OK to NOTIFY: {}", e),
                 })?;
 
             debug!("NOTIFY accepted (fallback path) for dialog {}", dialog_id);
-            self.publish_notify_received(&dialog_id, notify_fields).await;
+            self.publish_notify_received(&dialog_id, notify_fields)
+                .await;
             Ok(())
         } else {
             // NOTIFY outside dialog - could be unsolicited, send 481
-            let server_transaction = self.transaction_manager
+            let server_transaction = self
+                .transaction_manager
                 .create_server_transaction(request.clone(), source)
                 .await
                 .map_err(|e| DialogError::TransactionError {
@@ -565,9 +629,14 @@ impl MethodHandler for DialogManager {
                 })?;
 
             let transaction_id = server_transaction.id().clone();
-            let response = crate::transaction::utils::response_builders::create_response(&request, StatusCode::CallOrTransactionDoesNotExist);
+            let response = crate::transaction::utils::response_builders::create_response(
+                &request,
+                StatusCode::CallOrTransactionDoesNotExist,
+            );
 
-            self.transaction_manager.send_response(&transaction_id, response).await
+            self.transaction_manager
+                .send_response(&transaction_id, response)
+                .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send 481 response to NOTIFY: {}", e),
                 })?;
@@ -634,7 +703,10 @@ impl DialogManager {
         fields: NotifyFields,
     ) {
         let Some(hub) = self.event_hub.read().await.as_ref().cloned() else {
-            debug!("No event hub wired; dropping NOTIFY surface for dialog {}", dialog_id);
+            debug!(
+                "No event hub wired; dropping NOTIFY surface for dialog {}",
+                dialog_id
+            );
             return;
         };
         let Some(session_id) = self.get_session_id(dialog_id) else {
@@ -680,15 +752,20 @@ impl DialogManager {
             Method::Info,
             Method::Refer,
         ];
-        
-        let response = crate::transaction::utils::response_builders::create_ok_response_for_options(request, &allowed_methods);
-        
-        self.transaction_manager.send_response(transaction_id, response).await
+
+        let response = crate::transaction::utils::response_builders::create_ok_response_for_options(
+            request,
+            &allowed_methods,
+        );
+
+        self.transaction_manager
+            .send_response(transaction_id, response)
+            .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send OPTIONS response: {}", e),
             })?;
-        
+
         debug!("Sent basic OPTIONS response");
         Ok(())
     }
-} 
+}

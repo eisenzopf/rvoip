@@ -2,23 +2,23 @@
 //!
 //! This module provides security-related interfaces for the client-side media transport.
 
+use async_trait::async_trait;
+use std::any::Any;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::any::Any;
-use async_trait::async_trait;
 use tokio::net::UdpSocket;
 
-use crate::api::common::error::SecurityError;
 use crate::api::common::config::{SecurityInfo, SecurityMode, SrtpProfile};
+use crate::api::common::error::SecurityError;
 use crate::api::server::security::SocketHandle;
 use crate::dtls::{DtlsConfig, DtlsRole};
 
 // Export modules
 pub mod default;
 pub mod dtls;
-pub mod srtp;
 pub mod fingerprint;
 pub mod packet;
+pub mod srtp;
 
 // Re-export public implementation
 pub use default::DefaultClientSecurityContext;
@@ -54,10 +54,7 @@ impl Default for ClientSecurityConfig {
             remote_fingerprint: None,
             remote_fingerprint_algorithm: None,
             validate_fingerprint: true,
-            srtp_profiles: vec![
-                SrtpProfile::AesCm128HmacSha1_80,
-                SrtpProfile::AesGcm128,
-            ],
+            srtp_profiles: vec![SrtpProfile::AesCm128HmacSha1_80, SrtpProfile::AesGcm128],
             certificate_path: None,
             private_key_path: None,
             srtp_key: None,
@@ -66,12 +63,22 @@ impl Default for ClientSecurityConfig {
 }
 
 /// Convert API SrtpProfile to internal DTLS SrtpProtectionProfile
-pub(crate) fn convert_to_dtls_profile(profile: SrtpProfile) -> crate::dtls::message::extension::SrtpProtectionProfile {
+pub(crate) fn convert_to_dtls_profile(
+    profile: SrtpProfile,
+) -> crate::dtls::message::extension::SrtpProtectionProfile {
     match profile {
-        SrtpProfile::AesCm128HmacSha1_80 => crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_80,
-        SrtpProfile::AesCm128HmacSha1_32 => crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_32,
-        SrtpProfile::AesGcm128 => crate::dtls::message::extension::SrtpProtectionProfile::AeadAes128Gcm,
-        SrtpProfile::AesGcm256 => crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm,
+        SrtpProfile::AesCm128HmacSha1_80 => {
+            crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_80
+        }
+        SrtpProfile::AesCm128HmacSha1_32 => {
+            crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_32
+        }
+        SrtpProfile::AesGcm128 => {
+            crate::dtls::message::extension::SrtpProtectionProfile::AeadAes128Gcm
+        }
+        SrtpProfile::AesGcm256 => {
+            crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm
+        }
     }
 }
 
@@ -83,42 +90,50 @@ pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
     }
 
     // Convert our API profiles to DTLS profiles
-    let dtls_profiles: Vec<crate::dtls::message::extension::SrtpProtectionProfile> = config.srtp_profiles.iter()
+    let dtls_profiles: Vec<crate::dtls::message::extension::SrtpProtectionProfile> = config
+        .srtp_profiles
+        .iter()
         .map(|p| convert_to_dtls_profile(*p))
         .collect();
-    
+
     // Create DTLS config with client role
     let mut dtls_config = DtlsConfig::default();
     dtls_config.role = DtlsRole::Client;
-    
+
     // We need to convert the SrtpProtectionProfile values to SrtpCryptoSuite values
-    let crypto_suites: Vec<crate::srtp::SrtpCryptoSuite> = dtls_profiles.iter()
+    let crypto_suites: Vec<crate::srtp::SrtpCryptoSuite> = dtls_profiles
+        .iter()
         .map(|profile| match profile {
-            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_80 => 
-                crate::srtp::SRTP_AES128_CM_SHA1_80,
-            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_32 => 
-                crate::srtp::SRTP_AES128_CM_SHA1_32,
-            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes128Gcm => 
-                crate::srtp::SRTP_AEAD_AES_128_GCM,
-            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm => 
-                crate::srtp::SRTP_AEAD_AES_256_GCM,
-            &crate::dtls::message::extension::SrtpProtectionProfile::Unknown(_) => 
-                panic!("Unknown SRTP protection profile specified"), // Don't silently default
+            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_80 => {
+                crate::srtp::SRTP_AES128_CM_SHA1_80
+            }
+            &crate::dtls::message::extension::SrtpProtectionProfile::Aes128CmSha1_32 => {
+                crate::srtp::SRTP_AES128_CM_SHA1_32
+            }
+            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes128Gcm => {
+                crate::srtp::SRTP_AEAD_AES_128_GCM
+            }
+            &crate::dtls::message::extension::SrtpProtectionProfile::AeadAes256Gcm => {
+                crate::srtp::SRTP_AEAD_AES_256_GCM
+            }
+            &crate::dtls::message::extension::SrtpProtectionProfile::Unknown(_) => {
+                panic!("Unknown SRTP protection profile specified")
+            } // Don't silently default
         })
         .collect();
-    
+
     // Never use a default - if no crypto suites were mapped, that's an error
     if crypto_suites.is_empty() {
         panic!("Failed to map any SRTP profiles to crypto suites");
     }
-    
+
     // Set the mapped crypto suites
     dtls_config.srtp_profiles = crypto_suites;
-    
+
     // Set appropriate mtu and timeout values
     dtls_config.mtu = 1200;
     dtls_config.max_retransmissions = 5;
-    
+
     dtls_config
 }
 
@@ -130,70 +145,78 @@ pub(crate) fn create_dtls_config(config: &ClientSecurityConfig) -> DtlsConfig {
 pub trait ClientSecurityContext: Send + Sync {
     /// Initialize the security context
     async fn initialize(&self) -> Result<(), SecurityError>;
-    
+
     /// Start the DTLS handshake with the server
     async fn start_handshake(&self) -> Result<(), SecurityError>;
-    
+
     /// Check if the security handshake is complete
     async fn is_handshake_complete(&self) -> Result<bool, SecurityError>;
-    
+
     /// Wait for the DTLS handshake to complete
     async fn wait_for_handshake(&self) -> Result<(), SecurityError>;
-    
+
     /// Set the remote address for the security context
     async fn set_remote_address(&self, addr: SocketAddr) -> Result<(), SecurityError>;
-    
+
     /// Set the socket handle to use for security operations
     async fn set_socket(&self, socket: SocketHandle) -> Result<(), SecurityError>;
-    
+
     /// Set the remote fingerprint for DTLS verification
-    async fn set_remote_fingerprint(&self, fingerprint: &str, algorithm: &str) -> Result<(), SecurityError>;
-    
+    async fn set_remote_fingerprint(
+        &self,
+        fingerprint: &str,
+        algorithm: &str,
+    ) -> Result<(), SecurityError>;
+
     /// Perform a complete handshake in a single call
     /// This combines setting the remote fingerprint, starting handshake, and waiting for completion
-    async fn complete_handshake(&self, remote_addr: SocketAddr, remote_fingerprint: &str) -> Result<(), SecurityError>;
-    
+    async fn complete_handshake(
+        &self,
+        remote_addr: SocketAddr,
+        remote_fingerprint: &str,
+    ) -> Result<(), SecurityError>;
+
     /// Process a DTLS packet manually
     /// This allows for explicit processing of received DTLS packets
     async fn process_packet(&self, data: &[u8]) -> Result<(), SecurityError>;
-    
+
     /// Start automatic packet handler to process incoming DTLS packets
     /// This creates a background task that receives packets from the socket
     /// and automatically passes them to process_packet
     async fn start_packet_handler(&self) -> Result<(), SecurityError>;
-    
+
     /// Get security information for SDP exchange
     async fn get_security_info(&self) -> Result<SecurityInfo, SecurityError>;
-    
+
     /// Close the security context and clean up resources
     async fn close(&self) -> Result<(), SecurityError>;
-    
+
     /// Check if the security context is fully initialized and ready to start a handshake
     /// This verifies that all prerequisites (socket, transport, etc.) are set
     async fn is_ready(&self) -> Result<bool, SecurityError>;
-    
+
     /// Is the client using secure transport?
     fn is_secure(&self) -> bool;
-    
-    /// Get basic security information synchronously 
+
+    /// Get basic security information synchronously
     /// (for use during initialization when async isn't available)
     fn get_security_info_sync(&self) -> SecurityInfo;
-    
+
     /// Get the local fingerprint (client's fingerprint)
     async fn get_fingerprint(&self) -> Result<String, SecurityError>;
-    
+
     /// Get the local fingerprint algorithm (client's algorithm)
     async fn get_fingerprint_algorithm(&self) -> Result<String, SecurityError>;
-    
+
     /// Check if transport is set
     async fn has_transport(&self) -> Result<bool, SecurityError>;
-    
+
     /// Process a DTLS packet received from the server
     async fn process_dtls_packet(&self, data: &[u8]) -> Result<(), SecurityError>;
-    
+
     /// Get the security configuration
     fn get_config(&self) -> &ClientSecurityConfig;
-    
+
     /// Allow downcasting for internal implementation details
     fn as_any(&self) -> &dyn Any;
-} 
+}

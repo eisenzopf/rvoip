@@ -9,11 +9,9 @@ use std::str::FromStr;
 /// Utility function to extract string field from a Header value
 pub fn header_value_to_string(header: &Header) -> Result<String> {
     match &header.value {
-        HeaderValue::Raw(bytes) => {
-            String::from_utf8(bytes.clone())
-                .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in header value: {}", e)))
-        },
-        _ => Err(Error::ParseError("Expected raw header value".to_string()))
+        HeaderValue::Raw(bytes) => String::from_utf8(bytes.clone())
+            .map_err(|e| Error::ParseError(format!("Invalid UTF-8 in header value: {}", e))),
+        _ => Err(Error::ParseError("Expected raw header value".to_string())),
     }
 }
 
@@ -38,7 +36,7 @@ pub fn parse_header_params(value_str: &str) -> Result<Vec<Param>> {
             if param_str.is_empty() {
                 return None;
             }
-            
+
             let parts: Vec<&str> = param_str.splitn(2, '=').collect();
             let name = parts[0].trim();
             let value = if parts.len() > 1 {
@@ -46,10 +44,10 @@ pub fn parse_header_params(value_str: &str) -> Result<Vec<Param>> {
             } else {
                 None
             };
-            
+
             Some(Param::new(name.to_string(), value))
         })
         .collect();
-    
+
     Ok(params)
-} 
+}

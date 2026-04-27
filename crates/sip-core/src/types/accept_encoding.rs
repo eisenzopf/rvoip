@@ -1,5 +1,5 @@
 //! # SIP Accept-Encoding Header
-//! 
+//!
 //! This module provides an implementation of the SIP Accept-Encoding header field as defined in
 //! [RFC 3261 Section 20.2](https://datatracker.ietf.org/doc/html/rfc3261#section-20.2).
 //!
@@ -31,14 +31,14 @@
 //! assert!(formatted.contains("*"));
 //! ```
 
-use crate::parser::headers::accept_encoding::{EncodingInfo, parse_accept_encoding};
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
-use nom::combinator::all_consuming;
-use serde::{Deserialize, Serialize};
+use crate::error::{Error, Result};
+use crate::parser::headers::accept_encoding::{parse_accept_encoding, EncodingInfo};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::Param;
+use nom::combinator::all_consuming;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Represents the Accept-Encoding header field (RFC 3261 Section 20.2).
 ///
@@ -70,7 +70,7 @@ use crate::types::param::Param;
 ///
 /// // Check if an encoding is acceptable
 /// assert!(header.accepts("gzip"));
-/// assert!(header.accepts("identity")); 
+/// assert!(header.accepts("identity"));
 /// assert!(!header.accepts("compress")); // q=0 for * means not acceptable
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -144,7 +144,7 @@ impl AcceptEncoding {
     /// ```
     pub fn from_encodings<I>(encodings: I) -> Self
     where
-        I: IntoIterator<Item = EncodingInfo>
+        I: IntoIterator<Item = EncodingInfo>,
     {
         Self(encodings.into_iter().collect())
     }
@@ -232,7 +232,7 @@ impl AcceptEncoding {
                 return encoding_info.q_value() > 0.0;
             }
         }
-        
+
         // Then check for wildcard
         for encoding_info in &self.0 {
             if encoding_info.coding == "*" {
@@ -241,7 +241,7 @@ impl AcceptEncoding {
                 return encoding_info.q_value() > 0.0;
             }
         }
-        
+
         // Default behavior - if not mentioned and no wildcard, it's not acceptable
         false
     }
@@ -252,8 +252,9 @@ impl fmt::Display for AcceptEncoding {
         // Create a sorted copy of the encodings
         let mut sorted_encodings = self.0.clone();
         sorted_encodings.sort();
-        
-        let encoding_strings: Vec<String> = sorted_encodings.iter().map(|enc| enc.to_string()).collect();
+
+        let encoding_strings: Vec<String> =
+            sorted_encodings.iter().map(|enc| enc.to_string()).collect();
         write!(f, "{}", encoding_strings.join(", "))
     }
 }
@@ -261,9 +262,10 @@ impl fmt::Display for AcceptEncoding {
 // Helper function to parse from owned bytes
 fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<EncodingInfo>> {
     // Check if the input starts with "Accept-Encoding:" and strip it if present
-    let bytes_to_parse = if bytes.len() > 16 && 
-        bytes[0..15].eq_ignore_ascii_case(b"Accept-Encoding") && 
-        bytes[15] == b':' {
+    let bytes_to_parse = if bytes.len() > 16
+        && bytes[0..15].eq_ignore_ascii_case(b"Accept-Encoding")
+        && bytes[15] == b':'
+    {
         // Skip the header name and colon, and any leading whitespace
         let mut i = 16;
         while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
@@ -276,9 +278,10 @@ fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<EncodingInfo>> {
 
     match all_consuming(parse_accept_encoding)(bytes_to_parse) {
         Ok((_, encodings)) => Ok(encodings),
-        Err(e) => Err(Error::ParseError(
-            format!("Failed to parse Accept-Encoding header: {:?}", e)
-        ))
+        Err(e) => Err(Error::ParseError(format!(
+            "Failed to parse Accept-Encoding header: {:?}",
+            e
+        ))),
     }
 }
 
@@ -293,7 +296,7 @@ impl FromStr for AcceptEncoding {
         } else {
             s.as_bytes().to_vec()
         };
-        
+
         // Parse using our helper function that takes ownership of the bytes
         parse_from_owned_bytes(input_bytes).map(AcceptEncoding)
     }
@@ -308,14 +311,19 @@ impl TypedHeaderTrait for AcceptEncoding {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -323,17 +331,17 @@ impl TypedHeaderTrait for AcceptEncoding {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     AcceptEncoding::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            HeaderValue::AcceptEncoding(encodings) => {
-                Ok(AcceptEncoding(encodings.clone()))
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            HeaderValue::AcceptEncoding(encodings) => Ok(AcceptEncoding(encodings.clone())),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -341,29 +349,29 @@ impl TypedHeaderTrait for AcceptEncoding {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ordered_float::NotNan;
     use crate::types::param::Param;
+    use ordered_float::NotNan;
 
     #[test]
     fn test_from_str() {
         // Test with header name
         let header_str = "Accept-Encoding: gzip;q=0.8, identity, compress;q=0.7";
         let accept_enc: AcceptEncoding = header_str.parse().unwrap();
-        
+
         assert_eq!(accept_enc.0.len(), 3);
         assert!(accept_enc.accepts("gzip"));
         assert!(accept_enc.accepts("identity"));
         assert!(accept_enc.accepts("compress"));
-        
+
         // Test without header name
         let value_str = "gzip;q=0.5, *;q=0.1";
         let accept_enc2: AcceptEncoding = value_str.parse().unwrap();
-        
+
         assert_eq!(accept_enc2.0.len(), 2);
         assert!(accept_enc2.accepts("gzip"));
         assert!(accept_enc2.accepts("identity")); // Matched by wildcard
     }
-    
+
     #[test]
     fn test_accepts() {
         // Create test encodings with q param in params vector
@@ -373,31 +381,37 @@ mod tests {
             coding: "gzip".to_string(),
             params: gzip_params,
         };
-        
+
         let identity = EncodingInfo {
             coding: "identity".to_string(),
-            params: vec![],  // Empty params means q=1.0 by default
+            params: vec![], // Empty params means q=1.0 by default
         };
-        
+
         let mut wildcard_params = Vec::new();
         wildcard_params.push(Param::Q(NotNan::new(0.1).unwrap()));
         let wildcard = EncodingInfo {
             coding: "*".to_string(),
             params: wildcard_params,
         };
-        
+
         // Test with encodings
         let accept_enc = AcceptEncoding(vec![gzip.clone(), identity.clone()]);
-        
+
         assert!(accept_enc.accepts("gzip"), "Should accept exact match");
         assert!(accept_enc.accepts("identity"), "Should accept exact match");
-        assert!(!accept_enc.accepts("compress"), "Should not accept non-matching encoding");
-        
+        assert!(
+            !accept_enc.accepts("compress"),
+            "Should not accept non-matching encoding"
+        );
+
         // Test with wildcard
         let accept_enc_wildcard = AcceptEncoding(vec![gzip.clone(), wildcard.clone()]);
-        
-        assert!(accept_enc_wildcard.accepts("compress"), "Should accept any encoding with wildcard");
-        
+
+        assert!(
+            accept_enc_wildcard.accepts("compress"),
+            "Should accept any encoding with wildcard"
+        );
+
         // Test with zero q-value
         let mut wildcard_zero_params = Vec::new();
         wildcard_zero_params.push(Param::Q(NotNan::new(0.0).unwrap()));
@@ -405,18 +419,30 @@ mod tests {
             coding: "*".to_string(),
             params: wildcard_zero_params,
         };
-        
+
         let accept_enc_zero = AcceptEncoding(vec![gzip.clone(), wildcard_zero]);
-        
-        assert!(accept_enc_zero.accepts("gzip"), "Should accept explicit encoding");
-        assert!(!accept_enc_zero.accepts("compress"), "Should not accept wildcard with q=0");
-        
+
+        assert!(
+            accept_enc_zero.accepts("gzip"),
+            "Should accept explicit encoding"
+        );
+        assert!(
+            !accept_enc_zero.accepts("compress"),
+            "Should not accept wildcard with q=0"
+        );
+
         // Test empty Accept-Encoding (default is identity only)
         let empty_accept_enc = AcceptEncoding::new();
-        assert!(empty_accept_enc.accepts("identity"), "Empty Accept-Encoding should accept identity");
-        assert!(!empty_accept_enc.accepts("gzip"), "Empty Accept-Encoding should reject non-identity");
+        assert!(
+            empty_accept_enc.accepts("identity"),
+            "Empty Accept-Encoding should accept identity"
+        );
+        assert!(
+            !empty_accept_enc.accepts("gzip"),
+            "Empty Accept-Encoding should reject non-identity"
+        );
     }
-    
+
     #[test]
     fn test_display() {
         // Create test encodings
@@ -426,26 +452,32 @@ mod tests {
             coding: "gzip".to_string(),
             params: gzip_params,
         };
-        
+
         let identity = EncodingInfo {
             coding: "identity".to_string(),
-            params: vec![],  // Empty params means q=1.0 by default
+            params: vec![], // Empty params means q=1.0 by default
         };
-        
+
         // Test display
         let accept_enc = AcceptEncoding(vec![gzip.clone(), identity.clone()]);
         let display_str = accept_enc.to_string();
-        
-        assert!(display_str.contains("identity"), "Should contain identity encoding");
-        assert!(display_str.contains("gzip;q=0.800"), "Should contain gzip with q-value");
+
+        assert!(
+            display_str.contains("identity"),
+            "Should contain identity encoding"
+        );
+        assert!(
+            display_str.contains("gzip;q=0.800"),
+            "Should contain gzip with q-value"
+        );
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         // Create and convert to Header
         let mut gzip_params = Vec::new();
         gzip_params.push(Param::Q(NotNan::new(0.8).unwrap()));
-        
+
         let accept_enc = AcceptEncoding(vec![
             EncodingInfo {
                 coding: "gzip".to_string(),
@@ -453,19 +485,19 @@ mod tests {
             },
             EncodingInfo {
                 coding: "identity".to_string(),
-                params: vec![],  // Empty params means q=1.0 by default
+                params: vec![], // Empty params means q=1.0 by default
             },
         ]);
-        
+
         let header = accept_enc.to_header();
         assert_eq!(header.name, HeaderName::AcceptEncoding);
-        
+
         // Convert back from Header
         let accept_enc2 = AcceptEncoding::from_header(&header).unwrap();
         assert_eq!(accept_enc.to_string(), accept_enc2.to_string());
-        
+
         // Test with wrong header name
         let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
         assert!(AcceptEncoding::from_header(&wrong_header).is_err());
     }
-} 
+}

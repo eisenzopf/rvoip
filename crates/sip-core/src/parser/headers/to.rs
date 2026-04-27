@@ -22,8 +22,8 @@ use std::str;
 use crate::parser::address::name_addr_or_addr_spec;
 use crate::parser::common_params::{from_to_param, semicolon_separated_params0};
 use crate::parser::separators::{hcolon, semi};
-use crate::parser::ParseResult;
-use crate::parser::token::token; // Use just token, not token_no_case
+use crate::parser::token::token;
+use crate::parser::ParseResult; // Use just token, not token_no_case
 
 // Import types
 use crate::types::address::Address;
@@ -38,12 +38,13 @@ fn to_spec(input: &[u8]) -> ParseResult<Address> {
     map(
         pair(
             name_addr_or_addr_spec, // Returns Address{..., params: []}
-            many0(preceded(semi, from_to_param))
+            many0(preceded(semi, from_to_param)),
         ),
-        |(mut addr, params_vec)| { // Make addr mutable
+        |(mut addr, params_vec)| {
+            // Make addr mutable
             addr.params = params_vec; // Assign parsed params
             addr // Return the modified Address
-        }
+        },
     )(input)
 }
 
@@ -58,14 +59,8 @@ pub fn parse_to(input: &[u8]) -> ParseResult<ToHeader> {
 /// To = ( "To" / "t" ) HCOLON to-spec
 pub fn to_header(input: &[u8]) -> ParseResult<ToHeader> {
     preceded(
-        terminated(
-            alt((
-                tag_no_case(b"To"),
-                tag_no_case(b"t")
-            )),
-            hcolon
-        ),
-        parse_to
+        terminated(alt((tag_no_case(b"To"), tag_no_case(b"t"))), hcolon),
+        parse_to,
     )(input)
 }
 
@@ -73,10 +68,10 @@ pub fn to_header(input: &[u8]) -> ParseResult<ToHeader> {
 mod tests {
     use super::*;
     use crate::types::address::Address;
+    use crate::types::param::{GenericValue, Param};
     use crate::types::uri::{Host, Scheme, Uri};
-    use crate::types::param::{Param, GenericValue};
-    use std::collections::HashMap;
     use nom::combinator::all_consuming;
+    use std::collections::HashMap;
 
     // Helper function to test with full input consumption
     fn test_parse_to(input: &[u8]) -> Result<ToHeader, nom::Err<nom::error::Error<&[u8]>>> {
@@ -95,7 +90,7 @@ mod tests {
         assert_eq!(addr.uri.scheme, Scheme::Sip);
         assert!(addr.params.is_empty());
     }
-    
+
     #[test]
     fn test_parse_to_name_addr_with_tag() {
         let input = b"\"Receiver\" <sips:recv@example.com>;tag=zxcv";
@@ -121,7 +116,10 @@ mod tests {
         assert_eq!(addr.display_name, Some("Alice".to_string()));
         assert_eq!(addr.params.len(), 2);
         assert!(addr.params.contains(&Param::Tag("abc".to_string())));
-        assert!(addr.params.contains(&Param::Other("myparam".to_string(), Some(GenericValue::Token("value".to_string())))));
+        assert!(addr.params.contains(&Param::Other(
+            "myparam".to_string(),
+            Some(GenericValue::Token("value".to_string()))
+        )));
     }
 
     /* Additional RFC 3261 compliance tests */
@@ -146,8 +144,14 @@ mod tests {
         let addr = result.0;
         assert_eq!(addr.params.len(), 3);
         assert!(addr.params.contains(&Param::Tag("1234".to_string())));
-        assert!(addr.params.contains(&Param::Other("expires".to_string(), Some(GenericValue::Token("3600".to_string())))));
-        assert!(addr.params.contains(&Param::Other("q".to_string(), Some(GenericValue::Token("0.8".to_string())))));
+        assert!(addr.params.contains(&Param::Other(
+            "expires".to_string(),
+            Some(GenericValue::Token("3600".to_string()))
+        )));
+        assert!(addr.params.contains(&Param::Other(
+            "q".to_string(),
+            Some(GenericValue::Token("0.8".to_string()))
+        )));
     }
 
     #[test]
@@ -226,7 +230,9 @@ mod tests {
         let result = test_parse_to(input).unwrap();
         let addr = result.0;
         assert_eq!(addr.params.len(), 1);
-        assert!(addr.params.contains(&Param::Tag("a.b-c+d%12345".to_string())));
+        assert!(addr
+            .params
+            .contains(&Param::Tag("a.b-c+d%12345".to_string())));
     }
 
     #[test]
@@ -242,12 +248,12 @@ mod tests {
                 assert_eq!(parsed.0.uri.host.to_string(), "example.com");
                 assert_eq!(parsed.0.params.len(), 1);
                 assert!(parsed.0.params.contains(&Param::Tag("941683".to_string())));
-            },
+            }
             Err(e) => {
                 panic!("Failed to parse quoted display name: {:?}", e);
             }
         }
-        
+
         // Test with unquoted display name (now works correctly with RFC 3261 compliance!)
         let input = b"The User <sip:user@example.com>;tag=941683";
         let result = parse_to(input);
@@ -260,9 +266,12 @@ mod tests {
             assert_eq!(parsed.0.params.len(), 1);
             assert!(parsed.0.params.contains(&Param::Tag("941683".to_string())));
         } else {
-            panic!("Multi-token display name parsing should now work with RFC 3261 compliance: {:?}", result);
+            panic!(
+                "Multi-token display name parsing should now work with RFC 3261 compliance: {:?}",
+                result
+            );
         }
-        
+
         // Test RFC 3261 example 2 (no display name)
         let input = b"sip:+12125551212@phone2net.com";
         let result = parse_to(input);
@@ -273,7 +282,7 @@ mod tests {
                 assert_eq!(parsed.0.uri.scheme, Scheme::Sip);
                 assert_eq!(parsed.0.uri.host.to_string(), "phone2net.com");
                 assert!(parsed.0.params.is_empty());
-            },
+            }
             Err(e) => {
                 panic!("Failed to parse URI without display name: {:?}", e);
             }
@@ -281,7 +290,7 @@ mod tests {
     }
 
     // Error case tests
-    
+
     #[test]
     fn test_parse_to_missing_uri() {
         // Test with missing URI
@@ -310,7 +319,7 @@ mod tests {
     fn test_parse_to_rfc3261_examples() {
         // Examples from RFC 3261 - Section 20.39
         // The examples must be quoted properly for the current parser implementation
-        
+
         // Test RFC 3261 example 1, properly formatted
         let example1 = b"\"The User\" <sip:user@example.com>;tag=941683";
         let result = parse_to(example1);
@@ -323,12 +332,12 @@ mod tests {
                 assert_eq!(addr.uri.host.to_string(), "example.com");
                 assert_eq!(addr.params.len(), 1);
                 assert!(addr.params.contains(&Param::Tag("941683".to_string())));
-            },
+            }
             Err(e) => {
                 panic!("Failed to parse RFC example 1: {:?}", e);
             }
         }
-        
+
         // Test RFC 3261 example 2
         let example2 = b"sip:+12125551212@phone2net.com";
         let result = parse_to(example2);
@@ -340,7 +349,7 @@ mod tests {
                 assert_eq!(addr.uri.scheme, Scheme::Sip);
                 assert_eq!(addr.uri.host.to_string(), "phone2net.com");
                 assert!(addr.params.is_empty());
-            },
+            }
             Err(e) => {
                 panic!("Failed to parse RFC example 2: {:?}", e);
             }
@@ -363,12 +372,12 @@ mod tests {
                 assert_eq!(addr.uri.host.to_string(), "127.0.0.1");
                 assert_eq!(addr.uri.port, Some(5062));
                 assert!(addr.params.is_empty());
-            },
+            }
             Err(e) => {
                 panic!("Failed to parse SIPp To header: {:?}", e);
             }
         }
-        
+
         // Test other multi-token display names that should work now
         let input2 = b"Sales Department <sip:sales@company.com>";
         let result2 = parse_to(input2);
@@ -376,12 +385,12 @@ mod tests {
             Ok((rem, parsed)) => {
                 assert!(rem.is_empty());
                 assert_eq!(parsed.0.display_name, Some("Sales Department".to_string()));
-            },
+            }
             Err(e) => {
                 panic!("Failed to parse multi-token To header: {:?}", e);
             }
         }
-        
+
         // Test the old broken behavior is now fixed
         let input3 = b"The User <sip:user@example.com>;tag=941683";
         let result3 = parse_to(input3);
@@ -394,10 +403,10 @@ mod tests {
                 assert_eq!(parsed.0.uri.host.to_string(), "example.com");
                 assert_eq!(parsed.0.params.len(), 1);
                 assert!(parsed.0.params.contains(&Param::Tag("941683".to_string())));
-            },
+            }
             Err(e) => {
                 panic!("Failed to parse multi-token To header with tag: {:?}", e);
             }
         }
     }
-} 
+}

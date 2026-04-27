@@ -39,17 +39,17 @@
 //! let reply_to = ReplyTo::from_str(header).unwrap();
 //! ```
 
-use crate::types::address::Address; // Or maybe UriWithParams?
-use crate::parser::headers::reply_to::parse_reply_to; // Use the parser
 use crate::error::{Error, Result};
-use std::fmt;
-use std::str::FromStr;
+use crate::parser::headers::reply_to::parse_reply_to; // Use the parser
+use crate::types::address::Address; // Or maybe UriWithParams?
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize}; // Add import
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::fmt;
+use std::str::FromStr;
 
 /// Typed Reply-To header.
-/// 
+///
 /// Defined in RFC 3261 Section 20.32:
 /// Reply-To = "Reply-To" HCOLON rplyto-spec
 /// rplyto-spec = ( name-addr / addr-spec ) *( SEMI rplyto-param )
@@ -116,7 +116,7 @@ impl ReplyTo {
     pub fn new(address: Address) -> Self {
         Self(address)
     }
-    
+
     /// Access the underlying Address
     ///
     /// Returns a reference to the Address structure contained in this Reply-To header.
@@ -251,9 +251,9 @@ impl ReplyTo {
     pub fn get_param(&self, key: &str) -> Option<Option<&str>> {
         self.0.get_param(key)
     }
-    
+
     /// Validates the Reply-To header according to RFC 3261
-    /// 
+    ///
     /// While RFC 3261 doesn't specify many restrictions on Reply-To,
     /// this method performs basic validation to ensure URI scheme is valid
     /// and header parameters are properly formed.
@@ -282,13 +282,16 @@ impl ReplyTo {
     pub fn validate(&self) -> Result<()> {
         // Validate URI scheme is supported
         match self.0.uri.scheme {
-            crate::types::uri::Scheme::Sip | 
-            crate::types::uri::Scheme::Sips | 
-            crate::types::uri::Scheme::Tel => Ok(()),
-            _ => Err(Error::InvalidUri(format!("Unsupported scheme in Reply-To: {}", self.0.uri.scheme)))
+            crate::types::uri::Scheme::Sip
+            | crate::types::uri::Scheme::Sips
+            | crate::types::uri::Scheme::Tel => Ok(()),
+            _ => Err(Error::InvalidUri(format!(
+                "Unsupported scheme in Reply-To: {}",
+                self.0.uri.scheme
+            ))),
         }
     }
-    
+
     /// Add a parameter to this Reply-To header
     ///
     /// Adds a parameter to the header and returns the modified header.
@@ -321,7 +324,7 @@ impl ReplyTo {
         self.0.params.push(param);
         self
     }
-    
+
     /// Creates a new ReplyTo with a SIP URI
     ///
     /// Convenience method to create a Reply-To header with a SIP URI.
@@ -358,7 +361,7 @@ impl ReplyTo {
         let address = Address::new(uri);
         Ok(Self(address))
     }
-    
+
     /// Creates a new ReplyTo with a SIPS URI
     ///
     /// Convenience method to create a Reply-To header with a SIPS (secure SIP) URI.
@@ -389,7 +392,7 @@ impl ReplyTo {
         let address = Address::new(uri);
         Ok(Self(address))
     }
-    
+
     /// Creates a new ReplyTo with a TEL URI
     ///
     /// Convenience method to create a Reply-To header with a TEL URI.
@@ -415,7 +418,7 @@ impl ReplyTo {
         let address = Address::new(uri);
         Ok(Self(address))
     }
-    
+
     /// Creates a new ReplyTo with a display name
     ///
     /// Adds a display name to the Reply-To header and returns the modified header.
@@ -473,7 +476,7 @@ impl fmt::Display for ReplyTo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Use direct formatting for the Address, not delegate to avoid potential recursion
         let mut wrote_display_name = false;
-        
+
         // Format display name if present
         if let Some(name) = &self.0.display_name {
             let trimmed_name = name.trim();
@@ -486,20 +489,20 @@ impl fmt::Display for ReplyTo {
                 wrote_display_name = true;
             }
         }
-        
+
         // Add space between display name and URI if needed
         if wrote_display_name {
             write!(f, " ")?;
         }
-        
+
         // Format the URI within angle brackets
         write!(f, "<{}>", self.0.uri)?;
-        
+
         // Format parameters
         for param in &self.0.params {
             write!(f, ";{}", param)?;
         }
-        
+
         Ok(())
     }
 }
@@ -518,9 +521,11 @@ impl TypedHeaderTrait for ReplyTo {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -528,15 +533,17 @@ impl TypedHeaderTrait for ReplyTo {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ReplyTo::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::ReplyTo(reply_to) => Ok(reply_to.clone()),
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -579,12 +586,12 @@ impl FromStr for ReplyTo {
         let result = all_consuming(parse_reply_to)(s.as_bytes())
             .map(|(_rem, header)| header)
             .map_err(|e| Error::from(e.to_owned()));
-        
+
         // If parsing succeeded, validate the result
         if let Ok(reply_to) = &result {
             reply_to.validate()?;
         }
-        
+
         result
     }
 }
@@ -592,30 +599,30 @@ impl FromStr for ReplyTo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::{Uri, Scheme, Host};
     use crate::types::address::Address;
-    use crate::types::param::{Param, GenericValue};
-    use std::str::FromStr;
+    use crate::types::param::{GenericValue, Param};
+    use crate::types::uri::{Host, Scheme, Uri};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::str::FromStr;
 
     #[test]
     fn test_reply_to_from_str() {
         let s = "\"Support\" <sip:support@example.com>;dept=billing";
         let reply_to = ReplyTo::from_str(s).unwrap();
-        
+
         assert_eq!(reply_to.address().display_name, Some("Support".to_string()));
         assert_eq!(reply_to.uri().scheme, Scheme::Sip);
         assert_eq!(reply_to.params().len(), 1);
         assert!(reply_to.has_param("dept"));
         assert_eq!(reply_to.get_param("dept"), Some(Some("billing")));
     }
-    
+
     #[test]
     fn test_reply_to_display() {
         // Create URI directly without using FromStr to avoid recursion
-        use crate::types::uri::{Uri, Scheme, Host};
+        use crate::types::uri::{Host, Scheme, Uri};
         use std::collections::HashMap;
-        
+
         // Create a simple URI directly without parsing
         let uri = Uri {
             scheme: Scheme::Sip,
@@ -627,13 +634,13 @@ mod tests {
             headers: HashMap::new(),
             raw_uri: None,
         };
-        
+
         // Create Address directly
         let addr = Address::new(uri);
         let reply_to = ReplyTo::new(addr);
-        
+
         assert_eq!(reply_to.to_string(), "<sip:user@example.com>");
-        
+
         // Create a new URI instance for the second test
         let uri2 = Uri {
             scheme: Scheme::Sip,
@@ -645,18 +652,21 @@ mod tests {
             headers: HashMap::new(),
             raw_uri: None,
         };
-        
+
         // Test with display name
         let addr_with_name = Address::new_with_display_name("Test User", uri2);
         let reply_to_with_name = ReplyTo::new(addr_with_name);
-        
+
         // According to RFC 3261, display names with spaces must be quoted
-        assert_eq!(reply_to_with_name.to_string(), "\"Test User\" <sip:user@example.com>");
+        assert_eq!(
+            reply_to_with_name.to_string(),
+            "\"Test User\" <sip:user@example.com>"
+        );
     }
-    
+
     #[test]
     fn test_reply_to_with_params() {
-        use crate::types::uri::{Uri, Scheme, Host};
+        use crate::types::uri::{Host, Scheme, Uri};
         use std::collections::HashMap;
 
         // Create URI directly
@@ -670,26 +680,29 @@ mod tests {
             headers: HashMap::new(),
             raw_uri: None,
         };
-        
+
         // Create Address directly with display name
         let mut addr = Address::new_with_display_name("Support", uri);
-        
+
         // Add parameter directly to avoid using the Address::with_param method
-        addr.params.push(Param::Other("dept".to_string(), Some(GenericValue::Token("sales".to_string()))));
-        
+        addr.params.push(Param::Other(
+            "dept".to_string(),
+            Some(GenericValue::Token("sales".to_string())),
+        ));
+
         // Create ReplyTo
         let reply_to = ReplyTo::new(addr);
-        
+
         assert!(reply_to.has_param("dept"));
         assert_eq!(reply_to.get_param("dept"), Some(Some("sales")));
     }
-    
+
     #[test]
     fn test_reply_to_with_ipv6() {
         // Testing with IPv6 address in URI
         let s = "<sip:[2001:db8::1]>";
         let reply_to = ReplyTo::from_str(s).unwrap();
-        
+
         if let Host::Address(addr) = &reply_to.uri().host {
             if let IpAddr::V6(ipv6) = addr {
                 // Convert expected address to bytes for comparison
@@ -702,13 +715,13 @@ mod tests {
             panic!("Expected address type host");
         }
     }
-    
+
     #[test]
     fn test_reply_to_with_tel_uri() {
         // Testing with tel URI scheme - TEL URIs store the number in the host part
         let s = "tel:+1-212-555-1234";
         let reply_to = ReplyTo::from_str(s).unwrap();
-        
+
         assert_eq!(reply_to.uri().scheme(), &Scheme::Tel);
         // TEL URIs in our implementation store the number in the host field
         if let Host::Domain(number) = &reply_to.uri().host {
@@ -717,81 +730,96 @@ mod tests {
             panic!("Expected domain type host for TEL URI");
         }
     }
-    
+
     #[test]
     fn test_reply_to_with_special_display_name() {
         // Display name with characters requiring escaping
         let s = "\"Support Team @ Example, Inc.\" <sip:support@example.com>";
         let reply_to = ReplyTo::from_str(s).unwrap();
-        
-        assert_eq!(reply_to.address().display_name, Some("Support Team @ Example, Inc.".to_string()));
+
+        assert_eq!(
+            reply_to.address().display_name,
+            Some("Support Team @ Example, Inc.".to_string())
+        );
         assert_eq!(reply_to.to_string(), s);
     }
-    
+
     #[test]
     fn test_reply_to_with_quoted_param() {
         // Parameter with quoted string value
         let s = "<sip:support@example.com>;note=\"Call us at 24/7 service\"";
         let reply_to = ReplyTo::from_str(s).unwrap();
-        
+
         assert!(reply_to.has_param("note"));
-        assert_eq!(reply_to.get_param("note"), Some(Some("Call us at 24/7 service")));
+        assert_eq!(
+            reply_to.get_param("note"),
+            Some(Some("Call us at 24/7 service"))
+        );
     }
-    
+
     #[test]
     fn test_reply_to_with_multiple_params_same_name() {
         // Parameters with the same name in URI and header
         let s = "<sip:support@example.com;priority=low>;priority=high";
         let reply_to = ReplyTo::from_str(s).unwrap();
-        
+
         // URI parameters
-        assert!(reply_to.uri().parameters.iter().any(|p| 
-            matches!(p, Param::Other(k, Some(GenericValue::Token(v))) 
+        assert!(reply_to.uri().parameters.iter().any(
+            |p| matches!(p, Param::Other(k, Some(GenericValue::Token(v))) 
                 if k == "priority" && v == "low")
         ));
-        
+
         // Header parameters
         assert!(reply_to.has_param("priority"));
         assert_eq!(reply_to.get_param("priority"), Some(Some("high")));
     }
-    
+
     #[test]
     fn test_reply_to_with_escaped_display_name() {
         // Display name with escaped quotes
         let s = "\"Support\\\"Team\" <sip:support@example.com>";
         let reply_to = ReplyTo::from_str(s).unwrap();
-        
-        assert_eq!(reply_to.address().display_name, Some("Support\"Team".to_string()));
+
+        assert_eq!(
+            reply_to.address().display_name,
+            Some("Support\"Team".to_string())
+        );
     }
-    
+
     #[test]
     fn test_reply_to_factory_methods() {
         // Test the factory methods for creating ReplyTo objects
         let reply_to = ReplyTo::sip("example.com", Some("support")).unwrap();
         assert_eq!(reply_to.uri().scheme(), &Scheme::Sip);
         assert_eq!(reply_to.uri().user, Some("support".to_string()));
-        
+
         let reply_to = ReplyTo::sips("secure.example.com", Some("secure")).unwrap();
         assert_eq!(reply_to.uri().scheme(), &Scheme::Sips);
-        
+
         let reply_to = ReplyTo::tel("+1-212-555-1234").unwrap();
         assert_eq!(reply_to.uri().scheme(), &Scheme::Tel);
-        
+
         let reply_to = ReplyTo::sip("example.com", Some("support"))
             .unwrap()
             .with_display_name("Support Team")
-            .with_param(Param::Other("department".to_string(), Some(GenericValue::Token("sales".to_string()))));
-            
-        assert_eq!(reply_to.address().display_name, Some("Support Team".to_string()));
+            .with_param(Param::Other(
+                "department".to_string(),
+                Some(GenericValue::Token("sales".to_string())),
+            ));
+
+        assert_eq!(
+            reply_to.address().display_name,
+            Some("Support Team".to_string())
+        );
         assert!(reply_to.has_param("department"));
     }
-    
+
     #[test]
     fn test_reply_to_validation() {
         // Test validation of supported schemes
-        use crate::types::uri::{Uri, Scheme, Host};
+        use crate::types::uri::{Host, Scheme, Uri};
         use std::collections::HashMap;
-        
+
         // Create a URI with the HTTP scheme directly
         let uri = Uri {
             scheme: Scheme::Http,
@@ -803,13 +831,13 @@ mod tests {
             headers: HashMap::new(),
             raw_uri: Some("http://example.com".to_string()),
         };
-        
+
         let addr = Address::new(uri);
         let reply_to = ReplyTo::new(addr);
-        
+
         assert!(reply_to.validate().is_err());
     }
-    
+
     #[test]
     fn test_malformed_reply_to() {
         // Test handling of malformed Reply-To headers
@@ -817,14 +845,14 @@ mod tests {
         assert!(ReplyTo::from_str("<>").is_err());
         assert!(ReplyTo::from_str("<sip:>").is_err());
         assert!(ReplyTo::from_str("<sip:@>").is_err());
-        
+
         // Invalid scheme
         assert!(ReplyTo::from_str("<invalid:user@example.com>").is_err());
-        
+
         // Malformed parameters
         assert!(ReplyTo::from_str("<sip:user@example.com>;=value").is_err());
         assert!(ReplyTo::from_str("<sip:user@example.com>;key=").is_err());
     }
 }
 
-// TODO: Implement methods if needed 
+// TODO: Implement methods if needed

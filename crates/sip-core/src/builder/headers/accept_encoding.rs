@@ -1,14 +1,10 @@
-use crate::error::{Error, Result};
-use ordered_float::NotNan;
-use crate::types::{
-    TypedHeader,
-    header::TypedHeaderTrait,
-    headers::header_access::HeaderAccess,
-};
-use crate::types::accept_encoding::AcceptEncoding;
-use crate::parser::headers::accept_encoding::EncodingInfo;
-use crate::types::param::Param;
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::parser::headers::accept_encoding::EncodingInfo;
+use crate::types::accept_encoding::AcceptEncoding;
+use crate::types::param::Param;
+use crate::types::{header::TypedHeaderTrait, headers::header_access::HeaderAccess, TypedHeader};
+use ordered_float::NotNan;
 
 /// Accept-Encoding Header Builder for SIP Messages
 ///
@@ -18,7 +14,7 @@ use super::HeaderSetter;
 /// ## SIP Accept-Encoding Header Overview
 ///
 /// The Accept-Encoding header is defined in [RFC 3261 Section 20.2](https://datatracker.ietf.org/doc/html/rfc3261#section-20.2)
-/// as part of the core SIP protocol. It follows the syntax and semantics defined in 
+/// as part of the core SIP protocol. It follows the syntax and semantics defined in
 /// [RFC 2616 Section 14.3](https://datatracker.ietf.org/doc/html/rfc2616#section-14.3) for HTTP.
 /// The header specifies which content encodings are acceptable in responses or future messages.
 ///
@@ -192,7 +188,7 @@ pub trait AcceptEncodingExt {
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptEncodingExt};
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a request that accepts gzip-compressed responses
     /// let request = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com").unwrap()
     ///     .from("Alice", "sip:alice@example.com", Some("tag5678"))
@@ -202,9 +198,9 @@ pub trait AcceptEncodingExt {
     /// ```
     ///
     /// # RFC Reference
-    /// 
+    ///
     /// As per [RFC 3261 Section 20.2](https://datatracker.ietf.org/doc/html/rfc3261#section-20.2),
-    /// the Accept-Encoding header field follows the syntax defined in 
+    /// the Accept-Encoding header field follows the syntax defined in
     /// [RFC 2616 Section 14.3](https://datatracker.ietf.org/doc/html/rfc2616#section-14.3),
     /// including the use of q-values to indicate relative preference.
     fn accept_encoding(self, encoding: &str, q: Option<f32>) -> Self;
@@ -228,7 +224,7 @@ pub trait AcceptEncodingExt {
     /// ```rust
     /// use rvoip_sip_core::builder::{SimpleRequestBuilder, headers::AcceptEncodingExt};
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a comprehensive set of encoding preferences
     /// let encodings = vec![
     ///     ("gzip", Some(1.0)),         // Highest priority - prefer gzip
@@ -236,7 +232,7 @@ pub trait AcceptEncodingExt {
     ///     ("identity", Some(0.5)),     // Third priority - uncompressed content
     ///     ("*", Some(0.0)),            // Reject all other encodings not listed
     /// ];
-    /// 
+    ///
     /// // Create a request with encoding preferences
     /// let request = SimpleRequestBuilder::new(Method::Subscribe, "sip:presence@example.com").unwrap()
     ///     .from("Watcher", "sip:watcher@example.com", Some("watch123"))
@@ -254,13 +250,13 @@ pub trait AcceptEncodingExt {
     fn accept_encodings(self, encodings: Vec<(&str, Option<f32>)>) -> Self;
 }
 
-impl<T> AcceptEncodingExt for T 
-where 
+impl<T> AcceptEncodingExt for T
+where
     T: HeaderSetter,
 {
     fn accept_encoding(self, encoding: &str, q: Option<f32>) -> Self {
         let mut params = Vec::new();
-        
+
         // Create q value if provided
         if let Some(v) = q {
             if let Ok(nn) = NotNan::new(v) {
@@ -281,22 +277,25 @@ where
 
     fn accept_encodings(self, encodings: Vec<(&str, Option<f32>)>) -> Self {
         // Convert the encodings input to the required format
-        let encoding_infos = encodings.into_iter().map(|(encoding, q)| {
-            let mut params = Vec::new();
-            
-            // Create q value if provided
-            if let Some(v) = q {
-                if let Ok(nn) = NotNan::new(v) {
-                    params.push(Param::Q(nn));
-                }
-            }
+        let encoding_infos = encodings
+            .into_iter()
+            .map(|(encoding, q)| {
+                let mut params = Vec::new();
 
-            // Create the encoding info
-            EncodingInfo {
-                coding: encoding.to_string(),
-                params,
-            }
-        }).collect::<Vec<_>>();
+                // Create q value if provided
+                if let Some(v) = q {
+                    if let Ok(nn) = NotNan::new(v) {
+                        params.push(Param::Q(nn));
+                    }
+                }
+
+                // Create the encoding info
+                EncodingInfo {
+                    coding: encoding.to_string(),
+                    params,
+                }
+            })
+            .collect::<Vec<_>>();
 
         // If we have no encodings, just return self
         if encoding_infos.is_empty() {
@@ -315,37 +314,45 @@ mod tests {
     use crate::builder::SimpleRequestBuilder;
     use crate::types::header::HeaderName;
     use crate::types::AcceptEncoding; // Import the actual type
-    
+
     #[test]
     fn test_accept_encoding_single() {
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .accept_encoding("gzip", Some(0.9))
             .build();
-            
+
         // Check if Accept-Encoding header exists with the correct value
         let header = request.header(&HeaderName::AcceptEncoding);
         assert!(header.is_some(), "Accept-Encoding header not found");
-        
+
         if let Some(TypedHeader::AcceptEncoding(accept_encoding)) = header {
             let encodings = accept_encoding.encodings();
-            assert_eq!(encodings.len(), 1, "Expected 1 encoding, got {}", encodings.len());
-            assert_eq!(encodings[0].coding, "gzip", "Expected encoding 'gzip', got '{}'", encodings[0].coding);
-            
+            assert_eq!(
+                encodings.len(),
+                1,
+                "Expected 1 encoding, got {}",
+                encodings.len()
+            );
+            assert_eq!(
+                encodings[0].coding, "gzip",
+                "Expected encoding 'gzip', got '{}'",
+                encodings[0].coding
+            );
+
             // Check q parameter - need to look through params
-            let has_q = encodings[0].params.iter().any(|p| {
-                match p {
-                    Param::Q(q) => (q.into_inner() - 0.9).abs() < 0.00001,
-                    _ => false,
-                }
+            let has_q = encodings[0].params.iter().any(|p| match p {
+                Param::Q(q) => (q.into_inner() - 0.9).abs() < 0.00001,
+                _ => false,
             });
             assert!(has_q, "Q parameter with value 0.9 not found");
         } else {
             panic!("Expected Accept-Encoding header, got {:?}", header);
         }
     }
-    
+
     #[test]
     fn test_accept_encodings_multiple() {
         let encodings = vec![
@@ -353,55 +360,58 @@ mod tests {
             ("identity", Some(0.5)),
             ("*", Some(0.0)), // Reject all other encodings
         ];
-        
-        let request = SimpleRequestBuilder::register("sip:example.com").unwrap()
+
+        let request = SimpleRequestBuilder::register("sip:example.com")
+            .unwrap()
             .from("Alice", "sip:alice@example.com", None)
             .to("Alice", "sip:alice@example.com", None)
             .accept_encodings(encodings)
             .build();
-            
+
         // Check if Accept-Encoding header exists with the correct values
         let header = request.header(&HeaderName::AcceptEncoding);
         assert!(header.is_some(), "Accept-Encoding header not found");
-        
+
         if let Some(TypedHeader::AcceptEncoding(accept_encoding)) = header {
             let encodings = accept_encoding.encodings();
-            assert_eq!(encodings.len(), 3, "Expected 3 encodings, got {}", encodings.len());
-            
+            assert_eq!(
+                encodings.len(),
+                3,
+                "Expected 3 encodings, got {}",
+                encodings.len()
+            );
+
             // Check for gzip with q=1.0
             let has_gzip = encodings.iter().any(|enc| {
-                enc.coding == "gzip" && enc.params.iter().any(|p| {
-                    match p {
+                enc.coding == "gzip"
+                    && enc.params.iter().any(|p| match p {
                         Param::Q(q) => (q.into_inner() - 1.0).abs() < 0.00001,
                         _ => false,
-                    }
-                })
+                    })
             });
             assert!(has_gzip, "gzip encoding not found with q=1.0");
-            
+
             // Check for identity with q=0.5
             let has_identity = encodings.iter().any(|enc| {
-                enc.coding == "identity" && enc.params.iter().any(|p| {
-                    match p {
+                enc.coding == "identity"
+                    && enc.params.iter().any(|p| match p {
                         Param::Q(q) => (q.into_inner() - 0.5).abs() < 0.00001,
                         _ => false,
-                    }
-                })
+                    })
             });
             assert!(has_identity, "identity encoding not found with q=0.5");
-            
+
             // Check for wildcard with q=0.0
             let has_wildcard = encodings.iter().any(|enc| {
-                enc.coding == "*" && enc.params.iter().any(|p| {
-                    match p {
+                enc.coding == "*"
+                    && enc.params.iter().any(|p| match p {
                         Param::Q(q) => q.into_inner() < 0.00001,
                         _ => false,
-                    }
-                })
+                    })
             });
             assert!(has_wildcard, "* encoding not found with q=0.0");
         } else {
             panic!("Expected Accept-Encoding header");
         }
     }
-} 
+}

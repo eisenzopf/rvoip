@@ -1,18 +1,20 @@
 //! Security Context Manager
 //!
 //! This module provides high-level management of security contexts, including
-//! support for multiple key exchange methods, fallback mechanisms, and 
+//! support for multiple key exchange methods, fallback mechanisms, and
 //! integration with existing DTLS-SRTP infrastructure.
 
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
+use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
 use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SecurityMode, SrtpProfile};
 use crate::api::common::error::SecurityError;
-use crate::api::common::unified_security::{UnifiedSecurityContext, SecurityState, SecurityContextFactory};
-use crate::api::client::security::{ClientSecurityContext, DefaultClientSecurityContext};
-use crate::api::server::security::{ServerSecurityContext, DefaultServerSecurityContext};
+use crate::api::common::unified_security::{
+    SecurityContextFactory, SecurityState, UnifiedSecurityContext,
+};
+use crate::api::server::security::{DefaultServerSecurityContext, ServerSecurityContext};
 
 /// High-level security context manager that can coordinate multiple security methods
 pub struct SecurityContextManager {
@@ -68,10 +70,10 @@ impl SecurityContextManager {
     pub fn new(config: SecurityConfig) -> Self {
         // Default method preference based on security and compatibility
         let method_preference = vec![
-            KeyExchangeMethod::DtlsSrtp,  // Most common in modern systems
-            KeyExchangeMethod::Sdes,      // Good for SIP systems
-            KeyExchangeMethod::Zrtp,      // Good for P2P
-            KeyExchangeMethod::Mikey,     // Enterprise
+            KeyExchangeMethod::DtlsSrtp,     // Most common in modern systems
+            KeyExchangeMethod::Sdes,         // Good for SIP systems
+            KeyExchangeMethod::Zrtp,         // Good for P2P
+            KeyExchangeMethod::Mikey,        // Enterprise
             KeyExchangeMethod::PreSharedKey, // Fallback
         ];
 
@@ -84,7 +86,10 @@ impl SecurityContextManager {
     }
 
     /// Create a manager with custom method preference
-    pub fn with_method_preference(config: SecurityConfig, preference: Vec<KeyExchangeMethod>) -> Self {
+    pub fn with_method_preference(
+        config: SecurityConfig,
+        preference: Vec<KeyExchangeMethod>,
+    ) -> Self {
         Self {
             contexts: Arc::new(RwLock::new(HashMap::new())),
             method_preference: preference,
@@ -102,24 +107,30 @@ impl SecurityContextManager {
                 KeyExchangeMethod::DtlsSrtp => {
                     // DTLS-SRTP contexts are created separately via existing infrastructure
                     // We'll handle this when needed
-                },
-                KeyExchangeMethod::Sdes 
-                | KeyExchangeMethod::Mikey 
-                | KeyExchangeMethod::Zrtp 
+                }
+                KeyExchangeMethod::Sdes
+                | KeyExchangeMethod::Mikey
+                | KeyExchangeMethod::Zrtp
                 | KeyExchangeMethod::PreSharedKey => {
                     // Create unified context for these methods
                     let method_config = self.create_method_config(*method)?;
                     match SecurityContextFactory::create_context(method_config) {
                         Ok(unified_context) => {
-                            contexts.insert(*method, SecurityContextType::Unified(Arc::new(unified_context)));
-                        },
+                            contexts.insert(
+                                *method,
+                                SecurityContextType::Unified(Arc::new(unified_context)),
+                            );
+                        }
                         Err(e) => {
                             // Log warning but continue with other methods
-                            eprintln!("Warning: Failed to initialize {} context: {}", 
-                                self.method_name(*method), e);
+                            eprintln!(
+                                "Warning: Failed to initialize {} context: {}",
+                                self.method_name(*method),
+                                e
+                            );
                         }
                     }
-                },
+                }
             }
         }
 
@@ -127,7 +138,10 @@ impl SecurityContextManager {
     }
 
     /// Create method-specific configuration
-    fn create_method_config(&self, method: KeyExchangeMethod) -> Result<SecurityConfig, SecurityError> {
+    fn create_method_config(
+        &self,
+        method: KeyExchangeMethod,
+    ) -> Result<SecurityConfig, SecurityError> {
         let mut config = self.config.clone();
         config.mode = method.to_security_mode();
         Ok(config)
@@ -147,37 +161,50 @@ impl SecurityContextManager {
     /// Add a DTLS-SRTP client context
     pub async fn add_dtls_client_context(&self, context: Arc<dyn ClientSecurityContext>) {
         let mut contexts = self.contexts.write().await;
-        contexts.insert(KeyExchangeMethod::DtlsSrtp, SecurityContextType::DtlsClient(context));
+        contexts.insert(
+            KeyExchangeMethod::DtlsSrtp,
+            SecurityContextType::DtlsClient(context),
+        );
     }
 
     /// Add a DTLS-SRTP server context
     pub async fn add_dtls_server_context(&self, context: Arc<dyn ServerSecurityContext>) {
         let mut contexts = self.contexts.write().await;
-        contexts.insert(KeyExchangeMethod::DtlsSrtp, SecurityContextType::DtlsServer(context));
+        contexts.insert(
+            KeyExchangeMethod::DtlsSrtp,
+            SecurityContextType::DtlsServer(context),
+        );
     }
 
     /// Start security negotiation with a specific method
     pub async fn start_negotiation(&self, method: KeyExchangeMethod) -> Result<(), SecurityError> {
         let contexts = self.contexts.read().await;
-        let context = contexts.get(&method)
-            .ok_or_else(|| SecurityError::Configuration(format!("Method {} not available", self.method_name(method))))?;
+        let context = contexts.get(&method).ok_or_else(|| {
+            SecurityError::Configuration(format!(
+                "Method {} not available",
+                self.method_name(method)
+            ))
+        })?;
 
         match context {
             SecurityContextType::Unified(unified) => {
                 unified.initialize().await?;
                 *self.active_method.write().await = Some(method);
-            },
+            }
             SecurityContextType::DtlsClient(_) | SecurityContextType::DtlsServer(_) => {
                 // DTLS negotiation is handled by existing infrastructure
                 *self.active_method.write().await = Some(method);
-            },
+            }
         }
 
         Ok(())
     }
 
     /// Auto-negotiate security method based on available contexts and preference
-    pub async fn auto_negotiate(&self, strategy: NegotiationStrategy) -> Result<KeyExchangeMethod, SecurityError> {
+    pub async fn auto_negotiate(
+        &self,
+        strategy: NegotiationStrategy,
+    ) -> Result<KeyExchangeMethod, SecurityError> {
         let contexts = self.contexts.read().await;
 
         match strategy {
@@ -190,16 +217,20 @@ impl SecurityContextManager {
                         return Ok(selected_method);
                     }
                 }
-                Err(SecurityError::Configuration("No security methods available".to_string()))
-            },
+                Err(SecurityError::Configuration(
+                    "No security methods available".to_string(),
+                ))
+            }
             NegotiationStrategy::PreferenceWithFallback => {
                 // Try to initialize the first available method
-                let available_methods: Vec<KeyExchangeMethod> = self.method_preference.iter()
+                let available_methods: Vec<KeyExchangeMethod> = self
+                    .method_preference
+                    .iter()
                     .filter(|method| contexts.contains_key(method))
                     .copied()
                     .collect();
                 drop(contexts);
-                
+
                 for method in available_methods {
                     match self.start_negotiation(method).await {
                         Ok(_) => return Ok(method),
@@ -209,32 +240,42 @@ impl SecurityContextManager {
                         }
                     }
                 }
-                Err(SecurityError::Configuration("All security methods failed".to_string()))
-            },
+                Err(SecurityError::Configuration(
+                    "All security methods failed".to_string(),
+                ))
+            }
             NegotiationStrategy::Strict => {
                 // Use only the primary method from config
-                let primary_method = self.config.mode.key_exchange_method()
-                    .ok_or_else(|| SecurityError::Configuration("No primary method configured".to_string()))?;
-                
+                let primary_method = self.config.mode.key_exchange_method().ok_or_else(|| {
+                    SecurityError::Configuration("No primary method configured".to_string())
+                })?;
+
                 if contexts.contains_key(&primary_method) {
                     drop(contexts);
                     self.start_negotiation(primary_method).await?;
                     Ok(primary_method)
                 } else {
-                    Err(SecurityError::Configuration(format!("Primary method {} not available", self.method_name(primary_method))))
+                    Err(SecurityError::Configuration(format!(
+                        "Primary method {} not available",
+                        self.method_name(primary_method)
+                    )))
                 }
-            },
+            }
             NegotiationStrategy::AutoDetect => {
                 // This would analyze incoming signaling to determine the best method
                 // For now, fall back to FirstAvailable
                 drop(contexts);
                 Box::pin(self.auto_negotiate(NegotiationStrategy::FirstAvailable)).await
-            },
+            }
         }
     }
 
     /// Process incoming signaling for key exchange
-    pub async fn process_signaling(&self, data: &[u8], method: Option<KeyExchangeMethod>) -> Result<Option<Vec<u8>>, SecurityError> {
+    pub async fn process_signaling(
+        &self,
+        data: &[u8],
+        method: Option<KeyExchangeMethod>,
+    ) -> Result<Option<Vec<u8>>, SecurityError> {
         let method = match method {
             Some(m) => m,
             None => {
@@ -244,24 +285,31 @@ impl SecurityContextManager {
         };
 
         let contexts = self.contexts.read().await;
-        let context = contexts.get(&method)
-            .ok_or_else(|| SecurityError::Configuration(format!("Method {} not available", self.method_name(method))))?;
+        let context = contexts.get(&method).ok_or_else(|| {
+            SecurityError::Configuration(format!(
+                "Method {} not available",
+                self.method_name(method)
+            ))
+        })?;
 
         match context {
-            SecurityContextType::Unified(unified) => {
-                unified.process_message(data).await
-            },
+            SecurityContextType::Unified(unified) => unified.process_message(data).await,
             SecurityContextType::DtlsClient(_) | SecurityContextType::DtlsServer(_) => {
                 // DTLS signaling is handled differently
-                Err(SecurityError::Configuration("DTLS signaling should be handled by DTLS contexts".to_string()))
-            },
+                Err(SecurityError::Configuration(
+                    "DTLS signaling should be handled by DTLS contexts".to_string(),
+                ))
+            }
         }
     }
 
     /// Detect key exchange method from signaling data
-    fn detect_method_from_signaling(&self, data: &[u8]) -> Result<KeyExchangeMethod, SecurityError> {
+    fn detect_method_from_signaling(
+        &self,
+        data: &[u8],
+    ) -> Result<KeyExchangeMethod, SecurityError> {
         let data_str = std::str::from_utf8(data).unwrap_or("");
-        
+
         // Simple detection heuristics
         if data_str.contains("a=crypto:") {
             Ok(KeyExchangeMethod::Sdes)
@@ -282,26 +330,28 @@ impl SecurityContextManager {
 
     /// Check if security is established
     pub async fn is_established(&self) -> Result<bool, SecurityError> {
-        let active_method = self.get_active_method().await
-            .ok_or_else(|| SecurityError::NotInitialized("No active security method".to_string()))?;
+        let active_method = self.get_active_method().await.ok_or_else(|| {
+            SecurityError::NotInitialized("No active security method".to_string())
+        })?;
 
         let contexts = self.contexts.read().await;
-        let context = contexts.get(&active_method)
-            .ok_or_else(|| SecurityError::NotInitialized("Active method context not found".to_string()))?;
+        let context = contexts.get(&active_method).ok_or_else(|| {
+            SecurityError::NotInitialized("Active method context not found".to_string())
+        })?;
 
         match context {
-            SecurityContextType::Unified(unified) => {
-                Ok(unified.is_established().await)
-            },
-            SecurityContextType::DtlsClient(client) => {
-                client.is_handshake_complete().await
-                    .map_err(|e| SecurityError::CryptoError(format!("DTLS client error: {}", e)))
-            },
+            SecurityContextType::Unified(unified) => Ok(unified.is_established().await),
+            SecurityContextType::DtlsClient(client) => client
+                .is_handshake_complete()
+                .await
+                .map_err(|e| SecurityError::CryptoError(format!("DTLS client error: {}", e))),
             SecurityContextType::DtlsServer(server) => {
                 // Server readiness check - this might need adjustment based on server API
-                server.is_ready().await
+                server
+                    .is_ready()
+                    .await
                     .map_err(|e| SecurityError::CryptoError(format!("DTLS server error: {}", e)))
-            },
+            }
         }
     }
 
@@ -319,10 +369,17 @@ impl SecurityContextManager {
     }
 
     /// Generate security offer (e.g., for SDP)
-    pub async fn create_security_offer(&self, method: KeyExchangeMethod) -> Result<Vec<String>, SecurityError> {
+    pub async fn create_security_offer(
+        &self,
+        method: KeyExchangeMethod,
+    ) -> Result<Vec<String>, SecurityError> {
         let contexts = self.contexts.read().await;
-        let context = contexts.get(&method)
-            .ok_or_else(|| SecurityError::Configuration(format!("Method {} not available", self.method_name(method))))?;
+        let context = contexts.get(&method).ok_or_else(|| {
+            SecurityError::Configuration(format!(
+                "Method {} not available",
+                self.method_name(method)
+            ))
+        })?;
 
         match context {
             SecurityContextType::Unified(unified) => {
@@ -330,31 +387,37 @@ impl SecurityContextManager {
                 if method == KeyExchangeMethod::Sdes {
                     // This would generate SDP crypto attributes
                     // For now, return a placeholder
-                    Ok(vec!["a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:placeholder".to_string()])
+                    Ok(vec![
+                        "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:placeholder".to_string(),
+                    ])
                 } else {
-                    Err(SecurityError::Configuration("Offer generation not implemented for this method".to_string()))
+                    Err(SecurityError::Configuration(
+                        "Offer generation not implemented for this method".to_string(),
+                    ))
                 }
-            },
+            }
             SecurityContextType::DtlsClient(client) => {
                 // Get DTLS fingerprint for SDP
-                let fingerprint = client.get_fingerprint().await
-                    .map_err(|e| SecurityError::CryptoError(format!("Failed to get fingerprint: {}", e)))?;
-                
+                let fingerprint = client.get_fingerprint().await.map_err(|e| {
+                    SecurityError::CryptoError(format!("Failed to get fingerprint: {}", e))
+                })?;
+
                 Ok(vec![
                     format!("a=fingerprint:sha-256 {}", fingerprint),
                     "a=setup:actpass".to_string(),
                 ])
-            },
+            }
             SecurityContextType::DtlsServer(server) => {
                 // Get DTLS fingerprint for SDP
-                let fingerprint = server.get_fingerprint().await
-                    .map_err(|e| SecurityError::CryptoError(format!("Failed to get fingerprint: {}", e)))?;
-                
+                let fingerprint = server.get_fingerprint().await.map_err(|e| {
+                    SecurityError::CryptoError(format!("Failed to get fingerprint: {}", e))
+                })?;
+
                 Ok(vec![
                     format!("a=fingerprint:sha-256 {}", fingerprint),
                     "a=setup:passive".to_string(),
                 ])
-            },
+            }
         }
     }
 
@@ -372,11 +435,11 @@ mod tests {
 
     /// Test SRTP key for testing
     fn test_srtp_key() -> Vec<u8> {
-        vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-             // Salt
-             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E]
+        vec![
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10, // Salt
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        ]
     }
 
     #[tokio::test]
@@ -413,7 +476,10 @@ mod tests {
         let manager = SecurityContextManager::with_method_preference(config, preference);
 
         assert_eq!(manager.method_preference[0], KeyExchangeMethod::Sdes);
-        assert_eq!(manager.method_preference[1], KeyExchangeMethod::PreSharedKey);
+        assert_eq!(
+            manager.method_preference[1],
+            KeyExchangeMethod::PreSharedKey
+        );
     }
 
     #[tokio::test]
@@ -447,11 +513,17 @@ mod tests {
         let config = SecurityConfig::sdes_srtp();
         let manager = SecurityContextManager::new(config);
 
-        assert_eq!(manager.method_name(KeyExchangeMethod::DtlsSrtp), "DTLS-SRTP");
+        assert_eq!(
+            manager.method_name(KeyExchangeMethod::DtlsSrtp),
+            "DTLS-SRTP"
+        );
         assert_eq!(manager.method_name(KeyExchangeMethod::Sdes), "SDES-SRTP");
         assert_eq!(manager.method_name(KeyExchangeMethod::Mikey), "MIKEY-SRTP");
         assert_eq!(manager.method_name(KeyExchangeMethod::Zrtp), "ZRTP-SRTP");
-        assert_eq!(manager.method_name(KeyExchangeMethod::PreSharedKey), "PSK-SRTP");
+        assert_eq!(
+            manager.method_name(KeyExchangeMethod::PreSharedKey),
+            "PSK-SRTP"
+        );
     }
 
     #[tokio::test]
@@ -461,7 +533,7 @@ mod tests {
         manager.initialize().await.unwrap();
 
         let capabilities = manager.get_capabilities().await;
-        
+
         assert!(capabilities.can_offer);
         assert!(capabilities.can_answer);
         assert!(!capabilities.supported_methods.is_empty());
@@ -480,12 +552,12 @@ mod tests {
     #[test]
     fn test_security_context_type_variants() {
         // Test that we can create different context types
+        use crate::api::common::unified_security::SecurityContextFactory;
         use std::sync::Arc;
-        use crate::api::common::unified_security::{SecurityContextFactory};
-        
+
         let unified_context = SecurityContextFactory::create_sdes_context().unwrap();
         let _context_type = SecurityContextType::Unified(Arc::new(unified_context));
-        
+
         // Test that the enum variants exist (can't easily create DTLS contexts in unit tests)
         // but we can verify the types compile
     }
@@ -497,11 +569,16 @@ mod tests {
         manager.initialize().await.unwrap();
 
         // Should be able to start PSK negotiation
-        let result = manager.start_negotiation(KeyExchangeMethod::PreSharedKey).await;
+        let result = manager
+            .start_negotiation(KeyExchangeMethod::PreSharedKey)
+            .await;
         assert!(result.is_ok());
 
         // Should now have an active method
-        assert_eq!(manager.get_active_method().await, Some(KeyExchangeMethod::PreSharedKey));
+        assert_eq!(
+            manager.get_active_method().await,
+            Some(KeyExchangeMethod::PreSharedKey)
+        );
     }
 
     #[tokio::test]
@@ -509,7 +586,9 @@ mod tests {
         let config = SecurityConfig::sdes_srtp();
         let manager = SecurityContextManager::new(config);
 
-        let method_config = manager.create_method_config(KeyExchangeMethod::Sdes).unwrap();
+        let method_config = manager
+            .create_method_config(KeyExchangeMethod::Sdes)
+            .unwrap();
         assert_eq!(method_config.mode, SecurityMode::SdesSrtp);
     }
 
@@ -519,7 +598,9 @@ mod tests {
         let config = SecurityConfig::sdes_srtp();
         let manager = SecurityContextManager::with_method_preference(config, vec![]);
 
-        let result = manager.auto_negotiate(NegotiationStrategy::FirstAvailable).await;
+        let result = manager
+            .auto_negotiate(NegotiationStrategy::FirstAvailable)
+            .await;
         assert!(result.is_err());
     }
 
@@ -548,4 +629,4 @@ mod tests {
         assert!(!capabilities.can_answer);
         assert_eq!(capabilities.srtp_profiles.len(), 1);
     }
-} 
+}

@@ -4,8 +4,8 @@
 //! SIP event subscriptions, including subscription lifecycle, refresh timers,
 //! and event package support.
 
-pub mod manager;
 pub mod event_package;
+pub mod manager;
 
-pub use manager::SubscriptionManager;
 pub use event_package::{EventPackage, PresencePackage};
+pub use manager::SubscriptionManager;

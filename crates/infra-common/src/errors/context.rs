@@ -21,7 +21,7 @@ impl ErrorContext {
             details: None,
         }
     }
-    
+
     /// Add details to the context
     pub fn with_details<S: Into<String>>(mut self, details: S) -> Self {
         self.details = Some(details.into());
@@ -31,7 +31,11 @@ impl ErrorContext {
 
 impl fmt::Display for ErrorContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "in component '{}' during operation '{}'", self.component, self.operation)?;
+        write!(
+            f,
+            "in component '{}' during operation '{}'",
+            self.component, self.operation
+        )?;
         if let Some(details) = &self.details {
             write!(f, " ({})", details)?;
         }
@@ -43,7 +47,7 @@ impl fmt::Display for ErrorContext {
 pub trait ErrorExt {
     /// Add context to an error
     fn context(self, ctx: ErrorContext) -> Error;
-    
+
     /// Add simple context with component and operation
     fn with_context<S: Into<String>, T: Into<String>>(self, component: S, operation: T) -> Error;
 }
@@ -51,18 +55,12 @@ pub trait ErrorExt {
 impl ErrorExt for Error {
     fn context(self, ctx: ErrorContext) -> Error {
         match self {
-            Error::Custom(msg) => {
-                Error::Custom(format!("{} [{}]", msg, ctx))
-            },
-            Error::Internal(msg) => {
-                Error::Internal(format!("{} [{}]", msg, ctx))
-            },
-            other => {
-                Error::Custom(format!("{} [{}]", other, ctx))
-            }
+            Error::Custom(msg) => Error::Custom(format!("{} [{}]", msg, ctx)),
+            Error::Internal(msg) => Error::Internal(format!("{} [{}]", msg, ctx)),
+            other => Error::Custom(format!("{} [{}]", other, ctx)),
         }
     }
-    
+
     fn with_context<S: Into<String>, T: Into<String>>(self, component: S, operation: T) -> Error {
         self.context(ErrorContext::new(component, operation))
     }
@@ -75,8 +73,8 @@ impl<E> ErrorExt for Result<E, Error> {
             Err(e) => e.context(ctx),
         }
     }
-    
+
     fn with_context<S: Into<String>, T: Into<String>>(self, component: S, operation: T) -> Error {
         self.context(ErrorContext::new(component, operation))
     }
-} 
+}

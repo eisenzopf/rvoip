@@ -3,8 +3,8 @@
 //! This is currently a stub implementation that will be completed
 //! when distributed mode is fully implemented.
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 use std::sync::Arc;
 
 use super::{NetworkTransport, TransportReceiver, TransportReceiverImpl};
@@ -22,18 +22,14 @@ pub struct NatsTransport {
 
 impl NatsTransport {
     /// Create a new NATS transport
-    pub fn new(
-        servers: Vec<String>,
-        cluster: Option<String>,
-        service_name: String,
-    ) -> Self {
+    pub fn new(servers: Vec<String>, cluster: Option<String>, service_name: String) -> Self {
         Self {
             servers,
             cluster,
             service_name,
         }
     }
-    
+
     /// Connect to NATS servers
     pub async fn connect(&mut self) -> Result<()> {
         // TODO: Implement NATS connection
@@ -63,7 +59,7 @@ impl NetworkTransport for NatsTransport {
             target
         ))
     }
-    
+
     async fn subscribe(&self, event_types: Vec<&str>) -> Result<TransportReceiver> {
         tracing::warn!(
             "NATS transport subscribe() called but not yet implemented. \
@@ -72,12 +68,12 @@ impl NetworkTransport for NatsTransport {
         );
         Ok(TransportReceiver::new(Box::new(NatsReceiver::new())))
     }
-    
+
     async fn health_check(&self) -> Result<()> {
         tracing::warn!("NATS transport health_check() called but not yet implemented");
         Err(anyhow::anyhow!("NATS transport not yet implemented"))
     }
-    
+
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("NATS transport shutdown() called (no-op for stub)");
         Ok(())
@@ -108,7 +104,7 @@ impl TransportReceiverImpl for NatsReceiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_nats_transport_creation() {
         let transport = NatsTransport::new(
@@ -116,12 +112,12 @@ mod tests {
             Some("test-cluster".to_string()),
             "test-service".to_string(),
         );
-        
+
         assert_eq!(transport.servers.len(), 1);
         assert_eq!(transport.cluster, Some("test-cluster".to_string()));
         assert_eq!(transport.service_name, "test-service");
     }
-    
+
     #[tokio::test]
     async fn test_nats_transport_not_implemented() {
         let mut transport = NatsTransport::new(
@@ -129,11 +125,11 @@ mod tests {
             None,
             "test-service".to_string(),
         );
-        
+
         // All methods should return not implemented errors
         assert!(transport.connect().await.is_err());
         assert!(transport.health_check().await.is_err());
-        
+
         // Shutdown should succeed (no-op)
         assert!(transport.shutdown().await.is_ok());
     }

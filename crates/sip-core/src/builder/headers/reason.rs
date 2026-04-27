@@ -1,12 +1,9 @@
-use crate::error::{Error, Result};
-use crate::types::{
-    reason::Reason,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
-};
 use super::HeaderSetter;
+use crate::error::{Error, Result};
 use crate::types::StatusCode;
+use crate::types::{
+    headers::header_access::HeaderAccess, headers::HeaderName, headers::TypedHeader, reason::Reason,
+};
 
 /// Reason header builder
 ///
@@ -49,7 +46,7 @@ use crate::types::StatusCode;
 ///
 /// Q.850 Reason headers carry ISDN/PSTN cause codes:
 ///
-/// - **16** (Normal Clearing): Normal call clearing 
+/// - **16** (Normal Clearing): Normal call clearing
 /// - **17** (User Busy): The called party is busy
 /// - **18** (No User Responding): The user is not responding to the call request
 /// - **19** (No Answer): The user has been alerted but does not answer
@@ -151,8 +148,13 @@ pub trait ReasonBuilderExt {
     /// // This provides application-specific reason information
     /// // that might be useful for analytics or debugging
     /// ```
-    fn reason(self, protocol: impl Into<String>, cause: u16, text: Option<impl Into<String>>) -> Self;
-    
+    fn reason(
+        self,
+        protocol: impl Into<String>,
+        cause: u16,
+        text: Option<impl Into<String>>,
+    ) -> Self;
+
     /// Add a Reason header with SIP protocol and the specified cause code and text
     ///
     /// This convenience method adds a Reason header with the "SIP" protocol and
@@ -184,7 +186,7 @@ pub trait ReasonBuilderExt {
     /// // was explicitly declined, not just disconnected
     /// ```
     fn reason_sip(self, cause: u16, text: Option<impl Into<String>>) -> Self;
-    
+
     /// Add a Reason header with Q.850 protocol and the specified cause code and text
     ///
     /// This convenience method adds a Reason header with the "Q.850" protocol and
@@ -216,7 +218,7 @@ pub trait ReasonBuilderExt {
     /// // which helps maintain diagnostic information across network boundaries
     /// ```
     fn reason_q850(self, cause: u16, text: Option<impl Into<String>>) -> Self;
-    
+
     /// Add a Reason header for SIP request termination
     ///
     /// This convenience method adds a Reason header with the "SIP" protocol and
@@ -243,7 +245,7 @@ pub trait ReasonBuilderExt {
     /// // This is the standard Reason header for CANCELing an INVITE transaction
     /// ```
     fn reason_terminated(self) -> Self;
-    
+
     /// Add a Reason header for busy indication
     ///
     /// This convenience method adds a Reason header with the "SIP" protocol and
@@ -270,7 +272,7 @@ pub trait ReasonBuilderExt {
     /// // not because the caller hung up or due to some other error
     /// ```
     fn reason_busy(self) -> Self;
-    
+
     /// Add a Reason header for normal call clearing
     ///
     /// This convenience method adds a Reason header with the "Q.850" protocol and
@@ -298,7 +300,7 @@ pub trait ReasonBuilderExt {
     /// // using the same code as would be used in PSTN networks
     /// ```
     fn reason_normal_clearing(self) -> Self;
-    
+
     /// Add a Reason header for call rejected/declined
     ///
     /// This convenience method adds a Reason header with the "SIP" protocol and
@@ -327,35 +329,40 @@ pub trait ReasonBuilderExt {
     fn reason_declined(self) -> Self;
 }
 
-impl<T> ReasonBuilderExt for T 
-where 
+impl<T> ReasonBuilderExt for T
+where
     T: HeaderSetter,
 {
-    fn reason(self, protocol: impl Into<String>, cause: u16, text: Option<impl Into<String>>) -> Self {
+    fn reason(
+        self,
+        protocol: impl Into<String>,
+        cause: u16,
+        text: Option<impl Into<String>>,
+    ) -> Self {
         let reason = Reason::new(protocol, cause, text);
         self.set_header(reason)
     }
-    
+
     fn reason_sip(self, cause: u16, text: Option<impl Into<String>>) -> Self {
         self.reason("SIP", cause, text)
     }
-    
+
     fn reason_q850(self, cause: u16, text: Option<impl Into<String>>) -> Self {
         self.reason("Q.850", cause, text)
     }
-    
+
     fn reason_terminated(self) -> Self {
         self.reason_sip(487, Some("Request Terminated"))
     }
-    
+
     fn reason_busy(self) -> Self {
         self.reason_sip(486, Some("Busy Here"))
     }
-    
+
     fn reason_normal_clearing(self) -> Self {
         self.reason_q850(16, Some("Normal Clearing"))
     }
-    
+
     fn reason_declined(self) -> Self {
         self.reason_sip(603, Some("Declined"))
     }
@@ -365,22 +372,23 @@ where
 mod tests {
     use super::*;
     use crate::builder::request::SimpleRequestBuilder;
-    use crate::types::Method;
-    use crate::types::reason::Reason;
     use crate::types::headers::HeaderName;
+    use crate::types::reason::Reason;
+    use crate::types::Method;
     use crate::types::StatusCode;
     use crate::{RequestBuilder, ResponseBuilder};
     use std::str::FromStr;
 
     #[test]
     fn test_request_reason() {
-        let request = RequestBuilder::new(Method::Bye, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Bye, "sip:bob@example.com")
+            .unwrap()
             .reason("SIP", 200, Some("Call completed elsewhere"))
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Reason(reason)) = request.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "SIP");
             assert_eq!(reason.cause(), 200);
@@ -395,10 +403,10 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .reason_sip(486, Some("Busy Here"))
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Reason(reason)) = response.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "SIP");
             assert_eq!(reason.cause(), 486);
@@ -410,10 +418,11 @@ mod tests {
 
     #[test]
     fn test_reason_q850() {
-        let request = RequestBuilder::new(Method::Bye, "sip:bob@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Bye, "sip:bob@example.com")
+            .unwrap()
             .reason_q850(16, Some("Normal Clearing"))
             .build();
-            
+
         if let Some(TypedHeader::Reason(reason)) = request.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "Q.850");
             assert_eq!(reason.cause(), 16);
@@ -426,10 +435,11 @@ mod tests {
     #[test]
     fn test_reason_convenience_methods() {
         // Test reason_terminated
-        let terminate_request = RequestBuilder::new(Method::Cancel, "sip:bob@example.com").unwrap()
+        let terminate_request = RequestBuilder::new(Method::Cancel, "sip:bob@example.com")
+            .unwrap()
             .reason_terminated()
             .build();
-            
+
         if let Some(TypedHeader::Reason(reason)) = terminate_request.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "SIP");
             assert_eq!(reason.cause(), 487);
@@ -437,12 +447,13 @@ mod tests {
         } else {
             panic!("Reason header not found or has wrong type");
         }
-        
+
         // Test reason_busy
-        let busy_request = RequestBuilder::new(Method::Cancel, "sip:bob@example.com").unwrap()
+        let busy_request = RequestBuilder::new(Method::Cancel, "sip:bob@example.com")
+            .unwrap()
             .reason_busy()
             .build();
-            
+
         if let Some(TypedHeader::Reason(reason)) = busy_request.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "SIP");
             assert_eq!(reason.cause(), 486);
@@ -450,12 +461,13 @@ mod tests {
         } else {
             panic!("Reason header not found or has wrong type");
         }
-        
+
         // Test reason_normal_clearing
-        let clearing_request = RequestBuilder::new(Method::Bye, "sip:bob@example.com").unwrap()
+        let clearing_request = RequestBuilder::new(Method::Bye, "sip:bob@example.com")
+            .unwrap()
             .reason_normal_clearing()
             .build();
-            
+
         if let Some(TypedHeader::Reason(reason)) = clearing_request.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "Q.850");
             assert_eq!(reason.cause(), 16);
@@ -463,12 +475,13 @@ mod tests {
         } else {
             panic!("Reason header not found or has wrong type");
         }
-        
+
         // Test reason_declined
-        let declined_request = RequestBuilder::new(Method::Cancel, "sip:bob@example.com").unwrap()
+        let declined_request = RequestBuilder::new(Method::Cancel, "sip:bob@example.com")
+            .unwrap()
             .reason_declined()
             .build();
-            
+
         if let Some(TypedHeader::Reason(reason)) = declined_request.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "SIP");
             assert_eq!(reason.cause(), 603);
@@ -491,6 +504,10 @@ mod tests {
         let reason = header.unwrap();
         assert_eq!(reason.protocol(), "Q.850", "Protocol should be Q.850");
         assert_eq!(reason.cause(), 16, "Cause should be 16");
-        assert_eq!(reason.text().as_deref(), Some("Normal Clearing"), "Text should be 'Normal Clearing'");
+        assert_eq!(
+            reason.text().as_deref(),
+            Some("Normal Clearing"),
+            "Text should be 'Normal Clearing'"
+        );
     }
-} 
+}

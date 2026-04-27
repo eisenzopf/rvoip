@@ -3,8 +3,8 @@
 //! This module provides an implementation of the SIP Max-Forwards header as defined in
 //! [RFC 3261 Section 20.22](https://datatracker.ietf.org/doc/html/rfc3261#section-20.22).
 //!
-//! The Max-Forwards header field serves to limit the number of hops a request can 
-//! transit on the way to its destination. It consists of an integer that is 
+//! The Max-Forwards header field serves to limit the number of hops a request can
+//! transit on the way to its destination. It consists of an integer that is
 //! decremented by one at each hop.
 //!
 //! ## Purpose
@@ -42,10 +42,10 @@
 //!
 //! // Create a Max-Forwards header with the default value
 //! let max_forwards = MaxForwards::new(70);
-//! 
+//!
 //! // Parse from a string
 //! let max_forwards = MaxForwards::from_str("70").unwrap();
-//! 
+//!
 //! // Process at a proxy
 //! if let Some(decremented) = max_forwards.decrement() {
 //!     // Forward the request with the decremented value
@@ -54,23 +54,23 @@
 //! }
 //! ```
 
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use nom::combinator::all_consuming;
-use crate::error::{Error, Result};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Max-Forwards header field (RFC 3261 Section 8.1.1.4).
 /// Limits the number of proxies a request can traverse.
 ///
-/// This header is mandatory in all SIP requests to prevent infinite loops in 
-/// recursive and iterative routing situations. Each proxy that forwards the 
+/// This header is mandatory in all SIP requests to prevent infinite loops in
+/// recursive and iterative routing situations. Each proxy that forwards the
 /// request must decrement this value by one. If a proxy or redirect server
 /// receives a request with Max-Forwards set to 0, it must not forward the
 /// request and should instead return a 483 (Too Many Hops) response.
 ///
-/// The Max-Forwards value is an 8-bit unsigned integer (0-255), though in 
+/// The Max-Forwards value is an 8-bit unsigned integer (0-255), though in
 /// practice, values around 70 are common for initial requests.
 ///
 /// # Examples
@@ -194,7 +194,7 @@ impl MaxForwards {
     pub fn is_zero(&self) -> bool {
         self.0 == 0
     }
-    
+
     /// Extracts MaxForwards from a Message or similar type.
     ///
     /// This helper method simplifies extracting MaxForwards from SIP messages.
@@ -220,19 +220,30 @@ impl MaxForwards {
     /// ```
     pub fn from_message(message: &impl AsRef<crate::types::Message>) -> u8 {
         match message.as_ref() {
-            crate::types::Message::Request(req) => {
-                req.header(&crate::types::header::HeaderName::MaxForwards)
-                    .and_then(|h| if let crate::types::TypedHeader::MaxForwards(mf) = h { Some(mf.0) } else { None })
-                    .unwrap_or(0)
-            },
-            crate::types::Message::Response(_) => 0 // Responses don't have Max-Forwards
+            crate::types::Message::Request(req) => req
+                .header(&crate::types::header::HeaderName::MaxForwards)
+                .and_then(|h| {
+                    if let crate::types::TypedHeader::MaxForwards(mf) = h {
+                        Some(mf.0)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0),
+            crate::types::Message::Response(_) => 0, // Responses don't have Max-Forwards
         }
     }
 
     /// Overload of from_message that accepts a Request directly
     pub fn from_request(req: &crate::types::Request) -> u8 {
         req.header(&crate::types::header::HeaderName::MaxForwards)
-            .and_then(|h| if let crate::types::TypedHeader::MaxForwards(mf) = h { Some(mf.0) } else { None })
+            .and_then(|h| {
+                if let crate::types::TypedHeader::MaxForwards(mf) = h {
+                    Some(mf.0)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(0)
     }
 
@@ -269,7 +280,7 @@ impl FromStr for MaxForwards {
 
     /// Parses a string into a Max-Forwards header value.
     ///
-    /// This method parses a string containing an unsigned 8-bit integer (0-255) 
+    /// This method parses a string containing an unsigned 8-bit integer (0-255)
     /// into a MaxForwards struct.
     ///
     /// # Parameters
@@ -306,11 +317,10 @@ impl FromStr for MaxForwards {
     /// assert!(result.is_err());
     /// ```
     fn from_str(s: &str) -> Result<Self> {
-        s.trim().parse::<u8>()
+        s.trim()
+            .parse::<u8>()
             .map(MaxForwards)
-            .map_err(|e| Error::ParseError(
-                format!("Invalid Max-Forwards value: {}", e)
-            ))
+            .map_err(|e| Error::ParseError(format!("Invalid Max-Forwards value: {}", e)))
     }
 }
 
@@ -327,28 +337,34 @@ impl TypedHeaderTrait for MaxForwards {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
             HeaderValue::Raw(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
-                    s.trim().parse::<u8>().map(MaxForwards)
-                        .map_err(|_| Error::InvalidHeader(
-                            format!("Invalid integer value in {} header", Self::header_name())
+                    s.trim().parse::<u8>().map(MaxForwards).map_err(|_| {
+                        Error::InvalidHeader(format!(
+                            "Invalid integer value in {} header",
+                            Self::header_name()
                         ))
+                    })
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::MaxForwards(max_forwards) => Ok(*max_forwards),
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
-} 
+}

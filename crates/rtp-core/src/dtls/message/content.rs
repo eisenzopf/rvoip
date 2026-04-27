@@ -2,23 +2,23 @@
 //!
 //! This module contains the different content message types used in DTLS.
 
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::dtls::record::ContentType;
 use super::handshake::HandshakeMessage;
+use crate::dtls::record::ContentType;
 
 /// DTLS content message
 #[derive(Debug, Clone)]
 pub enum ContentMessage {
     /// ChangeCipherSpec message
     ChangeCipherSpec(ChangeCipherSpecMessage),
-    
+
     /// Alert message
     Alert(crate::dtls::alert::Alert),
-    
+
     /// Handshake message
     Handshake(HandshakeMessage),
-    
+
     /// Application data
     ApplicationData(Bytes),
 }
@@ -33,7 +33,7 @@ impl ContentMessage {
             Self::ApplicationData(_) => ContentType::ApplicationData,
         }
     }
-    
+
     /// Get the message data
     pub fn data(&self) -> Bytes {
         match self {
@@ -68,9 +68,7 @@ impl ChangeCipherSpecMessage {
     pub fn new() -> Self {
         let mut buf = BytesMut::with_capacity(1);
         buf.put_u8(1);
-        Self {
-            data: buf.freeze(),
-        }
+        Self { data: buf.freeze() }
     }
 }
 
@@ -78,4 +76,4 @@ impl Default for ChangeCipherSpecMessage {
     fn default() -> Self {
         Self::new()
     }
-} 
+}

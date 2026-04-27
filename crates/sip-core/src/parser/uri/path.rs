@@ -4,13 +4,13 @@
 use nom::{
     branch::alt,
     bytes::complete::{tag, take_while1},
-    combinator::{recognize},
-    multi::{many0},
+    combinator::recognize,
+    multi::many0,
     sequence::{pair, preceded},
 };
 use std::str;
 
-use crate::parser::common_chars::{escaped};
+use crate::parser::common_chars::escaped;
 use crate::parser::ParseResult;
 
 // pchar = unreserved / escaped / ":" / "@" / "&" / "=" / "+" / "$" / ","
@@ -33,18 +33,12 @@ pub fn param(input: &[u8]) -> ParseResult<&[u8]> {
 
 // segment = *pchar *( ";" param )
 pub fn segment(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(pair(
-        many0(pchar),
-        many0(preceded(tag(b";"), param))
-    ))(input)
+    recognize(pair(many0(pchar), many0(preceded(tag(b";"), param))))(input)
 }
 
 // path-segments = segment *( "/" segment )
 pub fn path_segments(input: &[u8]) -> ParseResult<&[u8]> {
-    recognize(pair(
-        segment,
-        many0(preceded(tag(b"/"), segment))
-    ))(input)
+    recognize(pair(segment, many0(preceded(tag(b"/"), segment))))(input)
 }
 
 // abs-path = "/" path-segments
@@ -239,13 +233,13 @@ mod tests {
     fn test_invalid_paths() {
         // Path must start with "/"
         assert!(parse_path(b"path").is_err());
-        
+
         // This test would only apply if the parser strictly checked for
         // invalid characters, which the current implementation doesn't.
         // Left as documentation of what would be checked in a stricter parser:
-        // 
+        //
         // Invalid characters in path (if strictly enforcing)
         // assert!(parse_path(b"/path with space").is_err());
         // assert!(parse_path(b"/path<invalid>char").is_err());
     }
-} 
+}

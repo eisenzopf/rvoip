@@ -19,20 +19,24 @@ impl<T: DeserializeOwned + Debug + 'static> SchemaValidator<T> {
             _phantom: PhantomData,
         }
     }
-    
+
     /// Validate a JSON value against this schema
     pub fn validate(&self, value: &Value) -> Result<T> {
         // In a real implementation, this would use JSON Schema validation
         // For the stub, we'll just try to deserialize the value
-        serde_json::from_value(value.clone())
-            .map_err(|e| Error::Validation(format!("Schema validation failed for {}: {}", self.schema_name, e)))
+        serde_json::from_value(value.clone()).map_err(|e| {
+            Error::Validation(format!(
+                "Schema validation failed for {}: {}",
+                self.schema_name, e
+            ))
+        })
     }
-    
+
     /// Validate a configuration string against this schema
     pub fn validate_str(&self, json_str: &str) -> Result<T> {
         let value: Value = serde_json::from_str(json_str)
             .map_err(|e| Error::Validation(format!("Invalid JSON: {}", e)))?;
-        
+
         self.validate(&value)
     }
 }
@@ -49,10 +53,10 @@ pub fn validate_config<T: DeserializeOwned + Debug + 'static>(
 pub trait SelfValidating: Sized {
     /// Validate the configuration
     fn validate(&self) -> Result<()>;
-    
+
     /// Validate after loading
     fn validate_after_load(self) -> Result<Self> {
         self.validate()?;
         Ok(self)
     }
-} 
+}

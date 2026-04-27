@@ -1,43 +1,43 @@
 use crate::error::{Error, Result};
-use std::fmt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 
-use crate::types::param::Param;
-use crate::types::contact::ContactValue as TypesContactValue;
-use crate::types::from::From as FromHeaderValue;
-use crate::types::to::To as ToHeaderValue;
-use crate::parser::headers::route::RouteEntry;
-use crate::types::record_route::RecordRouteEntry;
-use crate::parser::headers::reply_to::ReplyToValue;
-use crate::types::reply_to::ReplyTo;
-use crate::types::refer_to::ReferTo;
-use crate::types::referred_by::ReferredBy;
-use crate::types::via::ViaHeader;
-use crate::types::cseq::CSeq;
-use crate::types::max_forwards::MaxForwards;
-use crate::types::expires::Expires;
-use crate::types::retry_after::RetryAfter;
-use crate::types::warning::Warning;
 use crate::parser::headers::accept::AcceptValue;
 use crate::parser::headers::accept_encoding::EncodingInfo;
+use crate::parser::headers::alert_info::AlertInfoValue;
+use crate::parser::headers::error_info::ErrorInfoValue;
+use crate::parser::headers::reply_to::ReplyToValue;
+use crate::parser::headers::route::RouteEntry;
+use crate::prelude::GenericValue;
 use crate::types::accept_language::AcceptLanguage;
+use crate::types::call_info::CallInfoValue;
+use crate::types::contact::ContactValue as TypesContactValue;
 use crate::types::content_length::ContentLength;
 use crate::types::content_type::ContentType;
-use crate::parser::headers::alert_info::AlertInfoValue;
-use crate::types::call_info::CallInfoValue;
-use crate::parser::headers::error_info::ErrorInfoValue;
+use crate::types::cseq::CSeq;
+use crate::types::expires::Expires;
+use crate::types::from::From as FromHeaderValue;
 use crate::types::in_reply_to::InReplyTo;
-use crate::prelude::GenericValue;
+use crate::types::max_forwards::MaxForwards;
+use crate::types::param::Param;
+use crate::types::record_route::RecordRouteEntry;
+use crate::types::refer_to::ReferTo;
+use crate::types::referred_by::ReferredBy;
+use crate::types::reply_to::ReplyTo;
+use crate::types::retry_after::RetryAfter;
+use crate::types::to::To as ToHeaderValue;
+use crate::types::via::ViaHeader;
+use crate::types::warning::Warning;
 
 /// Value of a SIP header, parsed into its specific structure.
 ///
-/// This enum represents the value part of a SIP header, with variants for 
+/// This enum represents the value part of a SIP header, with variants for
 /// different header types. During parsing, header values are stored in the
 /// appropriate variant based on the header name.
 ///
-/// Most variants store partially parsed structured data (like addresses, 
-/// parameters, etc.), while the `Raw` variant is used for unparsed or 
+/// Most variants store partially parsed structured data (like addresses,
+/// parameters, etc.), while the `Raw` variant is used for unparsed or
 /// unknown header values.
 ///
 /// This type is primarily used during the parsing process before converting
@@ -81,7 +81,10 @@ pub enum HeaderValue {
     MinExpires(u32),
     RetryAfter(RetryAfter),
     Warning(Vec<Warning>),
-    Timestamp((Vec<u8>, Option<Vec<u8>>), Option<(Vec<u8>, Option<Vec<u8>>)>), // (ts, delay_opt)
+    Timestamp(
+        (Vec<u8>, Option<Vec<u8>>),
+        Option<(Vec<u8>, Option<Vec<u8>>)>,
+    ), // (ts, delay_opt)
     Date(Vec<u8>),
 
     // === Content Negotiation ===
@@ -92,16 +95,16 @@ pub enum HeaderValue {
     // === Body Info ===
     ContentLength(ContentLength),
     ContentType(ContentType),
-    ContentEncoding(Vec<Vec<u8>>), // Vec<token>
-    ContentLanguage(Vec<Vec<u8>>), // Vec<language-tag>
+    ContentEncoding(Vec<Vec<u8>>),             // Vec<token>
+    ContentLanguage(Vec<Vec<u8>>),             // Vec<language-tag>
     ContentDisposition((Vec<u8>, Vec<Param>)), // (disp_type, params)
-    MimeVersion((u8, u8)), // (major, minor)
+    MimeVersion((u8, u8)),                     // (major, minor)
 
     // === Capabilities/Options ===
-    Allow(Vec<Vec<u8>>), // Vec<token>
-    Require(Vec<Vec<u8>>), // Vec<token>
-    Supported(Vec<Vec<u8>>), // Vec<token>
-    Unsupported(Vec<Vec<u8>>), // Vec<token>
+    Allow(Vec<Vec<u8>>),        // Vec<token>
+    Require(Vec<Vec<u8>>),      // Vec<token>
+    Supported(Vec<Vec<u8>>),    // Vec<token>
+    Unsupported(Vec<Vec<u8>>),  // Vec<token>
     ProxyRequire(Vec<Vec<u8>>), // Vec<token>
 
     // === Info Headers ===
@@ -146,7 +149,7 @@ impl HeaderValue {
     pub fn content_type_sdp() -> Self {
         use crate::parser::headers::content_type::ContentTypeValue;
         use std::collections::HashMap;
-        
+
         HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
             m_type: "application".to_string(),
             m_subtype: "sdp".to_string(),
@@ -158,7 +161,7 @@ impl HeaderValue {
     pub fn content_type_text_plain() -> Self {
         use crate::parser::headers::content_type::ContentTypeValue;
         use std::collections::HashMap;
-        
+
         HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
             m_type: "text".to_string(),
             m_subtype: "plain".to_string(),
@@ -170,7 +173,7 @@ impl HeaderValue {
     pub fn content_type_json() -> Self {
         use crate::parser::headers::content_type::ContentTypeValue;
         use std::collections::HashMap;
-        
+
         HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
             m_type: "application".to_string(),
             m_subtype: "json".to_string(),
@@ -182,10 +185,10 @@ impl HeaderValue {
     pub fn content_type_multipart_mixed(boundary: impl Into<String>) -> Self {
         use crate::parser::headers::content_type::ContentTypeValue;
         use std::collections::HashMap;
-        
+
         let mut parameters = HashMap::new();
         parameters.insert("boundary".to_string(), boundary.into());
-        
+
         HeaderValue::ContentType(crate::types::content_type::ContentType(ContentTypeValue {
             m_type: "multipart".to_string(),
             m_subtype: "mixed".to_string(),
@@ -234,7 +237,7 @@ impl fmt::Display for HeaderValue {
                     // Fall back to printing the raw bytes for non-UTF8 values
                     write!(f, "{:?}", bytes)
                 }
-            },
+            }
             HeaderValue::CallInfo(ref values) => {
                 let mut first = true;
                 for value in values {
@@ -248,7 +251,7 @@ impl fmt::Display for HeaderValue {
                     first = false;
                 }
                 Ok(())
-            },
+            }
             _ => write!(f, "[Complex Value]"),
         }
     }
@@ -257,13 +260,13 @@ impl fmt::Display for HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_header_value_creation() {
         let text = HeaderValue::text("Hello");
         assert_eq!(text.as_text(), Some("Hello"));
-        
+
         let int = HeaderValue::integer(42);
         assert_eq!(int.as_integer(), Some(42));
     }
-} 
+}

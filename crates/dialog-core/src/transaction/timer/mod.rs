@@ -35,7 +35,7 @@
 //! RFC 3261 defines several timer types for different transaction scenarios:
 //!
 //! ## Client Transaction Timers
-//! - **Timer A** (INVITE): Controls request retransmissions 
+//! - **Timer A** (INVITE): Controls request retransmissions
 //! - **Timer B** (INVITE): Transaction timeout
 //! - **Timer D** (INVITE): Wait time for response retransmissions
 //! - **Timer E** (non-INVITE): Controls request retransmissions
@@ -71,21 +71,21 @@
 //! # }
 //! ```
 
-pub mod types;
-pub mod manager;
 pub mod factory;
+pub mod manager;
+pub mod types;
 
 // Re-export main items from submodules to make them accessible via `crate::timer::ItemName`
-pub use types::{Timer, TimerType, TimerSettings};
-pub use manager::TimerManager;
 pub use factory::TimerFactory;
+pub use manager::TimerManager;
+pub use types::{Timer, TimerSettings, TimerType};
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
     use crate::transaction::TransactionKey; // For Timer::new_one_shot
-    use rvoip_sip_core::Method; // For TransactionKey
+    use rvoip_sip_core::Method;
+    use std::time::Duration; // For TransactionKey
 
     #[test]
     fn test_re_exports_exist_and_usable() {
@@ -106,4 +106,4 @@ mod tests {
         let _manager = TimerManager::default();
         let _factory = TimerFactory::default();
     }
-} 
+}

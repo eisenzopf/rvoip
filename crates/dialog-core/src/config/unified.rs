@@ -74,10 +74,10 @@
 //! });
 //! ```
 
-use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 
-use crate::api::{DialogConfig, Credentials, RelUsage};
+use crate::api::{Credentials, DialogConfig, RelUsage};
 
 /// Unified configuration for DialogManager
 ///
@@ -128,10 +128,10 @@ use crate::api::{DialogConfig, Credentials, RelUsage};
 pub enum DialogManagerConfig {
     /// Client mode - optimized for outgoing calls
     Client(ClientBehavior),
-    
+
     /// Server mode - optimized for incoming calls
     Server(ServerBehavior),
-    
+
     /// Hybrid mode - supports both incoming and outgoing calls
     Hybrid(HybridBehavior),
 }
@@ -151,10 +151,10 @@ impl DialogManagerConfig {
                 from_uri: None,
                 auto_auth: false,
                 credentials: None,
-            }
+            },
         }
     }
-    
+
     /// Create a server mode configuration
     ///
     /// # Arguments
@@ -169,10 +169,10 @@ impl DialogManagerConfig {
                 domain: None,
                 auto_options_response: false,
                 auto_register_response: false,
-            }
+            },
         }
     }
-    
+
     /// Create a hybrid mode configuration
     ///
     /// # Arguments
@@ -190,10 +190,10 @@ impl DialogManagerConfig {
                 credentials: None,
                 auto_options_response: false,
                 auto_register_response: false,
-            }
+            },
         }
     }
-    
+
     /// Get the base dialog configuration
     pub fn dialog_config(&self) -> &DialogConfig {
         match self {
@@ -202,12 +202,12 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(h) => &h.dialog,
         }
     }
-    
+
     /// Get the local address for binding
     pub fn local_address(&self) -> SocketAddr {
         self.dialog_config().local_address
     }
-    
+
     /// Check if this configuration supports outgoing calls
     pub fn supports_outgoing_calls(&self) -> bool {
         match self {
@@ -216,7 +216,7 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(_) => true,
         }
     }
-    
+
     /// Check if this configuration supports incoming calls  
     pub fn supports_incoming_calls(&self) -> bool {
         match self {
@@ -225,7 +225,7 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(_) => true,
         }
     }
-    
+
     /// Get the from URI for outgoing requests (if available)
     pub fn from_uri(&self) -> Option<&str> {
         match self {
@@ -234,7 +234,7 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(h) => h.from_uri.as_deref(),
         }
     }
-    
+
     /// Get the domain for server operations (if available)
     pub fn domain(&self) -> Option<&str> {
         match self {
@@ -243,7 +243,7 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(h) => h.domain.as_deref(),
         }
     }
-    
+
     /// Check if automatic authentication is enabled
     pub fn auto_auth_enabled(&self) -> bool {
         match self {
@@ -252,7 +252,7 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(h) => h.auto_auth,
         }
     }
-    
+
     /// Get authentication credentials (if available)
     pub fn credentials(&self) -> Option<&Credentials> {
         match self {
@@ -261,7 +261,7 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(h) => h.credentials.as_ref(),
         }
     }
-    
+
     /// Check if automatic OPTIONS response is enabled
     pub fn auto_options_enabled(&self) -> bool {
         match self {
@@ -270,7 +270,7 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(h) => h.auto_options_response,
         }
     }
-    
+
     /// Get the configured 100rel policy for outgoing INVITEs (RFC 3262).
     pub fn use_100rel(&self) -> RelUsage {
         self.dialog_config().use_100rel
@@ -284,12 +284,12 @@ impl DialogManagerConfig {
             DialogManagerConfig::Hybrid(h) => h.auto_register_response,
         }
     }
-    
+
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
         // Validate base dialog config
         self.dialog_config().validate()?;
-        
+
         // Mode-specific validation
         match self {
             DialogManagerConfig::Client(c) => c.validate(),
@@ -307,13 +307,13 @@ impl DialogManagerConfig {
 pub struct ClientBehavior {
     /// Base dialog configuration
     pub dialog: DialogConfig,
-    
+
     /// Default from URI for outgoing requests
     pub from_uri: Option<String>,
-    
+
     /// Enable automatic authentication
     pub auto_auth: bool,
-    
+
     /// Credentials for authentication
     pub credentials: Option<Credentials>,
 }
@@ -324,13 +324,13 @@ impl ClientBehavior {
         if self.auto_auth && self.credentials.is_none() {
             return Err("auto_auth enabled but no credentials provided".to_string());
         }
-        
+
         if let Some(from_uri) = &self.from_uri {
             if !from_uri.starts_with("sip:") && !from_uri.starts_with("sips:") {
                 return Err("from_uri must be a valid SIP URI".to_string());
             }
         }
-        
+
         Ok(())
     }
 }
@@ -343,13 +343,13 @@ impl ClientBehavior {
 pub struct ServerBehavior {
     /// Base dialog configuration
     pub dialog: DialogConfig,
-    
+
     /// Server domain name
     pub domain: Option<String>,
-    
+
     /// Enable automatic OPTIONS response
     pub auto_options_response: bool,
-    
+
     /// Enable automatic REGISTER response
     pub auto_register_response: bool,
 }
@@ -371,22 +371,22 @@ impl ServerBehavior {
 pub struct HybridBehavior {
     /// Base dialog configuration
     pub dialog: DialogConfig,
-    
+
     /// Default from URI for outgoing requests
     pub from_uri: Option<String>,
-    
+
     /// Server domain name
     pub domain: Option<String>,
-    
+
     /// Enable automatic authentication
     pub auto_auth: bool,
-    
+
     /// Credentials for authentication
     pub credentials: Option<Credentials>,
-    
+
     /// Enable automatic OPTIONS response
     pub auto_options_response: bool,
-    
+
     /// Enable automatic REGISTER response
     pub auto_register_response: bool,
 }
@@ -397,13 +397,13 @@ impl HybridBehavior {
         if self.auto_auth && self.credentials.is_none() {
             return Err("auto_auth enabled but no credentials provided".to_string());
         }
-        
+
         if let Some(from_uri) = &self.from_uri {
             if !from_uri.starts_with("sip:") && !from_uri.starts_with("sips:") {
                 return Err("from_uri must be a valid SIP URI".to_string());
             }
         }
-        
+
         Ok(())
     }
 }
@@ -419,29 +419,29 @@ impl ClientConfigBuilder {
         self.behavior.from_uri = Some(from_uri.into());
         self
     }
-    
+
     /// Enable automatic authentication with credentials
     pub fn with_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
         self.behavior.auto_auth = true;
         self.behavior.credentials = Some(Credentials::new(username, password));
         self
     }
-    
+
     /// Set custom credentials without enabling auto-auth
     pub fn with_credentials(mut self, credentials: Credentials) -> Self {
         self.behavior.credentials = Some(credentials);
         self
     }
-    
+
     /// Customize the dialog configuration
-    pub fn with_dialog_config<F>(mut self, f: F) -> Self 
-    where 
-        F: FnOnce(DialogConfig) -> DialogConfig
+    pub fn with_dialog_config<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(DialogConfig) -> DialogConfig,
     {
         self.behavior.dialog = f(self.behavior.dialog);
         self
     }
-    
+
     /// Set the 100rel (reliable provisional) policy (RFC 3262).
     pub fn with_100rel(mut self, policy: RelUsage) -> Self {
         self.behavior.dialog.use_100rel = policy;
@@ -477,28 +477,28 @@ impl ServerConfigBuilder {
         self.behavior.domain = Some(domain.into());
         self
     }
-    
+
     /// Enable automatic OPTIONS responses
     pub fn with_auto_options(mut self) -> Self {
         self.behavior.auto_options_response = true;
         self
     }
-    
+
     /// Enable automatic REGISTER responses
     pub fn with_auto_register(mut self) -> Self {
         self.behavior.auto_register_response = true;
         self
     }
-    
+
     /// Customize the dialog configuration
-    pub fn with_dialog_config<F>(mut self, f: F) -> Self 
-    where 
-        F: FnOnce(DialogConfig) -> DialogConfig
+    pub fn with_dialog_config<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(DialogConfig) -> DialogConfig,
     {
         self.behavior.dialog = f(self.behavior.dialog);
         self
     }
-    
+
     /// Set the 100rel (reliable provisional) policy (RFC 3262).
     pub fn with_100rel(mut self, policy: RelUsage) -> Self {
         self.behavior.dialog.use_100rel = policy;
@@ -534,47 +534,47 @@ impl HybridConfigBuilder {
         self.behavior.from_uri = Some(from_uri.into());
         self
     }
-    
+
     /// Set the server domain
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
         self.behavior.domain = Some(domain.into());
         self
     }
-    
+
     /// Enable automatic authentication with credentials
     pub fn with_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
         self.behavior.auto_auth = true;
         self.behavior.credentials = Some(Credentials::new(username, password));
         self
     }
-    
+
     /// Set custom credentials without enabling auto-auth
     pub fn with_credentials(mut self, credentials: Credentials) -> Self {
         self.behavior.credentials = Some(credentials);
         self
     }
-    
+
     /// Enable automatic OPTIONS responses
     pub fn with_auto_options(mut self) -> Self {
         self.behavior.auto_options_response = true;
         self
     }
-    
+
     /// Enable automatic REGISTER responses
     pub fn with_auto_register(mut self) -> Self {
         self.behavior.auto_register_response = true;
         self
     }
-    
+
     /// Customize the dialog configuration
-    pub fn with_dialog_config<F>(mut self, f: F) -> Self 
-    where 
-        F: FnOnce(DialogConfig) -> DialogConfig
+    pub fn with_dialog_config<F>(mut self, f: F) -> Self
+    where
+        F: FnOnce(DialogConfig) -> DialogConfig,
     {
         self.behavior.dialog = f(self.behavior.dialog);
         self
     }
-    
+
     /// Set the 100rel (reliable provisional) policy (RFC 3262).
     pub fn with_100rel(mut self, policy: RelUsage) -> Self {
         self.behavior.dialog.use_100rel = policy;
@@ -620,4 +620,4 @@ impl From<crate::api::ServerConfig> for DialogManagerConfig {
             auto_register_response: server_config.auto_register_response,
         })
     }
-} 
+}

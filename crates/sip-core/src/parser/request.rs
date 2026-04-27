@@ -1,24 +1,24 @@
-use std::str;
-use std::str::FromStr;
 use nom::{
     branch::alt,
-    bytes::complete::{take_till, take_while1, tag},
+    bytes::complete::{tag, take_till, take_while1},
     character::complete::{line_ending, space1},
     combinator::{map_res, recognize},
     error::{Error as NomError, ErrorKind, ParseError},
     sequence::tuple,
     IResult,
 };
+use std::str;
+use std::str::FromStr;
 // Keep Result for FromStr impls if needed elsewhere
 use crate::error::{Error, Result};
-use crate::types::{Method, Version, Uri};
-use crate::types::param::Param;
-use crate::types::uri::{Host, Scheme};
-use crate::parser::uri::parse_uri;
-use crate::parser::token::token;
 use crate::parser::common::sip_version;
+use crate::parser::token::token;
+use crate::parser::uri::parse_uri;
 use crate::parser::whitespace::crlf;
 use crate::parser::ParseResult;
+use crate::types::param::Param;
+use crate::types::uri::{Host, Scheme};
+use crate::types::{Method, Uri, Version};
 
 /// SIP Request Line Parser
 ///
@@ -46,11 +46,11 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
     // First, parse the method and the first space
     let (input, method_bytes) = token(input)?;
     let (input, _) = space1(input)?;
-    
+
     // Check if method is valid before proceeding
     let method_str = str::from_utf8(method_bytes)
         .map_err(|_| nom::Err::Failure(NomError::new(method_bytes, ErrorKind::Char)))?;
-    
+
     // Verify method is a valid SIP method
     match method_str.parse::<Method>() {
         Ok(method) => {
@@ -58,10 +58,10 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
             if let Some(space_pos) = input.iter().position(|&c| c == b' ') {
                 // Extract the URI portion
                 let uri_part = &input[..space_pos];
-                
+
                 // First try to parse as a SIP URI
                 let uri_result = parse_uri(uri_part);
-                
+
                 let uri = match uri_result {
                     Ok((_, uri)) => uri,
                     Err(_) => {
@@ -78,7 +78,7 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
                             } else {
                                 Scheme::Sip // Default for unknown schemes
                             };
-                            
+
                             // Create a custom URI with the detected scheme
                             let mut uri = Uri::new(scheme, Host::domain("example.com"));
                             uri.raw_uri = Some(uri_str.to_string());
@@ -89,12 +89,10 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
                         }
                     }
                 };
-                
+
                 // Parse the remaining part after the URI (space + SIP/2.0 + CRLF)
                 let version_part = &input[space_pos..];
-                if let Ok((remaining, version)) = 
-                    tuple((space1, sip_version, crlf))(version_part) {
-                    
+                if let Ok((remaining, version)) = tuple((space1, sip_version, crlf))(version_part) {
                     Ok((remaining, (method, uri, version.1)))
                 } else {
                     Err(nom::Err::Error(NomError::new(version_part, ErrorKind::Tag)))
@@ -103,21 +101,24 @@ pub fn parse_request_line(input: &[u8]) -> ParseResult<(Method, Uri, Version)> {
                 // No space found after URI
                 Err(nom::Err::Error(NomError::new(input, ErrorKind::Space)))
             }
-        },
+        }
         Err(_) => {
             // Invalid SIP method
-            Err(nom::Err::Failure(NomError::new(method_bytes, ErrorKind::Tag)))
+            Err(nom::Err::Failure(NomError::new(
+                method_bytes,
+                ErrorKind::Tag,
+            )))
         }
     }
 }
 
-// Removed request_parser, request_parser_nom, parse_headers_and_body functions. 
+// Removed request_parser, request_parser_nom, parse_headers_and_body functions.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::uri::{Host, Scheme};
-    use std::net::{Ipv4Addr, Ipv6Addr, IpAddr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn test_parse_valid_request_line() {
@@ -159,16 +160,37 @@ mod tests {
     fn test_standard_methods() {
         // Using Vec instead of array to avoid size mismatch issues
         let methods = vec![
-            (b"REGISTER sip:example.com SIP/2.0\r\n".to_vec(), Method::Register),
-            (b"INVITE sip:example.com SIP/2.0\r\n".to_vec(), Method::Invite),
+            (
+                b"REGISTER sip:example.com SIP/2.0\r\n".to_vec(),
+                Method::Register,
+            ),
+            (
+                b"INVITE sip:example.com SIP/2.0\r\n".to_vec(),
+                Method::Invite,
+            ),
             (b"ACK sip:example.com SIP/2.0\r\n".to_vec(), Method::Ack),
             (b"BYE sip:example.com SIP/2.0\r\n".to_vec(), Method::Bye),
-            (b"CANCEL sip:example.com SIP/2.0\r\n".to_vec(), Method::Cancel),
-            (b"OPTIONS sip:example.com SIP/2.0\r\n".to_vec(), Method::Options),
+            (
+                b"CANCEL sip:example.com SIP/2.0\r\n".to_vec(),
+                Method::Cancel,
+            ),
+            (
+                b"OPTIONS sip:example.com SIP/2.0\r\n".to_vec(),
+                Method::Options,
+            ),
             (b"REFER sip:example.com SIP/2.0\r\n".to_vec(), Method::Refer),
-            (b"SUBSCRIBE sip:example.com SIP/2.0\r\n".to_vec(), Method::Subscribe),
-            (b"NOTIFY sip:example.com SIP/2.0\r\n".to_vec(), Method::Notify),
-            (b"MESSAGE sip:example.com SIP/2.0\r\n".to_vec(), Method::Message)
+            (
+                b"SUBSCRIBE sip:example.com SIP/2.0\r\n".to_vec(),
+                Method::Subscribe,
+            ),
+            (
+                b"NOTIFY sip:example.com SIP/2.0\r\n".to_vec(),
+                Method::Notify,
+            ),
+            (
+                b"MESSAGE sip:example.com SIP/2.0\r\n".to_vec(),
+                Method::Message,
+            ),
         ];
 
         for (line, expected_method) in methods.iter() {
@@ -186,7 +208,9 @@ mod tests {
         let result = parse_request_line(line);
         assert!(result.is_ok());
         let (_, (_, uri, _)) = result.unwrap();
-        assert!(matches!(uri.host, Host::Address(IpAddr::V4(ip)) if ip == Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(
+            matches!(uri.host, Host::Address(IpAddr::V4(ip)) if ip == Ipv4Addr::new(192, 168, 1, 1))
+        );
     }
 
     // Test URI with IPv6 address, if supported
@@ -194,7 +218,7 @@ mod tests {
     fn test_request_uri_with_ipv6() {
         let line = b"INVITE sip:user@[2001:db8::1] SIP/2.0\r\n";
         let result = parse_request_line(line);
-        
+
         // If IPv6 is implemented, test it's parsed correctly
         if result.is_ok() {
             let (_, (_, uri, _)) = result.unwrap();
@@ -220,13 +244,11 @@ mod tests {
         let result = parse_request_line(line);
         assert!(result.is_ok());
         let (_, (_, uri, _)) = result.unwrap();
-        
+
         // Check if transport parameter is present
-        let has_transport_param = uri.parameters.iter().any(|p| {
-            match p {
-                Param::Transport(value) => value == "udp",
-                _ => false
-            }
+        let has_transport_param = uri.parameters.iter().any(|p| match p {
+            Param::Transport(value) => value == "udp",
+            _ => false,
         });
         assert!(has_transport_param);
     }
@@ -238,7 +260,7 @@ mod tests {
         let result = parse_request_line(line);
         assert!(result.is_ok());
         let (_, (_, uri, _)) = result.unwrap();
-        
+
         // Check if the headers map contains the subject
         assert!(!uri.headers.is_empty());
         assert!(uri.headers.contains_key("subject"));
@@ -268,7 +290,7 @@ mod tests {
     fn test_version_variations() {
         // Valid versions
         assert!(parse_request_line(b"INVITE sip:user@example.com SIP/2.0\r\n").is_ok());
-        
+
         // Other versions
         let result = parse_request_line(b"INVITE sip:user@example.com SIP/3.0\r\n");
         if result.is_ok() {
@@ -284,7 +306,7 @@ mod tests {
         let result = parse_request_line(line);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_request_uri_with_non_sip_schemes() {
         // We now support non-SIP URI schemes for requests
@@ -293,14 +315,14 @@ mod tests {
         assert!(result.is_ok());
         let (_, (_, uri, _)) = result.unwrap();
         assert_eq!(uri.scheme, Scheme::Http);
-        
+
         // Test with HTTPS
         let line = b"OPTIONS https://example.com SIP/2.0\r\n";
         let result = parse_request_line(line);
         assert!(result.is_ok());
         let (_, (_, uri, _)) = result.unwrap();
         assert_eq!(uri.scheme, Scheme::Https);
-        
+
         // Test with unknown scheme
         let line = b"OPTIONS someunknownscheme:something SIP/2.0\r\n";
         let result = parse_request_line(line);
@@ -324,7 +346,7 @@ mod tests {
         let result = parse_request_line(line);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_invalid_request_line_crlf() {
         let line = b"INVITE sip:user@example.com SIP/2.0";
@@ -348,8 +370,8 @@ mod tests {
         let mut long_uri = b"INVITE sip:user@".to_vec();
         long_uri.extend_from_slice(&vec![b'a'; 500]);
         long_uri.extend_from_slice(b".example.com SIP/2.0\r\n");
-        
+
         let result = parse_request_line(&long_uri);
         assert!(result.is_ok());
     }
-} 
+}

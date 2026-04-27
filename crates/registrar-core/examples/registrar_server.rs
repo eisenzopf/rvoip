@@ -15,17 +15,17 @@
 //!   - bob / secret456
 //!   - charlie / mypass789
 
-use rvoip_registrar_core::RegistrarService;
 use rvoip_dialog_core::{
-    DialogServer,
     api::config::ServerConfig,
-    transaction::{TransactionManager},
     transaction::transport::{TransportManager, TransportManagerConfig},
+    transaction::TransactionManager,
+    DialogServer,
 };
-use rvoip_sip_core::{Request, Response, StatusCode, Method};
-use std::sync::Arc;
+use rvoip_registrar_core::RegistrarService;
+use rvoip_sip_core::{Method, Request, Response, StatusCode};
 use std::net::SocketAddr;
-use tracing::{info, warn, error, debug};
+use std::sync::Arc;
+use tracing::{debug, error, info, warn};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,34 +48,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Creating transport manager on 0.0.0.0:5060");
     let (transport, transport_rx) = TransportManager::new(transport_config).await?;
-    
+
     info!("Creating transaction manager");
-    let (transaction_manager, global_rx) = TransactionManager::with_transport_manager(
-        transport,
-        transport_rx,
-        Some(100),
-    ).await?;
+    let (transaction_manager, global_rx) =
+        TransactionManager::with_transport_manager(transport, transport_rx, Some(100)).await?;
 
     // Create dialog server
     info!("Creating dialog server");
     let server_config = ServerConfig::default();
-    let dialog_server = DialogServer::with_global_events(
-        Arc::new(transaction_manager),
-        global_rx,
-        server_config,
-    ).await?;
+    let dialog_server =
+        DialogServer::with_global_events(Arc::new(transaction_manager), global_rx, server_config)
+            .await?;
 
     // Create registrar service with authentication
     let realm = "rvoip.local";
     let config = rvoip_registrar_core::types::RegistrarConfig::default();
     let registrar = Arc::new(
-        RegistrarService::with_auth(
-            rvoip_registrar_core::api::ServiceMode::B2BUA,
-            config,
-            realm
-        ).await?
+        RegistrarService::with_auth(rvoip_registrar_core::api::ServiceMode::B2BUA, config, realm)
+            .await?,
     );
-    
+
     // Add test users to user store
     if let Some(user_store) = registrar.user_store() {
         user_store.add_user("alice", "password123")?;
@@ -83,14 +75,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         user_store.add_user("charlie", "mypass789")?;
         info!("Test users added: alice, bob, charlie");
     }
-    
+
     info!("Registrar service created with authentication enabled");
 
     info!("Setting up REGISTER request handler");
-    
+
     // We'll manually handle REGISTER requests
     // In a real implementation, this would be integrated into dialog-core's protocol handlers
-    
+
     info!("Registrar server ready!");
     info!("Listening on: 0.0.0.0:5060");
     info!("Realm: rvoip.local");
@@ -128,9 +120,10 @@ async fn handle_register_request(
     debug!("Processing REGISTER request from {}", source);
 
     // Extract username from From header
-    let from_header = request.from()
-        .ok_or("Missing From header")?;
-    let username = from_header.uri().user()
+    let from_header = request.from().ok_or("Missing From header")?;
+    let username = from_header
+        .uri()
+        .user()
         .ok_or("Missing username in From URI")?;
 
     debug!("REGISTER request for user: {}", username);
@@ -141,25 +134,31 @@ async fn handle_register_request(
         let auth_str = auth_header_value.as_str()?;
         let digest_response = DigestAuthenticator::parse_authorization(auth_str)?;
 
-        debug!("Authorization header found for user: {}", digest_response.username);
+        debug!(
+            "Authorization header found for user: {}",
+            digest_response.username
+        );
 
         // Get password from user store
-        let password = user_store.get_password(&digest_response.username)
+        let password = user_store
+            .get_password(&digest_response.username)
             .ok_or_else(|| format!("User not found: {}", digest_response.username))?;
 
         // Validate digest response
-        let is_valid = auth.validate_response(
-            &digest_response,
-            "REGISTER",
-            &password,
-        )?;
+        let is_valid = auth.validate_response(&digest_response, "REGISTER", &password)?;
 
         if !is_valid {
-            warn!("Authentication failed for user: {}", digest_response.username);
+            warn!(
+                "Authentication failed for user: {}",
+                digest_response.username
+            );
             return create_401_response(&request, auth);
         }
 
-        info!("User {} authenticated successfully", digest_response.username);
+        info!(
+            "User {} authenticated successfully",
+            digest_response.username
+        );
 
         // Process registration
         // In a real implementation, we would:
@@ -221,7 +220,7 @@ fn create_401_response(
     let www_auth = auth.format_www_authenticate(&challenge);
 
     let mut response = Response::new(StatusCode::Unauthorized);
-    
+
     // Copy headers from request
     if let Some(via) = request.header("Via") {
         response.insert_header("Via", via.clone());
@@ -254,7 +253,8 @@ fn create_401_response(
 
 /// Extract Expires value from request
 fn extract_expires(request: &Request) -> Option<u32> {
-    request.header("Expires")
+    request
+        .header("Expires")
         .and_then(|h| h.as_str().ok())
         .and_then(|s| s.parse().ok())
 }
@@ -266,4 +266,3 @@ fn generate_tag() -> String {
     let random: u64 = rng.gen();
     format!("{:x}", random)
 }
-

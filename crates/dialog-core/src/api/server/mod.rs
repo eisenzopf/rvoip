@@ -80,7 +80,7 @@
 //!         while let Some(event) = session_rx.recv().await {
 //!             match event {
 //!                 SessionCoordinationEvent::IncomingCall { dialog_id, request, .. } => {
-//!                     println!("📞 Incoming call: {} from {}", 
+//!                     println!("📞 Incoming call: {} from {}",
 //!                         dialog_id, request.from().unwrap().uri());
 //!                     // Handle call - see examples below
 //!                 },
@@ -113,12 +113,12 @@
 //! # async fn simple_server() -> Result<(), Box<dyn std::error::Error>> {
 //! # let (tx_mgr, config) = setup_dependencies().await?;
 //! let server = DialogServer::with_dependencies(tx_mgr, config).await?;
-//! 
+//!
 //! // Session coordination events now flow via GlobalEventCoordinator;
 //! // the channel below is illustrative only.
 //! let (_session_tx, mut session_rx) = mpsc::channel::<SessionCoordinationEvent>(100);
 //! server.start().await?;
-//! 
+//!
 //! // Simple call handler
 //! tokio::spawn(async move {
 //!     while let Some(event) = session_rx.recv().await {
@@ -214,7 +214,7 @@
 //!
 //! # async fn protocol_server(server: DialogServer) -> Result<(), Box<dyn std::error::Error>> {
 //! // Handle custom SIP methods and extensions
-//! 
+//!
 //! // Custom NOTIFY handler for presence
 //! async fn handle_notify(server: &DialogServer, dialog_id: &DialogId, body: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
 //!     if let Some(presence_data) = body {
@@ -464,7 +464,7 @@
 //!         println!("=== Server Statistics ===");
 //!         println!("Active dialogs: {}", stats.active_dialogs);
 //!         println!("Total dialogs: {}", stats.total_dialogs);
-//!         println!("Success rate: {:.1}%", 
+//!         println!("Success rate: {:.1}%",
 //!             100.0 * stats.successful_calls as f64 / (stats.successful_calls + stats.failed_calls) as f64);
 //!         println!("Average call duration: {:.1}s", stats.avg_call_duration);
 //!
@@ -479,7 +479,7 @@
 //!             println!("📋 {} active dialogs (showing first 5):", active_dialogs.len());
 //!             for dialog_id in active_dialogs.iter().take(5) {
 //!                 if let Ok(info) = server.get_dialog_info(dialog_id).await {
-//!                     println!("  Dialog {}: {} -> {} ({})", 
+//!                     println!("  Dialog {}: {} -> {} ({})",
 //!                         dialog_id, info.local_uri, info.remote_uri, info.state);
 //!                 }
 //!             }
@@ -542,8 +542,8 @@
 //! - [`response_builder`]: Response building and sending functionality with SIP compliance
 //! - [`sip_methods`]: Specialized SIP method handlers (BYE, REFER, NOTIFY, UPDATE, INFO)
 
-pub mod core;
 pub mod call_operations;
+pub mod core;
 pub mod dialog_operations;
 pub mod response_builder;
 pub mod sip_methods;

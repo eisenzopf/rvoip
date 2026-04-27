@@ -21,23 +21,23 @@
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
-use crate::types::sdp::ParsedAttribute;
 use crate::sdp::attributes::MediaDirection;
+use crate::types::sdp::ParsedAttribute;
 
 // Import specialized parse functions
-use crate::sdp::attributes::rtpmap::parse_rtpmap;
-use crate::sdp::attributes::fmtp::parse_fmtp;
-use crate::sdp::attributes::ptime;
 use crate::sdp::attributes::candidate::parse_candidate;
-use crate::sdp::attributes::ssrc::parse_ssrc;
+use crate::sdp::attributes::extmap;
+use crate::sdp::attributes::fmtp::parse_fmtp;
+use crate::sdp::attributes::group;
 use crate::sdp::attributes::mid;
 use crate::sdp::attributes::msid;
-use crate::sdp::attributes::group;
-use crate::sdp::attributes::rtcp;
-use crate::sdp::attributes::extmap;
+use crate::sdp::attributes::ptime;
 use crate::sdp::attributes::rid;
-use crate::sdp::attributes::simulcast;
+use crate::sdp::attributes::rtcp;
+use crate::sdp::attributes::rtpmap::parse_rtpmap;
 use crate::sdp::attributes::sctpmap::parse_sctpmap;
+use crate::sdp::attributes::simulcast;
+use crate::sdp::attributes::ssrc::parse_ssrc;
 
 /// Parse an attribute line (a=) from SDP.
 ///
@@ -65,11 +65,11 @@ use crate::sdp::attributes::sctpmap::parse_sctpmap;
 /// use rvoip_sip_core::sdp::parser::parse_attribute;
 /// use rvoip_sip_core::types::sdp::ParsedAttribute;
 /// use rvoip_sip_core::sdp::attributes::MediaDirection;
-/// 
+///
 /// // Parse a flag attribute
 /// let sendrecv = parse_attribute("sendrecv").unwrap();
 /// assert!(matches!(sendrecv, ParsedAttribute::Direction(MediaDirection::SendRecv)));
-/// 
+///
 /// // Parse a key-value attribute
 /// let rtpmap = parse_attribute("rtpmap:96 VP8/90000").unwrap();
 /// if let ParsedAttribute::RtpMap(map) = rtpmap {
@@ -77,7 +77,7 @@ use crate::sdp::attributes::sctpmap::parse_sctpmap;
 ///     assert_eq!(map.encoding_name, "VP8");
 ///     assert_eq!(map.clock_rate, 90000);
 /// }
-/// 
+///
 /// // Parse an ICE candidate
 /// let candidate = parse_attribute("candidate:1 1 UDP 2113667327 192.168.1.4 46416 typ host").unwrap();
 /// if let ParsedAttribute::Candidate(cand) = candidate {
@@ -109,40 +109,45 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
     if let Some(colon_pos) = value.find(':') {
         let key = &value[0..colon_pos];
         let val = &value[colon_pos + 1..];
-        
+
         // Handle different attribute types
         match key {
             // Media format attributes
             "rtpmap" => parse_rtpmap(val),
             "fmtp" => parse_fmtp(val),
-            
+
             // Timing attributes
             "ptime" => {
                 let ptime_val = ptime::parse_ptime(val)?;
                 Ok(ParsedAttribute::Ptime(ptime_val as u64))
-            },
+            }
             "maxptime" => {
                 let maxptime_val = ptime::parse_maxptime(val)?;
                 Ok(ParsedAttribute::MaxPtime(maxptime_val as u64))
-            },
-            
+            }
+
             // ICE attributes
             "ice-ufrag" => Ok(ParsedAttribute::IceUfrag(val.to_string())),
             "ice-pwd" => Ok(ParsedAttribute::IcePwd(val.to_string())),
             "ice-options" => {
                 let options = val.split_whitespace().map(|s| s.to_string()).collect();
                 Ok(ParsedAttribute::IceOptions(options))
-            },
+            }
             "candidate" => parse_candidate(val),
-            
+
             // DTLS attributes
             "fingerprint" => {
                 let parts: Vec<&str> = val.splitn(2, ' ').collect();
                 if parts.len() < 2 {
-                    return Err(Error::SdpParsingError("Invalid fingerprint format".to_string()));
+                    return Err(Error::SdpParsingError(
+                        "Invalid fingerprint format".to_string(),
+                    ));
                 }
-                Ok(ParsedAttribute::Fingerprint(parts[0].to_string(), parts[1].to_string()))
-            },
+                Ok(ParsedAttribute::Fingerprint(
+                    parts[0].to_string(),
+                    parts[1].to_string(),
+                ))
+            }
             "setup" => Ok(ParsedAttribute::Setup(val.to_string())),
 
             // SDES-SRTP `a=crypto:` (RFC 4568 §9.1).
@@ -153,15 +158,14 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
                 let tag = parts
                     .next()
                     .and_then(|s| s.parse::<u32>().ok())
-                    .ok_or_else(|| Error::SdpParsingError(
-                        "a=crypto: missing or non-numeric tag".to_string()
-                    ))?;
+                    .ok_or_else(|| {
+                        Error::SdpParsingError("a=crypto: missing or non-numeric tag".to_string())
+                    })?;
                 let suite_str = parts.next().ok_or_else(|| {
                     Error::SdpParsingError("a=crypto: missing crypto-suite".to_string())
                 })?;
-                let suite = CryptoSuite::from_str(suite_str).map_err(|e| {
-                    Error::SdpParsingError(format!("a=crypto: {}", e))
-                })?;
+                let suite = CryptoSuite::from_str(suite_str)
+                    .map_err(|e| Error::SdpParsingError(format!("a=crypto: {}", e)))?;
                 let key_param = parts.next().ok_or_else(|| {
                     Error::SdpParsingError("a=crypto: missing inline= parameter".to_string())
                 })?;
@@ -180,61 +184,66 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
                 // Remaining whitespace-delimited tokens are session-params.
                 attr.session_params = parts.map(|s| s.to_string()).collect();
                 Ok(ParsedAttribute::Crypto(attr))
-            },
-            
+            }
+
             // Identification attributes
             "mid" => {
                 let mid_val = mid::parse_mid(val)?;
                 Ok(ParsedAttribute::Mid(mid_val))
-            },
+            }
             "msid" => {
                 let (stream_id, track_id) = msid::parse_msid(val)?;
                 Ok(ParsedAttribute::Msid(stream_id, track_id))
-            },
+            }
             "ssrc" => parse_ssrc(val),
-            
+
             // Grouping attributes
             "group" => {
                 let (semantics, tags) = group::parse_group(val)?;
                 Ok(ParsedAttribute::Group(semantics, tags))
-            },
-            
+            }
+
             // RTCP attributes
             "rtcp-fb" => {
                 let (pt, fb_type, fb_param) = rtcp::parse_rtcp_fb(val)?;
                 Ok(ParsedAttribute::RtcpFb(pt, fb_type, fb_param))
-            },
-            
+            }
+
             // Extension attributes
             "extmap" => {
                 let (id, direction, uri, params) = extmap::parse_extmap(val)?;
                 // Convert id from u16 to u8, verifying it's in range
                 if id > 255 {
-                    return Err(Error::SdpParsingError(format!("Extmap id {} is out of range for u8", id)));
+                    return Err(Error::SdpParsingError(format!(
+                        "Extmap id {} is out of range for u8",
+                        id
+                    )));
                 }
                 Ok(ParsedAttribute::ExtMap(id as u8, direction, uri, params))
-            },
-            
+            }
+
             // Simulcast & RID attributes
             "rid" => {
                 let rid_attr = rid::parse_rid(val)?;
                 Ok(ParsedAttribute::Rid(rid_attr))
-            },
+            }
             "simulcast" => {
                 let (send, recv) = simulcast::parse_simulcast(val)?;
                 Ok(ParsedAttribute::Simulcast(send, recv))
-            },
-            
+            }
+
             // Data channel attributes
             "sctpmap" => {
                 let (port, app, streams) = parse_sctpmap(val)?;
                 Ok(ParsedAttribute::SctpMap(port, app, streams as u16))
-            },
-            "sctp-port" => Ok(ParsedAttribute::SctpPort(val.parse().map_err(|_| 
-                Error::SdpParsingError(format!("Invalid sctp-port: {}", val)))?)),
-            "max-message-size" => Ok(ParsedAttribute::MaxMessageSize(val.parse().map_err(|_| 
-                Error::SdpParsingError(format!("Invalid max-message-size: {}", val)))?)),
-            
+            }
+            "sctp-port" => Ok(ParsedAttribute::SctpPort(val.parse().map_err(|_| {
+                Error::SdpParsingError(format!("Invalid sctp-port: {}", val))
+            })?)),
+            "max-message-size" => Ok(ParsedAttribute::MaxMessageSize(val.parse().map_err(
+                |_| Error::SdpParsingError(format!("Invalid max-message-size: {}", val)),
+            )?)),
+
             // Generic key-value attribute if no specialized parser
             _ => Ok(ParsedAttribute::Value(key.to_string(), val.to_string())),
         }
@@ -246,25 +255,25 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
             "sendonly" => Ok(ParsedAttribute::Direction(MediaDirection::SendOnly)),
             "recvonly" => Ok(ParsedAttribute::Direction(MediaDirection::RecvOnly)),
             "inactive" => Ok(ParsedAttribute::Direction(MediaDirection::Inactive)),
-            
+
             // RTCP multiplexing
             "rtcp-mux" => Ok(ParsedAttribute::RtcpMux),
-            
+
             // ICE attributes
             "end-of-candidates" => Ok(ParsedAttribute::EndOfCandidates),
             "ice-lite" => Ok(ParsedAttribute::Flag("ice-lite".to_string())),
-            
+
             // Generic flag attribute if no specialized parser
             _ => Ok(ParsedAttribute::Flag(value.to_string())),
         }
     }
-} 
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::sdp::{RtpMapAttribute, FmtpAttribute, CandidateAttribute};
     use crate::sdp::attributes::rid::{RidAttribute, RidDirection};
+    use crate::types::sdp::{CandidateAttribute, FmtpAttribute, RtpMapAttribute};
 
     // --- Flag Attribute Tests ---
 
@@ -305,7 +314,7 @@ mod tests {
             parse_attribute("end-of-candidates").unwrap(),
             ParsedAttribute::EndOfCandidates
         ));
-        
+
         assert!(matches!(
             parse_attribute("ice-lite").unwrap(),
             ParsedAttribute::Flag(flag) if flag == "ice-lite"
@@ -335,7 +344,7 @@ mod tests {
         } else {
             panic!("Expected RtpMap attribute");
         }
-        
+
         // Test rtpmap with encoding parameters
         let result = parse_attribute("rtpmap:111 opus/48000/2").unwrap();
         if let ParsedAttribute::RtpMap(rtpmap) = result {
@@ -346,7 +355,7 @@ mod tests {
         } else {
             panic!("Expected RtpMap attribute");
         }
-        
+
         // Test invalid rtpmap format
         assert!(parse_attribute("rtpmap:").is_err());
         assert!(parse_attribute("rtpmap:abc").is_err());
@@ -362,16 +371,20 @@ mod tests {
         } else {
             panic!("Expected Fmtp attribute");
         }
-        
+
         // Test fmtp with complex parameters
-        let result = parse_attribute("fmtp:96 profile-level-id=42e01f;level-asymmetry-allowed=1").unwrap();
+        let result =
+            parse_attribute("fmtp:96 profile-level-id=42e01f;level-asymmetry-allowed=1").unwrap();
         if let ParsedAttribute::Fmtp(fmtp) = result {
             assert_eq!(fmtp.format, "96");
-            assert_eq!(fmtp.parameters, "profile-level-id=42e01f;level-asymmetry-allowed=1");
+            assert_eq!(
+                fmtp.parameters,
+                "profile-level-id=42e01f;level-asymmetry-allowed=1"
+            );
         } else {
             panic!("Expected Fmtp attribute");
         }
-        
+
         // Test invalid fmtp format
         assert!(parse_attribute("fmtp:").is_err());
     }
@@ -385,7 +398,7 @@ mod tests {
         } else {
             panic!("Expected Ptime attribute");
         }
-        
+
         // Test invalid ptime format
         assert!(parse_attribute("ptime:abc").is_err());
     }
@@ -399,7 +412,7 @@ mod tests {
         } else {
             panic!("Expected MaxPtime attribute");
         }
-        
+
         // Test invalid maxptime format
         assert!(parse_attribute("maxptime:abc").is_err());
     }
@@ -413,7 +426,7 @@ mod tests {
         } else {
             panic!("Expected IceUfrag attribute");
         }
-        
+
         // Test ice-pwd attribute (RFC 8839)
         let result = parse_attribute("ice-pwd:x9cml/YzichV2+XlhiMu8g").unwrap();
         if let ParsedAttribute::IcePwd(pwd) = result {
@@ -421,7 +434,7 @@ mod tests {
         } else {
             panic!("Expected IcePwd attribute");
         }
-        
+
         // Test ice-options attribute (RFC 8839)
         let result = parse_attribute("ice-options:trickle renomination").unwrap();
         if let ParsedAttribute::IceOptions(options) = result {
@@ -436,7 +449,8 @@ mod tests {
     #[test]
     fn test_parse_candidate() {
         // Test candidate attribute (RFC 8839 Section 5.1)
-        let result = parse_attribute("candidate:1 1 UDP 2113667327 192.168.1.4 46416 typ host").unwrap();
+        let result =
+            parse_attribute("candidate:1 1 UDP 2113667327 192.168.1.4 46416 typ host").unwrap();
         if let ParsedAttribute::Candidate(candidate) = result {
             assert_eq!(candidate.foundation, "1");
             assert_eq!(candidate.component_id, 1);
@@ -450,9 +464,12 @@ mod tests {
         } else {
             panic!("Expected Candidate attribute");
         }
-        
+
         // Test candidate with related address (RFC 8839 Section 5.1)
-        let result = parse_attribute("candidate:2 1 UDP 1694302207 1.2.3.4 46416 typ srflx raddr 192.168.1.4 rport 46416").unwrap();
+        let result = parse_attribute(
+            "candidate:2 1 UDP 1694302207 1.2.3.4 46416 typ srflx raddr 192.168.1.4 rport 46416",
+        )
+        .unwrap();
         if let ParsedAttribute::Candidate(candidate) = result {
             assert_eq!(candidate.foundation, "2");
             assert_eq!(candidate.component_id, 1);
@@ -479,7 +496,7 @@ mod tests {
         } else {
             panic!("Expected Fingerprint attribute");
         }
-        
+
         // Test invalid fingerprint format
         assert!(parse_attribute("fingerprint:sha-256").is_err());
     }
@@ -516,7 +533,7 @@ mod tests {
         } else {
             panic!("Expected Msid attribute");
         }
-        
+
         // Test msid with only stream id
         let result = parse_attribute("msid:stream1").unwrap();
         if let ParsedAttribute::Msid(stream_id, track_id) = result {
@@ -552,7 +569,7 @@ mod tests {
         } else {
             panic!("Expected RtcpFb attribute");
         }
-        
+
         // Test rtcp-fb with feedback parameter
         let result = parse_attribute("rtcp-fb:96 nack pli").unwrap();
         if let ParsedAttribute::RtcpFb(pt, fb_type, fb_param) = result {
@@ -567,7 +584,8 @@ mod tests {
     #[test]
     fn test_parse_extmap() {
         // Test extmap attribute (RFC 8285)
-        let result = parse_attribute("extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level").unwrap();
+        let result =
+            parse_attribute("extmap:1 urn:ietf:params:rtp-hdrext:ssrc-audio-level").unwrap();
         if let ParsedAttribute::ExtMap(id, direction, uri, params) = result {
             assert_eq!(id, 1);
             assert_eq!(direction, None);
@@ -576,9 +594,10 @@ mod tests {
         } else {
             panic!("Expected ExtMap attribute");
         }
-        
+
         // Test extmap with direction
-        let result = parse_attribute("extmap:2/sendrecv urn:ietf:params:rtp-hdrext:toffset").unwrap();
+        let result =
+            parse_attribute("extmap:2/sendrecv urn:ietf:params:rtp-hdrext:toffset").unwrap();
         if let ParsedAttribute::ExtMap(id, direction, uri, params) = result {
             assert_eq!(id, 2);
             assert_eq!(direction, Some("sendrecv".to_string()));
@@ -587,9 +606,10 @@ mod tests {
         } else {
             panic!("Expected ExtMap attribute");
         }
-        
+
         // Test extmap with parameters
-        let result = parse_attribute("extmap:3 urn:ietf:params:rtp-hdrext:sdes:mid some-params").unwrap();
+        let result =
+            parse_attribute("extmap:3 urn:ietf:params:rtp-hdrext:sdes:mid some-params").unwrap();
         if let ParsedAttribute::ExtMap(id, direction, uri, params) = result {
             assert_eq!(id, 3);
             assert_eq!(direction, None);
@@ -598,7 +618,7 @@ mod tests {
         } else {
             panic!("Expected ExtMap attribute");
         }
-        
+
         // Test extmap with id out of range
         assert!(parse_attribute("extmap:256 urn:ietf:params:rtp-hdrext:ssrc-audio-level").is_err());
     }
@@ -615,7 +635,7 @@ mod tests {
         } else {
             panic!("Expected Rid attribute");
         }
-        
+
         // Test rid with restrictions
         // Note: Using space-separated restrictions instead of semicolon-separated
         // This matches the current behavior of the parser, though it's not RFC-compliant
@@ -623,12 +643,15 @@ mod tests {
         if let ParsedAttribute::Rid(rid) = result {
             // Debug output to understand what's in the restrictions map
             println!("RID Restrictions count: {}", rid.restrictions.len());
-            println!("RID Restrictions keys: {:?}", rid.restrictions.keys().collect::<Vec<_>>());
-            
+            println!(
+                "RID Restrictions keys: {:?}",
+                rid.restrictions.keys().collect::<Vec<_>>()
+            );
+
             assert_eq!(rid.id, "high");
             assert_eq!(rid.direction, RidDirection::Recv);
             assert_eq!(rid.formats, vec!["96"]);
-            
+
             // Check for the expected restrictions
             assert_eq!(rid.restrictions.len(), 2);
             assert!(rid.restrictions.contains_key("max-width"));
@@ -653,11 +676,11 @@ mod tests {
         } else {
             panic!("Expected Simulcast attribute");
         }
-        
+
         // Test simulcast with both send and receive streams
         let result = parse_attribute("simulcast:send low,high recv low").unwrap();
         if let ParsedAttribute::Simulcast(send, recv) = result {
-            assert_eq!(send.len(), 1);  // Changed from 2 to 1 as the parser treats "low,high" as a single stream
+            assert_eq!(send.len(), 1); // Changed from 2 to 1 as the parser treats "low,high" as a single stream
             assert_eq!(send[0], "low,high");
             assert_eq!(recv.len(), 1);
             assert_eq!(recv[0], "low");
@@ -675,7 +698,7 @@ mod tests {
         } else {
             panic!("Expected SctpPort attribute");
         }
-        
+
         // Test max-message-size attribute (RFC 8841)
         let result = parse_attribute("max-message-size:262144").unwrap();
         if let ParsedAttribute::MaxMessageSize(size) = result {
@@ -683,7 +706,7 @@ mod tests {
         } else {
             panic!("Expected MaxMessageSize attribute");
         }
-        
+
         // Test sctpmap attribute (RFC 4960, older format)
         let result = parse_attribute("sctpmap:5000 webrtc-datachannel 1024").unwrap();
         if let ParsedAttribute::SctpMap(port, app, streams) = result {
@@ -693,7 +716,7 @@ mod tests {
         } else {
             panic!("Expected SctpMap attribute");
         }
-        
+
         // Test invalid data channel attributes
         assert!(parse_attribute("sctp-port:abc").is_err());
         assert!(parse_attribute("max-message-size:abc").is_err());
@@ -710,4 +733,4 @@ mod tests {
             panic!("Expected Value attribute");
         }
     }
-} 
+}

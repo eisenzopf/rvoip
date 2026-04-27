@@ -4,19 +4,17 @@
 //! adding extensions to outgoing packets, and extracting them from incoming packets.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::common::extension::ExtensionFormat;
 use crate::api::server::transport::HeaderExtension;
 
 /// Check if header extensions are enabled
-pub fn is_header_extensions_enabled(
-    config_header_extensions_enabled: bool,
-) -> bool {
+pub fn is_header_extensions_enabled(config_header_extensions_enabled: bool) -> bool {
     // Placeholder for the extracted is_header_extensions_enabled functionality
     config_header_extensions_enabled
 }
@@ -31,10 +29,7 @@ pub async fn enable_header_extensions(
 }
 
 /// Configure a header extension mapping
-pub async fn configure_header_extension(
-    id: u8,
-    uri: String,
-) -> Result<(), MediaTransportError> {
+pub async fn configure_header_extension(id: u8, uri: String) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted configure_header_extension functionality
     // In a real implementation, this would register the URI for the given ID
     Ok(())
@@ -50,9 +45,7 @@ pub async fn configure_header_extensions(
 }
 
 /// Add a header extension to the next outgoing packet
-pub async fn add_header_extension(
-    extension: HeaderExtension,
-) -> Result<(), MediaTransportError> {
+pub async fn add_header_extension(extension: HeaderExtension) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted add_header_extension functionality
     // In a real implementation, this would store the extension to be added to the next packet
     Ok(())
@@ -80,9 +73,7 @@ pub async fn add_video_orientation_extension(
 }
 
 /// Add transport-cc header extension
-pub async fn add_transport_cc_extension(
-    sequence_number: u16,
-) -> Result<(), MediaTransportError> {
+pub async fn add_transport_cc_extension(sequence_number: u16) -> Result<(), MediaTransportError> {
     // Placeholder for the extracted add_transport_cc_extension functionality
     // In a real implementation, this would create and store a transport-cc extension
     Ok(())
@@ -103,7 +94,8 @@ pub async fn get_received_audio_level() -> Result<Option<(bool, u8)>, MediaTrans
 }
 
 /// Get video orientation header extension received from the remote peer
-pub async fn get_received_video_orientation() -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
+pub async fn get_received_video_orientation(
+) -> Result<Option<(bool, bool, u16)>, MediaTransportError> {
     // Placeholder for the extracted get_received_video_orientation functionality
     // In a real implementation, this would extract and return the video orientation extension
     Ok(None)
@@ -114,4 +106,4 @@ pub async fn get_received_transport_cc() -> Result<Option<u16>, MediaTransportEr
     // Placeholder for the extracted get_received_transport_cc functionality
     // In a real implementation, this would extract and return the transport-cc extension
     Ok(None)
-} 
+}

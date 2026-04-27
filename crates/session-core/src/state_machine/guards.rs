@@ -1,12 +1,9 @@
-use crate::{
-    state_table::Guard,
-    session_store::SessionState,
-};
+use crate::{session_store::SessionState, state_table::Guard};
 
 /// Check if a guard condition is satisfied
 pub async fn check_guard(guard: &Guard, session: &SessionState) -> bool {
     use crate::types::CallState;
-    
+
     match guard {
         Guard::HasLocalSDP => session.local_sdp.is_some(),
         Guard::HasRemoteSDP => session.remote_sdp.is_some(),

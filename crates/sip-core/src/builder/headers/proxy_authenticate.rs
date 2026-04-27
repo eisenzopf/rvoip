@@ -1,19 +1,12 @@
-use crate::error::{Error, Result};
-use std::convert::TryFrom;
-use crate::types::{
-    auth::{
-        ProxyAuthenticate,
-        Challenge,
-        DigestParam,
-        AuthParam,
-        Algorithm,
-        Qop
-    },
-    TypedHeader,
-    header::{TypedHeaderTrait, Header, HeaderName},
-    headers::header_access::HeaderAccess,
-};
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::types::{
+    auth::{Algorithm, AuthParam, Challenge, DigestParam, ProxyAuthenticate, Qop},
+    header::{Header, HeaderName, TypedHeaderTrait},
+    headers::header_access::HeaderAccess,
+    TypedHeader,
+};
+use std::convert::TryFrom;
 
 /// Proxy-Authenticate header builder
 ///
@@ -41,7 +34,7 @@ use super::HeaderSetter;
 ///   to authenticate without transmitting passwords in plaintext
 /// - **Basic Authentication**: A simple challenge method requiring username:password in Base64 encoding,
 ///   which should only be used over secure transports like TLS
-/// 
+///
 /// ## Common Digest Challenge Parameters
 ///
 /// - **realm**: Authentication domain, indicates the protection space (e.g., "sip.example.com")
@@ -62,11 +55,11 @@ use super::HeaderSetter;
 ///
 /// ## Difference from WWW-Authenticate
 ///
-/// While the structure and parameters are nearly identical to WWW-Authenticate, 
+/// While the structure and parameters are nearly identical to WWW-Authenticate,
 /// the Proxy-Authenticate header is used for different purposes:
 ///
 /// - **WWW-Authenticate**: Used by the final destination server (UAS) for end-to-end authentication
-/// - **Proxy-Authenticate**: Used by intermediate proxy servers for hop-by-hop authentication 
+/// - **Proxy-Authenticate**: Used by intermediate proxy servers for hop-by-hop authentication
 ///   before forwarding requests
 ///
 /// ## Benefits of Proxy Authentication
@@ -141,10 +134,10 @@ use super::HeaderSetter;
 /// // Step 2: Proxy challenges client with Proxy-Authenticate
 /// // Generate a nonce value (in production, this would be securely generated)
 /// let nonce = "3ba1f67c4c2229b3a5fd";
-/// 
+///
 /// let challenge_response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
 ///     .proxy_authenticate_digest(
-///         "proxy.example.com",       // realm 
+///         "proxy.example.com",       // realm
 ///         nonce,                     // nonce
 ///         None,                      // opaque
 ///         Some("SHA-256"),           // algorithm
@@ -172,7 +165,7 @@ use super::HeaderSetter;
 ///         nonce,                    // nonce (from challenge)
 ///         "sip:bob@example.net",    // uri
 ///         proxy_auth_hash,          // response
-///         Some("SHA-256"),          // algorithm 
+///         Some("SHA-256"),          // algorithm
 ///         Some("8f5666ab"),         // cnonce
 ///         None,                     // opaque
 ///         Some("auth"),             // qop
@@ -194,7 +187,7 @@ use super::HeaderSetter;
 /// // and requires different authentication for different services
 ///
 /// // Create a challenge response for VoIP services
-/// let voip_challenge = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, 
+/// let voip_challenge = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired,
 ///                                                Some("Authentication Required"))
 ///     .proxy_authenticate_digest(
 ///         "voip.example.com",           // VoIP services realm
@@ -205,7 +198,7 @@ use super::HeaderSetter;
 ///         None,
 ///         // Domain list for all VoIP-related services
 ///         Some(vec![
-///             "sip:pbx.example.com", 
+///             "sip:pbx.example.com",
 ///             "sip:voicemail.example.com",
 ///             "sip:conference.example.com"
 ///         ])
@@ -213,11 +206,11 @@ use super::HeaderSetter;
 ///     .build();
 ///     
 /// // Create a challenge response for multimedia services
-/// let media_challenge = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, 
+/// let media_challenge = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired,
 ///                                                Some("Authentication Required"))
 ///     .proxy_authenticate_digest(
 ///         "media.example.com",          // Media services realm
-///         "67d89af356c21e94db702c5478", 
+///         "67d89af356c21e94db702c5478",
 ///         Some("1f2e3d4c5b6a"),         // Opaque data
 ///         Some("SHA-256"),              // Modern algorithm
 ///         Some(vec!["auth"]),           // QoP with nonce counting
@@ -225,7 +218,7 @@ use super::HeaderSetter;
 ///         // Domain list for all media-related services
 ///         Some(vec![
 ///             "sip:video.example.com",
-///             "sip:streaming.example.com", 
+///             "sip:streaming.example.com",
 ///             "sip:recording.example.com"
 ///         ])
 ///     )
@@ -240,13 +233,13 @@ use super::HeaderSetter;
 /// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
 /// use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
 /// use rvoip_sip_core::types::TypedHeader;
-/// 
+///
 /// // Scenario: SIP Gateway that provides both Digest and TLS-based authentication
-/// 
+///
 /// // Function to create a challenge response based on client capabilities
 /// fn create_gateway_challenge(secure_transport: bool) -> SimpleResponseBuilder {
 ///     let builder = SimpleResponseBuilder::new(
-///         StatusCode::ProxyAuthenticationRequired, 
+///         StatusCode::ProxyAuthenticationRequired,
 ///         Some("Gateway Authentication Required")
 ///     );
 ///     
@@ -273,7 +266,7 @@ use super::HeaderSetter;
 ///         // For non-TLS clients, only offer Digest with mandatory domain restriction
 ///         builder.proxy_authenticate_digest(
 ///             "gateway.example.com",
-///             "891a2b3c4d5e6f7g8h9i0j", 
+///             "891a2b3c4d5e6f7g8h9i0j",
 ///             None,
 ///             Some("SHA-256"),
 ///             Some(vec!["auth"]),
@@ -283,7 +276,7 @@ use super::HeaderSetter;
 ///         )
 ///     }
 /// }
-/// 
+///
 /// // Create challenges for different connection types
 /// let tls_challenge = create_gateway_challenge(true).build();
 /// let standard_challenge = create_gateway_challenge(false).build();
@@ -301,7 +294,7 @@ use super::HeaderSetter;
 ///     .proxy_authenticate_digest(
 ///         "proxy.example.com",
 ///         "9FxHwSyJClx391jQKoMl3Z1",
-///         Some("secureOpaque8734"), 
+///         Some("secureOpaque8734"),
 ///         Some("SHA-256"),            // SHA-256 for improved security
 ///         Some(vec!["auth", "auth-int"]), // Support both auth types
 ///         None,
@@ -327,7 +320,7 @@ pub trait ProxyAuthenticateExt {
     /// Add a Digest Proxy-Authenticate header to the response
     ///
     /// This method adds a Proxy-Authenticate header with a Digest authentication challenge
-    /// to a SIP response. This is typically used with 407 Proxy Authentication Required 
+    /// to a SIP response. This is typically used with 407 Proxy Authentication Required
     /// responses to challenge the client to authenticate with the proxy.
     ///
     /// ## Digest Challenge in SIP Proxies
@@ -413,7 +406,7 @@ pub trait ProxyAuthenticateExt {
     /// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
     ///
     /// // Load balancer proxy that handles multiple domains
-    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, 
+    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired,
     ///                                         Some("Authentication Required for Proxy Access"))
     ///     .proxy_authenticate_digest(
     ///         "lb.example.com",                   // Load balancer realm
@@ -424,9 +417,9 @@ pub trait ProxyAuthenticateExt {
     ///         None,
     ///         // Multiple domains handled by this load balancer
     ///         Some(vec![
-    ///             "sip:east.example.com", 
+    ///             "sip:east.example.com",
     ///             "sip:west.example.com",
-    ///             "sip:north.example.com", 
+    ///             "sip:north.example.com",
     ///             "sip:south.example.com"
     ///         ])
     ///     )
@@ -441,7 +434,7 @@ pub trait ProxyAuthenticateExt {
     /// use rvoip_sip_core::builder::headers::ProxyAuthenticateExt;
     ///
     /// // When a client uses an expired nonce, send a new challenge with stale=true
-    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, 
+    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired,
     ///                                          Some("Nonce Expired - Please Refresh"))
     ///     .proxy_authenticate_digest(
     ///         "proxy.example.com",
@@ -475,7 +468,7 @@ pub trait ProxyAuthenticateExt {
     ///
     /// ## Basic Authentication in SIP Proxies
     ///
-    /// Basic authentication simply requires the client to provide Base64-encoded 
+    /// Basic authentication simply requires the client to provide Base64-encoded
     /// "username:password" credentials. It is defined in [RFC 7617](https://datatracker.ietf.org/doc/html/rfc7617)
     /// for HTTP and adapted for SIP.
     ///
@@ -549,7 +542,7 @@ pub trait ProxyAuthenticateExt {
     /// use rvoip_sip_core::types::TypedHeader;
     ///
     /// // When using Basic auth, always ensure TLS is used
-    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, 
+    /// let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired,
     ///                                          Some("TLS Authentication Required"))
     ///     .proxy_authenticate_basic("secure.proxy.example.com")
     ///     // Add headers indicating security requirements
@@ -562,7 +555,7 @@ pub trait ProxyAuthenticateExt {
     fn proxy_authenticate_basic(self, realm: &str) -> Self;
 }
 
-impl<T> ProxyAuthenticateExt for T 
+impl<T> ProxyAuthenticateExt for T
 where
     T: HeaderSetter,
 {
@@ -581,12 +574,12 @@ where
             DigestParam::Realm(realm.to_string()),
             DigestParam::Nonce(nonce.to_string()),
         ];
-        
+
         // Add optional parameters if provided
         if let Some(opaque_str) = opaque {
             params.push(DigestParam::Opaque(opaque_str.to_string()));
         }
-        
+
         if let Some(algorithm_str) = algorithm {
             // Convert string to Algorithm enum
             let algorithm = match algorithm_str.to_lowercase().as_str() {
@@ -600,7 +593,7 @@ where
             };
             params.push(DigestParam::Algorithm(algorithm));
         }
-        
+
         if let Some(qop_values) = qop {
             if !qop_values.is_empty() {
                 let mut qops = Vec::new();
@@ -618,39 +611,37 @@ where
                 }
             }
         }
-        
+
         if let Some(stale_flag) = stale {
             params.push(DigestParam::Stale(stale_flag));
         }
-        
+
         if let Some(domain_values) = domain {
             if !domain_values.is_empty() {
                 let domains = domain_values.iter().map(|s| s.to_string()).collect();
                 params.push(DigestParam::Domain(domains));
             }
         }
-        
+
         // Create the ProxyAuthenticate header with the Digest challenge
         let header_value = ProxyAuthenticate(vec![Challenge::Digest { params }]);
-        
+
         // Add the header to the builder
         self.set_header(header_value)
     }
-    
+
     fn proxy_authenticate_basic(self, realm: &str) -> Self {
         // Create a Basic challenge with just a realm parameter
-        let basic_challenge = Challenge::Basic { 
-            params: vec![
-                AuthParam { 
-                    name: "realm".to_string(), 
-                    value: realm.to_string() 
-                }
-            ] 
+        let basic_challenge = Challenge::Basic {
+            params: vec![AuthParam {
+                name: "realm".to_string(),
+                value: realm.to_string(),
+            }],
         };
-        
+
         // Create the ProxyAuthenticate header with the Basic challenge
         let header_value = ProxyAuthenticate(vec![basic_challenge]);
-        
+
         // Add the header to the builder
         self.set_header(header_value)
     }
@@ -660,18 +651,18 @@ where
 mod tests {
     use super::*;
     use crate::builder::SimpleResponseBuilder;
-    use crate::types::StatusCode;
+    use crate::types::auth::{Algorithm, DigestParam, Qop};
     use crate::types::header::HeaderName;
-    use crate::types::auth::{DigestParam, Qop, Algorithm};
-    
+    use crate::types::StatusCode;
+
     #[test]
     fn test_proxy_authenticate_digest() {
         // Test basic parameters
         let digest_params = vec![
             ("realm", "proxy.example.com"),
-            ("nonce", "dcd98b7102dd2f0e8b11d0f600bfb0c093")
+            ("nonce", "dcd98b7102dd2f0e8b11d0f600bfb0c093"),
         ];
-        
+
         // Create a response with just the required parameters
         let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
             .proxy_authenticate_digest(
@@ -684,11 +675,11 @@ mod tests {
                 None,               // domain
             )
             .build();
-            
+
         // Verify the Proxy-Authenticate header was added correctly
         let proxy_auth = response.header(&HeaderName::ProxyAuthenticate);
         assert!(proxy_auth.is_some());
-        
+
         // Check the parameters of the challenge
         if let Some(header) = proxy_auth {
             match header {
@@ -696,33 +687,37 @@ mod tests {
                     assert_eq!(auth.0.len(), 1);
                     if let Challenge::Digest { params } = &auth.0[0] {
                         assert_eq!(params.len(), 2); // There should be 2 parameters (realm and nonce)
-                        assert!(params.contains(&DigestParam::Realm(digest_params[0].1.to_string())));
-                        assert!(params.contains(&DigestParam::Nonce(digest_params[1].1.to_string())));
+                        assert!(
+                            params.contains(&DigestParam::Realm(digest_params[0].1.to_string()))
+                        );
+                        assert!(
+                            params.contains(&DigestParam::Nonce(digest_params[1].1.to_string()))
+                        );
                     } else {
                         panic!("Expected Digest challenge");
                     }
-                },
+                }
                 _ => panic!("Expected ProxyAuthenticate header"),
             }
         }
-        
+
         // Test complete challenge with all optional parameters
         let response2 = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
             .proxy_authenticate_digest(
                 "proxy.example.com",                      // realm
-                "dcd98b7102dd2f0e8b11d0f600bfb0c093",    // nonce
+                "dcd98b7102dd2f0e8b11d0f600bfb0c093",     // nonce
                 Some("5ccc069c403ebaf9f0171e9517f40e41"), // opaque
-                Some("SHA-256"),                         // algorithm
-                Some(vec!["auth", "auth-int"]),          // qop
-                Some(false),                             // stale
-                Some(vec!["sip:example.com"]),           // domain
+                Some("SHA-256"),                          // algorithm
+                Some(vec!["auth", "auth-int"]),           // qop
+                Some(false),                              // stale
+                Some(vec!["sip:example.com"]),            // domain
             )
             .build();
-            
+
         // Verify the Proxy-Authenticate header
         let proxy_auth2 = response2.header(&HeaderName::ProxyAuthenticate);
         assert!(proxy_auth2.is_some());
-        
+
         // Verify all parameters
         if let Some(header) = proxy_auth2 {
             match header {
@@ -730,17 +725,27 @@ mod tests {
                     assert_eq!(auth.0.len(), 1);
                     if let Challenge::Digest { params } = &auth.0[0] {
                         // We expect 6 distinct parameter types
-                        assert!(params.len() >= 6, "Expected at least 6 parameters, found {}", params.len());
-                        
+                        assert!(
+                            params.len() >= 6,
+                            "Expected at least 6 parameters, found {}",
+                            params.len()
+                        );
+
                         // Check required parameters
-                        assert!(params.contains(&DigestParam::Realm("proxy.example.com".to_string())));
-                        assert!(params.contains(&DigestParam::Nonce("dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string())));
-                        
+                        assert!(
+                            params.contains(&DigestParam::Realm("proxy.example.com".to_string()))
+                        );
+                        assert!(params.contains(&DigestParam::Nonce(
+                            "dcd98b7102dd2f0e8b11d0f600bfb0c093".to_string()
+                        )));
+
                         // Check optional parameters
-                        assert!(params.contains(&DigestParam::Opaque("5ccc069c403ebaf9f0171e9517f40e41".to_string())));
+                        assert!(params.contains(&DigestParam::Opaque(
+                            "5ccc069c403ebaf9f0171e9517f40e41".to_string()
+                        )));
                         assert!(params.contains(&DigestParam::Algorithm(Algorithm::Sha256)));
                         assert!(params.contains(&DigestParam::Stale(false)));
-                        
+
                         // Check that Qop has both auth and auth-int
                         let qop = params.iter().find(|p| matches!(p, DigestParam::Qop(_)));
                         assert!(qop.is_some());
@@ -749,7 +754,7 @@ mod tests {
                             assert!(qops.contains(&Qop::Auth));
                             assert!(qops.contains(&Qop::AuthInt));
                         }
-                        
+
                         // Check domain parameter
                         let domain = params.iter().find(|p| matches!(p, DigestParam::Domain(_)));
                         assert!(domain.is_some());
@@ -760,26 +765,26 @@ mod tests {
                     } else {
                         panic!("Expected Digest challenge");
                     }
-                },
+                }
                 _ => panic!("Expected ProxyAuthenticate header"),
             }
         }
     }
-    
+
     #[test]
     fn test_proxy_authenticate_basic() {
         // Test basic authentication
         let realm = "proxy.example.com";
-        
+
         // Create a response with a Basic challenge
         let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
             .proxy_authenticate_basic(realm)
             .build();
-            
+
         // Verify the Proxy-Authenticate header was added
         let proxy_auth = response.header(&HeaderName::ProxyAuthenticate);
         assert!(proxy_auth.is_some());
-        
+
         // Verify it's a Basic challenge with the correct realm
         if let Some(header) = proxy_auth {
             match header {
@@ -792,7 +797,7 @@ mod tests {
                     } else {
                         panic!("Expected Basic challenge");
                     }
-                },
+                }
                 _ => panic!("Expected ProxyAuthenticate header"),
             }
         }
@@ -805,14 +810,22 @@ mod tests {
             .proxy_authenticate_digest(
                 "proxy.example.com",
                 "nonce123",
-                None, None, None, None, None
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .proxy_authenticate_basic("proxy.example.com")
             .build();
 
         // Get all Proxy-Authenticate headers
         let headers = response.headers(&HeaderName::ProxyAuthenticate);
-        assert_eq!(headers.len(), 2, "Should have two Proxy-Authenticate headers");
+        assert_eq!(
+            headers.len(),
+            2,
+            "Should have two Proxy-Authenticate headers"
+        );
 
         // Verify Digest challenge in first header
         if let crate::types::TypedHeader::ProxyAuthenticate(auth) = &headers[0] {
@@ -826,7 +839,7 @@ mod tests {
         } else {
             panic!("Expected ProxyAuthenticate header");
         }
-        
+
         // Verify Basic challenge in second header
         if let crate::types::TypedHeader::ProxyAuthenticate(auth) = &headers[1] {
             assert_eq!(auth.0.len(), 1);
@@ -853,17 +866,18 @@ mod tests {
         ];
 
         for (algo_str, expected_algo) in algorithms {
-            let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
-                .proxy_authenticate_digest(
-                    "proxy.example.com",
-                    "nonce123",
-                    None,
-                    Some(algo_str),
-                    None,
-                    None,
-                    None
-                )
-                .build();
+            let response =
+                SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+                    .proxy_authenticate_digest(
+                        "proxy.example.com",
+                        "nonce123",
+                        None,
+                        Some(algo_str),
+                        None,
+                        None,
+                        None,
+                    )
+                    .build();
 
             let proxy_auth = response.header(&HeaderName::ProxyAuthenticate);
             assert!(proxy_auth.is_some());
@@ -876,7 +890,7 @@ mod tests {
                         } else {
                             panic!("Expected Digest challenge");
                         }
-                    },
+                    }
                     _ => panic!("Expected ProxyAuthenticate header"),
                 }
             }
@@ -894,17 +908,18 @@ mod tests {
         ];
 
         for qops in qop_combinations {
-            let response = SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
-                .proxy_authenticate_digest(
-                    "proxy.example.com",
-                    "nonce123",
-                    None,
-                    None,
-                    Some(qops.clone()),
-                    None,
-                    None
-                )
-                .build();
+            let response =
+                SimpleResponseBuilder::new(StatusCode::ProxyAuthenticationRequired, None)
+                    .proxy_authenticate_digest(
+                        "proxy.example.com",
+                        "nonce123",
+                        None,
+                        None,
+                        Some(qops.clone()),
+                        None,
+                        None,
+                    )
+                    .build();
 
             let proxy_auth = response.header(&HeaderName::ProxyAuthenticate);
             assert!(proxy_auth.is_some());
@@ -921,17 +936,20 @@ mod tests {
                                     match qop_str {
                                         "auth" => assert!(parsed_qops.contains(&Qop::Auth)),
                                         "auth-int" => assert!(parsed_qops.contains(&Qop::AuthInt)),
-                                        _ => assert!(parsed_qops.contains(&Qop::Other(qop_str.to_string()))),
+                                        _ => {
+                                            assert!(parsed_qops
+                                                .contains(&Qop::Other(qop_str.to_string())))
+                                        }
                                     }
                                 }
                             }
                         } else {
                             panic!("Expected Digest challenge");
                         }
-                    },
+                    }
                     _ => panic!("Expected ProxyAuthenticate header"),
                 }
             }
         }
     }
-} 
+}

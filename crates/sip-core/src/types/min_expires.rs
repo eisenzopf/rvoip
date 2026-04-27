@@ -30,11 +30,11 @@
 //! assert_eq!(min_expires.value(), 3600);
 //! ```
 
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Min-Expires header field (RFC 3261 Section 20.23).
 ///
@@ -121,17 +121,20 @@ impl FromStr for MinExpires {
             // Strip the "Min-Expires:" prefix
             let parts: Vec<&str> = s.splitn(2, ':').collect();
             if parts.len() != 2 {
-                return Err(Error::ParseError("Invalid Min-Expires header format".to_string()));
+                return Err(Error::ParseError(
+                    "Invalid Min-Expires header format".to_string(),
+                ));
             }
             parts[1].trim()
         } else {
             s.trim()
         };
-        
+
         // Parse the value as a u32
-        let value = value_str.parse::<u32>()
+        let value = value_str
+            .parse::<u32>()
             .map_err(|e| Error::ParseError(format!("Invalid Min-Expires value: {}", e)))?;
-            
+
         Ok(MinExpires(value))
     }
 }
@@ -145,14 +148,19 @@ impl TypedHeaderTrait for MinExpires {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name().as_str(), header.name.as_str())
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name().as_str(),
+                header.name.as_str()
+            )));
         }
 
         match &header.value {
@@ -160,17 +168,17 @@ impl TypedHeaderTrait for MinExpires {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     MinExpires::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name().as_str())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name().as_str()
+                    )))
                 }
             }
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}: {:?}. Expected Raw for FromStr.", 
-                    Self::header_name().as_str(), 
-                    header.value
-                )
-            )),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}: {:?}. Expected Raw for FromStr.",
+                Self::header_name().as_str(),
+                header.value
+            ))),
         }
     }
 }
@@ -184,47 +192,47 @@ mod tests {
         let min_expires = MinExpires::new(60);
         assert_eq!(min_expires.value(), 60);
     }
-    
+
     #[test]
     fn test_display() {
         let min_expires = MinExpires::new(60);
         assert_eq!(min_expires.to_string(), "60");
     }
-    
+
     #[test]
     fn test_from_str() {
         // Simple case
         let min_expires: MinExpires = "60".parse().unwrap();
         assert_eq!(min_expires.value(), 60);
-        
+
         // With header name
         let min_expires: MinExpires = "Min-Expires: 3600".parse().unwrap();
         assert_eq!(min_expires.value(), 3600);
-        
+
         // Invalid value
         let result: Result<MinExpires> = "not_a_number".parse();
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_typed_header_trait() {
         // Create a header
         let min_expires = MinExpires::new(60);
         let header = min_expires.to_header();
-        
+
         assert_eq!(header.name, HeaderName::MinExpires);
-        
+
         // Convert back from Header
         let min_expires2 = MinExpires::from_header(&header).unwrap();
         assert_eq!(min_expires.value(), min_expires2.value());
-        
+
         // Test with HeaderValue::integer() which creates a Raw variant internally
         let integer_header = Header::new(HeaderName::MinExpires, HeaderValue::integer(3600));
         let min_expires3 = MinExpires::from_header(&integer_header).unwrap();
         assert_eq!(min_expires3.value(), 3600);
-        
+
         // Test invalid header name
         let wrong_header = Header::text(HeaderName::ContentType, "text/plain");
         assert!(MinExpires::from_header(&wrong_header).is_err());
     }
-} 
+}

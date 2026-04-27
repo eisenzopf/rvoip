@@ -4,12 +4,12 @@
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-    use crate::api::server::transport::MediaTransportServer;
+    use crate::api::common::extension::ExtensionFormat;
     use crate::api::server::config::ServerConfig;
     use crate::api::server::transport::DefaultMediaTransportServer;
-    use crate::api::common::extension::ExtensionFormat;
-    
+    use crate::api::server::transport::MediaTransportServer;
+    use std::time::Duration;
+
     #[tokio::test]
     async fn test_server_lifecycle() {
         // Create a server config with default values
@@ -32,40 +32,67 @@ mod tests {
             ssrc_demultiplexing_enabled: Some(false),
             transmit_buffer_config: Default::default(),
         };
-        
+
         // Create a new server
         let server = DefaultMediaTransportServer::new(config).await.unwrap();
-        
+
         // Start the server
         assert!(server.start().await.is_ok(), "Failed to start server");
-        
+
         // Get the local address
         let addr = server.get_local_address().await.unwrap();
         println!("Server bound to {}", addr);
-        
+
         // Get server stats (should be empty)
         let stats = server.get_stats().await.unwrap();
         assert_eq!(stats.streams.len(), 0, "New server should have no streams");
-        
+
         // Enable CSRC management
-        assert!(server.enable_csrc_management().await.unwrap(), "Failed to enable CSRC management");
-        assert!(server.is_csrc_management_enabled().await.unwrap(), "CSRC management should be enabled");
-        
+        assert!(
+            server.enable_csrc_management().await.unwrap(),
+            "Failed to enable CSRC management"
+        );
+        assert!(
+            server.is_csrc_management_enabled().await.unwrap(),
+            "CSRC management should be enabled"
+        );
+
         // Enable SSRC demultiplexing
-        assert!(server.enable_ssrc_demultiplexing().await.unwrap(), "Failed to enable SSRC demultiplexing");
-        assert!(server.is_ssrc_demultiplexing_enabled().await.unwrap(), "SSRC demultiplexing should be enabled");
-        
+        assert!(
+            server.enable_ssrc_demultiplexing().await.unwrap(),
+            "Failed to enable SSRC demultiplexing"
+        );
+        assert!(
+            server.is_ssrc_demultiplexing_enabled().await.unwrap(),
+            "SSRC demultiplexing should be enabled"
+        );
+
         // Enable header extensions
-        assert!(server.enable_header_extensions(ExtensionFormat::OneByte).await.unwrap(), "Failed to enable header extensions");
-        assert!(server.is_header_extensions_enabled().await.unwrap(), "Header extensions should be enabled");
-        
+        assert!(
+            server
+                .enable_header_extensions(ExtensionFormat::OneByte)
+                .await
+                .unwrap(),
+            "Failed to enable header extensions"
+        );
+        assert!(
+            server.is_header_extensions_enabled().await.unwrap(),
+            "Header extensions should be enabled"
+        );
+
         // Configure a header extension
-        server.configure_header_extension(1, "urn:ietf:params:rtp-hdrext:ssrc-audio-level".to_string()).await.unwrap();
-        
+        server
+            .configure_header_extension(
+                1,
+                "urn:ietf:params:rtp-hdrext:ssrc-audio-level".to_string(),
+            )
+            .await
+            .unwrap();
+
         // Stop the server
         assert!(server.stop().await.is_ok(), "Failed to stop server");
-        
+
         // Sleep briefly to ensure resources are released
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-} 
+}

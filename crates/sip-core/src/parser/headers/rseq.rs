@@ -3,37 +3,36 @@
 
 use nom::{
     character::complete::digit1,
-    combinator::{map_res, recognize, all_consuming},
-    IResult, error::ErrorKind,
+    combinator::{all_consuming, map_res, recognize},
+    error::ErrorKind,
+    IResult,
 };
 use std::str;
 
 // Import from other modules
 use crate::parser::separators::hcolon;
-use crate::parser::ParseResult;
 use crate::parser::whitespace::owsp;
+use crate::parser::ParseResult;
 
 /// Parse an RSeq value, which is a non-negative integer
 pub fn parse_rseq(input: &[u8]) -> ParseResult<u32> {
     let (input, _) = owsp(input)?;
-    
+
     // Define parse_digit as a function rather than a variable
     fn parse_digit(input: &[u8]) -> ParseResult<u32> {
-        map_res(
-            recognize(digit1),
-            |digits: &[u8]| {
-                let digits_str = str::from_utf8(digits)
-                    .map_err(|_| nom::Err::Error(nom::error::Error::new(digits, ErrorKind::Digit)))?;
-                digits_str.parse::<u32>()
-                    .map_err(|_| nom::Err::Error(nom::error::Error::new(digits, ErrorKind::Digit)))
-            }
-        )(input)
+        map_res(recognize(digit1), |digits: &[u8]| {
+            let digits_str = str::from_utf8(digits)
+                .map_err(|_| nom::Err::Error(nom::error::Error::new(digits, ErrorKind::Digit)))?;
+            digits_str
+                .parse::<u32>()
+                .map_err(|_| nom::Err::Error(nom::error::Error::new(digits, ErrorKind::Digit)))
+        })(input)
     }
-    
+
     let (input, rseq_val) = parse_digit(input)?;
-    
+
     let (input, _) = owsp(input)?;
-    
+
     Ok((input, rseq_val))
 }
 
@@ -60,7 +59,7 @@ mod tests {
         let input = b"1";
         let result = test_parse_rseq(input).unwrap();
         assert_eq!(result, 1);
-        
+
         // Larger value
         let input = b"12345";
         let result = test_parse_rseq(input).unwrap();
@@ -81,12 +80,12 @@ mod tests {
         let input = b"abc";
         let result = test_parse_rseq(input);
         assert!(result.is_err());
-        
+
         // Empty string should fail
         let input = b"";
         let result = test_parse_rseq(input);
         assert!(result.is_err());
-        
+
         // Negative number is not valid in SIP
         let input = b"-1";
         let result = test_parse_rseq(input);
@@ -100,14 +99,14 @@ mod tests {
         let (remaining, rseq) = parse_rseq_header(input).unwrap();
         assert!(remaining.is_empty());
         assert_eq!(rseq, 42);
-        
+
         // Case insensitive header name
         let input = b"rseq: 123";
         let (remaining, rseq) = parse_rseq_header(input).unwrap();
         assert!(remaining.is_empty());
         assert_eq!(rseq, 123);
     }
-    
+
     #[test]
     fn test_parse_rseq_in_message() {
         // Sample provisional response message with RSeq header
@@ -123,30 +122,30 @@ mod tests {
                          Content-Type: application/sdp\r\n\
                          Content-Length: 0\r\n\
                          \r\n";
-                         
+
         // Just use the RSeq line directly
         let rseq_line = b"RSeq: 123";
-        
+
         // Parse the RSeq line
         let (_, rseq) = parse_rseq_header(rseq_line).unwrap();
         assert_eq!(rseq, 123);
     }
-    
+
     #[test]
     fn test_parse_rseq_sequence() {
         // Test sequential RSeq values
         let first = b"RSeq: 1";
         let (_, rseq1) = parse_rseq_header(first).unwrap();
         assert_eq!(rseq1, 1);
-        
+
         let second = b"RSeq: 2";
         let (_, rseq2) = parse_rseq_header(second).unwrap();
         assert_eq!(rseq2, 2);
-        
+
         // Verify incremental relationship
         assert_eq!(rseq2, rseq1 + 1);
     }
-    
+
     #[test]
     fn test_parse_rseq_large_values() {
         // Test with values close to u32 limit
@@ -155,4 +154,4 @@ mod tests {
         let (_, rseq) = parse_rseq_header(almost_max.as_bytes()).unwrap();
         assert_eq!(rseq, max_u32 - 1);
     }
-} 
+}

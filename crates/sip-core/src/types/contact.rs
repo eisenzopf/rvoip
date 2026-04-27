@@ -1,5 +1,5 @@
 //! # SIP Contact Header
-//! 
+//!
 //! This module provides an implementation of the SIP Contact header as defined in
 //! [RFC 3261 Section 20.10](https://datatracker.ietf.org/doc/html/rfc3261#section-20.10).
 //!
@@ -48,23 +48,22 @@
 /// let contact = Contact::from_str("\"Alice\" <sip:alice@example.com>;expires=3600").unwrap();
 /// assert_eq!(contact.expires(), Some(3600));
 /// ```
-
 use crate::types::address::Address;
 // use crate::types::Param; // Removed duplicate import
-use std::fmt;
-use std::str::FromStr;
-use crate::parser::headers::parse_contact; // For FromStr
-use std::ops::Deref;
-use crate::types::param::Param;
-use ordered_float::NotNan;
-use serde::{Serialize, Deserialize};
-use crate::types::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
 use crate::error::{Error, Result};
+use crate::parser::headers::parse_contact; // For FromStr
+use crate::types::param::Param;
+use crate::types::{Header, HeaderName, HeaderValue, TypedHeader, TypedHeaderTrait};
+use ordered_float::NotNan;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 /// Represents a single parsed contact-param item (address + params)
 /// Used by the parser and the updated ContactValue enum.
 ///
-/// A `ContactParamInfo` contains an `Address` which includes the URI, 
+/// A `ContactParamInfo` contains an `Address` which includes the URI,
 /// display name, and address parameters for a contact entry.
 ///
 /// # Examples
@@ -115,12 +114,12 @@ pub enum ContactValue {
 /// Typed Contact header.
 /// Represents the *entire* header value, which could be STAR or a list of contacts.
 ///
-/// The `Contact` header is a critical component of SIP messages that contains addresses 
-/// where a user can be directly contacted. It's used in REGISTER requests to indicate 
-/// where a user can be reached, in INVITE requests to specify the caller's address, 
+/// The `Contact` header is a critical component of SIP messages that contains addresses
+/// where a user can be directly contacted. It's used in REGISTER requests to indicate
+/// where a user can be reached, in INVITE requests to specify the caller's address,
 /// and in responses to indicate the callee's location.
 ///
-/// This implementation allows for both regular contacts (with addresses and parameters) 
+/// This implementation allows for both regular contacts (with addresses and parameters)
 /// and the special wildcard ("*") contact used for removing registrations.
 ///
 /// # Examples
@@ -313,15 +312,17 @@ impl Contact {
     /// ```
     pub fn addresses(&self) -> impl Iterator<Item = &Address> {
         // Use Box to erase the specific Map type from each arm
-        self.0.iter().flat_map(|value| -> Box<dyn Iterator<Item = &Address>> { 
-            match value {
-                ContactValue::Params(params) => Box::new(params.iter().map(|cp| &cp.address)),
-                ContactValue::Star => Box::new(std::iter::empty()), // Use std::iter::empty for efficiency
-            }
-        })
+        self.0
+            .iter()
+            .flat_map(|value| -> Box<dyn Iterator<Item = &Address>> {
+                match value {
+                    ContactValue::Params(params) => Box::new(params.iter().map(|cp| &cp.address)),
+                    ContactValue::Star => Box::new(std::iter::empty()), // Use std::iter::empty for efficiency
+                }
+            })
     }
-    
-     /// Gets mutable references to all addresses from the Params variant.
+
+    /// Gets mutable references to all addresses from the Params variant.
     /// Returns an empty iterator for wildcard contacts or empty lists.
     ///
     /// # Returns
@@ -350,12 +351,16 @@ impl Contact {
     /// ```
     pub fn addresses_mut(&mut self) -> impl Iterator<Item = &mut Address> {
         // Use Box to erase the specific Map type from each arm
-        self.0.iter_mut().flat_map(|value| -> Box<dyn Iterator<Item = &mut Address>> { 
-            match value {
-                ContactValue::Params(params) => Box::new(params.iter_mut().map(|cp| &mut cp.address)),
-                ContactValue::Star => Box::new(std::iter::empty()), // Use std::iter::empty
-            }
-        })
+        self.0
+            .iter_mut()
+            .flat_map(|value| -> Box<dyn Iterator<Item = &mut Address>> {
+                match value {
+                    ContactValue::Params(params) => {
+                        Box::new(params.iter_mut().map(|cp| &mut cp.address))
+                    }
+                    ContactValue::Star => Box::new(std::iter::empty()), // Use std::iter::empty
+                }
+            })
     }
 
     /// Gets the expires parameter value from the *first* contact, if present.
@@ -382,11 +387,12 @@ impl Contact {
     /// assert_eq!(contact.expires(), None);
     /// ```
     pub fn expires(&self) -> Option<u32> {
-        self.address().and_then(|addr| addr.get_param("expires"))
+        self.address()
+            .and_then(|addr| addr.get_param("expires"))
             .flatten()
             .and_then(|s| s.parse::<u32>().ok())
     }
-    
+
     /// Sets or replaces the expires parameter on the *first* contact.
     /// Adds the first contact if the list is empty.
     /// Panics if called on a Star contact.
@@ -419,12 +425,14 @@ impl Contact {
             match value {
                 ContactValue::Params(params) => {
                     if let Some(cp_info) = params.first_mut() {
-                        cp_info.address.set_param("expires", Some(expires.to_string()));
+                        cp_info
+                            .address
+                            .set_param("expires", Some(expires.to_string()));
                     } else {
                         // Handle case where Params list is empty? This seems unlikely for set_expires.
                         panic!("Cannot set expires on an empty Contact parameter list");
                     }
-                },
+                }
                 ContactValue::Star => panic!("Cannot set expires on star Contact"),
             }
         }
@@ -451,12 +459,13 @@ impl Contact {
     /// assert_eq!(contact.q().map(|v| v.into_inner()), Some(0.8));
     /// ```
     pub fn q(&self) -> Option<NotNan<f32>> {
-        self.address().and_then(|addr| addr.get_param("q"))
+        self.address()
+            .and_then(|addr| addr.get_param("q"))
             .flatten()
             .and_then(|s| s.parse::<f32>().ok())
             .and_then(|f| NotNan::new(f).ok())
     }
-    
+
     /// Sets or replaces the q parameter on the *first* contact.
     /// Panics if called on a Star contact or if list is empty.
     ///
@@ -470,7 +479,7 @@ impl Contact {
     ///
     /// # Panics
     ///
-    /// Panics if called on a Star contact, if the Params list is empty, 
+    /// Panics if called on a Star contact, if the Params list is empty,
     /// or if the provided value is NaN
     ///
     /// # Examples
@@ -495,9 +504,11 @@ impl Contact {
     /// ```
     pub fn set_q(&mut self, q: f32) {
         let clamped_q = q.max(0.0).min(1.0);
-        if clamped_q.is_nan() { panic!("q value cannot be NaN"); }
+        if clamped_q.is_nan() {
+            panic!("q value cannot be NaN");
+        }
         let q_value_str = clamped_q.to_string();
-        
+
         if let Some(value) = self.0.first_mut() {
             match value {
                 ContactValue::Params(params) => {
@@ -506,12 +517,12 @@ impl Contact {
                     } else {
                         panic!("Cannot set q on an empty Contact parameter list");
                     }
-                },
+                }
                 ContactValue::Star => panic!("Cannot set q on star Contact"),
             }
         }
     }
-    
+
     /// Gets the tag parameter value from the *first* contact.
     ///
     /// # Returns
@@ -531,7 +542,7 @@ impl Contact {
     pub fn tag(&self) -> Option<&str> {
         self.address().and_then(|addr| addr.tag())
     }
-    
+
     /// Sets or replaces the tag parameter on the *first* contact.
     /// Panics if called on a Star contact or if list is empty.
     ///
@@ -567,7 +578,7 @@ impl Contact {
                     } else {
                         panic!("Cannot set tag on an empty Contact parameter list");
                     }
-                },
+                }
                 ContactValue::Star => panic!("Cannot set tag on star Contact"),
             }
         }
@@ -597,7 +608,9 @@ impl Contact {
     /// assert!(!contact.is_star());
     /// ```
     pub fn is_star(&self) -> bool {
-        self.0.iter().any(|value| matches!(value, ContactValue::Star))
+        self.0
+            .iter()
+            .any(|value| matches!(value, ContactValue::Star))
     }
 }
 
@@ -657,7 +670,7 @@ impl FromStr for Contact {
     /// let contact = Contact::from_str(
     ///     "<sip:john@example.com>;q=0.8, <sip:john@mobile.example.com>;q=0.5"
     /// ).unwrap();
-    /// 
+    ///
     /// // The first contact should have q=0.8
     /// assert_eq!(contact.q().map(|v| v.into_inner()), Some(0.8));
     /// ```
@@ -675,7 +688,7 @@ impl FromStr for Contact {
 // Remove Deref as Contact no longer directly wraps Address/Wildcard
 
 // TODO: Review if ContactParamInfo is the best structure or if Address is sufficient.
-// TODO: Re-evaluate handling of empty Contact header. 
+// TODO: Re-evaluate handling of empty Contact header.
 
 // Add TypedHeaderTrait implementation for Contact header
 impl TypedHeaderTrait for Contact {
@@ -703,10 +716,13 @@ impl TypedHeaderTrait for Contact {
         if self.is_star() {
             return Header::text(Self::header_name(), "*");
         }
-        
+
         // Otherwise use the normal Contact value
         let contact_values: Vec<ContactValue> = self.0.iter().cloned().collect();
-        Header::new(Self::header_name(), HeaderValue::Contact(contact_values[0].clone()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Contact(contact_values[0].clone()),
+        )
     }
 
     /// Creates a Contact header from a generic Header.
@@ -724,7 +740,8 @@ impl TypedHeaderTrait for Contact {
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::Contact {
             return Err(Error::InvalidHeader(format!(
-                "Expected Contact header, got {:?}", header.name
+                "Expected Contact header, got {:?}",
+                header.name
             )));
         }
 
@@ -748,11 +765,14 @@ impl TypedHeaderTrait for Contact {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     s.parse::<Contact>()
                 } else {
-                    Err(Error::ParseError("Invalid UTF-8 in Contact header".to_string()))
+                    Err(Error::ParseError(
+                        "Invalid UTF-8 in Contact header".to_string(),
+                    ))
                 }
-            },
+            }
             _ => Err(Error::InvalidHeader(format!(
-                "Unexpected value type for Contact header: {:?}", header.value
+                "Unexpected value type for Contact header: {:?}",
+                header.value
             ))),
         }
     }
@@ -761,8 +781,8 @@ impl TypedHeaderTrait for Contact {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::uri::Uri;
     use crate::types::address::Address;
+    use crate::types::uri::Uri;
     use std::str::FromStr;
 
     #[test]
@@ -783,11 +803,11 @@ mod tests {
         // Test from_header()
         let round_trip = Contact::from_header(&header).unwrap();
         assert_eq!(round_trip.to_string(), contact.to_string());
-        
+
         // Test star contact
         let star_contact = Contact::new_star();
         let star_header = star_contact.to_header();
         let star_round_trip = Contact::from_header(&star_header).unwrap();
         assert!(star_round_trip.is_star());
     }
-} 
+}

@@ -3,9 +3,7 @@
 //! Validates the default state table for structural integrity beyond
 //! basic happy-path transitions covered by state_table_validation_tests.rs.
 
-use rvoip_session_core::state_table::{
-    YamlTableLoader, StateTable, StateKey, EventType, Role,
-};
+use rvoip_session_core::state_table::{EventType, Role, StateKey, StateTable, YamlTableLoader};
 use rvoip_session_core::types::CallState;
 use std::path::Path;
 
@@ -92,9 +90,15 @@ fn test_used_states_includes_basic_call_states() {
     let states = table.collect_used_states();
     // A valid call flow requires at least these states
     assert!(states.contains(&CallState::Idle), "missing Idle");
-    assert!(states.contains(&CallState::Initiating), "missing Initiating");
+    assert!(
+        states.contains(&CallState::Initiating),
+        "missing Initiating"
+    );
     assert!(states.contains(&CallState::Active), "missing Active");
-    assert!(states.contains(&CallState::Terminated), "missing Terminated");
+    assert!(
+        states.contains(&CallState::Terminated),
+        "missing Terminated"
+    );
 }
 
 #[test]
@@ -135,8 +139,14 @@ fn test_hold_resume_are_symmetric() {
 
     // Check both roles
     for role in [Role::UAC, Role::UAS, Role::Both] {
-        let hold = StateKey { role, ..hold_key.clone() };
-        let resume = StateKey { role, ..resume_key.clone() };
+        let hold = StateKey {
+            role,
+            ..hold_key.clone()
+        };
+        let resume = StateKey {
+            role,
+            ..resume_key.clone()
+        };
 
         if table.has_transition(&hold) {
             // If we can hold, we should also be able to resume
@@ -158,10 +168,15 @@ fn test_transition_has_next_state() {
     let key = StateKey {
         role: Role::UAC,
         state: CallState::Idle,
-        event: EventType::MakeCall { target: String::new() },
+        event: EventType::MakeCall {
+            target: String::new(),
+        },
     };
     let t = table.get(&key);
-    assert!(t.is_some(), "MakeCall from Idle (UAC) should have a transition");
+    assert!(
+        t.is_some(),
+        "MakeCall from Idle (UAC) should have a transition"
+    );
     let t = t.unwrap();
     assert!(
         t.next_state.is_some(),
@@ -177,7 +192,9 @@ fn test_transition_has_actions() {
     let key = StateKey {
         role: Role::UAC,
         state: CallState::Idle,
-        event: EventType::MakeCall { target: String::new() },
+        event: EventType::MakeCall {
+            target: String::new(),
+        },
     };
     let t = table.get(&key).expect("MakeCall transition should exist");
     assert!(

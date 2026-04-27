@@ -3,25 +3,25 @@
 //! Thin translation layer between media-core and state machine.
 //! Focuses only on essential media operations and events.
 
-use std::sync::Arc;
-use std::net::{IpAddr, SocketAddr};
-use tokio::sync::mpsc;
+use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
+use crate::errors::{Result, SessionError};
+use crate::session_store::SessionStore;
+use crate::state_table::types::SessionId;
 use dashmap::DashMap;
+use rvoip_media_core::types::AudioFrame;
 use rvoip_media_core::{
     relay::controller::{
-        MediaSessionController, MediaConfig, MediaSessionInfo,
-        AudioSource, BridgeError, BridgeHandle,
+        AudioSource, BridgeError, BridgeHandle, MediaConfig, MediaSessionController,
+        MediaSessionInfo,
     },
     DialogId,
 };
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
+use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
-use crate::state_table::types::SessionId;
-use crate::errors::{Result, SessionError};
-use crate::session_store::SessionStore;
-use rvoip_media_core::types::AudioFrame;
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Audio format for recording
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -88,32 +88,31 @@ pub struct NegotiatedConfig {
 pub struct MediaAdapter {
     /// Media-core controller
     pub(crate) controller: Arc<MediaSessionController>,
-    
+
     /// Session store for updating IDs
     pub(crate) store: Arc<SessionStore>,
-    
+
     /// Simple mapping of session IDs to dialog IDs (media-core uses DialogId)
     pub(crate) session_to_dialog: Arc<DashMap<SessionId, DialogId>>,
     pub(crate) dialog_to_session: Arc<DashMap<DialogId, SessionId>>,
-    
+
     /// Store media session info for SDP generation
     media_sessions: Arc<DashMap<SessionId, MediaSessionInfo>>,
-    
+
     /// Audio frame channels for receiving decoded audio from media-core
     audio_receivers: Arc<DashMap<SessionId, mpsc::Sender<AudioFrame>>>,
-    
+
     /// Local IP for SDP generation
     local_ip: IpAddr,
-    
+
     /// Port range for media
     media_port_start: u16,
     media_port_end: u16,
-    
+
     /// Audio mixers for conferences
     audio_mixers: Arc<DashMap<crate::types::MediaSessionId, Vec<crate::types::MediaSessionId>>>,
 
     // ==== RFC 4568 SDES-SRTP state (Step 2B) ====
-
     /// Whether to attach `a=crypto:` lines to outgoing offers and to
     /// answer with `RTP/SAVP` when peer offers SRTP. When `false`,
     /// the adapter behaves like the pre-2B baseline (plain RTP/AVP).
@@ -145,8 +144,11 @@ pub struct MediaAdapter {
     /// onto the session-core API event bus. Populated at boot via
     /// [`Self::set_global_coordinator`]; `None` in tests that bypass
     /// the full wiring.
-    pub(crate) global_coordinator:
-        Arc<tokio::sync::RwLock<Option<Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>>>>,
+    pub(crate) global_coordinator: Arc<
+        tokio::sync::RwLock<
+            Option<Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>>,
+        >,
+    >,
 
     /// Sprint 3 A6 — public RTP-side address advertised in SDP `c=` /
     /// `o=` / `m=audio` lines. Set at coordinator boot from either
@@ -279,9 +281,9 @@ impl MediaAdapter {
             self.srtp_offered_suites = suites;
         }
     }
-    
+
     // ===== Outbound Actions (from state machine) =====
-    
+
     /// Start a media session
     pub async fn start_session(&self, session_id: &SessionId) -> Result<()> {
         // Check if session already exists
@@ -292,12 +294,12 @@ impl MediaAdapter {
                 return Ok(());
             }
         }
-        
+
         // If not, create it - delegate to create_session
         let _media_id = self.create_session(session_id).await?;
         Ok(())
     }
-    
+
     /// Generate SDP offer (for UAC).
     ///
     /// Built via `sip-core`'s typed `SdpBuilder` (RFC 8866). The
@@ -321,9 +323,13 @@ impl MediaAdapter {
             })
             .unwrap_or_default()
     }
-    
+
     /// Process SDP answer and negotiate (for UAC)
-    pub async fn negotiate_sdp_as_uac(&self, session_id: &SessionId, remote_sdp: &str) -> Result<NegotiatedConfig> {
+    pub async fn negotiate_sdp_as_uac(
+        &self,
+        session_id: &SessionId,
+        remote_sdp: &str,
+    ) -> Result<NegotiatedConfig> {
         // Parse remote SDP to extract IP and port
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
 
@@ -332,9 +338,7 @@ impl MediaAdapter {
         // failure-with-487 hook today; if `srtp_required` and the
         // answer can't satisfy SRTP, we surface `SDPNegotiationFailed`
         // which the executor turns into terminal `CallFailed`.
-        if let Some((_, offerer_state)) =
-            self.pending_srtp_offerers.remove(session_id)
-        {
+        if let Some((_, offerer_state)) = self.pending_srtp_offerers.remove(session_id) {
             // We did offer SRTP. Look for a matching `a=crypto:` in the answer.
             let parsed = SdpSession::from_str(remote_sdp).map_err(|e| {
                 SessionError::SDPNegotiationFailed(format!(
@@ -354,8 +358,7 @@ impl MediaAdapter {
                 );
             } else if self.srtp_required {
                 return Err(SessionError::SDPNegotiationFailed(
-                    "srtp_required is set but the SDP answer carries no a=crypto: line"
-                        .into(),
+                    "srtp_required is set but the SDP answer carries no a=crypto: line".into(),
                 ));
             } else {
                 tracing::warn!(
@@ -366,7 +369,7 @@ impl MediaAdapter {
                 let _ = offerer_state; // dropped — keys discarded
             }
         }
-        
+
         // Update media session with remote address. SRTP contexts (if
         // negotiated in 2B.1) must be installed *between* updating the
         // remote address and starting the audio transmitter — the
@@ -376,9 +379,12 @@ impl MediaAdapter {
         if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
-            self.controller.update_rtp_remote_addr(&dialog_id, remote_addr)
+            self.controller
+                .update_rtp_remote_addr(&dialog_id, remote_addr)
                 .await
-                .map_err(|e| SessionError::MediaError(format!("Failed to update RTP remote address: {}", e)))?;
+                .map_err(|e| {
+                    SessionError::MediaError(format!("Failed to update RTP remote address: {}", e))
+                })?;
 
             // RFC 4568 SDES: install per-direction contexts before the
             // first wire packet flows.
@@ -386,9 +392,9 @@ impl MediaAdapter {
                 self.controller
                     .install_srtp_contexts(&dialog_id, pair.send_ctx, pair.recv_ctx)
                     .await
-                    .map_err(|e| SessionError::MediaError(
-                        format!("Failed to install SRTP contexts: {}", e)
-                    ))?;
+                    .map_err(|e| {
+                        SessionError::MediaError(format!("Failed to install SRTP contexts: {}", e))
+                    })?;
                 tracing::info!(
                     "🔒 SRTP contexts installed for session {} (suite {:?})",
                     session_id.0,
@@ -397,11 +403,18 @@ impl MediaAdapter {
             }
 
             // Establish media flow (this starts audio transmission)
-            self.controller.establish_media_flow(&dialog_id, remote_addr)
+            self.controller
+                .establish_media_flow(&dialog_id, remote_addr)
                 .await
-                .map_err(|e| SessionError::MediaError(format!("Failed to establish media flow: {}", e)))?;
+                .map_err(|e| {
+                    SessionError::MediaError(format!("Failed to establish media flow: {}", e))
+                })?;
 
-            tracing::info!("✅ Updated RTP remote address to {} for session {}", remote_addr, session_id.0);
+            tracing::info!(
+                "✅ Updated RTP remote address to {} for session {}",
+                remote_addr,
+                session_id.0
+            );
         }
 
         let config = NegotiatedConfig {
@@ -417,7 +430,11 @@ impl MediaAdapter {
     }
 
     /// Generate SDP answer and negotiate (for UAS)
-    pub async fn negotiate_sdp_as_uas(&self, session_id: &SessionId, remote_sdp: &str) -> Result<(String, NegotiatedConfig)> {
+    pub async fn negotiate_sdp_as_uas(
+        &self,
+        session_id: &SessionId,
+        remote_sdp: &str,
+    ) -> Result<(String, NegotiatedConfig)> {
         // Parse remote SDP — typed parse for both connection extraction
         // and SDES handling.
         let parsed_offer = SdpSession::from_str(remote_sdp).map_err(|e| {
@@ -464,10 +481,10 @@ impl MediaAdapter {
             (None, false)
         };
         let _ = srtp_pair; // suppress unused warning — value retained via DashMap insert
-        
+
         // Get our local port
         let local_port = self.get_local_port(session_id)?;
-        
+
         // Update media session with remote address. SRTP contexts must
         // be installed BEFORE establish_media_flow starts the audio
         // transmitter — see `negotiate_sdp_as_uac` for the same
@@ -475,17 +492,23 @@ impl MediaAdapter {
         if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
-            self.controller.update_rtp_remote_addr(&dialog_id, remote_addr)
+            self.controller
+                .update_rtp_remote_addr(&dialog_id, remote_addr)
                 .await
-                .map_err(|e| SessionError::MediaError(format!("Failed to update RTP remote address: {}", e)))?;
+                .map_err(|e| {
+                    SessionError::MediaError(format!("Failed to update RTP remote address: {}", e))
+                })?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
                 self.controller
                     .install_srtp_contexts(&dialog_id, pair.send_ctx, pair.recv_ctx)
                     .await
-                    .map_err(|e| SessionError::MediaError(
-                        format!("Failed to install SRTP contexts (UAS): {}", e)
-                    ))?;
+                    .map_err(|e| {
+                        SessionError::MediaError(format!(
+                            "Failed to install SRTP contexts (UAS): {}",
+                            e
+                        ))
+                    })?;
                 tracing::info!(
                     "🔒 SRTP contexts installed for session {} (UAS, suite {:?})",
                     session_id.0,
@@ -493,13 +516,20 @@ impl MediaAdapter {
                 );
             }
 
-            self.controller.establish_media_flow(&dialog_id, remote_addr)
+            self.controller
+                .establish_media_flow(&dialog_id, remote_addr)
                 .await
-                .map_err(|e| SessionError::MediaError(format!("Failed to establish media flow: {}", e)))?;
+                .map_err(|e| {
+                    SessionError::MediaError(format!("Failed to establish media flow: {}", e))
+                })?;
 
-            tracing::info!("✅ Updated RTP remote address to {} for session {} (UAS)", remote_addr, session_id.0);
+            tracing::info!(
+                "✅ Updated RTP remote address to {} for session {} (UAS)",
+                remote_addr,
+                session_id.0
+            );
         }
-        
+
         // Generate the SDP answer.
         //
         // Sprint 3.5 — `negotiate_sdp_as_uas` now consumes the
@@ -521,7 +551,11 @@ impl MediaAdapter {
             .filter(|sa| sa.port() != 0)
             .map(|sa| sa.port())
             .unwrap_or(local_port);
-        let answer_transport = if answer_attr.is_some() { "RTP/SAVP" } else { "RTP/AVP" };
+        let answer_transport = if answer_attr.is_some() {
+            "RTP/SAVP"
+        } else {
+            "RTP/AVP"
+        };
 
         let formats = compute_answer_formats(
             &parsed_offer,
@@ -537,7 +571,7 @@ impl MediaAdapter {
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(advertised_port, answer_transport)
-                .formats(&formats_str);
+            .formats(&formats_str);
         // Emit rtpmap/fmtp ONLY for the formats we kept. In the
         // permissive branch this is the full set; in the strict
         // branch the matcher's intersection has already filtered.
@@ -564,103 +598,134 @@ impl MediaAdapter {
             media_builder = media_builder.crypto_attribute(attr);
         }
         let session = media_builder
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
-            .map_err(|e| SessionError::SDPNegotiationFailed(
-                format!("SdpBuilder failed to build answer: {}", e)
-            ))?;
+            .map_err(|e| {
+                SessionError::SDPNegotiationFailed(format!(
+                    "SdpBuilder failed to build answer: {}",
+                    e
+                ))
+            })?;
         let sdp_answer = session.to_string();
-        
+
         let config = NegotiatedConfig {
             local_addr: SocketAddr::new(self.local_ip, local_port),
             remote_addr: SocketAddr::new(remote_ip, remote_port),
             codec: "PCMU".to_string(),
             payload_type: 0,
         };
-        
+
         // Event publishing will be handled by SessionCrossCrateEventHandler
-        
+
         // Media flow is already represented by MediaStreamStarted above
-        
+
         Ok((sdp_answer, config))
     }
-    
+
     /// Play an audio file to the remote party
     pub async fn play_audio_file(&self, session_id: &SessionId, file_path: &str) -> Result<()> {
         // Get the dialog ID for this session
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for {}", session_id.0))
+            })?
             .clone();
-        
+
         // Send play file command to media controller
         // Note: The actual media-core API might differ
-        tracing::info!("Playing audio file {} for session {}", file_path, session_id.0);
-        
+        tracing::info!(
+            "Playing audio file {} for session {}",
+            file_path,
+            session_id.0
+        );
+
         // In a real implementation, this would send the file path to the media relay
         // For now, we'll just log it
         // Send a media event (using MediaError as a workaround for now)
         // In production, we'd have proper event types for these
         tracing::debug!("Audio playback started: {}", file_path);
-        
+
         Ok(())
     }
-    
+
     /// Start recording the media session
     pub async fn start_recording_old(&self, session_id: &SessionId) -> Result<String> {
         // Get the dialog ID for this session
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for {}", session_id.0))
+            })?
             .clone();
-        
+
         // Generate a unique recording filename
         let recording_path = format!("/tmp/recording_{}.wav", session_id.0);
-        
-        tracing::info!("Starting recording for session {} at {}", session_id.0, recording_path);
-        
+
+        tracing::info!(
+            "Starting recording for session {} at {}",
+            session_id.0,
+            recording_path
+        );
+
         // In a real implementation, this would start recording through the media relay
         // For now, just log the recording start
         tracing::debug!("Recording started at: {}", recording_path);
-        
+
         // Store recording path in session if needed
         if let Ok(session) = self.store.get_session(session_id).await {
             // Could add a recording_path field to SessionState if needed
             let _ = self.store.update_session(session).await;
         }
-        
+
         Ok(recording_path)
     }
-    
+
     /// Create a media bridge between two sessions (for peer-to-peer conferencing)
     pub async fn create_bridge(&self, session1: &SessionId, session2: &SessionId) -> Result<()> {
         // Get dialog IDs for both sessions
-        let _dialog1 = self.session_to_dialog.get(session1)
-            .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session1.0)))?
+        let _dialog1 = self
+            .session_to_dialog
+            .get(session1)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for {}", session1.0))
+            })?
             .clone();
-        let _dialog2 = self.session_to_dialog.get(session2)
-            .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session2.0)))?
+        let _dialog2 = self
+            .session_to_dialog
+            .get(session2)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for {}", session2.0))
+            })?
             .clone();
-        
-        tracing::info!("Creating media bridge between {} and {}", session1.0, session2.0);
-        
+
+        tracing::info!(
+            "Creating media bridge between {} and {}",
+            session1.0,
+            session2.0
+        );
+
         // In a real implementation, this would configure the media relay to bridge RTP streams
         // For now, we'll just update the session states
         if let Ok(mut session1_state) = self.store.get_session(session1).await {
             session1_state.bridged_to = Some(session2.clone());
             let _ = self.store.update_session(session1_state).await;
         }
-        
+
         if let Ok(mut session2_state) = self.store.get_session(session2).await {
             session2_state.bridged_to = Some(session1.clone());
             let _ = self.store.update_session(session2_state).await;
         }
-        
+
         // Log bridge creation
         tracing::debug!("Bridge created between {} and {}", session1.0, session2.0);
-        
+
         Ok(())
     }
-    
+
     /// Swap the audio source on the running transmitter for a session.
     /// Used by early-media flows to replace silence with a ringback tone,
     /// hold announcement, or custom samples during `EarlyMedia`.
@@ -676,10 +741,9 @@ impl MediaAdapter {
         let dialog_id = self
             .session_to_dialog
             .get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!(
-                "No media session for {}",
-                session_id.0
-            )))?
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for {}", session_id.0))
+            })?
             .clone();
 
         self.controller
@@ -736,97 +800,140 @@ impl MediaAdapter {
         } else {
             None
         };
-        
+
         if let Some(other_session) = bridged_session {
-            tracing::info!("Destroying bridge between {} and {}", session_id.0, other_session.0);
-            
+            tracing::info!(
+                "Destroying bridge between {} and {}",
+                session_id.0,
+                other_session.0
+            );
+
             // Clear bridge information from both sessions
             if let Ok(mut session1_state) = self.store.get_session(session_id).await {
                 session1_state.bridged_to = None;
                 let _ = self.store.update_session(session1_state).await;
             }
-            
+
             if let Ok(mut session2_state) = self.store.get_session(&other_session).await {
                 session2_state.bridged_to = None;
                 let _ = self.store.update_session(session2_state).await;
             }
-            
+
             // Log bridge destruction
-            tracing::debug!("Bridge destroyed between {} and {}", session_id.0, other_session.0);
+            tracing::debug!(
+                "Bridge destroyed between {} and {}",
+                session_id.0,
+                other_session.0
+            );
         }
-        
+
         Ok(())
     }
-    
+
     /// Stop recording the media session
     pub async fn stop_recording_old(&self, session_id: &SessionId) -> Result<()> {
         // Get the dialog ID for this session
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for {}", session_id.0))
+            })?
             .clone();
-        
+
         tracing::info!("Stopping recording for session {}", session_id.0);
-        
+
         // In a real implementation, this would stop recording through the media relay
         tracing::debug!("Recording stopped");
-        
+
         Ok(())
     }
-    
+
     // ===== AUDIO FRAME API - The Missing Core Functionality =====
-    
+
     /// Send an audio frame for encoding and transmission
     /// This is the equivalent of the old session-core's MediaControl::send_audio_frame()
-    pub async fn send_audio_frame(&self, session_id: &SessionId, audio_frame: AudioFrame) -> Result<()> {
+    pub async fn send_audio_frame(
+        &self,
+        session_id: &SessionId,
+        audio_frame: AudioFrame,
+    ) -> Result<()> {
         // Get the dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No media session for {}", session_id.0)))?
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No media session for {}", session_id.0))
+            })?
             .clone();
-        
-        tracing::info!("📤 Sending audio frame for session {} ({} samples) via RTP", session_id.0, audio_frame.samples.len());
-        
+
+        tracing::info!(
+            "📤 Sending audio frame for session {} ({} samples) via RTP",
+            session_id.0,
+            audio_frame.samples.len()
+        );
+
         // Convert AudioFrame to PCM samples and call encode_and_send_audio_frame
         // This will encode the audio and send it via RTP to the remote peer
         let pcm_samples = audio_frame.samples.clone();
         let timestamp = audio_frame.timestamp;
-        
-        self.controller.encode_and_send_audio_frame(&dialog_id, pcm_samples, timestamp)
+
+        self.controller
+            .encode_and_send_audio_frame(&dialog_id, pcm_samples, timestamp)
             .await
-            .map_err(|e| SessionError::MediaError(format!("Failed to send audio frame via RTP: {}", e)))?;
-        
-        tracing::debug!("✅ Audio frame sent successfully via RTP for session {}", session_id.0);
+            .map_err(|e| {
+                SessionError::MediaError(format!("Failed to send audio frame via RTP: {}", e))
+            })?;
+
+        tracing::debug!(
+            "✅ Audio frame sent successfully via RTP for session {}",
+            session_id.0
+        );
         Ok(())
     }
-    
+
     /// Create a new media session
-    pub async fn create_session(&self, session_id: &SessionId) -> Result<crate::types::MediaSessionId> {
+    pub async fn create_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::types::MediaSessionId> {
         // Create dialog ID for media-core
         let dialog_id = DialogId::new(format!("media-{}", session_id.0));
-        
-        tracing::info!("🚀 Creating media session for session {} with dialog ID {}", session_id.0, dialog_id);
-        
+
+        tracing::info!(
+            "🚀 Creating media session for session {} with dialog ID {}",
+            session_id.0,
+            dialog_id
+        );
+
         // Store mappings
-        self.session_to_dialog.insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session.insert(dialog_id.clone(), session_id.clone());
-        
+        self.session_to_dialog
+            .insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session
+            .insert(dialog_id.clone(), session_id.clone());
+
         // Create media config with our settings
         let media_config = MediaConfig {
             local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
-            remote_addr: None, // Will be set when we get remote SDP
-            preferred_codec: Some("PCMU".to_string()), // G.711 µ-law as default
+            remote_addr: None,                             // Will be set when we get remote SDP
+            preferred_codec: Some("PCMU".to_string()),     // G.711 µ-law as default
             parameters: std::collections::HashMap::new(),
         };
-        
+
         // Start the media session in media-core
-        self.controller.start_media(dialog_id.clone(), media_config)
+        self.controller
+            .start_media(dialog_id.clone(), media_config)
             .await
-            .map_err(|e| SessionError::MediaError(format!("Failed to start media session: {}", e)))?;
+            .map_err(|e| {
+                SessionError::MediaError(format!("Failed to start media session: {}", e))
+            })?;
 
         // Install RFC 4733 DTMF callback so incoming PT 101 frames
         // surface as `Event::DtmfReceived` on the public API bus.
         // Fires once per digit (media-core dedupes the three §2.5.1.3
         // retransmits) so app consumers don't see duplicate digits.
-        self.install_dtmf_callback(session_id.clone(), dialog_id.clone()).await;
+        self.install_dtmf_callback(session_id.clone(), dialog_id.clone())
+            .await;
 
         // Get and store session info
         if let Some(info) = self.controller.get_session_info(&dialog_id).await {
@@ -845,13 +952,18 @@ impl MediaAdapter {
                 rvoip_media_core::MediaSessionId::from_dialog(&dialog_id),
             );
 
-            tracing::info!("✅ Media session created successfully for dialog {}", dialog_id);
+            tracing::info!(
+                "✅ Media session created successfully for dialog {}",
+                dialog_id
+            );
             return Ok(media_id);
         }
-        
-        Err(SessionError::MediaError("Failed to get session info after creation".to_string()))
+
+        Err(SessionError::MediaError(
+            "Failed to get session info after creation".to_string(),
+        ))
     }
-    
+
     /// Generate the local SDP offer. **Sole** SDP-offer generator — this
     /// is the only entry point used by the state-machine's
     /// `Action::GenerateLocalSDP`. Always uses `SdpBuilder`, always
@@ -875,11 +987,26 @@ impl MediaAdapter {
         // Resolve dialog id and prime the cached session info. Both
         // the SRTP and plaintext paths used to do this; doing it once
         // up front lets the rest of the body share one shape.
-        let dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(format!("No dialog mapping for session {}", session_id.0)))?
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::SessionNotFound(format!(
+                    "No dialog mapping for session {}",
+                    session_id.0
+                ))
+            })?
             .clone();
-        let info = self.controller.get_session_info(&dialog_id).await
-            .ok_or_else(|| SessionError::MediaError(format!("Failed to get session info for dialog {}", dialog_id)))?;
+        let info = self
+            .controller
+            .get_session_info(&dialog_id)
+            .await
+            .ok_or_else(|| {
+                SessionError::MediaError(format!(
+                    "Failed to get session info for dialog {}",
+                    dialog_id
+                ))
+            })?;
         self.media_sessions.insert(session_id.clone(), info.clone());
 
         // Sprint 3 A6 — when a public RTP address has been configured
@@ -903,9 +1030,9 @@ impl MediaAdapter {
         // Profile + crypto. RFC 4568 §3.1.4 — `RTP/SAVP` is mandatory
         // when offering SDES.
         let (transport, crypto_attrs) = if self.offer_srtp {
-            let (negotiator, attrs) =
-                SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
-            self.pending_srtp_offerers.insert(session_id.clone(), negotiator);
+            let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
+            self.pending_srtp_offerers
+                .insert(session_id.clone(), negotiator);
             ("RTP/SAVP", attrs)
         } else {
             ("RTP/AVP", Vec::new())
@@ -934,9 +1061,9 @@ impl MediaAdapter {
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(port, transport)
-                .formats(formats)
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000");
+            .formats(formats)
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000");
         if self.comfort_noise_enabled {
             media_builder = media_builder.rtpmap("13", "CN/8000");
         }
@@ -947,18 +1074,25 @@ impl MediaAdapter {
             media_builder = media_builder.crypto_attribute(attr);
         }
         let session = media_builder
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
-            .map_err(|e| SessionError::SDPNegotiationFailed(
-                format!("SdpBuilder failed to build offer: {}", e)
-            ))?;
+            .map_err(|e| {
+                SessionError::SDPNegotiationFailed(format!(
+                    "SdpBuilder failed to build offer: {}",
+                    e
+                ))
+            })?;
 
         let sdp = session.to_string();
-        tracing::info!("✅ Generated SDP for session {} with local port {}", session_id.0, port);
+        tracing::info!(
+            "✅ Generated SDP for session {} with local port {}",
+            session_id.0,
+            port
+        );
         Ok(sdp)
     }
-    
+
     /// Install the RFC 4733 DTMF bridge: registers a callback with
     /// media-core so PT 101 packets (already deduped to one-per-digit
     /// on the first end-of-event frame) are published as
@@ -975,10 +1109,16 @@ impl MediaAdapter {
         };
 
         let (tx, mut rx) = mpsc::channel::<rvoip_media_core::DtmfNotification>(32);
-        if let Err(e) = self.controller.set_dtmf_callback(dialog_id.clone(), tx).await {
+        if let Err(e) = self
+            .controller
+            .set_dtmf_callback(dialog_id.clone(), tx)
+            .await
+        {
             tracing::warn!(
                 "Failed to register DTMF callback for session {} (dialog {}): {}",
-                session_id.0, dialog_id, e
+                session_id.0,
+                dialog_id,
+                e
             );
             return;
         }
@@ -998,80 +1138,118 @@ impl MediaAdapter {
                 if let Err(e) = coordinator.publish(wrapped).await {
                     tracing::warn!(
                         "Failed to publish DtmfReceived for session {}: {}",
-                        sid.0, e
+                        sid.0,
+                        e
                     );
                 } else {
                     tracing::info!(
                         "📢 Published DtmfReceived digit='{}' for session {}",
-                        notification.digit, sid.0
+                        notification.digit,
+                        sid.0
                     );
                 }
             }
-            tracing::debug!("DTMF bridge task exited for session {} (dialog {})", sid.0, did);
+            tracing::debug!(
+                "DTMF bridge task exited for session {} (dialog {})",
+                sid.0,
+                did
+            );
         });
     }
 
     /// Subscribe to receive decoded audio frames from RTP
     /// This is the equivalent of the old session-core's MediaControl::subscribe_to_audio_frames()
-    pub async fn subscribe_to_audio_frames(&self, session_id: &SessionId) -> Result<crate::types::AudioFrameSubscriber> {
+    pub async fn subscribe_to_audio_frames(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::types::AudioFrameSubscriber> {
         // Get the dialog ID for this session
-        let dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(format!("No media session for {}", session_id.0)))?
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::SessionNotFound(format!("No media session for {}", session_id.0))
+            })?
             .clone();
-        
-        tracing::info!("🎧 Setting up audio subscription for session {} (dialog: {})", session_id.0, dialog_id);
-        
+
+        tracing::info!(
+            "🎧 Setting up audio subscription for session {} (dialog: {})",
+            session_id.0,
+            dialog_id
+        );
+
         // Create channel for audio frames
         let (tx, rx) = mpsc::channel(1000); // Buffer up to 1000 frames (20 seconds at 50fps)
-        
+
         // Register the callback with MediaSessionController to receive audio frames
-        self.controller.set_audio_frame_callback(dialog_id.clone(), tx.clone())
+        self.controller
+            .set_audio_frame_callback(dialog_id.clone(), tx.clone())
             .await
-            .map_err(|e| SessionError::MediaError(format!("Failed to set audio callback: {}", e)))?;
-        
+            .map_err(|e| {
+                SessionError::MediaError(format!("Failed to set audio callback: {}", e))
+            })?;
+
         // Store the sender for this session for cleanup
         self.audio_receivers.insert(session_id.clone(), tx);
-        
-        tracing::info!("🎧 Created audio frame subscriber for session {} with dialog {}", session_id.0, dialog_id);
-        
+
+        tracing::info!(
+            "🎧 Created audio frame subscriber for session {} with dialog {}",
+            session_id.0,
+            dialog_id
+        );
+
         // Return our types::AudioFrameSubscriber
-        Ok(crate::types::AudioFrameSubscriber::new(session_id.clone(), rx))
+        Ok(crate::types::AudioFrameSubscriber::new(
+            session_id.clone(),
+            rx,
+        ))
     }
-    
+
     /// Internal method to forward received audio frames to subscribers
     /// This should be called by the media event handler when audio frames are received
     #[allow(dead_code)]
-    pub(crate) async fn forward_audio_frame_to_subscriber(&self, session_id: &SessionId, audio_frame: rvoip_media_core::types::AudioFrame) -> Result<()> {
+    pub(crate) async fn forward_audio_frame_to_subscriber(
+        &self,
+        session_id: &SessionId,
+        audio_frame: rvoip_media_core::types::AudioFrame,
+    ) -> Result<()> {
         if let Some(tx) = self.audio_receivers.get(session_id) {
             if let Err(_) = tx.send(audio_frame).await {
                 // Receiver has been dropped, clean up
                 self.audio_receivers.remove(session_id);
-                tracing::debug!("Audio frame subscriber disconnected for session {}", session_id.0);
+                tracing::debug!(
+                    "Audio frame subscriber disconnected for session {}",
+                    session_id.0
+                );
             }
         }
         Ok(())
     }
-    
+
     // ===== New Methods for CallController and ConferenceManager =====
-    
+
     /// Create a media session
     pub async fn create_media_session(&self) -> Result<crate::types::MediaSessionId> {
         let media_id = crate::types::MediaSessionId::new_v4();
         Ok(media_id)
     }
-    
+
     /// Stop a media session
     pub async fn stop_media_session(&self, _media_id: crate::types::MediaSessionId) -> Result<()> {
         // For now, just return Ok
         Ok(())
     }
-    
+
     /// Set media direction (for hold/resume)
-    pub async fn set_media_direction(&self, _media_id: crate::types::MediaSessionId, _direction: crate::types::MediaDirection) -> Result<()> {
+    pub async fn set_media_direction(
+        &self,
+        _media_id: crate::types::MediaSessionId,
+        _direction: crate::types::MediaDirection,
+    ) -> Result<()> {
         // TODO: Implement actual media direction control
         Ok(())
     }
-    
+
     /// Create hold SDP
     pub async fn create_hold_sdp(&self) -> Result<String> {
         // Create SDP with sendonly attribute
@@ -1087,7 +1265,7 @@ impl MediaAdapter {
         );
         Ok(sdp)
     }
-    
+
     /// Create active SDP
     pub async fn create_active_sdp(&self) -> Result<String> {
         // Create SDP with sendrecv attribute
@@ -1105,7 +1283,7 @@ impl MediaAdapter {
         );
         Ok(sdp)
     }
-    
+
     /// Send DTMF digit (legacy `media_id` signature used by the state
     /// machine's CallController path). Delegates to
     /// [`Self::send_dtmf_rfc4733`] with a 100 ms duration.
@@ -1137,10 +1315,9 @@ impl MediaAdapter {
         let dialog_id = self
             .session_to_dialog
             .get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(format!(
-                "No media session for {}",
-                session_id.0
-            )))?
+            .ok_or_else(|| {
+                SessionError::SessionNotFound(format!("No media session for {}", session_id.0))
+            })?
             .clone();
 
         self.controller
@@ -1150,34 +1327,48 @@ impl MediaAdapter {
 
         tracing::info!(
             "☎️  Queued DTMF '{}' for session {} (dialog {}, duration={}ms)",
-            digit, session_id.0, dialog_id, duration_ms
+            digit,
+            session_id.0,
+            dialog_id,
+            duration_ms
         );
         Ok(())
     }
-    
+
     /// Set mute state
-    pub async fn set_mute(&self, media_id: crate::types::MediaSessionId, muted: bool) -> Result<()> {
+    pub async fn set_mute(
+        &self,
+        media_id: crate::types::MediaSessionId,
+        muted: bool,
+    ) -> Result<()> {
         // TODO: Implement mute control
-        tracing::debug!("Setting mute state to {} for media session {:?}", muted, media_id);
+        tracing::debug!(
+            "Setting mute state to {} for media session {:?}",
+            muted,
+            media_id
+        );
         Ok(())
     }
-    
+
     /// Start recording for media session
-    pub async fn start_recording_media(&self, media_id: crate::types::MediaSessionId) -> Result<()> {
+    pub async fn start_recording_media(
+        &self,
+        media_id: crate::types::MediaSessionId,
+    ) -> Result<()> {
         // TODO: Implement recording
         tracing::info!("Starting recording for media session {:?}", media_id);
         Ok(())
     }
-    
+
     /// Stop recording for media session
     pub async fn stop_recording_media(&self, media_id: crate::types::MediaSessionId) -> Result<()> {
         // TODO: Implement recording stop
         tracing::info!("Stopping recording for media session {:?}", media_id);
         Ok(())
     }
-    
+
     // ===== Conference Methods =====
-    
+
     /// Create an audio mixer for a conference
     pub async fn create_audio_mixer(&self) -> Result<crate::types::MediaSessionId> {
         let mixer_id = crate::types::MediaSessionId::new_v4();
@@ -1185,32 +1376,40 @@ impl MediaAdapter {
         tracing::info!("Created audio mixer {:?}", mixer_id);
         Ok(mixer_id)
     }
-    
+
     /// Redirect audio to a mixer
-    pub async fn redirect_to_mixer(&self, media_id: crate::types::MediaSessionId, mixer_id: crate::types::MediaSessionId) -> Result<()> {
+    pub async fn redirect_to_mixer(
+        &self,
+        media_id: crate::types::MediaSessionId,
+        mixer_id: crate::types::MediaSessionId,
+    ) -> Result<()> {
         if let Some(mut mixer) = self.audio_mixers.get_mut(&mixer_id) {
             mixer.push(media_id.clone());
         }
         tracing::debug!("Redirected media {:?} to mixer {:?}", media_id, mixer_id);
         Ok(())
     }
-    
+
     /// Remove audio from a mixer
-    pub async fn remove_from_mixer(&self, media_id: crate::types::MediaSessionId, mixer_id: crate::types::MediaSessionId) -> Result<()> {
+    pub async fn remove_from_mixer(
+        &self,
+        media_id: crate::types::MediaSessionId,
+        mixer_id: crate::types::MediaSessionId,
+    ) -> Result<()> {
         if let Some(mut mixer) = self.audio_mixers.get_mut(&mixer_id) {
             mixer.retain(|id| id != &media_id);
         }
         tracing::debug!("Removed media {:?} from mixer {:?}", media_id, mixer_id);
         Ok(())
     }
-    
+
     /// Destroy an audio mixer
     pub async fn destroy_mixer(&self, mixer_id: crate::types::MediaSessionId) -> Result<()> {
         self.audio_mixers.remove(&mixer_id);
         tracing::info!("Destroyed audio mixer {:?}", mixer_id);
         Ok(())
     }
-    
+
     /// Clean up all mappings and resources for a session.
     ///
     /// Idempotent — safe to call multiple times. Always removes the audio
@@ -1235,7 +1434,10 @@ impl MediaAdapter {
         };
 
         if let Some(dialog_id) = dialog_id {
-            let _ = self.controller.remove_audio_frame_callback(&dialog_id).await;
+            let _ = self
+                .controller
+                .remove_audio_frame_callback(&dialog_id)
+                .await;
             // stop_media may return "session not found" on the fallback path
             // (media-core already cleaned up) — expected; ignore.
             let _ = self.controller.stop_media(&dialog_id).await;
@@ -1246,20 +1448,25 @@ impl MediaAdapter {
         // Drop our own clone of the tx as well (the other lived in media-core).
         self.audio_receivers.remove(session_id);
 
-        tracing::debug!("Cleaned up media adapter resources for session {}", session_id.0);
+        tracing::debug!(
+            "Cleaned up media adapter resources for session {}",
+            session_id.0
+        );
         Ok(())
     }
-    
+
     // ===== Helper Methods =====
-    
+
     /// Get local RTP port for a session
     fn get_local_port(&self, session_id: &SessionId) -> Result<u16> {
         self.media_sessions
             .get(session_id)
             .and_then(|info| info.rtp_port)
-            .ok_or_else(|| SessionError::SessionNotFound(format!("No local port for session {}", session_id.0)))
+            .ok_or_else(|| {
+                SessionError::SessionNotFound(format!("No local port for session {}", session_id.0))
+            })
     }
-    
+
     /// Parse SDP to extract connection info from the audio m= section.
     ///
     /// Uses sip-core's typed `SdpSession::from_str` parser instead of
@@ -1279,9 +1486,9 @@ impl MediaAdapter {
             .media_descriptions
             .iter()
             .find(|m| m.media == "audio")
-            .ok_or_else(|| SessionError::SDPNegotiationFailed(
-                "SDP has no audio m= section".into()
-            ))?;
+            .ok_or_else(|| {
+                SessionError::SDPNegotiationFailed("SDP has no audio m= section".into())
+            })?;
 
         let port = media.port as u16;
 
@@ -1290,9 +1497,11 @@ impl MediaAdapter {
             .connection_info
             .as_ref()
             .or(session.connection_info.as_ref())
-            .ok_or_else(|| SessionError::SDPNegotiationFailed(
-                "SDP has no c= line at session or audio level".into()
-            ))?;
+            .ok_or_else(|| {
+                SessionError::SDPNegotiationFailed(
+                    "SDP has no c= line at session or audio level".into(),
+                )
+            })?;
 
         let ip = match &conn.connection_address {
             host_str => host_str.parse::<IpAddr>().map_err(|e| {
@@ -1305,7 +1514,7 @@ impl MediaAdapter {
 
         Ok((ip, port))
     }
-    
+
     // ===== Event handling removed - now centralized in SessionCrossCrateEventHandler ====="
 
     // ===== Recording Management =====
@@ -1324,11 +1533,19 @@ impl MediaAdapter {
         config: RecordingConfig,
     ) -> Result<String> {
         // Get dialog ID
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No dialog for session {}", session_id.0))
+            })?
             .clone();
 
-        tracing::info!("Starting recording for session {} with path: {}", session_id.0, config.file_path);
+        tracing::info!(
+            "Starting recording for session {} with path: {}",
+            session_id.0,
+            config.file_path
+        );
 
         // For now, we'll generate a simple recording ID
         // In a real implementation, this would interact with media-core's recording API
@@ -1337,7 +1554,11 @@ impl MediaAdapter {
         // TODO: When media-core adds recording support, implement this properly
         // self.controller.start_recording(&dialog_id, config).await
 
-        tracing::info!("✅ Recording started for session {} with ID: {}", session_id.0, recording_id);
+        tracing::info!(
+            "✅ Recording started for session {} with ID: {}",
+            session_id.0,
+            recording_id
+        );
         Ok(recording_id)
     }
 
@@ -1350,13 +1571,25 @@ impl MediaAdapter {
     }
 
     /// Stop recording for a session with specific recording ID
-    pub async fn stop_recording_with_id(&self, session_id: &SessionId, recording_id: &str) -> Result<()> {
+    pub async fn stop_recording_with_id(
+        &self,
+        session_id: &SessionId,
+        recording_id: &str,
+    ) -> Result<()> {
         // Get dialog ID
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No dialog for session {}", session_id.0))
+            })?
             .clone();
 
-        tracing::info!("Stopping recording {} for session {}", recording_id, session_id.0);
+        tracing::info!(
+            "Stopping recording {} for session {}",
+            recording_id,
+            session_id.0
+        );
 
         // TODO: When media-core adds recording support, implement this properly
         // self.controller.stop_recording(&dialog_id, recording_id).await
@@ -1368,11 +1601,19 @@ impl MediaAdapter {
     /// Pause recording for a session
     pub async fn pause_recording(&self, session_id: &SessionId, recording_id: &str) -> Result<()> {
         // Get dialog ID
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No dialog for session {}", session_id.0))
+            })?
             .clone();
 
-        tracing::debug!("Pausing recording {} for session {}", recording_id, session_id.0);
+        tracing::debug!(
+            "Pausing recording {} for session {}",
+            recording_id,
+            session_id.0
+        );
 
         // TODO: When media-core adds recording support, implement this properly
         // self.controller.pause_recording(&dialog_id, recording_id).await
@@ -1383,11 +1624,19 @@ impl MediaAdapter {
     /// Resume a paused recording
     pub async fn resume_recording(&self, session_id: &SessionId, recording_id: &str) -> Result<()> {
         // Get dialog ID
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No dialog for session {}", session_id.0))
+            })?
             .clone();
 
-        tracing::debug!("Resuming recording {} for session {}", recording_id, session_id.0);
+        tracing::debug!(
+            "Resuming recording {} for session {}",
+            recording_id,
+            session_id.0
+        );
 
         // TODO: When media-core adds recording support, implement this properly
         // self.controller.resume_recording(&dialog_id, recording_id).await
@@ -1402,8 +1651,12 @@ impl MediaAdapter {
         _recording_id: &str,
     ) -> Result<RecordingStatus> {
         // Get dialog ID
-        let _dialog_id = self.session_to_dialog.get(session_id)
-            .ok_or_else(|| SessionError::MediaError(format!("No dialog for session {}", session_id.0)))?
+        let _dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| {
+                SessionError::MediaError(format!("No dialog for session {}", session_id.0))
+            })?
             .clone();
 
         // TODO: When media-core adds recording support, implement this properly
@@ -1423,7 +1676,11 @@ impl MediaAdapter {
         session2: &SessionId,
         config: RecordingConfig,
     ) -> Result<String> {
-        tracing::info!("Starting bridge recording for sessions {} <-> {}", session1.0, session2.0);
+        tracing::info!(
+            "Starting bridge recording for sessions {} <-> {}",
+            session1.0,
+            session2.0
+        );
 
         // Start recording on both sessions with mixed audio
         let mut recording_config = config;
@@ -1431,7 +1688,8 @@ impl MediaAdapter {
         recording_config.separate_tracks = true;
 
         // Start recording on the first session (will capture both legs if bridged)
-        self.start_recording_with_config(session1, recording_config).await
+        self.start_recording_with_config(session1, recording_config)
+            .await
     }
 
     /// Enable/disable recording for all conference sessions
@@ -1524,9 +1782,7 @@ pub(crate) fn compute_answer_formats(
         .iter()
         .find(|l| l.media == "audio")
         .ok_or_else(|| {
-            SessionError::SDPNegotiationFailed(
-                "matcher returned no audio media line".into(),
-            )
+            SessionError::SDPNegotiationFailed("matcher returned no audio media line".into())
         })?;
     if !line.accepted {
         return Err(SessionError::SDPNegotiationFailed(
@@ -1559,13 +1815,13 @@ mod sdp_format_tests {
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/AVP")
-                .formats(&["0", "8", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15")
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .formats(&["0", "8", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("offer builds")
             .to_string()
@@ -1578,13 +1834,13 @@ mod sdp_format_tests {
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/AVP")
-                .formats(&["0", "8", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15")
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .formats(&["0", "8", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("answer builds")
             .to_string()
@@ -1637,7 +1893,10 @@ mod sdp_format_tests {
         let port = 16000;
         let new = build_offer(dialog_id, elapsed, ip, port);
         let old = legacy_offer(dialog_id, elapsed, ip, port);
-        assert_eq!(new, old, "SdpBuilder offer drifted from legacy format-string output");
+        assert_eq!(
+            new, old,
+            "SdpBuilder offer drifted from legacy format-string output"
+        );
     }
 
     #[test]
@@ -1647,7 +1906,10 @@ mod sdp_format_tests {
         let port = 16002;
         let new = build_answer(sess_id, ip, port);
         let old = legacy_answer(sess_id, ip, port);
-        assert_eq!(new, old, "SdpBuilder answer drifted from legacy format-string output");
+        assert_eq!(
+            new, old,
+            "SdpBuilder answer drifted from legacy format-string output"
+        );
     }
 
     #[test]
@@ -1702,17 +1964,17 @@ mod sdp_format_tests {
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/SAVP")
-                .formats(&["0", "8", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15");
+            .formats(&["0", "8", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15");
         for attr in attrs {
             media_builder = media_builder.crypto_attribute(attr);
         }
         media_builder
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("srtp offer builds")
             .to_string()
@@ -1852,14 +2114,14 @@ mod sdp_format_tests {
             .connection("IN", "IP4", ip)
             .time("0", "0")
             .media_audio(port, "RTP/AVP")
-                .formats(&["0", "8", "13", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .rtpmap("13", "CN/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15")
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .formats(&["0", "8", "13", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .rtpmap("13", "CN/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("offer builds")
             .to_string();
@@ -1890,23 +2152,20 @@ mod sdp_format_tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(16000, "RTP/AVP")
-                .formats(&["0", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15")
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .formats(&["0", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("offer builds")
             .to_string();
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let formats = compute_answer_formats(
-            &offer,
-            /*comfort_noise_enabled*/ false,
-            /*strict*/ true,
-            /*offer_srtp*/ false,
-            /*srtp_required*/ false,
+            &offer, /*comfort_noise_enabled*/ false, /*strict*/ true,
+            /*offer_srtp*/ false, /*srtp_required*/ false,
         )
         .expect("strict-mode match succeeds");
         assert_eq!(
@@ -1925,23 +2184,20 @@ mod sdp_format_tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(16000, "RTP/AVP")
-                .formats(&["0", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15")
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .formats(&["0", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("offer builds")
             .to_string();
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let formats = compute_answer_formats(
-            &offer,
-            /*comfort_noise_enabled*/ false,
-            /*strict*/ false,
-            /*offer_srtp*/ false,
-            /*srtp_required*/ false,
+            &offer, /*comfort_noise_enabled*/ false, /*strict*/ false,
+            /*offer_srtp*/ false, /*srtp_required*/ false,
         )
         .expect("permissive mode never errors on overlap");
         assert_eq!(
@@ -1962,22 +2218,19 @@ mod sdp_format_tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(16000, "RTP/AVP")
-                .formats(&["97", "98"])
-                .rtpmap("97", "VP8/90000")
-                .rtpmap("98", "VP9/90000")
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .formats(&["97", "98"])
+            .rtpmap("97", "VP8/90000")
+            .rtpmap("98", "VP9/90000")
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("offer builds")
             .to_string();
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let err = compute_answer_formats(
-            &offer,
-            /*comfort_noise_enabled*/ false,
-            /*strict*/ true,
-            /*offer_srtp*/ false,
-            /*srtp_required*/ false,
+            &offer, /*comfort_noise_enabled*/ false, /*strict*/ true,
+            /*offer_srtp*/ false, /*srtp_required*/ false,
         )
         .unwrap_err();
         assert!(
@@ -1997,24 +2250,21 @@ mod sdp_format_tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(16000, "RTP/AVP")
-                .formats(&["0", "13", "101"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("13", "CN/8000")
-                .rtpmap("101", "telephone-event/8000")
-                .fmtp("101", "0-15")
-                .attribute("sendrecv", None::<String>)
-                .done()
+            .formats(&["0", "13", "101"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("13", "CN/8000")
+            .rtpmap("101", "telephone-event/8000")
+            .fmtp("101", "0-15")
+            .attribute("sendrecv", None::<String>)
+            .done()
             .build()
             .expect("offer builds")
             .to_string();
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let formats = compute_answer_formats(
-            &offer,
-            /*comfort_noise_enabled*/ true,
-            /*strict*/ true,
-            /*offer_srtp*/ false,
-            /*srtp_required*/ false,
+            &offer, /*comfort_noise_enabled*/ true, /*strict*/ true,
+            /*offer_srtp*/ false, /*srtp_required*/ false,
         )
         .expect("CN-on-both-sides match succeeds");
         assert_eq!(
@@ -2033,7 +2283,11 @@ mod sdp_format_tests {
             "default offer must keep the pre-Sprint-3 format set:\n{}",
             sdp
         );
-        assert!(!sdp.contains("CN/8000"), "default offer must not advertise CN: \n{}", sdp);
+        assert!(
+            !sdp.contains("CN/8000"),
+            "default offer must not advertise CN: \n{}",
+            sdp
+        );
     }
 
     #[test]

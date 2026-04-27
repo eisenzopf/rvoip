@@ -1,28 +1,28 @@
 //! # Media Core library for the RVOIP project
-//! 
+//!
 //! `media-core` provides comprehensive media processing capabilities for SIP servers.
 //! It focuses exclusively on media processing, codec management, and media session
 //! coordination while integrating cleanly with `session-core` and `rtp-core`.
 //!
 //! ## Core Components
-//! 
+//!
 //! - **MediaEngine**: Central orchestrator for all media processing
 //! - **MediaSession**: Per-dialog media management
 //! - **Codec Framework**: Audio codec support (G.711, Opus, etc.)
 //! - **Audio Processing**: AEC, AGC, VAD, noise suppression
 //! - **Quality Monitoring**: Real-time quality metrics and adaptation
-//! 
+//!
 //! ## Audio Muting
-//! 
+//!
 //! The media-core library implements silence-based muting that maintains continuous
 //! RTP packet flow. When a session is muted, audio samples are replaced with silence
 //! before encoding, preserving:
-//! 
+//!
 //! - RTP sequence numbers and timestamps
 //! - NAT traversal and binding keepalive
 //! - Compatibility with all SIP endpoints
 //! - Instant mute/unmute without renegotiation
-//! 
+//!
 //! Use `MediaSessionController::set_audio_muted()` for production-ready muting.
 //!
 //! ## Quick Start
@@ -30,7 +30,7 @@
 //! ```rust,ignore
 //! use rvoip_media_core::relay::controller::MediaSessionController;
 //! use rvoip_media_core::types::{MediaSessionId, DialogId};
-//! 
+//!
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create media session controller
@@ -44,17 +44,17 @@
 //! ```
 
 // Core modules
-pub mod api;         // NEW - API types and errors for moved functionality
-pub mod error;
-pub mod types;
+pub mod api; // NEW - API types and errors for moved functionality
+pub mod buffer; // New buffer module
 pub mod engine;
-pub mod session;     // New session module
-pub mod processing;  // New processing pipeline module
-pub mod quality;     // New quality monitoring module
+pub mod error;
 pub mod integration; // New integration module
-pub mod buffer;      // New buffer module
 pub mod performance; // New performance optimization module
-pub mod rtp_processing; // NEW - RTP media processing (moved from rtp-core)
+pub mod processing; // New processing pipeline module
+pub mod quality; // New quality monitoring module
+pub mod rtp_processing;
+pub mod session; // New session module
+pub mod types; // NEW - RTP media processing (moved from rtp-core)
 
 // Working modules from old implementation (to be refactored)
 pub mod codec;
@@ -75,59 +75,38 @@ pub use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
 
 // Re-export engine components
 pub use engine::{
-    MediaEngine, 
-    MediaEngineConfig, 
-    EngineCapabilities,
+    EngineCapabilities, EngineState, MediaEngine, MediaEngineConfig, MediaSessionHandle,
     MediaSessionParams,
-    MediaSessionHandle,
-    EngineState,
 };
 
 // NEW: Enhanced configuration exports from media_engine
-pub use engine::media_engine::{
-    PerformanceLevel,
-    AdvancedProcessorFactory,
-};
+pub use engine::media_engine::{AdvancedProcessorFactory, PerformanceLevel};
 
 // Re-export session components
 pub use session::{
     MediaSession,
     MediaSessionConfig,
-    MediaSessionState,
     MediaSessionEvent as SessionEvent, // Rename to avoid conflict
     MediaSessionEventType,
+    MediaSessionState,
 };
 
 // Re-export integration components
 pub use integration::{
-    RtpBridge,
-    RtpBridgeConfig,
-    IntegrationEvent,
-    IntegrationEventType,
-    RtpEvent,
-    RtpEventCallback,
+    IntegrationEvent, IntegrationEventType, RtpBridge, RtpBridgeConfig, RtpEvent, RtpEventCallback,
 };
 
 // Legacy exports (will be replaced in Phase 2)
 pub use codec::{Codec, CodecRegistry};
 pub use relay::{
-    DtmfNotification,
-    MediaSessionController,
-    MediaConfig,
-    MediaSessionStatus,
-    MediaSessionInfo,
-    G711PcmuCodec,
-    G711PcmaCodec,
+    DtmfNotification, G711PcmaCodec, G711PcmuCodec, MediaConfig, MediaSessionController,
+    MediaSessionInfo, MediaSessionStatus,
 };
 
 // NEW: Enhanced configuration re-exports
 pub use engine::config::{
-    PerformanceConfig,
-    AdvancedProcessingConfig,
-    AudioConfig,
-    CodecConfig,
+    AdvancedProcessingConfig, AudioConfig, BufferConfig, CodecConfig, PerformanceConfig,
     QualityConfig,
-    BufferConfig,
 };
 
 /// Media sample type (raw audio data)
@@ -147,8 +126,8 @@ pub struct AudioFormat {
 impl Default for AudioFormat {
     fn default() -> Self {
         Self {
-            channels: 1,         // Default to mono
-            bit_depth: 16,       // Default to 16-bit
+            channels: 1,   // Default to mono
+            bit_depth: 16, // Default to 16-bit
             sample_rate: crate::types::SampleRate::default(),
         }
     }
@@ -163,17 +142,17 @@ impl AudioFormat {
             sample_rate,
         }
     }
-    
+
     /// Create a new mono 16-bit format with the given sample rate
     pub fn mono_16bit(sample_rate: crate::types::SampleRate) -> Self {
         Self::new(1, 16, sample_rate)
     }
-    
+
     /// Create a new stereo 16-bit format with the given sample rate
     pub fn stereo_16bit(sample_rate: crate::types::SampleRate) -> Self {
         Self::new(2, 16, sample_rate)
     }
-    
+
     /// Standard narrowband telephony format (mono, 16-bit, 8kHz)
     pub fn telephony() -> Self {
         Self::mono_16bit(crate::types::SampleRate::Rate8000)
@@ -194,14 +173,14 @@ impl AudioBuffer {
     pub fn new(data: bytes::Bytes, format: AudioFormat) -> Self {
         Self { data, format }
     }
-    
+
     /// Get the duration of the audio in milliseconds
     pub fn duration_ms(&self) -> u32 {
         let bytes_per_sample = (self.format.bit_depth / 8) as u32;
         let samples = (self.data.len() as u32) / bytes_per_sample / (self.format.channels as u32);
         (samples * 1000) / self.format.sample_rate.as_hz()
     }
-    
+
     /// Get the number of samples in the buffer
     pub fn samples(&self) -> usize {
         let bytes_per_sample = (self.format.bit_depth / 8) as usize;
@@ -213,55 +192,40 @@ impl AudioBuffer {
 pub mod prelude {
     // Re-export basic types for convenience
     pub use crate::types::{
+        // Payload types
+        payload_types::{dynamic_range, static_types},
+        AudioFrame,
         // Basic types
         DialogId,
-        MediaSessionId,
-        PayloadType,
-        MediaType,
         MediaDirection,
-        SampleRate,
-        AudioFrame,
-        VideoFrame,
         MediaPacket,
-        // Payload types
-        payload_types::{static_types, dynamic_range},
+        MediaProcessingStats,
+        MediaSessionId,
         // Statistics types
         MediaStatistics,
-        MediaProcessingStats,
+        MediaType,
+        PayloadType,
         QualityMetrics,
+        SampleRate,
+        VideoFrame,
     };
-    
+
     // Re-export from codec module
-    pub use crate::codec::{
-        mapping::CodecMapper,
-        audio::AudioCodec,
-    };
-    
-    // Re-export from engine module  
+    pub use crate::codec::{audio::AudioCodec, mapping::CodecMapper};
+
+    // Re-export from engine module
     pub use crate::engine::{
-        media_engine::MediaEngine,
         config::{
-            MediaEngineConfig,
-            AudioConfig,
-            CodecConfig,
-            QualityConfig,
-            BufferConfig,
-            PerformanceConfig,
-            AdvancedProcessingConfig,
-            EngineCapabilities,
-            AudioCodecCapability,
-            AudioProcessingCapabilities,
+            AdvancedProcessingConfig, AudioCodecCapability, AudioConfig,
+            AudioProcessingCapabilities, BufferConfig, CodecConfig, EngineCapabilities,
+            MediaEngineConfig, PerformanceConfig, QualityConfig,
         },
+        media_engine::MediaEngine,
     };
-    
+
     // Re-export from RTP core
-    pub use rvoip_rtp_core::{
-        RtpHeader,
-        RtpPacket,
-        RtpSession,
-        RtpSessionConfig,
-    };
-    
+    pub use rvoip_rtp_core::{RtpHeader, RtpPacket, RtpSession, RtpSessionConfig};
+
     // Re-export from error module
     pub use crate::error::{Error, Result};
-} 
+}

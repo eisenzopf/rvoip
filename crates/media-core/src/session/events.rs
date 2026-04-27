@@ -3,8 +3,8 @@
 //! This module defines events that MediaSession can emit to notify other components
 //! about codec changes, quality issues, and media session lifecycle events.
 
-use crate::types::{MediaSessionId, MediaType, DialogId};
 use crate::quality::metrics::QualityMetrics;
+use crate::types::{DialogId, MediaSessionId, MediaType};
 use std::time::Instant;
 
 /// Media session event types
@@ -12,29 +12,26 @@ use std::time::Instant;
 pub enum MediaSessionEventType {
     /// Session was created successfully
     SessionCreated,
-    
+
     /// Session was destroyed
     SessionDestroyed,
-    
+
     /// Codec was changed (e.g., due to negotiation or adaptation)
     CodecChanged {
         media_type: MediaType,
         old_codec: String,
         new_codec: String,
     },
-    
+
     /// Quality threshold exceeded
     QualityIssue {
         metrics: QualityMetrics,
         severity: QualitySeverity,
     },
-    
+
     /// Media processing error occurred
-    ProcessingError {
-        error_type: String,
-        details: String,
-    },
-    
+    ProcessingError { error_type: String, details: String },
+
     /// RTP packet statistics update
     PacketStats {
         packets_sent: u64,
@@ -62,13 +59,13 @@ pub enum QualitySeverity {
 pub struct MediaSessionEvent {
     /// Session that generated the event
     pub session_id: MediaSessionId,
-    
+
     /// Associated dialog ID
     pub dialog_id: DialogId,
-    
+
     /// Event type and payload
     pub event_type: MediaSessionEventType,
-    
+
     /// Event timestamp
     pub timestamp: Instant,
 }
@@ -87,17 +84,21 @@ impl MediaSessionEvent {
             timestamp: Instant::now(),
         }
     }
-    
+
     /// Create a session created event
     pub fn session_created(session_id: MediaSessionId, dialog_id: DialogId) -> Self {
         Self::new(session_id, dialog_id, MediaSessionEventType::SessionCreated)
     }
-    
+
     /// Create a session destroyed event
     pub fn session_destroyed(session_id: MediaSessionId, dialog_id: DialogId) -> Self {
-        Self::new(session_id, dialog_id, MediaSessionEventType::SessionDestroyed)
+        Self::new(
+            session_id,
+            dialog_id,
+            MediaSessionEventType::SessionDestroyed,
+        )
     }
-    
+
     /// Create a codec changed event
     pub fn codec_changed(
         session_id: MediaSessionId,
@@ -116,7 +117,7 @@ impl MediaSessionEvent {
             },
         )
     }
-    
+
     /// Create a quality issue event
     pub fn quality_issue(
         session_id: MediaSessionId,
@@ -142,7 +143,7 @@ impl QualitySeverity {
             _ => Self::Critical,
         }
     }
-    
+
     /// Get severity level as number (higher = more severe)
     pub fn level(&self) -> u8 {
         match self {
@@ -152,4 +153,4 @@ impl QualitySeverity {
             Self::Critical => 4,
         }
     }
-} 
+}

@@ -11,7 +11,7 @@ use crate::parser::token::token;
 use crate::parser::whitespace::{lws, sws};
 use crate::parser::ParseResult;
 use crate::types::allow_events::AllowEvents;
-use nom::bytes::complete::{take_while1, is_not};
+use nom::bytes::complete::{is_not, take_while1};
 use nom::character::complete::char;
 use nom::combinator::{map, opt, recognize};
 use nom::multi::separated_list1;
@@ -19,8 +19,11 @@ use nom::sequence::{preceded, separated_pair, tuple};
 
 /// Check if a byte is valid for token-nodot (excludes '.')
 fn is_token_nodot_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || 
-    matches!(c, b'-' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~')
+    c.is_ascii_alphanumeric()
+        || matches!(
+            c,
+            b'-' | b'!' | b'%' | b'*' | b'_' | b'+' | b'`' | b'\'' | b'~'
+        )
 }
 
 /// Parse a token-nodot
@@ -32,15 +35,11 @@ fn token_nodot(input: &[u8]) -> ParseResult<&[u8]> {
 /// event-type = event-package *( "." event-template )
 fn event_type(input: &[u8]) -> ParseResult<String> {
     map(
-        recognize(
-            tuple((
-                token_nodot,
-                nom::multi::many0(
-                    preceded(char('.'), token_nodot)
-                )
-            ))
-        ),
-        |bytes| std::str::from_utf8(bytes).unwrap_or("").to_string()
+        recognize(tuple((
+            token_nodot,
+            nom::multi::many0(preceded(char('.'), token_nodot)),
+        ))),
+        |bytes| std::str::from_utf8(bytes).unwrap_or("").to_string(),
     )(input)
 }
 
@@ -59,16 +58,13 @@ fn event_type(input: &[u8]) -> ParseResult<String> {
 pub fn parse_allow_events(input: &[u8]) -> ParseResult<AllowEvents> {
     // Parse any leading whitespace
     let (input, _) = sws(input)?;
-    
+
     // Parse comma-separated list of event types
-    let (input, events) = separated_list1(
-        tuple((sws, char(','), sws)),
-        event_type
-    )(input)?;
-    
+    let (input, events) = separated_list1(tuple((sws, char(','), sws)), event_type)(input)?;
+
     // Parse any trailing whitespace
     let (input, _) = sws(input)?;
-    
+
     Ok((input, AllowEvents::new(events)))
 }
 
@@ -83,7 +79,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(allow.events(), &["presence"]);
     }
-    
+
     #[test]
     fn test_parse_allow_events_multiple() {
         let input = b"presence, dialog, message-summary";
@@ -94,7 +90,7 @@ mod tests {
         assert!(allow.supports("dialog"));
         assert!(allow.supports("message-summary"));
     }
-    
+
     #[test]
     fn test_parse_allow_events_with_templates() {
         let input = b"presence.winfo, conference.floor";
@@ -102,7 +98,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(allow.events(), &["presence.winfo", "conference.floor"]);
     }
-    
+
     #[test]
     fn test_parse_allow_events_with_spaces() {
         let input = b"  presence  ,  dialog  ,  refer  ";
@@ -110,7 +106,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(allow.events().len(), 3);
     }
-    
+
     #[test]
     fn test_parse_allow_events_complex() {
         let input = b"presence, presence.winfo, dialog, message-summary, conference";
@@ -118,7 +114,7 @@ mod tests {
         assert!(rem.is_empty());
         assert_eq!(allow.events().len(), 5);
     }
-    
+
     #[test]
     fn test_parse_allow_events_empty_fails() {
         let input = b"";

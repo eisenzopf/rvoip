@@ -5,7 +5,7 @@
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-use rvoip_dialog_core::{DialogError, Dialog, DialogState};
+use rvoip_dialog_core::{Dialog, DialogError, DialogState};
 use rvoip_sip_core::Method;
 
 /// Test basic dialog creation and state management
@@ -113,7 +113,7 @@ async fn test_dialog_id_tuple() {
         None, // No remote tag
         true,
     );
-    
+
     assert!(incomplete_dialog.dialog_id_tuple().is_none());
 }
 
@@ -131,15 +131,15 @@ async fn test_dialog_request_template_creation() -> Result<(), DialogError> {
 
     // Initial CSeq should be 0
     assert_eq!(dialog.local_cseq, 0);
-    
+
     // Create a BYE request template
     let bye_request = dialog.create_request_template(Method::Bye);
     assert_eq!(dialog.local_cseq, 1); // Should increment
-    
+
     // Verify request has proper headers (using fields, not methods)
     assert_eq!(bye_request.call_id, "request-test-call-id");
     assert_eq!(bye_request.method, Method::Bye);
-    
+
     // Create another request
     let info_request = dialog.create_request_template(Method::Info);
     assert_eq!(dialog.local_cseq, 2); // Should increment further
@@ -166,13 +166,13 @@ async fn test_dialog_sequence_numbers() -> Result<(), DialogError> {
 
     // Test local sequence number management
     assert_eq!(dialog.local_cseq, 0);
-    
+
     dialog.increment_local_cseq();
     assert_eq!(dialog.local_cseq, 1);
-    
+
     // Test remote sequence number management
     assert_eq!(dialog.remote_cseq, 0); // Initially unset
-    
+
     // Test that we can manually set remote sequence number
     dialog.remote_cseq = 42;
     assert_eq!(dialog.remote_cseq, 42);
@@ -195,21 +195,29 @@ async fn test_dialog_termination_scenarios() -> Result<(), DialogError> {
             call_id.to_string(),
             "sip:alice@example.com".parse().unwrap(),
             "sip:bob@example.com".parse().unwrap(),
-            if initial_state == DialogState::Initial { Some("alice-tag".to_string()) } else { Some("alice-tag".to_string()) },
-            if initial_state == DialogState::Initial { None } else { Some("bob-tag".to_string()) },
+            if initial_state == DialogState::Initial {
+                Some("alice-tag".to_string())
+            } else {
+                Some("alice-tag".to_string())
+            },
+            if initial_state == DialogState::Initial {
+                None
+            } else {
+                Some("bob-tag".to_string())
+            },
             true,
         );
 
         // Set the desired initial state
         match initial_state {
-            DialogState::Initial => {}, // Already set
+            DialogState::Initial => {} // Already set
             DialogState::Early => {
                 dialog.state = DialogState::Early;
-            },
+            }
             DialogState::Confirmed => {
                 dialog.state = DialogState::Confirmed;
-            },
-            _ => {},
+            }
+            _ => {}
         }
 
         assert_eq!(dialog.state, initial_state);
@@ -286,10 +294,10 @@ async fn test_dialog_metadata() {
     assert_eq!(dialog.local_tag.as_ref().unwrap(), "alice-tag");
     assert_eq!(dialog.remote_tag.as_ref().unwrap(), "bob-tag");
     assert!(dialog.is_initiator);
-    
+
     // Test route set (should be empty initially)
     assert!(dialog.route_set.is_empty());
-    
+
     // Test recovery metadata (no timestamp fields)
     assert_eq!(dialog.recovery_attempts, 0);
     assert!(dialog.recovery_reason.is_none());
@@ -304,4 +312,4 @@ async fn test_dialog_lifecycle_architecture_note() {
     info!("  - transaction-core: Handles SIP message transport and routing");
     info!("  - Separation: Dialog tests focus on state, not transport");
     info!("  - Integration: Full SIP message flow tested at transaction-core level");
-} 
+}

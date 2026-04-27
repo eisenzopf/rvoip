@@ -2,14 +2,14 @@
 //!
 //! This module provides a concise, declarative macro-based syntax for creating
 //! Session Description Protocol (SDP) messages as defined in RFC 8866.
-//! 
+//!
 //! # Overview
 //!
 //! The `sdp!` macro offers a domain-specific language for defining SDP sessions
 //! with minimal boilerplate. This approach complements the builder pattern
 //! found in the `builder` module, offering different trade-offs:
 //!
-//! - **Declarative syntax**: Define SDP sessions in a nested, structured format 
+//! - **Declarative syntax**: Define SDP sessions in a nested, structured format
 //!   that closely resembles the logical structure of an SDP message
 //! - **Compile-time checks**: Benefit from Rust's macro system to catch some
 //!   structural errors at compile time
@@ -73,7 +73,7 @@
 //!     time: ("0", "0"),
 //!     media: {
 //!         type: "audio",
-//!         port: 9, 
+//!         port: 9,
 //!         protocol: "UDP/TLS/RTP/SAVPF",
 //!         formats: ["111", "103"],
 //!         rtpmap: ("111", "opus/48000/2"),
@@ -113,17 +113,17 @@
 //!
 //! Both approaches validate the resulting SDP message against RFC 8866 requirements.
 
-use crate::types::sdp::{
-    SdpSession, Origin, ConnectionData, TimeDescription, MediaDescription,
-    ParsedAttribute, RtpMapAttribute, FmtpAttribute,
-};
-use crate::sdp::attributes::MediaDirection;
 use crate::error::Result;
+use crate::sdp::attributes::MediaDirection;
+use crate::types::sdp::{
+    ConnectionData, FmtpAttribute, MediaDescription, Origin, ParsedAttribute, RtpMapAttribute,
+    SdpSession, TimeDescription,
+};
 
 /// Creates a validated SDP session with a declarative syntax
 ///
 /// The `sdp!` macro provides a structured, declarative syntax for creating SDP sessions
-/// that closely mirrors the logical structure of SDP messages. It handles parsing and 
+/// that closely mirrors the logical structure of SDP messages. It handles parsing and
 /// validation automatically, returning a `Result<SdpSession>`.
 ///
 /// # Syntax
@@ -293,13 +293,13 @@ macro_rules! sdp {
             addr_type: String::from($addr_type),
             unicast_address: String::from($unicast_address),
         };
-        
+
         // Create the session
         let mut session = SdpSession::new(origin, String::from($session_name));
-        
+
         // Clear default time description (we'll add our own below)
         session.time_descriptions.clear();
-        
+
         // Add connection info if provided
         $(
             let connection = ConnectionData {
@@ -311,7 +311,7 @@ macro_rules! sdp {
             };
             session = session.with_connection_data(connection);
         )?
-        
+
         // Add time description if provided
         $(
             let time = TimeDescription {
@@ -321,7 +321,7 @@ macro_rules! sdp {
             };
             session.time_descriptions.push(time);
         )?
-        
+
         // Add media descriptions if provided
         $(
             let mut formats_vec: Vec<String> = Vec::new();
@@ -335,7 +335,7 @@ macro_rules! sdp {
                 String::from($media_protocol),
                 formats_vec
             );
-            
+
             // Add rtpmap attributes
             $(
                 let rtpmap_parts: Vec<&str> = $rtpmap_encoding.split('/').collect();
@@ -346,7 +346,7 @@ macro_rules! sdp {
                 } else {
                     None
                 };
-                
+
                 let payload_type = $rtpmap_pt.parse::<u8>().unwrap_or(0);
                 let rtpmap = ParsedAttribute::RtpMap(RtpMapAttribute {
                     payload_type,
@@ -356,7 +356,7 @@ macro_rules! sdp {
                 });
                 media.generic_attributes.push(rtpmap);
             )*
-            
+
             // Add fmtp attributes
             $(
                 let fmtp = ParsedAttribute::Fmtp(FmtpAttribute {
@@ -365,7 +365,7 @@ macro_rules! sdp {
                 });
                 media.generic_attributes.push(fmtp);
             )*
-            
+
             // Add direction if provided
             $(
                 let direction = match $media_direction {
@@ -378,10 +378,10 @@ macro_rules! sdp {
                 media.direction = Some(direction);
                 media.generic_attributes.push(ParsedAttribute::Direction(direction));
             )?
-            
+
             session.add_media(media);
         )*
-        
+
         // Validate the SDP session
         $crate::sdp::parser::validate_sdp(&session).map(|_| session)
     }};
@@ -390,7 +390,7 @@ macro_rules! sdp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_basic_sdp_macro() {
         // Create a minimal SDP session with one audio media section
@@ -409,30 +409,34 @@ mod tests {
                 direction: "sendrecv"
             }
         };
-        
+
         // Verify the session is valid
-        assert!(session.is_ok(), "SDP validation failed: {:?}", session.err());
-        
+        assert!(
+            session.is_ok(),
+            "SDP validation failed: {:?}",
+            session.err()
+        );
+
         let session = session.unwrap();
-        
+
         // Verify basic session properties
         assert_eq!(session.origin.username, "-");
         assert_eq!(session.origin.sess_id, "1234567890");
         assert_eq!(session.origin.sess_version, "2");
         assert_eq!(session.origin.unicast_address, "192.168.1.100");
         assert_eq!(session.session_name, "Test SDP Session");
-        
+
         // Verify connection info
         assert!(session.connection_info.is_some());
         if let Some(conn) = &session.connection_info {
             assert_eq!(conn.connection_address, "192.168.1.100");
         }
-        
+
         // Verify time description
         assert_eq!(session.time_descriptions.len(), 1);
         assert_eq!(session.time_descriptions[0].start_time, "0");
         assert_eq!(session.time_descriptions[0].stop_time, "0");
-        
+
         // Verify media section
         assert_eq!(session.media_descriptions.len(), 1);
         let media = &session.media_descriptions[0];
@@ -441,9 +445,11 @@ mod tests {
         assert_eq!(media.protocol, "RTP/AVP");
         assert_eq!(media.formats, vec!["0", "8"]);
         assert_eq!(media.direction, Some(MediaDirection::SendRecv));
-        
+
         // Verify rtpmap attributes
-        let rtpmaps: Vec<_> = media.generic_attributes.iter()
+        let rtpmaps: Vec<_> = media
+            .generic_attributes
+            .iter()
             .filter_map(|attr| {
                 if let ParsedAttribute::RtpMap(rtpmap) = attr {
                     Some(rtpmap)
@@ -452,7 +458,7 @@ mod tests {
                 }
             })
             .collect();
-        
+
         assert_eq!(rtpmaps.len(), 2);
         assert_eq!(rtpmaps[0].payload_type, 0);
         assert_eq!(rtpmaps[0].encoding_name, "PCMU");
@@ -461,7 +467,7 @@ mod tests {
         assert_eq!(rtpmaps[1].encoding_name, "PCMA");
         assert_eq!(rtpmaps[1].clock_rate, 8000);
     }
-    
+
     #[test]
     fn test_minimal_sdp_macro() {
         // Create an SDP with only the required fields
@@ -469,10 +475,13 @@ mod tests {
             origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
             session_name: "Minimal SDP Session"
         };
-        
+
         // This should fail validation as it's missing required fields (time description)
-        assert!(session.is_err(), "Minimal SDP without time should fail validation");
-        
+        assert!(
+            session.is_err(),
+            "Minimal SDP without time should fail validation"
+        );
+
         // Create a minimal valid SDP
         let session = sdp! {
             origin: ("-", "1234567890", "2", "IN", "IP4", "192.168.1.100"),
@@ -480,10 +489,14 @@ mod tests {
             connection: ("IN", "IP4", "192.168.1.100"),
             time: ("0", "0")
         };
-        
+
         // This should pass validation
-        assert!(session.is_ok(), "Minimal valid SDP failed validation: {:?}", session.err());
-        
+        assert!(
+            session.is_ok(),
+            "Minimal valid SDP failed validation: {:?}",
+            session.err()
+        );
+
         let session = session.unwrap();
         assert_eq!(session.origin.username, "-");
         assert_eq!(session.session_name, "Minimal SDP Session");
@@ -491,7 +504,7 @@ mod tests {
         assert_eq!(session.time_descriptions.len(), 1);
         assert_eq!(session.media_descriptions.len(), 0);
     }
-    
+
     #[test]
     fn test_multi_media_sdp_macro() {
         // Create an SDP with multiple media sections
@@ -519,40 +532,43 @@ mod tests {
                 direction: "sendrecv"
             }
         };
-        
+
         // Verify the session is valid
-        assert!(session.is_ok(), "Multi-media SDP validation failed: {:?}", session.err());
-        
+        assert!(
+            session.is_ok(),
+            "Multi-media SDP validation failed: {:?}",
+            session.err()
+        );
+
         let session = session.unwrap();
-        
+
         // Verify we have two media sections
         assert_eq!(session.media_descriptions.len(), 2);
-        
+
         // Verify audio media
         let audio = &session.media_descriptions[0];
         assert_eq!(audio.media, "audio");
         assert_eq!(audio.port, 49170);
         assert_eq!(audio.formats, vec!["0", "8"]);
-        
+
         // Verify video media
         let video = &session.media_descriptions[1];
         assert_eq!(video.media, "video");
         assert_eq!(video.port, 51372);
         assert_eq!(video.formats, vec!["96"]);
-        
+
         // Verify fmtp in video
-        let fmtp = video.generic_attributes.iter()
-            .find_map(|attr| {
-                if let ParsedAttribute::Fmtp(fmtp) = attr {
-                    Some(fmtp)
-                } else {
-                    None
-                }
-            });
-        
+        let fmtp = video.generic_attributes.iter().find_map(|attr| {
+            if let ParsedAttribute::Fmtp(fmtp) = attr {
+                Some(fmtp)
+            } else {
+                None
+            }
+        });
+
         assert!(fmtp.is_some());
         let fmtp = fmtp.unwrap();
         assert_eq!(fmtp.format, "96");
         assert_eq!(fmtp.parameters, "profile-level-id=42e01f");
     }
-} 
+}

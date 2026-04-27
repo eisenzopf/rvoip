@@ -135,46 +135,43 @@
 //! [`Config`]: unified::Config
 
 // Core modules only
-pub mod types;      // Core types (legacy)
-pub mod events;     // Event-driven API for v3
-pub mod unified;    // Unified API
-pub mod builder;    // Session builder
-pub mod simple;     // Simple peer API (legacy — use StreamPeer instead)
+pub mod builder; // Session builder
+pub mod events; // Event-driven API for v3
+pub mod simple;
+pub mod types; // Core types (legacy)
+pub mod unified; // Unified API // Simple peer API (legacy — use StreamPeer instead)
 
 // New v3 API modules
-pub mod audio;          // AudioStream, AudioSender, AudioReceiver
-pub mod handle;         // SessionHandle, CallId
-pub mod incoming;       // IncomingCall, IncomingCallGuard
-pub mod stream_peer;    // StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder
-pub mod callback_peer;  // CallbackPeer, CallHandler, CallHandlerDecision, EndReason
-pub mod handlers;       // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
+pub mod audio; // AudioStream, AudioSender, AudioReceiver
+pub mod callback_peer; // CallbackPeer, CallHandler, CallHandlerDecision, EndReason
+pub mod handle; // SessionHandle, CallId
+pub mod handlers;
+pub mod incoming; // IncomingCall, IncomingCallGuard
+pub mod stream_peer; // StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
 
 // Re-export the main types
 pub use types::{
-    SessionId, CallSession, CallDecision,
-    SessionStats, MediaInfo, AudioStreamConfig,
-    parse_sdp_connection, SdpInfo,
+    parse_sdp_connection, AudioStreamConfig, CallDecision, CallSession, MediaInfo, SdpInfo,
+    SessionId, SessionStats,
 };
 // IncomingCall from types (data-only, legacy) is NOT re-exported here to avoid
 // clash with the new IncomingCall in `incoming`. Use `api::types::IncomingCall` if needed.
 pub use crate::types::CallState;
 
 // Re-export the unified API
-pub use unified::{UnifiedCoordinator, Config, RegistrationHandle};
+pub use unified::{Config, RegistrationHandle, UnifiedCoordinator};
 
 // Re-export the simple API (legacy)
 pub use simple::SimplePeer;
 
 // Re-export event types
-pub use events::{
-    Event, CallHandle, CallId,
-};
+pub use events::{CallHandle, CallId, Event};
 
 // Re-export builder
 pub use builder::SessionBuilder;
 
 // Re-export from state table for consistency
-pub use crate::state_table::types::{Role, EventType};
+pub use crate::state_table::types::{EventType, Role};
 
 // Error types
 pub use crate::errors::{Result, SessionError};
@@ -182,7 +179,7 @@ pub use crate::errors::{Result, SessionError};
 // ── New public API surface ──────────────────────────────────────────────────
 
 // Audio
-pub use audio::{AudioStream, AudioSender, AudioReceiver};
+pub use audio::{AudioReceiver, AudioSender, AudioStream};
 
 // SessionHandle
 pub use handle::SessionHandle;
@@ -194,7 +191,7 @@ pub use types::DialogIdentity;
 pub use incoming::{IncomingCall, IncomingCallGuard};
 
 // StreamPeer (replaces SimplePeer for new code)
-pub use stream_peer::{StreamPeer, PeerControl, EventReceiver};
+pub use stream_peer::{EventReceiver, PeerControl, StreamPeer};
 
 // CallbackPeer (reactive server-style)
-pub use callback_peer::{CallbackPeer, CallHandler, CallHandlerDecision, EndReason};
+pub use callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, EndReason};

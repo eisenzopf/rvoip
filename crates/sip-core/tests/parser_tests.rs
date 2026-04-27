@@ -3,8 +3,8 @@
 // Public module declarations to include tests
 pub mod parser {
     pub mod header_parser_test;
-    pub mod uri_parser_test;
     pub mod message_parser_test;
+    pub mod uri_parser_test;
 }
 
 // Import common test utilities
@@ -15,17 +15,15 @@ mod common;
 #[cfg(test)]
 mod parser_tests {
     use std::str::FromStr;
-    
+
     // Import core types directly with current paths
-    use rvoip_sip_core::{
-        types::{
-            content_type::ContentType,
-            cseq::CSeq,
-            call_id::CallId,
-            content_length::ContentLength,
-            method::Method,
-            uri::{Uri, Scheme},
-        }
+    use rvoip_sip_core::types::{
+        call_id::CallId,
+        content_length::ContentLength,
+        content_type::ContentType,
+        cseq::CSeq,
+        method::Method,
+        uri::{Scheme, Uri},
     };
 
     #[test]
@@ -64,4 +62,4 @@ mod parser_tests {
     }
 
     // We won't test Via header directly since it seems to have a more complex API
-} 
+}

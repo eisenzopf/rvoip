@@ -45,22 +45,22 @@
 //! assert_eq!(from.uri.to_string(), "sip:bob@example.org");
 //! ```
 
-use crate::types::header::Header;
-use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, TypedHeaderTrait};
-use crate::types::address::Address;
-use serde::{Deserialize, Serialize};
-use std::fmt;
-use std::str::FromStr;
 use crate::error::{Error, Result};
 use crate::parser::parse_address; // For FromStr
-use std::ops::Deref;
+use crate::types::address::Address;
+use crate::types::header::Header;
+use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, TypedHeaderTrait};
 use nom::combinator;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 /// Represents the From header field (RFC 3261 Section 8.1.1.3).
 /// Contains the logical identity of the initiator of the request.
 ///
-/// The From header is a critical component of SIP messages that identifies the 
-/// initiator of a request. It consists of an Address, which may include a display name, 
+/// The From header is a critical component of SIP messages that identifies the
+/// initiator of a request. It consists of an Address, which may include a display name,
 /// a SIP URI, and parameters, most importantly the 'tag' parameter.
 ///
 /// The 'tag' parameter, combined with the To tag and Call-ID, forms a dialog ID
@@ -366,7 +366,8 @@ impl TypedHeaderTrait for From {
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::From {
             return Err(Error::InvalidHeader(format!(
-                "Expected From header, got {:?}", header.name
+                "Expected From header, got {:?}",
+                header.name
             )));
         }
 
@@ -381,11 +382,14 @@ impl TypedHeaderTrait for From {
                 if let Ok(s) = std::str::from_utf8(&bytes) {
                     Self::from_str(s)
                 } else {
-                    Err(Error::ParseError("Invalid UTF-8 in From header".to_string()))
+                    Err(Error::ParseError(
+                        "Invalid UTF-8 in From header".to_string(),
+                    ))
                 }
-            },
+            }
             _ => Err(Error::InvalidHeader(format!(
-                "Unexpected value type for From header: {:?}", header.value
+                "Unexpected value type for From header: {:?}",
+                header.value
             ))),
         }
     }
@@ -417,4 +421,4 @@ mod tests {
     }
 }
 
-// ... Display/FromStr impls ... 
+// ... Display/FromStr impls ...

@@ -2,8 +2,8 @@
 //!
 //! This module handles routing of SIP messages to appropriate dialogs.
 
+pub mod dialog_matcher;
 pub mod request_router;
 pub mod response_router;
-pub mod dialog_matcher;
 
-// TODO: Re-export main types 
+// TODO: Re-export main types

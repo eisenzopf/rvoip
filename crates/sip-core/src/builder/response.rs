@@ -1,28 +1,21 @@
-use std::str::FromStr;
 use bytes::Bytes;
+use std::str::FromStr;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    Method,
-    StatusCode,
-    Version,
-    sip_response::Response,
-    sip_request::Request,
-    uri::{Uri, Host, Scheme},
-    to::To,
-    from::From,
     call_id::CallId,
-    cseq::CSeq,
     contact::{Contact, ContactParamInfo, ContactValue},
-    content_type::ContentType,
     content_length::ContentLength,
-    via::{Via, ViaHeader, SentProtocol},
-    Address,
-    TypedHeader,
-    Param,
-    HeaderName,
-    HeaderValue,
+    content_type::ContentType,
+    cseq::CSeq,
+    from::From,
     headers::header_access::HeaderAccess,
+    sip_request::Request,
+    sip_response::Response,
+    to::To,
+    uri::{Host, Scheme, Uri},
+    via::{SentProtocol, Via, ViaHeader},
+    Address, HeaderName, HeaderValue, Method, Param, StatusCode, TypedHeader, Version,
 };
 
 /// # SIP Response Builder
@@ -32,8 +25,8 @@ use crate::types::{
 ///
 /// ## SIP Response Overview
 ///
-/// SIP (Session Initiation Protocol) responses are messages sent by servers to clients in response 
-/// to client requests. Each response contains a status code indicating the outcome, a reason phrase, 
+/// SIP (Session Initiation Protocol) responses are messages sent by servers to clients in response
+/// to client requests. Each response contains a status code indicating the outcome, a reason phrase,
 /// and various headers providing additional information.
 ///
 /// A typical SIP response looks like:
@@ -247,14 +240,14 @@ impl SimpleResponseBuilder {
     /// ```
     pub fn new(status: StatusCode, reason: Option<&str>) -> Self {
         let mut response = Response::new(status);
-        
+
         if let Some(reason_text) = reason {
             response = response.with_reason(reason_text);
         }
-        
+
         Self { response }
     }
-    
+
     /// Create a response for a request with automatic header copying according to SIP standards
     ///
     /// This method creates a response based on an existing request, automatically copying
@@ -292,9 +285,9 @@ impl SimpleResponseBuilder {
         reason: Option<&str>,
     ) -> Self {
         let mut builder = Self::new(status, reason);
-        
+
         // Headers that MUST be copied from request to response (RFC 3261 Section 8.2.6.2)
-        
+
         // Copy From header (must be copied unchanged)
         if let Some(from) = request.from() {
             builder = builder.from(
@@ -303,7 +296,7 @@ impl SimpleResponseBuilder {
                 from.tag(),
             );
         }
-        
+
         // Copy To header (server may add tag for non-100 responses)
         if let Some(to) = request.to() {
             builder = builder.to(
@@ -312,17 +305,17 @@ impl SimpleResponseBuilder {
                 to.tag(), // Copy existing tag if present
             );
         }
-        
+
         // Copy Call-ID header (must be copied unchanged)
         if let Some(call_id) = request.call_id() {
             builder = builder.call_id(&call_id.to_string());
         }
-        
+
         // Copy CSeq header (must be copied unchanged)
         if let Some(cseq) = request.cseq() {
             builder = builder.cseq(cseq.sequence(), cseq.method().clone());
         }
-        
+
         // Copy all Via headers in same order (must be copied unchanged)
         for via in request.via_headers() {
             for via_header in via.headers() {
@@ -333,16 +326,16 @@ impl SimpleResponseBuilder {
                     via_header.sent_by_host.to_string()
                 };
                 let transport = via_header.sent_protocol.transport.clone();
-                
+
                 // RFC 3261 requires preserving ALL Via header parameters, not just branch
                 // So instead of using the simplified via() method, we need to copy the complete header
                 let mut params = Vec::new();
-                
+
                 // Copy all parameters from the original Via header
                 for param in &via_header.params {
                     params.push(param.clone());
                 }
-                
+
                 // Create Via header with all parameters preserved
                 if let Ok(complete_via) = Via::new(
                     &via_header.sent_protocol.name,
@@ -350,87 +343,87 @@ impl SimpleResponseBuilder {
                     &transport,
                     &via_header.sent_by_host.to_string(),
                     via_header.sent_by_port,
-                    params
+                    params,
                 ) {
                     builder = builder.header(TypedHeader::Via(complete_via));
                 }
             }
         }
-        
+
         // Copy Record-Route headers in the same order for potential dialog establishment
         for header in request.headers(&HeaderName::RecordRoute) {
             builder = builder.header(header.clone());
         }
-        
+
         // Copy useful optional headers if present in the request
-        
+
         // Supported header (indicates supported extensions)
         for header in request.headers(&HeaderName::Supported) {
             builder = builder.header(header.clone());
         }
-        
+
         // Allow header (indicates allowed methods)
         for header in request.headers(&HeaderName::Allow) {
             builder = builder.header(header.clone());
         }
-        
+
         // Require header (mandatory extensions)
         for header in request.headers(&HeaderName::Require) {
             // Only copy if we actually support all required extensions
             // In practice, a real implementation would check this
             builder = builder.header(header.clone());
         }
-        
+
         // Event header for subscription scenarios
         for header in request.headers(&HeaderName::Event) {
             builder = builder.header(header.clone());
         }
-        
+
         // Additional headers that may appear multiple times
-        
+
         // Warning headers
         for header in request.headers(&HeaderName::Warning) {
             builder = builder.header(header.clone());
         }
-        
+
         // Accept headers
         for header in request.headers(&HeaderName::Accept) {
             builder = builder.header(header.clone());
         }
-        
+
         // Accept-Encoding headers
         for header in request.headers(&HeaderName::AcceptEncoding) {
             builder = builder.header(header.clone());
         }
-        
+
         // Accept-Language headers
         for header in request.headers(&HeaderName::AcceptLanguage) {
             builder = builder.header(header.clone());
         }
-        
+
         // Content-Encoding headers
         for header in request.headers(&HeaderName::ContentEncoding) {
             builder = builder.header(header.clone());
         }
-        
+
         // Content-Language headers
         for header in request.headers(&HeaderName::ContentLanguage) {
             builder = builder.header(header.clone());
         }
-        
+
         // Proxy-Require headers
         for header in request.headers(&HeaderName::ProxyRequire) {
             builder = builder.header(header.clone());
         }
-        
+
         // Unsupported headers
         for header in request.headers(&HeaderName::Unsupported) {
             builder = builder.header(header.clone());
         }
-        
+
         builder
     }
-    
+
     /// Create a standard dialog-establishing response
     ///
     /// This is a convenience method that creates a response with the standard set of headers
@@ -465,13 +458,9 @@ impl SimpleResponseBuilder {
     ///     .contact("sip:bob@192.168.1.2:5060", None)
     ///     .build();
     /// ```
-    pub fn dialog_response(
-        request: &Request,
-        status: StatusCode,
-        reason: Option<&str>,
-    ) -> Self {
+    pub fn dialog_response(request: &Request, status: StatusCode, reason: Option<&str>) -> Self {
         let mut builder = Self::response_from_request(request, status, reason);
-        
+
         // For dialog establishment, ensure To has a tag if not already present
         // (non-100 responses should have a To tag for dialog establishment)
         if let Some(to) = request.to() {
@@ -481,14 +470,14 @@ impl SimpleResponseBuilder {
                 builder = builder.to(
                     to.address().display_name().unwrap_or_default(),
                     &to.address().uri.to_string(),
-                    Some("local-tag-value") // In a real implementation, generate a unique tag
+                    Some("local-tag-value"), // In a real implementation, generate a unique tag
                 );
             }
         }
-        
+
         builder
     }
-    
+
     /// Create a minimal error response
     ///
     /// This is a convenience method that creates a response with the minimal set of headers
@@ -522,13 +511,9 @@ impl SimpleResponseBuilder {
     /// let not_found = SimpleResponseBuilder::error_response(&request, StatusCode::NotFound, None)
     ///     .build();
     /// ```
-    pub fn error_response(
-        request: &Request,
-        status: StatusCode,
-        reason: Option<&str>,
-    ) -> Self {
+    pub fn error_response(request: &Request, status: StatusCode, reason: Option<&str>) -> Self {
         let mut builder = Self::new(status, reason);
-        
+
         // Copy From with tag
         if let Some(from) = request.from() {
             builder = builder.from(
@@ -537,7 +522,7 @@ impl SimpleResponseBuilder {
                 from.tag(),
             );
         }
-        
+
         // Copy To (typically without tag for error responses)
         if let Some(to) = request.to() {
             builder = builder.to(
@@ -546,48 +531,48 @@ impl SimpleResponseBuilder {
                 to.tag(), // Copy the tag if present, don't add one
             );
         }
-        
+
         // Copy Call-ID
         if let Some(call_id) = request.call_id() {
             builder = builder.call_id(&call_id.to_string());
         }
-        
+
         // Copy CSeq
         if let Some(cseq) = request.cseq() {
             builder = builder.cseq(cseq.sequence(), cseq.method().clone());
         }
-        
+
         // Copy ONLY the first Via header for error responses
         if let Some(via) = request.via_headers().first() {
             if let Some(via_header) = via.headers().first() {
                 let host = via_header.sent_by_host.to_string();
                 let transport = via_header.sent_protocol.transport.clone();
                 let branch = via_header.branch();
-                
+
                 builder = builder.via(&host, &transport, branch);
             }
         }
-        
+
         // For specific error types, add appropriate headers
         match status {
             StatusCode::Unauthorized => {
                 // Would add WWW-Authenticate header in a real implementation
-            },
+            }
             StatusCode::ProxyAuthenticationRequired => {
                 // Would add Proxy-Authenticate header in a real implementation
-            },
+            }
             StatusCode::UnsupportedMediaType => {
                 // Would add Accept, Accept-Encoding, Accept-Language headers
-            },
+            }
             StatusCode::BadExtension => {
                 // Would add Unsupported header
-            },
+            }
             _ => {}
         }
-        
+
         builder
     }
-    
+
     /// Create from an existing Response object
     ///
     /// This allows you to modify an existing response by using the builder pattern.
@@ -613,7 +598,7 @@ impl SimpleResponseBuilder {
     pub fn from_response(response: Response) -> Self {
         Self { response }
     }
-    
+
     /// Create a 200 OK response
     ///
     /// This is a convenience constructor for creating a 200 OK response as specified
@@ -638,7 +623,7 @@ impl SimpleResponseBuilder {
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleResponseBuilder;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a 200 OK response accepting an INVITE request
     /// let ok_response = SimpleResponseBuilder::ok()
     ///     // Copy headers from the original request
@@ -661,7 +646,7 @@ impl SimpleResponseBuilder {
     /// use rvoip_sip_core::types::Method;
     /// use rvoip_sip_core::sdp::SdpBuilder;
     /// use rvoip_sip_core::sdp::attributes::MediaDirection;
-    /// 
+    ///
     /// // Create an SDP answer using the SdpBuilder pattern
     /// let sdp_answer = SdpBuilder::new("SIP Call")
     ///     .origin("bob", "2890844527", "2890844527", "IN", "IP4", "192.168.1.2")
@@ -693,7 +678,7 @@ impl SimpleResponseBuilder {
         let response = Response::ok();
         Self { response }
     }
-    
+
     /// Create a 100 Trying response
     ///
     /// This is a convenience constructor for creating a 100 Trying response as specified
@@ -757,7 +742,7 @@ impl SimpleResponseBuilder {
         let response = Response::trying();
         Self { response }
     }
-    
+
     /// Create a 180 Ringing response
     ///
     /// This is a convenience constructor for creating a 180 Ringing response as specified
@@ -836,7 +821,7 @@ impl SimpleResponseBuilder {
         let response = Response::ringing();
         Self { response }
     }
-    
+
     /// Create a 400 Bad Request response
     ///
     /// This is a convenience constructor for creating a 400 Bad Request response as specified
@@ -889,7 +874,7 @@ impl SimpleResponseBuilder {
     /// use rvoip_sip_core::types::{Method, TypedHeader, Warning};
     ///
     /// // Create an explanation of the syntax error in plain text
-    /// let error_body = 
+    /// let error_body =
     ///     "The request contained a malformed header:\r\n\
     ///     Contact: <sip:bob@example.com missing-bracket\r\n\
     ///     \r\n\
@@ -911,7 +896,7 @@ impl SimpleResponseBuilder {
     pub fn bad_request() -> Self {
         Self::new(StatusCode::BadRequest, None)
     }
-    
+
     /// Create a 404 Not Found response
     ///
     /// This is a convenience constructor for creating a 404 Not Found response as specified
@@ -976,7 +961,7 @@ impl SimpleResponseBuilder {
     pub fn not_found() -> Self {
         Self::new(StatusCode::NotFound, None)
     }
-    
+
     /// Create a 401 Unauthorized response
     ///
     /// This is a convenience constructor for creating a 401 Unauthorized response as specified
@@ -1004,7 +989,7 @@ impl SimpleResponseBuilder {
     pub fn unauthorized() -> Self {
         Self::new(StatusCode::Unauthorized, None)
     }
-    
+
     /// Create a 403 Forbidden response
     ///
     /// This is a convenience constructor for creating a 403 Forbidden response as specified
@@ -1031,7 +1016,7 @@ impl SimpleResponseBuilder {
     pub fn forbidden() -> Self {
         Self::new(StatusCode::Forbidden, None)
     }
-    
+
     /// Create a 423 Interval Too Brief response
     ///
     /// This is a convenience constructor for creating a 423 Interval Too Brief response as specified
@@ -1059,7 +1044,7 @@ impl SimpleResponseBuilder {
     pub fn interval_too_brief() -> Self {
         Self::new(StatusCode::IntervalTooBrief, None)
     }
-    
+
     /// Create a 489 Bad Event response
     ///
     /// This is a convenience constructor for creating a 489 Bad Event response as specified
@@ -1087,7 +1072,7 @@ impl SimpleResponseBuilder {
     pub fn bad_event() -> Self {
         Self::new(StatusCode::BadEvent, None)
     }
-    
+
     /// Create a 500 Server Error response
     ///
     /// This is a convenience constructor for creating a 500 Server Internal Error response as specified
@@ -1112,7 +1097,7 @@ impl SimpleResponseBuilder {
     /// ```rust
     /// use rvoip_sip_core::builder::SimpleResponseBuilder;
     /// use rvoip_sip_core::types::Method;
-    /// 
+    ///
     /// // Create a 500 Server Error response for an INVITE
     /// let server_error_response = SimpleResponseBuilder::server_error()
     ///     // Include original headers from the request
@@ -1193,7 +1178,7 @@ impl SimpleResponseBuilder {
         use crate::builder::headers::FromBuilderExt;
         FromBuilderExt::from(self, display_name, uri, tag)
     }
-    
+
     /// Add a To header with optional tag parameter
     ///
     /// Creates and adds a To header as specified in [RFC 3261 Section 20.39](https://datatracker.ietf.org/doc/html/rfc3261#section-20.39).
@@ -1220,7 +1205,7 @@ impl SimpleResponseBuilder {
         use crate::builder::headers::ToBuilderExt;
         ToBuilderExt::to(self, display_name, uri, tag)
     }
-    
+
     /// Add a Call-ID header
     ///
     /// Creates and adds a Call-ID header as specified in [RFC 3261 Section 20.8](https://datatracker.ietf.org/doc/html/rfc3261#section-20.8).
@@ -1245,7 +1230,7 @@ impl SimpleResponseBuilder {
         use crate::builder::headers::CallIdBuilderExt;
         CallIdBuilderExt::call_id(self, call_id)
     }
-    
+
     /// Add a CSeq header for responses (requires method)
     ///
     /// Creates and adds a CSeq header as specified in [RFC 3261 Section 20.16](https://datatracker.ietf.org/doc/html/rfc3261#section-20.16).
@@ -1271,7 +1256,7 @@ impl SimpleResponseBuilder {
         use crate::builder::headers::CSeqBuilderExt;
         CSeqBuilderExt::cseq_with_method(self, seq, method)
     }
-    
+
     /// Add a Via header with optional branch parameter
     ///
     /// Creates and adds a Via header as specified in [RFC 3261 Section 20.42](https://datatracker.ietf.org/doc/html/rfc3261#section-20.42).
@@ -1298,7 +1283,7 @@ impl SimpleResponseBuilder {
         use crate::builder::headers::ViaBuilderExt;
         ViaBuilderExt::via(self, host, transport, branch)
     }
-    
+
     /// Add a Contact header
     ///
     /// Creates and adds a Contact header as specified in [RFC 3261 Section 20.10](https://datatracker.ietf.org/doc/html/rfc3261#section-20.10).
@@ -1324,7 +1309,7 @@ impl SimpleResponseBuilder {
         use crate::builder::headers::ContactBuilderExt;
         ContactBuilderExt::contact(self, uri, display_name)
     }
-    
+
     /// Add a Content-Type header
     ///
     /// Creates and adds a Content-Type header as specified in [RFC 3261 Section 20.15](https://datatracker.ietf.org/doc/html/rfc3261#section-20.15).
@@ -1349,14 +1334,14 @@ impl SimpleResponseBuilder {
         match ContentType::from_str(content_type) {
             Ok(ct) => {
                 self.response = self.response.with_header(TypedHeader::ContentType(ct));
-            },
+            }
             Err(_) => {
                 // Silently fail - content-type is not critical
             }
         }
         self
     }
-    
+
     /// Add a SIP-ETag header
     ///
     /// Sets the SIP-ETag header in PUBLISH responses as specified
@@ -1379,10 +1364,12 @@ impl SimpleResponseBuilder {
     /// ```
     pub fn sip_etag(mut self, etag: &str) -> Self {
         use crate::types::sip_etag::SipETag;
-        self.response = self.response.with_header(TypedHeader::SipETag(SipETag::new(etag)));
+        self.response = self
+            .response
+            .with_header(TypedHeader::SipETag(SipETag::new(etag)));
         self
     }
-    
+
     /// Add an Allow-Events header
     ///
     /// Sets the Allow-Events header to indicate supported event packages as specified
@@ -1406,10 +1393,12 @@ impl SimpleResponseBuilder {
     pub fn allow_events(mut self, events: &[&str]) -> Self {
         use crate::types::allow_events::AllowEvents;
         let events_vec: Vec<String> = events.iter().map(|e| e.to_string()).collect();
-        self.response = self.response.with_header(TypedHeader::AllowEvents(AllowEvents::new(events_vec)));
+        self.response = self
+            .response
+            .with_header(TypedHeader::AllowEvents(AllowEvents::new(events_vec)));
         self
     }
-    
+
     /// Add an Expires header
     ///
     /// Sets the Expires header for responses to REGISTER, SUBSCRIBE, and PUBLISH requests.
@@ -1434,7 +1423,7 @@ impl SimpleResponseBuilder {
         // Use the builder's header method which properly handles single-value headers
         self.header(TypedHeader::Expires(Expires::new(seconds)))
     }
-    
+
     /// Add a Min-Expires header
     ///
     /// Sets the Min-Expires header in 423 Interval Too Brief responses.
@@ -1456,10 +1445,12 @@ impl SimpleResponseBuilder {
     /// ```
     pub fn min_expires(mut self, seconds: u32) -> Self {
         use crate::types::min_expires::MinExpires;
-        self.response = self.response.with_header(TypedHeader::MinExpires(MinExpires::new(seconds)));
+        self.response = self
+            .response
+            .with_header(TypedHeader::MinExpires(MinExpires::new(seconds)));
         self
     }
-    
+
     /// Add WWW-Authenticate header with Digest challenge
     ///
     /// # Parameters
@@ -1489,10 +1480,12 @@ impl SimpleResponseBuilder {
     pub fn www_authenticate_digest(mut self, realm: &str, nonce: &str) -> Self {
         use crate::types::auth::WwwAuthenticate;
         let www_auth = WwwAuthenticate::new(realm, nonce);
-        self.response = self.response.with_header(TypedHeader::WwwAuthenticate(www_auth));
+        self.response = self
+            .response
+            .with_header(TypedHeader::WwwAuthenticate(www_auth));
         self
     }
-    
+
     /// Add WWW-Authenticate header with Bearer challenge
     ///
     /// # Parameters
@@ -1521,10 +1514,12 @@ impl SimpleResponseBuilder {
     pub fn www_authenticate_bearer(mut self, realm: &str) -> Self {
         use crate::types::auth::WwwAuthenticate;
         let www_auth = WwwAuthenticate::new_bearer(realm);
-        self.response = self.response.with_header(TypedHeader::WwwAuthenticate(www_auth));
+        self.response = self
+            .response
+            .with_header(TypedHeader::WwwAuthenticate(www_auth));
         self
     }
-    
+
     /// Add WWW-Authenticate header with Bearer challenge including error
     ///
     /// # Parameters
@@ -1553,21 +1548,23 @@ impl SimpleResponseBuilder {
     ///     .build();
     /// ```
     pub fn www_authenticate_bearer_error(
-        mut self, 
-        realm: &str, 
-        error: &str, 
-        error_description: Option<&str>
+        mut self,
+        realm: &str,
+        error: &str,
+        error_description: Option<&str>,
     ) -> Self {
         use crate::types::auth::WwwAuthenticate;
         let www_auth = WwwAuthenticate::new_bearer_error(
-            realm, 
-            error, 
-            error_description.map(|s| s.to_string())
+            realm,
+            error,
+            error_description.map(|s| s.to_string()),
         );
-        self.response = self.response.with_header(TypedHeader::WwwAuthenticate(www_auth));
+        self.response = self
+            .response
+            .with_header(TypedHeader::WwwAuthenticate(www_auth));
         self
     }
-    
+
     /// Add a generic header
     ///
     /// Allows adding any supported SIP header type using the [`TypedHeader`][`crate::types::TypedHeader`] enum.
@@ -1699,7 +1696,7 @@ impl SimpleResponseBuilder {
         self.response.headers.push(header);
         self
     }
-    
+
     /// Add body content and update Content-Length
     ///
     /// Adds a message body to the response and automatically sets the Content-Length header
@@ -1739,7 +1736,7 @@ impl SimpleResponseBuilder {
         self.response = self.response.with_body(body);
         self
     }
-    
+
     /// Build the final Response
     ///
     /// Finalizes the response construction and returns the complete SIP response.

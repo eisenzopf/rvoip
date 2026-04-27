@@ -1,34 +1,41 @@
 // RFC 3261 Section 25.1 & Authentication Sections
 // Common components for challenge/credentials parsing
 
-use crate::parser::common_chars::{lhex, digit};
-use crate::parser::token::token;
+use crate::parser::common_chars::{digit, lhex};
 use crate::parser::quoted::quoted_string;
 use crate::parser::separators::{comma, equal, ldquot, rdquot};
+use crate::parser::token::token;
 use crate::parser::uri::parse_uri;
 use crate::parser::whitespace::lws;
 use crate::parser::ParseResult;
 // Keep types used internally or returned by base parsers
-use crate::types::auth::{Algorithm, Qop, AuthParam, DigestParam, AuthenticationInfoParam};
+use crate::types::auth::{Algorithm, AuthParam, AuthenticationInfoParam, DigestParam, Qop};
 use crate::types::Uri;
 use nom::{
     branch::alt,
-    bytes::complete::{self as bytes, take_while1, take_while, tag_no_case, tag},
+    bytes::complete::{self as bytes, tag, tag_no_case, take_while, take_while1},
     character::complete::char,
-    combinator::{map, map_res, opt, value, recognize, verify},
-    multi::{many0, separated_list0, separated_list1, many_m_n},
+    combinator::{map, map_res, opt, recognize, value, verify},
+    error::{make_error, Error as NomError, ErrorKind, ParseError},
+    multi::{many0, many_m_n, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, separated_pair},
-    IResult,
-    error::{Error as NomError, ErrorKind, make_error, ParseError},
-    Err,
+    Err, IResult,
 };
 use std::str::{self, FromStr, Utf8Error}; // Add Utf8Error
 
 // Helper function to check if a byte is a valid token character
 fn is_token_char(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || 
-    c == b'-' || c == b'.' || c == b'!' || c == b'%' || c == b'*' || 
-    c == b'_' || c == b'+' || c == b'`' || c == b'\'' || c == b'~'
+    c.is_ascii_alphanumeric()
+        || c == b'-'
+        || c == b'.'
+        || c == b'!'
+        || c == b'%'
+        || c == b'*'
+        || c == b'_'
+        || c == b'+'
+        || c == b'`'
+        || c == b'\''
+        || c == b'~'
 }
 
 // auth-scheme = token
@@ -38,29 +45,32 @@ pub fn auth_scheme(input: &[u8]) -> ParseResult<String> {
     if input.iter().any(|&c| c == b'@') {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
     }
-    
+
     let mut i = 0;
     let len = input.len();
-    
+
     // Check if we have at least one character
     if len == 0 {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
     }
-    
+
     // Verify the first character is valid (not whitespace)
     if !is_token_char(input[0]) {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
     }
-    
+
     // Find the end of the token
     while i < len && is_token_char(input[i]) {
         i += 1;
     }
-    
+
     // Convert to string
     match str::from_utf8(&input[0..i]) {
         Ok(s) => Ok((&input[i..], s.to_string())),
-        Err(_) => Err(nom::Err::Error(NomError::new(input, ErrorKind::AlphaNumeric)))
+        Err(_) => Err(nom::Err::Error(NomError::new(
+            input,
+            ErrorKind::AlphaNumeric,
+        ))),
     }
 }
 
@@ -81,12 +91,16 @@ pub fn auth_param(input: &[u8]) -> ParseResult<AuthParam> {
         separated_pair(auth_param_name, equal, auth_value),
         |(name_bytes, value_bytes)| {
             // Specify error type for map_res
-            let name = str::from_utf8(name_bytes).map_err(|_| NomError::new(name_bytes, ErrorKind::Char))?.to_string();
-            let value = str::from_utf8(value_bytes).map_err(|_| NomError::new(value_bytes, ErrorKind::Char))?.to_string();
-            
+            let name = str::from_utf8(name_bytes)
+                .map_err(|_| NomError::new(name_bytes, ErrorKind::Char))?
+                .to_string();
+            let value = str::from_utf8(value_bytes)
+                .map_err(|_| NomError::new(value_bytes, ErrorKind::Char))?
+                .to_string();
+
             // RFC 3261 is strict about realm for Digest scheme, but we need to be lenient
             // for other schemes where the requirement might not be enforced
-            
+
             Ok::<_, NomError<&[u8]>>(AuthParam { name, value }) // Explicit Ok type needed by map_res
         },
     )(input)
@@ -142,7 +156,7 @@ pub fn opaque(input: &[u8]) -> ParseResult<String> {
 // Let's simplify for now and parse as a single quoted string.
 // Returns String
 pub fn domain(input: &[u8]) -> ParseResult<String> {
-     map_res(
+    map_res(
         preceded(bytes::tag_no_case("domain"), preceded(equal, quoted_string)),
         |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
@@ -170,49 +184,45 @@ pub fn stale(input: &[u8]) -> ParseResult<bool> {
 pub fn algorithm(input: &[u8]) -> ParseResult<Algorithm> {
     let (input, _) = tag_no_case(b"algorithm")(input)?;
     let (input, _) = tag(b"=")(input)?;
-    
+
     // Check if value is quoted
     if !input.is_empty() && input[0] == b'"' {
         // Parse quoted algorithm value
-        let (input, quoted_value) = delimited(
-            tag(b"\""), 
-            take_while(|c| c != b'"'), 
-            tag(b"\"")
-        )(input)?;
-        
+        let (input, quoted_value) =
+            delimited(tag(b"\""), take_while(|c| c != b'"'), tag(b"\""))(input)?;
+
         // Convert to uppercase for comparison
         let value = quoted_value.to_ascii_uppercase();
-        
+
         let algorithm = match value.as_slice() {
             b"MD5" => Algorithm::Md5,
             b"MD5-SESS" => Algorithm::Md5Sess,
             b"SHA-256" => Algorithm::Sha256,
             _ => Algorithm::Other(String::from_utf8_lossy(quoted_value).to_string()),
         };
-        
+
         Ok((input, algorithm))
     } else {
         // Parse unquoted algorithm value
         let (input, value) = take_while(is_token_char)(input)?;
-        
+
         if value.is_empty() {
             return Err(Err::Error(make_error(input, ErrorKind::TakeWhile1)));
         }
-        
+
         // Convert to uppercase for comparison
         let value = value.to_ascii_uppercase();
-        
+
         let algorithm = match value.as_slice() {
             b"MD5" => Algorithm::Md5,
             b"MD5-SESS" => Algorithm::Md5Sess,
             b"SHA-256" => Algorithm::Sha256,
             _ => Algorithm::Other(String::from_utf8_lossy(&value).to_string()),
         };
-        
+
         Ok((input, algorithm))
     }
 }
-
 
 // qop-value = "auth" / "auth-int" / token
 // Returns Qop enum
@@ -242,7 +252,10 @@ fn username_value(input: &[u8]) -> ParseResult<&[u8]> {
 // Returns String
 pub fn username(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(bytes::tag_no_case("username"), preceded(equal, username_value)),
+        preceded(
+            bytes::tag_no_case("username"),
+            preceded(equal, username_value),
+        ),
         |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
@@ -256,16 +269,13 @@ fn digest_uri_value_content(input: &[u8]) -> ParseResult<&[u8]> {
 // digest-uri = "uri" EQUAL LDQUOT digest-uri-value RDQUOT ; Corrected grammar
 // Returns Uri struct
 pub fn digest_uri(input: &[u8]) -> ParseResult<'_, Uri> {
-    let (rest, _) = preceded(
-        bytes::tag_no_case("uri"),
-        equal
-    )(input)?;
-    
+    let (rest, _) = preceded(bytes::tag_no_case("uri"), equal)(input)?;
+
     let (rest, value) = quoted_string(rest)?;
-    
+
     // Parse the URI from the quoted string
     let (_, uri) = parse_uri(value)?;
-    
+
     Ok((rest, uri))
 }
 
@@ -277,19 +287,18 @@ fn is_hex_digit(c: u8) -> bool {
 // request-digest = LDQUOT 32LHEX RDQUOT ; RFC 2617 specifies 32 hex digits
 // However, we'll allow other lengths as some implementations don't adhere strictly to 32
 fn request_digest(input: &[u8]) -> ParseResult<&[u8]> {
-    delimited(
-        ldquot,
-        take_while1(is_hex_digit),
-        rdquot
-    )(input)
+    delimited(ldquot, take_while1(is_hex_digit), rdquot)(input)
 }
 
 // dresponse = "response" EQUAL request-digest
 // Returns String (hex digest)
 pub fn dresponse(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(bytes::tag_no_case("response"), preceded(equal, request_digest)),
-        |bytes| str::from_utf8(bytes).map(String::from)
+        preceded(
+            bytes::tag_no_case("response"),
+            preceded(equal, request_digest),
+        ),
+        |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
 
@@ -303,7 +312,7 @@ fn cnonce_value(input: &[u8]) -> ParseResult<&[u8]> {
 pub fn cnonce(input: &[u8]) -> ParseResult<String> {
     map_res(
         preceded(bytes::tag_no_case("cnonce"), preceded(equal, cnonce_value)),
-        |bytes| str::from_utf8(bytes).map(String::from)
+        |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
 
@@ -311,10 +320,7 @@ pub fn cnonce(input: &[u8]) -> ParseResult<String> {
 // Note: This is different from qop-options in challenge, value is not quoted
 // Returns Qop enum
 pub fn message_qop(input: &[u8]) -> ParseResult<Qop> {
-    preceded(
-        bytes::tag_no_case("qop"),
-        preceded(equal, qop_value)
-    )(input)
+    preceded(bytes::tag_no_case("qop"), preceded(equal, qop_value))(input)
 }
 
 // nc-value = 8LHEX
@@ -324,14 +330,14 @@ fn nc_value(input: &[u8]) -> ParseResult<&[u8]> {
     if input.len() < 8 {
         return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
     }
-    
+
     // Check that the first 8 characters are all hex digits (0-9, a-f, A-F)
     for &c in &input[0..8] {
         if !(c.is_ascii_digit() || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F')) {
             return Err(nom::Err::Error(NomError::new(input, ErrorKind::TakeWhile1)));
         }
     }
-    
+
     // Return the 8 characters
     Ok((&input[8..], &input[0..8]))
 }
@@ -339,28 +345,27 @@ fn nc_value(input: &[u8]) -> ParseResult<&[u8]> {
 // nonce-count = "nc" EQUAL nc-value
 // Returns u32 (parsed hex)
 pub fn nonce_count(input: &[u8]) -> ParseResult<u32> {
-    let (rem, nc_bytes) = preceded(
-        bytes::tag_no_case("nc"),
-        preceded(equal, nc_value)
-    )(input)?;
-    
+    let (rem, nc_bytes) = preceded(bytes::tag_no_case("nc"), preceded(equal, nc_value))(input)?;
+
     // Convert Utf8Error and ParseIntError into nom::Err::Failure
     let s = str::from_utf8(nc_bytes)
         .map_err(|_| nom::Err::Error(NomError::new(nc_bytes, ErrorKind::Char)))?;
-    
+
     let value = u32::from_str_radix(s, 16)
         .map_err(|_| nom::Err::Error(NomError::new(nc_bytes, ErrorKind::Digit)))?;
-    
+
     Ok((rem, value))
 }
-
 
 // nextnonce = "nextnonce" EQUAL nonce-value
 // Returns String
 pub fn nextnonce(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(bytes::tag_no_case("nextnonce"), preceded(equal, nonce_value)),
-        |bytes| str::from_utf8(bytes).map(String::from)
+        preceded(
+            bytes::tag_no_case("nextnonce"),
+            preceded(equal, nonce_value),
+        ),
+        |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
 
@@ -373,8 +378,11 @@ fn response_digest(input: &[u8]) -> ParseResult<&[u8]> {
 // Returns String (hex digest)
 pub fn response_auth(input: &[u8]) -> ParseResult<String> {
     map_res(
-        preceded(bytes::tag_no_case("rspauth"), preceded(equal, response_digest)),
-        |bytes| str::from_utf8(bytes).map(String::from)
+        preceded(
+            bytes::tag_no_case("rspauth"),
+            preceded(equal, response_digest),
+        ),
+        |bytes| str::from_utf8(bytes).map(String::from),
     )(input)
 }
 
@@ -427,7 +435,7 @@ pub fn digest_credential(input: &[u8]) -> ParseResult<Vec<DigestParam>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::auth::{DigestParam, Qop, Algorithm, AuthParam};
+    use crate::types::auth::{Algorithm, AuthParam, DigestParam, Qop};
 
     #[test]
     fn test_auth_scheme() {
@@ -663,7 +671,8 @@ mod tests {
         // Test invalid cases
         assert!(dresponse(b"response=\"xyz\"").is_err()); // Invalid hex chars
         assert!(dresponse(b"response=\"\"").is_err()); // Empty value
-        assert!(dresponse(b"response=1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d").is_err()); // Not quoted
+        assert!(dresponse(b"response=1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d").is_err());
+        // Not quoted
     }
 
     #[test]
@@ -777,17 +786,20 @@ mod tests {
                 assert_eq!(qops.len(), 2);
                 assert_eq!(qops[0], Qop::Auth);
                 assert_eq!(qops[1], Qop::AuthInt);
-            },
+            }
             _ => panic!("Expected Qop parameter"),
         }
 
         // Test unknown parameter
         let (rem, param) = digest_param(b"custom=\"value\"").unwrap();
         assert!(rem.is_empty());
-        assert_eq!(param, DigestParam::Param(AuthParam { 
-            name: "custom".to_string(), 
-            value: "value".to_string() 
-        }));
+        assert_eq!(
+            param,
+            DigestParam::Param(AuthParam {
+                name: "custom".to_string(),
+                value: "value".to_string()
+            })
+        );
 
         // Test trailing content
         let (rem, param) = digest_param(b"realm=\"example.com\",").unwrap();
@@ -806,39 +818,39 @@ mod tests {
         // Verify specific parameters
         assert!(params.iter().any(|p| match p {
             DigestParam::Username(u) => u == "alice",
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::Realm(r) => r == "example.com",
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::Nonce(n) => n == "1234abcd",
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::Uri(u) => u.to_string() == "sip:bob@example.com",
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::Response(r) => r == "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d",
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::Algorithm(a) => *a == Algorithm::Md5,
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::Cnonce(c) => c == "0a1b2c3d",
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::MsgQop(q) => *q == Qop::Auth,
-            _ => false
+            _ => false,
         }));
         assert!(params.iter().any(|p| match p {
             DigestParam::NonceCount(nc) => *nc == 1,
-            _ => false
+            _ => false,
         }));
 
         // Test with a subset of parameters
@@ -862,10 +874,10 @@ mod tests {
             Ok((rem, params)) => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(rem, b" nonce=\"1234abcd\"");
-            },
+            }
             Err(_) => {
                 panic!("Parser should parse the first parameter and return remainder");
             }
         }
     }
-} 
+}

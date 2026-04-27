@@ -1,7 +1,7 @@
 //! Configuration for users-core
 
-use serde::Deserialize;
 use crate::jwt::JwtConfig;
+use serde::Deserialize;
 
 /// Main configuration
 #[derive(Debug, Clone, Deserialize)]
@@ -33,7 +33,7 @@ pub struct TlsSettings {
     pub enabled: bool,
     pub cert_path: String,
     pub key_path: String,
-    pub require_tls: bool,  // If true, refuse to start without TLS
+    pub require_tls: bool, // If true, refuse to start without TLS
 }
 
 impl Default for TlsSettings {
@@ -42,7 +42,7 @@ impl Default for TlsSettings {
             enabled: false,
             cert_path: "certs/server.crt".to_string(),
             key_path: "certs/server.key".to_string(),
-            require_tls: true,  // Fail safe by default
+            require_tls: true, // Fail safe by default
         }
     }
 }

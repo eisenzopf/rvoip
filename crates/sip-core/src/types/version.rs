@@ -245,12 +245,12 @@ mod tests {
         let v = Version::from_str("SIP/2.0").unwrap();
         assert_eq!(v.major, 2);
         assert_eq!(v.minor, 0);
-        
+
         // Case insensitive
         let v = Version::from_str("sip/2.0").unwrap();
         assert_eq!(v.major, 2);
         assert_eq!(v.minor, 0);
-        
+
         // Invalid format
         assert!(Version::from_str("2.0").is_err());
         assert!(Version::from_str("SIP/a.0").is_err());
@@ -262,7 +262,7 @@ mod tests {
     fn test_version_display() {
         let v = Version::new(2, 0);
         assert_eq!(v.to_string(), "SIP/2.0");
-        
+
         let v = Version::new(3, 1);
         assert_eq!(v.to_string(), "SIP/3.1");
     }
@@ -274,4 +274,4 @@ mod tests {
         assert_eq!(v.minor, 0);
         assert_eq!(v, Version::sip_2_0());
     }
-} 
+}

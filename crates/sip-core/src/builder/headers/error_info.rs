@@ -1,11 +1,11 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
     error_info::{ErrorInfo, ErrorInfoHeader, ErrorInfoList},
+    headers::header_access::HeaderAccess,
     headers::HeaderName,
     headers::TypedHeader,
-    headers::header_access::HeaderAccess,
 };
-use super::HeaderSetter;
 
 /// Error-Info header builder
 ///
@@ -137,7 +137,7 @@ pub trait ErrorInfoBuilderExt {
     /// // The response now includes an Error-Info header with the specified URI
     /// ```
     fn error_info_uri(self, uri: &str) -> Self;
-    
+
     /// Add an Error-Info header with a URI and a parameter
     ///
     /// This method adds an Error-Info header with a URI and a single parameter,
@@ -169,7 +169,7 @@ pub trait ErrorInfoBuilderExt {
     /// // The response now includes an Error-Info header with the URI and parameter
     /// ```
     fn error_info_uri_with_param(self, uri: &str, param_name: &str, param_value: &str) -> Self;
-    
+
     /// Add an Error-Info header with a URI and multiple parameters
     ///
     /// This method adds an Error-Info header with a URI and multiple parameters
@@ -195,7 +195,7 @@ pub trait ErrorInfoBuilderExt {
     ///     .from("Server", "sip:server.example.com", Some("xyz"))
     ///     .to("User", "sip:user@example.com", Some("abc"))
     ///     .error_info_uri_with_params(
-    ///         "sip:overloaded@example.com", 
+    ///         "sip:overloaded@example.com",
     ///         vec![
     ///             ("reason", "capacity-exceeded"),
     ///             ("retry-after", "300")
@@ -206,7 +206,7 @@ pub trait ErrorInfoBuilderExt {
     /// // The response now includes an Error-Info header with multiple parameters
     /// ```
     fn error_info_uri_with_params(self, uri: &str, params: Vec<(&str, &str)>) -> Self;
-    
+
     /// Add an Error-Info header with a URI and a comment
     ///
     /// This method adds an Error-Info header with a URI and a human-readable comment
@@ -240,7 +240,7 @@ pub trait ErrorInfoBuilderExt {
     /// // The response now includes an Error-Info header with a URI and comment
     /// ```
     fn error_info_uri_with_comment(self, uri: &str, comment: &str) -> Self;
-    
+
     /// Add multiple Error-Info headers to a response
     ///
     /// This method adds multiple Error-Info headers to a response, each with a different
@@ -275,8 +275,8 @@ pub trait ErrorInfoBuilderExt {
     fn error_info_uris(self, uris: Vec<&str>) -> Self;
 }
 
-impl<T> ErrorInfoBuilderExt for T 
-where 
+impl<T> ErrorInfoBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn error_info_uri(self, uri: &str) -> Self {
@@ -285,14 +285,14 @@ where
         header.error_info_list.add(error_info);
         self.set_header(header)
     }
-    
+
     fn error_info_uri_with_param(self, uri: &str, param_name: &str, param_value: &str) -> Self {
         let error_info = ErrorInfo::new(uri).with_param(param_name, param_value);
         let mut header = ErrorInfoHeader::new();
         header.error_info_list.add(error_info);
         self.set_header(header)
     }
-    
+
     fn error_info_uri_with_params(self, uri: &str, params: Vec<(&str, &str)>) -> Self {
         let mut error_info = ErrorInfo::new(uri);
         for (name, value) in params {
@@ -302,14 +302,14 @@ where
         header.error_info_list.add(error_info);
         self.set_header(header)
     }
-    
+
     fn error_info_uri_with_comment(self, uri: &str, comment: &str) -> Self {
         let error_info = ErrorInfo::new(uri).with_comment(comment);
         let mut header = ErrorInfoHeader::new();
         header.error_info_list.add(error_info);
         self.set_header(header)
     }
-    
+
     fn error_info_uris(self, uris: Vec<&str>) -> Self {
         let mut header = ErrorInfoHeader::new();
         for uri in uris {
@@ -322,25 +322,28 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
-    use crate::{RequestBuilder, ResponseBuilder};
-    use std::str::FromStr;
-    use std::convert::TryFrom;
     use crate::types::header::TypedHeaderTrait;
     use crate::types::TypedHeader;
+    use crate::types::{method::Method, uri::Uri, version::Version, StatusCode};
+    use crate::{RequestBuilder, ResponseBuilder};
+    use std::convert::TryFrom;
+    use std::str::FromStr;
 
     #[test]
     fn test_error_info_uri() {
         let response = ResponseBuilder::new(StatusCode::NotFound, Some("Not Found"))
             .error_info_uri("https://example.com/errors/user-not-found.html")
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::ErrorInfo(header)) = response.header(&HeaderName::ErrorInfo) {
             assert_eq!(header.error_info_list.len(), 1);
-            assert_eq!(header.error_info_list.items[0].uri, "https://example.com/errors/user-not-found.html");
+            assert_eq!(
+                header.error_info_list.items[0].uri,
+                "https://example.com/errors/user-not-found.html"
+            );
         } else {
             panic!("Error-Info header not found or has wrong type");
         }
@@ -351,11 +354,17 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::BusyHere, Some("Busy Here"))
             .error_info_uri_with_param("sip:busy@example.com", "reason", "in-call")
             .build();
-            
+
         if let Some(TypedHeader::ErrorInfo(header)) = response.header(&HeaderName::ErrorInfo) {
             assert_eq!(header.error_info_list.len(), 1);
             assert_eq!(header.error_info_list.items[0].uri, "sip:busy@example.com");
-            assert_eq!(header.error_info_list.items[0].parameters.get("reason").unwrap(), "in-call");
+            assert_eq!(
+                header.error_info_list.items[0]
+                    .parameters
+                    .get("reason")
+                    .unwrap(),
+                "in-call"
+            );
         } else {
             panic!("Error-Info header not found or has wrong type");
         }
@@ -363,21 +372,34 @@ mod tests {
 
     #[test]
     fn test_error_info_uri_with_params() {
-        let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, Some("Service Unavailable"))
-            .error_info_uri_with_params(
-                "sip:overloaded@example.com", 
-                vec![
-                    ("reason", "capacity-exceeded"),
-                    ("retry-after", "300")
-                ]
-            )
-            .build();
-            
+        let response =
+            ResponseBuilder::new(StatusCode::ServiceUnavailable, Some("Service Unavailable"))
+                .error_info_uri_with_params(
+                    "sip:overloaded@example.com",
+                    vec![("reason", "capacity-exceeded"), ("retry-after", "300")],
+                )
+                .build();
+
         if let Some(TypedHeader::ErrorInfo(header)) = response.header(&HeaderName::ErrorInfo) {
             assert_eq!(header.error_info_list.len(), 1);
-            assert_eq!(header.error_info_list.items[0].uri, "sip:overloaded@example.com");
-            assert_eq!(header.error_info_list.items[0].parameters.get("reason").unwrap(), "capacity-exceeded");
-            assert_eq!(header.error_info_list.items[0].parameters.get("retry-after").unwrap(), "300");
+            assert_eq!(
+                header.error_info_list.items[0].uri,
+                "sip:overloaded@example.com"
+            );
+            assert_eq!(
+                header.error_info_list.items[0]
+                    .parameters
+                    .get("reason")
+                    .unwrap(),
+                "capacity-exceeded"
+            );
+            assert_eq!(
+                header.error_info_list.items[0]
+                    .parameters
+                    .get("retry-after")
+                    .unwrap(),
+                "300"
+            );
         } else {
             panic!("Error-Info header not found or has wrong type");
         }
@@ -388,14 +410,20 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServerInternalError, Some("Server Error"))
             .error_info_uri_with_comment(
                 "https://example.com/errors/server-error.html",
-                "See this page for error details and status"
+                "See this page for error details and status",
             )
             .build();
-            
+
         if let Some(TypedHeader::ErrorInfo(header)) = response.header(&HeaderName::ErrorInfo) {
             assert_eq!(header.error_info_list.len(), 1);
-            assert_eq!(header.error_info_list.items[0].uri, "https://example.com/errors/server-error.html");
-            assert_eq!(header.error_info_list.items[0].comment.as_ref().unwrap(), "See this page for error details and status");
+            assert_eq!(
+                header.error_info_list.items[0].uri,
+                "https://example.com/errors/server-error.html"
+            );
+            assert_eq!(
+                header.error_info_list.items[0].comment.as_ref().unwrap(),
+                "See this page for error details and status"
+            );
         } else {
             panic!("Error-Info header not found or has wrong type");
         }
@@ -406,14 +434,20 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::ServerInternalError, Some("Server Error"))
             .error_info_uris(vec![
                 "http://example.com/sounds/server-error.wav",
-                "https://example.com/errors/server-error.html"
+                "https://example.com/errors/server-error.html",
             ])
             .build();
-            
+
         if let Some(TypedHeader::ErrorInfo(header)) = response.header(&HeaderName::ErrorInfo) {
             assert_eq!(header.error_info_list.len(), 2);
-            assert_eq!(header.error_info_list.items[0].uri, "http://example.com/sounds/server-error.wav");
-            assert_eq!(header.error_info_list.items[1].uri, "https://example.com/errors/server-error.html");
+            assert_eq!(
+                header.error_info_list.items[0].uri,
+                "http://example.com/sounds/server-error.wav"
+            );
+            assert_eq!(
+                header.error_info_list.items[1].uri,
+                "https://example.com/errors/server-error.html"
+            );
         } else {
             panic!("Error-Info header not found or has wrong type");
         }
@@ -425,13 +459,16 @@ mod tests {
             .error_info_uri("http://example.com/sounds/server-error.wav")
             .error_info_uri_with_comment(
                 "https://example.com/errors/server-error.html",
-                "See this page for error details"
+                "See this page for error details",
             )
             .build();
-        
+
         if let Some(TypedHeader::ErrorInfo(header)) = response.header(&HeaderName::ErrorInfo) {
             assert_eq!(header.error_info_list.len(), 1);
-            assert_eq!(header.error_info_list.items[0].uri, "http://example.com/sounds/server-error.wav");
+            assert_eq!(
+                header.error_info_list.items[0].uri,
+                "http://example.com/sounds/server-error.wav"
+            );
         } else {
             panic!("Error-Info header not found in response");
         }
@@ -443,11 +480,11 @@ mod tests {
         let error_info = ErrorInfo::new("sip:busy@example.com").with_param("reason", "busy");
         let mut header = ErrorInfoHeader::new();
         header.error_info_list.add(error_info);
-        
+
         // Convert to a generic Header through TypedHeaderTrait
         let generic_header = header.to_header();
         println!("Generic header: {:?}", generic_header);
-        
+
         // Try to convert back to TypedHeader
         match TypedHeader::try_from(generic_header) {
             Ok(typed_header) => {
@@ -456,24 +493,24 @@ mod tests {
                 match typed_header {
                     TypedHeader::ErrorInfo(ei) => {
                         println!("Successfully got ErrorInfoHeader: {:?}", ei);
-                    },
+                    }
                     _ => {
                         println!("Got wrong TypedHeader variant: {:?}", typed_header);
                     }
                 }
-            },
+            }
             Err(e) => {
                 println!("Failed to convert to TypedHeader: {:?}", e);
             }
         }
-        
+
         // Now try via the builder
         let response = ResponseBuilder::new(StatusCode::NotFound, Some("Not Found"))
             .error_info_uri("sip:busy@example.com")
             .build();
-            
+
         println!("Response headers: {:?}", response.headers);
-        
+
         // Check if the header is present
         if let Some(h) = response.header(&HeaderName::ErrorInfo) {
             println!("Found ErrorInfo header: {:?}", h);
@@ -484,4 +521,4 @@ mod tests {
             }
         }
     }
-} 
+}

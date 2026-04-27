@@ -7,8 +7,4 @@
 
 pub mod publish;
 
-pub use publish::{
-    PublishBuilder,
-    PublishResponse,
-    PresencePublisher,
-};
+pub use publish::{PresencePublisher, PublishBuilder, PublishResponse};

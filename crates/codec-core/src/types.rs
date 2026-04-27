@@ -378,8 +378,6 @@ impl CodecConfig {
         Self::new(CodecType::G711Pcma)
     }
 
-
-
     /// Create G.729 configuration
     pub fn g729() -> Self {
         Self::new(CodecType::G729)
@@ -419,37 +417,37 @@ impl CodecConfig {
         self.parameters = parameters;
         self
     }
-    
+
     /// Set Opus application type
     pub fn with_opus_application(mut self, application: OpusApplication) -> Self {
         self.parameters.opus.application = application;
         self
     }
-    
+
     /// Set Opus VBR mode
     pub fn with_opus_vbr(mut self, vbr: bool) -> Self {
         self.parameters.opus.vbr = vbr;
         self
     }
-    
+
     /// Set Opus complexity
     pub fn with_opus_complexity(mut self, complexity: u8) -> Self {
         self.parameters.opus.complexity = complexity;
         self
     }
-    
+
     /// Set Opus FEC
     pub fn with_opus_fec(mut self, fec: bool) -> Self {
         self.parameters.opus.inband_fec = fec;
         self
     }
-    
+
     /// Set G.729 VAD
     pub fn with_g729_vad(mut self, vad: bool) -> Self {
         self.parameters.g729.vad_enabled = vad;
         self
     }
-    
+
     /// Set G.729 CNG
     pub fn with_g729_cng(mut self, cng: bool) -> Self {
         self.parameters.g729.cng_enabled = cng;
@@ -523,8 +521,6 @@ pub struct G711Parameters {
     pub use_alaw: bool,
 }
 
-
-
 /// G.729 codec parameters
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct G729Parameters {
@@ -532,7 +528,7 @@ pub struct G729Parameters {
     pub annex_a: bool,
     /// Enable G.729 Annex B (VAD/DTX/CNG - ~50% bandwidth savings)
     pub annex_b: bool,
-    
+
     // Legacy fields for backward compatibility (deprecated)
     /// Use reduced complexity mode (Annex A) - DEPRECATED: use annex_a instead
     #[deprecated(since = "0.1.14", note = "use annex_a instead")]
@@ -548,8 +544,8 @@ pub struct G729Parameters {
 impl Default for G729Parameters {
     fn default() -> Self {
         Self {
-            annex_a: true,  // Default to reduced complexity
-            annex_b: true,  // Default to VAD/DTX/CNG enabled (G.729BA)
+            annex_a: true, // Default to reduced complexity
+            annex_b: true, // Default to VAD/DTX/CNG enabled (G.729BA)
             #[allow(deprecated)]
             reduced_complexity: true,
             #[allow(deprecated)]
@@ -683,8 +679,8 @@ mod tests {
         let config = CodecConfig::g711_pcmu();
         assert!(config.validate().is_ok());
 
-        let invalid_config = CodecConfig::new(CodecType::G711Pcmu)
-            .with_sample_rate(SampleRate::Rate48000); // Invalid for G.711
+        let invalid_config =
+            CodecConfig::new(CodecType::G711Pcmu).with_sample_rate(SampleRate::Rate48000); // Invalid for G.711
         assert!(invalid_config.validate().is_err());
     }
 
@@ -708,4 +704,4 @@ mod tests {
         let empty_frame = AudioFrame::new(vec![], SampleRate::Rate8000, 1);
         assert!(empty_frame.validate().is_err());
     }
-} 
+}

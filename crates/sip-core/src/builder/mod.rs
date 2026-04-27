@@ -1,13 +1,13 @@
 #![doc = include_str!("builder.md")]
 
-mod request;
-mod response;
 pub mod headers;
 pub mod multipart;
-pub use request::SimpleRequestBuilder;
-pub use response::SimpleResponseBuilder;
+mod request;
+mod response;
 pub use headers::*;
 pub use multipart::MultipartBodyBuilder;
+pub use request::SimpleRequestBuilder;
+pub use response::SimpleResponseBuilder;
 
 #[cfg(test)]
-mod tests; 
+mod tests;

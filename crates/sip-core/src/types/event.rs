@@ -58,10 +58,10 @@
 //! // // let event = Event::from_str(parsed_event_val) ... (if FromStr is on Event value)
 //! ```
 
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
-use std::collections::BTreeMap;
-use serde::{Serialize, Deserialize};
 
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::{Error, Result}; // Assuming Result is crate::error::Result
@@ -244,7 +244,8 @@ impl FromStr for Event {
         // Requires the parser function to be accessible and to handle the whole value string.
         // crate::parser::headers::event::parse_event_header_value is the target.
         match crate::parser::headers::event::parse_event_header_value(s.as_bytes()) {
-            Ok((_rem, event)) => { // _rem should be empty if parse_event_header_value used eof correctly
+            Ok((_rem, event)) => {
+                // _rem should be empty if parse_event_header_value used eof correctly
                 // The `parse_event_header_value` already ensures full consumption via `terminated(..., eof)`.
                 // So, if Ok, it means the whole string was validly parsed.
                 Ok(event)
@@ -262,8 +263,7 @@ impl FromStr for Event {
             }
             Err(nom::Err::Incomplete(needed)) => Err(Error::Parser(format!(
                 "Failed to parse Event value string \'{}\': Incomplete input, needed: {:?}",
-                s,
-                needed
+                s, needed
             ))),
         }
     }
@@ -283,8 +283,9 @@ impl TypedHeaderTrait for Event {
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
             return Err(Error::InvalidHeader(format!(
-                "Mismatched header for Event: expected {}, got {}", 
-                Self::header_name(), header.name
+                "Mismatched header for Event: expected {}, got {}",
+                Self::header_name(),
+                header.name
             )));
         }
 
@@ -292,15 +293,16 @@ impl TypedHeaderTrait for Event {
             HeaderValue::Raw(bytes) => {
                 // Use the FromStr implementation for Event which calls the parser
                 // This requires `bytes` to be valid UTF-8 for `from_str`.
-                let value_str = std::str::from_utf8(bytes).map_err(|e| 
+                let value_str = std::str::from_utf8(bytes).map_err(|e| {
                     Error::Parser(format!("Invalid UTF-8 in Event header value: {}", e))
-                )?;
+                })?;
                 Event::from_str(value_str) // This now calls the FromStr for Event above
             }
             // No HeaderValue::Event variant expected as per previous discussion
             _ => Err(Error::InvalidHeader(format!(
                 "Unexpected header value type for {}: expected Raw, got {:?}",
-                Self::header_name(), header.value // Using Debug for header.value
+                Self::header_name(),
+                header.value // Using Debug for header.value
             ))),
         }
     }
@@ -310,12 +312,15 @@ impl TypedHeaderTrait for Event {
 mod tests {
     use super::*;
     use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
-    use crate::Error as SipError; 
+    use crate::Error as SipError;
     use std::str::FromStr;
 
     #[test]
     fn test_event_type_display() {
-        assert_eq!(EventType::Package("presence".to_string()).to_string(), "<presence>");
+        assert_eq!(
+            EventType::Package("presence".to_string()).to_string(),
+            "<presence>"
+        );
         assert_eq!(EventType::Token("dialog".to_string()).to_string(), "dialog");
     }
 
@@ -339,12 +344,16 @@ mod tests {
         let event4 = Event::new(EventType::Token("another".to_string()))
             .with_id("ID-XYZ".to_string())
             .with_param("UPPERCASE_PARAM", Some("Value".to_string()));
-        assert_eq!(event4.to_string(), "another;id=ID-XYZ;UPPERCASE_PARAM=Value");
+        assert_eq!(
+            event4.to_string(),
+            "another;id=ID-XYZ;UPPERCASE_PARAM=Value"
+        );
     }
 
     #[test]
     fn test_event_id_case_sensitivity_in_value() {
-        let event = Event::new(EventType::Token("test".to_string())).with_id("CaseSensitiveID".to_string());
+        let event =
+            Event::new(EventType::Token("test".to_string())).with_id("CaseSensitiveID".to_string());
         assert_eq!(event.id, Some("CaseSensitiveID".to_string()));
         assert_eq!(event.to_string(), "test;id=CaseSensitiveID");
     }
@@ -364,7 +373,10 @@ mod tests {
         assert_eq!(event.event_type, EventType::Token("presence".to_string()));
         assert_eq!(event.id, Some("123".to_string()));
         assert_eq!(event.params.get("flag"), Some(&ParamValue::None));
-        assert_eq!(event.params.get("foo"), Some(&ParamValue::Value("bar".to_string())));
+        assert_eq!(
+            event.params.get("foo"),
+            Some(&ParamValue::Value("bar".to_string()))
+        );
     }
 
     #[test]
@@ -411,41 +423,62 @@ mod tests {
     #[test]
     fn test_typed_header_trait_from_header_basic() {
         let header_value_str = "presence;id=abc-123;status=online";
-        let header = Header::new(HeaderName::Event, HeaderValue::text(header_value_str.to_string()));
-        
+        let header = Header::new(
+            HeaderName::Event,
+            HeaderValue::text(header_value_str.to_string()),
+        );
+
         let event = Event::from_header(&header).expect("Should parse successfully");
 
         assert_eq!(event.event_type, EventType::Token("presence".to_string()));
         assert_eq!(event.id, Some("abc-123".to_string()));
-        assert_eq!(event.params.get("status"), Some(&ParamValue::Value("online".to_string())));
+        assert_eq!(
+            event.params.get("status"),
+            Some(&ParamValue::Value("online".to_string()))
+        );
     }
 
     #[test]
     fn test_typed_header_trait_from_header_package_type() {
         let header_value_str = "<conference-info>;id=conf-xyz;version=2";
-        let header = Header::new(HeaderName::Event, HeaderValue::text(header_value_str.to_string()));
-        
+        let header = Header::new(
+            HeaderName::Event,
+            HeaderValue::text(header_value_str.to_string()),
+        );
+
         let event = Event::from_header(&header).expect("Should parse package type");
 
-        assert_eq!(event.event_type, EventType::Package("conference-info".to_string()));
+        assert_eq!(
+            event.event_type,
+            EventType::Package("conference-info".to_string())
+        );
         assert_eq!(event.id, Some("conf-xyz".to_string()));
-        assert_eq!(event.params.get("version"), Some(&ParamValue::Value("2".to_string())));
+        assert_eq!(
+            event.params.get("version"),
+            Some(&ParamValue::Value("2".to_string()))
+        );
     }
 
     #[test]
     fn test_typed_header_trait_from_header_flag_param() {
         let header_value_str = "dialog;id=12345;notify-only";
-        let header = Header::new(HeaderName::Event, HeaderValue::text(header_value_str.to_string()));
+        let header = Header::new(
+            HeaderName::Event,
+            HeaderValue::text(header_value_str.to_string()),
+        );
 
         let event = Event::from_header(&header).expect("Should parse flag param");
         assert_eq!(event.params.get("notify-only"), Some(&ParamValue::None));
     }
-    
+
     #[test]
     fn test_typed_header_trait_from_header_no_id_no_params() {
         let header_value_str = "keep-alive";
-        let header = Header::new(HeaderName::Event, HeaderValue::text(header_value_str.to_string()));
-        
+        let header = Header::new(
+            HeaderName::Event,
+            HeaderValue::text(header_value_str.to_string()),
+        );
+
         let event = Event::from_header(&header).expect("Should parse event type only");
         assert_eq!(event.event_type, EventType::Token("keep-alive".to_string()));
         assert!(event.id.is_none());
@@ -454,7 +487,10 @@ mod tests {
 
     #[test]
     fn test_typed_header_trait_from_header_mismatched_name() {
-        let header = Header::new(HeaderName::From, HeaderValue::text("presence;id=123".to_string()));
+        let header = Header::new(
+            HeaderName::From,
+            HeaderValue::text("presence;id=123".to_string()),
+        );
         let result = Event::from_header(&header);
         assert!(result.is_err());
         if let Err(SipError::InvalidHeader(msg)) = result {
@@ -466,36 +502,52 @@ mod tests {
 
     #[test]
     fn test_typed_header_trait_from_header_parser_error_incomplete() {
-        let header = Header::new(HeaderName::Event, HeaderValue::text("<incomplete-package".to_string()));
+        let header = Header::new(
+            HeaderName::Event,
+            HeaderValue::text("<incomplete-package".to_string()),
+        );
         let result = Event::from_header(&header);
         assert!(result.is_err());
         if let Err(SipError::Parser(msg)) = result {
-            assert!(msg.contains("Failed to parse Event value string"), "Error message: {}", msg);
+            assert!(
+                msg.contains("Failed to parse Event value string"),
+                "Error message: {}",
+                msg
+            );
         } else {
-            panic!("Expected Parser error for incomplete input, got {:?}", result);
+            panic!(
+                "Expected Parser error for incomplete input, got {:?}",
+                result
+            );
         }
     }
 
     #[test]
     fn test_typed_header_trait_from_header_parser_error_trailing_rubbish() {
         let header_value_str = "presence;id=123 extra-stuff";
-        let header = Header::new(HeaderName::Event, HeaderValue::text(header_value_str.to_string()));
+        let header = Header::new(
+            HeaderName::Event,
+            HeaderValue::text(header_value_str.to_string()),
+        );
         let result = Event::from_header(&header);
         assert!(result.is_err());
-         if let Err(SipError::Parser(msg)) = result {
+        if let Err(SipError::Parser(msg)) = result {
             let expected_msg_part1 = "Failed to parse Event value string 'presence;id=123 extra-stuff': Parser error at '";
             let expected_rubbish_part = "extra-stuff"; // This is what e.input should be for the Eof error
-            
+
             assert!(
                 msg.starts_with(expected_msg_part1) && msg.contains(expected_rubbish_part) && msg.ends_with("(code: Eof)"),
                 "Unexpected error message for trailing rubbish. Got: {}. Expected to start with '{}', contain '{}', and end with '(code: Eof)'",
                 msg, expected_msg_part1, expected_rubbish_part
             );
         } else {
-            panic!("Expected Parser error for trailing rubbish, got {:?}", result);
+            panic!(
+                "Expected Parser error for trailing rubbish, got {:?}",
+                result
+            );
         }
     }
-    
+
     #[test]
     fn test_typed_header_trait_from_header_invalid_utf8_in_raw() {
         let invalid_bytes = vec![0xC3, 0x28]; // Invalid UTF-8 sequence
@@ -503,9 +555,16 @@ mod tests {
         let result_syntax = Event::from_header(&header);
         assert!(result_syntax.is_err());
         if let Err(SipError::Parser(msg)) = result_syntax {
-            assert!(msg.contains("Invalid UTF-8 in Event header value"), "Error message: {}", msg);
+            assert!(
+                msg.contains("Invalid UTF-8 in Event header value"),
+                "Error message: {}",
+                msg
+            );
         } else {
-            panic!("Expected Parser error for invalid UTF-8, got {:?}", result_syntax);
+            panic!(
+                "Expected Parser error for invalid UTF-8, got {:?}",
+                result_syntax
+            );
         }
     }
 
@@ -518,17 +577,23 @@ mod tests {
 
         let header = original_event.to_header();
         let roundtripped_event = Event::from_header(&header).expect("Round trip should succeed");
-        
+
         assert_eq!(original_event, roundtripped_event);
         assert_eq!(original_event.to_string(), roundtripped_event.to_string());
-        assert_eq!(original_event.to_string(), "<test-package>;id=id-789;flag1;key2=value2");
+        assert_eq!(
+            original_event.to_string(),
+            "<test-package>;id=id-789;flag1;key2=value2"
+        );
     }
-    
+
     #[test]
     fn test_event_header_with_special_chars_in_params_if_allowed_by_token() {
         let event_with_quotes = Event::new(EventType::Token("token-event".to_string()))
             .with_id("id-with-!%*".to_string())
-            .with_param("param_quoted", Some(r#""a quoted string with spaces""#.to_string()));
+            .with_param(
+                "param_quoted",
+                Some(r#""a quoted string with spaces""#.to_string()),
+            );
 
         let header_str = r#"token-event;id=id-with-!%*;param_quoted="a quoted string with spaces""#;
         assert_eq!(event_with_quotes.to_string(), header_str);
@@ -544,9 +609,15 @@ mod tests {
         let header = Header::new(HeaderName::Event, HeaderValue::text(header_val.to_string()));
         let event = Event::from_header(&header).unwrap();
 
-        assert_eq!(event.id, Some("first".to_string())); 
-        assert_eq!(event.params.get("ID"), Some(&ParamValue::Value("second".to_string()))); 
-        assert_eq!(event.params.get("Id"), Some(&ParamValue::Value("third-flag".to_string()))); 
+        assert_eq!(event.id, Some("first".to_string()));
+        assert_eq!(
+            event.params.get("ID"),
+            Some(&ParamValue::Value("second".to_string()))
+        );
+        assert_eq!(
+            event.params.get("Id"),
+            Some(&ParamValue::Value("third-flag".to_string()))
+        );
     }
 
     #[test]
@@ -555,9 +626,12 @@ mod tests {
         let header = Header::new(HeaderName::Event, HeaderValue::text(header_val.to_string()));
         let event = Event::from_header(&header).unwrap();
 
-        assert!(event.id.is_none()); 
-        assert_eq!(event.params.get("id"), Some(&ParamValue::None)); 
-        assert_eq!(event.params.get("foo"), Some(&ParamValue::Value("bar".to_string())));
+        assert!(event.id.is_none());
+        assert_eq!(event.params.get("id"), Some(&ParamValue::None));
+        assert_eq!(
+            event.params.get("foo"),
+            Some(&ParamValue::Value("bar".to_string()))
+        );
     }
 
     // Ensure all .to_string() are added to EventType::Token initializations in existing tests
@@ -580,12 +654,16 @@ mod tests {
         let event4 = Event::new(EventType::Token("another".to_string()))
             .with_id("ID-XYZ".to_string())
             .with_param("UPPERCASE_PARAM", Some("Value".to_string()));
-        assert_eq!(event4.to_string(), "another;id=ID-XYZ;UPPERCASE_PARAM=Value");
+        assert_eq!(
+            event4.to_string(),
+            "another;id=ID-XYZ;UPPERCASE_PARAM=Value"
+        );
     }
 
     #[test]
     fn test_event_id_case_sensitivity_in_value_corrected() {
-        let event = Event::new(EventType::Token("test".to_string())).with_id("CaseSensitiveID".to_string());
+        let event =
+            Event::new(EventType::Token("test".to_string())).with_id("CaseSensitiveID".to_string());
         assert_eq!(event.id, Some("CaseSensitiveID".to_string()));
         assert_eq!(event.to_string(), "test;id=CaseSensitiveID");
     }
@@ -597,4 +675,4 @@ mod tests {
         assert!(event.params.contains_key("ParamKey"));
         assert_eq!(event.to_string(), "test;ParamKey=value");
     }
-} 
+}

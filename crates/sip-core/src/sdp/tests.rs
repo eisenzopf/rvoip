@@ -7,9 +7,11 @@
 //! - Round-trip tests (parse -> serialize -> parse)
 
 use crate::error::Error;
-use crate::sdp::parser::parse_sdp;
-use crate::types::sdp::{SdpSession, MediaDescription, ConnectionData, Origin, ParsedAttribute, TimeDescription};
 use crate::sdp::attributes::MediaDirection;
+use crate::sdp::parser::parse_sdp;
+use crate::types::sdp::{
+    ConnectionData, MediaDescription, Origin, ParsedAttribute, SdpSession, TimeDescription,
+};
 use bytes::Bytes;
 
 use std::str::FromStr;
@@ -25,10 +27,14 @@ mod tests {
                       o=- 1234567890 1234567890 IN IP4 127.0.0.1\r\n\
                       s=-\r\n\
                       t=0 0\r\n";
-        
+
         let result = SdpSession::from_str(sdp_str);
-        assert!(result.is_ok(), "Failed to parse minimal SDP: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Failed to parse minimal SDP: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
         assert_eq!(session.version, "0");
         assert_eq!(session.origin.username, "-");
@@ -57,10 +63,14 @@ mod tests {
                       a=rtpmap:31 H261/90000\r\n\
                       a=rtpmap:32 MPV/90000\r\n\
                       a=recvonly\r\n";
-        
+
         let result = SdpSession::from_str(sdp_str);
-        assert!(result.is_ok(), "Failed to parse complete SDP: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Failed to parse complete SDP: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
         // Check session-level attributes
         assert_eq!(session.origin.username, "alice");
@@ -70,10 +80,10 @@ mod tests {
             assert_eq!(conn.addr_type, "IP4");
             assert_eq!(conn.connection_address, "192.0.2.1");
         }
-        
+
         // Check media descriptions
         assert_eq!(session.media_descriptions.len(), 2);
-        
+
         // Audio media
         let audio = &session.media_descriptions[0];
         assert_eq!(audio.media, "audio");
@@ -81,7 +91,7 @@ mod tests {
         assert_eq!(audio.protocol, "RTP/AVP");
         assert_eq!(audio.formats, vec!["0", "8", "97"]);
         assert_eq!(audio.direction, Some(MediaDirection::SendRecv));
-        
+
         // Video media
         let video = &session.media_descriptions[1];
         assert_eq!(video.media, "video");
@@ -89,7 +99,7 @@ mod tests {
         assert_eq!(video.protocol, "RTP/AVP");
         assert_eq!(video.formats, vec!["31", "32"]);
         assert_eq!(video.direction, Some(MediaDirection::RecvOnly));
-        
+
         // Check rtpmap attributes
         let audio_rtpmap = audio.get_rtpmap(0);
         assert!(audio_rtpmap.is_some());
@@ -114,18 +124,31 @@ mod tests {
                        m=audio 49170 RTP/AVP 0\r\n\
                        m=video 51372 RTP/AVP 99\r\n\
                        a=rtpmap:99 h263-1998/90000\r\n";
-        
+
         let result = SdpSession::from_str(sdp_str);
-        assert!(result.is_ok(), "Failed to parse RFC example SDP: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Failed to parse RFC example SDP: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
         assert_eq!(session.version, "0");
         assert_eq!(session.origin.username, "jdoe");
         assert_eq!(session.session_name, "SDP Seminar");
-        assert_eq!(session.session_info, Some("A Seminar on the session description protocol".to_string()));
-        assert_eq!(session.uri, Some("http://www.example.com/seminars/sdp.pdf".to_string()));
-        assert_eq!(session.email, Some("j.doe@example.com (Jane Doe)".to_string()));
-        
+        assert_eq!(
+            session.session_info,
+            Some("A Seminar on the session description protocol".to_string())
+        );
+        assert_eq!(
+            session.uri,
+            Some("http://www.example.com/seminars/sdp.pdf".to_string())
+        );
+        assert_eq!(
+            session.email,
+            Some("j.doe@example.com (Jane Doe)".to_string())
+        );
+
         // Check connection data with TTL
         if let Some(conn) = session.connection_info {
             assert_eq!(conn.connection_address, "224.2.17.12");
@@ -133,13 +156,13 @@ mod tests {
         } else {
             panic!("Connection info should be present");
         }
-        
+
         // Check direction
         assert_eq!(session.direction, Some(MediaDirection::RecvOnly));
-        
+
         // Check media descriptions
         assert_eq!(session.media_descriptions.len(), 2);
-        
+
         // Check time
         assert_eq!(session.time_descriptions[0].start_time, "2873397496");
         assert_eq!(session.time_descriptions[0].stop_time, "2873404696");
@@ -155,23 +178,27 @@ mod tests {
                        t=0 0\r\n\
                        m=audio 49170 RTP/AVP 0\r\n\
                        c=IN IP6 2001:db8:1:2:3:4:5:7\r\n";
-        
+
         let result = SdpSession::from_str(sdp_str);
-        assert!(result.is_ok(), "Failed to parse IPv6 SDP: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Failed to parse IPv6 SDP: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
-        
+
         // Check session IPv6 address
         assert_eq!(session.origin.addr_type, "IP6");
         assert_eq!(session.origin.unicast_address, "2001:db8::1");
-        
+
         if let Some(conn) = &session.connection_info {
             assert_eq!(conn.addr_type, "IP6");
             assert_eq!(conn.connection_address, "2001:db8:1:2:3:4:5:6");
         } else {
             panic!("Session-level connection info should be present");
         }
-        
+
         // Check media-level IPv6 address
         let audio = &session.media_descriptions[0];
         if let Some(conn) = &audio.connection_info {
@@ -209,12 +236,16 @@ mod tests {
                        a=fmtp:96 profile-level-id=42e01f;level-asymmetry-allowed=1\r\n\
                        a=sendrecv\r\n\
                        a=mid:video\r\n";
-        
+
         let result = SdpSession::from_str(sdp_str);
-        assert!(result.is_ok(), "Failed to parse WebRTC SDP: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Failed to parse WebRTC SDP: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
-        
+
         // Check BUNDLE group
         let bundle = session.generic_attributes.iter().find_map(|attr| {
             if let ParsedAttribute::Group(semantic, ids) = attr {
@@ -227,30 +258,37 @@ mod tests {
                 None
             }
         });
-        
+
         assert!(bundle.is_some());
         if let Some(ids) = bundle {
             assert_eq!(ids.len(), 2);
             assert_eq!(ids[0], "audio");
             assert_eq!(ids[1], "video");
         }
-        
+
         // Check ICE candidates in audio section
         let audio = &session.media_descriptions[0];
-        let candidates = audio.generic_attributes.iter().filter_map(|attr| {
-            if let ParsedAttribute::Candidate(c) = attr {
-                Some(c)
-            } else {
-                None
-            }
-        }).collect::<Vec<_>>();
-        
+        let candidates = audio
+            .generic_attributes
+            .iter()
+            .filter_map(|attr| {
+                if let ParsedAttribute::Candidate(c) = attr {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0].component_id, 1);
         assert_eq!(candidates[0].candidate_type, "host");
         assert_eq!(candidates[1].candidate_type, "srflx");
-        assert_eq!(candidates[1].related_address, Some("192.168.1.4".to_string()));
-        
+        assert_eq!(
+            candidates[1].related_address,
+            Some("192.168.1.4".to_string())
+        );
+
         // Check fingerprint
         let fingerprint = audio.generic_attributes.iter().find_map(|attr| {
             if let ParsedAttribute::Fingerprint(hash, fp) = attr {
@@ -259,7 +297,7 @@ mod tests {
                 None
             }
         });
-        
+
         assert!(fingerprint.is_some());
         if let Some((hash, _)) = fingerprint {
             assert_eq!(hash, "sha-256");
@@ -276,21 +314,30 @@ mod tests {
                              s=No Origin Test\r\n\
                              t=0 0\r\n";
         let result = SdpSession::from_str(missing_origin);
-        assert!(result.is_err(), "Parser should reject SDP with missing origin");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with missing origin"
+        );
+
         // Missing session name (s=) line
         let missing_session_name = "v=0\r\n\
                                   o=- 123 456 IN IP4 127.0.0.1\r\n\
                                   t=0 0\r\n";
         let result = SdpSession::from_str(missing_session_name);
-        assert!(result.is_err(), "Parser should reject SDP with missing session name");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with missing session name"
+        );
+
         // Missing timing (t=) line
         let missing_timing = "v=0\r\n\
                             o=- 123 456 IN IP4 127.0.0.1\r\n\
                             s=No Timing Test\r\n";
         let result = SdpSession::from_str(missing_timing);
-        assert!(result.is_err(), "Parser should reject SDP with missing timing");
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with missing timing"
+        );
     }
 
     /// Test parsing an SDP message with incorrect field order
@@ -302,8 +349,11 @@ mod tests {
                               o=- 123 456 IN IP4 127.0.0.1\r\n\
                               t=0 0\r\n";
         let result = SdpSession::from_str(incorrect_order);
-        assert!(result.is_err(), "Parser should reject SDP with incorrect field order");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with incorrect field order"
+        );
+
         // Media section before session fields
         let media_before_session = "v=0\r\n\
                                   m=audio 9 RTP/AVP 0\r\n\
@@ -311,7 +361,10 @@ mod tests {
                                   s=Bad Order\r\n\
                                   t=0 0\r\n";
         let result = SdpSession::from_str(media_before_session);
-        assert!(result.is_err(), "Parser should reject SDP with media before all session fields");
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with media before all session fields"
+        );
     }
 
     /// Test parsing an SDP message with invalid version
@@ -323,15 +376,21 @@ mod tests {
                              s=Invalid Version\r\n\
                              t=0 0\r\n";
         let result = SdpSession::from_str(invalid_version);
-        assert!(result.is_err(), "Parser should reject SDP with version != 0");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with version != 0"
+        );
+
         // Non-numeric version
         let non_numeric_version = "v=abc\r\n\
                                  o=- 123 456 IN IP4 127.0.0.1\r\n\
                                  s=Non-numeric Version\r\n\
                                  t=0 0\r\n";
         let result = SdpSession::from_str(non_numeric_version);
-        assert!(result.is_err(), "Parser should reject SDP with non-numeric version");
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with non-numeric version"
+        );
     }
 
     /// Test parsing an SDP message with invalid connection data
@@ -344,11 +403,14 @@ mod tests {
                         c=IN IP4 192.168.1\r\n\
                         t=0 0\r\n";
         let result = SdpSession::from_str(invalid_ip);
-        assert!(result.is_err(), "Parser should reject incomplete IPv4 address");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject incomplete IPv4 address"
+        );
+
         // Note: The parser appears to be lenient with IP validation
         // which is reasonable for a parser implementation
-        
+
         // Invalid address type
         let invalid_addr_type = "v=0\r\n\
                                o=- 123 456 IN IP4 127.0.0.1\r\n\
@@ -357,7 +419,7 @@ mod tests {
                                t=0 0\r\n";
         let result = SdpSession::from_str(invalid_addr_type);
         assert!(result.is_err(), "Parser should reject invalid address type");
-        
+
         // Invalid network type
         let invalid_net_type = "v=0\r\n\
                               o=- 123 456 IN IP4 127.0.0.1\r\n\
@@ -366,7 +428,7 @@ mod tests {
                               t=0 0\r\n";
         let result = SdpSession::from_str(invalid_net_type);
         assert!(result.is_err(), "Parser should reject invalid network type");
-        
+
         // Missing IP address
         let missing_ip = "v=0\r\n\
                         o=- 123 456 IN IP4 127.0.0.1\r\n\
@@ -374,7 +436,10 @@ mod tests {
                         c=IN IP4\r\n\
                         t=0 0\r\n";
         let result = SdpSession::from_str(missing_ip);
-        assert!(result.is_err(), "Parser should reject connection line missing IP address");
+        assert!(
+            result.is_err(),
+            "Parser should reject connection line missing IP address"
+        );
     }
 
     /// Test parsing an SDP message with invalid media descriptions
@@ -388,7 +453,7 @@ mod tests {
                                m=invalid 9 RTP/AVP 0\r\n";
         let result = SdpSession::from_str(invalid_media_type);
         // Note: The parser might accept non-standard media types, so this could pass
-        
+
         // Invalid port number
         let invalid_port = "v=0\r\n\
                          o=- 123 456 IN IP4 127.0.0.1\r\n\
@@ -396,8 +461,11 @@ mod tests {
                          t=0 0\r\n\
                          m=audio 999999 RTP/AVP 0\r\n";
         let result = SdpSession::from_str(invalid_port);
-        assert!(result.is_err(), "Parser should reject SDP with invalid port number");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with invalid port number"
+        );
+
         // Missing required parts
         let incomplete_media = "v=0\r\n\
                              o=- 123 456 IN IP4 127.0.0.1\r\n\
@@ -405,7 +473,10 @@ mod tests {
                              t=0 0\r\n\
                              m=audio 9\r\n"; // Missing protocol and formats
         let result = SdpSession::from_str(incomplete_media);
-        assert!(result.is_err(), "Parser should reject SDP with incomplete media line");
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with incomplete media line"
+        );
     }
 
     /// Test parsing an SDP message with invalid attributes
@@ -418,8 +489,11 @@ mod tests {
                          t=0 0\r\n\
                          a=rtpmap\r\n"; // Missing value
         let result = SdpSession::from_str(invalid_attr);
-        assert!(result.is_err(), "Parser should reject SDP with invalid rtpmap attribute");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with invalid rtpmap attribute"
+        );
+
         // Invalid rtpmap format
         let invalid_rtpmap = "v=0\r\n\
                            o=- 123 456 IN IP4 127.0.0.1\r\n\
@@ -428,7 +502,10 @@ mod tests {
                            m=audio 9 RTP/AVP 0\r\n\
                            a=rtpmap:0 PCMU/unexpected/format/with/too/many/parts\r\n";
         let result = SdpSession::from_str(invalid_rtpmap);
-        assert!(result.is_err(), "Parser should reject SDP with invalid rtpmap format");
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with invalid rtpmap format"
+        );
     }
 
     /// Test parsing an SDP message with duplicate fields
@@ -441,8 +518,11 @@ mod tests {
                                s=Duplicate Version\r\n\
                                t=0 0\r\n";
         let result = SdpSession::from_str(duplicate_version);
-        assert!(result.is_err(), "Parser should reject SDP with duplicate version");
-        
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with duplicate version"
+        );
+
         // Duplicate session name
         let duplicate_session = "v=0\r\n\
                              o=- 123 456 IN IP4 127.0.0.1\r\n\
@@ -450,7 +530,10 @@ mod tests {
                              s=Second Session Name\r\n\
                              t=0 0\r\n";
         let result = SdpSession::from_str(duplicate_session);
-        assert!(result.is_err(), "Parser should reject SDP with duplicate session name");
+        assert!(
+            result.is_err(),
+            "Parser should reject SDP with duplicate session name"
+        );
     }
 
     // ----- EDGE CASE TESTS -----
@@ -464,8 +547,12 @@ mod tests {
                               s= Extra Whitespace  \r\n\
                               t=0  0\r\n";
         let result = SdpSession::from_str(extra_whitespace);
-        assert!(result.is_ok(), "Parser should accept SDP with extra whitespace: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Parser should accept SDP with extra whitespace: {:?}",
+            result.err()
+        );
+
         // Note: The parser doesn't accept empty lines within SDP messages
         // This behavior is valid as RFC 4566 doesn't require parsers to handle empty lines
     }
@@ -483,22 +570,31 @@ mod tests {
             session_name
         );
         let result = SdpSession::from_str(&long_session_name);
-        assert!(result.is_ok(), "Parser should accept SDP with long session name: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Parser should accept SDP with long session name: {:?}",
+            result.err()
+        );
+
         // Many media sections (with connection data as required by parser)
         let mut many_media = "v=0\r\n\
                             o=- 123 456 IN IP4 127.0.0.1\r\n\
                             s=Many Media\r\n\
                             c=IN IP4 127.0.0.1\r\n\
-                            t=0 0\r\n".to_string();
-        
+                            t=0 0\r\n"
+            .to_string();
+
         for i in 0..100 {
             many_media.push_str(&format!("m=audio {} RTP/AVP 0\r\n", 10000 + i));
         }
-        
+
         let result = SdpSession::from_str(&many_media);
-        assert!(result.is_ok(), "Parser should accept SDP with many media sections: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Parser should accept SDP with many media sections: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
         assert_eq!(session.media_descriptions.len(), 100);
     }
@@ -512,15 +608,23 @@ mod tests {
                         s=LF Endings\n\
                         t=0 0\n";
         let result = SdpSession::from_str(lf_endings);
-        assert!(result.is_ok(), "Parser should accept SDP with LF line endings: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Parser should accept SDP with LF line endings: {:?}",
+            result.err()
+        );
+
         // SDP with mixed line endings
         let mixed_endings = "v=0\r\n\
                           o=- 123 456 IN IP4 127.0.0.1\n\
                           s=Mixed Endings\r\n\
                           t=0 0\n";
         let result = SdpSession::from_str(mixed_endings);
-        assert!(result.is_ok(), "Parser should accept SDP with mixed line endings: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Parser should accept SDP with mixed line endings: {:?}",
+            result.err()
+        );
     }
 
     /// Test parsing SDP with extreme time values
@@ -532,10 +636,17 @@ mod tests {
                       s=Max Time\r\n\
                       t=18446744073709551615 18446744073709551615\r\n";
         let result = SdpSession::from_str(max_time);
-        assert!(result.is_ok(), "Parser should accept SDP with maximum timestamp values: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Parser should accept SDP with maximum timestamp values: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
-        assert_eq!(session.time_descriptions[0].start_time, "18446744073709551615");
+        assert_eq!(
+            session.time_descriptions[0].start_time,
+            "18446744073709551615"
+        );
     }
 
     /// Test parsing SDP with numeric session ID and version
@@ -547,12 +658,16 @@ mod tests {
                            s=Unusual Origin\r\n\
                            t=0 0\r\n";
         let result = SdpSession::from_str(unusual_origin);
-        assert!(result.is_ok(), "Parser should accept SDP with unusual numeric origin values: {:?}", result.err());
-        
+        assert!(
+            result.is_ok(),
+            "Parser should accept SDP with unusual numeric origin values: {:?}",
+            result.err()
+        );
+
         let session = result.unwrap();
         assert_eq!(session.origin.sess_id, "9223372036854775807");
         assert_eq!(session.origin.sess_version, "2147483647");
-        
+
         // Note: While RFC 4566 allows numeric-strings for session IDs,
         // our implementation is stricter and requires them to be actual numbers
     }
@@ -572,23 +687,26 @@ mod tests {
                           a=rtpmap:8 PCMA/8000\r\n\
                           a=rtpmap:97 iLBC/8000\r\n\
                           a=sendrecv\r\n";
-        
+
         // First parse
         let parsed = SdpSession::from_str(original_sdp).expect("Failed to parse original SDP");
-        
+
         // Format back to string
         let formatted = parsed.to_string();
-        
+
         // Parse the formatted string
         let reparsed = SdpSession::from_str(&formatted).expect("Failed to parse formatted SDP");
-        
+
         // Compare essential properties of the two parsed sessions
         assert_eq!(parsed.version, reparsed.version);
         assert_eq!(parsed.origin.username, reparsed.origin.username);
         assert_eq!(parsed.origin.sess_id, reparsed.origin.sess_id);
         assert_eq!(parsed.session_name, reparsed.session_name);
-        assert_eq!(parsed.media_descriptions.len(), reparsed.media_descriptions.len());
-        
+        assert_eq!(
+            parsed.media_descriptions.len(),
+            reparsed.media_descriptions.len()
+        );
+
         // Compare specific attributes
         assert_eq!(
             parsed.media_descriptions[0].direction,
@@ -632,19 +750,23 @@ mod tests {
                          a=mid:video\r\n\
                          a=msid:stream1 track2\r\n\
                          a=rtcp-mux\r\n";
-        
+
         // First parse
         let parsed = SdpSession::from_str(complex_sdp).expect("Failed to parse complex SDP");
-        
+
         // Format back to string
         let formatted = parsed.to_string();
-        
+
         // Parse the formatted string
-        let reparsed = SdpSession::from_str(&formatted).expect("Failed to parse formatted complex SDP");
-        
+        let reparsed =
+            SdpSession::from_str(&formatted).expect("Failed to parse formatted complex SDP");
+
         // Compare the structures
-        assert_eq!(parsed.media_descriptions.len(), reparsed.media_descriptions.len());
-        
+        assert_eq!(
+            parsed.media_descriptions.len(),
+            reparsed.media_descriptions.len()
+        );
+
         // Check that key attributes are preserved
         let find_attribute = |session: &SdpSession, key: &str| -> bool {
             session.generic_attributes.iter().any(|attr| match attr {
@@ -654,10 +776,16 @@ mod tests {
                 _ => false,
             })
         };
-        
-        assert_eq!(find_attribute(&parsed, "group"), find_attribute(&reparsed, "group"));
-        assert_eq!(find_attribute(&parsed, "ice-options"), find_attribute(&reparsed, "ice-options"));
-        
+
+        assert_eq!(
+            find_attribute(&parsed, "group"),
+            find_attribute(&reparsed, "group")
+        );
+        assert_eq!(
+            find_attribute(&parsed, "ice-options"),
+            find_attribute(&reparsed, "ice-options")
+        );
+
         // Check media attributes
         assert_eq!(
             parsed.media_descriptions[0].media,
@@ -681,7 +809,7 @@ mod tests {
             addr_type: "IP4".to_string(),
             unicast_address: "192.168.1.100".to_string(),
         };
-        
+
         let conn = ConnectionData {
             net_type: "IN".to_string(),
             addr_type: "IP4".to_string(),
@@ -689,34 +817,40 @@ mod tests {
             ttl: None,
             multicast_count: None,
         };
-        
+
         let mut session = SdpSession::new(origin, "Programmatic Test");
         session = session.with_connection_data(conn);
-        
+
         // Add a time description (required after recent changes)
         session.time_descriptions.push(TimeDescription {
             start_time: "0".to_string(),
             stop_time: "0".to_string(),
             repeat_times: Vec::new(),
         });
-        
+
         // Add a media description
-        let mut audio_media = MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
-        audio_media = audio_media.with_attribute(ParsedAttribute::Direction(MediaDirection::SendRecv));
-        
+        let mut audio_media =
+            MediaDescription::new("audio", 49170, "RTP/AVP", vec!["0".to_string()]);
+        audio_media =
+            audio_media.with_attribute(ParsedAttribute::Direction(MediaDirection::SendRecv));
+
         session.add_media(audio_media);
-        
+
         // Convert to string
         let sdp_string = session.to_string();
-        
+
         // Parse back
-        let parsed = SdpSession::from_str(&sdp_string).expect("Failed to parse programmatically created SDP");
-        
+        let parsed = SdpSession::from_str(&sdp_string)
+            .expect("Failed to parse programmatically created SDP");
+
         // Verify
         assert_eq!(parsed.session_name, "Programmatic Test");
         assert_eq!(parsed.media_descriptions.len(), 1);
         assert_eq!(parsed.media_descriptions[0].media, "audio");
-        assert_eq!(parsed.media_descriptions[0].direction, Some(MediaDirection::SendRecv));
+        assert_eq!(
+            parsed.media_descriptions[0].direction,
+            Some(MediaDirection::SendRecv)
+        );
     }
 }
 
@@ -724,13 +858,13 @@ mod tests {
 
 mod api_tests {
     use super::*;
+    use crate::error::Result;
     use crate::sdp;
     use crate::sdp::builder::SdpBuilder;
-    use crate::error::Result;
-    use crate::sdp::macros::*;  // Import the macros explicitly
+    use crate::sdp::macros::*; // Import the macros explicitly
     use crate::types::sdp::{
-        SdpSession, Origin, ConnectionData, TimeDescription, MediaDescription,
-        ParsedAttribute, RtpMapAttribute, FmtpAttribute,
+        ConnectionData, FmtpAttribute, MediaDescription, Origin, ParsedAttribute, RtpMapAttribute,
+        SdpSession, TimeDescription,
     };
 
     /// Test creating an SDP message using the sdp! macro
@@ -763,33 +897,37 @@ mod api_tests {
                 direction: "recvonly"
             }
         };
-        
+
         // Verify the session is valid
-        assert!(session.is_ok(), "SDP validation failed: {:?}", session.err());
-        
+        assert!(
+            session.is_ok(),
+            "SDP validation failed: {:?}",
+            session.err()
+        );
+
         let session = session.unwrap();
-        
+
         // Validate the created SDP
         assert_eq!(session.version, "0");
         assert_eq!(session.origin.username, "-");
         assert_eq!(session.origin.sess_id, "2890844526");
         assert_eq!(session.origin.sess_version, "2890842807");
         assert_eq!(session.session_name, "SDP Test Using Macro");
-        
+
         // Check connection data
         assert!(session.connection_info.is_some());
         if let Some(conn) = &session.connection_info {
             assert_eq!(conn.connection_address, "224.2.17.12");
         }
-        
+
         // Check time description
         assert_eq!(session.time_descriptions.len(), 1);
         assert_eq!(session.time_descriptions[0].start_time, "2873397496");
         assert_eq!(session.time_descriptions[0].stop_time, "2873404696");
-        
+
         // Check media sections
         assert_eq!(session.media_descriptions.len(), 2);
-        
+
         // Check first media (audio)
         let audio = &session.media_descriptions[0];
         assert_eq!(audio.media, "audio");
@@ -797,16 +935,18 @@ mod api_tests {
         assert_eq!(audio.protocol, "RTP/AVP");
         assert_eq!(audio.formats, vec!["0", "8", "97"]);
         assert_eq!(audio.direction, Some(MediaDirection::SendRecv));
-        
+
         // Check second media (video)
         let video = &session.media_descriptions[1];
         assert_eq!(video.media, "video");
         assert_eq!(video.port, 51372);
         assert_eq!(video.formats, vec!["31", "32"]);
         assert_eq!(video.direction, Some(MediaDirection::RecvOnly));
-        
+
         // Check audio rtpmap and fmtp
-        let rtpmaps = audio.generic_attributes.iter()
+        let rtpmaps = audio
+            .generic_attributes
+            .iter()
             .filter_map(|attr| {
                 if let ParsedAttribute::RtpMap(rtpmap) = attr {
                     Some(rtpmap)
@@ -815,13 +955,15 @@ mod api_tests {
                 }
             })
             .collect::<Vec<_>>();
-        
+
         assert_eq!(rtpmaps.len(), 3);
         assert_eq!(rtpmaps[2].payload_type, 97);
         assert_eq!(rtpmaps[2].encoding_name, "iLBC");
-        
+
         // Check fmtp
-        let fmtps = audio.generic_attributes.iter()
+        let fmtps = audio
+            .generic_attributes
+            .iter()
             .filter_map(|attr| {
                 if let ParsedAttribute::Fmtp(fmtp) = attr {
                     Some(fmtp)
@@ -830,7 +972,7 @@ mod api_tests {
                 }
             })
             .collect::<Vec<_>>();
-        
+
         assert_eq!(fmtps.len(), 1);
         assert_eq!(fmtps[0].format, "97");
         assert_eq!(fmtps[0].parameters, "mode=20");
@@ -867,28 +1009,28 @@ mod api_tests {
                 .rtcp_mux()
                 .done()
             .build()?;
-        
+
         // Validate the created SDP
         assert_eq!(session.version, "0");
         assert_eq!(session.origin.username, "-");
         assert_eq!(session.origin.sess_id, "2890844526");
         assert_eq!(session.origin.sess_version, "2890842807");
         assert_eq!(session.session_name, "SDP Test Using Builder");
-        
+
         // Check connection data
         assert!(session.connection_info.is_some());
         if let Some(conn) = &session.connection_info {
             assert_eq!(conn.connection_address, "224.2.17.12");
         }
-        
+
         // Check time description
         assert_eq!(session.time_descriptions.len(), 1);
         assert_eq!(session.time_descriptions[0].start_time, "2873397496");
         assert_eq!(session.time_descriptions[0].stop_time, "2873404696");
-        
+
         // Check media sections
         assert_eq!(session.media_descriptions.len(), 2);
-        
+
         // Check first media (audio)
         let audio = &session.media_descriptions[0];
         assert_eq!(audio.media, "audio");
@@ -896,14 +1038,14 @@ mod api_tests {
         assert_eq!(audio.protocol, "RTP/AVP");
         assert_eq!(audio.formats, vec!["0", "8", "97"]);
         assert_eq!(audio.direction, Some(MediaDirection::SendRecv));
-        
+
         // Check second media (video)
         let video = &session.media_descriptions[1];
         assert_eq!(video.media, "video");
         assert_eq!(video.port, 51372);
         assert_eq!(video.formats, vec!["31", "32"]);
         assert_eq!(video.direction, Some(MediaDirection::RecvOnly));
-        
+
         // Check BUNDLE attribute
         let bundle = session.generic_attributes.iter().find_map(|attr| {
             if let ParsedAttribute::Group(semantic, ids) = attr {
@@ -916,14 +1058,14 @@ mod api_tests {
                 None
             }
         });
-        
+
         assert!(bundle.is_some());
         if let Some(ids) = bundle {
             assert_eq!(ids.len(), 2);
             assert_eq!(ids[0], "audio");
             assert_eq!(ids[1], "video");
         }
-        
+
         // Check ICE attributes
         let ice_ufrag = session.generic_attributes.iter().find_map(|attr| {
             if let ParsedAttribute::IceUfrag(ufrag) = attr {
@@ -932,14 +1074,20 @@ mod api_tests {
                 None
             }
         });
-        
+
         assert!(ice_ufrag.is_some());
         assert_eq!(ice_ufrag.unwrap(), "F7gI");
-        
+
         // Check rtcp-mux in both media sections
-        assert!(audio.generic_attributes.iter().any(|attr| matches!(attr, ParsedAttribute::RtcpMux)));
-        assert!(video.generic_attributes.iter().any(|attr| matches!(attr, ParsedAttribute::RtcpMux)));
-        
+        assert!(audio
+            .generic_attributes
+            .iter()
+            .any(|attr| matches!(attr, ParsedAttribute::RtcpMux)));
+        assert!(video
+            .generic_attributes
+            .iter()
+            .any(|attr| matches!(attr, ParsedAttribute::RtcpMux)));
+
         Ok(())
     }
-} 
+}

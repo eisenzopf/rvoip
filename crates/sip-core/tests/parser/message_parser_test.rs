@@ -10,12 +10,7 @@ use crate::common::*;
 use rvoip_sip_core::{
     error::Error,
     parse_message,
-    types::{
-        Message,
-        StatusCode,
-        Method,
-        header::HeaderName
-    },
+    types::{header::HeaderName, Message, Method, StatusCode},
 };
 
 #[test]
@@ -44,54 +39,54 @@ a=rtpmap:31 LPC";
 
     // Try parsing each header individually to isolate the issue
     println!("--- Testing individual headers ---");
-    
+
     // Status line
     println!("Status line: SIP/2.0 200 = 2**3 * 5**2 но сто девяносто девять - простое");
-    
+
     // Via header
     println!("Via header: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923");
-    
+
     // Call-ID header
     println!("Call-ID header: unreason.1234ksdfak3j2erwedfsASdf");
-    
+
     // CSeq header
     println!("CSeq header: 35 INVITE");
-    
+
     // From header
     println!("From header: sip:user@example.com;tag=11141343");
-    
+
     // To header
     println!("To header: sip:user@example.edu;tag=2229");
-    
+
     // Now try parsing the whole message
     println!("\n--- Attempting to parse complete message ---");
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info on the parse result
     match &result {
         Ok(msg) => println!("Successfully parsed message: {:?}", msg),
         Err(e) => {
             println!("Parse error: {}", e);
-            
+
             // Try parsing with byte-by-byte inspection to find the exact failure point
             println!("\n--- Message bytes (with line numbers) ---");
             for (i, line) in message.lines().enumerate() {
-                println!("{:3}: {}", i+1, line);
+                println!("{:3}: {}", i + 1, line);
             }
-            
+
             // Try again with a simple message to see if basic parsing works
             let simple_message = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923\r\nCall-ID: test\r\nCSeq: 1 INVITE\r\nContent-Length: 0\r\n\r\n";
             println!("\n--- Trying with a simplified message ---");
             match parse_message(simple_message.as_bytes()) {
                 Ok(_) => println!("Simple message parsed successfully"),
-                Err(e) => println!("Simple message parse error: {}", e)
+                Err(e) => println!("Simple message parse error: {}", e),
             }
         }
     }
-    
+
     // The test should pass - this message should be valid according to RFC 4475
     assert!(result.is_ok(), "Failed to parse wellformed message");
-    
+
     // If it parsed successfully, verify the main components
     if let Ok(parsed_msg) = result {
         match parsed_msg {
@@ -99,18 +94,18 @@ a=rtpmap:31 LPC";
                 assert_eq!(resp.status(), StatusCode::Ok);
                 // The reason phrase contains non-ASCII characters
                 assert!(resp.reason_phrase().contains("но сто девяносто девять"));
-                
+
                 // Verify some headers exist
                 assert!(resp.header(&HeaderName::Via).is_some());
                 assert!(resp.header(&HeaderName::CallId).is_some());
                 assert!(resp.header(&HeaderName::CSeq).is_some());
-                
+
                 // Check content-length and body
                 let content_length = rvoip_sip_core::types::ContentLength::from_response(&resp);
                 assert_eq!(content_length, 152);
                 assert!(!resp.body().is_empty());
-            },
-            _ => panic!("Expected Response but got Request")
+            }
+            _ => panic!("Expected Response but got Request"),
         }
     }
 }
@@ -130,13 +125,13 @@ Content-Length: 0\r\n\
 
     // Parse the message
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info
     match &result {
         Ok(msg) => println!("Successfully parsed minimal response: {:?}", msg),
-        Err(e) => println!("Parse error for minimal response: {}", e)
+        Err(e) => println!("Parse error for minimal response: {}", e),
     }
-    
+
     assert!(result.is_ok(), "Failed to parse minimal response");
 }
 
@@ -150,12 +145,13 @@ c=IN IP4 pc33.atlanta.com\r\n\
 t=0 0\r\n\
 m=audio 49172 RTP/AVP 0\r\n\
 a=rtpmap:0 PCMU/8000";
-    
+
     let body_len = body.len();
     println!("Exact body length for INVITE: {}", body_len);
 
     // Test a basic INVITE request
-    let message = format!("INVITE sip:bob@biloxi.com SIP/2.0\r\n\
+    let message = format!(
+        "INVITE sip:bob@biloxi.com SIP/2.0\r\n\
 Via: SIP/2.0/UDP pc33.atlanta.com;branch=z9hG4bK776asdhds\r\n\
 Max-Forwards: 70\r\n\
 To: Bob <sip:bob@biloxi.com>\r\n\
@@ -166,39 +162,41 @@ Contact: <sip:alice@pc33.atlanta.com>\r\n\
 Content-Type: application/sdp\r\n\
 Content-Length: {}\r\n\
 \r\n\
-{}", body_len, body);
+{}",
+        body_len, body
+    );
 
     // Parse the message
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info
     match &result {
         Ok(msg) => println!("Successfully parsed INVITE: {:?}", msg),
-        Err(e) => println!("Parse error for INVITE: {}", e)
+        Err(e) => println!("Parse error for INVITE: {}", e),
     }
-    
+
     assert!(result.is_ok(), "Failed to parse basic INVITE request");
-    
+
     // If parsed successfully, verify the components
     if let Ok(parsed_msg) = result {
         match parsed_msg {
             Message::Request(req) => {
                 assert_eq!(req.method(), Method::Invite);
                 assert_eq!(req.uri().to_string(), "sip:bob@biloxi.com");
-                
+
                 // Verify headers
                 assert!(req.header(&HeaderName::Via).is_some());
                 assert!(req.header(&HeaderName::From).is_some());
                 assert!(req.header(&HeaderName::To).is_some());
                 assert!(req.header(&HeaderName::CallId).is_some());
                 assert!(req.header(&HeaderName::CSeq).is_some());
-                
+
                 // Check content-length and body
                 let content_length = rvoip_sip_core::types::ContentLength::from_request(&req);
                 assert_eq!(content_length, body_len as u32);
                 assert!(!req.body().is_empty());
-            },
-            _ => panic!("Expected Request but got Response")
+            }
+            _ => panic!("Expected Request but got Response"),
         }
     }
 }
@@ -219,13 +217,13 @@ Test";
 
     // Parse the message
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info
     match &result {
         Ok(msg) => println!("Successfully parsed small body response: {:?}", msg),
-        Err(e) => println!("Parse error for small body response: {}", e)
+        Err(e) => println!("Parse error for small body response: {}", e),
     }
-    
+
     assert!(result.is_ok(), "Failed to parse response with small body");
 }
 
@@ -234,7 +232,7 @@ Test";
 fn test_parse_unreason_response_exact_length() {
     // This is the content of 3.1.1.12_unreason.sip with an EXACTLY matching content length
     // For debugging the "Incomplete message: Needed Size(10)" error
-    
+
     // Calculate the exact body length first
     let body = "v=0\r\n\
 o=mhandley 29739 7272939 IN IP4 192.0.2.198\r\n\
@@ -244,12 +242,13 @@ t=0 0\r\n\
 m=audio 49217 RTP/AVP 0 12\r\n\
 m=video 3227 RTP/AVP 31\r\n\
 a=rtpmap:31 LPC";
-    
+
     let body_len = body.len();
     println!("Exact body length: {}", body_len);
-    
+
     // Create the message with the actual body length
-    let message = format!("SIP/2.0 200 = 2**3 * 5**2 но сто девяносто девять - простое\r\n\
+    let message = format!(
+        "SIP/2.0 200 = 2**3 * 5**2 но сто девяносто девять - простое\r\n\
 Via: SIP/2.0/UDP 192.0.2.198;branch=z9hG4bK1324923\r\n\
 Call-ID: unreason.1234ksdfak3j2erwedfsASdf\r\n\
 CSeq: 35 INVITE\r\n\
@@ -259,33 +258,41 @@ Content-Length: {}\r\n\
 Content-Type: application/sdp\r\n\
 Contact: <sip:user@host198.example.com>\r\n\
 \r\n\
-{}", body_len, body);
+{}",
+        body_len, body
+    );
 
     // Parse the message
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info
     match &result {
         Ok(msg) => println!("Successfully parsed with exact length: {:?}", msg),
         Err(e) => {
             println!("Parse error with exact length: {}", e);
-            
+
             // Try parsing with various content lengths
-            for test_len in [body_len-1, body_len, body_len+1, body_len+10] {
-                let test_message = format!("SIP/2.0 200 OK\r\n\
+            for test_len in [body_len - 1, body_len, body_len + 1, body_len + 10] {
+                let test_message = format!(
+                    "SIP/2.0 200 OK\r\n\
 Content-Length: {}\r\n\
 \r\n\
-{}", test_len, body);
-                
+{}",
+                    test_len, body
+                );
+
                 match parse_message(test_message.as_bytes()) {
                     Ok(_) => println!("Content-Length {} worked!", test_len),
-                    Err(e) => println!("Content-Length {} failed: {}", test_len, e)
+                    Err(e) => println!("Content-Length {} failed: {}", test_len, e),
                 }
             }
         }
     }
-    
-    assert!(result.is_ok(), "Failed to parse wellformed message with exact length");
+
+    assert!(
+        result.is_ok(),
+        "Failed to parse wellformed message with exact length"
+    );
 }
 
 // Add a test for one of the failing wellformed messages from the torture tests
@@ -308,46 +315,46 @@ Contact: <sip:user@host105.example.com>\r\n\
 
     // Try parsing each header individually to isolate the issue
     println!("--- Testing individual headers ---");
-    
+
     // Status line
     println!("Status line: SIP/2.0 100 ");
-    
+
     // Via header
     println!("Via header: SIP/2.0/UDP 192.0.2.105;branch=z9hG4bK2398ndaoe");
-    
+
     // Call-ID header
     println!("Call-ID header: noreason.asndj203insdf99223ndf");
-    
+
     // CSeq header
     println!("CSeq header: 35 INVITE");
-    
+
     // From header
     println!("From header: <sip:user@example.com>;tag=39ansfi3");
-    
+
     // To header
     println!("To header: <sip:user@example.edu>;tag=902jndnke3");
-    
+
     // Now try parsing the whole message
     println!("\n--- Attempting to parse complete message ---");
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info on the parse result
     match &result {
         Ok(msg) => println!("Successfully parsed message: {:?}", msg),
         Err(e) => {
             println!("Parse error: {}", e);
-            
+
             // Try parsing with byte-by-byte inspection to find the exact failure point
             println!("\n--- Message bytes (with line numbers) ---");
             for (i, line) in message.lines().enumerate() {
-                println!("{:3}: {}", i+1, line);
+                println!("{:3}: {}", i + 1, line);
             }
         }
     }
-    
+
     // The test should pass - this message should be valid according to RFC 3261
     assert!(result.is_ok(), "Failed to parse wellformed message");
-    
+
     // If it parsed successfully, verify the main components
     if let Ok(parsed_msg) = result {
         match parsed_msg {
@@ -355,18 +362,18 @@ Contact: <sip:user@host105.example.com>\r\n\
                 assert_eq!(resp.status(), StatusCode::Trying);
                 // The reason phrase is empty
                 assert_eq!(resp.reason_phrase(), "");
-                
+
                 // Verify some headers exist
                 assert!(resp.header(&HeaderName::Via).is_some());
                 assert!(resp.header(&HeaderName::CallId).is_some());
                 assert!(resp.header(&HeaderName::CSeq).is_some());
-                
+
                 // Check content-length
                 let content_length = rvoip_sip_core::types::ContentLength::from_response(&resp);
                 assert_eq!(content_length, 0);
                 assert!(resp.body().is_empty());
-            },
-            _ => panic!("Expected Response but got Request")
+            }
+            _ => panic!("Expected Response but got Request"),
         }
     }
 }
@@ -391,63 +398,66 @@ Content-Length: 0\r\n\
 
     // Try parsing each header individually to isolate the issue
     println!("--- Testing individual headers ---");
-    
+
     // Request line
     println!("Request line: REGISTER sip:[2001:db8::10] SIP/2.0");
-    
+
     // To header
     println!("To header: sip:user@example.com");
-    
+
     // From header
     println!("From header: sip:user@example.com;tag=81x2");
-    
+
     // Via header
     println!("Via header: SIP/2.0/UDP [2001:db8::9:1];branch=z9hG4bKas3-111");
-    
+
     // Call-ID header
     println!("Call-ID header: SSG9559905523997077@hlau_4100");
-    
+
     // Now try parsing the whole message
     println!("\n--- Attempting to parse complete message ---");
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info on the parse result
     match &result {
         Ok(msg) => println!("Successfully parsed message: {:?}", msg),
         Err(e) => {
             println!("Parse error: {}", e);
-            
+
             // Try parsing with byte-by-byte inspection to find the exact failure point
             println!("\n--- Message bytes (with line numbers) ---");
             for (i, line) in message.lines().enumerate() {
-                println!("{:3}: {}", i+1, line);
+                println!("{:3}: {}", i + 1, line);
             }
         }
     }
-    
+
     // Comment out the assertion if we know it will fail due to URI parser limitations
-    assert!(result.is_ok(), "Failed to parse wellformed message with IPv6 addresses");
-    
+    assert!(
+        result.is_ok(),
+        "Failed to parse wellformed message with IPv6 addresses"
+    );
+
     // If it parsed successfully, verify the main components
     if let Ok(parsed_msg) = result {
         match parsed_msg {
             Message::Request(req) => {
                 assert_eq!(req.method(), Method::Register);
                 assert_eq!(req.uri().to_string(), "sip:[2001:db8::10]");
-                
+
                 // Verify some headers exist
                 assert!(req.header(&HeaderName::Via).is_some());
                 assert!(req.header(&HeaderName::From).is_some());
                 assert!(req.header(&HeaderName::To).is_some());
                 assert!(req.header(&HeaderName::CallId).is_some());
                 assert!(req.header(&HeaderName::CSeq).is_some());
-                
+
                 // Check content-length
                 let content_length = rvoip_sip_core::types::ContentLength::from_request(&req);
                 assert_eq!(content_length, 0);
                 assert!(req.body().is_empty());
-            },
-            _ => panic!("Expected Request but got Response")
+            }
+            _ => panic!("Expected Request but got Response"),
         }
     }
 }
@@ -475,43 +485,47 @@ l: 0\r\n\
     // Now try parsing the whole message
     println!("\n--- Attempting to parse message with multiple transports ---");
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info on the parse result
     match &result {
         Ok(msg) => println!("Successfully parsed message: {:?}", msg),
         Err(e) => {
             println!("Parse error: {}", e);
-            
+
             // Try parsing with byte-by-byte inspection to find the exact failure point
             println!("\n--- Message bytes (with line numbers) ---");
             for (i, line) in message.lines().enumerate() {
-                println!("{:3}: {}", i+1, line);
+                println!("{:3}: {}", i + 1, line);
             }
         }
     }
-    
-    assert!(result.is_ok(), "Failed to parse wellformed message with multiple transports");
-    
+
+    assert!(
+        result.is_ok(),
+        "Failed to parse wellformed message with multiple transports"
+    );
+
     // If it parsed successfully, verify the main components
     if let Ok(parsed_msg) = result {
         match parsed_msg {
             Message::Request(req) => {
                 assert_eq!(req.method(), Method::Options);
                 assert_eq!(req.uri().to_string(), "sip:user@example.com");
-                
+
                 // Check Via headers - we should have 5 of them with different transports
                 let via_headers = req.via_headers();
                 assert_eq!(via_headers.len(), 5, "Should have 5 Via headers");
-                
+
                 // Verify the transports from the Via headers
                 if !via_headers.is_empty() {
-                    let transports: Vec<&str> = via_headers.iter()
+                    let transports: Vec<&str> = via_headers
+                        .iter()
                         .flat_map(|v| v.0.iter())
                         .map(|vh| vh.sent_protocol.transport.as_str())
                         .collect();
-                    
+
                     println!("Found transports: {:?}", transports);
-                    
+
                     // Verify we have all the expected transports
                     assert!(transports.contains(&"UDP"), "Missing UDP transport");
                     assert!(transports.contains(&"SCTP"), "Missing SCTP transport");
@@ -519,12 +533,12 @@ l: 0\r\n\
                     assert!(transports.contains(&"UNKNOWN"), "Missing UNKNOWN transport");
                     assert!(transports.contains(&"TCP"), "Missing TCP transport");
                 }
-                
+
                 // Check compact header name ('l' for Content-Length)
                 let content_length = rvoip_sip_core::types::ContentLength::from_request(&req);
                 assert_eq!(content_length, 0, "Content-Length should be 0");
-            },
-            _ => panic!("Expected Request but got Response")
+            }
+            _ => panic!("Expected Request but got Response"),
         }
     }
 }
@@ -548,47 +562,53 @@ Content-Length: 0\r\n\
     // Now try parsing the whole message
     println!("\n--- Attempting to parse message with compact headers ---");
     let result = parse_message(message.as_bytes());
-    
+
     // Print detailed debug info on the parse result
     match &result {
         Ok(msg) => println!("Successfully parsed message: {:?}", msg),
         Err(e) => {
             println!("Parse error: {}", e);
-            
+
             // Try parsing with byte-by-byte inspection to find the exact failure point
             println!("\n--- Message bytes (with line numbers) ---");
             for (i, line) in message.lines().enumerate() {
-                println!("{:3}: {}", i+1, line);
+                println!("{:3}: {}", i + 1, line);
             }
         }
     }
-    
-    assert!(result.is_ok(), "Failed to parse wellformed message with compact headers");
-    
+
+    assert!(
+        result.is_ok(),
+        "Failed to parse wellformed message with compact headers"
+    );
+
     // If it parsed successfully, verify the main components
     if let Ok(parsed_msg) = result {
         match parsed_msg {
             Message::Request(req) => {
                 assert_eq!(req.method(), Method::Register);
                 assert_eq!(req.uri().to_string(), "sip:example.com");
-                
+
                 // Check the Call-ID header (compact form 'I')
                 let call_id = req.call_id();
-                
-                assert!(call_id.is_some(), "Call-ID header not found despite using compact form 'I'");
+
+                assert!(
+                    call_id.is_some(),
+                    "Call-ID header not found despite using compact form 'I'"
+                );
                 if let Some(cid) = call_id {
                     println!("Found Call-ID: {}", cid.0);
                     assert_eq!(cid.0, "dblreq.0ha0isndaksdj99sdfafnl3lk233412");
                 }
-                
+
                 // Check Max-Forwards
                 let max_forwards = rvoip_sip_core::types::MaxForwards::from_request(&req);
                 assert_eq!(max_forwards, 8, "Max-Forwards should be 8");
-            },
-            _ => panic!("Expected Request but got Response")
+            }
+            _ => panic!("Expected Request but got Response"),
         }
     }
 }
 
 // Note: We've moved the helper functions for ContentLength and MaxForwards extraction
-// to their respective type implementations for better code organization. 
+// to their respective type implementations for better code organization.

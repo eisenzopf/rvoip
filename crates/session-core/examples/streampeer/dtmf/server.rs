@@ -7,8 +7,8 @@
 //! Or with client:  ./examples/streampeer/dtmf/run.sh
 
 use async_trait::async_trait;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use rvoip_session_core::{
     CallHandler, CallHandlerDecision, CallId, CallbackPeer, Config, EndReason, IncomingCall,
@@ -30,7 +30,10 @@ impl CallHandler for DtmfLogger {
     }
 
     async fn on_call_established(&self, handle: SessionHandle) {
-        println!("[SERVER] Call {} established — waiting for DTMF…", handle.id());
+        println!(
+            "[SERVER] Call {} established — waiting for DTMF…",
+            handle.id()
+        );
     }
 
     async fn on_call_ended(&self, call_id: CallId, reason: EndReason) {
@@ -51,7 +54,9 @@ impl CallHandler for DtmfLogger {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let handler = DtmfLogger {

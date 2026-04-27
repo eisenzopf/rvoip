@@ -1,10 +1,10 @@
 //! Presence data storage
 
+use crate::error::{RegistrarError, Result};
+use crate::types::{BasicStatus, DevicePresence, ExtendedStatus, PresenceState, PresenceStatus};
+use chrono::Utc;
 use dashmap::DashMap;
 use std::sync::Arc;
-use chrono::Utc;
-use crate::types::{PresenceState, PresenceStatus, ExtendedStatus, DevicePresence, BasicStatus};
-use crate::error::{RegistrarError, Result};
 
 /// In-memory presence store
 pub struct PresenceStore {
@@ -18,7 +18,7 @@ impl PresenceStore {
             presence: Arc::new(DashMap::new()),
         }
     }
-    
+
     /// Update user's presence status
     pub async fn update_status(
         &self,
@@ -35,7 +35,7 @@ impl PresenceStore {
             PresenceStatus::Offline => ExtendedStatus::Offline,
             PresenceStatus::Custom(s) => ExtendedStatus::Custom(s),
         };
-        
+
         self.presence
             .entry(user_id.to_string())
             .and_modify(|state| {
@@ -54,10 +54,10 @@ impl PresenceStore {
                 expires: None,
                 priority: 0,
             });
-        
+
         Ok(())
     }
-    
+
     /// Get user's presence state
     pub async fn get_status(&self, user_id: &str) -> Result<PresenceState> {
         self.presence
@@ -65,14 +65,16 @@ impl PresenceStore {
             .map(|entry| entry.clone())
             .ok_or_else(|| RegistrarError::UserNotFound(user_id.to_string()))
     }
-    
+
     /// Add device to user's presence
     pub async fn add_device(&self, user_id: &str, device: DevicePresence) -> Result<()> {
         self.presence
             .entry(user_id.to_string())
             .and_modify(|state| {
                 // Remove duplicate device if exists
-                state.devices.retain(|d| d.instance_id != device.instance_id);
+                state
+                    .devices
+                    .retain(|d| d.instance_id != device.instance_id);
                 state.devices.push(device.clone());
                 state.last_updated = Utc::now();
             })
@@ -87,16 +89,16 @@ impl PresenceStore {
                 expires: None,
                 priority: 0,
             });
-        
+
         Ok(())
     }
-    
+
     /// Remove device from user's presence
     pub async fn remove_device(&self, user_id: &str, device_id: &str) -> Result<()> {
         if let Some(mut entry) = self.presence.get_mut(user_id) {
             entry.devices.retain(|d| d.instance_id != device_id);
             entry.last_updated = Utc::now();
-            
+
             // If no devices left, mark as offline
             if entry.devices.is_empty() {
                 entry.extended_status = Some(ExtendedStatus::Offline);
@@ -105,13 +107,13 @@ impl PresenceStore {
         }
         Ok(())
     }
-    
+
     /// Clear all presence data for a user
     pub async fn clear_presence(&self, user_id: &str) -> Result<()> {
         self.presence.remove(user_id);
         Ok(())
     }
-    
+
     /// List all users with presence
     pub async fn list_users_with_presence(&self) -> Vec<String> {
         self.presence

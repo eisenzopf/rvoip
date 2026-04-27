@@ -107,7 +107,10 @@ impl FromStr for PAssertedIdentity {
             return Ok(PAssertedIdentity::empty());
         }
         let bytes = s.as_bytes();
-        match all_consuming(crate::parser::headers::p_asserted_identity::parse_p_asserted_identity_value)(bytes) {
+        match all_consuming(
+            crate::parser::headers::p_asserted_identity::parse_p_asserted_identity_value,
+        )(bytes)
+        {
             Ok((_, list)) => Ok(PAssertedIdentity(list)),
             Err(_) => Err(Error::ParseError(format!(
                 "Failed to parse P-Asserted-Identity: {}",
@@ -259,7 +262,10 @@ impl FromStr for PPreferredIdentity {
             return Ok(PPreferredIdentity::empty());
         }
         let bytes = s.as_bytes();
-        match all_consuming(crate::parser::headers::p_asserted_identity::parse_p_asserted_identity_value)(bytes) {
+        match all_consuming(
+            crate::parser::headers::p_asserted_identity::parse_p_asserted_identity_value,
+        )(bytes)
+        {
             Ok((_, list)) => Ok(PPreferredIdentity(list)),
             Err(_) => Err(Error::ParseError(format!(
                 "Failed to parse P-Preferred-Identity: {}",

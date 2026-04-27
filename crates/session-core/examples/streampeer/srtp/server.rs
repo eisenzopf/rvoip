@@ -25,7 +25,10 @@ struct SrtpLogger;
 #[async_trait]
 impl CallHandler for SrtpLogger {
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
-        println!("[SERVER] Incoming SRTP-required call: {} -> {}", call.from, call.to);
+        println!(
+            "[SERVER] Incoming SRTP-required call: {} -> {}",
+            call.from, call.to
+        );
         CallHandlerDecision::Accept
     }
 

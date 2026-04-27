@@ -10,19 +10,19 @@ pub struct MediaStatistics {
     /// Session identifiers
     pub session_id: MediaSessionId,
     pub dialog_id: DialogId,
-    
+
     /// RTP/RTCP statistics from rtp-core
     pub rtp_stats: Option<RtpSessionStats>,
-    
+
     /// Per-stream statistics (for multi-stream scenarios)
     pub stream_stats: Vec<RtpStreamStats>,
-    
+
     /// Media processing statistics
     pub media_stats: MediaProcessingStats,
-    
+
     /// Quality metrics
     pub quality_metrics: Option<QualityMetrics>,
-    
+
     /// Session timing
     pub session_start: Instant,
     pub session_duration: Duration,
@@ -33,19 +33,19 @@ pub struct MediaStatistics {
 pub struct MediaProcessingStats {
     /// Packets processed
     pub packets_processed: u64,
-    
+
     /// Frames encoded
     pub frames_encoded: u64,
-    
+
     /// Frames decoded
     pub frames_decoded: u64,
-    
+
     /// Processing errors
     pub processing_errors: u64,
-    
+
     /// Codec changes
     pub codec_changes: u32,
-    
+
     /// Current codec
     pub current_codec: Option<String>,
 }
@@ -55,16 +55,16 @@ pub struct MediaProcessingStats {
 pub struct QualityMetrics {
     /// Packet loss percentage (from RTCP)
     pub packet_loss_percent: f32,
-    
+
     /// Jitter in milliseconds (from RTCP)
     pub jitter_ms: f64,
-    
+
     /// Round-trip time in milliseconds (from RTCP SR/RR)
     pub rtt_ms: Option<f64>,
-    
+
     /// MOS score estimate (1-5)
     pub mos_score: Option<f32>,
-    
+
     /// Network quality indicator (0-100)
     pub network_quality: u8,
 }
@@ -79,4 +79,4 @@ impl Default for QualityMetrics {
             network_quality: 100,
         }
     }
-} 
+}

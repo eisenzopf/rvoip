@@ -4,9 +4,9 @@
 //! specific configurations, allowing users to customize the event system
 //! to their needs without dealing with implementation details.
 
-use std::time::Duration;
-use crate::events::bus::EventBusConfig;
 use super::system::EventSystem;
+use crate::events::bus::EventBusConfig;
+use std::time::Duration;
 
 /// Enum representing the implementation type to use.
 ///
@@ -16,7 +16,7 @@ use super::system::EventSystem;
 pub enum ImplementationType {
     /// Use the Static Fast Path implementation for maximum performance
     StaticFastPath,
-    
+
     /// Use the Zero Copy implementation for advanced features
     ZeroCopy,
 }
@@ -29,28 +29,28 @@ pub enum ImplementationType {
 pub struct EventSystemBuilder {
     /// The implementation type to use
     implementation: ImplementationType,
-    
+
     /// The capacity of event channels
     channel_capacity: usize,
-    
+
     /// The maximum number of concurrent dispatches (zero-copy only)
     max_concurrent_dispatches: usize,
-    
+
     /// Whether to enable priority-based routing (zero-copy only)
     enable_priority: bool,
-    
+
     /// The default timeout for operations (zero-copy only)
     default_timeout: Option<Duration>,
-    
+
     /// The batch size for batch operations (zero-copy only)
     batch_size: usize,
-    
+
     /// The number of shards to use for the event bus (zero-copy only)
     shard_count: usize,
-    
+
     /// Whether to enable metrics collection (zero-copy only)
     enable_metrics: bool,
-    
+
     /// The interval for reporting metrics (zero-copy only)
     metrics_reporting_interval: Duration,
 }
@@ -80,7 +80,7 @@ impl EventSystemBuilder {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Sets the implementation type to use.
     ///
     /// # Arguments
@@ -94,7 +94,7 @@ impl EventSystemBuilder {
         self.implementation = implementation;
         self
     }
-    
+
     /// Sets the channel capacity.
     ///
     /// This option applies to both implementations.
@@ -110,7 +110,7 @@ impl EventSystemBuilder {
         self.channel_capacity = capacity;
         self
     }
-    
+
     /// Sets the maximum number of concurrent dispatches.
     ///
     /// This option only applies to the Zero Copy implementation.
@@ -126,7 +126,7 @@ impl EventSystemBuilder {
         self.max_concurrent_dispatches = max_dispatches;
         self
     }
-    
+
     /// Sets whether to enable priority-based routing.
     ///
     /// This option only applies to the Zero Copy implementation.
@@ -142,7 +142,7 @@ impl EventSystemBuilder {
         self.enable_priority = enable;
         self
     }
-    
+
     /// Sets the default timeout for operations.
     ///
     /// This option only applies to the Zero Copy implementation.
@@ -158,7 +158,7 @@ impl EventSystemBuilder {
         self.default_timeout = timeout;
         self
     }
-    
+
     /// Sets the batch size for batch operations.
     ///
     /// This option only applies to the Zero Copy implementation.
@@ -174,7 +174,7 @@ impl EventSystemBuilder {
         self.batch_size = size;
         self
     }
-    
+
     /// Sets the number of shards to use for the event bus.
     ///
     /// This option only applies to the Zero Copy implementation.
@@ -190,7 +190,7 @@ impl EventSystemBuilder {
         self.shard_count = count;
         self
     }
-    
+
     /// Sets whether to enable metrics collection.
     ///
     /// This option only applies to the Zero Copy implementation.
@@ -206,7 +206,7 @@ impl EventSystemBuilder {
         self.enable_metrics = enable;
         self
     }
-    
+
     /// Sets the interval for reporting metrics.
     ///
     /// This option only applies to the Zero Copy implementation.
@@ -222,7 +222,7 @@ impl EventSystemBuilder {
         self.metrics_reporting_interval = interval;
         self
     }
-    
+
     /// Builds an event system with the configured options.
     ///
     /// # Returns
@@ -232,7 +232,7 @@ impl EventSystemBuilder {
         match self.implementation {
             ImplementationType::StaticFastPath => {
                 EventSystem::new_static_fast_path(self.channel_capacity)
-            },
+            }
             ImplementationType::ZeroCopy => {
                 let config = EventBusConfig {
                     broadcast_capacity: self.channel_capacity,
@@ -243,9 +243,9 @@ impl EventSystemBuilder {
                     batch_size: self.batch_size,
                     shard_count: self.shard_count,
                 };
-                
+
                 EventSystem::new_zero_copy(config)
             }
         }
     }
-} 
+}

@@ -3,9 +3,9 @@
 //! This module defines quality metrics structures and calculation utilities
 //! for monitoring media session performance.
 
+use crate::types::{MediaPacket, MediaSessionId};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-use crate::types::{MediaSessionId, MediaPacket};
 
 /// Comprehensive quality metrics for a media session
 #[derive(Debug, Clone, Default)]
@@ -78,10 +78,10 @@ pub struct QualityThresholds {
 impl Default for QualityThresholds {
     fn default() -> Self {
         Self {
-            critical_packet_loss: 5.0,  // 5% packet loss is critical
-            high_jitter: 30.0,           // 30ms jitter is high
-            poor_mos: 2.5,               // MOS below 2.5 is poor
-            high_latency: 150.0,         // 150ms latency is high
+            critical_packet_loss: 5.0, // 5% packet loss is critical
+            high_jitter: 30.0,         // 30ms jitter is high
+            poor_mos: 2.5,             // MOS below 2.5 is poor
+            high_latency: 150.0,       // 150ms latency is high
         }
     }
 }
@@ -100,7 +100,7 @@ impl SessionMetrics {
             last_updated: Instant::now(),
         }
     }
-    
+
     /// Update metrics with new measurement
     pub fn update(&mut self, metrics: QualityMetrics) {
         // Store previous metrics in history
@@ -108,24 +108,24 @@ impl SessionMetrics {
             self.history.pop_front();
         }
         self.history.push_back(self.current.clone());
-        
+
         // Update current metrics
         self.current = metrics;
         self.last_updated = Instant::now();
     }
-    
+
     /// Get quality trend (improving, stable, degrading)
     pub fn get_trend(&self) -> QualityTrend {
         if self.history.len() < 3 {
             return QualityTrend::Stable;
         }
-        
+
         let recent: Vec<_> = self.history.iter().rev().take(3).collect();
         let latest_mos = self.current.mos_score;
         let avg_recent_mos = recent.iter().map(|m| m.mos_score).sum::<f32>() / recent.len() as f32;
-        
+
         let trend_threshold = 0.2; // MOS difference threshold
-        
+
         if latest_mos > avg_recent_mos + trend_threshold {
             QualityTrend::Improving
         } else if latest_mos < avg_recent_mos - trend_threshold {
@@ -134,15 +134,15 @@ impl SessionMetrics {
             QualityTrend::Stable
         }
     }
-    
+
     /// Check if quality is below thresholds
     pub fn is_quality_poor(&self, thresholds: &QualityThresholds) -> bool {
-        self.current.packet_loss > thresholds.critical_packet_loss ||
-        self.current.jitter_ms > thresholds.high_jitter ||
-        self.current.mos_score < thresholds.poor_mos ||
-        self.current.processing_latency_ms > thresholds.high_latency
+        self.current.packet_loss > thresholds.critical_packet_loss
+            || self.current.jitter_ms > thresholds.high_jitter
+            || self.current.mos_score < thresholds.poor_mos
+            || self.current.processing_latency_ms > thresholds.high_latency
     }
-    
+
     /// Update packet statistics
     pub fn update_packet_stats(&mut self, packet: &MediaPacket, is_received: bool) {
         if is_received {
@@ -159,24 +159,24 @@ impl QualityMetrics {
     pub fn calculate_mos(packet_loss: f32, jitter_ms: f32, latency_ms: f32) -> f32 {
         // Simplified MOS calculation based on ITU-T P.800
         let mut mos = 4.5; // Start with good quality
-        
+
         // Reduce score based on packet loss
         mos -= packet_loss * 0.1; // 10% packet loss = -1.0 MOS
-        
+
         // Reduce score based on jitter
         if jitter_ms > 20.0 {
             mos -= (jitter_ms - 20.0) * 0.02; // High jitter penalty
         }
-        
+
         // Reduce score based on latency
         if latency_ms > 150.0 {
             mos -= (latency_ms - 150.0) * 0.01; // High latency penalty
         }
-        
+
         // Clamp to valid MOS range (1.0-5.0)
         mos.max(1.0).min(5.0)
     }
-    
+
     /// Get quality grade from MOS score
     pub fn get_quality_grade(&self) -> QualityGrade {
         match self.mos_score {
@@ -205,4 +205,4 @@ pub enum QualityGrade {
     Fair,      // 2.5-3.5
     Poor,      // 1.5-2.5
     Bad,       // 1.0-1.5
-} 
+}

@@ -65,19 +65,77 @@ impl std::fmt::Display for DigestAlgorithm {
 }
 
 fn parse_algorithm(value: &str) -> DigestAlgorithm {
-    match value {
-        "MD5" => DigestAlgorithm::MD5,
-        "MD5-sess" => DigestAlgorithm::MD5Sess,
-        "SHA-256" => DigestAlgorithm::SHA256,
-        "SHA-256-sess" => DigestAlgorithm::SHA256Sess,
-        other => {
-            tracing::warn!(
-                "Unknown digest algorithm '{}' — falling back to MD5 (RFC 8760 SHA-512-256 not yet wired)",
-                other
-            );
-            DigestAlgorithm::MD5
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("MD5") {
+        DigestAlgorithm::MD5
+    } else if value.eq_ignore_ascii_case("MD5-sess") {
+        DigestAlgorithm::MD5Sess
+    } else if value.eq_ignore_ascii_case("SHA-256") {
+        DigestAlgorithm::SHA256
+    } else if value.eq_ignore_ascii_case("SHA-256-sess") {
+        DigestAlgorithm::SHA256Sess
+    } else {
+        tracing::warn!(
+            "Unknown digest algorithm '{}' — falling back to MD5 (RFC 8760 SHA-512-256 not yet wired)",
+            value
+        );
+        DigestAlgorithm::MD5
+    }
+}
+
+fn split_auth_params(params: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for (idx, ch) in params.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => {
+                parts.push(params[start..idx].trim());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
         }
     }
+
+    parts.push(params[start..].trim());
+    parts.into_iter().filter(|part| !part.is_empty()).collect()
+}
+
+fn unquote_auth_value(value: &str) -> String {
+    let value = value.trim();
+    let Some(inner) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
+        return value.to_string();
+    };
+
+    let mut unescaped = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                unescaped.push(next);
+            }
+        } else {
+            unescaped.push(ch);
+        }
+    }
+    unescaped
+}
+
+fn parse_qop_options(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Digest challenge issued by server (401/407 response).
@@ -189,9 +247,8 @@ impl DigestAuthenticator {
     ) -> Result<bool> {
         let algorithm = response.algorithm;
         // HA1
-        let basic_ha1 = algorithm.hash(
-            format!("{}:{}:{}", response.username, response.realm, password).as_bytes(),
-        );
+        let basic_ha1 = algorithm
+            .hash(format!("{}:{}:{}", response.username, response.realm, password).as_bytes());
         let ha1 = if algorithm.is_sess() {
             let cnonce = response.cnonce.as_deref().ok_or_else(|| {
                 AuthError::InvalidResponse("Missing cnonce for -sess algorithm".into())
@@ -249,26 +306,20 @@ impl DigestAuthenticator {
         let mut qop = None;
         let mut opaque = None;
 
-        for param in params_str.split(',') {
+        for param in split_auth_params(params_str) {
             let param = param.trim();
             if let Some((key, value)) = param.split_once('=') {
-                let key = key.trim();
-                let value = value.trim().trim_matches('"');
+                let key = key.trim().to_ascii_lowercase();
+                let value = unquote_auth_value(value);
 
-                match key {
-                    "realm" => realm = Some(value.to_string()),
-                    "nonce" => nonce = Some(value.to_string()),
-                    "algorithm" => algorithm = parse_algorithm(value),
+                match key.as_str() {
+                    "realm" => realm = Some(value),
+                    "nonce" => nonce = Some(value),
+                    "algorithm" => algorithm = parse_algorithm(&value),
                     "qop" => {
-                        qop = Some(
-                            value
-                                .split(',')
-                                .map(|s| s.trim().to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect(),
-                        );
+                        qop = Some(parse_qop_options(&value));
                     }
-                    "opaque" => opaque = Some(value.to_string()),
+                    "opaque" => opaque = Some(value),
                     _ => {}
                 }
             }
@@ -290,9 +341,7 @@ impl DigestAuthenticator {
         let params_str = if header.starts_with("Digest ") || header.starts_with("digest ") {
             &header[7..]
         } else {
-            return Err(AuthError::InvalidResponse(
-                "Missing 'Digest' prefix".into(),
-            ));
+            return Err(AuthError::InvalidResponse("Missing 'Digest' prefix".into()));
         };
 
         let mut username = None;
@@ -306,23 +355,23 @@ impl DigestAuthenticator {
         let mut nc = None;
         let mut opaque = None;
 
-        for param in params_str.split(',') {
+        for param in split_auth_params(params_str) {
             let param = param.trim();
             if let Some((key, value)) = param.split_once('=') {
-                let key = key.trim();
-                let value = value.trim().trim_matches('"');
+                let key = key.trim().to_ascii_lowercase();
+                let value = unquote_auth_value(value);
 
-                match key {
-                    "username" => username = Some(value.to_string()),
-                    "realm" => realm = Some(value.to_string()),
-                    "nonce" => nonce = Some(value.to_string()),
-                    "uri" => uri = Some(value.to_string()),
-                    "response" => response = Some(value.to_string()),
-                    "algorithm" => algorithm = parse_algorithm(value),
-                    "cnonce" => cnonce = Some(value.to_string()),
-                    "qop" => qop = Some(value.to_string()),
-                    "nc" => nc = Some(value.to_string()),
-                    "opaque" => opaque = Some(value.to_string()),
+                match key.as_str() {
+                    "username" => username = Some(value),
+                    "realm" => realm = Some(value),
+                    "nonce" => nonce = Some(value),
+                    "uri" => uri = Some(value),
+                    "response" => response = Some(value),
+                    "algorithm" => algorithm = parse_algorithm(&value),
+                    "cnonce" => cnonce = Some(value),
+                    "qop" => qop = Some(value.to_ascii_lowercase()),
+                    "nc" => nc = Some(value),
+                    "opaque" => opaque = Some(value),
                     _ => {}
                 }
             }
@@ -377,9 +426,8 @@ impl DigestClient {
         method: &str,
         uri: &str,
     ) -> Result<(String, Option<String>)> {
-        let computed = Self::compute_response_with_state(
-            username, password, challenge, method, uri, 1, None,
-        )?;
+        let computed =
+            Self::compute_response_with_state(username, password, challenge, method, uri, 1, None)?;
         Ok((computed.response, computed.cnonce))
     }
 
@@ -410,13 +458,10 @@ impl DigestClient {
 
         // HA1 (RFC 7616 §3.4.2). `-sess` wraps the basic HA1 in a
         // session-bound construction with nonce + cnonce.
-        let basic_ha1 = algorithm.hash(
-            format!("{}:{}:{}", username, challenge.realm, password).as_bytes(),
-        );
+        let basic_ha1 =
+            algorithm.hash(format!("{}:{}:{}", username, challenge.realm, password).as_bytes());
         let ha1 = if algorithm.is_sess() {
-            algorithm.hash(
-                format!("{}:{}:{}", basic_ha1, challenge.nonce, cnonce_value).as_bytes(),
-            )
+            algorithm.hash(format!("{}:{}:{}", basic_ha1, challenge.nonce, cnonce_value).as_bytes())
         } else {
             basic_ha1
         };
@@ -564,12 +609,41 @@ mod tests {
     #[test]
     fn algorithm_parser_recognises_known_tokens() {
         assert_eq!(parse_algorithm("MD5"), DigestAlgorithm::MD5);
+        assert_eq!(parse_algorithm("md5"), DigestAlgorithm::MD5);
         assert_eq!(parse_algorithm("MD5-sess"), DigestAlgorithm::MD5Sess);
+        assert_eq!(parse_algorithm("md5-sess"), DigestAlgorithm::MD5Sess);
         assert_eq!(parse_algorithm("SHA-256"), DigestAlgorithm::SHA256);
         assert_eq!(parse_algorithm("SHA-256-sess"), DigestAlgorithm::SHA256Sess);
         // Unknown falls back to MD5 with a warning (RFC 8760 SHA-512-256 deferred).
         assert_eq!(parse_algorithm("SHA-512-256"), DigestAlgorithm::MD5);
         assert_eq!(parse_algorithm("garbage"), DigestAlgorithm::MD5);
+    }
+
+    #[test]
+    fn challenge_parser_preserves_quoted_qop_list() {
+        let challenge = DigestAuthenticator::parse_challenge(
+            r#"Digest realm="example.com", nonce="fixed", algorithm=md5, qop="auth,auth-int""#,
+        )
+        .unwrap();
+
+        assert_eq!(challenge.algorithm, DigestAlgorithm::MD5);
+        assert_eq!(
+            challenge.qop,
+            Some(vec!["auth".to_string(), "auth-int".to_string()])
+        );
+    }
+
+    #[test]
+    fn authorization_parser_ignores_commas_inside_quotes() {
+        let response = DigestAuthenticator::parse_authorization(
+            r#"Digest username="alice,ua", realm="example.com", nonce="fixed", uri="sip:example.com", response="abcd", algorithm=MD5, qop=auth, nc=00000001, cnonce="cn,once", opaque="op,aque""#,
+        )
+        .unwrap();
+
+        assert_eq!(response.username, "alice,ua");
+        assert_eq!(response.cnonce.as_deref(), Some("cn,once"));
+        assert_eq!(response.opaque.as_deref(), Some("op,aque"));
+        assert_eq!(response.qop.as_deref(), Some("auth"));
     }
 
     #[test]
@@ -591,11 +665,23 @@ mod tests {
         };
 
         let r1 = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "INVITE", "sip:bob@example.com", 1, None,
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            1,
+            None,
         )
         .unwrap();
         let r2 = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "INVITE", "sip:bob@example.com", 2, None,
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            2,
+            None,
         )
         .unwrap();
 
@@ -619,17 +705,32 @@ mod tests {
         };
 
         let r1 = DigestClient::compute_response_with_state(
-            "alice", "secret", &mk("nonce-A"), "REGISTER", "sip:reg.example.com", 1, None,
+            "alice",
+            "secret",
+            &mk("nonce-A"),
+            "REGISTER",
+            "sip:reg.example.com",
+            1,
+            None,
         )
         .unwrap();
         let r2 = DigestClient::compute_response_with_state(
-            "alice", "secret", &mk("nonce-B"), "REGISTER", "sip:reg.example.com", 1, None,
+            "alice",
+            "secret",
+            &mk("nonce-B"),
+            "REGISTER",
+            "sip:reg.example.com",
+            1,
+            None,
         )
         .unwrap();
 
         assert_eq!(r1.nc.as_deref(), Some("00000001"));
         assert_eq!(r2.nc.as_deref(), Some("00000001"));
-        assert_ne!(r1.response, r2.response, "different nonces must produce different responses");
+        assert_ne!(
+            r1.response, r2.response,
+            "different nonces must produce different responses"
+        );
     }
 
     #[test]
@@ -644,7 +745,13 @@ mod tests {
         };
 
         let computed = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "INVITE", "sip:bob@example.com", 1, None,
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            1,
+            None,
         )
         .unwrap();
 
@@ -661,9 +768,13 @@ mod tests {
             opaque: None,
         };
 
-        assert!(auth.validate_response(&response, "INVITE", "secret").unwrap());
+        assert!(auth
+            .validate_response(&response, "INVITE", "secret")
+            .unwrap());
         // Wrong password rejected.
-        assert!(!auth.validate_response(&response, "INVITE", "WRONG").unwrap());
+        assert!(!auth
+            .validate_response(&response, "INVITE", "WRONG")
+            .unwrap());
     }
 
     #[test]
@@ -690,7 +801,13 @@ mod tests {
         ] {
             let ch = mk(alg);
             let computed = DigestClient::compute_response_with_state(
-                "alice", "secret", &ch, "INVITE", "sip:bob@example.com", 1, None,
+                "alice",
+                "secret",
+                &ch,
+                "INVITE",
+                "sip:bob@example.com",
+                1,
+                None,
             )
             .unwrap();
             let resp = DigestResponse {
@@ -706,7 +823,9 @@ mod tests {
                 opaque: None,
             };
             assert!(
-                auth_plain.validate_response(&resp, "INVITE", "secret").unwrap(),
+                auth_plain
+                    .validate_response(&resp, "INVITE", "secret")
+                    .unwrap(),
                 "algorithm {:?} failed self-validation",
                 alg
             );
@@ -729,17 +848,32 @@ mod tests {
         let body_b = b"v=0\r\no=alice 2 2 IN IP4 5.6.7.8\r\n";
 
         let r_a = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "INVITE", "sip:bob@example.com", 1, Some(body_a),
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            1,
+            Some(body_a),
         )
         .unwrap();
         let r_b = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "INVITE", "sip:bob@example.com", 1, Some(body_b),
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            1,
+            Some(body_b),
         )
         .unwrap();
 
         assert_eq!(r_a.qop.as_deref(), Some("auth-int"));
         assert_eq!(r_b.qop.as_deref(), Some("auth-int"));
-        assert_ne!(r_a.response, r_b.response, "auth-int must fold the body into HA2");
+        assert_ne!(
+            r_a.response, r_b.response,
+            "auth-int must fold the body into HA2"
+        );
     }
 
     #[test]
@@ -754,7 +888,13 @@ mod tests {
 
         // With body present, auth-int wins.
         let r = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "INVITE", "sip:bob@example.com", 1, Some(b"sdp"),
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            1,
+            Some(b"sdp"),
         )
         .unwrap();
         assert_eq!(r.qop.as_deref(), Some("auth-int"));
@@ -762,7 +902,13 @@ mod tests {
         // Without body, auth wins (we don't pad an empty body for an
         // option the caller didn't ask for).
         let r2 = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "INVITE", "sip:bob@example.com", 1, None,
+            "alice",
+            "secret",
+            &challenge,
+            "INVITE",
+            "sip:bob@example.com",
+            1,
+            None,
         )
         .unwrap();
         assert_eq!(r2.qop.as_deref(), Some("auth"));
@@ -779,7 +925,13 @@ mod tests {
         };
 
         let computed = DigestClient::compute_response_with_state(
-            "alice", "secret", &challenge, "REGISTER", "sip:reg.example.com", 42, None,
+            "alice",
+            "secret",
+            &challenge,
+            "REGISTER",
+            "sip:reg.example.com",
+            42,
+            None,
         )
         .unwrap();
 

@@ -1,6 +1,6 @@
-use std::fmt;
 use crate::types::headers::header_name::HeaderName;
 use crate::types::headers::header_value::HeaderValue;
+use std::fmt;
 
 /// SIP header, consisting of a name and value
 ///
@@ -52,7 +52,10 @@ impl Header {
 
     /// Create a Content-Type header for plain text
     pub fn content_type_text_plain() -> Self {
-        Header::new(HeaderName::ContentType, HeaderValue::content_type_text_plain())
+        Header::new(
+            HeaderName::ContentType,
+            HeaderValue::content_type_text_plain(),
+        )
     }
 
     /// Create a Content-Type header for JSON
@@ -62,12 +65,18 @@ impl Header {
 
     /// Create a Content-Type header for multipart/mixed
     pub fn content_type_multipart_mixed(boundary: impl Into<String>) -> Self {
-        Header::new(HeaderName::ContentType, HeaderValue::content_type_multipart_mixed(boundary))
+        Header::new(
+            HeaderName::ContentType,
+            HeaderValue::content_type_multipart_mixed(boundary),
+        )
     }
 
     /// Create a Content-Length header
     pub fn content_length(length: usize) -> Self {
-        Header::new(HeaderName::ContentLength, HeaderValue::content_length(length))
+        Header::new(
+            HeaderName::ContentLength,
+            HeaderValue::content_length(length),
+        )
     }
 
     /// Create a Max-Forwards header
@@ -90,13 +99,13 @@ impl fmt::Display for Header {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_header_creation() {
         let h = Header::text(HeaderName::To, "sip:alice@example.com");
         assert_eq!(h.name, HeaderName::To);
         assert_eq!(h.value.as_text(), Some("sip:alice@example.com"));
-        
+
         let h = Header::integer(HeaderName::ContentLength, 42);
         assert_eq!(h.name, HeaderName::ContentLength);
         assert_eq!(h.value.as_integer(), Some(42));
@@ -106,17 +115,17 @@ mod tests {
     fn test_header_wire_format() {
         let h = Header::text(HeaderName::To, "sip:alice@example.com");
         assert_eq!(h.to_wire_format(), "To: sip:alice@example.com");
-        
+
         let h = Header::integer(HeaderName::ContentLength, 42);
         assert_eq!(h.to_wire_format(), "Content-Length: 42");
-        
+
         let h = Header::new(
-            HeaderName::Via, 
-            HeaderValue::text("SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK776asdhds")
+            HeaderName::Via,
+            HeaderValue::text("SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK776asdhds"),
         );
         assert_eq!(
-            h.to_wire_format(), 
+            h.to_wire_format(),
             "Via: SIP/2.0/UDP 192.168.1.1:5060;branch=z9hG4bK776asdhds"
         );
     }
-} 
+}

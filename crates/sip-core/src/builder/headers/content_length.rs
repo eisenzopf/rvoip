@@ -1,11 +1,6 @@
-
-
-use crate::types::{
-    content_length::ContentLength,
-    TypedHeader,
-};
-use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
 use crate::builder::headers::HeaderSetter;
+use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
+use crate::types::{content_length::ContentLength, TypedHeader};
 
 /// Content-Length Header Builder for SIP Messages
 ///
@@ -29,17 +24,17 @@ use crate::builder::headers::HeaderSetter;
 ///
 /// ## Special Considerations
 ///
-/// 1. **Automatic Content-Length**: In most cases, the `body()` method on SIP message builders 
+/// 1. **Automatic Content-Length**: In most cases, the `body()` method on SIP message builders
 ///    automatically sets the Content-Length header based on the actual body size
 /// 2. **Zero Content-Length**: A Content-Length of 0 explicitly indicates an empty body
-/// 3. **Transport Differences**: Content-Length is mandatory for TCP, TLS, and WebSocket transports, 
+/// 3. **Transport Differences**: Content-Length is mandatory for TCP, TLS, and WebSocket transports,
 ///    but optional for UDP (where message boundaries are handled by the datagram)
 /// 4. **Compact Form**: Content-Length has the compact form 'l', though this is less commonly used
 ///
 /// ## Relationship with other headers
 ///
 /// - **Content-Length** + **Content-Type**: Content-Length indicates body size while Content-Type specifies format
-/// - **Content-Length** vs **Transfer-Encoding**: These are mutually exclusive; if Transfer-Encoding is used 
+/// - **Content-Length** vs **Transfer-Encoding**: These are mutually exclusive; if Transfer-Encoding is used
 ///   (e.g., "chunked"), Content-Length should not be present
 /// - **Zero Content-Length**: Often used with response codes that don't permit bodies (e.g., 100, 304)
 /// - **Missing Content-Length**: In UDP, a missing Content-Length means the body extends to the end of the UDP datagram
@@ -242,7 +237,7 @@ pub trait ContentLengthBuilderExt {
     /// If you set both Content-Length and body, the body() method will override your Content-Length
     /// with the actual length of the body content.
     fn content_length(self, length: u32) -> Self;
-    
+
     /// Add a Content-Length header with value 0
     ///
     /// Creates and adds a Content-Length header with value 0, indicating that the message has no body.
@@ -281,7 +276,7 @@ impl ContentLengthBuilderExt for SimpleRequestBuilder {
     fn content_length(self, length: u32) -> Self {
         self.header(TypedHeader::ContentLength(ContentLength::new(length)))
     }
-    
+
     fn no_content(self) -> Self {
         self.content_length(0)
     }
@@ -291,7 +286,7 @@ impl ContentLengthBuilderExt for SimpleResponseBuilder {
     fn content_length(self, length: u32) -> Self {
         self.header(TypedHeader::ContentLength(ContentLength::new(length)))
     }
-    
+
     fn no_content(self) -> Self {
         self.content_length(0)
     }
@@ -300,92 +295,136 @@ impl ContentLengthBuilderExt for SimpleResponseBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Method, StatusCode};
-    use crate::types::headers::HeaderAccess;
     use crate::builder::headers::cseq::CSeqBuilderExt;
     use crate::builder::headers::from::FromBuilderExt;
     use crate::builder::headers::to::ToBuilderExt;
+    use crate::types::headers::HeaderAccess;
+    use crate::types::{Method, StatusCode};
 
     #[test]
     fn test_request_content_length() {
         let length = 1024;
-        
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .content_length(length)
             .build();
-            
-        let content_length_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentLength(c) = h { Some(c) } else { None })
+
+        let content_length_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentLength(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_length_headers.len(), 1);
         assert_eq!(content_length_headers[0].0, length);
     }
-    
+
     #[test]
     fn test_response_content_length() {
         let length = 2048;
-        
+
         let response = SimpleResponseBuilder::ok()
             .from("Alice", "sip:alice@example.com", Some("tag1234"))
             .to("Bob", "sip:bob@example.com", Some("tag5678"))
             .cseq_with_method(101, Method::Invite)
             .content_length(length)
             .build();
-            
-        let content_length_headers = response.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentLength(c) = h { Some(c) } else { None })
+
+        let content_length_headers = response
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentLength(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_length_headers.len(), 1);
         assert_eq!(content_length_headers[0].0, length);
     }
-    
+
     #[test]
     fn test_request_no_content() {
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .no_content()
             .build();
-            
-        let content_length_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentLength(c) = h { Some(c) } else { None })
+
+        let content_length_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentLength(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_length_headers.len(), 1);
         assert_eq!(content_length_headers[0].0, 0);
     }
-    
+
     #[test]
     fn test_content_length_with_body() {
         let body = "Hello, world!";
-        
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .body(body)
             .build();
-            
-        let content_length_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentLength(c) = h { Some(c) } else { None })
+
+        let content_length_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentLength(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_length_headers.len(), 1);
         assert_eq!(content_length_headers[0].0, body.len() as u32);
     }
-    
+
     #[test]
     fn test_override_content_length_with_body() {
         let body = "Hello, world!";
         let wrong_length = 1000; // This is wrong, but we'll override it
-        
-        let request = SimpleRequestBuilder::invite("sip:bob@example.com").unwrap()
+
+        let request = SimpleRequestBuilder::invite("sip:bob@example.com")
+            .unwrap()
             .content_length(wrong_length) // This will be overridden by the body method
             .body(body)
             .build();
-            
-        let content_length_headers = request.all_headers().iter()
-            .filter_map(|h| if let TypedHeader::ContentLength(c) = h { Some(c) } else { None })
+
+        let content_length_headers = request
+            .all_headers()
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::ContentLength(c) = h {
+                    Some(c)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(content_length_headers.len(), 1);
         assert_eq!(content_length_headers[0].0, body.len() as u32); // It should use the actual length
     }
-} 
+}

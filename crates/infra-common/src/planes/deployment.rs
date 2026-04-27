@@ -3,27 +3,27 @@
 //! Supports flexible deployment modes from monolithic to fully distributed
 
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use std::collections::HashMap;
+use std::time::Duration;
 
 /// Overall deployment mode for the RVOIP system
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DeploymentMode {
     /// All planes run in the same process (P2P clients)
     Monolithic,
-    
+
     /// Transport plane is remote (edge deployment)
     TransportDistributed,
-    
+
     /// Media plane is remote (cloud media processing)
     MediaDistributed,
-    
+
     /// Signaling plane is remote (centralized control)
     SignalingDistributed,
-    
+
     /// All planes run as separate services (microservices)
     FullyDistributed,
-    
+
     /// Custom deployment configuration
     Custom(CustomDeployment),
 }
@@ -33,7 +33,7 @@ impl DeploymentMode {
     pub fn is_monolithic(&self) -> bool {
         matches!(self, DeploymentMode::Monolithic)
     }
-    
+
     /// Check if any plane is distributed
     pub fn is_distributed(&self) -> bool {
         !self.is_monolithic()
@@ -53,7 +53,7 @@ pub struct CustomDeployment {
 pub enum PlaneConfig {
     /// Plane runs in the local process
     Local,
-    
+
     /// Plane runs as a remote service
     Remote {
         /// Service endpoints for the plane
@@ -63,7 +63,7 @@ pub enum PlaneConfig {
         /// Health check interval
         health_check_interval: Duration,
     },
-    
+
     /// Hybrid deployment with both local and remote components
     Hybrid {
         /// Weight for local processing (0-100)
@@ -82,18 +82,20 @@ impl PlaneConfig {
     pub fn is_local(&self) -> bool {
         matches!(self, PlaneConfig::Local)
     }
-    
+
     /// Check if this plane has remote components
     pub fn has_remote(&self) -> bool {
         !self.is_local()
     }
-    
+
     /// Get remote endpoints if any
     pub fn endpoints(&self) -> Vec<String> {
         match self {
             PlaneConfig::Local => vec![],
             PlaneConfig::Remote { endpoints, .. } => endpoints.clone(),
-            PlaneConfig::Hybrid { remote_endpoints, .. } => remote_endpoints.clone(),
+            PlaneConfig::Hybrid {
+                remote_endpoints, ..
+            } => remote_endpoints.clone(),
         }
     }
 }
@@ -131,16 +133,16 @@ pub enum LoadStrategy {
 pub struct DeploymentConfig {
     /// Overall deployment mode
     pub deployment_mode: DeploymentMode,
-    
+
     /// Individual plane configurations
     pub plane_configs: PlaneConfigs,
-    
+
     /// Network configuration for distributed deployment
     pub networking: NetworkConfig,
-    
+
     /// Service discovery configuration
     pub discovery: ServiceDiscoveryConfig,
-    
+
     /// Performance tuning parameters
     pub performance: PerformanceConfig,
 }
@@ -156,7 +158,7 @@ impl DeploymentConfig {
             performance: PerformanceConfig::low_resource(),
         }
     }
-    
+
     /// Create fully distributed configuration
     pub fn fully_distributed() -> Self {
         Self {
@@ -167,7 +169,7 @@ impl DeploymentConfig {
             performance: PerformanceConfig::high_throughput(),
         }
     }
-    
+
     /// Create edge deployment (local signaling/media, remote transport)
     pub fn edge_deployment() -> Self {
         Self {
@@ -205,7 +207,7 @@ impl PlaneConfigs {
             signaling: PlaneConfig::Local,
         }
     }
-    
+
     /// All planes remote with default configuration
     pub fn all_remote_default() -> Self {
         Self {
@@ -233,22 +235,22 @@ impl PlaneConfigs {
 pub struct NetworkConfig {
     /// Enable networking
     pub enabled: bool,
-    
+
     /// Primary protocol for inter-plane communication
     pub primary_protocol: String,
-    
+
     /// Backup protocols
     pub backup_protocols: Vec<String>,
-    
+
     /// Enable TLS/mTLS
     pub use_tls: bool,
-    
+
     /// Connection pool size
     pub connection_pool_size: usize,
-    
+
     /// Request timeout
     pub request_timeout: Duration,
-    
+
     /// Enable compression
     pub compression: CompressionConfig,
 }
@@ -265,7 +267,7 @@ impl NetworkConfig {
             compression: CompressionConfig::None,
         }
     }
-    
+
     pub fn multi_protocol() -> Self {
         Self {
             enabled: true,
@@ -277,7 +279,7 @@ impl NetworkConfig {
             compression: CompressionConfig::Auto,
         }
     }
-    
+
     pub fn single_protocol(protocol: &str) -> Self {
         Self {
             enabled: true,
@@ -306,43 +308,40 @@ pub enum CompressionConfig {
 pub enum ServiceDiscoveryConfig {
     /// No service discovery (static configuration)
     None,
-    
+
     /// Kubernetes service discovery
     Kubernetes {
         namespace: String,
         label_selector: String,
     },
-    
+
     /// Consul service discovery
     Consul {
         datacenter: String,
         service_prefix: String,
     },
-    
+
     /// Static configuration
     Static {
         endpoints: HashMap<String, Vec<String>>,
     },
-    
+
     /// DNS-based discovery
-    Dns {
-        domain: String,
-        srv_records: bool,
-    },
+    Dns { domain: String, srv_records: bool },
 }
 
 impl ServiceDiscoveryConfig {
     pub fn none() -> Self {
         ServiceDiscoveryConfig::None
     }
-    
+
     pub fn kubernetes() -> Self {
         ServiceDiscoveryConfig::Kubernetes {
             namespace: "default".to_string(),
             label_selector: "app=rvoip".to_string(),
         }
     }
-    
+
     pub fn static_config() -> Self {
         ServiceDiscoveryConfig::Static {
             endpoints: HashMap::new(),
@@ -355,19 +354,19 @@ impl ServiceDiscoveryConfig {
 pub struct PerformanceConfig {
     /// Maximum concurrent sessions
     pub max_sessions: usize,
-    
+
     /// Event buffer size
     pub event_buffer_size: usize,
-    
+
     /// Worker thread count
     pub worker_threads: usize,
-    
+
     /// Enable CPU affinity
     pub cpu_affinity: bool,
-    
+
     /// Memory pool size in MB
     pub memory_pool_mb: usize,
-    
+
     /// Enable performance monitoring
     pub monitoring_enabled: bool,
 }
@@ -383,7 +382,7 @@ impl PerformanceConfig {
             monitoring_enabled: false,
         }
     }
-    
+
     pub fn balanced() -> Self {
         Self {
             max_sessions: 100,
@@ -394,7 +393,7 @@ impl PerformanceConfig {
             monitoring_enabled: true,
         }
     }
-    
+
     pub fn high_throughput() -> Self {
         Self {
             max_sessions: 10000,

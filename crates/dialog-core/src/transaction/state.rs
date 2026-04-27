@@ -1,3 +1,5 @@
+use crate::transaction::error::{Error, Result};
+use crate::transaction::TransactionKind;
 /// # Transaction State Machine
 ///
 /// This module implements the SIP transaction state machines as defined in RFC 3261 Section 17.
@@ -174,35 +176,32 @@
 /// 1. The `TransactionState` enum representing the possible states
 /// 2. The `AtomicTransactionState` struct for thread-safe state management
 /// 3. Functions to validate state transitions according to RFC 3261 rules
-
 use std::sync::atomic::{AtomicU8, Ordering};
-use crate::transaction::error::{Error, Result};
-use crate::transaction::TransactionKind;
 
 /// Represents the state of a SIP transaction, aligned with the state machines
 /// defined in RFC 3261 (Section 17).
 ///
 /// Lifecycle states for robust transaction shutdown management.
-/// 
+///
 /// This enum tracks the overall lifecycle of a transaction beyond just the RFC 3261 states,
 /// providing proper coordination during shutdown to prevent "channel closed" errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TransactionLifecycle {
     /// Normal processing state - transaction is actively processing messages
     Active,
-    
+
     /// Terminal state reached but still accepting late messages during grace period
     /// - Transaction has reached RFC 3261 terminal state (Terminated/Completed)
     /// - Command channel remains open to accept stragglers
     /// - No events sent to Transaction User
     Terminating,
-    
+
     /// Grace period for processing late-arriving messages
     /// - Silently processes messages to prevent errors
     /// - Does not emit events to Transaction User  
     /// - Command channel still open
     Draining,
-    
+
     /// Fully cleaned up and removed from all data structures
     /// - Command channel closed
     /// - Removed from HashMap
@@ -223,19 +222,19 @@ impl Default for TransactionLifecycle {
 pub enum TransactionState {
     /// The initial state of a transaction before any significant event (like sending a request
     /// for client transactions, or receiving one for server transactions) has occurred.
-    /// 
+    ///
     /// This state is not explicitly named in RFC 3261 state diagrams but represents the state
     /// before the transaction officially starts its lifecycle (e.g., before moving to `Calling`
     /// or `Trying`).
     Initial,
 
     /// **Client INVITE Transactions Only**
-    /// 
-    /// The initial INVITE request has been sent, and the transaction is awaiting any response 
+    ///
+    /// The initial INVITE request has been sent, and the transaction is awaiting any response
     /// (provisional or final).
-    /// 
+    ///
     /// # RFC 3261 Context
-    /// 
+    ///
     /// RFC 3261 Section 17.1.1.2 defines this state:
     /// > When in the "Calling" state, any response received that is a 1xx response causes
     /// > the client transaction to transition to the "Proceeding" state. Any response
@@ -246,36 +245,36 @@ pub enum TransactionState {
     Calling,
 
     /// **Client Non-INVITE Transactions / Server Non-INVITE Transactions**
-    /// 
+    ///
     /// For client non-INVITE transactions: The request has been sent and the client is waiting
     /// for a response.
-    /// 
+    ///
     /// For server non-INVITE transactions: The request has been received but no response
     /// has been sent yet.
-    /// 
+    ///
     /// # RFC 3261 Context
-    /// 
+    ///
     /// RFC 3261 Section 17.1.2.2 (Client Non-INVITE):
     /// > When in the "Trying" state, any response received that is a 1xx response causes
     /// > the client transaction to transition to the "Proceeding" state. Any response
     /// > received that is a 2xx-699 response causes the client transaction to transition
     /// > to the "Completed" state.
-    /// 
+    ///
     /// RFC 3261 Section 17.2.2 (Server Non-INVITE):
     /// > The state machine is initialized in the "Trying" state and immediately transitions
     /// > to the "Proceeding" state when a provisional response is sent.
     Trying,
 
     /// **All Transaction Types**
-    /// 
+    ///
     /// For client transactions: A provisional (1xx) response has been received.
-    /// 
+    ///
     /// For server transactions: A provisional (1xx) response has been sent.
-    /// 
+    ///
     /// # RFC 3261 Context
-    /// 
+    ///
     /// RFC 3261 defines this state for all transaction types:
-    /// 
+    ///
     /// - Section 17.1.1.2 (Client INVITE): After receiving a 1xx response
     /// - Section 17.1.2.2 (Client Non-INVITE): After receiving a 1xx response
     /// - Section 17.2.1 (Server INVITE): After receiving INVITE and sending 1xx
@@ -283,13 +282,13 @@ pub enum TransactionState {
     Proceeding,
 
     /// **All Transaction Types**
-    /// 
+    ///
     /// For client transactions: A final (2xx-6xx) response has been received.
-    /// 
+    ///
     /// For server transactions: A final (2xx-6xx) response has been sent.
-    /// 
+    ///
     /// # RFC 3261 Context
-    /// 
+    ///
     /// - Section 17.1.1.2 (Client INVITE): After receiving 3xx-6xx response, ACK sent
     /// - Section 17.1.2.2 (Client Non-INVITE): After receiving final response
     /// - Section 17.2.1 (Server INVITE): After sending non-2xx final response, waiting for ACK
@@ -297,11 +296,11 @@ pub enum TransactionState {
     Completed,
 
     /// **Server INVITE Transactions Only**
-    /// 
+    ///
     /// An ACK has been received for a non-2xx final response.
-    /// 
+    ///
     /// # RFC 3261 Context
-    /// 
+    ///
     /// RFC 3261 Section 17.2.1 defines this state:
     /// > If an ACK is received while in the "Completed" state, the server transaction
     /// > MUST transition to the "Confirmed" state. As Timer G is ignored in this state,
@@ -309,11 +308,11 @@ pub enum TransactionState {
     Confirmed,
 
     /// **All Transaction Types**
-    /// 
+    ///
     /// The transaction has completed its function and will be removed from the transaction layer.
-    /// 
+    ///
     /// # RFC 3261 Context
-    /// 
+    ///
     /// All transaction types eventually reach this state when:
     /// - Client INVITE: After Timer D expires (Section 17.1.1.2)
     /// - Client Non-INVITE: After Timer K expires (Section 17.1.2.2)
@@ -401,7 +400,7 @@ impl From<u8> for StateValue {
 ///
 /// While RFC 3261 doesn't specify implementation details for managing transaction state,
 /// it does require that transactions properly handle concurrent events like:
-/// 
+///
 /// - Receiving a response while a retransmission timer is active
 /// - Receiving an ACK while a response retransmission is in progress
 /// - Handling timer expirations during message processing
@@ -434,7 +433,9 @@ impl AtomicTransactionState {
     /// both an acquire operation (for the read part) and a release operation (for the write part),
     /// synchronizing memory with other threads.
     pub fn set(&self, new_state: TransactionState) -> TransactionState {
-        let prev_value = self.value.swap(StateValue::from(new_state) as u8, Ordering::AcqRel);
+        let prev_value = self
+            .value
+            .swap(StateValue::from(new_state) as u8, Ordering::AcqRel);
         TransactionState::from(StateValue::from(prev_value))
     }
 
@@ -463,17 +464,21 @@ impl AtomicTransactionState {
     /// - `Ok(true)`: The state was successfully transitioned (or was already `new_state`, or `new_state` was `Terminated`).
     /// - `Ok(false)`: The state was not transitioned because the actual current state did not match `current_state`
     ///                (and it wasn't an unconditional termination or already the target state).
-    /// Note: This method previously returned `Result<bool>`, but `Error` was not constructible here. 
+    /// Note: This method previously returned `Result<bool>`, but `Error` was not constructible here.
     /// The RFC validation is separate. This method focuses on the atomic CAS logic.
-    pub fn transition_if(&self, current_state: TransactionState, new_state: TransactionState) -> bool {
+    pub fn transition_if(
+        &self,
+        current_state: TransactionState,
+        new_state: TransactionState,
+    ) -> bool {
         let current_value = StateValue::from(current_state) as u8;
         let new_value = StateValue::from(new_state) as u8;
-        
+
         // Attempt to transition using compare_exchange.
         match self.value.compare_exchange(
             current_value,
             new_value,
-            Ordering::AcqRel, // Strongest ordering for CAS success.
+            Ordering::AcqRel,  // Strongest ordering for CAS success.
             Ordering::Acquire, // Weaker ordering for CAS failure is fine, only reading.
         ) {
             Ok(_) => true, // Successfully transitioned from current_value to new_value.
@@ -523,7 +528,7 @@ impl AtomicTransactionState {
         if new_state == TransactionState::Terminated {
             return Ok(());
         }
-        
+
         match tx_kind {
             TransactionKind::InviteClient => {
                 match current_state {
@@ -532,34 +537,35 @@ impl AtomicTransactionState {
                         if new_state == TransactionState::Calling {
                             return Ok(());
                         }
-                    },
+                    }
                     TransactionState::Calling => {
                         // Calling can transition to Proceeding, Completed, or Terminated
                         match new_state {
-                            TransactionState::Proceeding | 
-                            TransactionState::Completed => return Ok(()),
-                            _ => {},
+                            TransactionState::Proceeding | TransactionState::Completed => {
+                                return Ok(())
+                            }
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Proceeding => {
                         // Proceeding can transition to Completed or Terminated
                         match new_state {
                             TransactionState::Completed => return Ok(()),
-                            _ => {},
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Completed => {
                         // Completed can only transition to Terminated
                         // Handled above
-                    },
+                    }
                     TransactionState::Terminated => {
                         // Terminated is a final state, cannot transition further
                         return Err("Cannot transition from Terminated state".to_string());
-                    },
+                    }
                     // States that don't apply to this transaction kind
-                    _ => {},
+                    _ => {}
                 }
-            },
+            }
             TransactionKind::NonInviteClient => {
                 match current_state {
                     TransactionState::Initial => {
@@ -567,112 +573,117 @@ impl AtomicTransactionState {
                         if new_state == TransactionState::Trying {
                             return Ok(());
                         }
-                    },
+                    }
                     TransactionState::Trying => {
                         // Trying can transition to Proceeding, Completed, or Terminated
                         match new_state {
-                            TransactionState::Proceeding | 
-                            TransactionState::Completed => return Ok(()),
-                            _ => {},
+                            TransactionState::Proceeding | TransactionState::Completed => {
+                                return Ok(())
+                            }
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Proceeding => {
                         // Proceeding can transition to Completed or Terminated
                         match new_state {
                             TransactionState::Completed => return Ok(()),
-                            _ => {},
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Completed => {
                         // Completed can only transition to Terminated
                         // Handled above
-                    },
+                    }
                     TransactionState::Terminated => {
                         // Terminated is a final state, cannot transition further
                         return Err("Cannot transition from Terminated state".to_string());
-                    },
+                    }
                     // States that don't apply to this transaction kind
-                    _ => {},
+                    _ => {}
                 }
-            },
+            }
             TransactionKind::InviteServer => {
                 match current_state {
                     TransactionState::Initial => {
                         // Initial state can transition to Proceeding, Completed, or Terminated
                         match new_state {
-                            TransactionState::Proceeding |
-                            TransactionState::Completed => return Ok(()),
-                            _ => {},
+                            TransactionState::Proceeding | TransactionState::Completed => {
+                                return Ok(())
+                            }
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Proceeding => {
                         // Proceeding can transition to Completed, Confirmed, or Terminated
                         match new_state {
-                            TransactionState::Completed | 
-                            TransactionState::Confirmed => return Ok(()),
-                            _ => {},
+                            TransactionState::Completed | TransactionState::Confirmed => {
+                                return Ok(())
+                            }
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Completed => {
                         // Completed can transition to Confirmed or Terminated
                         match new_state {
                             TransactionState::Confirmed => return Ok(()),
-                            _ => {},
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Confirmed => {
                         // Confirmed can only transition to Terminated
                         // Handled above
-                    },
+                    }
                     TransactionState::Terminated => {
                         // Terminated is a final state, cannot transition further
                         return Err("Cannot transition from Terminated state".to_string());
-                    },
+                    }
                     // States that don't apply to this transaction kind
-                    _ => {},
+                    _ => {}
                 }
-            },
+            }
             TransactionKind::NonInviteServer => {
                 match current_state {
                     TransactionState::Initial => {
                         // Initial state can transition to Trying, Proceeding, or Terminated
                         match new_state {
-                            TransactionState::Trying | 
-                            TransactionState::Proceeding => return Ok(()),
-                            _ => {},
+                            TransactionState::Trying | TransactionState::Proceeding => {
+                                return Ok(())
+                            }
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Trying => {
                         // Trying can transition to Proceeding, Completed, or Terminated
                         match new_state {
-                            TransactionState::Proceeding | 
-                            TransactionState::Completed => return Ok(()),
-                            _ => {},
+                            TransactionState::Proceeding | TransactionState::Completed => {
+                                return Ok(())
+                            }
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Proceeding => {
                         // Proceeding can transition to Completed or Terminated
                         match new_state {
                             TransactionState::Completed => return Ok(()),
-                            _ => {},
+                            _ => {}
                         }
-                    },
+                    }
                     TransactionState::Completed => {
                         // Completed can only transition to Terminated
                         // Handled above
-                    },
+                    }
                     TransactionState::Terminated => {
                         // Terminated is a final state, cannot transition further
                         return Err("Cannot transition from Terminated state".to_string());
-                    },
+                    }
                     // States that don't apply to this transaction kind
-                    _ => {},
+                    _ => {}
                 }
-            },
+            }
         }
-        
+
         Err(format!(
-            "Invalid transition for {:?}: {:?} -> {:?}", 
+            "Invalid transition for {:?}: {:?} -> {:?}",
             tx_kind, current_state, new_state
         ))
     }
@@ -695,24 +706,66 @@ mod tests {
 
     #[test]
     fn state_value_from_transaction_state() {
-        assert_eq!(StateValue::from(TransactionState::Initial), StateValue::Initial);
-        assert_eq!(StateValue::from(TransactionState::Calling), StateValue::Calling);
-        assert_eq!(StateValue::from(TransactionState::Trying), StateValue::Trying);
-        assert_eq!(StateValue::from(TransactionState::Proceeding), StateValue::Proceeding);
-        assert_eq!(StateValue::from(TransactionState::Completed), StateValue::Completed);
-        assert_eq!(StateValue::from(TransactionState::Confirmed), StateValue::Confirmed);
-        assert_eq!(StateValue::from(TransactionState::Terminated), StateValue::Terminated);
+        assert_eq!(
+            StateValue::from(TransactionState::Initial),
+            StateValue::Initial
+        );
+        assert_eq!(
+            StateValue::from(TransactionState::Calling),
+            StateValue::Calling
+        );
+        assert_eq!(
+            StateValue::from(TransactionState::Trying),
+            StateValue::Trying
+        );
+        assert_eq!(
+            StateValue::from(TransactionState::Proceeding),
+            StateValue::Proceeding
+        );
+        assert_eq!(
+            StateValue::from(TransactionState::Completed),
+            StateValue::Completed
+        );
+        assert_eq!(
+            StateValue::from(TransactionState::Confirmed),
+            StateValue::Confirmed
+        );
+        assert_eq!(
+            StateValue::from(TransactionState::Terminated),
+            StateValue::Terminated
+        );
     }
 
     #[test]
     fn transaction_state_from_state_value() {
-        assert_eq!(TransactionState::from(StateValue::Initial), TransactionState::Initial);
-        assert_eq!(TransactionState::from(StateValue::Calling), TransactionState::Calling);
-        assert_eq!(TransactionState::from(StateValue::Trying), TransactionState::Trying);
-        assert_eq!(TransactionState::from(StateValue::Proceeding), TransactionState::Proceeding);
-        assert_eq!(TransactionState::from(StateValue::Completed), TransactionState::Completed);
-        assert_eq!(TransactionState::from(StateValue::Confirmed), TransactionState::Confirmed);
-        assert_eq!(TransactionState::from(StateValue::Terminated), TransactionState::Terminated);
+        assert_eq!(
+            TransactionState::from(StateValue::Initial),
+            TransactionState::Initial
+        );
+        assert_eq!(
+            TransactionState::from(StateValue::Calling),
+            TransactionState::Calling
+        );
+        assert_eq!(
+            TransactionState::from(StateValue::Trying),
+            TransactionState::Trying
+        );
+        assert_eq!(
+            TransactionState::from(StateValue::Proceeding),
+            TransactionState::Proceeding
+        );
+        assert_eq!(
+            TransactionState::from(StateValue::Completed),
+            TransactionState::Completed
+        );
+        assert_eq!(
+            TransactionState::from(StateValue::Confirmed),
+            TransactionState::Confirmed
+        );
+        assert_eq!(
+            TransactionState::from(StateValue::Terminated),
+            TransactionState::Terminated
+        );
     }
 
     #[test]
@@ -761,7 +814,9 @@ mod tests {
     fn atomic_transaction_state_transition_if_already_new_state() {
         let atomic_state = AtomicTransactionState::new(TransactionState::Completed);
         // Current state is already new_state
-        assert!(atomic_state.transition_if(TransactionState::Proceeding, TransactionState::Completed));
+        assert!(
+            atomic_state.transition_if(TransactionState::Proceeding, TransactionState::Completed)
+        );
         assert_eq!(atomic_state.get(), TransactionState::Completed);
     }
 
@@ -781,24 +836,36 @@ mod tests {
         assert_eq!(atomic_state.get(), TransactionState::Terminated);
 
         let atomic_state_2 = AtomicTransactionState::new(TransactionState::Completed);
-        assert!(atomic_state_2.transition_if(TransactionState::Completed, TransactionState::Terminated));
+        assert!(
+            atomic_state_2.transition_if(TransactionState::Completed, TransactionState::Terminated)
+        );
         assert_eq!(atomic_state_2.get(), TransactionState::Terminated);
     }
-    
-    // --- Tests for validate_transition --- 
+
+    // --- Tests for validate_transition ---
 
     // Helper macro for terser validation tests
     macro_rules! assert_valid_transition {
         ($kind:expr, $from:expr, $to:expr) => {
-            assert!(AtomicTransactionState::validate_transition($kind, $from, $to).is_ok(),
-                    "Expected valid transition for {:?} from {:?} to {:?}", $kind, $from, $to);
+            assert!(
+                AtomicTransactionState::validate_transition($kind, $from, $to).is_ok(),
+                "Expected valid transition for {:?} from {:?} to {:?}",
+                $kind,
+                $from,
+                $to
+            );
         };
     }
 
     macro_rules! assert_invalid_transition {
         ($kind:expr, $from:expr, $to:expr) => {
-            assert!(AtomicTransactionState::validate_transition($kind, $from, $to).is_err(),
-                    "Expected invalid transition for {:?} from {:?} to {:?}", $kind, $from, $to);
+            assert!(
+                AtomicTransactionState::validate_transition($kind, $from, $to).is_err(),
+                "Expected invalid transition for {:?} from {:?} to {:?}",
+                $kind,
+                $from,
+                $to
+            );
         };
     }
 
@@ -818,7 +885,7 @@ mod tests {
         assert_valid_transition!(kind, Initial, Terminated);
         assert_valid_transition!(kind, Calling, Terminated);
         assert_valid_transition!(kind, Proceeding, Terminated);
-        
+
         // Valid: same state
         assert_valid_transition!(kind, Calling, Calling);
         assert_valid_transition!(kind, Proceeding, Proceeding);
@@ -842,7 +909,7 @@ mod tests {
         assert_valid_transition!(kind, Trying, Completed);
         assert_valid_transition!(kind, Proceeding, Completed);
         assert_valid_transition!(kind, Completed, Terminated);
-        
+
         assert_valid_transition!(kind, Initial, Terminated); // Always valid
         assert_valid_transition!(kind, Trying, Trying); // Same state
 
@@ -855,15 +922,15 @@ mod tests {
     fn validate_invite_server_transitions() {
         use TransactionState::*; // Initial, Proceeding, Completed, Confirmed, Terminated
         let kind = TransactionKind::InviteServer;
-        
+
         // Valid based on RFC + typical flows (e.g. server sends 1xx first)
         assert_valid_transition!(kind, Initial, Proceeding);
         assert_valid_transition!(kind, Initial, Completed); // e.g. send 4xx immediately
         assert_valid_transition!(kind, Proceeding, Completed);
         assert_valid_transition!(kind, Proceeding, Terminated); // e.g. send 2xx
-        assert_valid_transition!(kind, Completed, Confirmed);   // Sent non-2xx, got ACK
-        assert_valid_transition!(kind, Completed, Terminated);  // Timer H for non-2xx, or after 2xx+Timer G
-        assert_valid_transition!(kind, Confirmed, Terminated);  // Timer I after ACK for non-2xx
+        assert_valid_transition!(kind, Completed, Confirmed); // Sent non-2xx, got ACK
+        assert_valid_transition!(kind, Completed, Terminated); // Timer H for non-2xx, or after 2xx+Timer G
+        assert_valid_transition!(kind, Confirmed, Terminated); // Timer I after ACK for non-2xx
 
         assert_valid_transition!(kind, Initial, Terminated); // Always valid
         assert_valid_transition!(kind, Proceeding, Proceeding); // Same state
@@ -884,7 +951,7 @@ mod tests {
         assert_valid_transition!(kind, Trying, Completed);
         assert_valid_transition!(kind, Proceeding, Completed);
         assert_valid_transition!(kind, Completed, Terminated);
-        
+
         assert_valid_transition!(kind, Initial, Terminated); // Always valid
         assert_valid_transition!(kind, Trying, Trying); // Same state
 
@@ -892,4 +959,4 @@ mod tests {
         assert_invalid_transition!(kind, Initial, Completed);
         assert_invalid_transition!(kind, Completed, Trying);
     }
-} 
+}

@@ -2,8 +2,8 @@
 //!
 //! Tests Event enum construction, helper methods, and the call_id accessor.
 
-use rvoip_session_core::Event;
 use rvoip_session_core::state_table::types::SessionId;
+use rvoip_session_core::Event;
 
 fn test_id() -> SessionId {
     SessionId::new()
@@ -119,7 +119,9 @@ fn test_transfer_progress_event() {
 #[test]
 fn test_call_on_hold_event() {
     let id = test_id();
-    let e = Event::CallOnHold { call_id: id.clone() };
+    let e = Event::CallOnHold {
+        call_id: id.clone(),
+    };
     assert_eq!(e.call_id(), Some(&id));
     assert!(!e.is_call_event()); // hold is not a lifecycle event
 }
@@ -127,15 +129,21 @@ fn test_call_on_hold_event() {
 #[test]
 fn test_call_resumed_event() {
     let id = test_id();
-    let e = Event::CallResumed { call_id: id.clone() };
+    let e = Event::CallResumed {
+        call_id: id.clone(),
+    };
     assert_eq!(e.call_id(), Some(&id));
 }
 
 #[test]
 fn test_call_muted_unmuted_events() {
     let id = test_id();
-    let muted = Event::CallMuted { call_id: id.clone() };
-    let unmuted = Event::CallUnmuted { call_id: id.clone() };
+    let muted = Event::CallMuted {
+        call_id: id.clone(),
+    };
+    let unmuted = Event::CallUnmuted {
+        call_id: id.clone(),
+    };
     assert_eq!(muted.call_id(), Some(&id));
     assert_eq!(unmuted.call_id(), Some(&id));
 }

@@ -2,14 +2,14 @@
 //!
 //! This module defines the WWW-Authenticate header used in 401 Unauthorized responses.
 
-use std::fmt;
-use std::str::FromStr;
-use serde::{Deserialize, Serialize};
-use crate::error::{Result, Error};
+use crate::error::{Error, Result};
 use crate::types::auth::challenge::Challenge;
 use crate::types::auth::params::DigestParam;
 use crate::types::auth::scheme::{Algorithm, Qop};
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Typed WWW-Authenticate header.
 ///
@@ -24,12 +24,14 @@ impl fmt::Display for WwwAuthenticate {
         if self.0.is_empty() {
             return Ok(());
         }
-        
-        let challenges_str = self.0.iter()
+
+        let challenges_str = self
+            .0
+            .iter()
             .map(|challenge| challenge.to_string())
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         write!(f, "{}", challenges_str)
     }
 }
@@ -44,13 +46,15 @@ impl WwwAuthenticate {
     ///
     /// # Returns
     ///
-    /// A new WWW-Authenticate header with a Digest challenge containing the 
+    /// A new WWW-Authenticate header with a Digest challenge containing the
     /// specified realm and nonce
     pub fn new(realm: impl Into<String>, nonce: impl Into<String>) -> Self {
-        Self(vec![Challenge::Digest { params: vec![
-            DigestParam::Realm(realm.into()),
-            DigestParam::Nonce(nonce.into()),
-        ] }])
+        Self(vec![Challenge::Digest {
+            params: vec![
+                DigestParam::Realm(realm.into()),
+                DigestParam::Nonce(nonce.into()),
+            ],
+        }])
     }
 
     /// Creates a new WwwAuthenticate header with a Basic challenge.
@@ -64,11 +68,14 @@ impl WwwAuthenticate {
     /// A new WWW-Authenticate header with a Basic challenge containing the
     /// specified realm
     pub fn new_basic(realm: impl Into<String>) -> Self {
-        Self(vec![Challenge::Basic { params: vec![
-            crate::types::auth::params::AuthParam { name: "realm".to_string(), value: realm.into() }
-        ] }])
+        Self(vec![Challenge::Basic {
+            params: vec![crate::types::auth::params::AuthParam {
+                name: "realm".to_string(),
+                value: realm.into(),
+            }],
+        }])
     }
-    
+
     /// Creates a new WwwAuthenticate header with a Bearer challenge (RFC 8898).
     ///
     /// # Parameters
@@ -79,14 +86,14 @@ impl WwwAuthenticate {
     ///
     /// A new WWW-Authenticate header with a Bearer challenge
     pub fn new_bearer(realm: impl Into<String>) -> Self {
-        Self(vec![Challenge::Bearer { 
+        Self(vec![Challenge::Bearer {
             realm: realm.into(),
             scope: None,
             error: None,
             error_description: None,
         }])
     }
-    
+
     /// Creates a new WwwAuthenticate header with a Bearer challenge including error.
     ///
     /// # Parameters
@@ -99,11 +106,11 @@ impl WwwAuthenticate {
     ///
     /// A new WWW-Authenticate header with a Bearer challenge containing error information
     pub fn new_bearer_error(
-        realm: impl Into<String>, 
+        realm: impl Into<String>,
         error: impl Into<String>,
-        error_description: Option<String>
+        error_description: Option<String>,
     ) -> Self {
-        Self(vec![Challenge::Bearer { 
+        Self(vec![Challenge::Bearer {
             realm: realm.into(),
             scope: None,
             error: Some(error.into()),
@@ -129,7 +136,9 @@ impl WwwAuthenticate {
     /// An Option containing a reference to the first Digest challenge,
     /// or None if no Digest challenge is present
     pub fn first_digest(&self) -> Option<&Challenge> {
-        self.0.iter().find(|c| matches!(c, Challenge::Digest { .. }))
+        self.0
+            .iter()
+            .find(|c| matches!(c, Challenge::Digest { .. }))
     }
 
     /// Returns the first Basic challenge, if any.
@@ -141,7 +150,7 @@ impl WwwAuthenticate {
     pub fn first_basic(&self) -> Option<&Challenge> {
         self.0.iter().find(|c| matches!(c, Challenge::Basic { .. }))
     }
-    
+
     /// Returns the first Bearer challenge, if any.
     ///
     /// # Returns
@@ -149,7 +158,9 @@ impl WwwAuthenticate {
     /// An Option containing a reference to the first Bearer challenge,
     /// or None if no Bearer challenge is present
     pub fn first_bearer(&self) -> Option<&Challenge> {
-        self.0.iter().find(|c| matches!(c, Challenge::Bearer { .. }))
+        self.0
+            .iter()
+            .find(|c| matches!(c, Challenge::Bearer { .. }))
     }
 
     /// Sets the domain parameter on the first Digest challenge.
@@ -165,7 +176,11 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { ref mut params }) = self
+            .0
+            .first_mut()
+            .filter(|c| matches!(c, Challenge::Digest { .. }))
+        {
             params.push(DigestParam::Domain(vec![domain.into()]));
         }
         self
@@ -184,7 +199,11 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_opaque(mut self, opaque: impl Into<String>) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { ref mut params }) = self
+            .0
+            .first_mut()
+            .filter(|c| matches!(c, Challenge::Digest { .. }))
+        {
             params.push(DigestParam::Opaque(opaque.into()));
         }
         self
@@ -204,7 +223,11 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_stale(mut self, stale: bool) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { ref mut params }) = self
+            .0
+            .first_mut()
+            .filter(|c| matches!(c, Challenge::Digest { .. }))
+        {
             params.push(DigestParam::Stale(stale));
         }
         self
@@ -222,7 +245,11 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_algorithm(mut self, algorithm: Algorithm) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { ref mut params }) = self
+            .0
+            .first_mut()
+            .filter(|c| matches!(c, Challenge::Digest { .. }))
+        {
             params.push(DigestParam::Algorithm(algorithm));
         }
         self
@@ -241,7 +268,11 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_qop(mut self, qop: Qop) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { ref mut params }) = self
+            .0
+            .first_mut()
+            .filter(|c| matches!(c, Challenge::Digest { .. }))
+        {
             params.push(DigestParam::Qop(vec![qop]));
         }
         self
@@ -260,7 +291,11 @@ impl WwwAuthenticate {
     ///
     /// The modified WWW-Authenticate header
     pub fn with_qops(mut self, qops: Vec<Qop>) -> Self {
-        if let Some(Challenge::Digest { ref mut params }) = self.0.first_mut().filter(|c| matches!(c, Challenge::Digest { .. })) {
+        if let Some(Challenge::Digest { ref mut params }) = self
+            .0
+            .first_mut()
+            .filter(|c| matches!(c, Challenge::Digest { .. }))
+        {
             params.push(DigestParam::Qop(qops));
         }
         self
@@ -271,9 +306,9 @@ impl FromStr for WwwAuthenticate {
     type Err = crate::error::Error;
     fn from_str(s: &str) -> Result<Self> {
         // Call the actual parser and map nom::Err to crate::error::Error
-         crate::parser::headers::parse_www_authenticate(s.as_bytes())
-             .map(|(_, challenges)| WwwAuthenticate(challenges))
-             .map_err(Error::from) // Convert nom::Err to our Error type
+        crate::parser::headers::parse_www_authenticate(s.as_bytes())
+            .map(|(_, challenges)| WwwAuthenticate(challenges))
+            .map_err(Error::from) // Convert nom::Err to our Error type
     }
 }
 
@@ -285,14 +320,19 @@ impl TypedHeaderTrait for WwwAuthenticate {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::WwwAuthenticate(self.clone()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::WwwAuthenticate(self.clone()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -300,14 +340,16 @@ impl TypedHeaderTrait for WwwAuthenticate {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     WwwAuthenticate::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
-} 
+}

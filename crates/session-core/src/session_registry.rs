@@ -1,12 +1,12 @@
 //! Session Registry for single session mapping in session-core
-//! 
+//!
 //! This module provides simple mappings for the single session constraint.
 //! Since only one session can exist at a time, the mappings are much simpler.
 
-use tokio::sync::RwLock;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
-use crate::types::{SessionId, DialogId, MediaSessionId, IncomingCallInfo};
+use crate::types::{DialogId, IncomingCallInfo, MediaSessionId, SessionId};
 
 /// Registry for single session mappings
 #[derive(Clone)]
@@ -117,14 +117,21 @@ impl SessionRegistry {
         *self.current_media.write().await = None;
         *self.pending_incoming_call.write().await = None;
     }
-    
+
     /// Store pending incoming call info (single session version)
-    pub async fn store_pending_incoming_call(&self, _session_id: SessionId, info: IncomingCallInfo) {
+    pub async fn store_pending_incoming_call(
+        &self,
+        _session_id: SessionId,
+        info: IncomingCallInfo,
+    ) {
         *self.pending_incoming_call.write().await = Some(info);
     }
-    
+
     /// Get and remove pending incoming call info (single session version)
-    pub async fn take_pending_incoming_call(&self, _session_id: &SessionId) -> Option<IncomingCallInfo> {
+    pub async fn take_pending_incoming_call(
+        &self,
+        _session_id: &SessionId,
+    ) -> Option<IncomingCallInfo> {
         self.pending_incoming_call.write().await.take()
     }
 }
@@ -148,10 +155,18 @@ mod tests {
         let session_id = SessionId::new();
         let dialog_id = DialogId::new();
 
-        registry.map_dialog(session_id.clone(), dialog_id.clone()).await;
+        registry
+            .map_dialog(session_id.clone(), dialog_id.clone())
+            .await;
 
-        assert_eq!(registry.get_session_by_dialog(&dialog_id).await, Some(session_id.clone()));
-        assert_eq!(registry.get_dialog_by_session(&session_id).await, Some(dialog_id));
+        assert_eq!(
+            registry.get_session_by_dialog(&dialog_id).await,
+            Some(session_id.clone())
+        );
+        assert_eq!(
+            registry.get_dialog_by_session(&session_id).await,
+            Some(dialog_id)
+        );
     }
 
     #[tokio::test]
@@ -160,10 +175,18 @@ mod tests {
         let session_id = SessionId::new();
         let media_id = MediaSessionId::new_v4();
 
-        registry.map_media(session_id.clone(), media_id.clone()).await;
+        registry
+            .map_media(session_id.clone(), media_id.clone())
+            .await;
 
-        assert_eq!(registry.get_session_by_media(&media_id).await, Some(session_id.clone()));
-        assert_eq!(registry.get_media_by_session(&session_id).await, Some(media_id));
+        assert_eq!(
+            registry.get_session_by_media(&media_id).await,
+            Some(session_id.clone())
+        );
+        assert_eq!(
+            registry.get_media_by_session(&session_id).await,
+            Some(media_id)
+        );
     }
 
     #[tokio::test]
@@ -173,8 +196,12 @@ mod tests {
         let dialog_id = DialogId::new();
         let media_id = MediaSessionId::new_v4();
 
-        registry.map_dialog(session_id.clone(), dialog_id.clone()).await;
-        registry.map_media(session_id.clone(), media_id.clone()).await;
+        registry
+            .map_dialog(session_id.clone(), dialog_id.clone())
+            .await;
+        registry
+            .map_media(session_id.clone(), media_id.clone())
+            .await;
 
         assert!(registry.contains_session(&session_id).await);
 
@@ -207,8 +234,12 @@ mod tests {
         let registry = SessionRegistry::new();
         let session_id = SessionId::new();
 
-        registry.map_dialog(session_id.clone(), DialogId::new()).await;
-        registry.map_media(session_id.clone(), MediaSessionId::new_v4()).await;
+        registry
+            .map_dialog(session_id.clone(), DialogId::new())
+            .await;
+        registry
+            .map_media(session_id.clone(), MediaSessionId::new_v4())
+            .await;
 
         registry.clear().await;
 

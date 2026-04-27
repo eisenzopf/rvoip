@@ -28,7 +28,7 @@ mod tests {
         let codec = codec.unwrap();
         assert_eq!(codec.variant(), G711Variant::MuLaw);
         assert_eq!(codec.frame_size(), 160);
-        
+
         let info = codec.info();
         assert_eq!(info.name, "PCMU");
         assert_eq!(info.sample_rate, 8000);
@@ -48,7 +48,7 @@ mod tests {
 
         let codec = codec.unwrap();
         assert_eq!(codec.variant(), G711Variant::ALaw);
-        
+
         let info = codec.info();
         assert_eq!(info.name, "PCMA");
         assert_eq!(info.payload_type, Some(8));
@@ -62,7 +62,7 @@ mod tests {
 
         let result = G711Codec::new_pcmu(config);
         assert!(result.is_err());
-        
+
         if let Err(CodecError::InvalidSampleRate { rate, .. }) = result {
             assert_eq!(rate, 48000);
         } else {
@@ -78,7 +78,7 @@ mod tests {
 
         let result = G711Codec::new_pcmu(config);
         assert!(result.is_err());
-        
+
         if let Err(CodecError::InvalidChannelCount { channels, .. }) = result {
             assert_eq!(channels, 2);
         } else {
@@ -119,7 +119,7 @@ mod tests {
             .with_channels(1);
 
         let mut codec = G711Codec::new_pcmu(config).unwrap();
-        
+
         // G.711 is stateless, so reset should always succeed
         assert!(codec.reset().is_ok());
     }
@@ -148,7 +148,7 @@ mod tests {
             .with_channels(1);
 
         let codec = G711Codec::new_pcmu(config).unwrap();
-        
+
         // G.711 has 1:1 sample to byte ratio
         assert_eq!(codec.max_encoded_size(160), 160);
         assert_eq!(codec.max_decoded_size(160), 160);
@@ -172,4 +172,4 @@ mod tests {
         assert_eq!(codec_mu.info().payload_type, Some(0));
         assert_eq!(codec_a.info().payload_type, Some(8));
     }
-} 
+}

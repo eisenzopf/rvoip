@@ -8,18 +8,18 @@
 //! The architecture supports both monolithic (all planes in-process) and
 //! distributed (planes as separate services) deployments.
 
+use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use std::fmt::Debug;
-use anyhow::Result;
+use std::sync::Arc;
 
 pub mod deployment;
 pub mod routing;
 pub mod task_management;
 
 pub use deployment::{DeploymentMode, PlaneConfig};
-pub use routing::{PlaneRouter, EventAffinity, PlaneType};
+pub use routing::{EventAffinity, PlaneRouter, PlaneType};
 pub use task_management::{LayerTaskManager, TaskHandle, TaskPriority};
 
 /// Core trait for all federated planes
@@ -27,19 +27,19 @@ pub use task_management::{LayerTaskManager, TaskHandle, TaskPriority};
 pub trait FederatedPlane: Send + Sync + Debug {
     /// Get the plane type
     fn plane_type(&self) -> PlaneType;
-    
+
     /// Get the plane's unique identifier
     fn plane_id(&self) -> &str;
-    
+
     /// Check if the plane is healthy
     async fn health_check(&self) -> Result<PlaneHealth>;
-    
+
     /// Start the plane
     async fn start(&self) -> Result<()>;
-    
+
     /// Stop the plane gracefully
     async fn stop(&self) -> Result<()>;
-    
+
     /// Get plane metrics
     async fn metrics(&self) -> Result<PlaneMetrics>;
 }
@@ -79,13 +79,13 @@ pub struct PlaneMetrics {
 pub trait TransportPlane: FederatedPlane {
     /// Send a SIP message
     async fn send_sip_message(&self, message: Vec<u8>, destination: &str) -> Result<()>;
-    
+
     /// Send RTP packet
     async fn send_rtp_packet(&self, packet: Vec<u8>, session_id: &str) -> Result<()>;
-    
+
     /// Register SIP endpoint
     async fn register_endpoint(&self, uri: &str, transport: &str) -> Result<()>;
-    
+
     /// Get transport statistics
     async fn transport_stats(&self) -> Result<TransportStats>;
 }
@@ -95,18 +95,19 @@ pub trait TransportPlane: FederatedPlane {
 pub trait MediaPlane: FederatedPlane {
     /// Start media stream
     async fn start_media_stream(&self, session_id: &str, config: MediaConfig) -> Result<()>;
-    
+
     /// Stop media stream
     async fn stop_media_stream(&self, session_id: &str) -> Result<()>;
-    
+
     /// Process audio frame
     async fn process_audio_frame(&self, session_id: &str, frame: AudioFrame) -> Result<()>;
-    
+
     /// Get media quality metrics
     async fn media_quality(&self, session_id: &str) -> Result<MediaQuality>;
-    
+
     /// Mix conference streams
-    async fn mix_conference(&self, conference_id: &str, participant_ids: Vec<String>) -> Result<()>;
+    async fn mix_conference(&self, conference_id: &str, participant_ids: Vec<String>)
+        -> Result<()>;
 }
 
 /// Signaling Plane abstraction
@@ -114,16 +115,16 @@ pub trait MediaPlane: FederatedPlane {
 pub trait SignalingPlane: FederatedPlane {
     /// Create new session
     async fn create_session(&self, from: &str, to: &str) -> Result<String>;
-    
+
     /// Terminate session
     async fn terminate_session(&self, session_id: &str) -> Result<()>;
-    
+
     /// Update session state
     async fn update_session_state(&self, session_id: &str, state: SessionState) -> Result<()>;
-    
+
     /// Handle incoming call
     async fn handle_incoming_call(&self, call_info: IncomingCallInfo) -> Result<CallDecision>;
-    
+
     /// Get session information
     async fn get_session(&self, session_id: &str) -> Result<SessionInfo>;
 }
@@ -237,13 +238,13 @@ impl PlaneFactory {
             }
         }
     }
-    
+
     async fn create_local_plane(plane_type: PlaneType) -> Result<Arc<dyn FederatedPlane>> {
         // This will be implemented by the actual plane implementations
         // in their respective crates (dialog-core, media-core, etc.)
         todo!("Implement local plane creation")
     }
-    
+
     async fn create_remote_proxy(
         plane_type: PlaneType,
         endpoints: Vec<String>,
@@ -251,7 +252,7 @@ impl PlaneFactory {
         // Create a proxy that communicates with remote plane
         todo!("Implement remote proxy creation")
     }
-    
+
     async fn create_hybrid_plane(
         plane_type: PlaneType,
         config: PlaneConfig,

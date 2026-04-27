@@ -4,7 +4,7 @@
 //! [RFC 3261](https://datatracker.ietf.org/doc/html/rfc3261) and its extensions.
 //!
 //! SIP methods define the purpose of a request within the SIP protocol. Each method
-//! has specific semantics and behaviors, determining how the request should be 
+//! has specific semantics and behaviors, determining how the request should be
 //! processed by servers and user agents.
 //!
 //! ## Core Methods (RFC 3261)
@@ -360,7 +360,10 @@ mod tests {
         assert_eq!(Method::Ack.to_string(), "ACK");
         assert_eq!(Method::Bye.to_string(), "BYE");
         assert_eq!(Method::Register.to_string(), "REGISTER");
-        assert_eq!(Method::Extension("CUSTOM".to_string()).to_string(), "CUSTOM");
+        assert_eq!(
+            Method::Extension("CUSTOM".to_string()).to_string(),
+            "CUSTOM"
+        );
     }
 
     #[test]
@@ -375,4 +378,4 @@ mod tests {
         assert!(Method::Invite.is_standard());
         assert!(!Method::Extension("CUSTOM".to_string()).is_standard());
     }
-} 
+}

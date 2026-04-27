@@ -4,7 +4,7 @@
 //! `prack_integration` test.
 
 use rvoip_session_core::state_table::{
-    YamlTableLoader, StateTable, StateKey, EventType, Role, Action,
+    Action, EventType, Role, StateKey, StateTable, YamlTableLoader,
 };
 use rvoip_session_core::types::CallState;
 

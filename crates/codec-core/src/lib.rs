@@ -161,7 +161,6 @@ pub const SUPPORTED_CODECS: &[&str] = &[
     "PCMU",
     #[cfg(feature = "g711")]
     "PCMA",
-
 ];
 
 /// Initialize the codec library
@@ -175,8 +174,6 @@ pub const SUPPORTED_CODECS: &[&str] = &[
 pub fn init() -> Result<()> {
     // Initialize logging if not already done
     let _ = tracing_subscriber::fmt::try_init();
-
-
 
     // Initialize lookup tables
     #[cfg(feature = "g711")]
@@ -224,20 +221,19 @@ mod tests {
     #[test]
     fn test_supported_codecs() {
         assert!(!SUPPORTED_CODECS.is_empty());
-        
+
         #[cfg(feature = "g711")]
         {
             assert!(SUPPORTED_CODECS.contains(&"PCMU"));
             assert!(SUPPORTED_CODECS.contains(&"PCMA"));
         }
-        
+
         #[cfg(feature = "g722")]
         // G.722 support removed - only G.711 variants now supported
-        
         #[cfg(any(feature = "g729", feature = "g729-sim"))]
         assert!(SUPPORTED_CODECS.contains(&"G729"));
-        
+
         #[cfg(any(feature = "opus", feature = "opus-sim"))]
         assert!(SUPPORTED_CODECS.contains(&"opus"));
     }
-} 
+}

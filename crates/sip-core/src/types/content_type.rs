@@ -39,24 +39,24 @@
 //! assert_eq!(pidf.to_string(), "application/pidf+xml;charset=\"UTF-8\"");
 //! ```
 
-use crate::error::{Result, Error};
-use std::fmt;
-use std::str::FromStr;
-use nom::combinator::all_consuming;
+use crate::error::{Error, Result};
+use crate::parser;
+use crate::parser::headers::content_type::parse_content_type_value;
+use crate::parser::headers::content_type::ContentTypeValue;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 use crate::types::param::Param;
 use bytes::Bytes;
-use std::collections::HashMap;
-use crate::parser;
-use crate::parser::headers::content_type::ContentTypeValue;
-use crate::parser::headers::content_type::parse_content_type_value;
+use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 
 /// Represents the Content-Type header field (RFC 3261 Section 7.3.1).
 /// Describes the media type of the message body.
 ///
-/// The Content-Type header is essential for proper interpretation of the 
-/// message body by the recipient. It specifies the media type using a type/subtype 
+/// The Content-Type header is essential for proper interpretation of the
+/// message body by the recipient. It specifies the media type using a type/subtype
 /// syntax, optionally followed by parameters.
 ///
 /// This implementation wraps a `ContentTypeValue` which contains the type, subtype,
@@ -354,9 +354,11 @@ impl TypedHeaderTrait for ContentType {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -364,17 +366,19 @@ impl TypedHeaderTrait for ContentType {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     ContentType::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::ContentType(content_type) => Ok(content_type.clone()),
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
 
-// TODO: Implement methods if needed 
+// TODO: Implement methods if needed

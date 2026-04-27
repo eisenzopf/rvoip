@@ -1,3 +1,8 @@
+use crate::error::{Error, Result};
+use crate::sdp::attributes::{
+    rid::{RidAttribute, RidDirection},
+    MediaDirection,
+};
 /// Builder API for creating and modifying SDP sessions
 ///
 /// This module provides a fluent builder interface for constructing SDP sessions,
@@ -101,12 +106,9 @@
 ///     .build();
 /// ```
 use crate::types::sdp::{
-    SdpSession, Origin, ConnectionData, TimeDescription, MediaDescription,
-    ParsedAttribute, RtpMapAttribute, FmtpAttribute, CandidateAttribute,
-    SsrcAttribute, RepeatTime,
+    CandidateAttribute, ConnectionData, FmtpAttribute, MediaDescription, Origin, ParsedAttribute,
+    RepeatTime, RtpMapAttribute, SdpSession, SsrcAttribute, TimeDescription,
 };
-use crate::sdp::attributes::{MediaDirection, rid::{RidAttribute, RidDirection}};
-use crate::error::{Error, Result};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -163,12 +165,12 @@ impl SdpBuilder {
             addr_type: "IP4".to_string(),
             unicast_address: "0.0.0.0".to_string(),
         };
-        
+
         let mut session = SdpSession::new(origin, session_name);
-        
+
         // Clear default time description - we'll add our own later
         session.time_descriptions.clear();
-        
+
         Self { session }
     }
 
@@ -198,9 +200,15 @@ impl SdpBuilder {
     /// let builder = SdpBuilder::new("Session")
     ///     .origin("-", "1234567890", "1", "IN", "IP4", "192.168.1.100");
     /// ```
-    pub fn origin(mut self, username: impl Into<String>, sess_id: impl Into<String>, 
-                 sess_version: impl Into<String>, net_type: impl Into<String>, 
-                 addr_type: impl Into<String>, unicast_address: impl Into<String>) -> Self {
+    pub fn origin(
+        mut self,
+        username: impl Into<String>,
+        sess_id: impl Into<String>,
+        sess_version: impl Into<String>,
+        net_type: impl Into<String>,
+        addr_type: impl Into<String>,
+        unicast_address: impl Into<String>,
+    ) -> Self {
         self.session.origin = Origin {
             username: username.into(),
             sess_id: sess_id.into(),
@@ -335,8 +343,12 @@ impl SdpBuilder {
     /// let builder = SdpBuilder::new("Session")
     ///     .connection("IN", "IP4", "192.168.1.100");
     /// ```
-    pub fn connection(mut self, net_type: impl Into<String>, addr_type: impl Into<String>, 
-                     connection_address: impl Into<String>) -> Self {
+    pub fn connection(
+        mut self,
+        net_type: impl Into<String>,
+        addr_type: impl Into<String>,
+        connection_address: impl Into<String>,
+    ) -> Self {
         self.session.connection_info = Some(ConnectionData {
             net_type: net_type.into(),
             addr_type: addr_type.into(),
@@ -372,8 +384,14 @@ impl SdpBuilder {
     /// let builder = SdpBuilder::new("Session")
     ///     .connection_multicast("IN", "IP4", "224.2.36.42", 127, None);
     /// ```
-    pub fn connection_multicast(mut self, net_type: impl Into<String>, addr_type: impl Into<String>, 
-                               connection_address: impl Into<String>, ttl: u8, multicast_count: Option<u32>) -> Self {
+    pub fn connection_multicast(
+        mut self,
+        net_type: impl Into<String>,
+        addr_type: impl Into<String>,
+        connection_address: impl Into<String>,
+        ttl: u8,
+        multicast_count: Option<u32>,
+    ) -> Self {
         self.session.connection_info = Some(ConnectionData {
             net_type: net_type.into(),
             addr_type: addr_type.into(),
@@ -445,8 +463,12 @@ impl SdpBuilder {
     /// let builder = SdpBuilder::new("Session")
     ///     .time_with_repeats("3034423619", "3042462419", vec![repeat]);
     /// ```
-    pub fn time_with_repeats(mut self, start_time: impl Into<String>, stop_time: impl Into<String>, 
-                            repeat_times: Vec<RepeatTime>) -> Self {
+    pub fn time_with_repeats(
+        mut self,
+        start_time: impl Into<String>,
+        stop_time: impl Into<String>,
+        repeat_times: Vec<RepeatTime>,
+    ) -> Self {
         self.session.time_descriptions.push(TimeDescription {
             start_time: start_time.into(),
             stop_time: stop_time.into(),
@@ -477,9 +499,9 @@ impl SdpBuilder {
     ///     .bandwidth("AS", 1024);  // 1024 kbps Application-Specific bandwidth
     /// ```
     pub fn bandwidth(mut self, bwtype: impl Into<String>, bandwidth: u64) -> Self {
-        self.session.generic_attributes.push(
-            ParsedAttribute::Bandwidth(bwtype.into(), bandwidth)
-        );
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::Bandwidth(bwtype.into(), bandwidth));
         self
     }
 
@@ -506,7 +528,9 @@ impl SdpBuilder {
     /// ```
     pub fn direction(mut self, direction: MediaDirection) -> Self {
         self.session.direction = Some(direction);
-        self.session.generic_attributes.push(ParsedAttribute::Direction(direction));
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::Direction(direction));
         self
     }
 
@@ -531,9 +555,9 @@ impl SdpBuilder {
     ///     .ice_ufrag("F7gI");
     /// ```
     pub fn ice_ufrag(mut self, ufrag: impl Into<String>) -> Self {
-        self.session.generic_attributes.push(
-            ParsedAttribute::IceUfrag(ufrag.into())
-        );
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::IceUfrag(ufrag.into()));
         self
     }
 
@@ -558,9 +582,9 @@ impl SdpBuilder {
     ///     .ice_pwd("x9cml/YzichV2+XlhiMu8g");
     /// ```
     pub fn ice_pwd(mut self, pwd: impl Into<String>) -> Self {
-        self.session.generic_attributes.push(
-            ParsedAttribute::IcePwd(pwd.into())
-        );
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::IcePwd(pwd.into()));
         self
     }
 
@@ -586,9 +610,9 @@ impl SdpBuilder {
     /// ```
     pub fn ice_options(mut self, options: Vec<impl Into<String>>) -> Self {
         let options = options.into_iter().map(|opt| opt.into()).collect();
-        self.session.generic_attributes.push(
-            ParsedAttribute::IceOptions(options)
-        );
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::IceOptions(options));
         self
     }
 
@@ -609,9 +633,9 @@ impl SdpBuilder {
     ///     .ice_lite();
     /// ```
     pub fn ice_lite(mut self) -> Self {
-        self.session.generic_attributes.push(
-            ParsedAttribute::Flag("ice-lite".to_string())
-        );
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::Flag("ice-lite".to_string()));
         self
     }
 
@@ -636,10 +660,17 @@ impl SdpBuilder {
     /// let builder = SdpBuilder::new("Session")
     ///     .fingerprint("sha-256", "D2:FA:0E:C3:22:59:5E:14:95:69:92:3D:13:B4:84:24");
     /// ```
-    pub fn fingerprint(mut self, hash_function: impl Into<String>, fingerprint: impl Into<String>) -> Self {
-        self.session.generic_attributes.push(
-            ParsedAttribute::Fingerprint(hash_function.into(), fingerprint.into())
-        );
+    pub fn fingerprint(
+        mut self,
+        hash_function: impl Into<String>,
+        fingerprint: impl Into<String>,
+    ) -> Self {
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::Fingerprint(
+                hash_function.into(),
+                fingerprint.into(),
+            ));
         self
     }
 
@@ -681,7 +712,9 @@ impl SdpBuilder {
         key_inline: impl Into<String>,
     ) -> Self {
         let attr = crate::types::sdp::CryptoAttribute::new(tag, suite, key_inline);
-        self.session.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::Crypto(attr));
         self
     }
 
@@ -689,7 +722,9 @@ impl SdpBuilder {
     /// [`CryptoAttribute`]. Use this when you need lifetime, MKI, or
     /// session-params; otherwise [`SdpBuilder::crypto`] is more concise.
     pub fn crypto_attribute(mut self, attr: crate::types::sdp::CryptoAttribute) -> Self {
-        self.session.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::Crypto(attr));
         self
     }
 
@@ -716,9 +751,9 @@ impl SdpBuilder {
     /// ```
     pub fn group(mut self, semantics: impl Into<String>, ids: &[impl AsRef<str>]) -> Self {
         let ids = ids.iter().map(|id| id.as_ref().to_string()).collect();
-        self.session.generic_attributes.push(
-            ParsedAttribute::Group(semantics.into(), ids)
-        );
+        self.session
+            .generic_attributes
+            .push(ParsedAttribute::Group(semantics.into(), ids));
         self
     }
 
@@ -750,12 +785,14 @@ impl SdpBuilder {
     /// ```
     pub fn attribute(mut self, name: impl Into<String>, value: Option<impl Into<String>>) -> Self {
         match value {
-            Some(val) => self.session.generic_attributes.push(
-                ParsedAttribute::Value(name.into(), val.into())
-            ),
-            None => self.session.generic_attributes.push(
-                ParsedAttribute::Flag(name.into())
-            ),
+            Some(val) => self
+                .session
+                .generic_attributes
+                .push(ParsedAttribute::Value(name.into(), val.into())),
+            None => self
+                .session
+                .generic_attributes
+                .push(ParsedAttribute::Flag(name.into())),
         }
         self
     }
@@ -876,7 +913,12 @@ impl SdpBuilder {
     ///         .rtpmap("98", "t140/1000")
     ///         .done();
     /// ```
-    pub fn media(self, media_type: impl Into<String>, port: u16, protocol: impl Into<String>) -> MediaBuilder<Self> {
+    pub fn media(
+        self,
+        media_type: impl Into<String>,
+        port: u16,
+        protocol: impl Into<String>,
+    ) -> MediaBuilder<Self> {
         MediaBuilder::new(self, media_type, port, protocol)
     }
 
@@ -908,7 +950,7 @@ impl SdpBuilder {
     pub fn build(self) -> Result<SdpSession> {
         // Validate the SDP before returning
         crate::sdp::parser::validate_sdp(&self.session)?;
-        
+
         // Return the validated session
         Ok(self.session)
     }
@@ -922,28 +964,35 @@ pub struct MediaBuilder<P> {
 
 impl<P> MediaBuilder<P> {
     /// Create a new media builder
-    fn new(parent: P, media_type: impl Into<String>, port: u16, protocol: impl Into<String>) -> Self {
+    fn new(
+        parent: P,
+        media_type: impl Into<String>,
+        port: u16,
+        protocol: impl Into<String>,
+    ) -> Self {
         let media = MediaDescription::new(
             media_type.into(),
             port,
             protocol.into(),
             Vec::new(), // formats will be added later
         );
-        
+
         Self { parent, media }
     }
 
     /// Set the media formats (payload types)
     pub fn formats(mut self, formats: &[impl AsRef<str>]) -> Self {
-        self.media.formats = formats.iter()
-            .map(|f| f.as_ref().to_string())
-            .collect();
+        self.media.formats = formats.iter().map(|f| f.as_ref().to_string()).collect();
         self
     }
 
     /// Set the media-level connection information (c=)
-    pub fn connection(mut self, net_type: impl Into<String>, addr_type: impl Into<String>, 
-                     connection_address: impl Into<String>) -> Self {
+    pub fn connection(
+        mut self,
+        net_type: impl Into<String>,
+        addr_type: impl Into<String>,
+        connection_address: impl Into<String>,
+    ) -> Self {
         self.media.connection_info = Some(ConnectionData {
             net_type: net_type.into(),
             addr_type: addr_type.into(),
@@ -955,8 +1004,14 @@ impl<P> MediaBuilder<P> {
     }
 
     /// Set the media-level connection information with multicast parameters
-    pub fn connection_multicast(mut self, net_type: impl Into<String>, addr_type: impl Into<String>, 
-                               connection_address: impl Into<String>, ttl: u8, multicast_count: Option<u32>) -> Self {
+    pub fn connection_multicast(
+        mut self,
+        net_type: impl Into<String>,
+        addr_type: impl Into<String>,
+        connection_address: impl Into<String>,
+        ttl: u8,
+        multicast_count: Option<u32>,
+    ) -> Self {
         self.media.connection_info = Some(ConnectionData {
             net_type: net_type.into(),
             addr_type: addr_type.into(),
@@ -970,25 +1025,35 @@ impl<P> MediaBuilder<P> {
     /// Set the direction of the media (sendrecv, sendonly, recvonly, inactive)
     pub fn direction(mut self, direction: MediaDirection) -> Self {
         self.media.direction = Some(direction);
-        self.media.generic_attributes.push(ParsedAttribute::Direction(direction));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Direction(direction));
         self
     }
 
     /// Set the ptime attribute
     pub fn ptime(mut self, ptime: u64) -> Self {
         self.media.ptime = Some(ptime as u32);
-        self.media.generic_attributes.push(ParsedAttribute::Ptime(ptime));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Ptime(ptime));
         self
     }
 
     /// Set the maxptime attribute
     pub fn maxptime(mut self, maxptime: u64) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::MaxPtime(maxptime));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::MaxPtime(maxptime));
         self
     }
 
     /// Add an rtpmap attribute
-    pub fn rtpmap(mut self, payload_type: impl AsRef<str>, encoding_str: impl Into<String>) -> Self {
+    pub fn rtpmap(
+        mut self,
+        payload_type: impl AsRef<str>,
+        encoding_str: impl Into<String>,
+    ) -> Self {
         let encoding_str = encoding_str.into();
         let encoding_parts: Vec<&str> = encoding_str.split('/').collect();
         if encoding_parts.len() < 2 {
@@ -1003,29 +1068,35 @@ impl<P> MediaBuilder<P> {
         } else {
             None
         };
-        
+
         let payload_type = payload_type.as_ref().parse::<u8>().unwrap_or(0);
-        self.media.generic_attributes.push(ParsedAttribute::RtpMap(RtpMapAttribute {
-            payload_type,
-            encoding_name,
-            clock_rate,
-            encoding_params,
-        }));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::RtpMap(RtpMapAttribute {
+                payload_type,
+                encoding_name,
+                clock_rate,
+                encoding_params,
+            }));
         self
     }
 
     /// Add an fmtp attribute
     pub fn fmtp(mut self, format: impl AsRef<str>, parameters: impl Into<String>) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::Fmtp(FmtpAttribute {
-            format: format.as_ref().to_string(),
-            parameters: parameters.into(),
-        }));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Fmtp(FmtpAttribute {
+                format: format.as_ref().to_string(),
+                parameters: parameters.into(),
+            }));
         self
     }
 
     /// Add a mid attribute
     pub fn mid(mut self, mid: impl Into<String>) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::Mid(mid.into()));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Mid(mid.into()));
         self
     }
 
@@ -1036,20 +1107,26 @@ impl<P> MediaBuilder<P> {
     }
 
     /// Add an rtcp-fb attribute
-    pub fn rtcp_fb(mut self, payload_type: impl Into<String>, feedback_type: impl Into<String>, 
-                   param: Option<impl Into<String>>) -> Self {
+    pub fn rtcp_fb(
+        mut self,
+        payload_type: impl Into<String>,
+        feedback_type: impl Into<String>,
+        param: Option<impl Into<String>>,
+    ) -> Self {
         let param = param.map(|p| p.into());
         self.media.generic_attributes.push(ParsedAttribute::RtcpFb(
             payload_type.into(),
             feedback_type.into(),
-            param
+            param,
         ));
         self
     }
 
     /// Add a setup attribute
     pub fn setup(mut self, role: impl Into<String>) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::Setup(role.into()));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Setup(role.into()));
         self
     }
 
@@ -1083,7 +1160,9 @@ impl<P> MediaBuilder<P> {
         key_inline: impl Into<String>,
     ) -> Self {
         let attr = crate::types::sdp::CryptoAttribute::new(tag, suite, key_inline);
-        self.media.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Crypto(attr));
         self
     }
 
@@ -1091,17 +1170,27 @@ impl<P> MediaBuilder<P> {
     /// media section. Use this when you need lifetime, MKI, or
     /// session-params; otherwise [`MediaBuilder::crypto`] is more concise.
     pub fn crypto_attribute(mut self, attr: crate::types::sdp::CryptoAttribute) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::Crypto(attr));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Crypto(attr));
         self
     }
 
     /// Add an extmap attribute
-    pub fn extmap(mut self, id: u8, direction: Option<impl Into<String>>, 
-                 uri: impl Into<String>, params: Option<impl Into<String>>) -> Self {
+    pub fn extmap(
+        mut self,
+        id: u8,
+        direction: Option<impl Into<String>>,
+        uri: impl Into<String>,
+        params: Option<impl Into<String>>,
+    ) -> Self {
         let direction = direction.map(|d| d.into());
         let params = params.map(|p| p.into());
         self.media.generic_attributes.push(ParsedAttribute::ExtMap(
-            id, direction, uri.into(), params
+            id,
+            direction,
+            uri.into(),
+            params,
         ));
         self
     }
@@ -1127,22 +1216,24 @@ impl<P> MediaBuilder<P> {
             related_port: None,
             extensions: Vec::new(),
         };
-        
+
         // Process optional parameters
         let mut i = 8;
         while i + 1 < parts.len() {
             match parts[i] {
                 "raddr" => {
-                    candidate.related_address = Some(parts[i+1].to_string());
+                    candidate.related_address = Some(parts[i + 1].to_string());
                     i += 2;
-                },
+                }
                 "rport" => {
-                    candidate.related_port = parts[i+1].parse().ok();
+                    candidate.related_port = parts[i + 1].parse().ok();
                     i += 2;
-                },
+                }
                 _ => {
                     if i + 1 < parts.len() {
-                        candidate.extensions.push((parts[i].to_string(), Some(parts[i+1].to_string())));
+                        candidate
+                            .extensions
+                            .push((parts[i].to_string(), Some(parts[i + 1].to_string())));
                         i += 2;
                     } else {
                         candidate.extensions.push((parts[i].to_string(), None));
@@ -1151,81 +1242,113 @@ impl<P> MediaBuilder<P> {
                 }
             }
         }
-        
-        self.media.generic_attributes.push(ParsedAttribute::Candidate(candidate));
+
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Candidate(candidate));
         self
     }
 
     /// Add an ICE ufrag attribute
     pub fn ice_ufrag(mut self, ufrag: impl Into<String>) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::IceUfrag(ufrag.into()));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::IceUfrag(ufrag.into()));
         self
     }
 
     /// Add an ICE pwd attribute
     pub fn ice_pwd(mut self, pwd: impl Into<String>) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::IcePwd(pwd.into()));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::IcePwd(pwd.into()));
         self
     }
 
     /// Add an end-of-candidates attribute
     pub fn end_of_candidates(mut self) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::EndOfCandidates);
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::EndOfCandidates);
         self
     }
 
     /// Add a SSRC attribute
-    pub fn ssrc(mut self, ssrc_id: u32, attribute: impl Into<String>, value: Option<impl Into<String>>) -> Self {
+    pub fn ssrc(
+        mut self,
+        ssrc_id: u32,
+        attribute: impl Into<String>,
+        value: Option<impl Into<String>>,
+    ) -> Self {
         let value = value.map(|v| v.into());
-        self.media.generic_attributes.push(ParsedAttribute::Ssrc(SsrcAttribute {
-            ssrc_id,
-            attribute: attribute.into(),
-            value,
-        }));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Ssrc(SsrcAttribute {
+                ssrc_id,
+                attribute: attribute.into(),
+                value,
+            }));
         self
     }
 
     /// Add a RID attribute
-    pub fn rid(mut self, id: impl Into<String>, direction: RidDirection, 
-              formats: &[impl AsRef<str>], 
-              restrictions: &[(impl AsRef<str>, impl AsRef<str>)]) -> Self {
+    pub fn rid(
+        mut self,
+        id: impl Into<String>,
+        direction: RidDirection,
+        formats: &[impl AsRef<str>],
+        restrictions: &[(impl AsRef<str>, impl AsRef<str>)],
+    ) -> Self {
         let formats = formats.iter().map(|f| f.as_ref().to_string()).collect();
-        let restrictions = restrictions.iter()
+        let restrictions = restrictions
+            .iter()
             .map(|(k, v)| (k.as_ref().to_string(), v.as_ref().to_string()))
             .collect();
-            
-        self.media.generic_attributes.push(ParsedAttribute::Rid(RidAttribute {
-            id: id.into(),
-            direction,
-            formats,
-            restrictions,
-        }));
+
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Rid(RidAttribute {
+                id: id.into(),
+                direction,
+                formats,
+                restrictions,
+            }));
         self
     }
 
     /// Add a simulcast attribute
-    pub fn simulcast(mut self, send_streams: Vec<impl Into<String>>, recv_streams: Vec<impl Into<String>>) -> Self {
+    pub fn simulcast(
+        mut self,
+        send_streams: Vec<impl Into<String>>,
+        recv_streams: Vec<impl Into<String>>,
+    ) -> Self {
         let send = send_streams.into_iter().map(|s| s.into()).collect();
         let recv = recv_streams.into_iter().map(|s| s.into()).collect();
-        self.media.generic_attributes.push(ParsedAttribute::Simulcast(send, recv));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Simulcast(send, recv));
         self
     }
 
     /// Add bandwidth information
     pub fn bandwidth(mut self, bwtype: impl Into<String>, bandwidth: u64) -> Self {
-        self.media.generic_attributes.push(ParsedAttribute::Bandwidth(bwtype.into(), bandwidth));
+        self.media
+            .generic_attributes
+            .push(ParsedAttribute::Bandwidth(bwtype.into(), bandwidth));
         self
     }
 
     /// Add a custom attribute
     pub fn attribute(mut self, name: impl Into<String>, value: Option<impl Into<String>>) -> Self {
         match value {
-            Some(val) => self.media.generic_attributes.push(
-                ParsedAttribute::Value(name.into(), val.into())
-            ),
-            None => self.media.generic_attributes.push(
-                ParsedAttribute::Flag(name.into())
-            ),
+            Some(val) => self
+                .media
+                .generic_attributes
+                .push(ParsedAttribute::Value(name.into(), val.into())),
+            None => self
+                .media
+                .generic_attributes
+                .push(ParsedAttribute::Flag(name.into())),
         }
         self
     }
@@ -1255,7 +1378,7 @@ impl SdpSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_basic_sdp_builder() {
         let sdp = SdpBuilder::new("Test Session")
@@ -1263,28 +1386,28 @@ mod tests {
             .connection("IN", "IP4", "192.168.1.100")
             .time("0", "0")
             .media_audio(49170, "RTP/AVP")
-                .formats(&["0", "8"])
-                .rtpmap("0", "PCMU/8000")
-                .rtpmap("8", "PCMA/8000")
-                .direction(MediaDirection::SendRecv)
-                .done()
+            .formats(&["0", "8"])
+            .rtpmap("0", "PCMU/8000")
+            .rtpmap("8", "PCMA/8000")
+            .direction(MediaDirection::SendRecv)
+            .done()
             .build()
             .expect("Valid SDP should build without errors");
-            
+
         assert_eq!(sdp.session_name, "Test Session");
         assert_eq!(sdp.origin.sess_id, "1234567890");
         assert_eq!(sdp.time_descriptions.len(), 1);
         assert_eq!(sdp.time_descriptions[0].start_time, "0");
         assert_eq!(sdp.time_descriptions[0].stop_time, "0");
         assert_eq!(sdp.media_descriptions.len(), 1);
-        
+
         let media = &sdp.media_descriptions[0];
         assert_eq!(media.media, "audio");
         assert_eq!(media.port, 49170);
         assert_eq!(media.formats, vec!["0", "8"]);
         assert_eq!(media.direction, Some(MediaDirection::SendRecv));
     }
-    
+
     #[test]
     fn test_webrtc_sdp_builder() {
         let sdp = SdpBuilder::new("WebRTC Session")
@@ -1307,9 +1430,9 @@ mod tests {
                 .done()
             .build()
             .expect("Valid WebRTC SDP should build without errors");
-            
+
         assert_eq!(sdp.session_name, "WebRTC Session");
-        
+
         // Check session-level attributes
         let ice_ufrag = sdp.generic_attributes.iter().find_map(|attr| {
             if let ParsedAttribute::IceUfrag(ufrag) = attr {
@@ -1320,50 +1443,52 @@ mod tests {
         });
         assert!(ice_ufrag.is_some());
         assert_eq!(ice_ufrag.unwrap(), "F7gI");
-        
+
         // Check media-level attributes
         let media = &sdp.media_descriptions[0];
         assert_eq!(media.media, "audio");
         assert_eq!(media.port, 9);
         assert_eq!(media.protocol, "UDP/TLS/RTP/SAVPF");
         assert_eq!(media.formats, vec!["111"]);
-        
+
         // Check for rtcp-mux attribute in media section
-        let has_rtcp_mux = media.generic_attributes.iter().any(|attr| {
-            matches!(attr, ParsedAttribute::RtcpMux)
-        });
+        let has_rtcp_mux = media
+            .generic_attributes
+            .iter()
+            .any(|attr| matches!(attr, ParsedAttribute::RtcpMux));
         assert!(has_rtcp_mux);
     }
-    
+
     #[test]
     fn test_converting_existing_session() {
         // Create a basic session first
         let session = SdpBuilder::new("Original Session")
             .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
-            .connection("IN", "IP4", "192.168.1.100")  // Add connection for validation
+            .connection("IN", "IP4", "192.168.1.100") // Add connection for validation
             .time("0", "0")
             .build()
             .expect("Valid SDP should build without errors");
-            
+
         // Now convert it to a builder and add more
-        let modified_session = session.into_builder()
-            .connection("IN", "IP4", "192.168.1.200")  // Change IP
+        let modified_session = session
+            .into_builder()
+            .connection("IN", "IP4", "192.168.1.200") // Change IP
             .media_audio(49170, "RTP/AVP")
-                .formats(&["0"])
-                .done()
+            .formats(&["0"])
+            .done()
             .build()
             .expect("Valid modified SDP should build without errors");
-            
+
         assert_eq!(modified_session.session_name, "Original Session");
         assert_eq!(modified_session.media_descriptions.len(), 1);
-        
+
         if let Some(conn) = &modified_session.connection_info {
             assert_eq!(conn.connection_address, "192.168.1.200");
         } else {
             panic!("Connection info should be present");
         }
     }
-    
+
     #[test]
     fn test_validation_failures() {
         // Test missing time description
@@ -1372,38 +1497,38 @@ mod tests {
             .connection("IN", "IP4", "192.168.1.100")
             // No time description added
             .build();
-        
+
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(e.to_string().contains("time description"));
         }
-        
+
         // Test missing connection data
         let result = SdpBuilder::new("Invalid Session")
             .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
             .time("0", "0")
             // No connection data at session level
             .media_audio(49170, "RTP/AVP")
-                .formats(&["0"])
-                // No connection data at media level
-                .done()
+            .formats(&["0"])
+            // No connection data at media level
+            .done()
             .build();
-        
+
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(e.to_string().contains("Connection information"));
         }
-        
+
         // Test missing formats in media
         let result = SdpBuilder::new("Invalid Session")
             .origin("-", "1234567890", "2", "IN", "IP4", "192.168.1.100")
             .connection("IN", "IP4", "192.168.1.100")
             .time("0", "0")
             .media_audio(49170, "RTP/AVP")
-                // No formats added
-                .done()
+            // No formats added
+            .done()
             .build();
-        
+
         assert!(result.is_err());
         if let Err(e) = result {
             assert!(e.to_string().contains("must have at least one format"));
@@ -1476,9 +1601,9 @@ mod tests {
             .time("0", "0")
             .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
             .media_audio(49170, "RTP/SAVP")
-                .formats(&["0"])
-                .rtpmap("0", "PCMU/8000")
-                .done()
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000")
+            .done()
             .build()
             .expect("Valid SDP");
 
@@ -1487,7 +1612,10 @@ mod tests {
             .iter()
             .filter(|a| matches!(a, ParsedAttribute::Crypto(_)))
             .count();
-        assert_eq!(crypto_count, 1, "session-level crypto must land in session attrs");
+        assert_eq!(
+            crypto_count, 1,
+            "session-level crypto must land in session attrs"
+        );
         assert_eq!(
             sdp.media_descriptions[0]
                 .generic_attributes
@@ -1507,11 +1635,11 @@ mod tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(49170, "RTP/SAVP")
-                .formats(&["0"])
-                .rtpmap("0", "PCMU/8000")
-                .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
-                .crypto(2, CryptoSuite::AesCm128HmacSha1_32, "BBBB==")
-                .done()
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000")
+            .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
+            .crypto(2, CryptoSuite::AesCm128HmacSha1_32, "BBBB==")
+            .done()
             .build()
             .expect("Valid SDP");
 
@@ -1539,10 +1667,10 @@ mod tests {
             .connection("IN", "IP4", "127.0.0.1")
             .time("0", "0")
             .media_audio(49170, "RTP/SAVP")
-                .formats(&["0"])
-                .rtpmap("0", "PCMU/8000")
-                .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
-                .done()
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000")
+            .crypto(1, CryptoSuite::AesCm128HmacSha1_80, "AAAA==")
+            .done()
             .build()
             .expect("Valid SDP");
 
@@ -1553,4 +1681,4 @@ mod tests {
             wire
         );
     }
-} 
+}

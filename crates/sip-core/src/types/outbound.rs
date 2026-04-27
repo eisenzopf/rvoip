@@ -58,16 +58,18 @@ fn param_matches(param: &Param, name: &str) -> bool {
 
 fn set_or_replace_quoted(address: &mut Address, name: &str, value: String) {
     address.params.retain(|p| !param_matches(p, name));
-    address
-        .params
-        .push(Param::Other(name.to_string(), Some(GenericValue::Quoted(value))));
+    address.params.push(Param::Other(
+        name.to_string(),
+        Some(GenericValue::Quoted(value)),
+    ));
 }
 
 fn set_or_replace_token(address: &mut Address, name: &str, value: String) {
     address.params.retain(|p| !param_matches(p, name));
-    address
-        .params
-        .push(Param::Other(name.to_string(), Some(GenericValue::Token(value))));
+    address.params.push(Param::Other(
+        name.to_string(),
+        Some(GenericValue::Token(value)),
+    ));
 }
 
 fn read_string_param(address: &Address, name: &str) -> Option<String> {
@@ -83,13 +85,14 @@ fn read_string_param(address: &Address, name: &str) -> Option<String> {
 /// Write the RFC 5626 outbound Contact parameters onto the address. If
 /// either parameter was previously present, the existing entry is
 /// replaced so repeated calls are idempotent.
-pub fn set_outbound_contact_params(
-    address: &mut Address,
-    params: &OutboundContactParams,
-) {
+pub fn set_outbound_contact_params(address: &mut Address, params: &OutboundContactParams) {
     // `+sip.instance` value is a URN inside angle brackets, as a quoted
     // string (RFC 5626 §4.1 "URN" production).
-    set_or_replace_quoted(address, "+sip.instance", format!("<{}>", params.instance_urn));
+    set_or_replace_quoted(
+        address,
+        "+sip.instance",
+        format!("<{}>", params.instance_urn),
+    );
     set_or_replace_token(address, "reg-id", params.reg_id.to_string());
 }
 
@@ -125,14 +128,16 @@ pub fn set_gruu_contact_params(address: &mut Address, params: &GruuContactParams
         .params
         .retain(|p| !param_matches(p, "pub-gruu") && !param_matches(p, "temp-gruu"));
     if let Some(ref pub_g) = params.pub_gruu {
-        address
-            .params
-            .push(Param::Other("pub-gruu".to_string(), Some(GenericValue::Quoted(pub_g.clone()))));
+        address.params.push(Param::Other(
+            "pub-gruu".to_string(),
+            Some(GenericValue::Quoted(pub_g.clone())),
+        ));
     }
     if let Some(ref temp_g) = params.temp_gruu {
-        address
-            .params
-            .push(Param::Other("temp-gruu".to_string(), Some(GenericValue::Quoted(temp_g.clone()))));
+        address.params.push(Param::Other(
+            "temp-gruu".to_string(),
+            Some(GenericValue::Quoted(temp_g.clone())),
+        ));
     }
 }
 
@@ -156,7 +161,10 @@ pub fn mark_uri_as_outbound(address: &mut Address) {
         .iter()
         .any(|p| matches!(p, P::Other(k, None) if k.eq_ignore_ascii_case("ob")))
     {
-        address.uri.parameters.push(P::Other("ob".to_string(), None));
+        address
+            .uri
+            .parameters
+            .push(P::Other("ob".to_string(), None));
     }
 }
 
@@ -187,7 +195,11 @@ mod tests {
             "address string missing +sip.instance: {}",
             s
         );
-        assert!(s.contains("reg-id=1"), "address string missing reg-id: {}", s);
+        assert!(
+            s.contains("reg-id=1"),
+            "address string missing reg-id: {}",
+            s
+        );
     }
 
     #[test]
@@ -254,7 +266,10 @@ mod tests {
         };
         set_gruu_contact_params(&mut addr, &params);
         let read = read_gruu_contact_params(&addr);
-        assert_eq!(read.pub_gruu.as_deref(), Some("sip:alice+pub@example.com;gr=xyz"));
+        assert_eq!(
+            read.pub_gruu.as_deref(),
+            Some("sip:alice+pub@example.com;gr=xyz")
+        );
         assert!(read.temp_gruu.is_none());
     }
 
@@ -295,7 +310,9 @@ mod tests {
         let mut addr = make_address();
         addr.params.push(Param::Other(
             "+sip.instance".to_string(),
-            Some(GenericValue::Quoted("urn:uuid:raw-without-brackets".to_string())),
+            Some(GenericValue::Quoted(
+                "urn:uuid:raw-without-brackets".to_string(),
+            )),
         ));
         addr.params.push(Param::Other(
             "reg-id".to_string(),

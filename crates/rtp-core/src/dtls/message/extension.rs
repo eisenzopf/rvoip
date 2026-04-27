@@ -2,7 +2,7 @@
 //!
 //! This module contains the extension types used in DTLS.
 
-use bytes::{Bytes, BytesMut, Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io::Cursor;
 
 use crate::dtls::Result;
@@ -13,82 +13,82 @@ use crate::dtls::Result;
 pub enum ExtensionType {
     /// Server Name Indication
     ServerName = 0,
-    
+
     /// Maximum Fragment Length
     MaxFragmentLength = 1,
-    
+
     /// Client Certificate URL
     ClientCertificateUrl = 2,
-    
+
     /// Trusted CA Keys
     TrustedCaKeys = 3,
-    
+
     /// Truncated HMAC
     TruncatedHmac = 4,
-    
+
     /// Status Request
     StatusRequest = 5,
-    
+
     /// User Mapping
     UserMapping = 6,
-    
+
     /// Client Authentication
     ClientAuthz = 7,
-    
+
     /// Server Authentication
     ServerAuthz = 8,
-    
+
     /// Cert Type
     CertType = 9,
-    
+
     /// Supported Groups
     SupportedGroups = 10,
-    
+
     /// EC Point Formats
     EcPointFormats = 11,
-    
+
     /// SRP
     Srp = 12,
-    
+
     /// Signature Algorithms
     SignatureAlgorithms = 13,
-    
+
     /// Use SRTP (RFC 5764)
     UseSrtp = 14,
-    
+
     /// Heartbeat
     Heartbeat = 15,
-    
+
     /// Application Layer Protocol Negotiation
     Alpn = 16,
-    
+
     /// Signed Certificate Timestamp
     SignedCertificateTimestamp = 18,
-    
+
     /// Client Certificate Type
     ClientCertificateType = 19,
-    
+
     /// Server Certificate Type
     ServerCertificateType = 20,
-    
+
     /// Padding
     Padding = 21,
-    
+
     /// Encrypt-then-MAC
     EncryptThenMac = 22,
-    
+
     /// Extended Master Secret
     ExtendedMasterSecret = 23,
-    
+
     /// Token Binding
     TokenBinding = 24,
-    
+
     /// Cache Info
     CacheInfo = 25,
-    
+
     /// Renegotiation Info
     RenegotiationInfo = 0xff01,
-    
+
     /// Unknown extension type
     Unknown(u16),
 }
@@ -166,12 +166,12 @@ impl From<ExtensionType> for u16 {
 pub enum Extension {
     /// Use SRTP extension (RFC 5764)
     UseSrtp(UseSrtpExtension),
-    
+
     /// Unknown extension
     Unknown {
         /// Extension type
         typ: u16,
-        
+
         /// Extension data
         data: Bytes,
     },
@@ -185,58 +185,58 @@ impl Extension {
             Self::Unknown { typ, .. } => ExtensionType::from(*typ),
         }
     }
-    
+
     /// Serialize the extension to bytes
     pub fn serialize(&self) -> Result<Bytes> {
         let mut buf = BytesMut::new();
-        
+
         // Extension type (2 bytes)
         let typ: u16 = self.extension_type().into();
         buf.put_u16(typ);
-        
+
         // Extension data
         match self {
             Self::UseSrtp(ext) => {
                 let data = ext.serialize()?;
-                
+
                 // Extension length (2 bytes)
                 buf.put_u16(data.len() as u16);
-                
+
                 // Extension data
                 buf.extend_from_slice(&data);
             }
             Self::Unknown { data, .. } => {
                 // Extension length (2 bytes)
                 buf.put_u16(data.len() as u16);
-                
+
                 // Extension data
                 buf.extend_from_slice(data);
             }
         }
-        
+
         Ok(buf.freeze())
     }
-    
+
     /// Parse an extension from bytes
     pub fn parse(data: &[u8]) -> Result<(Self, usize)> {
         if data.len() < 4 {
             return Err(crate::error::Error::PacketTooShort);
         }
-        
+
         let mut cursor = Cursor::new(data);
-        
+
         // Extension type (2 bytes)
         let typ = cursor.get_u16();
-        
+
         // Extension length (2 bytes)
         let length = cursor.get_u16() as usize;
-        
+
         if data.len() < 4 + length {
             return Err(crate::error::Error::PacketTooShort);
         }
-        
+
         let ext_data = &data[4..4 + length];
-        
+
         let extension = match ExtensionType::from(typ) {
             ExtensionType::UseSrtp => {
                 let use_srtp = UseSrtpExtension::parse(ext_data)?;
@@ -247,7 +247,7 @@ impl Extension {
                 data: Bytes::copy_from_slice(ext_data),
             },
         };
-        
+
         Ok((extension, 4 + length))
     }
 }
@@ -258,16 +258,16 @@ impl Extension {
 pub enum SrtpProtectionProfile {
     /// SRTP_AES128_CM_HMAC_SHA1_80 (RFC 5764)
     Aes128CmSha1_80 = 0x0001,
-    
+
     /// SRTP_AES128_CM_HMAC_SHA1_32 (RFC 5764)
     Aes128CmSha1_32 = 0x0002,
-    
+
     /// SRTP_AEAD_AES_128_GCM (RFC 7714)
     AeadAes128Gcm = 0x0007,
-    
+
     /// SRTP_AEAD_AES_256_GCM (RFC 7714)
     AeadAes256Gcm = 0x0008,
-    
+
     /// Unknown profile
     Unknown(u16),
 }
@@ -301,7 +301,7 @@ impl From<SrtpProtectionProfile> for u16 {
 pub struct UseSrtpExtension {
     /// SRTP protection profiles
     pub profiles: Vec<SrtpProtectionProfile>,
-    
+
     /// MKI (Master Key Identifier) value
     pub mki: Bytes,
 }
@@ -309,12 +309,9 @@ pub struct UseSrtpExtension {
 impl UseSrtpExtension {
     /// Create a new Use SRTP extension
     pub fn new(profiles: Vec<SrtpProtectionProfile>, mki: Bytes) -> Self {
-        Self {
-            profiles,
-            mki,
-        }
+        Self { profiles, mki }
     }
-    
+
     /// Create a new Use SRTP extension with no MKI
     pub fn with_profiles(profiles: Vec<SrtpProtectionProfile>) -> Self {
         Self {
@@ -322,71 +319,71 @@ impl UseSrtpExtension {
             mki: Bytes::new(),
         }
     }
-    
+
     /// Serialize the extension to bytes
     pub fn serialize(&self) -> Result<Bytes> {
         // Calculate profiles length (2 bytes per profile)
         let profiles_len = self.profiles.len() * 2;
-        
+
         // Calculate total length
         let total_len = 2 + profiles_len + 1 + self.mki.len();
-        
+
         let mut buf = BytesMut::with_capacity(total_len);
-        
+
         // Profiles length (2 bytes)
         buf.put_u16(profiles_len as u16);
-        
+
         // Profiles
         for profile in &self.profiles {
             buf.put_u16((*profile).into());
         }
-        
+
         // MKI length (1 byte)
         buf.put_u8(self.mki.len() as u8);
-        
+
         // MKI value
         if !self.mki.is_empty() {
             buf.extend_from_slice(&self.mki);
         }
-        
+
         Ok(buf.freeze())
     }
-    
+
     /// Parse a Use SRTP extension from bytes
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < 3 {
             return Err(crate::error::Error::PacketTooShort);
         }
-        
+
         let mut cursor = Cursor::new(data);
-        
+
         // Profiles length (2 bytes)
         let profiles_len = cursor.get_u16() as usize;
-        
+
         if profiles_len % 2 != 0 {
             return Err(crate::error::Error::InvalidPacket(
-                "SRTP profiles length must be a multiple of 2".to_string()
+                "SRTP profiles length must be a multiple of 2".to_string(),
             ));
         }
-        
+
         if data.len() < 3 + profiles_len {
             return Err(crate::error::Error::PacketTooShort);
         }
-        
+
         // Profiles
         let mut profiles = Vec::with_capacity(profiles_len / 2);
         for _ in 0..(profiles_len / 2) {
             let profile_id = cursor.get_u16();
             profiles.push(SrtpProtectionProfile::from(profile_id));
         }
-        
+
         // MKI length (1 byte)
         let mki_len = cursor.get_u8() as usize;
-        
+
         if data.len() < 3 + profiles_len + mki_len {
             return Err(crate::error::Error::PacketTooShort);
         }
-        
+
         // MKI value
         let mki = if mki_len > 0 {
             let offset = 3 + profiles_len;
@@ -394,10 +391,7 @@ impl UseSrtpExtension {
         } else {
             Bytes::new()
         };
-        
-        Ok(Self {
-            profiles,
-            mki,
-        })
+
+        Ok(Self { profiles, mki })
     }
-} 
+}

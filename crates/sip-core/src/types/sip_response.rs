@@ -42,24 +42,24 @@
 //!     .with_header(TypedHeader::CSeq(CSeq::new(314159, Method::Invite)));
 //! ```
 
-use std::fmt;
-use std::collections::HashSet;
-use std::str::FromStr;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::fmt;
+use std::str::FromStr;
 
-use crate::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
-use crate::types::version::Version;
-use crate::types::StatusCode;
 use crate::types;
-use crate::types::via::Via;
-use crate::types::headers::HeaderAccess;
-use crate::types::to::To;
-use crate::types::from::From;
-use crate::types::CSeq;
-use crate::types::method::Method;
 use crate::types::address::Address;
+use crate::types::from::From;
+use crate::types::header::{HeaderName, TypedHeader, TypedHeaderTrait};
+use crate::types::headers::HeaderAccess;
+use crate::types::method::Method;
+use crate::types::to::To;
 use crate::types::uri::Uri;
+use crate::types::version::Version;
+use crate::types::via::Via;
+use crate::types::CSeq;
+use crate::types::StatusCode;
 
 /// A SIP response message
 ///
@@ -69,7 +69,7 @@ use crate::types::uri::Uri;
 ///
 /// # Standard RFC Compliance
 ///
-/// This implementation follows [RFC 3261](https://tools.ietf.org/html/rfc3261), 
+/// This implementation follows [RFC 3261](https://tools.ietf.org/html/rfc3261),
 /// which defines the Session Initiation Protocol.
 ///
 /// # Fields
@@ -276,16 +276,19 @@ impl Response {
     /// Self for method chaining
     pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
         self.body = body.into();
-        
+
         // Add or update Content-Length header
-        let content_length = TypedHeader::ContentLength(types::content_length::ContentLength(self.body.len() as u32));
-        
+        let content_length = TypedHeader::ContentLength(types::content_length::ContentLength(
+            self.body.len() as u32,
+        ));
+
         // Remove any existing Content-Length headers
-        self.headers.retain(|h| h.name() != HeaderName::ContentLength);
-        
+        self.headers
+            .retain(|h| h.name() != HeaderName::ContentLength);
+
         // Add the new Content-Length header
         self.headers.push(content_length);
-        
+
         self
     }
 
@@ -332,15 +335,15 @@ impl Response {
     pub fn reason_phrase(&self) -> &str {
         match &self.reason {
             Some(reason) => reason,
-            None => self.status.as_reason()
+            None => self.status.as_reason(),
         }
     }
-    
+
     /// Retrieves the first header with the specified type, if any.
-    pub fn typed_header<T>(&self) -> Option<&T> 
-    where 
+    pub fn typed_header<T>(&self) -> Option<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         for header in &self.headers {
             if let Some(typed) = try_as_typed_header::<T>(header) {
@@ -349,7 +352,7 @@ impl Response {
         }
         None
     }
-    
+
     /// Get the Call-ID header value, if present
     ///
     /// # Returns
@@ -362,7 +365,7 @@ impl Response {
         }
         None
     }
-    
+
     /// Retrieves the From header value, if present
     ///
     /// # Returns
@@ -382,7 +385,7 @@ impl Response {
     /// let mut from = From::new(address);
     /// // Add a tag parameter
     /// from.set_tag("1928301774");
-    /// 
+    ///
     /// let response = Response::new(StatusCode::Ok)
     ///     .with_header(TypedHeader::From(from.clone()));
     ///
@@ -397,7 +400,7 @@ impl Response {
         }
         None
     }
-    
+
     /// Retrieves the To header value, if present
     ///
     /// # Returns
@@ -423,7 +426,7 @@ impl Response {
         }
         None
     }
-    
+
     /// Retrieves the CSeq header value, if present
     ///
     /// # Returns
@@ -505,11 +508,11 @@ impl Response {
     /// ```
     pub fn first_via(&self) -> Option<Via> {
         self.headers.iter().find_map(|h| {
-             if let TypedHeader::Via(via_data) = h {
-                 Some(via_data.clone())
-             } else {
-                 None
-             }
+            if let TypedHeader::Via(via_data) = h {
+                Some(via_data.clone())
+            } else {
+                None
+            }
         })
     }
 
@@ -529,7 +532,7 @@ impl Response {
     pub fn status(&self) -> StatusCode {
         self.status
     }
-    
+
     /// Returns a reference to the body content
     ///
     /// # Returns
@@ -599,21 +602,21 @@ impl Response {
     /// ```
     pub fn from_request(status: StatusCode, request: &crate::types::sip_request::Request) -> Self {
         let mut response = Response::new(status);
-        
+
         // Copy essential headers
         for header in &request.headers {
             match header {
-                TypedHeader::From(_) | 
-                TypedHeader::To(_) | 
-                TypedHeader::CallId(_) | 
-                TypedHeader::CSeq(_) |
-                TypedHeader::Via(_) => {
+                TypedHeader::From(_)
+                | TypedHeader::To(_)
+                | TypedHeader::CallId(_)
+                | TypedHeader::CSeq(_)
+                | TypedHeader::Via(_) => {
                     response.headers.push(header.clone());
-                },
+                }
                 _ => {} // Skip other headers
             }
         }
-        
+
         response
     }
 
@@ -633,7 +636,7 @@ impl Response {
     pub fn version(&self) -> Version {
         self.version.clone()
     }
-    
+
     /// Returns a reference to the response headers
     ///
     /// # Returns
@@ -652,7 +655,7 @@ impl Response {
     pub fn all_headers(&self) -> &[TypedHeader] {
         &self.headers
     }
-    
+
     /// Returns the custom reason if set
     ///
     /// # Returns
@@ -671,7 +674,7 @@ impl Response {
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
-    
+
     /// Returns a reference to the response body as Bytes
     ///
     /// # Returns
@@ -715,9 +718,10 @@ impl Response {
     /// # Returns
     /// An optional From tag string
     pub fn from_tag(&self) -> Option<String> {
-        self.from().and_then(|from| from.tag().map(|s| s.to_string()))
+        self.from()
+            .and_then(|from| from.tag().map(|s| s.to_string()))
     }
-    
+
     /// Retrieves the To tag, if present
     ///
     /// # Returns
@@ -725,7 +729,7 @@ impl Response {
     pub fn to_tag(&self) -> Option<String> {
         self.to().and_then(|to| to.tag().map(|s| s.to_string()))
     }
-    
+
     /// Retrieves the Via branch from the first (topmost) Via header
     ///
     /// # Returns
@@ -752,7 +756,7 @@ impl Response {
         }
         None
     }
-    
+
     /// Retrieves all Via branches in order
     ///
     /// # Returns
@@ -773,7 +777,7 @@ impl Response {
         }
         branches
     }
-    
+
     /// Retrieves all Via transport protocols in order
     ///
     /// # Returns
@@ -789,7 +793,7 @@ impl Response {
         }
         transports
     }
-    
+
     /// Retrieves all Via hosts in order
     ///
     /// # Returns
@@ -810,16 +814,19 @@ impl Response {
 impl fmt::Display for Response {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Status line
-        write!(f, "{} {} {}\r\n", 
-            self.version, 
-            self.status.as_u16(), 
-            self.reason_phrase())?;
-        
+        write!(
+            f,
+            "{} {} {}\r\n",
+            self.version,
+            self.status.as_u16(),
+            self.reason_phrase()
+        )?;
+
         // Headers
         for header in &self.headers {
             write!(f, "{}\r\n", header)?;
         }
-        
+
         // Blank line and body (if any)
         write!(f, "\r\n")?;
         if !self.body.is_empty() {
@@ -838,34 +845,32 @@ impl fmt::Display for Response {
                 }
             }
         }
-        
+
         Ok(())
     }
 }
 
 // Implement HeaderAccess for Response
 impl HeaderAccess for Response {
-    fn typed_headers<T>(&self) -> Vec<&T> 
-    where 
+    fn typed_headers<T>(&self) -> Vec<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         use crate::types::headers::collect_typed_headers;
         collect_typed_headers::<T>(&self.headers)
     }
 
-    fn typed_header<T>(&self) -> Option<&T> 
-    where 
+    fn typed_header<T>(&self) -> Option<&T>
+    where
         T: TypedHeaderTrait + std::fmt::Debug + 'static,
-        <T as TypedHeaderTrait>::Name: std::fmt::Debug
+        <T as TypedHeaderTrait>::Name: std::fmt::Debug,
     {
         self.typed_headers::<T>().into_iter().next()
     }
 
     fn headers(&self, name: &HeaderName) -> Vec<&TypedHeader> {
-        self.headers.iter()
-            .filter(|h| h.name() == *name)
-            .collect()
+        self.headers.iter().filter(|h| h.name() == *name).collect()
     }
 
     fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
@@ -880,22 +885,19 @@ impl HeaderAccess for Response {
     }
 
     fn raw_header_value(&self, name: &HeaderName) -> Option<String> {
-        self.header(name).and_then(|h| {
-            match h.to_string().split_once(':') {
+        self.header(name)
+            .and_then(|h| match h.to_string().split_once(':') {
                 Some((_, value)) => Some(value.trim().to_string()),
                 None => None,
-            }
-        })
+            })
     }
 
     fn raw_headers(&self, name: &HeaderName) -> Vec<Vec<u8>> {
         self.headers(name)
             .iter()
-            .filter_map(|h| {
-                match h.to_string().split_once(':') {
-                    Some((_, value)) => Some(value.trim().as_bytes().to_vec()),
-                    None => None,
-                }
+            .filter_map(|h| match h.to_string().split_once(':') {
+                Some((_, value)) => Some(value.trim().as_bytes().to_vec()),
+                None => None,
             })
             .collect()
     }
@@ -914,10 +916,10 @@ impl HeaderAccess for Response {
 }
 
 // Helper function to try casting a TypedHeader to a specific type
-fn try_as_typed_header<'a, T>(header: &'a TypedHeader) -> Option<&'a T> 
-where 
+fn try_as_typed_header<'a, T>(header: &'a TypedHeader) -> Option<&'a T>
+where
     T: TypedHeaderTrait + std::fmt::Debug + 'static,
-    <T as TypedHeaderTrait>::Name: std::fmt::Debug
+    <T as TypedHeaderTrait>::Name: std::fmt::Debug,
 {
     header.as_typed_ref::<T>()
 }
@@ -926,27 +928,35 @@ where
 mod tests {
     use super::*;
     use crate::types::method::Method;
+    use crate::types::sip_request::Request;
+    use crate::types::CSeq;
+    use crate::types::CallId;
     use crate::types::ContentLength;
     use crate::types::MaxForwards;
-    use crate::types::CallId;
-    use crate::types::CSeq;
-    use crate::types::sip_request::Request;
-    
+
     #[test]
     fn test_response_creation() {
         let address = types::Address::new("sip:alice@example.com".parse().unwrap());
-        
+
         let response = Response::new(StatusCode::Ok)
             .with_header(TypedHeader::From(From::new(address)))
-            .with_header(TypedHeader::To(To::new(types::Address::new("sip:bob@example.com".parse().unwrap())).with_tag("a6c85cf")))
-            .with_header(TypedHeader::CallId(CallId::new("a84b4c76e66710@pc33.atlanta.example.com")))
+            .with_header(TypedHeader::To(
+                To::new(types::Address::new("sip:bob@example.com".parse().unwrap()))
+                    .with_tag("a6c85cf"),
+            ))
+            .with_header(TypedHeader::CallId(CallId::new(
+                "a84b4c76e66710@pc33.atlanta.example.com",
+            )))
             .with_header(TypedHeader::CSeq(CSeq::new(1, Method::Invite)))
-            .with_header(TypedHeader::Via(Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![]).expect("Failed to create Via")))
+            .with_header(TypedHeader::Via(
+                Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![])
+                    .expect("Failed to create Via"),
+            ))
             .with_body("v=0\r\no=bob 2890844527 2890844527 IN IP4 example.com\r\ns=\r\nt=0 0\r\n");
 
         assert_eq!(response.status, StatusCode::Ok);
         assert_eq!(response.version, Version::new(2, 0));
-        
+
         assert_eq!(response.headers.len(), 6); // 5 headers + Content-Length
         assert!(response.has_header(&HeaderName::From));
         assert!(response.has_header(&HeaderName::To));
@@ -954,7 +964,7 @@ mod tests {
         assert!(response.has_header(&HeaderName::CSeq));
         assert!(response.has_header(&HeaderName::Via));
         assert!(response.has_header(&HeaderName::ContentLength));
-        
+
         // Check Content-Length was set correctly
         let cl = response.header(&HeaderName::ContentLength).unwrap();
         if let TypedHeader::ContentLength(cl) = cl {
@@ -968,10 +978,10 @@ mod tests {
     fn test_convenience_constructors() {
         let trying = Response::trying();
         assert_eq!(trying.status, StatusCode::Trying);
-        
+
         let ringing = Response::ringing();
         assert_eq!(ringing.status, StatusCode::Ringing);
-        
+
         let ok = Response::ok();
         assert_eq!(ok.status, StatusCode::Ok);
     }
@@ -981,7 +991,7 @@ mod tests {
         let response = Response::new(StatusCode::Ok)
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
             .with_header(TypedHeader::MaxForwards(MaxForwards::new(70)));
-        
+
         assert_eq!(response.headers.len(), 2);
         assert!(response.header(&HeaderName::CallId).is_some());
         assert!(response.header(&HeaderName::MaxForwards).is_some());
@@ -990,12 +1000,11 @@ mod tests {
     #[test]
     fn test_response_with_reason() {
         let custom_reason = "Everything is Awesome";
-        let response = Response::new(StatusCode::Ok)
-            .with_reason(custom_reason);
-        
+        let response = Response::new(StatusCode::Ok).with_reason(custom_reason);
+
         assert_eq!(response.reason, Some(custom_reason.to_string()));
         assert_eq!(response.reason_phrase(), custom_reason);
-        
+
         // Test default reason
         let response = Response::new(StatusCode::NotFound);
         assert_eq!(response.reason_phrase(), "Not Found");
@@ -1004,9 +1013,8 @@ mod tests {
     #[test]
     fn test_response_with_body() {
         let body_content = "test body content";
-        let response = Response::new(StatusCode::Ok)
-            .with_body(Bytes::from(body_content));
-        
+        let response = Response::new(StatusCode::Ok).with_body(Bytes::from(body_content));
+
         assert_eq!(response.body, Bytes::from(body_content));
         assert_eq!(response.body(), body_content.as_bytes());
     }
@@ -1016,11 +1024,11 @@ mod tests {
         let mut response = Response::new(StatusCode::Ok);
         let headers = vec![
             TypedHeader::CallId(types::CallId::new("test-id")),
-            TypedHeader::MaxForwards(MaxForwards::new(70))
+            TypedHeader::MaxForwards(MaxForwards::new(70)),
         ];
-        
+
         response.set_headers(headers);
-        
+
         assert_eq!(response.headers.len(), 2);
         assert!(response.header(&HeaderName::CallId).is_some());
         assert!(response.header(&HeaderName::MaxForwards).is_some());
@@ -1029,13 +1037,13 @@ mod tests {
     #[test]
     fn test_typed_header_access() {
         let call_id = types::CallId::new("test-id");
-        let response = Response::new(StatusCode::Ok)
-            .with_header(TypedHeader::CallId(call_id.clone()));
-        
+        let response =
+            Response::new(StatusCode::Ok).with_header(TypedHeader::CallId(call_id.clone()));
+
         let retrieved = response.typed_header::<types::CallId>();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().value(), call_id.value());
-        
+
         // Test for a header that doesn't exist
         let non_existent = response.typed_header::<ContentLength>();
         assert!(non_existent.is_none());
@@ -1044,9 +1052,9 @@ mod tests {
     #[test]
     fn test_call_id_access() {
         let call_id = types::CallId::new("test-id");
-        let response = Response::new(StatusCode::Ok)
-            .with_header(TypedHeader::CallId(call_id.clone()));
-        
+        let response =
+            Response::new(StatusCode::Ok).with_header(TypedHeader::CallId(call_id.clone()));
+
         let retrieved = response.call_id();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().value(), call_id.value());
@@ -1054,13 +1062,13 @@ mod tests {
 
     #[test]
     fn test_via_headers() {
-        let via = Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![]).expect("Failed to create Via");
-        let response = Response::new(StatusCode::Ok)
-            .with_header(TypedHeader::Via(via.clone()));
-        
+        let via = Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![])
+            .expect("Failed to create Via");
+        let response = Response::new(StatusCode::Ok).with_header(TypedHeader::Via(via.clone()));
+
         let vias = response.via_headers();
         assert_eq!(vias.len(), 1);
-        
+
         let first_via = response.first_via();
         assert!(first_via.is_some());
     }
@@ -1070,9 +1078,9 @@ mod tests {
         let response = Response::new(StatusCode::Ok)
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
             .with_body(Bytes::from("test body"));
-        
+
         let display = format!("{}", response);
-        
+
         assert!(display.contains("SIP/2.0 200 OK"));
         assert!(display.contains("Call-ID: test-id"));
         assert!(display.contains("test body"));
@@ -1083,23 +1091,23 @@ mod tests {
         let response = Response::new(StatusCode::Ok)
             .with_header(TypedHeader::CallId(types::CallId::new("test-id")))
             .with_header(TypedHeader::MaxForwards(MaxForwards::new(70)));
-        
+
         // Test HeaderAccess implementation
         assert!(response.has_header(&HeaderName::CallId));
         assert!(response.has_header(&HeaderName::MaxForwards));
         assert!(!response.has_header(&HeaderName::To));
-        
+
         let call_id_headers = response.headers(&HeaderName::CallId);
         assert_eq!(call_id_headers.len(), 1);
-        
+
         let by_name = response.headers_by_name("Call-ID");
         assert_eq!(by_name.len(), 1);
-        
+
         let names = response.header_names();
         assert_eq!(names.len(), 2);
         assert!(names.contains(&HeaderName::CallId));
         assert!(names.contains(&HeaderName::MaxForwards));
-        
+
         let raw_value = response.raw_header_value(&HeaderName::CallId);
         assert!(raw_value.is_some());
         assert!(raw_value.unwrap().contains("test-id"));
@@ -1108,25 +1116,30 @@ mod tests {
     #[test]
     fn test_from_request() {
         let address = types::Address::new("sip:alice@example.com".parse().unwrap());
-        
+
         let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
             .with_header(TypedHeader::From(From::new(address)))
-            .with_header(TypedHeader::To(To::new(types::Address::new("sip:bob@example.com".parse().unwrap()))))
+            .with_header(TypedHeader::To(To::new(types::Address::new(
+                "sip:bob@example.com".parse().unwrap(),
+            ))))
             .with_header(TypedHeader::CallId(types::CallId::new("abc123")))
             .with_header(TypedHeader::CSeq(types::CSeq::new(1, Method::Invite)))
-            .with_header(TypedHeader::Via(Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![]).expect("Failed to create Via")))
+            .with_header(TypedHeader::Via(
+                Via::new_simple("SIP", "2.0", "UDP", "example.com", Some(5060), vec![])
+                    .expect("Failed to create Via"),
+            ))
             .with_header(TypedHeader::ContentLength(ContentLength::new(0)));
-            
+
         let response = Response::from_request(StatusCode::Ok, &request);
-        
+
         assert_eq!(response.status, StatusCode::Ok);
         assert!(response.has_header(&HeaderName::From));
         assert!(response.has_header(&HeaderName::To));
         assert!(response.has_header(&HeaderName::CallId));
         assert!(response.has_header(&HeaderName::CSeq));
         assert!(response.has_header(&HeaderName::Via));
-        
+
         // Content-Length should not be copied
         assert!(!response.has_header(&HeaderName::ContentLength));
     }
-} 
+}

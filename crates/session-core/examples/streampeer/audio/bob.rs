@@ -11,7 +11,10 @@ const SAMPLE_RATE: u32 = 8000;
 const FRAME_SIZE: usize = 160; // 20ms at 8kHz
 
 fn env_u16(k: &str, default: u16) -> u16 {
-    std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(k)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn env_string(k: &str, default: &str) -> String {
@@ -27,7 +30,11 @@ fn generate_tone(freq: f32, frame_num: usize) -> Vec<i16> {
         .collect()
 }
 
-fn save_wav(out_dir: &str, name: &str, samples: &[i16]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn save_wav(
+    out_dir: &str,
+    name: &str,
+    samples: &[i16],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::create_dir_all(out_dir)?;
     let spec = hound::WavSpec {
         channels: 1,
@@ -48,7 +55,9 @@ fn save_wav(out_dir: &str, name: &str, samples: &[i16]) -> Result<(), Box<dyn st
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let bob_port = env_u16("BOB_SIP_PORT", 5061);

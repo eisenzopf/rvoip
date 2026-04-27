@@ -1,8 +1,8 @@
 //! VP9 video payload format handler (moved from rtp-core)
 
+use super::traits::PayloadFormat;
 use bytes::Bytes;
 use std::any::Any;
-use super::traits::PayloadFormat;
 
 /// VP9 payload format handler
 pub struct Vp9PayloadFormat {
@@ -16,10 +16,18 @@ impl Vp9PayloadFormat {
 }
 
 impl PayloadFormat for Vp9PayloadFormat {
-    fn payload_type(&self) -> u8 { self.payload_type }
-    fn clock_rate(&self) -> u32 { 90000 } // Video clock rate
-    fn channels(&self) -> u8 { 1 }
-    fn preferred_packet_duration(&self) -> u32 { 33 } // ~30 FPS
+    fn payload_type(&self) -> u8 {
+        self.payload_type
+    }
+    fn clock_rate(&self) -> u32 {
+        90000
+    } // Video clock rate
+    fn channels(&self) -> u8 {
+        1
+    }
+    fn preferred_packet_duration(&self) -> u32 {
+        33
+    } // ~30 FPS
     fn packet_size_from_duration(&self, _duration_ms: u32) -> usize {
         1400 // Typical MTU-safe packet size for video
     }
@@ -32,5 +40,7 @@ impl PayloadFormat for Vp9PayloadFormat {
     fn unpack(&self, payload: &[u8], _timestamp: u32) -> Bytes {
         Bytes::copy_from_slice(payload) // Simplified
     }
-    fn as_any(&self) -> &dyn Any { self }
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }

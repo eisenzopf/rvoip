@@ -35,17 +35,17 @@
 //! assert_eq!(session_expires.refresher, Some(Refresher::Uas));
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Serialize, Deserialize};
 
 use crate::error::{Error, Result};
 use crate::parser::headers::session_expires::parse_session_expires;
-use crate::types::TypedHeaderTrait;
-use crate::types::headers::header_name::HeaderName;
 use crate::types::headers::header::Header;
+use crate::types::headers::header_name::HeaderName;
 use crate::types::headers::header_value::HeaderValue;
 use crate::types::param::Param;
+use crate::types::TypedHeaderTrait;
 use std::str;
 
 /// Refresher entity for Session-Expires header
@@ -94,7 +94,11 @@ impl SessionExpires {
     }
 
     /// Create a new SessionExpires with additional parameters
-    pub fn new_with_params(delta_seconds: u32, refresher: Option<Refresher>, params: Vec<Param>) -> Self {
+    pub fn new_with_params(
+        delta_seconds: u32,
+        refresher: Option<Refresher>,
+        params: Vec<Param>,
+    ) -> Self {
         SessionExpires {
             delta_seconds,
             refresher,
@@ -119,7 +123,9 @@ impl SessionExpires {
 
     /// Checks if a parameter with the given key exists (case-insensitive).
     pub fn has_param(&self, key: &str) -> bool {
-        self.params.iter().any(|param| param.key().eq_ignore_ascii_case(key))
+        self.params
+            .iter()
+            .any(|param| param.key().eq_ignore_ascii_case(key))
     }
 
     /// Gets the value of a parameter with the given key (case-insensitive).
@@ -127,7 +133,8 @@ impl SessionExpires {
     /// Some(None) if param exists but is valueless,
     /// None if param does not exist.
     pub fn get_param(&self, key: &str) -> Option<Option<String>> {
-        self.params.iter()
+        self.params
+            .iter()
             .find(|param| param.key().eq_ignore_ascii_case(key))
             .map(|param| param.value())
     }
@@ -152,8 +159,11 @@ impl FromStr for SessionExpires {
                     refresher,
                     params,
                 })
-            },
-            Err(e) => Err(Error::ParseError(format!("Failed to parse Session-Expires: {:?}", e))),
+            }
+            Err(e) => Err(Error::ParseError(format!(
+                "Failed to parse Session-Expires: {:?}",
+                e
+            ))),
         }
     }
 }
@@ -171,9 +181,13 @@ impl TypedHeaderTrait for SessionExpires {
 
     fn from_header(header: &Header) -> Result<Self> {
         // Check if the header name is either "Session-Expires" or its compact form "x"
-        let compact_name = HeaderName::from_str("x").unwrap_or_else(|_| HeaderName::Other("x".to_string())); // Fallback for safety, though unwrap should be fine if "x" is added
+        let compact_name =
+            HeaderName::from_str("x").unwrap_or_else(|_| HeaderName::Other("x".to_string())); // Fallback for safety, though unwrap should be fine if "x" is added
         if header.name != HeaderName::SessionExpires && header.name != compact_name {
-            return Err(Error::ParseError(format!("Expected Session-Expires header (or compact 'x'), got {:?}", header.name)));
+            return Err(Error::ParseError(format!(
+                "Expected Session-Expires header (or compact 'x'), got {:?}",
+                header.name
+            )));
         }
 
         Self::from_str(header.value.to_string().as_str())
@@ -229,7 +243,10 @@ mod tests {
         assert_eq!(se.refresher, Some(Refresher::Uas));
         assert_eq!(se.params.len(), 1);
         assert_eq!(se.params[0].key(), "custom");
-        assert_eq!(se.params[0].value().map(|s| s.to_owned()), Some("value".to_string()));
+        assert_eq!(
+            se.params[0].value().map(|s| s.to_owned()),
+            Some("value".to_string())
+        );
     }
 
     #[test]
@@ -241,7 +258,8 @@ mod tests {
         assert_eq!(se.to_string(), "3600;refresher=uac");
 
         let mut se = SessionExpires::new(1800, Some(Refresher::Uas));
-        se.params.push(Param::new("custom", Some("value".to_string())));
+        se.params
+            .push(Param::new("custom", Some("value".to_string())));
         assert_eq!(se.to_string(), "1800;refresher=uas;custom=value");
     }
 
@@ -250,7 +268,7 @@ mod tests {
         assert_eq!(SessionExpires::header_name(), HeaderName::SessionExpires);
         assert_eq!(SessionExpires::header_name().as_str(), "Session-Expires");
     }
-    
+
     #[test]
     fn test_session_expires_to_header() {
         let se = SessionExpires::new(3600, Some(Refresher::Uac));
@@ -258,27 +276,27 @@ mod tests {
         assert_eq!(header.name, HeaderName::SessionExpires);
         assert_eq!(header.value.to_string(), "3600;refresher=uac");
     }
-    
+
     #[test]
     fn test_session_expires_from_header() {
         let header = Header::text(
             HeaderName::SessionExpires, // Changed from Other(...)
-            "3600;refresher=uac"
+            "3600;refresher=uac",
         );
-        
+
         let se = SessionExpires::from_header(&header).unwrap();
         assert_eq!(se.delta_seconds, 3600);
         assert_eq!(se.refresher, Some(Refresher::Uac));
         assert!(se.params.is_empty());
     }
-    
+
     #[test]
     fn test_session_expires_from_compact_header() {
         let header = Header::text(
             HeaderName::from_str("x").unwrap(), // More robust way to get compact form
-            "1800;refresher=uas"
+            "1800;refresher=uas",
         );
-        
+
         let se = SessionExpires::from_header(&header).unwrap();
         assert_eq!(se.delta_seconds, 1800);
         assert_eq!(se.refresher, Some(Refresher::Uas));
@@ -289,8 +307,8 @@ mod tests {
     fn test_session_expires_invalid_input() {
         let result = SessionExpires::from_str("invalid");
         assert!(result.is_err());
-        
+
         let result = SessionExpires::from_str("3600;refresher=invalid");
         assert!(result.is_err());
     }
-} 
+}

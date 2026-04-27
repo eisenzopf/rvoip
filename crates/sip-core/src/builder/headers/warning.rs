@@ -1,12 +1,12 @@
+use super::HeaderSetter;
 use crate::error::{Error, Result};
 use crate::types::{
-    warning::{Warning, WarningHeader},
+    headers::header_access::HeaderAccess,
     headers::HeaderName,
     headers::TypedHeader,
-    headers::header_access::HeaderAccess,
     uri::Uri,
+    warning::{Warning, WarningHeader},
 };
-use super::HeaderSetter;
 
 /// Warning header builder
 ///
@@ -143,7 +143,7 @@ pub trait WarningBuilderExt {
     /// // The response includes Warning: 399 server.example.com "Malformed SDP in request"
     /// ```
     fn warning(self, code: u16, agent: Uri, text: impl Into<String>) -> Self;
-    
+
     /// Add multiple warnings to a message
     ///
     /// This method adds multiple Warning headers to a message at once.
@@ -176,7 +176,7 @@ pub trait WarningBuilderExt {
     /// // The response includes both warnings
     /// ```
     fn warnings(self, warnings: Vec<Warning>) -> Self;
-    
+
     /// Add a Warning header for incompatible network protocol (300)
     ///
     /// This convenience method adds a Warning header with code 300,
@@ -207,7 +207,7 @@ pub trait WarningBuilderExt {
     /// // The response includes Warning: 300 server.example.com "Only SIP/2.0 is supported"
     /// ```
     fn warning_incompatible_protocol(self, text: impl Into<String>) -> Self;
-    
+
     /// Add a Warning header for incompatible network address formats (301)
     ///
     /// This convenience method adds a Warning header with code 301,
@@ -238,7 +238,7 @@ pub trait WarningBuilderExt {
     /// // The response includes Warning: 301 server.example.com "IPv6 addresses not supported"
     /// ```
     fn warning_incompatible_address_format(self, text: impl Into<String>) -> Self;
-    
+
     /// Add a Warning header for incompatible transport protocol (302)
     ///
     /// This convenience method adds a Warning header with code 302,
@@ -269,7 +269,7 @@ pub trait WarningBuilderExt {
     /// // The response includes Warning: 302 server.example.com "SCTP transport not supported"
     /// ```
     fn warning_incompatible_transport(self, text: impl Into<String>) -> Self;
-    
+
     /// Add a Warning header for incompatible media format (305)
     ///
     /// This convenience method adds a Warning header with code 305,
@@ -300,7 +300,7 @@ pub trait WarningBuilderExt {
     /// // The response includes Warning: 305 media.example.com "VP9 video codec not supported"
     /// ```
     fn warning_incompatible_media_format(self, text: impl Into<String>) -> Self;
-    
+
     /// Add a Warning header for insufficient bandwidth (370)
     ///
     /// This convenience method adds a Warning header with code 370,
@@ -331,7 +331,7 @@ pub trait WarningBuilderExt {
     /// // The response includes Warning: 370 media.example.com "HD video requires at least 2 Mbps"
     /// ```
     fn warning_insufficient_bandwidth(self, text: impl Into<String>) -> Self;
-    
+
     /// Add a Warning header for miscellaneous warning (399)
     ///
     /// This convenience method adds a Warning header with code 399,
@@ -364,54 +364,54 @@ pub trait WarningBuilderExt {
     fn warning_miscellaneous(self, text: impl Into<String>) -> Self;
 }
 
-impl<T> WarningBuilderExt for T 
-where 
+impl<T> WarningBuilderExt for T
+where
     T: HeaderSetter,
 {
     fn warning(self, code: u16, agent: Uri, text: impl Into<String>) -> Self {
         // Create a single Warning
         let warning = Warning::new(code, agent, text);
-        
+
         // Create a WarningHeader with the single warning
         let warning_header = WarningHeader::new(vec![warning]);
-        
+
         // Use the HeaderSetter trait to set the header
         self.set_header(warning_header)
     }
-    
+
     fn warnings(self, warnings: Vec<Warning>) -> Self {
         // Create a WarningHeader with the warnings
         let warning_header = WarningHeader::new(warnings);
-        
+
         // Use the HeaderSetter trait to set the header
         self.set_header(warning_header)
     }
-    
+
     fn warning_incompatible_protocol(self, text: impl Into<String>) -> Self {
         let agent = Uri::sip("sip-server");
         self.warning(300, agent, text)
     }
-    
+
     fn warning_incompatible_address_format(self, text: impl Into<String>) -> Self {
         let agent = Uri::sip("sip-server");
         self.warning(301, agent, text)
     }
-    
+
     fn warning_incompatible_transport(self, text: impl Into<String>) -> Self {
         let agent = Uri::sip("sip-server");
         self.warning(302, agent, text)
     }
-    
+
     fn warning_incompatible_media_format(self, text: impl Into<String>) -> Self {
         let agent = Uri::sip("sip-server");
         self.warning(305, agent, text)
     }
-    
+
     fn warning_insufficient_bandwidth(self, text: impl Into<String>) -> Self {
         let agent = Uri::sip("sip-server");
         self.warning(370, agent, text)
     }
-    
+
     fn warning_miscellaneous(self, text: impl Into<String>) -> Self {
         let agent = Uri::sip("sip-server");
         self.warning(399, agent, text)
@@ -431,7 +431,7 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::NotAcceptable, None)
             .warning(305, agent.clone(), "Incompatible media format")
             .build();
-            
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 1);
             let warning = &warnings[0];
@@ -449,15 +449,16 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::NotAcceptableHere, None)
             .warning_incompatible_media_format("H.265 codec not supported")
             .build();
-            
+
         // First check if we have the header
         let all_headers = response.all_headers();
-        let warning_headers: Vec<_> = all_headers.iter()
+        let warning_headers: Vec<_> = all_headers
+            .iter()
             .filter(|h| h.name() == HeaderName::Warning)
             .collect();
-        
+
         assert!(!warning_headers.is_empty(), "Warning header not found");
-        
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 1);
             let warning = &warnings[0];
@@ -466,20 +467,21 @@ mod tests {
         } else {
             panic!("Warning header not found or has wrong type");
         }
-        
+
         // Test insufficient bandwidth warning
         let response = ResponseBuilder::new(StatusCode::TemporarilyUnavailable, None)
             .warning_insufficient_bandwidth("Not enough bandwidth for video")
             .build();
-            
+
         // First check if we have the header
         let all_headers = response.all_headers();
-        let warning_headers: Vec<_> = all_headers.iter()
+        let warning_headers: Vec<_> = all_headers
+            .iter()
             .filter(|h| h.name() == HeaderName::Warning)
             .collect();
-        
+
         assert!(!warning_headers.is_empty(), "Warning header not found");
-        
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 1);
             let warning = &warnings[0];
@@ -497,28 +499,39 @@ mod tests {
             .warning_incompatible_protocol("SIP/3.0 not supported")
             .warning_incompatible_media_format("H.265 codec not supported")
             .build();
-            
+
         // Get all headers
         let headers = response.all_headers();
-        
+
         // Count Warning headers
-        let warning_headers = headers.iter()
-            .filter_map(|h| if let TypedHeader::Warning(_) = h { Some(h) } else { None })
+        let warning_headers = headers
+            .iter()
+            .filter_map(|h| {
+                if let TypedHeader::Warning(_) = h {
+                    Some(h)
+                } else {
+                    None
+                }
+            })
             .collect::<Vec<_>>();
-            
+
         assert_eq!(warning_headers.len(), 2);
     }
-    
+
     #[test]
     fn test_warnings_method() {
         // Test adding multiple warnings at once
-        let warning1 = Warning::new(370, Uri::sip("server1.example.com"), "Insufficient bandwidth");
+        let warning1 = Warning::new(
+            370,
+            Uri::sip("server1.example.com"),
+            "Insufficient bandwidth",
+        );
         let warning2 = Warning::new(305, Uri::sip("server2.example.com"), "Incompatible codec");
-        
+
         let response = ResponseBuilder::new(StatusCode::NotAcceptable, None)
             .warnings(vec![warning1, warning2])
             .build();
-            
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 2);
             assert_eq!(warnings[0].code, 370);
@@ -534,15 +547,16 @@ mod tests {
         let response = ResponseBuilder::new(StatusCode::BadRequest, None)
             .warning_incompatible_protocol("Protocol error")
             .build();
-            
+
         // First check if we have the header
         let all_headers = response.all_headers();
-        let warning_headers: Vec<_> = all_headers.iter()
+        let warning_headers: Vec<_> = all_headers
+            .iter()
             .filter(|h| h.name() == HeaderName::Warning)
             .collect();
-        
+
         assert!(!warning_headers.is_empty(), "Warning header not found");
-        
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 1);
             let warning = &warnings[0];
@@ -550,19 +564,20 @@ mod tests {
         } else {
             panic!("Warning header not found or has wrong type");
         }
-        
+
         let response = ResponseBuilder::new(StatusCode::BadRequest, None)
             .warning_incompatible_address_format("Address format error")
             .build();
-            
+
         // First check if we have the header
         let all_headers = response.all_headers();
-        let warning_headers: Vec<_> = all_headers.iter()
+        let warning_headers: Vec<_> = all_headers
+            .iter()
             .filter(|h| h.name() == HeaderName::Warning)
             .collect();
-        
+
         assert!(!warning_headers.is_empty(), "Warning header not found");
-        
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 1);
             let warning = &warnings[0];
@@ -570,19 +585,20 @@ mod tests {
         } else {
             panic!("Warning header not found or has wrong type");
         }
-        
+
         let response = ResponseBuilder::new(StatusCode::BadRequest, None)
             .warning_incompatible_transport("Transport error")
             .build();
-            
+
         // First check if we have the header
         let all_headers = response.all_headers();
-        let warning_headers: Vec<_> = all_headers.iter()
+        let warning_headers: Vec<_> = all_headers
+            .iter()
             .filter(|h| h.name() == HeaderName::Warning)
             .collect();
-        
+
         assert!(!warning_headers.is_empty(), "Warning header not found");
-        
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 1);
             let warning = &warnings[0];
@@ -590,19 +606,20 @@ mod tests {
         } else {
             panic!("Warning header not found or has wrong type");
         }
-        
+
         let response = ResponseBuilder::new(StatusCode::ServiceUnavailable, None)
             .warning_miscellaneous("Miscellaneous warning")
             .build();
-            
+
         // First check if we have the header
         let all_headers = response.all_headers();
-        let warning_headers: Vec<_> = all_headers.iter()
+        let warning_headers: Vec<_> = all_headers
+            .iter()
             .filter(|h| h.name() == HeaderName::Warning)
             .collect();
-        
+
         assert!(!warning_headers.is_empty(), "Warning header not found");
-        
+
         if let Some(TypedHeader::Warning(warnings)) = response.header(&HeaderName::Warning) {
             assert_eq!(warnings.len(), 1);
             let warning = &warnings[0];
@@ -611,4 +628,4 @@ mod tests {
             panic!("Warning header not found or has wrong type");
         }
     }
-} 
+}

@@ -33,12 +33,9 @@ pub fn crlf(input: &[u8]) -> ParseResult<&[u8]> {
 pub fn lws(input: &[u8]) -> ParseResult<&[u8]> {
     alt((
         // Case 1: Folded line - *WSP CRLF 1*WSP
-        recognize(pair(
-            pair(owsp, crlf),
-            many1(wsp)
-        )),
+        recognize(pair(pair(owsp, crlf), many1(wsp))),
         // Case 2: Simple whitespace - 1*WSP (without folding)
-        recognize(many1(wsp))
+        recognize(many1(wsp)),
     ))(input)
 }
 
@@ -156,35 +153,35 @@ mod tests {
     #[test]
     fn test_rfc4475_whitespace_handling() {
         // Tests based on RFC 4475 (SIP Torture Test Messages)
-        
+
         // From RFC 4475 Section 3.1.1.8 - Extra Whitespace and Line Folding
         // Linear whitespace may appear between any two tokens
         let (rem, val) = lws(b"  \r\n  rest").unwrap();
         assert_eq!(rem, b"rest");
         assert_eq!(val, b"  \r\n  ");
-        
+
         // From RFC 4475 Section 3.1.1.9 - Use of LWS in Display Names
         // Complex line folding scenario with multiple line continuations
         // Let's debug the actual parsing of each segment to see what's being returned
         let input = b" \r\n \r\n \t\r\n rest";
-        
+
         // Parse the first LWS segment
         let (remaining1, val1) = lws(input).unwrap();
         assert_eq!(val1, b" \r\n ");
-        
+
         // Parse the second LWS segment - let's see what we actually get
         let (remaining2, val2) = lws(remaining1).unwrap();
         // Print the bytes for debugging
         println!("val2 bytes: {:?}", val2);
-        
+
         // For now, just assert that we can parse the remaining parts without being too specific
         assert!(remaining2.len() < remaining1.len());
-        
+
         // Parse the third LWS segment - again, just verify it works
         let (final_rem, val3) = lws(remaining2).unwrap();
         // Print the bytes for debugging
         println!("val3 bytes: {:?}", val3);
-        
+
         // Just assert that we reached the "rest" part
         assert_eq!(final_rem, b"rest");
     }
@@ -192,27 +189,27 @@ mod tests {
     #[test]
     fn test_sws() {
         // SWS = [LWS] (optional linear whitespace)
-        
+
         // Empty string is valid SWS
         let (rem, val) = sws(b"").unwrap();
         assert_eq!(rem, b"");
         assert_eq!(val, b"");
-        
+
         // Simple whitespace
         let (rem, val) = sws(b" rest").unwrap();
         assert_eq!(rem, b"rest");
         assert_eq!(val, b" ");
-        
+
         // Multiple whitespace
         let (rem, val) = sws(b"  \t rest").unwrap();
         assert_eq!(rem, b"rest");
         assert_eq!(val, b"  \t ");
-        
+
         // With line folding
         let (rem, val) = sws(b"\r\n rest").unwrap();
         assert_eq!(rem, b"rest");
         assert_eq!(val, b"\r\n ");
-        
+
         // No whitespace is also valid
         let (rem, val) = sws(b"rest").unwrap();
         assert_eq!(rem, b"rest");
@@ -222,23 +219,23 @@ mod tests {
     #[test]
     fn test_rfc3261_section25_examples() {
         // Examples from RFC 3261 Section 25.1 (BNF for SIP)
-        
+
         // LWS = [*WSP CRLF] 1*WSP
-        
+
         // Example: "  \r\n " (spaces before and after line break)
         let (rem, val) = lws(b"  \r\n rest").unwrap();
         assert_eq!(rem, b"rest");
         assert_eq!(val, b"  \r\n ");
-        
+
         // SWS = [LWS]
         // Example: "" (empty is valid)
         let (rem, val) = sws(b"").unwrap();
         assert_eq!(rem, b"");
         assert_eq!(val, b"");
-        
+
         // Example: " " (simple space)
         let (rem, val) = sws(b" ").unwrap();
         assert_eq!(rem, b"");
         assert_eq!(val, b" ");
     }
-} 
+}

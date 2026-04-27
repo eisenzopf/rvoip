@@ -1,49 +1,45 @@
-use crate::error::{Error, Result};
-use crate::types::{
-    address::Address,
-    route::Route,
-    uri::Uri,
-    headers::HeaderName,
-    headers::TypedHeader,
-    headers::header_access::HeaderAccess,
-};
-use crate::parser::headers::route::RouteEntry;
-use crate::{RequestBuilder, ResponseBuilder};
 use super::HeaderSetter;
+use crate::error::{Error, Result};
+use crate::parser::headers::route::RouteEntry;
+use crate::types::{
+    address::Address, headers::header_access::HeaderAccess, headers::HeaderName,
+    headers::TypedHeader, route::Route, uri::Uri,
+};
+use crate::{RequestBuilder, ResponseBuilder};
 
 /// Route header builder
 ///
 /// This module provides builder methods for the Route header in SIP messages.
-/// 
+///
 /// ## SIP Routing Overview
-/// 
+///
 /// The Route header is a crucial part of SIP message routing as defined in [RFC 3261 Section 20.30](https://datatracker.ietf.org/doc/html/rfc3261#section-20.30).
 /// It contains a list of URIs that represent proxies the request must traverse to reach its destination.
-/// 
+///
 /// When a client has a route set (a set of Route headers), it will:
 /// 1. Place those Route headers into the request
 /// 2. Set the Request-URI to the target URI (typically the final destination)
 /// 3. Send the request to the first URI in the Route set
-/// 
+///
 /// ## Route Header vs. Record-Route
-/// 
+///
 /// The Route and Record-Route headers work together to enable SIP dialog routing:
-/// 
+///
 /// - **Record-Route**: Added by proxies to responses to establish the route path for future requests
 /// - **Route**: Used in requests to force them through specific proxies, often constructed from
 ///   Record-Route headers seen in previous responses
-/// 
+///
 /// ## Loose Routing vs. Strict Routing
-/// 
+///
 /// RFC 3261 mandates support for "loose routing" which expects Route headers with the `lr` parameter:
-/// 
+///
 /// - **Loose routing**: The proxy forwards to the next hop in the Route set without changing the Request-URI
 /// - **Strict routing**: (Legacy) The proxy places the Request-URI in a new Route header and replaces the Request-URI with the next route
-/// 
+///
 /// Modern SIP implementations should use loose routing (indicated by the `lr` parameter in Route URIs).
-/// 
+///
 /// ## Common Use Cases
-/// 
+///
 /// - Directing requests through specific proxies
 /// - Maintaining dialog routing paths across multiple requests
 /// - Implementing service chaining (traversing multiple services in sequence)
@@ -113,7 +109,7 @@ use super::HeaderSetter;
 ///
 /// // Create a route URI with parameters
 /// let mut edge_proxy = Uri::from_str("sip:edge.example.com").unwrap();
-/// 
+///
 /// // Add parameters using with_parameter method
 /// edge_proxy = edge_proxy.with_parameter(Param::Lr); // Loose routing parameter
 /// edge_proxy = edge_proxy.with_parameter(Param::Transport("tcp".to_string())); // TCP transport
@@ -160,7 +156,7 @@ pub trait RouteBuilderExt {
     /// Add a Route header with an Address
     ///
     /// This method adds a Route header with a single Address, which includes a URI and potentially
-    /// a display name. This is useful when adding routing information that should preserve 
+    /// a display name. This is useful when adding routing information that should preserve
     /// display names.
     ///
     /// # Parameters
@@ -324,13 +320,14 @@ mod tests {
     #[test]
     fn test_request_route_uri() {
         let uri = Uri::from_str("sip:proxy.example.com").unwrap();
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .route_uri(uri.clone())
             .build();
-            
+
         let headers = &request.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Route(route)) = request.header(&HeaderName::Route) {
             assert_eq!(route.0.len(), 1);
             assert_eq!(route.0[0].0.uri, uri);
@@ -343,14 +340,14 @@ mod tests {
     fn test_response_route_address() {
         let uri = Uri::from_str("sip:proxy.example.com").unwrap();
         let address = Address::new(uri.clone());
-        
+
         let response = ResponseBuilder::new(StatusCode::Ok, None)
             .route_address(address.clone())
             .build();
-            
+
         let headers = &response.headers;
         assert_eq!(headers.len(), 1);
-        
+
         if let Some(TypedHeader::Route(route)) = response.header(&HeaderName::Route) {
             assert_eq!(route.0.len(), 1);
             assert_eq!(route.0[0].0.uri, uri);
@@ -363,14 +360,15 @@ mod tests {
     fn test_route_entries() {
         let uri1 = Uri::from_str("sip:proxy1.example.com").unwrap();
         let uri2 = Uri::from_str("sip:proxy2.example.com").unwrap();
-        
+
         let entry1 = RouteEntry(Address::new(uri1.clone()));
         let entry2 = RouteEntry(Address::new(uri2.clone()));
-        
-        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com").unwrap()
+
+        let request = RequestBuilder::new(Method::Invite, "sip:alice@example.com")
+            .unwrap()
             .route_entries(vec![entry1, entry2])
             .build();
-            
+
         if let Some(TypedHeader::Route(route)) = request.header(&HeaderName::Route) {
             assert_eq!(route.0.len(), 2);
             assert_eq!(route.0[0].0.uri, uri1);
@@ -379,4 +377,4 @@ mod tests {
             panic!("Route header not found or has wrong type");
         }
     }
-} 
+}

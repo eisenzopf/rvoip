@@ -7,13 +7,18 @@ use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let bob_port = env_port("BOB_PORT", 5061);
@@ -29,7 +34,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Talk for 2 seconds, then transfer
     sleep(Duration::from_secs(2)).await;
     println!("[BOB] Transferring Alice to Charlie...");
-    handle.transfer_blind(&format!("sip:charlie@127.0.0.1:{}", charlie_port)).await?;
+    handle
+        .transfer_blind(&format!("sip:charlie@127.0.0.1:{}", charlie_port))
+        .await?;
 
     sleep(Duration::from_secs(1)).await;
     handle.hangup().await?;

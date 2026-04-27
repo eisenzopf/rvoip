@@ -4,7 +4,7 @@
 //! [RFC 3261 Section 20.14](https://datatracker.ietf.org/doc/html/rfc3261#section-20.14).
 //!
 //! The Content-Length header indicates the size of the message body, in decimal
-//! number of octets (bytes), sent to the recipient. Its purpose is to allow 
+//! number of octets (bytes), sent to the recipient. Its purpose is to allow
 //! recipients to:
 //!
 //! - Detect message truncation
@@ -20,9 +20,9 @@
 //! ## Role in SIP
 //!
 //! The Content-Length header is mandatory if a message body is included in a SIP message,
-//! unless the body uses chunked encoding. If no body is present, the Content-Length 
+//! unless the body uses chunked encoding. If no body is present, the Content-Length
 //! header can be set to 0, or it can be omitted entirely.
-//! 
+//!
 //! ## Examples
 //!
 //! ```rust
@@ -39,24 +39,24 @@
 //! assert_eq!(*length, 2048);
 //! ```
 
+use crate::error::{Error, Result};
+use crate::parser;
+use crate::parser::headers::parse_content_length;
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use nom::combinator::all_consuming;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::str::FromStr;
-use crate::parser;
-use crate::error::{Result, Error};
-use crate::parser::headers::parse_content_length;
 use std::ops::Deref;
-use nom::combinator::all_consuming;
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use std::str::FromStr;
 
 /// Represents the Content-Length header field (RFC 3261 Section 7.3.2).
 /// Indicates the size of the message body in bytes.
 ///
-/// The Content-Length header is a simple unsigned integer that represents 
-/// the size of the message body in bytes (octets). This implementation wraps 
+/// The Content-Length header is a simple unsigned integer that represents
+/// the size of the message body in bytes (octets). This implementation wraps
 /// a u32 value to provide type safety and SIP-specific functionality.
 ///
-/// The Content-Length header is crucial for proper message parsing, as it allows 
+/// The Content-Length header is crucial for proper message parsing, as it allows
 /// the recipient to determine when the complete message body has been received.
 ///
 /// # Examples
@@ -108,7 +108,7 @@ impl ContentLength {
     pub fn new(length: u32) -> Self {
         Self(length)
     }
-    
+
     /// Extracts ContentLength from a Message or similar type.
     ///
     /// This helper method simplifies extracting ContentLength from SIP messages.
@@ -133,30 +133,52 @@ impl ContentLength {
     /// ```
     pub fn from_message(message: &impl AsRef<crate::types::Message>) -> u32 {
         match message.as_ref() {
-            crate::types::Message::Request(req) => {
-                req.header(&crate::types::header::HeaderName::ContentLength)
-                    .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
-                    .unwrap_or(0)
-            },
-            crate::types::Message::Response(resp) => {
-                resp.header(&crate::types::header::HeaderName::ContentLength)
-                    .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
-                    .unwrap_or(0)
-            }
+            crate::types::Message::Request(req) => req
+                .header(&crate::types::header::HeaderName::ContentLength)
+                .and_then(|h| {
+                    if let crate::types::TypedHeader::ContentLength(cl) = h {
+                        Some(cl.0)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0),
+            crate::types::Message::Response(resp) => resp
+                .header(&crate::types::header::HeaderName::ContentLength)
+                .and_then(|h| {
+                    if let crate::types::TypedHeader::ContentLength(cl) = h {
+                        Some(cl.0)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or(0),
         }
     }
 
     /// Overload of from_message that accepts a Request directly
     pub fn from_request(req: &crate::types::Request) -> u32 {
         req.header(&crate::types::header::HeaderName::ContentLength)
-            .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+            .and_then(|h| {
+                if let crate::types::TypedHeader::ContentLength(cl) = h {
+                    Some(cl.0)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(0)
     }
 
     /// Overload of from_message that accepts a Response directly
     pub fn from_response(resp: &crate::types::Response) -> u32 {
         resp.header(&crate::types::header::HeaderName::ContentLength)
-            .and_then(|h| if let crate::types::TypedHeader::ContentLength(cl) = h { Some(cl.0) } else { None })
+            .and_then(|h| {
+                if let crate::types::TypedHeader::ContentLength(cl) = h {
+                    Some(cl.0)
+                } else {
+                    None
+                }
+            })
             .unwrap_or(0)
     }
 }
@@ -249,7 +271,10 @@ impl FromStr for ContentLength {
     fn from_str(s: &str) -> Result<Self> {
         match s.trim().parse::<u32>() {
             Ok(len) => Ok(ContentLength(len)),
-            Err(_) => Err(Error::ParseError(format!("Invalid Content-Length value: {}", s)))
+            Err(_) => Err(Error::ParseError(format!(
+                "Invalid Content-Length value: {}",
+                s
+            ))),
         }
     }
 }
@@ -267,30 +292,36 @@ impl TypedHeaderTrait for ContentLength {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
             HeaderValue::Raw(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
-                    s.trim().parse::<u32>().map(ContentLength)
-                        .map_err(|_| Error::InvalidHeader(
-                            format!("Invalid integer value in {} header", Self::header_name())
+                    s.trim().parse::<u32>().map(ContentLength).map_err(|_| {
+                        Error::InvalidHeader(format!(
+                            "Invalid integer value in {} header",
+                            Self::header_name()
                         ))
+                    })
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::ContentLength(content_length) => Ok(*content_length),
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
 
-// TODO: Implement methods if needed 
+// TODO: Implement methods if needed

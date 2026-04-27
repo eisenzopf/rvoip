@@ -1,9 +1,9 @@
 //! # SIP Priority Header
-//! 
+//!
 //! This module provides an implementation of the SIP Priority header as defined in
 //! [RFC 3261 Section 20.26](https://datatracker.ietf.org/doc/html/rfc3261#section-20.26).
 //!
-//! The Priority header field indicates the urgency of a request as perceived by the 
+//! The Priority header field indicates the urgency of a request as perceived by the
 //! client. It helps receiving UAs or proxies to appropriately prioritize signaling operations
 //! based on urgency.
 //!
@@ -56,11 +56,11 @@
 // Priority types for SIP Priority header
 // Values according to RFC 3261 Section 20.26
 
-use std::fmt;
-use std::str::FromStr;
-use serde::{Serialize, Deserialize};
 use crate::error::Error;
 use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
 
 /// Priority values for SIP Priority header
 /// As defined in RFC 3261 Section 20.26
@@ -115,19 +115,19 @@ use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 pub enum Priority {
     /// Emergency call
     Emergency,
-    
+
     /// Urgent call/message
     Urgent,
-    
+
     /// Normal call/message (default)
     Normal,
-    
+
     /// Non-urgent call/message
     NonUrgent,
-    
+
     /// Numeric priority value (extension)
     Other(u8),
-    
+
     /// Other token priority value (extension)
     Token(String),
 }
@@ -170,7 +170,7 @@ impl Priority {
             Self::Token(_) => 99, // Custom tokens have lowest priority by default
         }
     }
-    
+
     /// Check if this priority is higher than another
     ///
     /// Compares the numeric priority values (lower values are higher priority) and
@@ -204,7 +204,7 @@ impl Priority {
     pub fn is_higher_than(&self, other: &Priority) -> bool {
         self.value() < other.value()
     }
-    
+
     /// Get the default priority (Normal)
     ///
     /// Returns the default priority value, which is Normal according to RFC 3261.
@@ -224,7 +224,7 @@ impl Priority {
     pub fn default() -> Self {
         Self::Normal
     }
-    
+
     /// Create a new priority from a token
     ///
     /// Parses a string token into a Priority value. The parsing is case-insensitive
@@ -317,7 +317,7 @@ impl fmt::Display for Priority {
 
 impl FromStr for Priority {
     type Err = Error;
-    
+
     /// Parses a string into a Priority.
     ///
     /// This method converts a string to the corresponding Priority enum variant.
@@ -364,7 +364,7 @@ impl FromStr for Priority {
         if s.is_empty() {
             return Err(Error::InvalidInput("Empty Priority value".to_string()));
         }
-        
+
         Ok(Self::from_token(s))
     }
 }
@@ -378,14 +378,19 @@ impl TypedHeaderTrait for Priority {
     }
 
     fn to_header(&self) -> Header {
-        Header::new(Self::header_name(), HeaderValue::Raw(self.to_string().into_bytes()))
+        Header::new(
+            Self::header_name(),
+            HeaderValue::Raw(self.to_string().into_bytes()),
+        )
     }
 
     fn from_header(header: &Header) -> Result<Self, Error> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -393,24 +398,27 @@ impl TypedHeaderTrait for Priority {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Priority::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::Priority(bytes) => {
                 // Convert the byte vector to a string and then parse it
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Priority::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            }
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
@@ -418,7 +426,7 @@ impl TypedHeaderTrait for Priority {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_priority_display() {
         assert_eq!(Priority::Emergency.to_string(), "emergency");
@@ -428,19 +436,31 @@ mod tests {
         assert_eq!(Priority::Other(5).to_string(), "5");
         assert_eq!(Priority::Token("custom".to_string()).to_string(), "custom");
     }
-    
+
     #[test]
     fn test_priority_from_str() {
-        assert_eq!("emergency".parse::<Priority>().unwrap(), Priority::Emergency);
+        assert_eq!(
+            "emergency".parse::<Priority>().unwrap(),
+            Priority::Emergency
+        );
         assert_eq!("URGENT".parse::<Priority>().unwrap(), Priority::Urgent);
         assert_eq!("normal".parse::<Priority>().unwrap(), Priority::Normal);
-        assert_eq!("non-urgent".parse::<Priority>().unwrap(), Priority::NonUrgent);
+        assert_eq!(
+            "non-urgent".parse::<Priority>().unwrap(),
+            Priority::NonUrgent
+        );
         assert_eq!("5".parse::<Priority>().unwrap(), Priority::Other(5));
-        assert_eq!("custom".parse::<Priority>().unwrap(), Priority::Token("custom".to_string()));
-        assert_eq!("high-priority".parse::<Priority>().unwrap(), Priority::Token("high-priority".to_string()));
+        assert_eq!(
+            "custom".parse::<Priority>().unwrap(),
+            Priority::Token("custom".to_string())
+        );
+        assert_eq!(
+            "high-priority".parse::<Priority>().unwrap(),
+            Priority::Token("high-priority".to_string())
+        );
         assert!("".parse::<Priority>().is_err());
     }
-    
+
     #[test]
     fn test_priority_comparison() {
         assert!(Priority::Emergency.is_higher_than(&Priority::Urgent));
@@ -450,7 +470,7 @@ mod tests {
         assert!(Priority::Other(10).is_higher_than(&Priority::Token("any".to_string())));
         assert!(!Priority::Normal.is_higher_than(&Priority::Emergency));
     }
-    
+
     #[test]
     fn test_from_token() {
         assert_eq!(Priority::from_token("emergency"), Priority::Emergency);
@@ -458,7 +478,13 @@ mod tests {
         assert_eq!(Priority::from_token("normal"), Priority::Normal);
         assert_eq!(Priority::from_token("Non-Urgent"), Priority::NonUrgent);
         assert_eq!(Priority::from_token("10"), Priority::Other(10));
-        assert_eq!(Priority::from_token("high-priority"), Priority::Token("high-priority".to_string()));
-        assert_eq!(Priority::from_token("custom_token"), Priority::Token("custom_token".to_string()));
+        assert_eq!(
+            Priority::from_token("high-priority"),
+            Priority::Token("high-priority".to_string())
+        );
+        assert_eq!(
+            Priority::from_token("custom_token"),
+            Priority::Token("custom_token".to_string())
+        );
     }
-} 
+}

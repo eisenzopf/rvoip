@@ -25,13 +25,13 @@ use std::sync::LazyLock;
 /// Generated using the ITU-T reference implementation.
 static MULAW_ENCODE_TABLE: LazyLock<[u8; 65536]> = LazyLock::new(|| {
     let mut table = [0u8; 65536];
-    
+
     // Generate table for all possible 16-bit input values
     for i in 0..65536 {
         let sample = (i as u16).wrapping_sub(32768) as i16; // Convert to signed -32768..32767
         table[i] = ulaw_compress(sample);
     }
-    
+
     table
 });
 
@@ -40,12 +40,12 @@ static MULAW_ENCODE_TABLE: LazyLock<[u8; 65536]> = LazyLock::new(|| {
 /// This table covers all possible 8-bit μ-law encoded values (0 to 255).
 static MULAW_DECODE_TABLE: LazyLock<[i16; 256]> = LazyLock::new(|| {
     let mut table = [0i16; 256];
-    
+
     // Generate table for all possible 8-bit μ-law values
     for i in 0..256 {
         table[i] = ulaw_expand(i as u8);
     }
-    
+
     table
 });
 
@@ -54,13 +54,13 @@ static MULAW_DECODE_TABLE: LazyLock<[i16; 256]> = LazyLock::new(|| {
 /// This table covers the full 16-bit signed input range (-32768 to 32767).
 static ALAW_ENCODE_TABLE: LazyLock<[u8; 65536]> = LazyLock::new(|| {
     let mut table = [0u8; 65536];
-    
+
     // Generate table for all possible 16-bit input values
     for i in 0..65536 {
         let sample = (i as u16).wrapping_sub(32768) as i16; // Convert to signed -32768..32767
         table[i] = alaw_compress(sample);
     }
-    
+
     table
 });
 
@@ -69,12 +69,12 @@ static ALAW_ENCODE_TABLE: LazyLock<[u8; 65536]> = LazyLock::new(|| {
 /// This table covers all possible 8-bit A-law encoded values (0 to 255).
 static ALAW_DECODE_TABLE: LazyLock<[i16; 256]> = LazyLock::new(|| {
     let mut table = [0i16; 256];
-    
+
     // Generate table for all possible 8-bit A-law values
     for i in 0..256 {
         table[i] = alaw_expand(i as u8);
     }
-    
+
     table
 });
 
@@ -144,8 +144,6 @@ pub fn alaw_expand_table(encoded: u8) -> i16 {
     ALAW_DECODE_TABLE[encoded as usize]
 }
 
-
-
 /// Batch μ-law expansion using lookup tables
 ///
 /// This function provides high-performance batch μ-law expansion using
@@ -161,13 +159,11 @@ pub fn alaw_expand_table(encoded: u8) -> i16 {
 /// Panics if the input and output slices have different lengths.
 pub fn mulaw_expand_batch_table(encoded: &[u8], output: &mut [i16]) {
     assert_eq!(encoded.len(), output.len());
-    
+
     for (i, &encoded_sample) in encoded.iter().enumerate() {
         output[i] = mulaw_expand_table(encoded_sample);
     }
 }
-
-
 
 /// Batch A-law expansion using lookup tables
 ///
@@ -184,7 +180,7 @@ pub fn mulaw_expand_batch_table(encoded: &[u8], output: &mut [i16]) {
 /// Panics if the input and output slices have different lengths.
 pub fn alaw_expand_batch_table(encoded: &[u8], output: &mut [i16]) {
     assert_eq!(encoded.len(), output.len());
-    
+
     for (i, &encoded_sample) in encoded.iter().enumerate() {
         output[i] = alaw_expand_table(encoded_sample);
     }
@@ -207,21 +203,29 @@ mod tests {
     fn test_mulaw_table_vs_reference() {
         // Test that table lookups match reference implementation
         let test_samples = vec![
-            -32768i16, -16384, -8192, -4096, -2048, -1024, -512, -256, -128, -64, -32, -16, -8, -4, -2, -1,
-            0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767
+            -32768i16, -16384, -8192, -4096, -2048, -1024, -512, -256, -128, -64, -32, -16, -8, -4,
+            -2, -1, 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767,
         ];
-        
+
         for sample in test_samples {
             let ref_encoded = ulaw_compress(sample);
             let table_encoded = mulaw_compress_table(sample);
-            assert_eq!(ref_encoded, table_encoded, "μ-law encode mismatch for sample {}", sample);
+            assert_eq!(
+                ref_encoded, table_encoded,
+                "μ-law encode mismatch for sample {}",
+                sample
+            );
         }
-        
+
         // Test decode table
         for i in 0..256 {
             let ref_decoded = ulaw_expand(i as u8);
             let table_decoded = mulaw_expand_table(i as u8);
-            assert_eq!(ref_decoded, table_decoded, "μ-law decode mismatch for encoded value {}", i);
+            assert_eq!(
+                ref_decoded, table_decoded,
+                "μ-law decode mismatch for encoded value {}",
+                i
+            );
         }
     }
 
@@ -229,54 +233,58 @@ mod tests {
     fn test_alaw_table_vs_reference() {
         // Test that table lookups match reference implementation
         let test_samples = vec![
-            -32768i16, -16384, -8192, -4096, -2048, -1024, -512, -256, -128, -64, -32, -16, -8, -4, -2, -1,
-            0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767
+            -32768i16, -16384, -8192, -4096, -2048, -1024, -512, -256, -128, -64, -32, -16, -8, -4,
+            -2, -1, 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767,
         ];
-        
+
         for sample in test_samples {
             let ref_encoded = alaw_compress(sample);
             let table_encoded = alaw_compress_table(sample);
-            assert_eq!(ref_encoded, table_encoded, "A-law encode mismatch for sample {}", sample);
+            assert_eq!(
+                ref_encoded, table_encoded,
+                "A-law encode mismatch for sample {}",
+                sample
+            );
         }
-        
+
         // Test decode table
         for i in 0..256 {
             let ref_decoded = alaw_expand(i as u8);
             let table_decoded = alaw_expand_table(i as u8);
-            assert_eq!(ref_decoded, table_decoded, "A-law decode mismatch for encoded value {}", i);
+            assert_eq!(
+                ref_decoded, table_decoded,
+                "A-law decode mismatch for encoded value {}",
+                i
+            );
         }
     }
-
-
 
     #[test]
     fn test_table_validation() {
         // Test that our tables produce the same results as reference implementation
         let test_samples = vec![
-            -32768i16, -16384, -8192, -4096, -2048, -1024, -512, -256, -128, -64, -32, -16, -8, -4, -2, -1,
-            0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767
+            -32768i16, -16384, -8192, -4096, -2048, -1024, -512, -256, -128, -64, -32, -16, -8, -4,
+            -2, -1, 0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32767,
         ];
-        
+
         for sample in test_samples {
             // Test μ-law round-trip with tables
             let ref_encoded = ulaw_compress(sample);
             let table_encoded = mulaw_compress_table(sample);
             assert_eq!(ref_encoded, table_encoded);
-            
+
             let ref_decoded = ulaw_expand(table_encoded);
             let table_decoded = mulaw_expand_table(table_encoded);
             assert_eq!(ref_decoded, table_decoded);
-            
+
             // Test A-law round-trip with tables
             let ref_encoded = alaw_compress(sample);
             let table_encoded = alaw_compress_table(sample);
             assert_eq!(ref_encoded, table_encoded);
-            
+
             let ref_decoded = alaw_expand(table_encoded);
             let table_decoded = alaw_expand_table(table_encoded);
             assert_eq!(ref_decoded, table_decoded);
         }
     }
-
-
-} 
+}

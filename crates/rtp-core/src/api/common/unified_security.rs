@@ -9,8 +9,8 @@ use tokio::sync::RwLock;
 
 use crate::api::common::config::{KeyExchangeMethod, SecurityConfig, SecurityMode};
 use crate::api::common::error::SecurityError;
-use crate::security::{SecurityKeyExchange, sdes::Sdes, mikey::Mikey, zrtp::Zrtp};
-use crate::srtp::{SrtpContext, SrtpCryptoSuite, crypto::SrtpCryptoKey};
+use crate::security::{mikey::Mikey, sdes::Sdes, zrtp::Zrtp, SecurityKeyExchange};
+use crate::srtp::{crypto::SrtpCryptoKey, SrtpContext, SrtpCryptoSuite};
 
 /// Security state for unified context
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,10 +53,7 @@ pub enum KeyExchangeConfig {
         cache_expiry: std::time::Duration,
     },
     /// Pre-shared key configuration
-    PreSharedKey {
-        key: Vec<u8>,
-        salt: Vec<u8>,
-    },
+    PreSharedKey { key: Vec<u8>, salt: Vec<u8> },
 }
 
 /// MIKEY operation mode
@@ -102,7 +99,11 @@ impl UnifiedSecurityContext {
     pub fn new(config: SecurityConfig) -> Result<Self, SecurityError> {
         let method = match config.mode.key_exchange_method() {
             Some(method) => method,
-            None => return Err(SecurityError::Configuration("No key exchange method for security mode".to_string())),
+            None => {
+                return Err(SecurityError::Configuration(
+                    "No key exchange method for security mode".to_string(),
+                ))
+            }
         };
 
         let method_config = Self::create_method_config(&config, method)?;
@@ -118,23 +119,28 @@ impl UnifiedSecurityContext {
     }
 
     /// Create method-specific configuration
-    fn create_method_config(config: &SecurityConfig, method: KeyExchangeMethod) -> Result<KeyExchangeConfig, SecurityError> {
+    fn create_method_config(
+        config: &SecurityConfig,
+        method: KeyExchangeMethod,
+    ) -> Result<KeyExchangeConfig, SecurityError> {
         match method {
-            KeyExchangeMethod::DtlsSrtp => {
-                Ok(KeyExchangeConfig::DtlsSrtp {
-                    certificate_path: config.certificate_path.clone(),
-                    private_key_path: config.private_key_path.clone(),
-                    fingerprint_algorithm: config.fingerprint_algorithm.clone(),
-                })
-            },
+            KeyExchangeMethod::DtlsSrtp => Ok(KeyExchangeConfig::DtlsSrtp {
+                certificate_path: config.certificate_path.clone(),
+                private_key_path: config.private_key_path.clone(),
+                fingerprint_algorithm: config.fingerprint_algorithm.clone(),
+            }),
             KeyExchangeMethod::Sdes => {
                 // Convert SrtpProfile to SrtpCryptoSuite
-                let crypto_suites = config.srtp_profiles.iter()
+                let crypto_suites = config
+                    .srtp_profiles
+                    .iter()
                     .filter_map(|profile| match profile {
-                        crate::api::common::config::SrtpProfile::AesCm128HmacSha1_80 => 
-                            Some(crate::srtp::SRTP_AES128_CM_SHA1_80),
-                        crate::api::common::config::SrtpProfile::AesCm128HmacSha1_32 => 
-                            Some(crate::srtp::SRTP_AES128_CM_SHA1_32),
+                        crate::api::common::config::SrtpProfile::AesCm128HmacSha1_80 => {
+                            Some(crate::srtp::SRTP_AES128_CM_SHA1_80)
+                        }
+                        crate::api::common::config::SrtpProfile::AesCm128HmacSha1_32 => {
+                            Some(crate::srtp::SRTP_AES128_CM_SHA1_32)
+                        }
                         _ => None, // Other profiles not implemented yet
                     })
                     .collect();
@@ -143,20 +149,20 @@ impl UnifiedSecurityContext {
                     crypto_suites,
                     offer_count: 2,
                 })
-            },
+            }
             KeyExchangeMethod::Mikey => {
                 Ok(KeyExchangeConfig::Mikey {
                     psk: config.srtp_key.clone(),
                     identity: None,
                     mode: MikeyMode::Psk, // Default to PSK mode
                 })
-            },
+            }
             KeyExchangeMethod::Zrtp => {
                 Ok(KeyExchangeConfig::Zrtp {
                     enable_sas: true,
                     cache_expiry: std::time::Duration::from_secs(3600), // 1 hour
                 })
-            },
+            }
             KeyExchangeMethod::PreSharedKey => {
                 match &config.srtp_key {
                     Some(key) => {
@@ -169,17 +175,21 @@ impl UnifiedSecurityContext {
                         let actual_key = if key.len() >= 16 {
                             key[0..16].to_vec()
                         } else {
-                            return Err(SecurityError::Configuration("Pre-shared key too short".to_string()));
+                            return Err(SecurityError::Configuration(
+                                "Pre-shared key too short".to_string(),
+                            ));
                         };
 
                         Ok(KeyExchangeConfig::PreSharedKey {
                             key: actual_key,
                             salt,
                         })
-                    },
-                    None => Err(SecurityError::Configuration("Pre-shared key required for PSK mode".to_string())),
+                    }
+                    None => Err(SecurityError::Configuration(
+                        "Pre-shared key required for PSK mode".to_string(),
+                    )),
                 }
-            },
+            }
         }
     }
 
@@ -187,29 +197,47 @@ impl UnifiedSecurityContext {
     pub async fn initialize(&self) -> Result<(), SecurityError> {
         let mut state = self.state.write().await;
         if *state != SecurityState::Initial {
-            return Err(SecurityError::InvalidState("Context already initialized".to_string()));
+            return Err(SecurityError::InvalidState(
+                "Context already initialized".to_string(),
+            ));
         }
 
         // Create the appropriate key exchange implementation
         let key_exchange_impl: Box<dyn SecurityKeyExchange + Send + Sync> = match self.method {
             KeyExchangeMethod::DtlsSrtp => {
                 // DTLS-SRTP is handled by existing security contexts, not here
-                return Err(SecurityError::Configuration("DTLS-SRTP should use existing security contexts".to_string()));
-            },
+                return Err(SecurityError::Configuration(
+                    "DTLS-SRTP should use existing security contexts".to_string(),
+                ));
+            }
             KeyExchangeMethod::Sdes => {
-                if let KeyExchangeConfig::Sdes { crypto_suites, offer_count } = &self.method_config {
+                if let KeyExchangeConfig::Sdes {
+                    crypto_suites,
+                    offer_count,
+                } = &self.method_config
+                {
                     let sdes_config = crate::security::sdes::SdesConfig {
                         crypto_suites: crypto_suites.clone(),
                         offer_count: *offer_count,
                     };
-                    let sdes = crate::security::sdes::Sdes::new(sdes_config, crate::security::sdes::SdesRole::Offerer);
+                    let sdes = crate::security::sdes::Sdes::new(
+                        sdes_config,
+                        crate::security::sdes::SdesRole::Offerer,
+                    );
                     Box::new(sdes)
                 } else {
-                    return Err(SecurityError::Configuration("Invalid SDES configuration".to_string()));
+                    return Err(SecurityError::Configuration(
+                        "Invalid SDES configuration".to_string(),
+                    ));
                 }
-            },
+            }
             KeyExchangeMethod::Mikey => {
-                if let KeyExchangeConfig::Mikey { psk, identity, mode } = &self.method_config {
+                if let KeyExchangeConfig::Mikey {
+                    psk,
+                    identity,
+                    mode,
+                } = &self.method_config
+                {
                     match mode {
                         MikeyMode::Psk => {
                             // Create MIKEY-PSK configuration
@@ -219,14 +247,14 @@ impl UnifiedSecurityContext {
                                 srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
                                 ..Default::default()
                             };
-                            
+
                             // Default to initiator role - would be determined by call setup in real usage
                             let mikey = crate::security::mikey::Mikey::new(
-                                mikey_config, 
-                                crate::security::mikey::MikeyRole::Initiator
+                                mikey_config,
+                                crate::security::mikey::MikeyRole::Initiator,
                             );
                             Box::new(mikey)
-                        },
+                        }
                         MikeyMode::Pke => {
                             // Create MIKEY-PKE configuration
                             let mikey_config = crate::security::mikey::MikeyConfig {
@@ -237,43 +265,57 @@ impl UnifiedSecurityContext {
                                 srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
                                 ..Default::default()
                             };
-                            
+
                             // Default to initiator role - would be determined by call setup in real usage
                             let mikey = crate::security::mikey::Mikey::new(
-                                mikey_config, 
-                                crate::security::mikey::MikeyRole::Initiator
+                                mikey_config,
+                                crate::security::mikey::MikeyRole::Initiator,
                             );
                             Box::new(mikey)
-                        },
+                        }
                     }
                 } else {
-                    return Err(SecurityError::Configuration("Invalid MIKEY configuration".to_string()));
+                    return Err(SecurityError::Configuration(
+                        "Invalid MIKEY configuration".to_string(),
+                    ));
                 }
-            },
+            }
             KeyExchangeMethod::Zrtp => {
-                if let KeyExchangeConfig::Zrtp { enable_sas, cache_expiry } = &self.method_config {
+                if let KeyExchangeConfig::Zrtp {
+                    enable_sas,
+                    cache_expiry,
+                } = &self.method_config
+                {
                     // Create ZRTP configuration based on security config
                     let zrtp_config = crate::security::zrtp::ZrtpConfig {
                         ciphers: vec![crate::security::zrtp::ZrtpCipher::Aes1],
                         hashes: vec![crate::security::zrtp::ZrtpHash::S256],
-                        auth_tags: vec![crate::security::zrtp::ZrtpAuthTag::HS80, crate::security::zrtp::ZrtpAuthTag::HS32],
+                        auth_tags: vec![
+                            crate::security::zrtp::ZrtpAuthTag::HS80,
+                            crate::security::zrtp::ZrtpAuthTag::HS32,
+                        ],
                         key_agreements: vec![crate::security::zrtp::ZrtpKeyAgreement::EC25],
-                        sas_types: if *enable_sas { 
-                            vec![crate::security::zrtp::ZrtpSasType::B32] 
-                        } else { 
-                            vec![] 
+                        sas_types: if *enable_sas {
+                            vec![crate::security::zrtp::ZrtpSasType::B32]
+                        } else {
+                            vec![]
                         },
                         client_id: "RVOIP Unified Security".to_string(),
                         srtp_profile: crate::srtp::SRTP_AES128_CM_SHA1_80,
                     };
-                    
+
                     // Default to initiator role - would be determined by call setup in real usage
-                    let zrtp = crate::security::zrtp::Zrtp::new(zrtp_config, crate::security::zrtp::ZrtpRole::Initiator);
+                    let zrtp = crate::security::zrtp::Zrtp::new(
+                        zrtp_config,
+                        crate::security::zrtp::ZrtpRole::Initiator,
+                    );
                     Box::new(zrtp)
                 } else {
-                    return Err(SecurityError::Configuration("Invalid ZRTP configuration".to_string()));
+                    return Err(SecurityError::Configuration(
+                        "Invalid ZRTP configuration".to_string(),
+                    ));
                 }
-            },
+            }
             KeyExchangeMethod::PreSharedKey => {
                 if let KeyExchangeConfig::PreSharedKey { key, salt } = &self.method_config {
                     // For pre-shared keys, we can immediately set up SRTP
@@ -281,21 +323,27 @@ impl UnifiedSecurityContext {
                     let srtp_context = SrtpContext::new(
                         crate::srtp::SRTP_AES128_CM_SHA1_80, // Default profile
                         srtp_key,
-                    ).map_err(|e| SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e)))?;
+                    )
+                    .map_err(|e| {
+                        SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e))
+                    })?;
 
                     *self.srtp_context.write().await = Some(srtp_context);
                     *state = SecurityState::Established;
                     return Ok(());
                 } else {
-                    return Err(SecurityError::Configuration("Invalid PSK configuration".to_string()));
+                    return Err(SecurityError::Configuration(
+                        "Invalid PSK configuration".to_string(),
+                    ));
                 }
-            },
+            }
         };
 
         // Initialize the key exchange
         let mut key_exchange_mut = key_exchange_impl;
-        key_exchange_mut.init()
-            .map_err(|e| SecurityError::CryptoError(format!("Failed to initialize key exchange: {}", e)))?;
+        key_exchange_mut.init().map_err(|e| {
+            SecurityError::CryptoError(format!("Failed to initialize key exchange: {}", e))
+        })?;
 
         *self.key_exchange.write().await = Some(key_exchange_mut);
         *state = SecurityState::Negotiating;
@@ -307,29 +355,38 @@ impl UnifiedSecurityContext {
     pub async fn process_message(&self, message: &[u8]) -> Result<Option<Vec<u8>>, SecurityError> {
         let state = self.state.read().await;
         if *state != SecurityState::Negotiating {
-            return Err(SecurityError::InvalidState("Key exchange not in progress".to_string()));
+            return Err(SecurityError::InvalidState(
+                "Key exchange not in progress".to_string(),
+            ));
         }
         drop(state);
 
         let mut key_exchange_guard = self.key_exchange.write().await;
-        let key_exchange = key_exchange_guard.as_mut()
-            .ok_or_else(|| SecurityError::NotInitialized("Key exchange not initialized".to_string()))?;
+        let key_exchange = key_exchange_guard.as_mut().ok_or_else(|| {
+            SecurityError::NotInitialized("Key exchange not initialized".to_string())
+        })?;
 
-        let response = key_exchange.process_message(message)
+        let response = key_exchange
+            .process_message(message)
             .map_err(|e| SecurityError::CryptoError(format!("Key exchange failed: {}", e)))?;
 
         // Check if key exchange is complete
         if key_exchange.is_complete() {
             // Get the negotiated keys and set up SRTP
-            if let (Some(srtp_key), Some(srtp_suite)) = (key_exchange.get_srtp_key(), key_exchange.get_srtp_suite()) {
-                let srtp_context = SrtpContext::new(srtp_suite, srtp_key)
-                    .map_err(|e| SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e)))?;
+            if let (Some(srtp_key), Some(srtp_suite)) =
+                (key_exchange.get_srtp_key(), key_exchange.get_srtp_suite())
+            {
+                let srtp_context = SrtpContext::new(srtp_suite, srtp_key).map_err(|e| {
+                    SecurityError::CryptoError(format!("Failed to create SRTP context: {}", e))
+                })?;
 
                 *self.srtp_context.write().await = Some(srtp_context);
                 *self.state.write().await = SecurityState::Established;
             } else {
                 *self.state.write().await = SecurityState::Failed;
-                return Err(SecurityError::CryptoError("Key exchange completed but no keys available".to_string()));
+                return Err(SecurityError::CryptoError(
+                    "Key exchange completed but no keys available".to_string(),
+                ));
             }
         }
 
@@ -365,22 +422,32 @@ impl UnifiedSecurityContext {
     }
 
     /// Protect an RTP packet using SRTP
-    pub async fn protect_rtp(&self, packet: &crate::packet::RtpPacket) -> Result<crate::srtp::ProtectedRtpPacket, SecurityError> {
+    pub async fn protect_rtp(
+        &self,
+        packet: &crate::packet::RtpPacket,
+    ) -> Result<crate::srtp::ProtectedRtpPacket, SecurityError> {
         let mut srtp_guard = self.srtp_context.write().await;
-        let srtp_context = srtp_guard.as_mut()
-            .ok_or_else(|| SecurityError::NotInitialized("SRTP context not established".to_string()))?;
+        let srtp_context = srtp_guard.as_mut().ok_or_else(|| {
+            SecurityError::NotInitialized("SRTP context not established".to_string())
+        })?;
 
-        srtp_context.protect(packet)
+        srtp_context
+            .protect(packet)
             .map_err(|e| SecurityError::CryptoError(format!("SRTP encryption failed: {}", e)))
     }
 
     /// Unprotect an RTP packet using SRTP
-    pub async fn unprotect_rtp(&self, data: &[u8]) -> Result<crate::packet::RtpPacket, SecurityError> {
+    pub async fn unprotect_rtp(
+        &self,
+        data: &[u8],
+    ) -> Result<crate::packet::RtpPacket, SecurityError> {
         let mut srtp_guard = self.srtp_context.write().await;
-        let srtp_context = srtp_guard.as_mut()
-            .ok_or_else(|| SecurityError::NotInitialized("SRTP context not established".to_string()))?;
+        let srtp_context = srtp_guard.as_mut().ok_or_else(|| {
+            SecurityError::NotInitialized("SRTP context not established".to_string())
+        })?;
 
-        srtp_context.unprotect(data)
+        srtp_context
+            .unprotect(data)
             .map_err(|e| SecurityError::CryptoError(format!("SRTP decryption failed: {}", e)))
     }
 }
@@ -427,18 +494,18 @@ mod tests {
 
     /// Test data for SRTP keys
     fn test_srtp_key() -> Vec<u8> {
-        vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-             // Salt
-             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E]
+        vec![
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E,
+            0x0F, 0x10, // Salt
+            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E,
+        ]
     }
 
     #[tokio::test]
     async fn test_create_psk_context() {
         let key = test_srtp_key();
         let context = SecurityContextFactory::create_psk_context(key).unwrap();
-        
+
         assert_eq!(context.get_method(), KeyExchangeMethod::PreSharedKey);
         assert_eq!(context.get_state().await, SecurityState::Initial);
     }
@@ -447,10 +514,10 @@ mod tests {
     async fn test_psk_initialization() {
         let key = test_srtp_key();
         let context = SecurityContextFactory::create_psk_context(key).unwrap();
-        
+
         // Initialize the PSK context
         context.initialize().await.unwrap();
-        
+
         // PSK should immediately establish security
         assert!(context.is_established().await);
         assert_eq!(context.get_state().await, SecurityState::Established);
@@ -512,15 +579,33 @@ mod tests {
     #[test]
     fn test_security_mode_conversions() {
         // Test mode to method conversion
-        assert_eq!(SecurityMode::SdesSrtp.key_exchange_method(), Some(KeyExchangeMethod::Sdes));
-        assert_eq!(SecurityMode::MikeySrtp.key_exchange_method(), Some(KeyExchangeMethod::Mikey));
-        assert_eq!(SecurityMode::ZrtpSrtp.key_exchange_method(), Some(KeyExchangeMethod::Zrtp));
+        assert_eq!(
+            SecurityMode::SdesSrtp.key_exchange_method(),
+            Some(KeyExchangeMethod::Sdes)
+        );
+        assert_eq!(
+            SecurityMode::MikeySrtp.key_exchange_method(),
+            Some(KeyExchangeMethod::Mikey)
+        );
+        assert_eq!(
+            SecurityMode::ZrtpSrtp.key_exchange_method(),
+            Some(KeyExchangeMethod::Zrtp)
+        );
         assert_eq!(SecurityMode::None.key_exchange_method(), None);
 
         // Test method to mode conversion
-        assert_eq!(KeyExchangeMethod::Sdes.to_security_mode(), SecurityMode::SdesSrtp);
-        assert_eq!(KeyExchangeMethod::Mikey.to_security_mode(), SecurityMode::MikeySrtp);
-        assert_eq!(KeyExchangeMethod::Zrtp.to_security_mode(), SecurityMode::ZrtpSrtp);
+        assert_eq!(
+            KeyExchangeMethod::Sdes.to_security_mode(),
+            SecurityMode::SdesSrtp
+        );
+        assert_eq!(
+            KeyExchangeMethod::Mikey.to_security_mode(),
+            SecurityMode::MikeySrtp
+        );
+        assert_eq!(
+            KeyExchangeMethod::Zrtp.to_security_mode(),
+            SecurityMode::ZrtpSrtp
+        );
     }
 
     #[test]
@@ -535,7 +620,7 @@ mod tests {
     async fn test_sdes_initialization_placeholder() {
         // Test SDES initialization (should work once SDES is fully implemented)
         let context = SecurityContextFactory::create_sdes_context().unwrap();
-        
+
         // Currently SDES initialization should work since we have the core implementation
         let result = context.initialize().await;
         assert!(result.is_ok());
@@ -547,7 +632,7 @@ mod tests {
         // Test MIKEY initialization - now fully implemented
         let key = test_srtp_key();
         let context = SecurityContextFactory::create_mikey_psk_context(key).unwrap();
-        
+
         let result = context.initialize().await;
         assert!(result.is_ok()); // MIKEY is now fully implemented
         assert_eq!(context.get_state().await, SecurityState::Negotiating);
@@ -557,7 +642,7 @@ mod tests {
     async fn test_zrtp_initialization_success() {
         // Test ZRTP initialization (now should work with real implementation)
         let context = SecurityContextFactory::create_zrtp_context().unwrap();
-        
+
         let result = context.initialize().await;
         assert!(result.is_ok()); // Should now succeed with actual ZRTP implementation
         assert_eq!(context.get_state().await, SecurityState::Negotiating);
@@ -568,16 +653,16 @@ mod tests {
         let key = test_srtp_key();
         let config = SecurityConfig::srtp_with_key(key);
         let context = UnifiedSecurityContext::new(config).unwrap();
-        
+
         // Verify the method config was created correctly
         assert_eq!(context.method, KeyExchangeMethod::PreSharedKey);
-        
+
         // Check the internal method config
         match &context.method_config {
             KeyExchangeConfig::PreSharedKey { key, salt } => {
                 assert_eq!(key.len(), 16); // AES-128 key
                 assert_eq!(salt.len(), 14); // Standard SRTP salt
-            },
+            }
             _ => panic!("Expected PreSharedKey config"),
         }
     }
@@ -604,4 +689,4 @@ mod tests {
         let config = SecurityConfig::multi_method(methods);
         assert_eq!(config.mode, SecurityMode::SdesSrtp); // Should use first method
     }
-} 
+}

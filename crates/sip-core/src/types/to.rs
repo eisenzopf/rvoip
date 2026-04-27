@@ -37,16 +37,16 @@
 //! assert_eq!(to.tag(), Some("1928301774"));
 //! ```
 
-use crate::types::header::Header;
-use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, TypedHeaderTrait};
-use crate::types::address::Address;
-use std::fmt;
-use std::str::FromStr;
 use crate::error::{Error, Result};
 use crate::parser::parse_address; // For FromStr
-use std::ops::Deref;
-use serde::{Serialize, Deserialize};
+use crate::types::address::Address;
+use crate::types::header::Header;
+use crate::types::{HeaderName, HeaderValue, Param, TypedHeader, TypedHeaderTrait};
 use nom::combinator;
+use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::ops::Deref;
+use std::str::FromStr;
 
 /// Represents the To header field (RFC 3261 Section 8.1.1.3).
 /// Contains the logical recipient of the request.
@@ -74,7 +74,7 @@ use nom::combinator;
 /// // Note: Directly constructing the To header with parsed components
 /// // is more reliable than parsing from a string
 /// let uri = Uri::from_str("sip:bob@example.com").unwrap();
-/// 
+///
 /// // Simple To header
 /// let address = Address::new(uri.clone());
 /// let to = To::new(address);
@@ -263,7 +263,7 @@ impl fmt::Display for To {
     /// Formats the To header as a string.
     ///
     /// Converts the To header to its string representation suitable for inclusion
-    /// in a SIP message. The format follows the SIP specifications, with 
+    /// in a SIP message. The format follows the SIP specifications, with
     /// display-name and parameters appropriately formatted.
     ///
     /// # Examples
@@ -415,7 +415,8 @@ impl TypedHeaderTrait for To {
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != HeaderName::To {
             return Err(Error::InvalidHeader(format!(
-                "Expected To header, got {:?}", header.name
+                "Expected To header, got {:?}",
+                header.name
             )));
         }
 
@@ -432,9 +433,10 @@ impl TypedHeaderTrait for To {
                 } else {
                     Err(Error::ParseError("Invalid UTF-8 in To header".to_string()))
                 }
-            },
+            }
             _ => Err(Error::InvalidHeader(format!(
-                "Unexpected value type for To header: {:?}", header.value
+                "Unexpected value type for To header: {:?}",
+                header.value
             ))),
         }
     }

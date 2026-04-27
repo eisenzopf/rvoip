@@ -139,11 +139,7 @@ async fn per_call_pai_overrides_config() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     let _alice_session = alice
-        .make_call_with_pai(
-            "sip:alice@127.0.0.1",
-            &target,
-            Some(per_call_pai.clone()),
-        )
+        .make_call_with_pai("sip:alice@127.0.0.1", &target, Some(per_call_pai.clone()))
         .await
         .expect("alice make_call_with_pai");
 

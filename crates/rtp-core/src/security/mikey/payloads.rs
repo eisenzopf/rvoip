@@ -208,30 +208,31 @@ impl SignatureAlgorithm {
     /// Get the hash algorithm used by this signature algorithm
     pub fn hash_algorithm(&self) -> &'static str {
         match self {
-            SignatureAlgorithm::RsaSha256 | 
-            SignatureAlgorithm::EcdsaSha256 | 
-            SignatureAlgorithm::RsaPssSha256 => "SHA-256",
-            SignatureAlgorithm::RsaSha512 | 
-            SignatureAlgorithm::EcdsaSha512 | 
-            SignatureAlgorithm::RsaPssSha512 => "SHA-512",
+            SignatureAlgorithm::RsaSha256
+            | SignatureAlgorithm::EcdsaSha256
+            | SignatureAlgorithm::RsaPssSha256 => "SHA-256",
+            SignatureAlgorithm::RsaSha512
+            | SignatureAlgorithm::EcdsaSha512
+            | SignatureAlgorithm::RsaPssSha512 => "SHA-512",
         }
     }
-    
+
     /// Check if this is an RSA-based algorithm
     pub fn is_rsa(&self) -> bool {
-        matches!(self, 
-            SignatureAlgorithm::RsaSha256 | 
-            SignatureAlgorithm::RsaSha512 |
-            SignatureAlgorithm::RsaPssSha256 |
-            SignatureAlgorithm::RsaPssSha512
+        matches!(
+            self,
+            SignatureAlgorithm::RsaSha256
+                | SignatureAlgorithm::RsaSha512
+                | SignatureAlgorithm::RsaPssSha256
+                | SignatureAlgorithm::RsaPssSha512
         )
     }
-    
+
     /// Check if this is an ECDSA-based algorithm
     pub fn is_ecdsa(&self) -> bool {
-        matches!(self, 
-            SignatureAlgorithm::EcdsaSha256 | 
-            SignatureAlgorithm::EcdsaSha512
+        matches!(
+            self,
+            SignatureAlgorithm::EcdsaSha256 | SignatureAlgorithm::EcdsaSha512
         )
     }
 }
@@ -241,7 +242,7 @@ impl EncryptionAlgorithm {
     pub fn requires_iv(&self) -> bool {
         matches!(self, EncryptionAlgorithm::Ecies)
     }
-    
+
     /// Get the expected key size for this algorithm (in bytes)
     pub fn key_size(&self) -> Option<usize> {
         match self {
@@ -256,14 +257,14 @@ impl PublicKeyAlgorithm {
     /// Get the expected key size for this algorithm (in bytes)
     pub fn key_size(&self) -> usize {
         match self {
-            PublicKeyAlgorithm::Rsa => 256, // 2048-bit RSA (variable)
-            PublicKeyAlgorithm::EcdsaP256 => 64, // 32 bytes x + 32 bytes y
-            PublicKeyAlgorithm::EcdsaP384 => 96, // 48 bytes x + 48 bytes y
+            PublicKeyAlgorithm::Rsa => 256,       // 2048-bit RSA (variable)
+            PublicKeyAlgorithm::EcdsaP256 => 64,  // 32 bytes x + 32 bytes y
+            PublicKeyAlgorithm::EcdsaP384 => 96,  // 48 bytes x + 48 bytes y
             PublicKeyAlgorithm::EcdsaP521 => 132, // 66 bytes x + 66 bytes y
-            PublicKeyAlgorithm::Ed25519 => 32, // 32 bytes
+            PublicKeyAlgorithm::Ed25519 => 32,    // 32 bytes
         }
     }
-    
+
     /// Get the curve name for ECC algorithms
     pub fn curve_name(&self) -> Option<&'static str> {
         match self {
@@ -274,4 +275,4 @@ impl PublicKeyAlgorithm {
             PublicKeyAlgorithm::Rsa => None,
         }
     }
-} 
+}

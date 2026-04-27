@@ -13,7 +13,10 @@ use rvoip_session_core::{Config, Event, RelUsage, StreamPeer};
 use tokio::time::{sleep, timeout, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
-    std::env::var(key).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(default)
 }
 
 fn positive_mode() -> bool {
@@ -25,7 +28,9 @@ fn positive_mode() -> bool {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
-        .with_env_filter(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()))
+        .with_env_filter(
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
+        )
         .init();
 
     let bob_port = env_port("BOB_PORT", 35064);
@@ -42,7 +47,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control = bob.control().clone();
 
     if positive {
-        println!("[BOB] Listening on {} (100rel=Supported, positive path)", bob_port);
+        println!(
+            "[BOB] Listening on {} (100rel=Supported, positive path)",
+            bob_port
+        );
 
         // Drive one call through reliable-183 → accept.
         match timeout(Duration::from_secs(10), bob.wait_for_incoming()).await {
@@ -88,7 +96,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     } else {
-        println!("[BOB] Listening on {} (100rel=Required, negative path)", bob_port);
+        println!(
+            "[BOB] Listening on {} (100rel=Required, negative path)",
+            bob_port
+        );
         // Give Alice time to send her INVITE, receive the 420, and exit.
         sleep(Duration::from_secs(8)).await;
     }

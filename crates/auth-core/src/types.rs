@@ -8,19 +8,19 @@ use std::collections::HashMap;
 pub struct UserContext {
     /// Unique user identifier
     pub user_id: String,
-    
+
     /// Username or email
     pub username: String,
-    
+
     /// User's roles
     pub roles: Vec<String>,
-    
+
     /// Additional claims from the token
     pub claims: HashMap<String, serde_json::Value>,
-    
+
     /// Token expiration time (Unix timestamp)
     pub expires_at: Option<i64>,
-    
+
     /// OAuth2 scopes
     pub scopes: Vec<String>,
 }

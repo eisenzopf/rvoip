@@ -1,13 +1,13 @@
-use crate::errors::types::{Error, Result};
 use crate::config::provider::{ConfigProvider, ConfigSource};
+use crate::errors::types::{Error, Result};
 use crate::events::bus::EventBus;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::any::Any;
 use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
-use std::any::Any;
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use std::time::Duration;
-use tokio::time::interval;
 use tokio::sync::mpsc;
+use tokio::time::interval;
 
 /// Configuration change event
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ impl crate::events::types::Event for ConfigChangedEvent {
     fn event_type() -> &'static str {
         "config_changed"
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -62,13 +62,15 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + 'static> DynamicConfig<
             source,
             config: Arc::new(RwLock::new(initial_config)),
             event_bus: None,
-            last_update: Arc::new(RwLock::new(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs())),
+            last_update: Arc::new(RwLock::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )),
         }
     }
-    
+
     /// Create a new dynamic configuration with an event bus
     pub fn with_events<S: Into<String>>(
         name: S,
@@ -81,18 +83,20 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + 'static> DynamicConfig<
             source,
             config: Arc::new(RwLock::new(initial_config)),
             event_bus: Some(event_bus),
-            last_update: Arc::new(RwLock::new(std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs())),
+            last_update: Arc::new(RwLock::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            )),
         }
     }
-    
+
     /// Get a clone of the current configuration
     pub fn get_config(&self) -> T {
         self.config.read().unwrap().clone()
     }
-    
+
     /// Update the configuration
     pub fn update(&self, new_config: T) -> Result<()> {
         let mut config = self.config.write().unwrap();
@@ -101,32 +105,32 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + 'static> DynamicConfig<
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        
+
         // Publish event if an event bus is available
         if let Some(event_bus) = &self.event_bus {
             let event = ConfigChangedEvent::new(self.name.clone(), self.source);
-            
+
             // Fire and forget
             let event_bus = event_bus.clone();
             tokio::spawn(async move {
                 let _ = event_bus.publish(event).await;
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Set up automatic refresh from a loader function
     pub fn auto_refresh<F>(&self, refresh_interval: Duration, loader: F) -> mpsc::Sender<()>
     where
-        F: Fn() -> Result<T> + Send + 'static
+        F: Fn() -> Result<T> + Send + 'static,
     {
         let (tx, mut rx) = mpsc::channel::<()>(1);
         let config = self.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = interval(refresh_interval);
-            
+
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
@@ -141,7 +145,7 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + 'static> DynamicConfig<
                 }
             }
         });
-        
+
         tx
     }
 }
@@ -158,41 +162,45 @@ impl<T: DeserializeOwned + Send + Sync + Clone + Debug + 'static> Clone for Dyna
     }
 }
 
-impl<T: DeserializeOwned + Send + Sync + Clone + Debug + Serialize + 'static> ConfigProvider for DynamicConfig<T> {
+impl<T: DeserializeOwned + Send + Sync + Clone + Debug + Serialize + 'static> ConfigProvider
+    for DynamicConfig<T>
+{
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn source(&self) -> ConfigSource {
         self.source
     }
-    
+
     fn get<U: DeserializeOwned>(&self, _key: &str) -> Result<U> {
         let config = self.config.read().unwrap();
         let value = serde_json::to_value(&*config)
             .map_err(|e| Error::Config(format!("Failed to serialize config: {}", e)))?;
-            
+
         serde_json::from_value(value)
             .map_err(|e| Error::Config(format!("Failed to deserialize config: {}", e)))
     }
-    
+
     fn get_raw(&self, _key: &str) -> Result<Box<dyn Any>> {
         let config = self.config.read().unwrap().clone();
         Ok(Box::new(config))
     }
-    
+
     fn has(&self, _key: &str) -> bool {
         true // The dynamic provider doesn't support keys
     }
-    
+
     fn keys(&self) -> Vec<String> {
         vec![] // The dynamic provider doesn't expose keys
     }
-    
+
     fn reload(&self) -> Result<()> {
         // This basic implementation doesn't know how to reload itself
         // A real implementation would track its data source and reload from there
-        Err(Error::Config("Reload not supported without a reload function".to_string()))
+        Err(Error::Config(
+            "Reload not supported without a reload function".to_string(),
+        ))
     }
 }
 
@@ -206,4 +214,4 @@ impl<T: Debug + 'static> Debug for DynamicConfig<T> {
             // Skip event_bus which doesn't implement Debug
             .finish()
     }
-} 
+}

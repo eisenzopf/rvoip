@@ -3,13 +3,11 @@
 //! This module defines configuration structures and capability definitions
 //! for the MediaEngine.
 
-use std::time::Duration;
 use crate::types::{PayloadType, SampleRate};
+use std::time::Duration;
 
 // NEW: Import advanced processor configs
-use crate::processing::audio::{
-    AdvancedVadConfig, AdvancedAgcConfig, AdvancedAecConfig
-};
+use crate::processing::audio::{AdvancedAecConfig, AdvancedAgcConfig, AdvancedVadConfig};
 
 /// Configuration for the MediaEngine
 #[derive(Debug, Clone)]
@@ -61,12 +59,12 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            enable_aec: false,        // Disabled by default (CPU intensive)
-            enable_agc: true,         // Enabled by default
-            enable_vad: true,         // Enabled by default
-            enable_noise_suppression: false, // Disabled by default (CPU intensive)
+            enable_aec: false,                         // Disabled by default (CPU intensive)
+            enable_agc: true,                          // Enabled by default
+            enable_vad: true,                          // Enabled by default
+            enable_noise_suppression: false,           // Disabled by default (CPU intensive)
             default_sample_rate: SampleRate::Rate8000, // Standard telephony
-            frame_size_ms: 20,        // Standard 20ms frames
+            frame_size_ms: 20,                         // Standard 20ms frames
         }
     }
 }
@@ -92,9 +90,9 @@ impl Default for CodecConfig {
                 8,   // PCMA
                 111, // Opus (dynamic)
             ],
-            preferred_codec: 0, // PCMU by default
+            preferred_codec: 0,        // PCMU by default
             enable_transcoding: false, // Disabled by default
-            max_complexity: 5, // Medium complexity
+            max_complexity: 5,         // Medium complexity
         }
     }
 }
@@ -137,8 +135,8 @@ pub struct QualityThresholds {
 impl Default for QualityThresholds {
     fn default() -> Self {
         Self {
-            max_packet_loss: 0.05,    // 5% max packet loss
-            max_jitter_ms: 100.0,     // 100ms max jitter
+            max_packet_loss: 0.05,     // 5% max packet loss
+            max_jitter_ms: 100.0,      // 100ms max jitter
             min_audio_level_db: -60.0, // -60dB minimum level
         }
     }
@@ -160,10 +158,10 @@ pub struct BufferConfig {
 impl Default for BufferConfig {
     fn default() -> Self {
         Self {
-            jitter_buffer_target_ms: 60,  // 60ms target
-            jitter_buffer_max_ms: 200,    // 200ms maximum
+            jitter_buffer_target_ms: 60, // 60ms target
+            jitter_buffer_max_ms: 200,   // 200ms maximum
             enable_adaptive_buffering: true,
-            initial_buffer_size: 1024,    // 1KB initial buffer
+            initial_buffer_size: 1024, // 1KB initial buffer
         }
     }
 }
@@ -177,7 +175,7 @@ pub struct PerformanceConfig {
     pub max_sessions: usize,
     /// Enable performance profiling
     pub enable_profiling: bool,
-    
+
     // NEW: Enhanced performance settings
     /// Enable zero-copy audio frame processing
     pub enable_zero_copy: bool,
@@ -199,14 +197,14 @@ impl Default for PerformanceConfig {
             worker_threads: num_cpus::get().max(2), // Use available CPUs, min 2
             max_sessions: 1000,                     // Support up to 1000 sessions
             enable_profiling: false,                // Disabled by default
-            
+
             // NEW: Enhanced performance defaults
-            enable_zero_copy: true,                 // Enable zero-copy by default
-            enable_simd_optimizations: true,        // Enable SIMD by default
-            enable_frame_pooling: true,             // Enable pooling by default
-            frame_pool_size: 32,                    // 32 frames per pool
-            enable_performance_metrics: true,       // Enable metrics by default  
-            metrics_collection_interval_ms: 1000,   // Collect metrics every second
+            enable_zero_copy: true,           // Enable zero-copy by default
+            enable_simd_optimizations: true,  // Enable SIMD by default
+            enable_frame_pooling: true,       // Enable pooling by default
+            frame_pool_size: 32,              // 32 frames per pool
+            enable_performance_metrics: true, // Enable metrics by default
+            metrics_collection_interval_ms: 1000, // Collect metrics every second
         }
     }
 }
@@ -229,11 +227,11 @@ pub struct AdvancedProcessingConfig {
 impl Default for AdvancedProcessingConfig {
     fn default() -> Self {
         Self {
-            use_advanced_processors: true,          // Use advanced processors by default
+            use_advanced_processors: true, // Use advanced processors by default
             advanced_aec_config: AdvancedAecConfig::default(),
             advanced_agc_config: AdvancedAgcConfig::default(),
             advanced_vad_config: AdvancedVadConfig::default(),
-            fallback_to_v1_on_error: true,         // Safe fallback by default
+            fallback_to_v1_on_error: true, // Safe fallback by default
         }
     }
 }
@@ -288,4 +286,4 @@ impl Default for AudioProcessingCapabilities {
             noise_suppression_available: true,
         }
     }
-} 
+}

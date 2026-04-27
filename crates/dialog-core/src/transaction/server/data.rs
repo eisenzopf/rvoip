@@ -1,6 +1,6 @@
 /// # Server Transaction Data Structures
 ///
-/// This module provides data structures and traits for implementing the server transaction 
+/// This module provides data structures and traits for implementing the server transaction
 /// state machines defined in RFC 3261 Section 17.2.
 ///
 /// Server transactions in SIP are responsible for:
@@ -13,7 +13,6 @@
 /// - `ServerTransactionData`: Core data structure shared by all server transaction types
 /// - `CommonServerTransaction`: Trait providing shared behavior across transaction types
 /// - Command channels for communication with the transaction's event loop
-
 use std::fmt;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -27,13 +26,15 @@ use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
 
 use crate::transaction::error::{Error, Result};
-use crate::transaction::{
-    Transaction, TransactionState, TransactionKey, TransactionEvent,
-    InternalTransactionCommand, AtomicTransactionState
+use crate::transaction::runner::{
+    AsRefKey, AsRefState, HasCommandSender, HasLifecycle, HasTransactionEvents, HasTransport,
 };
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::TimerSettings;
-use crate::transaction::runner::{AsRefState, AsRefKey, HasTransactionEvents, HasTransport, HasCommandSender, HasLifecycle};
+use crate::transaction::{
+    AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionEvent,
+    TransactionKey, TransactionState,
+};
 
 /// Command sender for transaction event loops.
 ///
@@ -64,37 +65,37 @@ pub type CommandReceiver = mpsc::Receiver<InternalTransactionCommand>;
 pub struct ServerTransactionData {
     /// Transaction ID based on RFC 3261 transaction matching rules
     pub id: TransactionKey,
-    
+
     /// Current transaction state (Trying/Proceeding, Completed, Confirmed, Terminated)
     pub state: Arc<AtomicTransactionState>,
-    
+
     /// Transaction lifecycle state for robust shutdown coordination
     pub lifecycle: Arc<std::sync::atomic::AtomicU8>, // Using AtomicU8 for TransactionLifecycle
-    
+
     /// Original request that initiated this transaction
     pub request: Arc<Mutex<Request>>,
-    
+
     /// Last response sent by this transaction
     pub last_response: Arc<Mutex<Option<Response>>>,
-    
+
     /// Remote address to which responses are sent
     pub remote_addr: SocketAddr,
-    
+
     /// Transport layer for sending SIP messages
     pub transport: Arc<dyn Transport>,
-    
+
     /// Channel for sending events to the Transaction User (TU)
     pub events_tx: mpsc::Sender<TransactionEvent>,
-    
+
     /// Channel for sending commands to the transaction's event loop
     pub cmd_tx: CommandSender,
-    
+
     /// Channel for receiving commands in the transaction's event loop
     pub cmd_rx: Arc<Mutex<CommandReceiver>>,
-    
+
     /// Handle to the transaction's event loop task
     pub event_loop_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-    
+
     /// Configuration for transaction timers (T1, T2, etc.)
     pub timer_config: TimerSettings,
 }
@@ -103,7 +104,7 @@ impl Drop for ServerTransactionData {
     fn drop(&mut self) {
         // Try to terminate the event loop when the transaction is dropped
         debug!(id=%self.id, "ServerTransactionData dropped, attempting to terminate event loop");
-        
+
         if let Ok(mut handle_guard) = self.event_loop_handle.try_lock() {
             if let Some(handle) = handle_guard.take() {
                 handle.abort();
@@ -177,12 +178,12 @@ impl HasLifecycle for ServerTransactionData {
         match val {
             0 => TransactionLifecycle::Active,
             1 => TransactionLifecycle::Terminating,
-            2 => TransactionLifecycle::Draining, 
+            2 => TransactionLifecycle::Draining,
             3 => TransactionLifecycle::Destroyed,
             _ => TransactionLifecycle::Active, // Default fallback
         }
     }
-    
+
     /// Set the lifecycle state
     fn set_lifecycle(&self, new_lifecycle: TransactionLifecycle) {
         let val = match new_lifecycle {
@@ -191,11 +192,12 @@ impl HasLifecycle for ServerTransactionData {
             TransactionLifecycle::Draining => 2,
             TransactionLifecycle::Destroyed => 3,
         };
-        self.lifecycle.store(val, std::sync::atomic::Ordering::Release);
+        self.lifecycle
+            .store(val, std::sync::atomic::Ordering::Release);
     }
-    
+
     /// Check if transaction should emit events to TU (not in Terminating/Draining states)
     fn should_emit_events(&self) -> bool {
         matches!(self.get_lifecycle(), TransactionLifecycle::Active)
     }
-} 
+}

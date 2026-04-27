@@ -59,7 +59,7 @@ impl Metric {
             value: 0.0,
         }
     }
-    
+
     /// Create a new gauge metric
     pub fn gauge<S: Into<String>, T: Into<String>>(name: S, component: T) -> Self {
         Metric {
@@ -71,7 +71,7 @@ impl Metric {
             value: 0.0,
         }
     }
-    
+
     /// Create a new timer metric
     pub fn timer<S: Into<String>, T: Into<String>>(name: S, component: T) -> Self {
         Metric {
@@ -83,19 +83,19 @@ impl Metric {
             value: 0.0,
         }
     }
-    
+
     /// Add a description to the metric
     pub fn with_description<S: Into<String>>(mut self, description: S) -> Self {
         self.description = Some(description.into());
         self
     }
-    
+
     /// Add a label to the metric
     pub fn with_label<S: Into<String>, T: Into<String>>(mut self, key: S, value: T) -> Self {
         self.labels.insert(key.into(), value.into());
         self
     }
-    
+
     /// Add multiple labels to the metric
     pub fn with_labels<S: Into<String>, T: Into<String>>(mut self, labels: Vec<(S, T)>) -> Self {
         for (key, value) in labels {
@@ -103,7 +103,7 @@ impl Metric {
         }
         self
     }
-    
+
     /// Set the value of the metric
     pub fn with_value(mut self, value: f64) -> Self {
         self.value = value;
@@ -126,13 +126,13 @@ impl MetricsCollector {
             timers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Register a metric
     pub fn register(&self, metric: Metric) {
         let mut metrics = self.metrics.write().unwrap();
         metrics.insert(metric.name.clone(), metric);
     }
-    
+
     /// Increment a counter
     pub fn increment(&self, name: &str, amount: f64) {
         let mut metrics = self.metrics.write().unwrap();
@@ -142,7 +142,7 @@ impl MetricsCollector {
             }
         }
     }
-    
+
     /// Set a gauge value
     pub fn set_gauge(&self, name: &str, value: f64) {
         let mut metrics = self.metrics.write().unwrap();
@@ -152,39 +152,39 @@ impl MetricsCollector {
             }
         }
     }
-    
+
     /// Start a timer
     pub fn start_timer(&self, name: &str) {
         let mut timers = self.timers.write().unwrap();
         timers.insert(name.to_string(), Instant::now());
     }
-    
+
     /// Stop a timer and record the duration
     pub fn stop_timer(&self, name: &str) -> Option<Duration> {
         let mut timers = self.timers.write().unwrap();
         let start = timers.remove(name)?;
         let duration = start.elapsed();
-        
+
         let mut metrics = self.metrics.write().unwrap();
         if let Some(metric) = metrics.get_mut(name) {
             if metric.metric_type == MetricType::Timer {
                 metric.value = duration.as_secs_f64();
             }
         }
-        
+
         Some(duration)
     }
-    
+
     /// Get a snapshot of all metrics
     pub fn snapshot(&self) -> HashMap<String, Metric> {
         self.metrics.read().unwrap().clone()
     }
-    
+
     /// Get a specific metric
     pub fn get(&self, name: &str) -> Option<Metric> {
         self.metrics.read().unwrap().get(name).cloned()
     }
-    
+
     /// Clear all metrics
     pub fn clear(&self) {
         self.metrics.write().unwrap().clear();
@@ -213,7 +213,7 @@ impl<'a> TimerGuard<'a> {
             name: name.to_string(),
         }
     }
-    
+
     /// Stop the timer early and get the duration
     pub fn stop(self) -> Option<Duration> {
         self.collector.stop_timer(&self.name)
@@ -224,4 +224,4 @@ impl<'a> Drop for TimerGuard<'a> {
     fn drop(&mut self) {
         let _ = self.collector.stop_timer(&self.name);
     }
-} 
+}

@@ -1,5 +1,5 @@
 //! # SIP Accept Header
-//! 
+//!
 //! This module provides an implementation of the SIP Accept header field as defined in
 //! [RFC 3261 Section 20.1](https://datatracker.ietf.org/doc/html/rfc3261#section-20.1).
 //!
@@ -35,18 +35,18 @@
 //! let header = Accept::from_media_types(vec![sdp]);
 //! ```
 
-use crate::types::media_type::MediaType;
+use crate::error::{Error, Result};
+use crate::parser::headers::accept::AcceptValue;
 use crate::parser::headers::parse_accept;
-use crate::error::{Result, Error};
+use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
+use crate::types::media_type::MediaType;
+use crate::types::param::Param;
+use nom::combinator::all_consuming;
+use ordered_float::NotNan;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use nom::combinator::all_consuming;
-use std::collections::HashMap;
-use ordered_float::NotNan;
-use crate::parser::headers::accept::AcceptValue;
-use serde::{Deserialize, Serialize};
-use crate::types::param::Param;
-use crate::types::header::{Header, HeaderName, HeaderValue, TypedHeaderTrait};
 
 /// Represents the Accept header field (RFC 3261 Section 20.1).
 ///
@@ -163,7 +163,7 @@ impl Accept {
     /// ```
     pub fn from_media_types<I>(types: I) -> Self
     where
-        I: IntoIterator<Item = AcceptValue>
+        I: IntoIterator<Item = AcceptValue>,
     {
         Self(types.into_iter().collect())
     }
@@ -236,8 +236,9 @@ impl Accept {
     pub fn accepts(&self, media_type: &AcceptValue) -> bool {
         self.0.iter().any(|accepted_type| {
             // Simple type/subtype match
-            (accepted_type.m_type == "*" || accepted_type.m_type == media_type.m_type) &&
-            (accepted_type.m_subtype == "*" || accepted_type.m_subtype == media_type.m_subtype)
+            (accepted_type.m_type == "*" || accepted_type.m_type == media_type.m_type)
+                && (accepted_type.m_subtype == "*"
+                    || accepted_type.m_subtype == media_type.m_subtype)
             // TODO: Parameter matching (like q values)
         })
     }
@@ -267,8 +268,10 @@ impl Accept {
     pub fn accepts_type(&self, type_str: &str, subtype_str: &str) -> bool {
         // Check if the media type is in the Accept header
         for accept_val in &self.0 {
-            if (accept_val.m_type == "*" || accept_val.m_type.eq_ignore_ascii_case(type_str)) &&
-                (accept_val.m_subtype == "*" || accept_val.m_subtype.eq_ignore_ascii_case(subtype_str)) {
+            if (accept_val.m_type == "*" || accept_val.m_type.eq_ignore_ascii_case(type_str))
+                && (accept_val.m_subtype == "*"
+                    || accept_val.m_subtype.eq_ignore_ascii_case(subtype_str))
+            {
                 // Check q value - if q=0, then the media type is not acceptable
                 if let Some(q) = accept_val.q {
                     if q.into_inner() <= 0.0 {
@@ -278,7 +281,7 @@ impl Accept {
                 return true;
             }
         }
-        
+
         // If no explicit match, check for wildcard
         for accept_val in &self.0 {
             if accept_val.m_type == "*" && accept_val.m_subtype == "*" {
@@ -291,7 +294,7 @@ impl Accept {
                 return true;
             }
         }
-        
+
         // Default behavior: if Not mentioned and no wildcard, return false
         false
     }
@@ -316,24 +319,24 @@ impl fmt::Display for Accept {
 // Helper function for the FromStr implementation
 fn parse_from_owned_bytes(bytes: Vec<u8>) -> Result<Vec<AcceptValue>> {
     // Check if the input starts with "Accept:" and strip it if present
-    let bytes_to_parse = if bytes.len() > 8 && 
-        bytes[0..6].eq_ignore_ascii_case(b"Accept") && 
-        bytes[6] == b':' {
-        // Skip the header name and colon, and any leading whitespace
-        let mut i = 7;
-        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-            i += 1;
-        }
-        &bytes[i..]
-    } else {
-        &bytes
-    };
+    let bytes_to_parse =
+        if bytes.len() > 8 && bytes[0..6].eq_ignore_ascii_case(b"Accept") && bytes[6] == b':' {
+            // Skip the header name and colon, and any leading whitespace
+            let mut i = 7;
+            while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+                i += 1;
+            }
+            &bytes[i..]
+        } else {
+            &bytes
+        };
 
     match all_consuming(parse_accept)(bytes_to_parse) {
         Ok((_, accept)) => Ok(accept.0),
-        Err(e) => Err(Error::ParseError(
-            format!("Failed to parse Accept header: {:?}", e)
-        ))
+        Err(e) => Err(Error::ParseError(format!(
+            "Failed to parse Accept header: {:?}",
+            e
+        ))),
     }
 }
 
@@ -348,10 +351,9 @@ impl FromStr for Accept {
         } else {
             s.as_bytes().to_vec()
         };
-        
+
         // Parse using our helper function that takes ownership of the bytes
-        parse_from_owned_bytes(input_bytes)
-            .map(Accept::from_media_types)
+        parse_from_owned_bytes(input_bytes).map(Accept::from_media_types)
     }
 }
 
@@ -383,19 +385,19 @@ impl FromStr for Accept {
 impl fmt::Display for AcceptValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut s = format!("{}/{}", self.m_type, self.m_subtype);
-        
+
         // First output params other than 'q'
         for (k, v) in &self.params {
             if k != "q" {
                 s.push_str(&format!(";{}={}", k, v));
             }
         }
-        
+
         // Then output q parameter if it exists
         if let Some(q) = self.q {
             s.push_str(&format!(";q={}", q));
         }
-        
+
         write!(f, "{}", s)
     }
 }
@@ -413,9 +415,11 @@ impl TypedHeaderTrait for Accept {
 
     fn from_header(header: &Header) -> Result<Self> {
         if header.name != Self::header_name() {
-            return Err(Error::InvalidHeader(
-                format!("Expected {} header, got {}", Self::header_name(), header.name)
-            ));
+            return Err(Error::InvalidHeader(format!(
+                "Expected {} header, got {}",
+                Self::header_name(),
+                header.name
+            )));
         }
 
         match &header.value {
@@ -423,15 +427,17 @@ impl TypedHeaderTrait for Accept {
                 if let Ok(s) = std::str::from_utf8(bytes) {
                     Accept::from_str(s.trim())
                 } else {
-                    Err(Error::InvalidHeader(
-                        format!("Invalid UTF-8 in {} header", Self::header_name())
-                    ))
+                    Err(Error::InvalidHeader(format!(
+                        "Invalid UTF-8 in {} header",
+                        Self::header_name()
+                    )))
                 }
-            },
+            }
             HeaderValue::Accept(accept_values) => Ok(Accept(accept_values.clone())),
-            _ => Err(Error::InvalidHeader(
-                format!("Unexpected header value type for {}", Self::header_name())
-            )),
+            _ => Err(Error::InvalidHeader(format!(
+                "Unexpected header value type for {}",
+                Self::header_name()
+            ))),
         }
     }
 }
