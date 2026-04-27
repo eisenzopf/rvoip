@@ -159,7 +159,7 @@ pub use types::{
 pub use crate::types::CallState;
 
 // Re-export the unified API
-pub use unified::{Config, RegistrationHandle, SipTlsMode, UnifiedCoordinator};
+pub use unified::{Config, RegistrationHandle, SipContactMode, SipTlsMode, UnifiedCoordinator};
 
 // Re-export the simple API (legacy)
 pub use simple::SimplePeer;

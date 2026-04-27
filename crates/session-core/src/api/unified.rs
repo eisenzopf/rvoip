@@ -43,6 +43,30 @@ impl Default for SipTlsMode {
     }
 }
 
+/// How this UA expects SIP peers to reach the Contact it advertises.
+///
+/// This is intentionally separate from [`SipTlsMode`]. The TLS mode controls
+/// sockets; the contact mode controls the SIP registration/routing contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SipContactMode {
+    /// Advertise a Contact address that peers can dial directly. For SIP TLS
+    /// this normally means a local TLS listener and listener certificate/key.
+    ReachableContact,
+    /// RFC 5626 SIP Outbound: advertise outbound Contact parameters and
+    /// receive inbound requests over the registered connection-oriented flow.
+    RegisteredFlowRfc5626,
+    /// Asterisk/PBX symmetric transport style: keep the registration flow
+    /// alive and accept inbound requests on that flow without requiring the
+    /// registrar to echo RFC 5626 Contact parameters.
+    RegisteredFlowSymmetric,
+}
+
+impl Default for SipContactMode {
+    fn default() -> Self {
+        Self::ReachableContact
+    }
+}
+
 /// Configuration for the unified coordinator
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -128,10 +152,10 @@ pub struct Config {
     /// modern carrier infra does. Default: `false` (pre-5626 REGISTER
     /// behaviour for backwards compatibility).
     ///
-    /// **Current scope** (A5 Phase 2a): only REGISTER Contact is rewritten.
-    /// The RFC 5626 §4.4 flow-failure state machine + §5.1 CRLFCRLF
-    /// keep-alive ping are tracked as A5 Phase 2b/2c follow-ups and have
-    /// no effect today.
+    /// When the registrar echoes the outbound Contact in a 2xx REGISTER,
+    /// dialog-core starts CRLFCRLF keep-alive pings on the registration
+    /// flow. Flow failure is surfaced back into session-core so the
+    /// registration can be refreshed.
     pub sip_outbound_enabled: bool,
 
     /// UA-stable instance URN advertised on outbound REGISTERs (RFC 5626
@@ -158,6 +182,15 @@ pub struct Config {
 
     /// SIP TLS signalling mode.
     pub sip_tls_mode: SipTlsMode,
+
+    /// SIP Contact reachability strategy.
+    ///
+    /// [`SipContactMode::ReachableContact`] is the classic SIP UA model:
+    /// the Contact URI is directly reachable by the peer. For SIP TLS that
+    /// means this process usually also runs a TLS listener. The registered
+    /// flow modes are for proxy/B2BUA deployments where inbound requests are
+    /// expected on the existing outbound registration flow.
+    pub sip_contact_mode: SipContactMode,
 
     /// Optional local SIP TLS listener address. Used for
     /// [`SipTlsMode::ServerOnly`] and [`SipTlsMode::ClientAndServer`].
@@ -362,6 +395,7 @@ impl Config {
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
             sip_tls_mode: SipTlsMode::Disabled,
+            sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
             contact_uri: None,
             tls_cert_path: None,
@@ -410,6 +444,7 @@ impl Config {
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
             sip_tls_mode: SipTlsMode::Disabled,
+            sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
             contact_uri: None,
             tls_cert_path: None,
@@ -429,6 +464,149 @@ impl Config {
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
+        }
+    }
+
+    /// Configure SIP TLS as a directly reachable Contact listener.
+    ///
+    /// The UA will both dial outbound TLS and listen on `tls_bind_addr` for
+    /// inbound TLS requests sent to its advertised Contact.
+    pub fn tls_reachable_contact(
+        mut self,
+        tls_bind_addr: SocketAddr,
+        cert_path: impl Into<std::path::PathBuf>,
+        key_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.sip_tls_mode = SipTlsMode::ClientAndServer;
+        self.sip_contact_mode = SipContactMode::ReachableContact;
+        self.tls_bind_addr = Some(tls_bind_addr);
+        self.tls_cert_path = Some(cert_path.into());
+        self.tls_key_path = Some(key_path.into());
+        self
+    }
+
+    /// Configure SIP TLS for RFC 5626 registered-flow reuse.
+    ///
+    /// No TLS listener certificate/key is required because inbound requests
+    /// are expected on the outbound registration flow.
+    pub fn tls_registered_flow_rfc5626(mut self, sip_instance: impl Into<String>) -> Self {
+        self.sip_tls_mode = SipTlsMode::ClientOnly;
+        self.sip_contact_mode = SipContactMode::RegisteredFlowRfc5626;
+        self.sip_outbound_enabled = true;
+        self.sip_instance = Some(sip_instance.into());
+        self
+    }
+
+    /// Configure SIP TLS for PBX symmetric-transport registered-flow reuse.
+    ///
+    /// This mode keeps the registration flow alive but does not require the
+    /// registrar to echo RFC 5626 Contact parameters.
+    pub fn tls_registered_flow_symmetric(mut self, sip_instance: impl Into<String>) -> Self {
+        self.sip_tls_mode = SipTlsMode::ClientOnly;
+        self.sip_contact_mode = SipContactMode::RegisteredFlowSymmetric;
+        self.sip_instance = Some(sip_instance.into());
+        self
+    }
+
+    /// Validate the SIP TLS/contact-mode configuration.
+    pub fn validate(&self) -> Result<()> {
+        let effective_tls_mode = self.effective_tls_mode();
+
+        if self.tls_cert_path.is_some() ^ self.tls_key_path.is_some() {
+            return Err(SessionError::ConfigError(
+                "TLS listener certificate and key must be provided together".to_string(),
+            ));
+        }
+        if self.tls_client_cert_path.is_some() ^ self.tls_client_key_path.is_some() {
+            return Err(SessionError::ConfigError(
+                "TLS client certificate and key must be provided together".to_string(),
+            ));
+        }
+        if matches!(
+            effective_tls_mode,
+            SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer
+        ) && (self.tls_cert_path.is_none() || self.tls_key_path.is_none())
+        {
+            return Err(SessionError::ConfigError(
+                "SIP TLS listener modes require tls_cert_path and tls_key_path".to_string(),
+            ));
+        }
+
+        match self.sip_contact_mode {
+            SipContactMode::ReachableContact => match effective_tls_mode {
+                SipTlsMode::Disabled => {}
+                SipTlsMode::ClientOnly => {
+                    if self.contact_uri.is_none() {
+                        return Err(SessionError::ConfigError(
+                            "reachable TLS Contact mode with ClientOnly requires an explicit external contact_uri".to_string(),
+                        ));
+                    }
+                }
+                SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer => {
+                    if self.tls_bind_addr.is_none() {
+                        return Err(SessionError::ConfigError(
+                            "reachable TLS Contact mode requires tls_bind_addr".to_string(),
+                        ));
+                    }
+                    if self.tls_cert_path.is_none() || self.tls_key_path.is_none() {
+                        return Err(SessionError::ConfigError(
+                            "reachable TLS Contact mode requires tls_cert_path and tls_key_path"
+                                .to_string(),
+                        ));
+                    }
+                }
+            },
+            SipContactMode::RegisteredFlowRfc5626 => {
+                if !matches!(
+                    effective_tls_mode,
+                    SipTlsMode::ClientOnly | SipTlsMode::ClientAndServer
+                ) {
+                    return Err(SessionError::ConfigError(
+                        "RFC 5626 registered-flow mode requires SIP TLS ClientOnly or ClientAndServer".to_string(),
+                    ));
+                }
+                if !self.sip_outbound_enabled {
+                    return Err(SessionError::ConfigError(
+                        "RFC 5626 registered-flow mode requires sip_outbound_enabled=true"
+                            .to_string(),
+                    ));
+                }
+                if self
+                    .sip_instance
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    return Err(SessionError::ConfigError(
+                        "RFC 5626 registered-flow mode requires a stable sip_instance URN"
+                            .to_string(),
+                    ));
+                }
+            }
+            SipContactMode::RegisteredFlowSymmetric => {
+                if !matches!(
+                    effective_tls_mode,
+                    SipTlsMode::ClientOnly | SipTlsMode::ClientAndServer
+                ) {
+                    return Err(SessionError::ConfigError(
+                        "symmetric registered-flow mode requires SIP TLS ClientOnly or ClientAndServer".to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn effective_tls_mode(&self) -> SipTlsMode {
+        if self.sip_tls_mode == SipTlsMode::Disabled
+            && self.tls_cert_path.is_some()
+            && self.tls_key_path.is_some()
+        {
+            SipTlsMode::ClientAndServer
+        } else {
+            self.sip_tls_mode
         }
     }
 }
@@ -468,6 +646,8 @@ pub struct UnifiedCoordinator {
 impl UnifiedCoordinator {
     /// Create a new coordinator
     pub async fn new(config: Config) -> Result<Arc<Self>> {
+        config.validate()?;
+
         // Get the global event coordinator singleton
         let global_coordinator = rvoip_infra_common::events::global_coordinator()
             .await
@@ -497,11 +677,14 @@ impl UnifiedCoordinator {
             None
         };
 
-        // A5 Phase 2a: build outbound Contact params from config. Require
-        // both the `sip_outbound_enabled` flag AND a stable `sip_instance`
-        // URN — enabling outbound without an instance URN means a restarted
-        // UA would look like a different device and defeat the purpose.
-        let outbound_contact_params = if config.sip_outbound_enabled {
+        // Build RFC 5626 outbound Contact params from config. Require both
+        // the outbound flag and a stable instance URN unless validation has
+        // already made that mode mandatory.
+        let outbound_contact_params = if config.sip_outbound_enabled
+            || matches!(
+                config.sip_contact_mode,
+                SipContactMode::RegisteredFlowRfc5626
+            ) {
             if let Some(instance) = config.sip_instance.as_ref() {
                 Some(rvoip_sip_core::types::outbound::OutboundContactParams {
                     instance_urn: instance.clone(),
@@ -519,12 +702,28 @@ impl UnifiedCoordinator {
             None
         };
 
-        // A5 Phase 2b-min: thread the RFC 5626 keep-alive interval into
-        // the DialogManager so REGISTER 2xx responses can spawn CRLFCRLF
-        // ping tasks. Only honoured when outbound is actually enabled —
-        // without a stable instance URN there is no meaningful flow to
-        // keep alive.
-        if outbound_contact_params.is_some() && config.outbound_keepalive_interval_secs > 0 {
+        let symmetric_flow_params = if matches!(
+            config.sip_contact_mode,
+            SipContactMode::RegisteredFlowSymmetric
+        ) {
+            Some(rvoip_sip_core::types::outbound::OutboundContactParams {
+                instance_urn: config
+                    .sip_instance
+                    .clone()
+                    .unwrap_or_else(|| format!("symmetric:{}", config.local_uri)),
+                reg_id: 1,
+            })
+        } else {
+            None
+        };
+
+        // Thread the registered-flow keep-alive interval into the
+        // DialogManager so REGISTER 2xx responses can spawn CRLFCRLF
+        // ping tasks. RFC 5626 mode starts after outbound Contact echo;
+        // symmetric mode starts after a successful REGISTER.
+        if (outbound_contact_params.is_some() || symmetric_flow_params.is_some())
+            && config.outbound_keepalive_interval_secs > 0
+        {
             dialog_api
                 .dialog_manager()
                 .core()
@@ -539,6 +738,7 @@ impl UnifiedCoordinator {
             global_coordinator.clone(),
             outbound_proxy_uri,
             outbound_contact_params,
+            symmetric_flow_params,
         ));
 
         let media_controller =
@@ -1336,15 +1536,7 @@ impl UnifiedCoordinator {
         // routes outbound INVITEs to the right flavour based on the
         // Request-URI's scheme + `;transport=` parameter.
         //
-        let explicit_mode = config.sip_tls_mode;
-        let legacy_listener_tls = explicit_mode == SipTlsMode::Disabled
-            && config.tls_cert_path.is_some()
-            && config.tls_key_path.is_some();
-        let effective_tls_mode = if legacy_listener_tls {
-            SipTlsMode::ClientAndServer
-        } else {
-            explicit_mode
-        };
+        let effective_tls_mode = config.effective_tls_mode();
         let enable_tls = effective_tls_mode != SipTlsMode::Disabled;
         if config.tls_cert_path.is_some() ^ config.tls_key_path.is_some() {
             tracing::warn!(

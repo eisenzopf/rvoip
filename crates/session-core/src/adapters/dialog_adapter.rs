@@ -79,6 +79,12 @@ pub struct DialogAdapter {
     /// [`crate::Config::sip_outbound_enabled`]+[`crate::Config::sip_instance`].
     pub(crate) outbound_contact_params:
         Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
+
+    /// Symmetric registered-flow keep-alive identity. Unlike RFC 5626 mode,
+    /// this starts after REGISTER success even if the registrar does not echo
+    /// outbound Contact parameters.
+    pub(crate) symmetric_flow_params:
+        Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
 }
 
 impl DialogAdapter {
@@ -97,6 +103,7 @@ impl DialogAdapter {
         global_coordinator: Arc<GlobalEventCoordinator>,
         outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
         outbound_contact_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
+        symmetric_flow_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
     ) -> Self {
         Self {
             dialog_api,
@@ -109,6 +116,7 @@ impl DialogAdapter {
             state_machine: Arc::new(std::sync::OnceLock::new()),
             outbound_proxy_uri,
             outbound_contact_params,
+            symmetric_flow_params,
         }
     }
 
@@ -846,6 +854,49 @@ impl DialogAdapter {
 
     // ===== Registration Methods =====
 
+    async fn start_symmetric_registration_keepalive(&self, from_uri: &str, registrar_uri: &str) {
+        let Some(params) = self.symmetric_flow_params.as_ref() else {
+            return;
+        };
+
+        let dest_uri = match registrar_uri.parse::<rvoip_sip_core::Uri>() {
+            Ok(uri) => uri,
+            Err(e) => {
+                tracing::warn!(
+                    "symmetric registered-flow: invalid registrar URI {}: {}",
+                    registrar_uri,
+                    e
+                );
+                return;
+            }
+        };
+        let Some(destination) =
+            rvoip_dialog_core::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri).await
+        else {
+            tracing::warn!(
+                "symmetric registered-flow: could not resolve registrar URI {} for keep-alive",
+                registrar_uri
+            );
+            return;
+        };
+
+        self.dialog_api.dialog_manager().core().start_outbound_ping(
+            (
+                from_uri.to_string(),
+                params.reg_id,
+                params.instance_urn.clone(),
+            ),
+            destination,
+        );
+        tracing::info!(
+            "symmetric registered-flow: keep-alive ping started for AoR {} (reg-id={}, instance={}) → {}",
+            from_uri,
+            params.reg_id,
+            params.instance_urn,
+            destination
+        );
+    }
+
     /// Send REGISTER request and process response
     pub async fn send_register(
         &self,
@@ -1008,6 +1059,8 @@ impl DialogAdapter {
                         "✅ Registration successful - session {} marked as registered",
                         session_id.0
                     );
+                    self.start_symmetric_registration_keepalive(from_uri, registrar_uri)
+                        .await;
                 }
 
                 if let Some(state_machine) = self.state_machine.get() {
@@ -1418,6 +1471,7 @@ impl Clone for DialogAdapter {
             state_machine: self.state_machine.clone(),
             outbound_proxy_uri: self.outbound_proxy_uri.clone(),
             outbound_contact_params: self.outbound_contact_params.clone(),
+            symmetric_flow_params: self.symmetric_flow_params.clone(),
         }
     }
 }

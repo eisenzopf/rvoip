@@ -56,9 +56,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let key_path = std::env::var("TLS_KEY_PATH")
         .expect("TLS_KEY_PATH must be set (the run.sh script does this)");
 
-    let mut config = Config::local("tls_server", 5060);
-    config.tls_cert_path = Some(cert_path.into());
-    config.tls_key_path = Some(key_path.into());
+    let mut config = Config::local("tls_server", 5060).tls_reachable_contact(
+        "127.0.0.1:5061".parse()?,
+        cert_path,
+        key_path,
+    );
+    config.local_uri = "sips:tls_server@127.0.0.1:5061;transport=tls".to_string();
+    config.contact_uri = Some("sips:tls_server@127.0.0.1:5061;transport=tls".to_string());
     // Server side does no TLS validation in this one-way-TLS demo —
     // it only presents its own cert. The client decides whether to
     // validate it (the `streampeer_tls_client` example exercises both

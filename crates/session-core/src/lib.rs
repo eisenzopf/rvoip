@@ -47,7 +47,7 @@ pub use api::incoming::{IncomingCall, IncomingCallGuard};
 
 // Configuration & registration
 pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
-pub use api::{Config, RegistrationHandle, SipTlsMode, UnifiedCoordinator};
+pub use api::{Config, RegistrationHandle, SipContactMode, SipTlsMode, UnifiedCoordinator};
 
 // Events
 pub use api::events::Event;
@@ -71,7 +71,7 @@ pub mod prelude {
         AudioReceiver, AudioSender, AudioStream, CallHandler, CallHandlerDecision, CallId,
         CallState, CallbackPeer, Config, EndReason, Event, EventReceiver, IncomingCall,
         IncomingCallGuard, PeerControl, Registration, RegistrationHandle, Result, SessionError,
-        SessionHandle, StreamPeer, StreamPeerBuilder,
+        SessionHandle, SipContactMode, SipTlsMode, StreamPeer, StreamPeerBuilder,
     };
 }
 

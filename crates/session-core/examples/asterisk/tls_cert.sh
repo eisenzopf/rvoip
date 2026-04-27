@@ -10,7 +10,7 @@ asterisk_tls_contact_mode() {
   mode=$(printf '%s' "${ASTERISK_TLS_CONTACT_MODE:-reachable-contact}" | tr '[:upper:]' '[:lower:]')
   flow_reuse=$(printf '%s' "${ASTERISK_TLS_FLOW_REUSE:-0}" | tr '[:upper:]' '[:lower:]')
   case "$flow_reuse" in
-    1|true|yes|on) mode=registered-flow ;;
+    1|true|yes|on) mode=registered-flow-symmetric ;;
   esac
   printf '%s\n' "$mode"
 }
@@ -18,6 +18,7 @@ asterisk_tls_contact_mode() {
 asterisk_tls_uses_reachable_contact() {
   case "$(asterisk_tls_contact_mode)" in
     reachable-contact|reachable|listener|uas) return 0 ;;
+    registered-flow|registered-flow-rfc5626|rfc5626|outbound|registered-flow-symmetric|symmetric|symmetric-transport|flow-reuse|client-only) return 1 ;;
     *) return 1 ;;
   esac
 }

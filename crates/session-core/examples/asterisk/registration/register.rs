@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use std::path::PathBuf;
 
-use rvoip_session_core::{types::Credentials, Config, Registration, SipTlsMode, StreamPeer};
+use rvoip_session_core::{types::Credentials, Config, Registration, SipContactMode, StreamPeer};
 use tokio::time::sleep;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -47,24 +47,74 @@ fn required_path(key: &str) -> Result<PathBuf, Box<dyn std::error::Error + Send 
     Ok(PathBuf::from(value))
 }
 
-fn tls_reachable_contact_mode() -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    if env_bool("ASTERISK_TLS_FLOW_REUSE", false)? {
-        return Ok(false);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TlsContactMode {
+    ReachableContact,
+    RegisteredFlowRfc5626,
+    RegisteredFlowSymmetric,
+}
+
+impl TlsContactMode {
+    fn from_env() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        if env_bool("ASTERISK_TLS_FLOW_REUSE", false)? {
+            return Ok(Self::RegisteredFlowSymmetric);
+        }
+
+        match env_or("ASTERISK_TLS_CONTACT_MODE", "reachable-contact")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "reachable-contact" | "reachable" | "listener" | "uas" => Ok(Self::ReachableContact),
+            "registered-flow" | "registered-flow-rfc5626" | "rfc5626" | "outbound" => {
+                Ok(Self::RegisteredFlowRfc5626)
+            }
+            "registered-flow-symmetric" | "symmetric" | "symmetric-transport"
+            | "flow-reuse" | "client-only" => Ok(Self::RegisteredFlowSymmetric),
+            other => Err(format!(
+                "ASTERISK_TLS_CONTACT_MODE must be reachable-contact, registered-flow-rfc5626, or registered-flow-symmetric, got '{}'",
+                other
+            )
+            .into()),
+        }
     }
 
-    match env_or("ASTERISK_TLS_CONTACT_MODE", "reachable-contact")
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "reachable-contact" | "reachable" | "listener" | "uas" => Ok(true),
-        "registered-flow" | "flow" | "flow-reuse" | "client-only" => Ok(false),
-        other => Err(format!(
-            "ASTERISK_TLS_CONTACT_MODE must be reachable-contact or registered-flow, got '{}'",
-            other
-        )
-        .into()),
+    fn uses_listener(self) -> bool {
+        self == Self::ReachableContact
     }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::ReachableContact => "reachable-contact",
+            Self::RegisteredFlowRfc5626 => "registered-flow-rfc5626",
+            Self::RegisteredFlowSymmetric => "registered-flow-symmetric",
+        }
+    }
+}
+
+fn deterministic_sip_instance(username: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in username.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!(
+        "urn:uuid:00000000-0000-4000-8000-{:012x}",
+        hash & 0xffff_ffff_ffff
+    )
+}
+
+fn sip_instance_urn(username: &str) -> String {
+    std::env::var(format!("ENDPOINT_{}_SIP_INSTANCE", username))
+        .or_else(|_| std::env::var("SIP_INSTANCE"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| deterministic_sip_instance(username))
+}
+
+fn tls_contact_mode() -> Result<TlsContactMode, Box<dyn std::error::Error + Send + Sync>> {
+    TlsContactMode::from_env()
 }
 
 #[tokio::main]
@@ -112,8 +162,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "tls" => ";transport=tls",
         _ => "",
     };
-    let use_tls_listener = is_tls && tls_reachable_contact_mode()?;
-    let contact_port = if use_tls_listener {
+    let contact_mode = if is_tls {
+        tls_contact_mode()?
+    } else {
+        TlsContactMode::ReachableContact
+    };
+    let contact_port = if is_tls && contact_mode.uses_listener() {
         tls_local_port
     } else {
         local_port
@@ -130,15 +184,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = Config::on(&username, local_ip, local_port);
     config.local_uri = aor_uri.clone();
     config.contact_uri = Some(contact_uri.clone());
+    config.sip_contact_mode = if is_tls {
+        match contact_mode {
+            TlsContactMode::ReachableContact => SipContactMode::ReachableContact,
+            TlsContactMode::RegisteredFlowRfc5626 => SipContactMode::RegisteredFlowRfc5626,
+            TlsContactMode::RegisteredFlowSymmetric => SipContactMode::RegisteredFlowSymmetric,
+        }
+    } else {
+        SipContactMode::ReachableContact
+    };
     config.credentials = Some(Credentials::new(&auth_user, &password));
     if is_tls {
-        if use_tls_listener {
-            config.sip_tls_mode = SipTlsMode::ClientAndServer;
-            config.tls_bind_addr = Some(SocketAddr::new(local_ip, tls_local_port));
-            config.tls_cert_path = Some(required_path("TLS_CERT_PATH")?);
-            config.tls_key_path = Some(required_path("TLS_KEY_PATH")?);
-        } else {
-            config.sip_tls_mode = SipTlsMode::ClientOnly;
+        match contact_mode {
+            TlsContactMode::ReachableContact => {
+                config = config.tls_reachable_contact(
+                    SocketAddr::new(local_ip, tls_local_port),
+                    required_path("TLS_CERT_PATH")?,
+                    required_path("TLS_KEY_PATH")?,
+                );
+            }
+            TlsContactMode::RegisteredFlowRfc5626 => {
+                config = config.tls_registered_flow_rfc5626(sip_instance_urn(&username));
+            }
+            TlsContactMode::RegisteredFlowSymmetric => {
+                config = config.tls_registered_flow_symmetric(sip_instance_urn(&username));
+            }
         }
         config.tls_extra_ca_path = optional_path("TLS_CA_PATH");
         config.tls_client_cert_path = optional_path("TLS_CLIENT_CERT_PATH");
@@ -153,12 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if is_tls {
         println!(
             "[registration] TLS mode:   {}{}",
-            if use_tls_listener {
-                "reachable-contact"
-            } else {
-                "registered-flow"
-            },
-            if use_tls_listener {
+            contact_mode.label(),
+            if contact_mode.uses_listener() {
                 format!(" (listener {}:{})", local_ip, tls_local_port)
             } else {
                 String::new()

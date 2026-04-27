@@ -8,7 +8,7 @@ use std::time::Duration;
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::{
     api::unified::RegistrationHandle, types::Credentials, Config, Registration, SessionHandle,
-    SipTlsMode, StreamPeer,
+    SipContactMode, StreamPeer,
 };
 use tokio::time::sleep;
 
@@ -28,13 +28,14 @@ pub const DEFAULT_POST_REGISTER_SETTLE_SECS: u64 = 5;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TlsContactMode {
     ReachableContact,
-    RegisteredFlow,
+    RegisteredFlowRfc5626,
+    RegisteredFlowSymmetric,
 }
 
 impl TlsContactMode {
     fn from_env() -> ExampleResult<Self> {
         if env_bool("ASTERISK_TLS_FLOW_REUSE", false)? {
-            return Ok(Self::RegisteredFlow);
+            return Ok(Self::RegisteredFlowSymmetric);
         }
 
         match env_string("ASTERISK_TLS_CONTACT_MODE", "reachable-contact")
@@ -43,9 +44,13 @@ impl TlsContactMode {
             .as_str()
         {
             "reachable-contact" | "reachable" | "listener" | "uas" => Ok(Self::ReachableContact),
-            "registered-flow" | "flow" | "flow-reuse" | "client-only" => Ok(Self::RegisteredFlow),
+            "registered-flow" | "registered-flow-rfc5626" | "rfc5626" | "outbound" => {
+                Ok(Self::RegisteredFlowRfc5626)
+            }
+            "registered-flow-symmetric" | "symmetric" | "symmetric-transport"
+            | "flow-reuse" | "client-only" => Ok(Self::RegisteredFlowSymmetric),
             other => Err(format!(
-                "ASTERISK_TLS_CONTACT_MODE must be reachable-contact or registered-flow, got '{}'",
+                "ASTERISK_TLS_CONTACT_MODE must be reachable-contact, registered-flow-rfc5626, or registered-flow-symmetric, got '{}'",
                 other
             )
             .into()),
@@ -56,10 +61,19 @@ impl TlsContactMode {
         self == Self::ReachableContact
     }
 
+    fn sip_contact_mode(self) -> SipContactMode {
+        match self {
+            Self::ReachableContact => SipContactMode::ReachableContact,
+            Self::RegisteredFlowRfc5626 => SipContactMode::RegisteredFlowRfc5626,
+            Self::RegisteredFlowSymmetric => SipContactMode::RegisteredFlowSymmetric,
+        }
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::ReachableContact => "reachable-contact",
-            Self::RegisteredFlow => "registered-flow",
+            Self::RegisteredFlowRfc5626 => "registered-flow-rfc5626",
+            Self::RegisteredFlowSymmetric => "registered-flow-symmetric",
         }
     }
 }
@@ -147,6 +161,11 @@ impl EndpointConfig {
         let mut config = Config::on(&self.username, self.local_ip, self.local_port);
         config.local_uri = self.aor_uri();
         config.contact_uri = Some(self.contact_uri());
+        config.sip_contact_mode = if self.is_tls() {
+            self.tls_contact_mode.sip_contact_mode()
+        } else {
+            SipContactMode::ReachableContact
+        };
         config.credentials = Some(Credentials::new(&self.auth_username, &self.password));
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
@@ -159,16 +178,23 @@ impl EndpointConfig {
         }
 
         let mut config = self.stream_config();
-        if self.tls_contact_mode.uses_listener() {
-            let tls_port = self.tls_local_port.ok_or_else(|| {
-                "TLS reachable-contact mode requires ENDPOINT_<user>_TLS_LOCAL_PORT".to_string()
-            })?;
-            config.sip_tls_mode = SipTlsMode::ClientAndServer;
-            config.tls_bind_addr = Some(SocketAddr::new(self.local_ip, tls_port));
-            config.tls_cert_path = Some(required_path("TLS_CERT_PATH")?);
-            config.tls_key_path = Some(required_path("TLS_KEY_PATH")?);
-        } else {
-            config.sip_tls_mode = SipTlsMode::ClientOnly;
+        match self.tls_contact_mode {
+            TlsContactMode::ReachableContact => {
+                let tls_port = self.tls_local_port.ok_or_else(|| {
+                    "TLS reachable-contact mode requires ENDPOINT_<user>_TLS_LOCAL_PORT".to_string()
+                })?;
+                config = config.tls_reachable_contact(
+                    SocketAddr::new(self.local_ip, tls_port),
+                    required_path("TLS_CERT_PATH")?,
+                    required_path("TLS_KEY_PATH")?,
+                );
+            }
+            TlsContactMode::RegisteredFlowRfc5626 => {
+                config = config.tls_registered_flow_rfc5626(self.sip_instance_urn());
+            }
+            TlsContactMode::RegisteredFlowSymmetric => {
+                config = config.tls_registered_flow_symmetric(self.sip_instance_urn());
+            }
         }
         config.tls_extra_ca_path = optional_path("TLS_CA_PATH");
         config.tls_client_cert_path = optional_path("TLS_CLIENT_CERT_PATH");
@@ -207,6 +233,15 @@ impl EndpointConfig {
         } else {
             self.local_port
         }
+    }
+
+    fn sip_instance_urn(&self) -> String {
+        std::env::var(format!("ENDPOINT_{}_SIP_INSTANCE", self.username))
+            .or_else(|_| std::env::var("SIP_INSTANCE"))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| deterministic_sip_instance(&self.username))
     }
 }
 
@@ -548,6 +583,18 @@ fn env_bool(key: &str, default: bool) -> ExampleResult<bool> {
         "0" | "false" | "no" | "off" => Ok(false),
         _ => Err(format!("{} must be a boolean value", key).into()),
     }
+}
+
+fn deterministic_sip_instance(username: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in username.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!(
+        "urn:uuid:00000000-0000-4000-8000-{:012x}",
+        hash & 0xffff_ffff_ffff
+    )
 }
 
 fn required_path(key: &str) -> ExampleResult<PathBuf> {

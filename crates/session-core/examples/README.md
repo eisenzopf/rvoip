@@ -79,10 +79,16 @@ verifies the endpoint listener certificate, configure Asterisk to trust that
 certificate or provide a trusted pair explicitly. Outbound verification of
 Asterisk uses system roots, `TLS_CA_PATH`, or dev-only `TLS_INSECURE=1`.
 
-Registered-flow mode is also available for Asterisk configurations using
-`rewrite_contact` / `symmetric_transport`: set
-`ASTERISK_TLS_CONTACT_MODE=registered-flow`. In that mode RVOIP keeps the
-outbound TLS flow open and does not need a listener certificate/key.
+Registered-flow modes are also available when Asterisk is configured to send
+inbound requests on the existing registration flow instead of dialing the
+advertised TLS listener Contact. Set
+`ASTERISK_TLS_CONTACT_MODE=registered-flow-rfc5626` for RFC 5626 Contact
+parameters (`;ob`, `+sip.instance`, `reg-id`) or
+`ASTERISK_TLS_CONTACT_MODE=registered-flow-symmetric` for Asterisk
+`rewrite_contact` / `symmetric_transport` labs that reuse the connection
+without echoing RFC 5626 parameters. In these modes RVOIP keeps the outbound
+TLS flow open and does not need a listener certificate/key; it still verifies
+Asterisk with system roots, `TLS_CA_PATH`, or dev-only `TLS_INSECURE=1`.
 
 ## Running peers individually
 

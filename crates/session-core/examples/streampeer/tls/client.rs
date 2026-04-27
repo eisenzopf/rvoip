@@ -48,9 +48,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // at `TLS_CA_PATH` (production code path).
     let insecure = std::env::var("TLS_INSECURE").ok().as_deref() == Some("1");
 
-    let mut config = Config::local("tls_client", 5062);
-    config.tls_cert_path = Some(cert_path.into());
-    config.tls_key_path = Some(key_path.into());
+    let mut config = Config::local("tls_client", 5062).tls_reachable_contact(
+        "127.0.0.1:5063".parse()?,
+        cert_path,
+        key_path,
+    );
+    config.local_uri = "sips:tls_client@127.0.0.1:5063;transport=tls".to_string();
+    config.contact_uri = Some("sips:tls_client@127.0.0.1:5063;transport=tls".to_string());
 
     if insecure {
         // Dev-only — server cert is accepted without validation.

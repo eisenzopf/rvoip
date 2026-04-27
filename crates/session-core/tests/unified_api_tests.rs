@@ -2,7 +2,7 @@
 //!
 //! These tests demonstrate the unified coordinator API usage
 
-use rvoip_session_core::api::unified::{Config, SipTlsMode, UnifiedCoordinator};
+use rvoip_session_core::api::unified::{Config, SipContactMode, SipTlsMode, UnifiedCoordinator};
 use rvoip_session_core::state_table::types::SessionId;
 use rvoip_session_core::types::CallState;
 use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -44,6 +44,96 @@ async fn tls_client_only_config_does_not_require_endpoint_certificates() {
         "client-only SIP TLS must not require tls_cert_path/tls_key_path: {:?}",
         coordinator.err()
     );
+}
+
+#[test]
+fn reachable_tls_client_only_requires_explicit_contact_uri() {
+    let mut config = test_config(15233);
+    config.sip_tls_mode = SipTlsMode::ClientOnly;
+    config.local_uri = "sips:test@127.0.0.1".to_string();
+
+    let err = config
+        .validate()
+        .expect_err("ClientOnly reachable Contact needs explicit Contact");
+    assert!(
+        err.to_string().contains("contact_uri"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn rfc5626_registered_flow_requires_outbound_and_instance() {
+    let mut config = test_config(15234);
+    config.sip_tls_mode = SipTlsMode::ClientOnly;
+    config.sip_contact_mode = SipContactMode::RegisteredFlowRfc5626;
+
+    let err = config
+        .validate()
+        .expect_err("RFC5626 mode must require sip_outbound_enabled");
+    assert!(
+        err.to_string().contains("sip_outbound_enabled"),
+        "unexpected validation error: {err}"
+    );
+
+    config.sip_outbound_enabled = true;
+    let err = config
+        .validate()
+        .expect_err("RFC5626 mode must require sip_instance");
+    assert!(
+        err.to_string().contains("sip_instance"),
+        "unexpected validation error: {err}"
+    );
+
+    config.sip_instance = Some("urn:uuid:00000000-0000-4000-8000-000000000001".to_string());
+    config
+        .validate()
+        .expect("RFC5626 registered-flow should be valid with outbound params");
+}
+
+#[test]
+fn symmetric_registered_flow_allows_tls_client_only_without_listener_certificates() {
+    let config = test_config(15235)
+        .tls_registered_flow_symmetric("urn:uuid:00000000-0000-4000-8000-000000000002");
+
+    config
+        .validate()
+        .expect("symmetric registered-flow should not require listener cert/key");
+}
+
+#[test]
+fn rfc5626_registered_flow_helper_sets_outbound_params() {
+    let config = test_config(15238)
+        .tls_registered_flow_rfc5626("urn:uuid:00000000-0000-4000-8000-000000000003");
+
+    assert_eq!(config.sip_tls_mode, SipTlsMode::ClientOnly);
+    assert_eq!(
+        config.sip_contact_mode,
+        SipContactMode::RegisteredFlowRfc5626
+    );
+    assert!(config.sip_outbound_enabled);
+    assert_eq!(
+        config.sip_instance.as_deref(),
+        Some("urn:uuid:00000000-0000-4000-8000-000000000003")
+    );
+    config
+        .validate()
+        .expect("RFC5626 helper should produce a valid config shape");
+}
+
+#[test]
+fn reachable_tls_helper_sets_listener_requirements() {
+    let config = test_config(15236).tls_reachable_contact(
+        "127.0.0.1:15237".parse().unwrap(),
+        "/tmp/rvoip-test-cert.pem",
+        "/tmp/rvoip-test-key.pem",
+    );
+
+    assert_eq!(config.sip_tls_mode, SipTlsMode::ClientAndServer);
+    assert_eq!(config.sip_contact_mode, SipContactMode::ReachableContact);
+    assert_eq!(config.tls_bind_addr.unwrap().port(), 15237);
+    config
+        .validate()
+        .expect("reachable TLS helper should produce a valid config shape");
 }
 
 #[tokio::test]
