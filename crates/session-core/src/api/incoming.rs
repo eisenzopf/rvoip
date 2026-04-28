@@ -10,8 +10,10 @@ use crate::errors::{Result, SessionError};
 
 /// An incoming SIP INVITE that must be handled.
 ///
-/// Obtain one via [`StreamPeer::wait_for_incoming()`] or via the `on_incoming_call`
-/// method of [`CallHandler`].
+/// Obtain one via
+/// [`StreamPeer::wait_for_incoming`](crate::api::stream_peer::StreamPeer::wait_for_incoming)
+/// or via the `on_incoming_call` method of
+/// [`CallHandler`](crate::api::callback_peer::CallHandler).
 ///
 /// The call remains in `Ringing` state until you call one of the resolution
 /// methods. Dropping without resolving rejects the call with **486 Busy Here**.

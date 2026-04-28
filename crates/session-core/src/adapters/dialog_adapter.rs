@@ -306,7 +306,8 @@ impl DialogAdapter {
     /// RFC 4028 §6 — resend an INVITE with a bumped `Session-Expires` /
     /// `Min-SE` after a 422 Session Interval Too Small. The UAS's Min-SE
     /// floor is supplied by the caller (parsed from the 422 response by
-    /// dialog-core). The timer headers bypass [`DialogManagerConfig`]'s
+    /// dialog-core). The timer headers bypass
+    /// [`DialogManagerConfig`](rvoip_dialog_core::config::DialogManagerConfig)'s
     /// global values and use these overrides verbatim.
     pub async fn resend_invite_with_session_timer_override(
         &self,
@@ -454,7 +455,7 @@ impl DialogAdapter {
         Ok(())
     }
 
-    /// Like [`send_invite_with_details`] but appends caller-supplied extra
+    /// Like [`send_invite_with_details`](Self::send_invite_with_details) but appends caller-supplied extra
     /// headers to the outgoing INVITE. Routes through dialog-core's
     /// `make_call_with_extra_headers_for_session` so the extras (typically
     /// `P-Asserted-Identity` per RFC 3325) ride on the very first wire

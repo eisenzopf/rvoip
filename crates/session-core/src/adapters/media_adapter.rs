@@ -361,7 +361,7 @@ impl MediaAdapter {
     }
 
     /// Configure the SRTP offer policy. Called by `UnifiedCoordinator`
-    /// when constructing the adapter from a [`Config`] that has
+    /// when constructing the adapter from a [`Config`](crate::api::unified::Config) that has
     /// `offer_srtp` / `srtp_required` / `srtp_offered_suites` set.
     /// Mutates in place rather than returning a new adapter so the
     /// existing constructor signature stays unchanged.
@@ -1575,7 +1575,7 @@ impl MediaAdapter {
     }
 
     /// Send RFC 4733 DTMF by session id — preferred public API, used
-    /// by [`UnifiedCoordinator::send_dtmf`].
+    /// by [`UnifiedCoordinator::send_dtmf`](crate::api::unified::UnifiedCoordinator::send_dtmf).
     pub async fn send_dtmf_rfc4733(
         &self,
         session_id: &SessionId,

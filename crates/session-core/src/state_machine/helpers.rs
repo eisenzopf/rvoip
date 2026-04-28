@@ -122,7 +122,7 @@ impl StateMachineHelpers {
     /// `make_call_with_extra_headers_for_session` path. `None` for `pai`
     /// is equivalent to plain [`make_call`](Self::make_call).
     ///
-    /// Per-call override of [`Config::pai_uri`].
+    /// Per-call override of [`Config::pai_uri`](crate::api::unified::Config::pai_uri).
     pub async fn make_call_with_pai(
         &self,
         from: &str,
@@ -132,7 +132,8 @@ impl StateMachineHelpers {
         self.make_call_inner(from, to, None, None, pai).await
     }
 
-    /// Combined entry point used by [`UnifiedCoordinator::make_call`] /
+    /// Combined entry point used by
+    /// [`UnifiedCoordinator::make_call`](crate::api::unified::UnifiedCoordinator::make_call) /
     /// `make_call_with_auth` to apply both the digest credentials and the
     /// `P-Asserted-Identity` from `Config` in a single dispatch. Either or
     /// both of `credentials` / `pai` may be `None`.
@@ -173,7 +174,7 @@ impl StateMachineHelpers {
     /// transferor session. Callers must accept the race — any dialog
     /// event that fires before this call is silently dropped by the
     /// no-op-on-`None` `SendTransferNotify*` actions. Prefer
-    /// [`make_transfer_leg`] for freshly-created legs.
+    /// [`make_transfer_leg`](Self::make_transfer_leg) for freshly-created legs.
     pub async fn set_transferor_session(
         &self,
         leg_session_id: &SessionId,

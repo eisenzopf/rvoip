@@ -1,9 +1,10 @@
 //! Cross-crate event wrapper for session-core user-facing (API) events.
 //!
 //! Session API events are published to the `"session_to_app"` channel on the
-//! [`GlobalEventCoordinator`]. Any peer type (StreamPeer, CallbackPeer, or a custom
-//! implementation using `UnifiedCoordinator::subscribe_events()`) receives them by
-//! subscribing to that channel.
+//! [`GlobalEventCoordinator`](rvoip_infra_common::events::coordinator::GlobalEventCoordinator).
+//! Any peer type (StreamPeer, CallbackPeer, or a custom implementation using
+//! `UnifiedCoordinator::subscribe_events()`) receives them by subscribing to
+//! that channel.
 //!
 //! The `MonolithicEventBus` inside the coordinator uses a lock-free broadcast channel
 //! internally, so multiple subscribers each get an independent, low-latency delivery.
@@ -22,7 +23,8 @@ use std::sync::Arc;
 /// ```
 pub const SESSION_TO_APP_CHANNEL: &str = "session_to_app";
 
-/// Wraps a session-core [`Event`] for publishing through the [`GlobalEventCoordinator`].
+/// Wraps a session-core [`Event`] for publishing through the
+/// [`GlobalEventCoordinator`](rvoip_infra_common::events::coordinator::GlobalEventCoordinator).
 ///
 /// [`Event`]: crate::api::events::Event
 #[derive(Debug)]

@@ -1,16 +1,33 @@
-//! # Session Core v3 API
+//! # Session Core API
 //!
-//! A state-machine driven SIP session management library for building clients,
-//! servers, proxies, and call center software.
+//! Public developer interfaces for building SIP applications on top of
+//! `session-core`.
 //!
-//! ## Two API Styles
+//! This module is organized around three API surfaces:
 //!
 //! | API | Best for | Style |
-//! |-----|----------|-------|
-//! | [`StreamPeer`] | Clients, scripts, tests | Sequential — call methods, await results |
-//! | [`CallbackPeer`] | Servers, proxies, IVR | Reactive — implement [`CallHandler`] trait |
+//! | --- | --- | --- |
+//! | [`StreamPeer`] | Clients, softphones, scripts, tests | Sequential helpers and typed events |
+//! | [`CallbackPeer`] | Servers, IVR, routing endpoints | Reactive [`CallHandler`] hooks |
+//! | [`UnifiedCoordinator`] | B2BUAs, gateways, custom frameworks | Explicit session IDs and orchestration methods |
 //!
-//! ## Quick Start — Making a Call
+//! All three surfaces drive the same coordinator, state table, dialog adapter,
+//! and media adapter. Choosing a surface is mostly about how your application
+//! wants to structure control flow.
+//!
+//! ## Common Building Blocks
+//!
+//! - [`Config`] configures SIP transports, contact behavior, TLS, SRTP,
+//!   registration, NAT/media address advertisement, session timers, 100rel,
+//!   and codec negotiation policy.
+//! - [`SessionHandle`] controls a single call once it exists.
+//! - [`IncomingCall`] represents a ringing inbound INVITE that must be accepted,
+//!   rejected, redirected, or deferred.
+//! - [`Event`] is the typed application event enum used by `StreamPeer` and
+//!   lower-level coordinator subscribers.
+//! - [`Registration`] describes outbound SIP REGISTER attempts.
+//!
+//! ## StreamPeer: Making a Call
 //!
 //! ```rust,no_run
 //! use rvoip_session_core::*;
@@ -29,7 +46,7 @@
 //! }
 //! ```
 //!
-//! ## Quick Start — Receiving a Call
+//! ## StreamPeer: Receiving a Call
 //!
 //! ```rust,no_run
 //! use rvoip_session_core::*;
@@ -47,7 +64,7 @@
 //! }
 //! ```
 //!
-//! ## Call Features
+//! ## Per-Call Control
 //!
 //! [`SessionHandle`] provides hold, resume, transfer, DTMF, and audio:
 //!
@@ -65,7 +82,7 @@
 //! # }
 //! ```
 //!
-//! ## Server with CallbackPeer
+//! ## CallbackPeer: Reactive Server
 //!
 //! For servers, implement [`CallHandler`] or use a built-in handler:
 //!
@@ -86,6 +103,35 @@
 //!     peer.run().await?;
 //!     Ok(())
 //! }
+//! ```
+//!
+//! ## UnifiedCoordinator: Custom Orchestration
+//!
+//! Use the coordinator directly when you need to build a higher-level
+//! application runtime, bridge legs, or subscribe to filtered event streams:
+//!
+//! ```rust,no_run
+//! use rvoip_session_core::{Config, Event, Result, UnifiedCoordinator};
+//!
+//! # async fn example() -> Result<()> {
+//! let coordinator = UnifiedCoordinator::new(Config::local("app", 5060)).await?;
+//! let mut events = coordinator.events().await?;
+//!
+//! let call_id = coordinator
+//!     .make_call("sip:app@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
+//!     .await?;
+//! let mut call_events = coordinator.events_for_session(&call_id).await?;
+//!
+//! while let Some(event) = call_events.next().await {
+//!     match event {
+//!         Event::CallAnswered { .. } => coordinator.send_dtmf(&call_id, '1').await?,
+//!         Event::CallEnded { .. } | Event::CallFailed { .. } => break,
+//!         _ => {}
+//!     }
+//! }
+//! # drop(events);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Custom Configuration
@@ -112,14 +158,14 @@
 //!
 //! ## Module Structure
 //!
-//! - [`stream_peer`] — Sequential SIP peer for clients and scripts
-//! - [`callback_peer`] — Reactive SIP peer for servers and proxies
-//! - [`handlers`] — Built-in [`CallHandler`] implementations
-//! - [`handle`] — [`SessionHandle`] for controlling active calls
-//! - [`incoming`] — [`IncomingCall`] and [`IncomingCallGuard`]
-//! - [`audio`] — [`AudioStream`], [`AudioSender`], [`AudioReceiver`]
-//! - [`events`] — [`Event`] enum for session lifecycle events
-//! - [`unified`] — [`UnifiedCoordinator`] and [`Config`]
+//! - [`stream_peer`] - sequential SIP peer for clients and scripts.
+//! - [`callback_peer`] - reactive SIP peer for servers and proxies.
+//! - [`handlers`] - built-in [`CallHandler`] implementations.
+//! - [`handle`] - [`SessionHandle`] for controlling active calls.
+//! - [`incoming`] - [`IncomingCall`] and [`IncomingCallGuard`].
+//! - [`audio`] - [`AudioStream`], [`AudioSender`], [`AudioReceiver`].
+//! - [`events`] - [`Event`] enum for session lifecycle events.
+//! - [`unified`] - [`UnifiedCoordinator`], [`Config`], and [`Registration`].
 //!
 //! [`StreamPeer`]: stream_peer::StreamPeer
 //! [`CallbackPeer`]: callback_peer::CallbackPeer
@@ -133,6 +179,7 @@
 //! [`Event`]: events::Event
 //! [`UnifiedCoordinator`]: unified::UnifiedCoordinator
 //! [`Config`]: unified::Config
+//! [`Registration`]: unified::Registration
 
 // Core modules only
 pub mod builder; // Session builder

@@ -580,17 +580,15 @@ impl AudioStreamConfig {
     }
 }
 
-/// Subscriber for receiving audio frames from a session
-///
-/// This is a handle that allows receiving decoded audio frames from a specific session.
-/// Use this to get audio data that should be played on speakers.
 /// SIP-level identity of a dialog: the three values required to construct
 /// a `Replaces` header (RFC 3891) for attended-transfer orchestration.
 ///
-/// Obtain one via [`SessionHandle::dialog_identity`]. To drive attended
-/// transfer from an orchestrator, read the identity of the consultation
-/// session and pass its formatted form to
-/// [`SessionHandle::transfer_attended`] on the original session.
+/// Obtain one via
+/// [`SessionHandle::dialog_identity`](crate::api::handle::SessionHandle::dialog_identity).
+/// To drive attended transfer from an orchestrator, read the identity of the
+/// consultation session and pass its formatted form to
+/// [`SessionHandle::transfer_attended`](crate::api::handle::SessionHandle::transfer_attended)
+/// on the original session.
 #[derive(Debug, Clone)]
 pub struct DialogIdentity {
     /// SIP `Call-ID` header value.
@@ -605,8 +603,9 @@ pub struct DialogIdentity {
 
 impl DialogIdentity {
     /// Format as a `Replaces` header *value* (no percent-encoding applied).
-    /// Pass this to [`SessionHandle::transfer_attended`], which handles
-    /// URI-escaping when embedding it in the Refer-To target.
+    /// Pass this to
+    /// [`SessionHandle::transfer_attended`](crate::api::handle::SessionHandle::transfer_attended),
+    /// which handles URI-escaping when embedding it in the Refer-To target.
     ///
     /// Returns `None` if either tag is missing (dialog not yet confirmed).
     pub fn to_replaces_value(&self) -> Option<String> {
@@ -621,6 +620,11 @@ impl DialogIdentity {
     }
 }
 
+/// Subscriber for receiving decoded audio frames from a session.
+///
+/// This is the lower-level subscriber used by the coordinator. Most
+/// application code should prefer [`SessionHandle::audio`](crate::SessionHandle::audio),
+/// which wraps this in an [`AudioStream`](crate::AudioStream).
 #[derive(Debug)]
 pub struct AudioFrameSubscriber {
     /// The session ID this subscriber is associated with

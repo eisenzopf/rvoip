@@ -1,8 +1,15 @@
-//! CallbackPeer — trait-based reactive SIP peer for servers and proxies.
+//! Trait-based reactive peer API for servers, IVR, and routing apps.
 //!
 //! Implement [`CallHandler`] and pass it to [`CallbackPeer::new()`]. Call
 //! [`run()`][CallbackPeer::run] to start the event loop; it returns when the peer
 //! is shut down.
+//!
+//! `CallbackPeer` is built for applications where the library should drive the
+//! event loop and call user code when something happens: incoming calls,
+//! established calls, DTMF, hold/resume, transfer, NOTIFY, registration, and
+//! auth retry notifications. The peer also exposes [`CallbackPeerControl`] so
+//! supervisors and handler-owned tasks can place outbound calls, register, and
+//! shut down the running peer.
 //!
 //! # Use cases
 //!
@@ -12,6 +19,30 @@
 //!   [`IncomingCallGuard`] in a queue until an agent is available.
 //! - **B2BUA leg**: `on_call_established` bridges the accepted session to a second
 //!   outgoing leg managed in the higher-layer b2bua crate.
+//!
+//! # Minimal server
+//!
+//! ```rust,no_run
+//! use async_trait::async_trait;
+//! use rvoip_session_core::{
+//!     CallHandler, CallHandlerDecision, CallbackPeer, Config, IncomingCall, Result,
+//! };
+//!
+//! struct Server;
+//!
+//! #[async_trait]
+//! impl CallHandler for Server {
+//!     async fn on_incoming_call(&self, _call: IncomingCall) -> CallHandlerDecision {
+//!         CallHandlerDecision::Accept
+//!     }
+//! }
+//!
+//! # async fn example() -> Result<()> {
+//! let peer = CallbackPeer::new(Server, Config::default()).await?;
+//! peer.run().await?;
+//! # Ok(())
+//! # }
+//! ```
 
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
@@ -58,7 +89,12 @@ pub enum CallHandlerDecision {
     /// Accept with a custom SDP answer.
     AcceptWithSdp(String),
     /// Reject immediately with a SIP status code and reason phrase.
-    Reject { status: u16, reason: String },
+    Reject {
+        /// SIP final response status code, usually in the 4xx, 5xx, or 6xx range.
+        status: u16,
+        /// SIP reason phrase to send with the final response.
+        reason: String,
+    },
     /// Redirect the caller to another URI (sends 3xx).
     Redirect(String),
     /// Hold the call in `Ringing` state; the framework waits for the guard to resolve.
@@ -314,6 +350,16 @@ impl CallbackPeerControl {
 
 /// A SIP peer driven by a [`CallHandler`] implementation.
 ///
+/// `CallbackPeer` subscribes to the coordinator event stream, dispatches each
+/// event to the relevant handler hook, and tracks in-flight hook tasks during
+/// shutdown. Incoming-call decisions can either be returned as
+/// [`CallHandlerDecision`] values or performed directly on the supplied
+/// [`IncomingCall`].
+///
+/// The peer consumes itself in [`run`](Self::run). Obtain
+/// [`shutdown_handle`](Self::shutdown_handle) or [`control`](Self::control)
+/// before calling `run` if another task must stop it or place outbound calls.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -391,13 +437,20 @@ impl<H: CallHandler> CallbackPeer<H> {
         })
     }
 
-    /// Access the underlying coordinator for initiating outgoing calls or
-    /// performing advanced operations.
+    /// Access the underlying coordinator for advanced operations.
+    ///
+    /// Prefer [`control`](Self::control) for normal outbound calls and
+    /// registration from outside the event loop. Use the coordinator directly
+    /// when you need lower-level methods such as media bridging,
+    /// per-session event receivers, or custom transfer orchestration.
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
         &self.coordinator
     }
 
     /// Return a cloneable control handle for calls, registration, and shutdown.
+    ///
+    /// This is the ergonomic way to place outbound calls or unregister while
+    /// the peer is running in another task.
     pub fn control(&self) -> CallbackPeerControl {
         CallbackPeerControl {
             coordinator: self.coordinator.clone(),

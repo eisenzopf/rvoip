@@ -1,4 +1,10 @@
-//! SessionHandle — the primary interface for controlling an active SIP session.
+//! Per-call control API shared by all peer surfaces.
+//!
+//! [`SessionHandle`] is returned by high-level peer APIs when a call is
+//! created or accepted. It is a cheap, cloneable handle to the underlying
+//! session and exposes the operations application developers usually need
+//! once a call exists: hangup, hold/resume, DTMF, transfer, INFO/NOTIFY,
+//! event subscription, state inspection, and audio frames.
 
 use rvoip_media_core::types::AudioFrame;
 use std::sync::Arc;
@@ -17,10 +23,17 @@ pub type CallId = SessionId;
 
 /// Handle for controlling an active SIP call session.
 ///
-/// Returned by [`StreamPeer::call()`], [`IncomingCall::accept()`], and similar methods.
+/// Returned by [`StreamPeer::call`](crate::api::stream_peer::StreamPeer::call),
+/// [`IncomingCall::accept`](crate::api::incoming::IncomingCall::accept), and
+/// similar methods.
 ///
 /// `SessionHandle` is cheap to clone — all clones control the same underlying session.
 /// It is `Send + Sync` and safe to share across tasks.
+///
+/// Most methods are thin call-control operations; the event stream is available
+/// through [`events`](Self::events) when the caller needs to observe the result
+/// of asynchronous SIP behavior such as remote hangup, REFER progress, DTMF,
+/// or hold/resume completion.
 ///
 /// # Example
 ///
@@ -86,17 +99,25 @@ impl SessionHandle {
         Ok(())
     }
 
-    /// Put the call on hold (sends re-INVITE with inactive SDP).
+    /// Put the call on hold with a target-refresh re-INVITE.
+    ///
+    /// On success, applications observe [`Event::CallOnHold`] through the
+    /// peer/coordinator event stream.
     pub async fn hold(&self) -> Result<()> {
         self.coordinator.hold(&self.call_id).await
     }
 
-    /// Resume a held call (sends re-INVITE with active SDP).
+    /// Resume a held call with a target-refresh re-INVITE.
+    ///
+    /// On success, applications observe [`Event::CallResumed`].
     pub async fn resume(&self) -> Result<()> {
         self.coordinator.resume(&self.call_id).await
     }
 
     /// Mute local audio.
+    ///
+    /// This is a local media-state transition; it does not place the SIP dialog
+    /// on hold. Use [`hold`](Self::hold) when the remote peer must be signalled.
     pub async fn mute(&self) -> Result<()> {
         use crate::state_table::types::EventType;
         self.coordinator
@@ -120,7 +141,7 @@ impl SessionHandle {
 
     // ===== Transfer =====
 
-    /// Initiate a blind transfer (sends REFER to the remote party).
+    /// Initiate a blind transfer by sending REFER to the remote party.
     ///
     /// The remote party is expected to call the `target` URI and then send a NOTIFY
     /// back when it has connected. Session ends after a successful transfer.
@@ -129,6 +150,10 @@ impl SessionHandle {
     }
 
     /// Accept a pending inbound REFER on this call.
+    ///
+    /// Use this from `StreamPeer` or direct coordinator event handling after an
+    /// [`Event::ReferReceived`] event. `CallbackPeer` usually drives this from
+    /// [`CallHandler::on_transfer_request`](crate::api::callback_peer::CallHandler::on_transfer_request).
     pub async fn accept_refer(&self) -> Result<()> {
         self.coordinator.accept_refer(&self.call_id).await
     }
@@ -170,7 +195,7 @@ impl SessionHandle {
 
     // ===== DTMF =====
 
-    /// Send a single DTMF digit in-band.
+    /// Send a single RFC 4733 DTMF digit over the active media session.
     pub async fn send_dtmf(&self, digit: char) -> Result<()> {
         self.coordinator.send_dtmf(&self.call_id, digit).await
     }
@@ -256,12 +281,12 @@ impl SessionHandle {
 
     // ===== State / info =====
 
-    /// Get the current call state.
+    /// Get the current call state from the session store.
     pub async fn state(&self) -> Result<CallState> {
         self.coordinator.get_state(&self.call_id).await
     }
 
-    /// Get detailed session information.
+    /// Get detailed session information from the session store.
     pub async fn info(&self) -> Result<SessionInfo> {
         self.coordinator.get_session_info(&self.call_id).await
     }
@@ -282,7 +307,8 @@ impl SessionHandle {
 
     /// Subscribe to events for this specific session.
     ///
-    /// Returns an [`EventReceiver`] pre-filtered to this session's [`CallId`].
+    /// Returns an [`EventReceiver`](crate::api::stream_peer::EventReceiver)
+    /// pre-filtered to this session's [`CallId`].
     /// Each call returns an independent receiver — all subscribers receive the
     /// same events (broadcast semantics via the global event bus).
     pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {

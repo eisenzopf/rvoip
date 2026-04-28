@@ -1,7 +1,12 @@
-//! Event types for SimplePeer API
+//! Typed application events emitted by `session-core`.
 //!
-//! This module defines the event-driven architecture that replaces callbacks
-//! for a truly simple API experience.
+//! [`Event`] is the common event contract used by [`StreamPeer`], per-call
+//! [`SessionHandle`](crate::SessionHandle) receivers, and direct
+//! [`UnifiedCoordinator`](crate::UnifiedCoordinator) subscribers. Events are
+//! translated from lower-level dialog/media notifications into
+//! application-facing call, registration, transfer, NOTIFY, and media events.
+//!
+//! [`StreamPeer`]: crate::StreamPeer
 
 use crate::errors::Result;
 use crate::state_table::types::SessionId;
@@ -102,10 +107,12 @@ impl CallHandle {
     }
 }
 
-/// Events that SimplePeer can receive
+/// Typed session events delivered to applications.
 ///
-/// These events are published by the state machine when SIP protocol
-/// events occur. Developers handle these events to implement business logic.
+/// These events are published by the state machine and adapters when SIP,
+/// media, registration, or transfer activity occurs. Use
+/// [`Event::call_id`] to route per-call events, or one of the `is_*`
+/// helpers to classify events in generic event loops.
 #[derive(Debug, Clone)]
 pub enum Event {
     // ===== Call Lifecycle Events =====
@@ -114,47 +121,75 @@ pub enum Event {
     /// The state machine has already sent 180 Ringing. Developer must
     /// call `accept()` or `reject()` to complete the call handling.
     IncomingCall {
+        /// Session identifier assigned to this incoming INVITE.
         call_id: CallId,
+        /// Caller URI from the SIP `From` header.
         from: String,
+        /// Called URI from the SIP `To` or request URI context.
         to: String,
+        /// Remote SDP offer, if the INVITE contained one.
         sdp: Option<String>,
     },
 
     /// Call was answered (200 OK received for outgoing call)
     CallAnswered {
+        /// Session identifier for the answered call.
         call_id: CallId,
+        /// SDP answer received from the remote peer, if present.
         sdp: Option<String>,
     },
 
     /// Call ended (BYE sent/received)
-    CallEnded { call_id: CallId, reason: String },
+    CallEnded {
+        /// Session identifier for the ended call.
+        call_id: CallId,
+        /// Human-readable teardown reason.
+        reason: String,
+    },
 
     /// Call failed (4xx/5xx response or timeout)
     CallFailed {
+        /// Session identifier for the failed call.
         call_id: CallId,
+        /// SIP status code or synthesized failure code.
         status_code: u16,
+        /// Human-readable failure reason.
         reason: String,
     },
 
     /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
     /// 487 Request Terminated following CANCEL). Distinct from `CallFailed`
     /// so UIs can render "missed call" rather than "call rejected".
-    CallCancelled { call_id: CallId },
+    CallCancelled {
+        /// Session identifier for the cancelled incoming call.
+        call_id: CallId,
+    },
 
     /// RFC 4028 session timer refresh succeeded (UPDATE or re-INVITE
     /// round-tripped). Emitted once per successful refresh — applications
     /// can use this to reset connection-health dashboards or log activity.
-    SessionRefreshed { call_id: CallId, expires_secs: u32 },
+    SessionRefreshed {
+        /// Session identifier for the refreshed dialog.
+        call_id: CallId,
+        /// Negotiated session expiration interval in seconds.
+        expires_secs: u32,
+    },
 
     /// RFC 4028 session-timer refresh failed; the dialog has been torn
     /// down with BYE (§10). Follow-up `CallEnded` will still fire.
-    SessionRefreshFailed { call_id: CallId, reason: String },
+    SessionRefreshFailed {
+        /// Session identifier for the dialog whose refresh failed.
+        call_id: CallId,
+        /// Human-readable refresh failure reason.
+        reason: String,
+    },
 
     /// RFC 3261 §22.2 — server challenged our INVITE with 401/407 and we're
     /// about to retry with a digest authorization header. Informational; no
     /// action required from the app. If the retry fails (wrong credentials
     /// or retry cap exceeded), `CallFailed` follows.
     CallAuthRetrying {
+        /// Session identifier for the challenged outgoing call.
         call_id: CallId,
         /// 401 or 407.
         status_code: u16,
@@ -170,35 +205,55 @@ pub enum Event {
     /// if they do nothing, session-core preserves the legacy behavior and
     /// accepts the REFER after a short grace period.
     ReferReceived {
+        /// Session identifier for the dialog that received REFER.
         call_id: CallId,
+        /// Raw `Refer-To` target URI.
         refer_to: String,
+        /// Optional `Referred-By` header value.
         referred_by: Option<String>,
+        /// Optional `Replaces` parameter/header value for attended transfer.
         replaces: Option<String>,
+        /// Dialog-core transaction ID used to correlate REFER response/NOTIFY.
         transaction_id: String, // For NOTIFY correlation
-        transfer_type: String,  // "blind" or "attended"
+        /// Transfer flavor, currently `"blind"` or `"attended"`.
+        transfer_type: String, // "blind" or "attended"
     },
 
     /// Transfer accepted by recipient
-    TransferAccepted { call_id: CallId, refer_to: String },
+    TransferAccepted {
+        /// Session identifier for the call whose REFER was accepted.
+        call_id: CallId,
+        /// Target URI from the accepted REFER.
+        refer_to: String,
+    },
 
     /// Transfer completed successfully
     TransferCompleted {
+        /// Original session being transferred.
         old_call_id: CallId,
+        /// New session established as part of transfer handling, when known.
         new_call_id: CallId,
+        /// Transfer target URI.
         target: String,
     },
 
     /// Transfer failed
     TransferFailed {
+        /// Session identifier for the failed transfer.
         call_id: CallId,
+        /// Human-readable failure reason.
         reason: String,
+        /// SIP status code reported by REFER/NOTIFY handling.
         status_code: u16,
     },
 
     /// Transfer progress update (for transferor monitoring)
     TransferProgress {
+        /// Session identifier for the REFER subscription/dialog.
         call_id: CallId,
+        /// SIP status code from the progress NOTIFY sipfrag.
         status_code: u16,
+        /// Reason phrase from the progress NOTIFY sipfrag.
         reason: String,
     },
 
@@ -212,75 +267,125 @@ pub enum Event {
     /// `TransferCompleted` / `TransferFailed` are also emitted with the
     /// parsed status line.
     NotifyReceived {
+        /// Session identifier for the dialog that received NOTIFY.
         call_id: CallId,
+        /// SIP `Event` package name.
         event_package: String,
         /// Raw `Subscription-State:` header value (unparsed).
         subscription_state: Option<String>,
         /// Raw `Content-Type:` header value.
         content_type: Option<String>,
+        /// NOTIFY body, if any.
         body: Option<String>,
     },
 
     // ===== Call State Events =====
     /// Local hold was accepted by the remote peer.
-    CallOnHold { call_id: CallId },
+    CallOnHold {
+        /// Session identifier for the held call.
+        call_id: CallId,
+    },
 
     /// Local resume was accepted by the remote peer.
-    CallResumed { call_id: CallId },
+    CallResumed {
+        /// Session identifier for the resumed call.
+        call_id: CallId,
+    },
 
     /// The remote peer placed this call on hold with a mid-call offer.
-    RemoteCallOnHold { call_id: CallId },
+    RemoteCallOnHold {
+        /// Session identifier for the remotely held call.
+        call_id: CallId,
+    },
 
     /// The remote peer resumed this call with a mid-call offer.
-    RemoteCallResumed { call_id: CallId },
+    RemoteCallResumed {
+        /// Session identifier for the remotely resumed call.
+        call_id: CallId,
+    },
 
     /// Call was muted locally
-    CallMuted { call_id: CallId },
+    CallMuted {
+        /// Session identifier for the muted call.
+        call_id: CallId,
+    },
 
     /// Call was unmuted locally
-    CallUnmuted { call_id: CallId },
+    CallUnmuted {
+        /// Session identifier for the unmuted call.
+        call_id: CallId,
+    },
 
     // ===== Media Events =====
     /// DTMF digit received
-    DtmfReceived { call_id: CallId, digit: char },
+    DtmfReceived {
+        /// Session identifier for the call that received DTMF.
+        call_id: CallId,
+        /// Received digit.
+        digit: char,
+    },
 
     /// Media quality changed
     MediaQualityChanged {
+        /// Session identifier for the media stream.
         call_id: CallId,
+        /// Packet loss percentage, rounded to an integer.
         packet_loss_percent: u32,
+        /// Jitter in milliseconds, rounded to an integer.
         jitter_ms: u32,
     },
 
     // ===== Registration Events =====
     /// Registration successful
     RegistrationSuccess {
+        /// Registrar URI used for the REGISTER.
         registrar: String,
+        /// Expiration interval accepted by the registrar.
         expires: u32,
+        /// Contact URI that was registered.
         contact: String,
     },
 
     /// Registration failed
     RegistrationFailed {
+        /// Registrar URI used for the failed REGISTER.
         registrar: String,
+        /// SIP status code returned by the registrar.
         status_code: u16,
+        /// Human-readable failure reason.
         reason: String,
     },
 
     /// Unregistration successful
-    UnregistrationSuccess { registrar: String },
+    UnregistrationSuccess {
+        /// Registrar URI used for the unregistration.
+        registrar: String,
+    },
 
     /// Unregistration failed
-    UnregistrationFailed { registrar: String, reason: String },
+    UnregistrationFailed {
+        /// Registrar URI used for the failed unregistration.
+        registrar: String,
+        /// Human-readable failure reason.
+        reason: String,
+    },
 
     // ===== Error Events =====
     /// Network error occurred
     NetworkError {
+        /// Session identifier, if the transport error can be tied to one call.
         call_id: Option<CallId>,
+        /// Human-readable error text.
         error: String,
     },
 
     /// Authentication required (401/407 response)
-    AuthenticationRequired { call_id: CallId, realm: String },
+    AuthenticationRequired {
+        /// Session identifier for the challenged request.
+        call_id: CallId,
+        /// Digest-auth realm from the challenge.
+        realm: String,
+    },
 }
 
 impl Event {

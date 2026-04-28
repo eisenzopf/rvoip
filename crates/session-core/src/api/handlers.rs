@@ -71,7 +71,9 @@ impl CallHandler for AutoAnswerHandler {
 /// # }
 /// ```
 pub struct RejectAllHandler {
+    /// SIP status code used for every rejected call.
     pub status: u16,
+    /// SIP reason phrase used for every rejected call.
     pub reason: String,
 }
 
@@ -112,7 +114,12 @@ pub enum RoutingAction {
     /// Accept the call.
     Accept,
     /// Reject with a SIP status code and reason.
-    Reject { status: u16, reason: String },
+    Reject {
+        /// SIP final response status code.
+        status: u16,
+        /// SIP reason phrase.
+        reason: String,
+    },
     /// Redirect the caller to another URI (sends 3xx).
     Redirect(String),
 }
@@ -120,7 +127,9 @@ pub enum RoutingAction {
 /// A single routing rule: if the `To` URI contains `pattern`, apply `action`.
 #[derive(Debug, Clone)]
 pub struct RoutingRule {
+    /// Substring matched against the incoming call's `To` URI.
     pub pattern: String,
+    /// Action applied when the pattern matches.
     pub action: RoutingAction,
 }
 

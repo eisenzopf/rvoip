@@ -1,8 +1,16 @@
-//! StreamPeer — sequential / event-loop SIP peer.
+//! Sequential peer API for clients, scripts, softphones, and tests.
 //!
-//! `StreamPeer` provides a sequential API suitable for test code, softphones,
-//! and simple scripts. All events arrive via `next_event()` or the `wait_for_*`
-//! helper methods.
+//! [`StreamPeer`] wraps a [`UnifiedCoordinator`]
+//! with two ergonomic pieces:
+//!
+//! - [`PeerControl`] for commands such as `call`, `accept`, registration, and
+//!   early media.
+//! - [`EventReceiver`] for typed application events.
+//!
+//! The unsplit [`StreamPeer`] exposes common `wait_for_*` helpers that consume
+//! events until the requested state is observed. This is the simplest API for
+//! application tests and single-peer clients. Split the peer when one task
+//! should receive events while other tasks issue commands.
 //!
 //! For reactive server code (proxies, IVR engines) use [`CallbackPeer`] instead.
 //!
@@ -33,6 +41,18 @@ pub use crate::api::unified::Config as PeerConfig;
 ///
 /// Events flow through the [`GlobalEventCoordinator`]'s `"session_to_app"` channel,
 /// which uses a lock-free broadcast internally.
+///
+/// # Consuming events
+///
+/// ```rust,no_run
+/// # async fn example(mut events: rvoip_session_core::EventReceiver) {
+/// while let Some(event) = events.next().await {
+///     if event.is_transfer_event() {
+///         println!("transfer event: {:?}", event);
+///     }
+/// }
+/// # }
+/// ```
 ///
 /// [`GlobalEventCoordinator`]: rvoip_infra_common::events::coordinator::GlobalEventCoordinator
 pub struct EventReceiver {
@@ -234,7 +254,7 @@ impl PeerControl {
     ///
     /// Call before [`accept()`] on an incoming call to stream ringback,
     /// announcements, or progress audio to the caller before answering. The
-    /// call enters [`CallState::EarlyMedia`]; a subsequent `accept()`
+    /// call enters [`CallState::EarlyMedia`](crate::CallState::EarlyMedia); a subsequent `accept()`
     /// transitions to `Active` while reusing the negotiated SDP.
     ///
     /// If `sdp` is `None`, the SDP answer is generated from the INVITE's
@@ -266,6 +286,17 @@ impl PeerControl {
 // ===== StreamPeer =====
 
 /// A sequential SIP peer with event-stream-style access.
+///
+/// Use this when your application wants to drive SIP as an async workflow:
+/// make a call, wait for it to answer, send DTMF, wait for hangup; or wait for
+/// an incoming call and resolve it inline.
+///
+/// `StreamPeer` owns one event receiver. Methods such as
+/// [`wait_for_incoming`](Self::wait_for_incoming) and
+/// [`wait_for_answered`](Self::wait_for_answered) consume and discard unrelated
+/// events while they wait. If multiple tasks need to observe events, use
+/// [`split`](Self::split) or [`PeerControl::subscribe_events`] to create
+/// independent receivers.
 ///
 /// # Quick start
 ///
@@ -302,6 +333,12 @@ pub struct StreamPeer {
 
 impl StreamPeer {
     /// Create a peer with an auto-generated SIP URI based on `name`.
+    ///
+    /// This uses [`Config::default`] as the base and sets
+    /// `local_uri = "sip:<name>@<local_ip>:<sip_port>"`. For production or
+    /// interop tests, prefer [`with_config`](Self::with_config) or
+    /// [`builder`](Self::builder) so bind addresses, media ports, TLS, SRTP,
+    /// registration credentials, and advertised addresses are explicit.
     pub async fn new(name: &str) -> Result<Self> {
         let mut config = Config::default();
         config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
@@ -309,6 +346,9 @@ impl StreamPeer {
     }
 
     /// Create a peer with explicit configuration.
+    ///
+    /// The coordinator starts immediately. Subscribe or split the peer before
+    /// triggering work if your code must not miss early events.
     pub async fn with_config(config: Config) -> Result<Self> {
         let local_uri = config.local_uri.clone();
         let coordinator = UnifiedCoordinator::new(config).await?;
@@ -337,7 +377,11 @@ impl StreamPeer {
 
     // ===== Sequential helpers =====
 
-    /// Initiate an outgoing call.
+    /// Initiate an outgoing call and return a [`SessionHandle`].
+    ///
+    /// The handle is returned as soon as the INVITE has been dispatched; wait
+    /// for [`Event::CallAnswered`] with [`wait_for_answered`](Self::wait_for_answered)
+    /// before assuming media is established.
     pub async fn call(&mut self, target: &str) -> Result<SessionHandle> {
         self.control.call(target).await
     }
@@ -415,6 +459,9 @@ impl StreamPeer {
     }
 
     /// Read the next event without filtering.
+    ///
+    /// Returns `None` when the coordinator shuts down or the event channel
+    /// closes.
     pub async fn next_event(&mut self) -> Option<Event> {
         self.events.next().await
     }

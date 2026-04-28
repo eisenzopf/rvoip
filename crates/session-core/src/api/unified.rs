@@ -1,7 +1,46 @@
-//! Simplified Unified Session API
+//! Lower-level session orchestration API.
 //!
-//! This is a thin wrapper over the state machine helpers.
-//! All business logic is in the state table.
+//! [`UnifiedCoordinator`] is the shared engine underneath [`StreamPeer`] and
+//! [`CallbackPeer`]. It exposes explicit [`SessionId`] values and direct
+//! methods for call creation, incoming-call resolution, registration, event
+//! subscription, transfer primitives, audio bridging, and media control.
+//!
+//! Use this module directly when you are building an application framework on
+//! top of `session-core`: B2BUA logic, gateways, carrier-facing services,
+//! custom peer abstractions, or multi-leg call orchestration. For ordinary
+//! client/test code, [`StreamPeer`] is usually more ergonomic. For reactive
+//! server endpoints, [`CallbackPeer`] is usually the better starting point.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use rvoip_session_core::{Config, Event, Result, UnifiedCoordinator};
+//!
+//! # async fn example() -> Result<()> {
+//! let coordinator = UnifiedCoordinator::new(Config::local("app", 5060)).await?;
+//! let mut events = coordinator.events().await?;
+//!
+//! let call_id = coordinator
+//!     .make_call("sip:app@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
+//!     .await?;
+//!
+//! while let Some(event) = events.next().await {
+//!     match event {
+//!         Event::CallAnswered { call_id: id, .. } if id == call_id => {
+//!             coordinator.send_dtmf(&call_id, '1').await?;
+//!             coordinator.hangup(&call_id).await?;
+//!         }
+//!         Event::CallEnded { call_id: id, .. } if id == call_id => break,
+//!         Event::CallFailed { call_id: id, .. } if id == call_id => break,
+//!         _ => {}
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! [`CallbackPeer`]: crate::api::callback_peer::CallbackPeer
+//! [`StreamPeer`]: crate::api::stream_peer::StreamPeer
 
 use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::errors::{Result, SessionError};
@@ -67,7 +106,33 @@ impl Default for SipContactMode {
     }
 }
 
-/// Configuration for the unified coordinator
+/// Runtime configuration for [`UnifiedCoordinator`].
+///
+/// `Config` controls SIP and media binding, advertised addresses, TLS,
+/// registration Contact behavior, SRTP policy, session timers, reliable
+/// provisionals, caller identity headers, outbound INVITE routing, NAT/media
+/// address discovery, and codec negotiation.
+///
+/// Start with [`Config::local`] for loopback examples, [`Config::on`] for a
+/// specific LAN/host address, then adjust the feature-specific fields for the
+/// deployment profile.
+///
+/// # Examples
+///
+/// ```rust
+/// use rvoip_session_core::{Config, SipContactMode, SipTlsMode};
+///
+/// let lan = Config::on("alice", "192.168.1.50".parse().unwrap(), 5060);
+/// assert_eq!(lan.local_uri, "sip:alice@192.168.1.50:5060");
+///
+/// let tls_registered = Config::local("alice", 5060)
+///     .tls_registered_flow_symmetric("urn:uuid:00000000-0000-0000-0000-000000000001");
+/// assert_eq!(tls_registered.sip_tls_mode, SipTlsMode::ClientOnly);
+/// assert_eq!(
+///     tls_registered.sip_contact_mode,
+///     SipContactMode::RegisteredFlowSymmetric
+/// );
+/// ```
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Local IP address for media
@@ -350,9 +415,8 @@ pub struct Config {
     /// When `true`, outgoing offers and answers carry `13` in the
     /// `m=audio` format list plus `a=rtpmap:13 CN/8000` so peers know
     /// we accept Comfort Noise during silence periods. The session
-    /// also exposes
-    /// [`UnifiedCoordinator::send_comfort_noise`](crate::api::unified::UnifiedCoordinator::send_comfort_noise)
-    /// for callers to drive CN packets from their own VAD output.
+    /// also enables media-core comfort-noise support so callers can drive CN
+    /// packets through their chosen media-control path.
     ///
     /// Default: `false` — peers see the pre-Sprint-3 PCMU + PCMA +
     /// telephone-event format set with no CN.
@@ -634,7 +698,19 @@ impl Default for Config {
     }
 }
 
-/// Simplified coordinator that uses state machine helpers
+/// Lower-level coordinator for SIP sessions, registrations, media, and events.
+///
+/// `UnifiedCoordinator` is intentionally explicit: most methods take or return
+/// a [`SessionId`], and event consumers choose whether to subscribe to all
+/// events or filter by session. This makes it suitable for applications that
+/// manage more than one call leg at a time.
+///
+/// Use higher-level wrappers when possible:
+///
+/// - [`StreamPeer`](crate::api::stream_peer::StreamPeer) for sequential clients
+///   and tests.
+/// - [`CallbackPeer`](crate::api::callback_peer::CallbackPeer) for reactive
+///   servers.
 #[allow(dead_code)]
 pub struct UnifiedCoordinator {
     /// State machine helpers
@@ -661,7 +737,12 @@ pub struct UnifiedCoordinator {
 }
 
 impl UnifiedCoordinator {
-    /// Create a new coordinator
+    /// Create and start a new coordinator.
+    ///
+    /// This validates [`Config`], initializes dialog and media adapters,
+    /// starts the central event handler, and returns a shared coordinator
+    /// handle. Background tasks are stopped by calling [`shutdown`](Self::shutdown)
+    /// or by dropping all coordinator owners.
     pub async fn new(config: Config) -> Result<Arc<Self>> {
         config.validate()?;
 
@@ -891,21 +972,13 @@ impl UnifiedCoordinator {
         Self::new(config).await
     }
 
-    // ===== Event Subscription =====
+    // ===== Shutdown =====
 
-    /// Subscribe to all session API events.
-    ///
-    /// Returns an [`mpsc::Receiver`] that receives every [`crate::api::events::Event`] published
-    /// by this coordinator. Each call to `subscribe_events()` returns an independent receiver —
-    /// all subscribers receive the same events (broadcast semantics via the global event bus).
-    ///
-    /// Events are published on the `"session_to_app"` channel. Use this to build custom peer
-    /// types on top of `UnifiedCoordinator`, or to get a raw event stream.
     /// Shut down this coordinator and all its background tasks.
     ///
     /// After calling this, the coordinator stops processing events. Existing
-    /// call sessions are not explicitly terminated — use [`hangup()`] first if
-    /// you need clean call teardown.
+    /// call sessions are not explicitly terminated; use [`hangup`](Self::hangup)
+    /// first if you need clean call teardown.
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
@@ -919,6 +992,18 @@ impl UnifiedCoordinator {
         crate::api::callback_peer::ShutdownHandle::from_sender(self.shutdown_tx.clone())
     }
 
+    // ===== Event Subscription =====
+
+    /// Subscribe to the raw cross-crate session API event stream.
+    ///
+    /// Returns an independent `mpsc::Receiver` for events published by this
+    /// coordinator on the internal `"session_to_app"` channel. Most
+    /// application code should prefer [`events`](Self::events), which wraps
+    /// this raw receiver and yields typed [`Event`](crate::api::events::Event)
+    /// values.
+    ///
+    /// Use this method only when building a custom peer type or diagnostic
+    /// tool that needs access to the raw event envelope.
     pub async fn subscribe_events(
         &self,
     ) -> crate::errors::Result<
@@ -937,7 +1022,7 @@ impl UnifiedCoordinator {
             })
     }
 
-    /// Return a typed, unfiltered [`EventReceiver`] that yields
+    /// Return a typed, unfiltered [`EventReceiver`](crate::api::stream_peer::EventReceiver) that yields
     /// [`crate::api::events::Event`] values across all sessions.
     ///
     /// Use when a single consumer needs every session API event (b2bua
@@ -946,14 +1031,16 @@ impl UnifiedCoordinator {
     ///
     /// The returned receiver already handles the downcast from the raw
     /// cross-crate broadcast and exposes filtering helpers like
-    /// [`EventReceiver::next_dtmf`], [`EventReceiver::next_incoming`], and
-    /// [`EventReceiver::next_transfer`].
+    /// [`EventReceiver::next_dtmf`](crate::api::stream_peer::EventReceiver::next_dtmf),
+    /// [`EventReceiver::next_incoming`](crate::api::stream_peer::EventReceiver::next_incoming),
+    /// and
+    /// [`EventReceiver::next_transfer`](crate::api::stream_peer::EventReceiver::next_transfer).
     pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {
         let rx = self.subscribe_events().await?;
         Ok(crate::api::stream_peer::EventReceiver::new(rx))
     }
 
-    /// Return an [`EventReceiver`] that only yields events whose
+    /// Return an [`EventReceiver`](crate::api::stream_peer::EventReceiver) that only yields events whose
     /// `call_id` matches `id`. Per-session filtering happens in the
     /// receiver's `next()` loop.
     ///
@@ -1067,7 +1154,7 @@ impl UnifiedCoordinator {
     }
 
     /// Retroactively link an existing session as a transfer leg of
-    /// `transferor_session_id`. Prefer [`make_transfer_leg`] — this
+    /// `transferor_session_id`. Prefer [`make_transfer_leg`](Self::make_transfer_leg) — this
     /// lower-level primitive accepts a race window in which dialog
     /// events fired before the linkage is set silently drop their
     /// corresponding progress NOTIFY.
@@ -1179,7 +1266,7 @@ impl UnifiedCoordinator {
     /// put the session into `EarlyMedia` (which starts a pass-through
     /// transmitter by default), call this to replace silence with a
     /// ringback tone, a "please hold" WAV, or any other
-    /// [`AudioSource`][crate::api::unified::AudioSource] variant.
+    /// [`AudioSource`] variant.
     ///
     /// On transition to `Active` (after `accept_call`), the state machine
     /// automatically swaps the transmitter back to `AudioSource::PassThrough`
@@ -1461,7 +1548,7 @@ impl UnifiedCoordinator {
     ///
     /// Primitive for attended-transfer orchestration: a caller managing two
     /// sessions (original + consultation) constructs the Replaces value from
-    /// the consultation session's [`DialogIdentity`] and passes it here for
+    /// the consultation session's [`DialogIdentity`](crate::api::types::DialogIdentity) and passes it here for
     /// the original session to send.
     pub async fn send_refer_with_replaces(
         &self,
@@ -1624,7 +1711,8 @@ impl UnifiedCoordinator {
     /// * `users` - Map of username -> password for authentication
     ///
     /// # Returns
-    /// Arc<RegistrarService> - The registrar service for managing registrations
+    ///
+    /// `Arc<RegistrarService>` for inspecting and managing registrations.
     pub async fn start_registration_server(
         &self,
         realm: &str,
