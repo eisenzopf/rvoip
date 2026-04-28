@@ -457,7 +457,15 @@ impl<H: CallHandler> CallbackPeer<H> {
             } => {
                 let handle = SessionHandle::new(call_id, coordinator);
                 handlers.spawn(async move {
-                    handler.on_transfer_request(handle, refer_to).await;
+                    let accepted = handler.on_transfer_request(handle.clone(), refer_to).await;
+                    let result = if accepted {
+                        handle.accept_refer().await
+                    } else {
+                        handle.reject_refer(603, "Decline").await
+                    };
+                    if let Err(e) = result {
+                        tracing::warn!("Failed to apply REFER handler decision: {}", e);
+                    }
                 });
             }
 

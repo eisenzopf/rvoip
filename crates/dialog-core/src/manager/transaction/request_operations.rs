@@ -285,8 +285,18 @@ impl DialogManager {
                     crate::errors::DialogError::protocol_error("REFER request requires remote tag in established dialog")
                 })?;
 
-                let target_uri = body_string.clone().unwrap_or_else(|| "sip:unknown".to_string());
-                dialog_quick::refer_for_dialog(
+                let target_uri = if let Some(body) = body_string.clone() {
+                    if body.starts_with("Refer-To: ") {
+                        body.trim_start_matches("Refer-To: ")
+                            .trim_end_matches("\r\n")
+                            .to_string()
+                    } else {
+                        body
+                    }
+                } else {
+                    "sip:unknown".to_string()
+                };
+                dialog_quick::refer_for_dialog_with_contact(
                     &template.call_id,
                     &template.local_uri.to_string(),
                     &local_tag,
@@ -295,7 +305,8 @@ impl DialogManager {
                     &target_uri,
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                    self.local_contact_uri(),
                 )
             },
 
@@ -347,11 +358,7 @@ impl DialogManager {
                 })?;
 
                 // Get event type from dialog's event_package field (RFC 6665)
-                let event_type = event_package.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error(
-                        "NOTIFY request requires event_package to be set on dialog"
-                    )
-                })?;
+                let event_type = event_package.unwrap_or("dialog");
 
                 // Get subscription state from dialog for RFC 6665 compliance
                 let sub_state_str = subscription_state.map(|s| s.to_header_value());
@@ -398,6 +405,12 @@ impl DialogManager {
                     crate::errors::DialogError::protocol_error(&format!("{} request requires remote tag in established dialog", method))
                 })?;
 
+                let contact = if matches!(method, Method::Update | Method::Refer | Method::Subscribe | Method::Notify) {
+                    self.local_contact_uri()
+                } else {
+                    None
+                };
+
                 // Use dialog template + utility function
                 let template_struct = dialog_utils::DialogRequestTemplate {
                     call_id: template.call_id.clone(),
@@ -409,7 +422,7 @@ impl DialogManager {
                     cseq: template.cseq_number,
                     local_address,
                     route_set: template.route_set.clone(),
-                    contact: self.local_contact_uri(),
+                    contact,
                 };
 
                 dialog_utils::request_builder_from_dialog_template(

@@ -1298,6 +1298,19 @@ impl InDialogRequestBuilder {
             .via(&local_addr.to_string(), &via_transport, Some(&branch))
             .max_forwards(self.max_forwards.into());
 
+        let has_contact_override = self
+            .custom_headers
+            .iter()
+            .any(|header| header.name() == HeaderName::Contact);
+        if matches!(
+            self.method,
+            Method::Refer | Method::Update | Method::Subscribe | Method::Notify
+        ) && !has_contact_override
+        {
+            let contact = default_contact_uri(&from_uri, local_addr, &via_transport);
+            builder = builder.contact(&contact, None);
+        }
+
         // Add Event header for NOTIFY requests
         if let Some(event) = &self.event_type {
             let event_header = Event::new(EventType::Token(event.clone()));
@@ -1364,9 +1377,17 @@ impl InDialogRequestBuilder {
     /// # Returns
     /// Pre-configured InDialogRequestBuilder for REFER
     pub fn for_refer(target_uri: impl Into<String>) -> Self {
-        Self::new(Method::Refer)
-            .with_body(format!("Refer-To: {}\r\n", target_uri.into()))
-            .with_content_type("message/sipfrag")
+        let target_uri = target_uri.into();
+        match Uri::from_str(&target_uri) {
+            Ok(uri) => {
+                let address = rvoip_sip_core::types::address::Address::new(uri);
+                Self::new(Method::Refer).header(TypedHeader::ReferTo(ReferTo::new(address)))
+            }
+            Err(_) => Self::new(Method::Refer).header(TypedHeader::Other(
+                HeaderName::ReferTo,
+                rvoip_sip_core::types::header::HeaderValue::Raw(target_uri.into_bytes()),
+            )),
+        }
     }
 
     /// Create an UPDATE request builder with dialog context
@@ -1410,7 +1431,9 @@ impl InDialogRequestBuilder {
     /// Pre-configured InDialogRequestBuilder for NOTIFY
     pub fn for_notify(event: impl Into<String>, body: Option<String>) -> Self {
         let event = event.into();
-        let mut builder = Self::new(Method::Notify).with_event(event.clone());
+        let mut builder = Self::new(Method::Notify)
+            .with_event(event.clone())
+            .with_subscription_state("active;expires=3600");
 
         if let Some(notification_body) = body {
             builder = builder
@@ -1442,6 +1465,105 @@ fn default_notify_content_type(event: &str) -> &'static str {
         "presence" => "application/pidf+xml",
         "refer" => "message/sipfrag",
         _ => "text/plain",
+    }
+}
+
+#[cfg(test)]
+mod in_dialog_builder_tests {
+    use super::*;
+    use rvoip_sip_core::types::headers::HeaderAccess;
+
+    fn header_count(request: &Request, name: HeaderName) -> usize {
+        request
+            .headers
+            .iter()
+            .filter(|header| header.name() == name)
+            .count()
+    }
+
+    fn apply_dialog(builder: InDialogRequestBuilder) -> InDialogRequestBuilder {
+        builder.from_dialog(
+            "call-123",
+            "sip:alice@example.com",
+            "alice-tag",
+            "sip:bob@example.com",
+            "bob-tag",
+            2,
+            "192.0.2.10:5070".parse().unwrap(),
+        )
+    }
+
+    #[test]
+    fn refer_builder_emits_refer_to_and_single_contact() {
+        let request = apply_dialog(InDialogRequestBuilder::for_refer("sip:carol@example.com"))
+            .build()
+            .unwrap();
+
+        assert_eq!(request.method(), Method::Refer);
+        assert_eq!(header_count(&request, HeaderName::ReferTo), 1);
+        assert_eq!(header_count(&request, HeaderName::Contact), 1);
+        assert_eq!(header_count(&request, HeaderName::ContentType), 0);
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[test]
+    fn target_refresh_builders_add_single_contact_by_default() {
+        let update = apply_dialog(InDialogRequestBuilder::for_update(None))
+            .build()
+            .unwrap();
+        assert_eq!(header_count(&update, HeaderName::Contact), 1);
+
+        let subscribe = apply_dialog(InDialogRequestBuilder::new(Method::Subscribe).header(
+            TypedHeader::Event(Event::new(EventType::Token("presence".to_string()))),
+        ))
+        .build()
+        .unwrap();
+        assert_eq!(header_count(&subscribe, HeaderName::Contact), 1);
+        rvoip_sip_core::validation::validate_wire_request(&subscribe).unwrap();
+
+        let notify = apply_dialog(InDialogRequestBuilder::for_notify(
+            "refer",
+            Some("SIP/2.0 200 OK".to_string()),
+        ))
+        .build()
+        .unwrap();
+        assert_eq!(header_count(&notify, HeaderName::Contact), 1);
+        assert_eq!(header_count(&notify, HeaderName::SubscriptionState), 1);
+        rvoip_sip_core::validation::validate_wire_request(&notify).unwrap();
+    }
+
+    #[test]
+    fn non_target_refresh_builders_do_not_gain_contact() {
+        let bye = apply_dialog(InDialogRequestBuilder::new(Method::Bye))
+            .build()
+            .unwrap();
+        assert_eq!(header_count(&bye, HeaderName::Contact), 0);
+
+        let info = apply_dialog(InDialogRequestBuilder::for_info("dtmf", None))
+            .build()
+            .unwrap();
+        assert_eq!(header_count(&info, HeaderName::Contact), 0);
+    }
+
+    #[test]
+    fn explicit_target_refresh_contact_is_not_duplicated() {
+        let explicit_contact = Contact::new_params(vec![ContactParamInfo {
+            address: rvoip_sip_core::types::address::Address::new(
+                "sip:alice@198.51.100.10:5080".parse().unwrap(),
+            ),
+        }]);
+
+        let request = apply_dialog(
+            InDialogRequestBuilder::for_update(None).header(TypedHeader::Contact(explicit_contact)),
+        )
+        .build()
+        .unwrap();
+
+        assert_eq!(header_count(&request, HeaderName::Contact), 1);
+        assert_eq!(
+            request.raw_header_value(&HeaderName::Contact).unwrap(),
+            "<sip:alice@198.51.100.10:5080>"
+        );
     }
 }
 

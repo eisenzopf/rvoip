@@ -298,6 +298,15 @@ impl DialogEventHub {
                 }
             }
 
+            SessionCoordinationEvent::CallCancelled { dialog_id, .. } => self
+                .dialog_manager
+                .get_session_id(&dialog_id)
+                .map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallCancelled {
+                        session_id,
+                    })
+                }),
+
             SessionCoordinationEvent::SessionRefreshed {
                 dialog_id,
                 expires_secs,

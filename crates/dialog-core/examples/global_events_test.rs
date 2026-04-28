@@ -9,14 +9,16 @@ use tracing::{info, Level};
 use tracing_subscriber;
 
 use rvoip_dialog_core::{
-    api::unified::UnifiedDialogApi,
-    config::DialogManagerConfig,
-    events::{DialogEvent, SessionCoordinationEvent},
+    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::DialogEventHub,
+};
+use rvoip_infra_common::events::{
+    cross_crate::RvoipCrossCrateEvent, EventCoordinatorConfig, GlobalEventCoordinator,
 };
 
 /// Global events test using unified API
 struct GlobalEventsTest {
     api: Arc<UnifiedDialogApi>,
+    event_coordinator: Arc<GlobalEventCoordinator>,
     local_addr: std::net::SocketAddr,
 }
 
@@ -32,13 +34,26 @@ impl GlobalEventsTest {
             .with_auto_options()
             .build();
 
-        // Create UnifiedDialogApi (handles transport and global events internally)
-        let api = UnifiedDialogApi::create(config).await?;
+        // Create UnifiedDialogApi and attach an isolated global event bus for the example.
+        let api = Arc::new(UnifiedDialogApi::create(config).await?);
+        let event_coordinator =
+            Arc::new(GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic()).await?);
+        let event_hub = DialogEventHub::new(
+            event_coordinator.clone(),
+            Arc::new(api.dialog_manager().as_ref().inner_manager().clone()),
+        )
+        .await?;
+        api.dialog_manager()
+            .as_ref()
+            .inner_manager()
+            .set_event_hub(event_hub)
+            .await;
 
-        info!("✅ Created UnifiedDialogApi with global event subscription");
+        info!("✅ Created UnifiedDialogApi with global event coordinator");
 
         Ok(Self {
-            api: Arc::new(api),
+            api,
+            event_coordinator,
             local_addr: "127.0.0.1:0".parse()?, // Placeholder, managed internally
         })
     }
@@ -51,39 +66,34 @@ impl GlobalEventsTest {
         self.api.start().await?;
         info!("✅ Started UnifiedDialogApi with global event processing");
 
-        // Set up additional event monitoring
-        let (session_tx, mut session_rx) =
-            tokio::sync::mpsc::channel::<SessionCoordinationEvent>(100);
-        let (dialog_tx, mut dialog_rx) = tokio::sync::mpsc::channel::<DialogEvent>(100);
+        // Monitor the current cross-crate event stream.
+        let mut dialog_to_session_rx = self
+            .event_coordinator
+            .subscribe("dialog_to_session")
+            .await?;
 
-        self.api.set_session_coordinator(session_tx).await?;
-        self.api.set_dialog_event_sender(dialog_tx).await?;
+        info!("✅ Cross-crate event monitoring subscription established");
 
-        info!("✅ Additional event monitoring channels established");
-
-        // Spawn event monitoring tasks
-        let session_monitor = tokio::spawn(async move {
+        // Spawn event monitoring task
+        let event_monitor = tokio::spawn(async move {
             let mut count = 0;
-            while let Some(event) = session_rx.recv().await {
+            while let Some(event) = dialog_to_session_rx.recv().await {
                 count += 1;
-                info!("📡 Session Event #{}: {:?}", count, event);
+                if let Some(RvoipCrossCrateEvent::DialogToSession(dialog_event)) =
+                    event.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+                {
+                    info!("📡 Dialog-to-session Event #{}: {:?}", count, dialog_event);
+                } else {
+                    info!("📡 Cross-crate Event #{}: {:?}", count, event);
+                }
                 if count >= 5 {
                     break;
                 }
             }
-            info!("✅ Session event monitoring complete ({} events)", count);
-        });
-
-        let dialog_monitor = tokio::spawn(async move {
-            let mut count = 0;
-            while let Some(event) = dialog_rx.recv().await {
-                count += 1;
-                info!("📞 Dialog Event #{}: {:?}", count, event);
-                if count >= 5 {
-                    break;
-                }
-            }
-            info!("✅ Dialog event monitoring complete ({} events)", count);
+            info!(
+                "✅ Cross-crate event monitoring complete ({} events)",
+                count
+            );
         });
 
         // Create test dialog
@@ -99,8 +109,7 @@ impl GlobalEventsTest {
         // Wait for event processing
         sleep(Duration::from_millis(500)).await;
 
-        session_monitor.abort();
-        dialog_monitor.abort();
+        event_monitor.abort();
 
         Ok(())
     }

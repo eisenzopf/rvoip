@@ -95,6 +95,18 @@ fn default_target_refresh_contact(
     }
 }
 
+fn contact_for_target_refresh(
+    override_contact: Option<String>,
+    from_uri: &str,
+    request_uri: &str,
+    route_set: &[Uri],
+    local_address: SocketAddr,
+) -> String {
+    override_contact.unwrap_or_else(|| {
+        default_target_refresh_contact(from_uri, request_uri, Some(route_set), local_address)
+    })
+}
+
 /// Quick BYE request creation for dialog termination
 ///
 /// Creates a BYE request from dialog context in a single function call.
@@ -239,19 +251,28 @@ pub fn refer_for_dialog_with_contact(
     contact_uri: Option<String>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    let from_uri_string = from_uri.into();
     let target_uri_str = target_uri.into();
+    let route_set = route_set.unwrap_or_default();
+    let contact_uri = contact_for_target_refresh(
+        contact_uri,
+        &from_uri_string,
+        &to_uri_string,
+        &route_set,
+        local_address,
+    );
 
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
-        from_uri: from_uri.into(),
+        from_uri: from_uri_string,
         from_tag: from_tag.into(),
         to_uri: to_uri_string.clone(),
         to_tag: to_tag.into(),
         request_uri: to_uri_string,
         cseq,
         local_address,
-        route_set: route_set.unwrap_or_default(),
-        contact: contact_uri,
+        route_set,
+        contact: Some(contact_uri),
     };
 
     // Build the REFER request without a body - we'll add the Refer-To header separately
@@ -533,16 +554,18 @@ pub fn notify_for_dialog(
     use crate::transaction::client::builders::InDialogRequestBuilder;
 
     let to_uri_string = to_uri.into();
+    let from_uri_string = from_uri.into();
+    let route_set = route_set.unwrap_or_default();
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
-        from_uri: from_uri.into(),
+        from_uri: from_uri_string,
         from_tag: from_tag.into(),
         to_uri: to_uri_string.clone(),
         to_tag: to_tag.into(),
         request_uri: to_uri_string.clone(),
         cseq,
         local_address,
-        route_set: route_set.unwrap_or_default(),
+        route_set,
         contact: None,
     };
 
@@ -925,7 +948,13 @@ pub fn response_for_dialog_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rvoip_sip_core::types::headers::HeaderAccess;
+    use rvoip_sip_core::HeaderName;
     use std::net::SocketAddr;
+
+    fn header_count(request: &Request, name: HeaderName) -> usize {
+        request.headers.iter().filter(|h| h.name() == name).count()
+    }
 
     #[tokio::test]
     async fn test_quick_bye_for_dialog() {
@@ -983,9 +1012,44 @@ mod tests {
             refer_to_header.unwrap().uri().to_string(),
             "sip:charlie@example.com"
         );
+        assert_eq!(header_count(&refer_request, HeaderName::Contact), 1);
+        assert_eq!(
+            refer_request
+                .raw_header_value(&HeaderName::Contact)
+                .unwrap(),
+            "<sip:alice@127.0.0.1:5060>"
+        );
+        rvoip_sip_core::validation::validate_wire_request(&refer_request).unwrap();
 
         // Body should be empty since Refer-To is now a header
         assert_eq!(refer_request.body().len(), 0, "Body should be empty");
+    }
+
+    #[tokio::test]
+    async fn reinvite_with_explicit_contact_has_exactly_one_contact() {
+        let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+
+        let request = reinvite_for_dialog(
+            "call-456",
+            "sip:alice@example.com",
+            "alice-tag",
+            "sip:bob@example.com",
+            "bob-tag",
+            "v=0\r\n",
+            3,
+            local_addr,
+            None,
+            Some("sip:alice@192.0.2.10:5070".to_string()),
+        )
+        .expect("Failed to create re-INVITE");
+
+        assert_eq!(request.method(), Method::Invite);
+        assert_eq!(header_count(&request, HeaderName::Contact), 1);
+        assert_eq!(
+            request.raw_header_value(&HeaderName::Contact).unwrap(),
+            "<sip:alice@192.0.2.10:5070>"
+        );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
 
     #[tokio::test]
@@ -1014,9 +1078,6 @@ mod tests {
 
     #[tokio::test]
     async fn update_for_dialog_uses_sips_contact_for_tls_route() {
-        use rvoip_sip_core::types::headers::HeaderAccess;
-        use rvoip_sip_core::HeaderName;
-
         let local_addr: SocketAddr = "192.0.2.10:5071".parse().unwrap();
         let route: Uri = "sips:proxy.example.com:5061;lr;transport=tls"
             .parse()
@@ -1043,6 +1104,32 @@ mod tests {
             "<sips:alice@192.0.2.10:5071;transport=tls>"
         );
         rvoip_sip_core::validation::validate_wire_request(&update_request).unwrap();
+    }
+
+    #[tokio::test]
+    async fn notify_for_dialog_includes_contact_event_and_subscription_state() {
+        let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+
+        let request = notify_for_dialog(
+            "call-notify",
+            "sip:alice@example.com",
+            "alice-tag",
+            "sip:bob@example.com",
+            "bob-tag",
+            "refer",
+            Some("SIP/2.0 200 OK".to_string()),
+            Some("terminated;reason=noresource".to_string()),
+            4,
+            local_addr,
+            None,
+        )
+        .expect("Failed to create NOTIFY");
+
+        assert_eq!(request.method(), Method::Notify);
+        assert_eq!(header_count(&request, HeaderName::Contact), 1);
+        assert!(request.header(&HeaderName::Event).is_some());
+        assert!(request.header(&HeaderName::SubscriptionState).is_some());
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
 
     #[tokio::test]
@@ -1119,7 +1206,7 @@ mod tests {
             "bob-tag",
             "dialog",
             Some(notification_body.to_string()),
-            None, // subscription_state
+            Some("active;expires=60".to_string()),
             6,
             local_addr,
             None,

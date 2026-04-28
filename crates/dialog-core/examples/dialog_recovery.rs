@@ -10,13 +10,18 @@ use tracing::{info, Level};
 use tracing_subscriber;
 
 use rvoip_dialog_core::{
-    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::SessionCoordinationEvent,
+    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::DialogEventHub,
+};
+use rvoip_infra_common::events::{
+    cross_crate::{DialogToSessionEvent, RvoipCrossCrateEvent},
+    EventCoordinatorConfig, GlobalEventCoordinator,
 };
 
 /// Dialog recovery example using unified API
 struct DialogRecoveryExample {
     primary_api: Arc<UnifiedDialogApi>,
     backup_api: Arc<UnifiedDialogApi>,
+    event_coordinator: Arc<GlobalEventCoordinator>,
     primary_addr: SocketAddr,
     #[allow(dead_code)]
     backup_addr: SocketAddr,
@@ -40,15 +45,31 @@ impl DialogRecoveryExample {
             .with_auto_options()
             .build();
 
-        let primary_api = UnifiedDialogApi::create(primary_config).await?;
-        let backup_api = UnifiedDialogApi::create(backup_config).await?;
+        let primary_api = Arc::new(UnifiedDialogApi::create(primary_config).await?);
+        let backup_api = Arc::new(UnifiedDialogApi::create(backup_config).await?);
+        let event_coordinator =
+            Arc::new(GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic()).await?);
+
+        for api in [&primary_api, &backup_api] {
+            let event_hub = DialogEventHub::new(
+                event_coordinator.clone(),
+                Arc::new(api.dialog_manager().as_ref().inner_manager().clone()),
+            )
+            .await?;
+            api.dialog_manager()
+                .as_ref()
+                .inner_manager()
+                .set_event_hub(event_hub)
+                .await;
+        }
 
         info!("✅ Primary API created for recovery testing");
         info!("✅ Backup API created for recovery testing");
 
         Ok(Self {
-            primary_api: Arc::new(primary_api),
-            backup_api: Arc::new(backup_api),
+            primary_api,
+            backup_api,
+            event_coordinator,
             primary_addr: "127.0.0.1:0".parse()?, // Placeholder, managed internally
             backup_addr: "127.0.0.1:0".parse()?,  // Placeholder, managed internally
         })
@@ -208,49 +229,58 @@ impl DialogRecoveryExample {
 
     /// Demonstrate session coordination during recovery
     async fn run_recovery_coordination(&self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("\n🔄 === Recovery Session Coordination ===");
+        info!("\n🔄 === Recovery Cross-Crate Event Coordination ===");
 
-        // Set up session coordination for monitoring
-        let (session_tx, mut session_rx) =
-            tokio::sync::mpsc::channel::<SessionCoordinationEvent>(100);
+        let mut dialog_to_session_rx = self
+            .event_coordinator
+            .subscribe("dialog_to_session")
+            .await?;
 
         // Restart primary for coordination demo
         self.primary_api.start().await?;
-        self.primary_api.set_session_coordinator(session_tx).await?;
 
-        info!("✅ Session coordination established for recovery monitoring");
+        info!("✅ Cross-crate event subscription established for recovery monitoring");
 
         // Spawn task to handle recovery events
         let event_handler = tokio::spawn(async move {
             let mut event_count = 0;
-            while let Some(event) = session_rx.recv().await {
+            while let Some(event) = dialog_to_session_rx.recv().await {
                 event_count += 1;
-                match event {
-                    SessionCoordinationEvent::IncomingCall { dialog_id, .. } => {
-                        info!(
-                            "[{}] 📞 Recovery: Incoming call for dialog: {}",
-                            event_count, dialog_id
-                        );
+                if let Some(RvoipCrossCrateEvent::DialogToSession(dialog_event)) =
+                    event.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+                {
+                    match dialog_event {
+                        DialogToSessionEvent::IncomingCall { session_id, .. } => {
+                            info!(
+                                "[{}] 📞 Recovery: Incoming call for session: {}",
+                                event_count, session_id
+                            );
+                        }
+                        DialogToSessionEvent::CallTerminated { session_id, reason } => {
+                            info!(
+                                "[{}] 💥 Recovery: Call terminated for session: {} - {:?}",
+                                event_count, session_id, reason
+                            );
+                        }
+                        DialogToSessionEvent::CallStateChanged {
+                            session_id,
+                            new_state,
+                            reason,
+                        } => {
+                            info!(
+                                "[{}] 🔄 Recovery: Call {} state changed: {:?} ({:?})",
+                                event_count, session_id, new_state, reason
+                            );
+                        }
+                        _ => {
+                            info!(
+                                "[{}] 📡 Recovery: Other dialog-to-session event",
+                                event_count
+                            );
+                        }
                     }
-                    SessionCoordinationEvent::CallTerminated { dialog_id, reason } => {
-                        info!(
-                            "[{}] 💥 Recovery: Call terminated for dialog: {} - {}",
-                            event_count, dialog_id, reason
-                        );
-                    }
-                    SessionCoordinationEvent::DialogStateChanged {
-                        dialog_id,
-                        new_state,
-                        previous_state,
-                    } => {
-                        info!(
-                            "[{}] 🔄 Recovery: Dialog {} state changed: {} -> {}",
-                            event_count, dialog_id, previous_state, new_state
-                        );
-                    }
-                    _ => {
-                        info!("[{}] 📡 Recovery: Other session event", event_count);
-                    }
+                } else {
+                    info!("[{}] 📡 Recovery: Other cross-crate event", event_count);
                 }
 
                 // Stop after handling some events
@@ -289,7 +319,7 @@ impl DialogRecoveryExample {
 
         info!("✅ Enhanced Resilience:");
         info!("   • Hybrid mode supports all recovery scenarios");
-        info!("   • Unified session coordination across all services");
+        info!("   • Unified cross-crate event coordination across all services");
         info!("   • Consistent state management regardless of mode");
 
         info!("✅ Operational Simplicity:");

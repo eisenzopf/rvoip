@@ -10,12 +10,17 @@ use tracing::{info, Level};
 use tracing_subscriber;
 
 use rvoip_dialog_core::{
-    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::SessionCoordinationEvent,
+    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::DialogEventHub,
+};
+use rvoip_infra_common::events::{
+    cross_crate::{DialogToSessionEvent, RvoipCrossCrateEvent},
+    EventCoordinatorConfig, GlobalEventCoordinator,
 };
 
 /// Multi-dialog management example using unified API
 struct MultiDialogExample {
     hybrid_api: Arc<UnifiedDialogApi>,
+    event_coordinator: Arc<GlobalEventCoordinator>,
     #[allow(dead_code)]
     local_addr: SocketAddr,
 }
@@ -32,12 +37,25 @@ impl MultiDialogExample {
             .with_auto_options()
             .build();
 
-        let api = UnifiedDialogApi::create(config).await?;
+        let api = Arc::new(UnifiedDialogApi::create(config).await?);
+        let event_coordinator =
+            Arc::new(GlobalEventCoordinator::new(EventCoordinatorConfig::monolithic()).await?);
+        let event_hub = DialogEventHub::new(
+            event_coordinator.clone(),
+            Arc::new(api.dialog_manager().as_ref().inner_manager().clone()),
+        )
+        .await?;
+        api.dialog_manager()
+            .as_ref()
+            .inner_manager()
+            .set_event_hub(event_hub)
+            .await;
 
         info!("✅ Hybrid API created for multi-dialog management");
 
         Ok(Self {
-            hybrid_api: Arc::new(api),
+            hybrid_api: api,
+            event_coordinator,
             local_addr: "127.0.0.1:0".parse()?, // Placeholder, actual address is managed internally
         })
     }
@@ -161,53 +179,55 @@ impl MultiDialogExample {
 
     /// Demonstrate session coordination with multiple dialogs
     async fn run_session_coordination(&self) -> Result<(), Box<dyn std::error::Error>> {
-        info!("\n🔄 === Multi-Dialog Session Coordination ===");
+        info!("\n🔄 === Multi-Dialog Cross-Crate Event Coordination ===");
 
-        // Set up session coordination channel
-        let (session_tx, mut session_rx) =
-            tokio::sync::mpsc::channel::<SessionCoordinationEvent>(100);
+        let mut dialog_to_session_rx = self
+            .event_coordinator
+            .subscribe("dialog_to_session")
+            .await?;
 
-        // Set session coordinator
-        self.hybrid_api.set_session_coordinator(session_tx).await?;
-        info!("✅ Session coordination established for multi-dialog management");
+        info!("✅ Cross-crate event subscription established for multi-dialog management");
 
-        // Spawn task to handle session events
+        // Spawn task to handle dialog-to-session events
         let event_handler = tokio::spawn(async move {
             let mut event_count = 0;
-            while let Some(event) = session_rx.recv().await {
+            while let Some(event) = dialog_to_session_rx.recv().await {
                 event_count += 1;
-                match event {
-                    SessionCoordinationEvent::IncomingCall { dialog_id, .. } => {
-                        info!(
-                            "[{}] 📞 Incoming call for dialog: {}",
-                            event_count, dialog_id
-                        );
+                if let Some(RvoipCrossCrateEvent::DialogToSession(dialog_event)) =
+                    event.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+                {
+                    match dialog_event {
+                        DialogToSessionEvent::IncomingCall { session_id, .. } => {
+                            info!(
+                                "[{}] 📞 Incoming call for session: {}",
+                                event_count, session_id
+                            );
+                        }
+                        DialogToSessionEvent::CallTerminated { session_id, reason } => {
+                            info!(
+                                "[{}] 💥 Call terminated for session: {} - {:?}",
+                                event_count, session_id, reason
+                            );
+                        }
+                        DialogToSessionEvent::CallStateChanged {
+                            session_id,
+                            new_state,
+                            reason,
+                        } => {
+                            info!(
+                                "[{}] 🔄 Call state changed for {}: {:?} ({:?})",
+                                event_count, session_id, new_state, reason
+                            );
+                        }
+                        _ => {
+                            info!(
+                                "[{}] 📡 Other dialog-to-session event received",
+                                event_count
+                            );
+                        }
                     }
-                    SessionCoordinationEvent::CallAnswered { dialog_id, .. } => {
-                        info!(
-                            "[{}] ✅ Call answered for dialog: {}",
-                            event_count, dialog_id
-                        );
-                    }
-                    SessionCoordinationEvent::CallTerminated { dialog_id, reason } => {
-                        info!(
-                            "[{}] 💥 Call terminated for dialog: {} - {}",
-                            event_count, dialog_id, reason
-                        );
-                    }
-                    SessionCoordinationEvent::DialogStateChanged {
-                        dialog_id,
-                        new_state,
-                        previous_state,
-                    } => {
-                        info!(
-                            "[{}] 🔄 Dialog state changed for {}: {} -> {}",
-                            event_count, dialog_id, previous_state, new_state
-                        );
-                    }
-                    _ => {
-                        info!("[{}] 📡 Other session event received", event_count);
-                    }
+                } else {
+                    info!("[{}] 📡 Other cross-crate event received", event_count);
                 }
 
                 // Stop after handling some events
@@ -215,7 +235,7 @@ impl MultiDialogExample {
                     break;
                 }
             }
-            info!("✅ Session coordination handled {} events", event_count);
+            info!("✅ Cross-crate coordination handled {} events", event_count);
         });
 
         // Let the coordination run briefly
@@ -277,7 +297,7 @@ impl MultiDialogExample {
         info!("✅ Simplified Multi-Dialog Management:");
         info!("   • One configuration system for all dialog types");
         info!("   • Unified statistics and monitoring across all dialogs");
-        info!("   • Single session coordination channel");
+        info!("   • Single global cross-crate event stream");
 
         info!("✅ Standards Compliance:");
         info!("   • Each dialog can act as UAC or UAS per transaction");
@@ -338,7 +358,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("");
     info!("✅ Demonstrated concurrent dialog management");
     info!("✅ Showcased hybrid mode capabilities");
-    info!("✅ Illustrated unified session coordination");
+    info!("✅ Illustrated unified cross-crate event coordination");
     info!("✅ Validated multi-dialog architecture benefits");
     info!("");
     info!("🚀 Ready for production multi-dialog scenarios!");

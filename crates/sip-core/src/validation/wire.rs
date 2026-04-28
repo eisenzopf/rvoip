@@ -19,6 +19,10 @@ fn has_header(headers: &[TypedHeader], name: HeaderName) -> bool {
     headers.iter().any(|h| h.name() == name)
 }
 
+fn header_count(headers: &[TypedHeader], name: HeaderName) -> usize {
+    headers.iter().filter(|h| h.name() == name).count()
+}
+
 fn content_length_value(headers: &[TypedHeader]) -> Result<Option<u32>> {
     headers
         .iter()
@@ -102,13 +106,44 @@ pub fn validate_wire_request(request: &Request) -> Result<()> {
         )));
     }
 
-    if matches!(request.method, Method::Invite | Method::Register)
-        && !has_header(headers, HeaderName::Contact)
+    if matches!(request.method, Method::Invite | Method::Refer) {
+        let contact_count = header_count(headers, HeaderName::Contact);
+        if contact_count != 1 {
+            return Err(validation_error(format!(
+                "{} request must contain exactly one Contact header, found {}",
+                request.method, contact_count
+            )));
+        }
+    }
+
+    if request.method == Method::Refer && !has_header(headers, HeaderName::ReferTo) {
+        return Err(validation_error("REFER request missing Refer-To header"));
+    }
+
+    if request.method == Method::Subscribe && !has_header(headers, HeaderName::Event) {
+        return Err(validation_error("SUBSCRIBE request missing Event header"));
+    }
+
+    if request.method == Method::Notify {
+        if !has_header(headers, HeaderName::Event) {
+            return Err(validation_error("NOTIFY request missing Event header"));
+        }
+        if !has_header(headers, HeaderName::SubscriptionState) {
+            return Err(validation_error(
+                "NOTIFY request missing Subscription-State header",
+            ));
+        }
+    }
+
+    if matches!(
+        request.method,
+        Method::Update | Method::Subscribe | Method::Notify
+    ) && !has_header(headers, HeaderName::Contact)
     {
-        return Err(validation_error(format!(
-            "{} request missing Contact header",
-            request.method
-        )));
+        tracing::warn!(
+            method = %request.method,
+            "target-refresh request missing recommended Contact header"
+        );
     }
 
     Ok(())
@@ -151,7 +186,8 @@ pub fn validate_wire_response(response: &Response) -> Result<()> {
 mod tests {
     use super::*;
     use crate::builder::{SimpleRequestBuilder, SimpleResponseBuilder};
-    use crate::types::{ContentLength, StatusCode};
+    use crate::types::{ContentLength, ReferTo, StatusCode};
+    use std::str::FromStr;
 
     fn valid_request() -> Request {
         SimpleRequestBuilder::register("sip:registrar.example.com")
@@ -170,6 +206,55 @@ mod tests {
     #[test]
     fn accepts_valid_empty_request() {
         assert!(validate_wire_request(&valid_request()).is_ok());
+    }
+
+    #[test]
+    fn accepts_register_query_without_contact() {
+        let mut request = valid_request();
+        request.headers.retain(|h| h.name() != HeaderName::Contact);
+        assert!(validate_wire_request(&request).is_ok());
+    }
+
+    fn valid_refer_request() -> Request {
+        SimpleRequestBuilder::new(Method::Refer, "sip:bob@example.com")
+            .unwrap()
+            .from("Alice", "sip:alice@example.com", Some("tag-1"))
+            .to("Bob", "sip:bob@example.com", Some("tag-2"))
+            .call_id("refer-call-1")
+            .cseq(2)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK-refer"))
+            .max_forwards(70)
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .header(TypedHeader::ReferTo(
+                ReferTo::from_str("sip:carol@example.com").unwrap(),
+            ))
+            .header(TypedHeader::ContentLength(ContentLength::new(0)))
+            .build()
+    }
+
+    #[test]
+    fn accepts_valid_refer_request() {
+        assert!(validate_wire_request(&valid_refer_request()).is_ok());
+    }
+
+    #[test]
+    fn rejects_refer_missing_contact() {
+        let mut request = valid_refer_request();
+        request.headers.retain(|h| h.name() != HeaderName::Contact);
+        assert!(validate_wire_request(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("Contact"));
+    }
+
+    #[test]
+    fn rejects_refer_missing_refer_to() {
+        let mut request = valid_refer_request();
+        request.headers.retain(|h| h.name() != HeaderName::ReferTo);
+        assert!(validate_wire_request(&request)
+            .unwrap_err()
+            .to_string()
+            .contains("Refer-To"));
     }
 
     #[test]

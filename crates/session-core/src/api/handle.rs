@@ -128,6 +128,18 @@ impl SessionHandle {
         self.coordinator.send_refer(&self.call_id, target).await
     }
 
+    /// Accept a pending inbound REFER on this call.
+    pub async fn accept_refer(&self) -> Result<()> {
+        self.coordinator.accept_refer(&self.call_id).await
+    }
+
+    /// Reject a pending inbound REFER on this call.
+    pub async fn reject_refer(&self, status_code: u16, reason: &str) -> Result<()> {
+        self.coordinator
+            .reject_refer(&self.call_id, status_code, reason)
+            .await
+    }
+
     /// Attended-transfer primitive: send REFER with a pre-built `Replaces`
     /// header value (RFC 3891). `replaces` is the raw header value
     /// (`call-id;to-tag=<remote>;from-tag=<local>`) — use

@@ -452,6 +452,12 @@ impl TransactionIntegration for DialogManager {
                         crate::errors::DialogError::protocol_error(&format!("{} request requires remote tag in established dialog", method))
                     })?;
 
+                    let contact = if matches!(method, Method::Update | Method::Refer | Method::Subscribe | Method::Notify) {
+                        self.local_contact_uri()
+                    } else {
+                        None
+                    };
+
                     // Use dialog template + utility function
                     let template_struct = DialogRequestTemplate {
                         call_id: template.call_id,
@@ -463,7 +469,7 @@ impl TransactionIntegration for DialogManager {
                         cseq: template.cseq_number,
                         local_address,
                         route_set: template.route_set.clone(),
-                        contact: None,
+                        contact,
                     };
 
                     request_builder_from_dialog_template(
@@ -1966,9 +1972,6 @@ impl DialogManager {
             invite_tx_id
         );
 
-        self.terminate_dialog_for_tx(invite_tx_id, "INVITE transaction cancelled")
-            .await;
-
         // Cancel the transaction using transaction-core
         let cancel_tx_id = self
             .transaction_manager
@@ -1977,6 +1980,9 @@ impl DialogManager {
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to cancel INVITE transaction: {}", e),
             })?;
+
+        self.terminate_dialog_for_tx(invite_tx_id, "INVITE transaction cancelled")
+            .await;
 
         debug!(
             "Successfully cancelled INVITE transaction {}, created CANCEL transaction {}",

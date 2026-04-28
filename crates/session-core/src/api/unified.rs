@@ -1268,9 +1268,137 @@ impl UnifiedCoordinator {
 
     /// Send REFER message to initiate transfer (this will trigger callback on recipient)
     pub async fn send_refer(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
+        if let Ok(mut session) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+        {
+            session.transfer_target = Some(refer_to.to_string());
+            session.transfer_state = crate::session_store::state::TransferState::TransferInitiated;
+            self.helpers
+                .state_machine
+                .store
+                .update_session(session)
+                .await?;
+        }
+
         self.dialog_adapter
             .send_refer_session(session_id, refer_to)
             .await
+    }
+
+    /// Accept a pending inbound REFER request and send RFC 3515 acceptance
+    /// responses/NOTIFYs through the state machine.
+    pub async fn accept_refer(&self, session_id: &SessionId) -> Result<()> {
+        let session = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await?;
+        let refer_to = session.transfer_target.clone().ok_or_else(|| {
+            SessionError::Other(format!(
+                "No pending REFER target for session {}",
+                session_id
+            ))
+        })?;
+        let transaction_id = session.refer_transaction_id.clone().ok_or_else(|| {
+            SessionError::Other(format!(
+                "No pending REFER transaction for session {}",
+                session_id
+            ))
+        })?;
+
+        self.helpers
+            .state_machine
+            .process_event(
+                session_id,
+                EventType::TransferRequested {
+                    refer_to,
+                    transfer_type: "blind".to_string(),
+                    transaction_id: transaction_id.clone(),
+                },
+            )
+            .await?;
+
+        if let Ok(mut session) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+        {
+            if session.refer_transaction_id.as_deref() == Some(transaction_id.as_str()) {
+                session.refer_transaction_id = None;
+                self.helpers
+                    .state_machine
+                    .store
+                    .update_session(session)
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reject a pending inbound REFER request with a final response.
+    pub async fn reject_refer(
+        &self,
+        session_id: &SessionId,
+        status_code: u16,
+        reason: &str,
+    ) -> Result<()> {
+        let session = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await?;
+        let transaction_id = session.refer_transaction_id.clone().ok_or_else(|| {
+            SessionError::Other(format!(
+                "No pending REFER transaction for session {}",
+                session_id
+            ))
+        })?;
+
+        let event = rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(
+            rvoip_infra_common::events::cross_crate::SessionToDialogEvent::ReferResponse {
+                transaction_id: transaction_id.clone(),
+                accept: false,
+                status_code,
+                reason: reason.to_string(),
+            },
+        );
+
+        self.global_coordinator
+            .publish(Arc::new(event))
+            .await
+            .map_err(|e| {
+                SessionError::Other(format!("Failed to publish REFER rejection: {}", e))
+            })?;
+
+        if let Ok(mut session) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+        {
+            if session.refer_transaction_id.as_deref() == Some(transaction_id.as_str()) {
+                session.refer_transaction_id = None;
+                session.transfer_target = None;
+                session.transfer_state = crate::session_store::state::TransferState::None;
+                self.helpers
+                    .state_machine
+                    .store
+                    .update_session(session)
+                    .await?;
+            }
+        }
+
+        Ok(())
     }
 
     /// Send an in-dialog INFO request (RFC 6086) with a caller-chosen
@@ -1341,6 +1469,23 @@ impl UnifiedCoordinator {
         target_uri: &str,
         replaces: &str,
     ) -> Result<()> {
+        if let Ok(mut session) = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+        {
+            session.transfer_target = Some(target_uri.to_string());
+            session.replaces_header = Some(replaces.to_string());
+            session.transfer_state = crate::session_store::state::TransferState::TransferInitiated;
+            self.helpers
+                .state_machine
+                .store
+                .update_session(session)
+                .await?;
+        }
+
         self.dialog_adapter
             .send_refer_with_replaces(session_id, target_uri, replaces)
             .await

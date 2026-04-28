@@ -366,7 +366,8 @@ pub async fn execute_action(
                 .await?;
         }
         Action::TransferCall(target) => {
-            // Send REFER for blind transfer
+            session.transfer_target = Some(target.clone());
+            session.transfer_state = crate::session_store::state::TransferState::TransferInitiated;
             dialog_adapter
                 .send_refer_session(&session.session_id, target)
                 .await?;

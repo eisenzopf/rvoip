@@ -165,8 +165,10 @@ pub enum Event {
     // ===== Transfer Events =====
     /// REFER request received
     ///
-    /// The state machine has already sent 202 Accepted. Developer can
-    /// create a new session to the transfer target or ignore the transfer.
+    /// Callback handlers may accept or reject the REFER through their return
+    /// value. Stream/unified users can call `accept_refer` or `reject_refer`;
+    /// if they do nothing, session-core preserves the legacy behavior and
+    /// accepts the REFER after a short grace period.
     ReferReceived {
         call_id: CallId,
         refer_to: String,

@@ -127,23 +127,6 @@ pub fn request_builder_from_dialog_template(
                 builder = builder.with_sdp(sdp_content);
             }
 
-            // Add Contact header if specified in template
-            if let Some(contact_uri) = &template.contact {
-                use rvoip_sip_core::types::address::Address;
-                use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
-                use rvoip_sip_core::types::uri::Uri;
-
-                // Parse the contact URI and create a Contact header
-                if let Ok(contact_uri_parsed) = contact_uri.parse::<Uri>() {
-                    let contact_addr = Address::new(contact_uri_parsed);
-                    let contact_param = ContactParamInfo {
-                        address: contact_addr,
-                    };
-                    let contact_header = Contact::new_params(vec![contact_param]);
-                    builder = builder.header(TypedHeader::Contact(contact_header));
-                }
-            }
-
             builder.build()?
         }
 
@@ -500,6 +483,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn quick_refer_template_builds_wire_ready_refer() {
+        let template = DialogRequestTemplate {
+            call_id: "refer-call-123".to_string(),
+            from_uri: "sip:alice@example.com".to_string(),
+            from_tag: "alice-tag".to_string(),
+            to_uri: "sip:bob@example.com".to_string(),
+            to_tag: "bob-tag".to_string(),
+            request_uri: "sip:bob@example.com".to_string(),
+            cseq: 3,
+            local_address: "192.0.2.10:5070".parse().unwrap(),
+            route_set: vec![],
+            contact: Some("sip:alice@192.0.2.10:5070".to_string()),
+        };
+
+        let request = helpers::quick_refer_from_template(&template, "sip:carol@example.com")
+            .expect("Failed to create REFER from template");
+
+        assert_eq!(request.method(), Method::Refer);
+        assert_eq!(request.body().len(), 0);
+        assert_eq!(
+            request
+                .headers
+                .iter()
+                .filter(|header| header.name() == HeaderName::Contact)
+                .count(),
+            1
+        );
+        assert_eq!(
+            request
+                .headers
+                .iter()
+                .filter(|header| header.name() == HeaderName::ReferTo)
+                .count(),
+            1
+        );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_dialog_transaction_context() {
         use crate::transaction::client::builders::InviteBuilder;
 
@@ -552,13 +574,18 @@ pub mod helpers {
         template: &DialogRequestTemplate,
         target_uri: &str,
     ) -> Result<Request> {
-        request_builder_from_dialog_template(
-            template,
-            Method::Refer,
-            Some(format!("Refer-To: {}\r\n", target_uri)),
-            Some("message/sipfrag".to_string()),
-            None,
-        )
+        let mut request =
+            request_builder_from_dialog_template(template, Method::Refer, None, None, None)?;
+
+        let uri = target_uri
+            .parse::<Uri>()
+            .map_err(|e| Error::Other(format!("Invalid Refer-To URI '{}': {}", target_uri, e)))?;
+        let address = rvoip_sip_core::types::address::Address::new(uri);
+        request.headers.push(TypedHeader::ReferTo(
+            rvoip_sip_core::types::refer_to::ReferTo::new(address),
+        ));
+
+        Ok(request)
     }
 
     /// Quick UPDATE request creation from dialog template

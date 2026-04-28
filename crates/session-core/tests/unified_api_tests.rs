@@ -315,19 +315,6 @@ async fn test_conference_operations() {
     assert!(in_conf1.is_ok());
 }
 
-// REFER requires a Confirmed dialog, which in turn requires a real peer
-// answering on the wire. We do not try to pair two in-process StreamPeers in
-// the same Tokio runtime — it's been unreliable. Transfer coverage lives in
-// `tests/blind_transfer_integration.rs`, which drives three separate example
-// binaries as subprocesses.
-
-#[tokio::test]
-#[ignore = "start_attended_transfer / complete_attended_transfer methods were removed in v3"]
-async fn test_attended_transfer() {
-    // These methods no longer exist on UnifiedCoordinator.
-    // Attended transfer is now handled via the state machine events directly.
-}
-
 #[tokio::test]
 async fn test_dtmf_operations() {
     let coordinator = UnifiedCoordinator::new(test_config(15214)).await.unwrap();

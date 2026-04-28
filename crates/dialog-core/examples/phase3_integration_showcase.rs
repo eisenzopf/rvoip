@@ -246,6 +246,7 @@ impl LifecycleTest {
                 dialog_id,
                 "test-event".to_string(),
                 Some("Unified API notification".to_string()),
+                Some("active;expires=60".to_string()),
             ),
         )
         .await;

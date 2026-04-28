@@ -345,17 +345,79 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
         // still in place for variants that haven't been migrated yet —
         // new typed dispatches go here. Returning early avoids
         // double-handling.
-        if let Some(typed) = event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
-            if let RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallRedirected {
-                session_id,
-                status_code,
-                targets,
-                q_values,
-            }) = typed
-            {
-                self.handle_call_redirected_typed(session_id, *status_code, targets, q_values)
+        if let Some(RvoipCrossCrateEvent::DialogToSession(typed)) =
+            event.as_any().downcast_ref::<RvoipCrossCrateEvent>()
+        {
+            match typed {
+                DialogToSessionEvent::CallRedirected {
+                    session_id,
+                    status_code,
+                    targets,
+                    q_values,
+                } => {
+                    self.handle_call_redirected_typed(session_id, *status_code, targets, q_values)
+                        .await?;
+                    return Ok(());
+                }
+                DialogToSessionEvent::CallCancelled { session_id } => {
+                    self.handle_call_cancelled_session(SessionId(session_id.clone()))
+                        .await?;
+                    return Ok(());
+                }
+                DialogToSessionEvent::CallFailed {
+                    session_id,
+                    status_code,
+                    reason_phrase,
+                } => {
+                    self.handle_call_failed_parts(
+                        SessionId(session_id.clone()),
+                        *status_code,
+                        reason_phrase.clone(),
+                    )
                     .await?;
-                return Ok(());
+                    return Ok(());
+                }
+                DialogToSessionEvent::CallTerminated { session_id, reason } => {
+                    self.handle_call_terminated_parts(
+                        SessionId(session_id.clone()),
+                        format!("{:?}", reason),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                DialogToSessionEvent::TransferRequested {
+                    session_id,
+                    refer_to,
+                    transfer_type,
+                    transaction_id,
+                } => {
+                    self.handle_transfer_requested_parts(
+                        SessionId(session_id.clone()),
+                        refer_to.clone(),
+                        format!("{:?}", transfer_type).to_ascii_lowercase(),
+                        transaction_id.clone(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                DialogToSessionEvent::NotifyReceived {
+                    session_id,
+                    event_package,
+                    subscription_state,
+                    content_type,
+                    body,
+                } => {
+                    self.handle_notify_received_parts(
+                        SessionId(session_id.clone()),
+                        event_package.clone(),
+                        subscription_state.clone(),
+                        content_type.clone(),
+                        body.clone(),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                _ => {}
             }
         }
 
@@ -1000,14 +1062,6 @@ impl SessionCrossCrateEventHandler {
         };
         let session_id = SessionId(session_id_str);
 
-        if !self.is_our_session(&session_id).await {
-            debug!(
-                "Ignoring CallFailed for session {} - not in our store",
-                session_id
-            );
-            return Ok(());
-        }
-
         let status = self
             .extract_field(event_str, "status_code: ")
             .and_then(|s| {
@@ -1019,6 +1073,24 @@ impl SessionCrossCrateEventHandler {
         let reason = self
             .extract_field(event_str, "reason_phrase: \"")
             .unwrap_or_else(|| "Failure".to_string());
+
+        self.handle_call_failed_parts(session_id, status, reason)
+            .await
+    }
+
+    async fn handle_call_failed_parts(
+        &self,
+        session_id: SessionId,
+        status: u16,
+        reason: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring CallFailed for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
 
         info!(
             "[handle_call_failed] session={} status={} reason={}",
@@ -1493,8 +1565,11 @@ impl SessionCrossCrateEventHandler {
             warn!("Could not extract session_id from CallCancelled event");
             return Ok(());
         };
-        let session_id = SessionId(session_id_str);
+        self.handle_call_cancelled_session(SessionId(session_id_str))
+            .await
+    }
 
+    async fn handle_call_cancelled_session(&self, session_id: SessionId) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
                 "Ignoring CallCancelled for session {} - not in our store",
@@ -1570,23 +1645,6 @@ impl SessionCrossCrateEventHandler {
         );
 
         if let Some(session_id_str) = self.extract_session_id(event_str) {
-            let session_id = SessionId(session_id_str.clone());
-
-            // Skip if this session isn't ours
-            if self
-                .state_machine
-                .store
-                .get_session(&session_id)
-                .await
-                .is_err()
-            {
-                debug!(
-                    "Ignoring CallTerminated for session {} - not in our store",
-                    session_id
-                );
-                return Ok(());
-            }
-
             info!(
                 "🎯 [handle_call_terminated] Extracted session_id: {}",
                 session_id_str
@@ -1595,43 +1653,69 @@ impl SessionCrossCrateEventHandler {
                 .extract_field(event_str, "reason: ")
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}",
-                  session_id, reason);
-
-            // Process DialogTerminated to complete Terminating → Terminated transition
-            // (DialogBYE was already processed when hangup was initiated)
-            if let Err(e) = self
-                .state_machine
-                .process_event(&session_id, EventType::DialogTerminated)
-                .await
-            {
-                error!("Failed to process dialog terminated: {}", e);
-            } else {
-                info!(
-                    "✅ [handle_call_terminated] DialogTerminated processed successfully for {}",
-                    session_id
-                );
-            }
-
-            // Publish CallEnded to the global coordinator's "session_to_app"
-            // channel, then release the session from the store + registry.
-            {
-                info!(
-                    "🔔 [handle_call_terminated] Publishing CallEnded for session {}",
-                    session_id
-                );
-                let api_event = crate::api::events::Event::CallEnded {
-                    call_id: session_id.clone(),
-                    reason: reason.clone(),
-                };
-                self.publish_and_release_session(api_event, session_id.clone())
-                    .await;
-            }
+            self.handle_call_terminated_parts(SessionId(session_id_str), reason)
+                .await?;
         } else {
             warn!("⚠️ [handle_call_terminated] Failed to extract session_id, cannot forward CallEnded event");
         }
 
         info!("🏁 [handle_call_terminated] Completed");
+        Ok(())
+    }
+
+    async fn handle_call_terminated_parts(
+        &self,
+        session_id: SessionId,
+        reason: String,
+    ) -> Result<()> {
+        // Skip if this session isn't ours
+        if self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .is_err()
+        {
+            debug!(
+                "Ignoring CallTerminated for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}",
+                  session_id, reason);
+
+        // Process DialogTerminated to complete Terminating → Terminated transition
+        // (DialogBYE was already processed when hangup was initiated)
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::DialogTerminated)
+            .await
+        {
+            error!("Failed to process dialog terminated: {}", e);
+        } else {
+            info!(
+                "✅ [handle_call_terminated] DialogTerminated processed successfully for {}",
+                session_id
+            );
+        }
+
+        // Publish CallEnded to the global coordinator's "session_to_app"
+        // channel, then release the session from the store + registry.
+        {
+            info!(
+                "🔔 [handle_call_terminated] Publishing CallEnded for session {}",
+                session_id
+            );
+            let api_event = crate::api::events::Event::CallEnded {
+                call_id: session_id.clone(),
+                reason: reason.clone(),
+            };
+            self.publish_and_release_session(api_event, session_id.clone())
+                .await;
+        }
+
         Ok(())
     }
 
@@ -1856,23 +1940,6 @@ impl SessionCrossCrateEventHandler {
 
     async fn handle_transfer_requested(&self, event_str: &str) -> Result<()> {
         if let Some(session_id_str) = self.extract_session_id(event_str) {
-            let session_id = SessionId(session_id_str.clone());
-
-            // Skip if this session isn't ours
-            if self
-                .state_machine
-                .store
-                .get_session(&session_id)
-                .await
-                .is_err()
-            {
-                debug!(
-                    "Ignoring TransferRequested for session {} - not in our store",
-                    session_id
-                );
-                return Ok(());
-            }
-
             let refer_to = self
                 .extract_field(event_str, "refer_to: \"")
                 .unwrap_or_else(|| "unknown".to_string());
@@ -1883,52 +1950,119 @@ impl SessionCrossCrateEventHandler {
                 .extract_field(event_str, "transaction_id: \"")
                 .unwrap_or_else(|| "unknown".to_string());
 
-            // RFC 3515 Compliance: Store transferor session ID
-            if let Ok(mut session) = self.state_machine.store.get_session(&session_id).await {
-                session.transferor_session_id = Some(session_id.clone());
-                if let Err(e) = self.state_machine.store.update_session(session).await {
-                    error!("Failed to store transferor session ID: {}", e);
+            self.handle_transfer_requested_parts(
+                SessionId(session_id_str),
+                refer_to,
+                transfer_type,
+                transaction_id,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_transfer_requested_parts(
+        &self,
+        session_id: SessionId,
+        refer_to: String,
+        transfer_type: String,
+        transaction_id: String,
+    ) -> Result<()> {
+        // Skip if this session isn't ours
+        if self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .is_err()
+        {
+            debug!(
+                "Ignoring TransferRequested for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        if let Ok(mut session) = self.state_machine.store.get_session(&session_id).await {
+            session.transfer_target = Some(refer_to.clone());
+            session.transfer_notify_dialog = session.dialog_id.clone();
+            session.refer_transaction_id = Some(transaction_id.clone());
+            if let Err(e) = self.state_machine.store.update_session(session).await {
+                error!("Failed to store transfer request fields: {}", e);
+            }
+        }
+
+        // Publish ReferReceived event to the global coordinator's "session_to_app" channel.
+        {
+            debug!("🔍 [DEBUG] Publishing ReferReceived event to global coordinator");
+            let api_event = crate::api::events::Event::ReferReceived {
+                call_id: session_id.clone(),
+                refer_to: refer_to.clone(),
+                referred_by: None, // TODO: Extract from event if available
+                replaces: None,    // TODO: Extract from event if available
+                transaction_id: transaction_id.clone(),
+                transfer_type: transfer_type.clone(),
+            };
+            let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+            let coordinator = self.global_coordinator.clone();
+            tokio::spawn(async move {
+                if let Err(e) = coordinator.publish(wrapped).await {
+                    tracing::warn!(
+                        "Failed to publish ReferReceived to global coordinator: {}",
+                        e
+                    );
                 }
+            });
+        }
+
+        let state_machine = self.state_machine.clone();
+        let session_for_default = session_id.clone();
+        let refer_to_for_default = refer_to.clone();
+        let transfer_type_for_default = transfer_type.clone();
+        let transaction_for_default = transaction_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let should_accept = state_machine
+                .store
+                .get_session(&session_for_default)
+                .await
+                .map(|session| {
+                    session.refer_transaction_id.as_deref()
+                        == Some(transaction_for_default.as_str())
+                })
+                .unwrap_or(false);
+
+            if !should_accept {
+                return;
             }
 
-            if let Err(e) = self
-                .state_machine
+            if let Err(e) = state_machine
                 .process_event(
-                    &session_id,
+                    &session_for_default,
                     EventType::TransferRequested {
-                        refer_to: refer_to.clone(),
-                        transfer_type: transfer_type.clone(),
-                        transaction_id: transaction_id.clone(),
+                        refer_to: refer_to_for_default,
+                        transfer_type: transfer_type_for_default,
+                        transaction_id: transaction_for_default.clone(),
                     },
                 )
                 .await
             {
-                error!("Failed to process TransferRequested: {}", e);
+                tracing::error!(
+                    "Failed to auto-accept pending TransferRequested for {}: {}",
+                    session_for_default,
+                    e
+                );
+                return;
             }
 
-            // Publish ReferReceived event to the global coordinator's "session_to_app" channel.
-            {
-                debug!("🔍 [DEBUG] Publishing ReferReceived event to global coordinator");
-                let api_event = crate::api::events::Event::ReferReceived {
-                    call_id: session_id.clone(),
-                    refer_to: refer_to.clone(),
-                    referred_by: None, // TODO: Extract from event if available
-                    replaces: None,    // TODO: Extract from event if available
-                    transaction_id: transaction_id.clone(),
-                    transfer_type: transfer_type.clone(),
-                };
-                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-                let coordinator = self.global_coordinator.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = coordinator.publish(wrapped).await {
-                        tracing::warn!(
-                            "Failed to publish ReferReceived to global coordinator: {}",
-                            e
-                        );
-                    }
-                });
+            if let Ok(mut session) = state_machine.store.get_session(&session_for_default).await {
+                if session.refer_transaction_id.as_deref() == Some(transaction_for_default.as_str())
+                {
+                    session.refer_transaction_id = None;
+                    let _ = state_machine.store.update_session(session).await;
+                }
             }
-        }
+        });
         Ok(())
     }
 
@@ -2124,6 +2258,31 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         };
         let session_id = SessionId(session_id_str);
+        let event_package = self
+            .extract_field(event_str, "event_package: \"")
+            .unwrap_or_default();
+        let subscription_state = self.extract_optional_field(event_str, "subscription_state: ");
+        let content_type = self.extract_optional_field(event_str, "content_type: ");
+        let body = self.extract_optional_field(event_str, "body: ");
+
+        self.handle_notify_received_parts(
+            session_id,
+            event_package,
+            subscription_state,
+            content_type,
+            body,
+        )
+        .await
+    }
+
+    async fn handle_notify_received_parts(
+        &self,
+        session_id: SessionId,
+        event_package: String,
+        subscription_state: Option<String>,
+        content_type: Option<String>,
+        body: Option<String>,
+    ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
                 "Ignoring NotifyReceived for session {} — not in our store",
@@ -2131,13 +2290,6 @@ impl SessionCrossCrateEventHandler {
             );
             return Ok(());
         }
-
-        let event_package = self
-            .extract_field(event_str, "event_package: \"")
-            .unwrap_or_default();
-        let subscription_state = self.extract_optional_field(event_str, "subscription_state: ");
-        let content_type = self.extract_optional_field(event_str, "content_type: ");
-        let body = self.extract_optional_field(event_str, "body: ");
 
         // Always surface the raw NOTIFY as a public event.
         let api_event = crate::api::events::Event::NotifyReceived {
@@ -2161,17 +2313,33 @@ impl SessionCrossCrateEventHandler {
             if is_sipfrag {
                 if let Some(body) = body {
                     if let Some((status_code, reason)) = parse_sipfrag_status_line(&body) {
+                        let transfer_target = self
+                            .state_machine
+                            .store
+                            .get_session(&session_id)
+                            .await
+                            .ok()
+                            .and_then(|session| session.transfer_target.clone())
+                            .unwrap_or_default();
                         let transfer_event = match status_code {
                             100..=199 => Some(crate::api::events::Event::TransferProgress {
                                 call_id: session_id.clone(),
                                 status_code,
                                 reason,
                             }),
-                            200..=299 => Some(crate::api::events::Event::TransferCompleted {
-                                old_call_id: session_id.clone(),
-                                new_call_id: session_id.clone(),
-                                target: String::new(),
-                            }),
+                            200..=299 => {
+                                if let Ok(mut session) =
+                                    self.state_machine.store.get_session(&session_id).await
+                                {
+                                    session.transfer_state = crate::session_store::state::TransferState::TransferCompleted;
+                                    let _ = self.state_machine.store.update_session(session).await;
+                                }
+                                Some(crate::api::events::Event::TransferCompleted {
+                                    old_call_id: session_id.clone(),
+                                    new_call_id: session_id.clone(),
+                                    target: transfer_target,
+                                })
+                            }
                             300..=699 => Some(crate::api::events::Event::TransferFailed {
                                 call_id: session_id.clone(),
                                 reason,
