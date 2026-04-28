@@ -184,6 +184,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut config = Config::on(&username, local_ip, local_port);
     config.local_uri = aor_uri.clone();
     config.contact_uri = Some(contact_uri.clone());
+    config.sip_advertised_addr = Some(SocketAddr::new(advertised_ip, local_port));
+    if is_tls {
+        config.tls_advertised_addr = Some(SocketAddr::new(advertised_ip, contact_port));
+    }
     config.sip_contact_mode = if is_tls {
         match contact_mode {
             TlsContactMode::ReachableContact => SipContactMode::ReachableContact,
@@ -220,6 +224,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     println!("[registration] Local bind: {}:{}", local_ip, local_port);
+    println!(
+        "[registration] SIP Via:    {}:{}",
+        advertised_ip, local_port
+    );
     if is_tls {
         println!(
             "[registration] TLS mode:   {}{}",
@@ -229,6 +237,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } else {
                 String::new()
             }
+        );
+        println!(
+            "[registration] TLS Via:    {}:{}",
+            advertised_ip, contact_port
         );
     }
     println!("[registration] AOR:        {}", aor_uri);

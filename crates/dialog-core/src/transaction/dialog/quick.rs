@@ -59,6 +59,42 @@ fn via_transport_for_uris(request_uri: &str, local_uri: &str) -> &'static str {
     }
 }
 
+fn via_transport_for_route_or_uris(
+    route_set: Option<&[Uri]>,
+    request_uri: &str,
+    local_uri: &str,
+) -> &'static str {
+    route_set
+        .and_then(|routes| routes.first())
+        .map(|route| via_transport_for_uri(&route.to_string()))
+        .filter(|transport| *transport != "UDP")
+        .unwrap_or_else(|| via_transport_for_uris(request_uri, local_uri))
+}
+
+fn default_target_refresh_contact(
+    from_uri: &str,
+    request_uri: &str,
+    route_set: Option<&[Uri]>,
+    local_address: SocketAddr,
+) -> String {
+    let user_part = if let Ok(parsed) = from_uri.parse::<Uri>() {
+        parsed
+            .user
+            .as_ref()
+            .map(|u| u.as_str().to_string())
+            .unwrap_or_else(|| "user".to_string())
+    } else {
+        "user".to_string()
+    };
+
+    let transport = via_transport_for_route_or_uris(route_set, request_uri, from_uri);
+    if transport.eq_ignore_ascii_case("TLS") || from_uri.starts_with("sips:") {
+        format!("sips:{}@{};transport=tls", user_part, local_address)
+    } else {
+        format!("sip:{}@{}", user_part, local_address)
+    }
+}
+
 /// Quick BYE request creation for dialog termination
 ///
 /// Creates a BYE request from dialog context in a single function call.
@@ -274,21 +310,44 @@ pub fn update_for_dialog(
     local_address: SocketAddr,
     route_set: Option<Vec<Uri>>,
 ) -> Result<Request> {
+    update_for_dialog_with_contact(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        sdp_content,
+        cseq,
+        local_address,
+        route_set,
+        None,
+    )
+}
+
+/// Quick UPDATE request creation with an explicit Contact override.
+pub fn update_for_dialog_with_contact(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    sdp_content: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact_uri: Option<String>,
+) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let from_uri_string = from_uri.into();
-
-    // Generate Contact URI for UPDATE request (RFC 3311 requirement)
-    // Extract user part from From URI if available, otherwise use "user"
-    let user_part = if let Ok(from_uri_parsed) = from_uri_string.parse::<Uri>() {
-        from_uri_parsed
-            .user
-            .as_ref()
-            .map(|u| u.as_str().to_string())
-            .unwrap_or_else(|| "user".to_string())
-    } else {
-        "user".to_string()
-    };
-    let contact_uri = format!("sip:{}@{}", user_part, local_address);
+    let route_set = route_set.unwrap_or_default();
+    let contact_uri = contact_uri.unwrap_or_else(|| {
+        default_target_refresh_contact(
+            &from_uri_string,
+            &to_uri_string,
+            Some(&route_set),
+            local_address,
+        )
+    });
 
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
@@ -299,7 +358,7 @@ pub fn update_for_dialog(
         request_uri: to_uri_string,
         cseq,
         local_address,
-        route_set: route_set.unwrap_or_default(),
+        route_set,
         contact: Some(contact_uri), // Include Contact header for target refresh capability
     };
 
@@ -924,6 +983,39 @@ mod tests {
         assert_eq!(update_request.call_id().unwrap().value(), "call-789");
         assert_eq!(update_request.cseq().unwrap().seq, 4);
         assert_eq!(update_request.body(), sdp_content.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn update_for_dialog_uses_sips_contact_for_tls_route() {
+        use rvoip_sip_core::types::headers::HeaderAccess;
+        use rvoip_sip_core::HeaderName;
+
+        let local_addr: SocketAddr = "192.0.2.10:5071".parse().unwrap();
+        let route: Uri = "sips:proxy.example.com:5061;lr;transport=tls"
+            .parse()
+            .unwrap();
+
+        let update_request = update_for_dialog(
+            "call-789",
+            "sip:alice@example.com",
+            "alice-tag",
+            "sip:bob@example.com",
+            "bob-tag",
+            Some("v=0\r\n".to_string()),
+            4,
+            local_addr,
+            Some(vec![route]),
+        )
+        .expect("Failed to create UPDATE");
+
+        assert_eq!(update_request.first_via_transport(), Some("TLS"));
+        assert_eq!(
+            update_request
+                .raw_header_value(&HeaderName::Contact)
+                .unwrap(),
+            "<sips:alice@192.0.2.10:5071;transport=tls>"
+        );
+        rvoip_sip_core::validation::validate_wire_request(&update_request).unwrap();
     }
 
     #[tokio::test]

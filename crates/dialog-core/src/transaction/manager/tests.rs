@@ -353,6 +353,12 @@ mod tests {
         assert!(addr.is_some());
         assert_eq!(addr.unwrap().to_string(), "192.168.1.10:5060");
 
+        // Test secure URI default port
+        let uri = Uri::from_str("sips:test@192.168.1.10").unwrap();
+        let addr = socket_addr_from_uri(&uri);
+        assert!(addr.is_some());
+        assert_eq!(addr.unwrap().to_string(), "192.168.1.10:5061");
+
         // Test with a non-IP URI
         let uri = Uri::from_str("sip:test@example.com:5080").unwrap();
         let addr = socket_addr_from_uri(&uri);

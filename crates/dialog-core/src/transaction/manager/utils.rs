@@ -23,6 +23,9 @@ use tracing::{debug, error, info, warn};
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{Host, TypedHeader};
+use rvoip_sip_transport::transport::TransportType;
+
+use crate::transaction::transport::multiplexed::select_transport_for_uri;
 
 use crate::transaction::client::ClientTransaction;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
@@ -124,7 +127,13 @@ impl ResponseBuilderExt for ResponseBuilder {
 /// ```
 pub fn socket_addr_from_uri(uri: &Uri) -> Option<SocketAddr> {
     let host = uri.host.to_string();
-    let port = uri.port.unwrap_or(5060); // Default to 5060 if no port specified
+    let port = uri.port.unwrap_or_else(|| {
+        if select_transport_for_uri(uri) == TransportType::Tls {
+            5061
+        } else {
+            5060
+        }
+    });
 
     // Try to parse the host as an IP address
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {

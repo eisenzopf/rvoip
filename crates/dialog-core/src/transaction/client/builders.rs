@@ -339,9 +339,9 @@ impl InviteBuilder {
         let from_tag = self
             .from_tag
             .unwrap_or_else(|| format!("tag-{}", Uuid::new_v4().simple()));
-        let via_transport = self
-            .via_transport
-            .unwrap_or_else(|| via_transport_for_uris(&request_uri, Some(&from_uri)));
+        let via_transport = self.via_transport.unwrap_or_else(|| {
+            via_transport_for_route_or_uris(&self.route_set, &request_uri, Some(&from_uri))
+        });
 
         // Build the request
         let mut builder = SimpleRequestBuilder::new(Method::Invite, &request_uri)
@@ -451,6 +451,18 @@ fn via_transport_for_uris(request_uri: &str, local_uri: Option<&str>) -> String 
         .unwrap_or(request_transport)
 }
 
+fn via_transport_for_route_or_uris(
+    route_set: &[Uri],
+    request_uri: &str,
+    local_uri: Option<&str>,
+) -> String {
+    route_set
+        .first()
+        .map(|route| via_transport_for_uri(&route.to_string()))
+        .filter(|transport| transport != "UDP")
+        .unwrap_or_else(|| via_transport_for_uris(request_uri, local_uri))
+}
+
 fn default_contact_uri(from_uri: &str, local_addr: SocketAddr, via_transport: &str) -> String {
     let user = from_uri
         .strip_prefix("sip:")
@@ -502,6 +514,28 @@ mod invite_builder_tests {
         assert_eq!(
             request.raw_header_value(&HeaderName::Contact).unwrap(),
             "<sips:1001@192.0.2.10:5070;transport=tls>"
+        );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
+
+    #[test]
+    fn invite_builder_uses_top_route_transport_for_via() {
+        let route: Uri = "sips:proxy.example.com:5061;lr;transport=tls"
+            .parse()
+            .unwrap();
+        let request = InviteBuilder::new()
+            .from_to("sip:1001@pbx.example.com", "sip:1002@pbx.example.com")
+            .request_uri("sip:1002@pbx.example.com")
+            .add_route(route)
+            .local_address("192.0.2.10:5071".parse().unwrap())
+            .with_sdp("v=0\r\n")
+            .build()
+            .unwrap();
+
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+        assert_eq!(
+            request.raw_header_value(&HeaderName::Contact).unwrap(),
+            "<sips:1001@192.0.2.10:5071;transport=tls>"
         );
         rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
     }
@@ -729,9 +763,9 @@ impl ByeBuilder {
 
         // Generate branch for this request
         let branch = generate_branch();
-        let via_transport = self
-            .via_transport
-            .unwrap_or_else(|| via_transport_for_uris(&request_uri, Some(&from_uri)));
+        let via_transport = self.via_transport.unwrap_or_else(|| {
+            via_transport_for_route_or_uris(&self.route_set, &request_uri, Some(&from_uri))
+        });
 
         // Build the request
         let mut builder = SimpleRequestBuilder::new(Method::Bye, &request_uri)
@@ -1248,9 +1282,9 @@ impl InDialogRequestBuilder {
 
         // Generate branch for this request
         let branch = generate_branch();
-        let via_transport = self
-            .via_transport
-            .unwrap_or_else(|| via_transport_for_uris(&request_uri, Some(&from_uri)));
+        let via_transport = self.via_transport.unwrap_or_else(|| {
+            via_transport_for_route_or_uris(&self.route_set, &request_uri, Some(&from_uri))
+        });
 
         // Build the request
         let mut builder = SimpleRequestBuilder::new(self.method.clone(), &request_uri)

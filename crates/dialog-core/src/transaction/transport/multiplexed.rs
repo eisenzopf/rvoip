@@ -7,7 +7,8 @@
 //! `sip:bob@host` defaults to UDP — we install a `MultiplexedTransport`
 //! as that single transport. It implements `Transport` itself and
 //! dispatches each `send_message` call to the appropriate underlying
-//! transport based on the SIP message's Request-URI (RFC 3261 §18.1.1).
+//! transport based on the SIP request next hop: the top Route URI when
+//! present, otherwise the Request-URI (RFC 3261 §8.1.2, §18.1.1).
 //!
 //! Responses are dispatched on whichever transport the underlying
 //! request arrived on; for outbound responses (server-side replies) we
@@ -20,7 +21,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rvoip_sip_core::{Message, Request};
+use rvoip_sip_core::{HeaderName, Message, Request, TypedHeader, Uri};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
@@ -28,11 +29,44 @@ use rvoip_sip_transport::{
 };
 use tracing::{debug, trace, warn};
 
-/// Picks the SIP transport flavour to use for a given Request-URI per
-/// RFC 3261 §26.2 (TLS is mandatory for `sips:` URIs) and §19.1.5
-/// (`;transport=` URI parameter).
+/// Returns the URI that determines the next hop for an outbound request:
+/// the first Route URI when present, otherwise the Request-URI. Route
+/// address parameters are folded back into the URI so `;transport=tls`
+/// on a name-addr Route still affects transport and default-port logic.
+pub fn next_hop_uri_for_request(request: &Request) -> Uri {
+    top_route_uri(request).unwrap_or_else(|| request.uri().clone())
+}
+
+/// Returns the top Route URI for an outbound request, when a route set is
+/// present.
+pub fn top_route_uri(request: &Request) -> Option<Uri> {
+    request
+        .headers
+        .iter()
+        .filter_map(|header| {
+            if header.name() == HeaderName::Route {
+                match header {
+                    TypedHeader::Route(route) => route.first().map(|entry| {
+                        let mut uri = entry.0.uri.clone();
+                        for param in &entry.0.params {
+                            uri = uri.with_parameter(param.clone());
+                        }
+                        uri
+                    }),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        })
+        .next()
+}
+
+/// Picks the SIP transport flavour to use for a request's next hop per
+/// RFC 3261 §8.1.2 / §18.1.1, §26.2 (TLS is mandatory for `sips:` URIs)
+/// and §19.1.5 (`;transport=` URI parameter).
 pub fn select_transport_for_request(request: &Request) -> TransportType {
-    select_transport_for_uri(request.uri())
+    select_transport_for_uri(&next_hop_uri_for_request(request))
 }
 
 /// Select transport from a URI alone.
@@ -68,7 +102,7 @@ pub fn select_transport_for_uri(uri: &rvoip_sip_core::Uri) -> TransportType {
 
 /// `Transport` implementation that owns a registry of underlying
 /// transports keyed by `TransportType` and dispatches `send_message`
-/// calls to whichever one matches the Request-URI.
+/// calls to whichever one matches the request next-hop URI.
 #[derive(Debug)]
 pub struct MultiplexedTransport {
     /// All registered transports keyed by their flavour. Populated at
@@ -112,8 +146,9 @@ impl MultiplexedTransport {
     /// Pick the underlying transport to use for a given outbound
     /// `Message` bound for `destination`.
     ///
-    /// - **Requests** route by Request-URI scheme + `;transport=`
-    ///   parameter (RFC 3261 §19.1.5, §26.2).
+    /// - **Requests** route by top Route URI when present, otherwise
+    ///   Request-URI, then by scheme + `;transport=` parameter (RFC 3261
+    ///   §8.1.2, §19.1.5, §26.2).
     /// - **Responses** must go back over the same connection-oriented
     ///   transport that received the matching request (RFC 3261 §17.2,
     ///   §18.2.2). The transport layer doesn't have the request
@@ -139,9 +174,9 @@ impl MultiplexedTransport {
                     Ok(transport.clone())
                 } else if want == TransportType::Tls {
                     Err(TransportError::UnsupportedTransport(format!(
-                        "{} requires TLS by Request-URI {}, but no TLS transport is registered",
+                        "{} requires TLS by next-hop URI {}, but no TLS transport is registered",
                         request.method(),
-                        request.uri()
+                        next_hop_uri_for_request(request)
                     )))
                 } else {
                     debug!(
@@ -463,6 +498,79 @@ mod tests {
         mux.send_message(msg, dest).await.unwrap();
         assert_eq!(tls.count(), 1, "sips: URI must route to TLS transport");
         assert_eq!(tcp.count(), 0);
+        assert_eq!(udp.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_uses_top_route_before_request_uri() {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::route::Route;
+        use rvoip_sip_core::{Method, TypedHeader, Uri};
+
+        let udp = CountingTransport::new("udp");
+        let tls = CountingTransport::new("tls");
+
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+        by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
+
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+
+        let route: Uri = "sips:proxy.example.com:5061;lr;transport=tls"
+            .parse()
+            .unwrap();
+        let req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("alice", "sip:alice@example.com", Some("tagA"))
+            .to("bob", "sip:bob@example.com", None)
+            .call_id("call-mux-route-test")
+            .cseq(1)
+            .header(TypedHeader::Route(Route::with_uri(route)))
+            .build();
+
+        let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
+        mux.send_message(Message::Request(req), dest).await.unwrap();
+        assert_eq!(tls.count(), 1, "top Route must select TLS");
+        assert_eq!(udp.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn dispatch_uses_transport_param_on_route_address() {
+        use rvoip_sip_core::builder::SimpleRequestBuilder;
+        use rvoip_sip_core::types::param::Param;
+        use rvoip_sip_core::types::route::Route;
+        use rvoip_sip_core::{Address, Method, TypedHeader, Uri};
+
+        let udp = CountingTransport::new("udp");
+        let tls = CountingTransport::new("tls");
+
+        let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
+        by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
+        by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
+
+        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+
+        let route_uri: Uri = "sip:proxy.example.com:5061".parse().unwrap();
+        let mut route_address = Address::new(route_uri);
+        route_address.params.push(Param::Lr);
+        route_address.params.push(Param::transport("tls"));
+        let route = Route::with_address(route_address);
+        let req = SimpleRequestBuilder::new(Method::Invite, "sip:bob@example.com")
+            .unwrap()
+            .from("alice", "sip:alice@example.com", Some("tagA"))
+            .to("bob", "sip:bob@example.com", None)
+            .call_id("call-mux-route-param-test")
+            .cseq(1)
+            .header(TypedHeader::Route(route))
+            .build();
+
+        let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
+        mux.send_message(Message::Request(req), dest).await.unwrap();
+        assert_eq!(
+            tls.count(),
+            1,
+            "Route address transport=tls must select TLS"
+        );
         assert_eq!(udp.count(), 0);
     }
 

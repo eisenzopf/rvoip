@@ -28,11 +28,12 @@ impl TransactionIntegration for DialogManager {
     ) -> DialogResult<TransactionKey> {
         debug!("Sending {} request for dialog {} using Phase 3 dialog functions", method, dialog_id);
 
-        // Get destination and dialog context
+        // Get dialog context and build the request. Destination is resolved
+        // from the final request next hop after Route headers are present.
         let (destination, request, event_package, subscription_state) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await
+            let fallback_destination = dialog.get_remote_target_address().await
                 .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?;
 
             // Convert body to String if provided
@@ -81,6 +82,12 @@ impl TransactionIntegration for DialogManager {
                 event_package.as_deref(),
                 subscription_state.as_ref()
             )?;
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request, event_package, subscription_state)
         };
@@ -188,7 +195,8 @@ impl DialogManager {
         event_package: Option<&str>,
         subscription_state: Option<&crate::dialog::subscription_state::SubscriptionState>,
     ) -> DialogResult<Request> {
-        let local_address = self.local_address_for_uri(&template.target_uri);
+        let local_address =
+            self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
         let request = match method {
             Method::Invite => {
                 // Distinguish between initial INVITE and re-INVITE based on remote tag
@@ -297,7 +305,7 @@ impl DialogManager {
                     crate::errors::DialogError::protocol_error("UPDATE request requires remote tag in established dialog")
                 })?;
 
-                dialog_quick::update_for_dialog(
+                dialog_quick::update_for_dialog_with_contact(
                     &template.call_id,
                     &template.local_uri.to_string(),
                     &local_tag,
@@ -306,7 +314,8 @@ impl DialogManager {
                     body_string, // SDP content
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                    self.local_contact_uri(),
                 )
             },
 

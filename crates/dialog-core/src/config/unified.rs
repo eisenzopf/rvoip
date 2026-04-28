@@ -208,16 +208,27 @@ impl DialogManagerConfig {
         self.dialog_config().local_address
     }
 
+    /// Address advertised in Via sent-by and fallback Contact generation
+    /// for non-TLS requests, when configured.
+    pub fn advertised_local_address(&self) -> Option<std::net::SocketAddr> {
+        self.dialog_config().advertised_local_address
+    }
+
     /// Local Contact URI override used for dialog-creating and
     /// target-refresh requests, when configured.
     pub fn local_contact_uri(&self) -> Option<&str> {
         self.dialog_config().local_contact_uri.as_deref()
     }
 
-    /// Local address to use for SIP TLS Via sent-by and fallback Contact
-    /// construction, when configured.
+    /// Local SIP TLS listener bind address, when configured.
     pub fn tls_local_address(&self) -> Option<std::net::SocketAddr> {
         self.dialog_config().tls_local_address
+    }
+
+    /// Address advertised in Via sent-by and fallback Contact generation
+    /// for TLS requests, when configured.
+    pub fn tls_advertised_local_address(&self) -> Option<std::net::SocketAddr> {
+        self.dialog_config().tls_advertised_local_address
     }
 
     /// Check if this configuration supports outgoing calls

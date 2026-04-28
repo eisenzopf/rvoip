@@ -720,7 +720,13 @@ fn extract_route_set(response: &Response, is_initiator: bool) -> Vec<Uri> {
                         routes
                             .0
                             .iter()
-                            .map(|route| route.uri().clone())
+                            .map(|route| {
+                                let mut uri = route.uri().clone();
+                                for param in &route.address().params {
+                                    uri = uri.with_parameter(param.clone());
+                                }
+                                uri
+                            })
                             .collect::<Vec<Uri>>(),
                     ),
                     _ => None,

@@ -80,6 +80,10 @@ pub struct Config {
     pub media_port_end: u16,
     /// Bind address for SIP
     pub bind_addr: SocketAddr,
+    /// Optional advertised address for SIP Via sent-by and fallback Contact
+    /// generation. This is distinct from [`Config::bind_addr`]: bind can be
+    /// `0.0.0.0`, while the advertised address must be routable by peers.
+    pub sip_advertised_addr: Option<SocketAddr>,
     /// Optional path to custom state table YAML
     /// Priority: 1) This config path, 2) RVOIP_STATE_TABLE env var, 3) Embedded default
     pub state_table_path: Option<String>,
@@ -198,6 +202,12 @@ pub struct Config {
     /// TLS listener address from [`Config::bind_addr`] by adding 1 to the
     /// port.
     pub tls_bind_addr: Option<SocketAddr>,
+
+    /// Optional advertised address for SIP TLS Via sent-by and fallback
+    /// Contact generation. This is distinct from [`Config::tls_bind_addr`]:
+    /// bind can be `0.0.0.0`, while the advertised address must be routable
+    /// by peers.
+    pub tls_advertised_addr: Option<SocketAddr>,
 
     /// Optional Contact URI override used by dialog-core for
     /// dialog-creating and target-refresh requests. Registrations can
@@ -383,6 +393,7 @@ impl Config {
             media_port_start: 16000,
             media_port_end: 17000,
             bind_addr: SocketAddr::new(ip, port),
+            sip_advertised_addr: None,
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
@@ -397,6 +408,7 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
+            tls_advertised_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -432,6 +444,7 @@ impl Config {
             media_port_start: 16000,
             media_port_end: 17000,
             bind_addr: SocketAddr::new(ip, port),
+            sip_advertised_addr: None,
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
@@ -446,6 +459,7 @@ impl Config {
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
+            tls_advertised_addr: None,
             contact_uri: None,
             tls_cert_path: None,
             tls_key_path: None,
@@ -480,6 +494,9 @@ impl Config {
         self.sip_tls_mode = SipTlsMode::ClientAndServer;
         self.sip_contact_mode = SipContactMode::ReachableContact;
         self.tls_bind_addr = Some(tls_bind_addr);
+        if self.tls_advertised_addr.is_none() && !tls_bind_addr.ip().is_unspecified() {
+            self.tls_advertised_addr = Some(tls_bind_addr);
+        }
         self.tls_cert_path = Some(cert_path.into());
         self.tls_key_path = Some(key_path.into());
         self
@@ -1662,8 +1679,10 @@ impl UnifiedCoordinator {
             .with_session_timer(config.session_timer_secs)
             .with_min_se(config.session_timer_min_se)
             .with_dialog_config(|mut dialog| {
+                dialog.advertised_local_address = config.sip_advertised_addr;
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.tls_local_address = dialog_tls_local_address;
+                dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog
             })
             .build();

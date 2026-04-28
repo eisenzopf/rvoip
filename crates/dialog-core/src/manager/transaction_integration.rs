@@ -178,13 +178,15 @@ impl TransactionIntegration for DialogManager {
             method, dialog_id
         );
 
-        // Get destination and dialog context
+        // Get dialog context and build the request. Destination is resolved
+        // from the final request next hop after Route headers are present.
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await.ok_or_else(|| {
-                crate::errors::DialogError::routing_error("No remote target address available")
-            })?;
+            let fallback_destination =
+                dialog.get_remote_target_address().await.ok_or_else(|| {
+                    crate::errors::DialogError::routing_error("No remote target address available")
+                })?;
 
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
@@ -242,7 +244,8 @@ impl TransactionIntegration for DialogManager {
                 _ => None,
             };
 
-            let local_address = self.local_address_for_uri(&template.target_uri);
+            let local_address =
+                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
 
             // Build request using Phase 3 dialog quick functions (MUCH simpler!)
             let request = match method {
@@ -365,7 +368,7 @@ impl TransactionIntegration for DialogManager {
                         crate::errors::DialogError::protocol_error("UPDATE request requires remote tag in established dialog")
                     })?;
 
-                    dialog_quick::update_for_dialog(
+                    dialog_quick::update_for_dialog_with_contact(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
@@ -374,7 +377,8 @@ impl TransactionIntegration for DialogManager {
                         body_string.clone(),
                         template.cseq_number,
                         local_address,
-                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                        self.local_contact_uri(),
                     )
                 },
 
@@ -485,6 +489,12 @@ impl TransactionIntegration for DialogManager {
                     inject_session_timer_headers(&mut request, secs, min_se);
                 }
             }
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request)
         };
@@ -686,11 +696,12 @@ impl DialogManager {
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await.ok_or_else(|| {
-                crate::errors::DialogError::routing_error(
-                    "No remote target address available for auth retry",
-                )
-            })?;
+            let fallback_destination =
+                dialog.get_remote_target_address().await.ok_or_else(|| {
+                    crate::errors::DialogError::routing_error(
+                        "No remote target address available for auth retry",
+                    )
+                })?;
 
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
 
@@ -711,7 +722,8 @@ impl DialogManager {
             // The challenge was a final response on the original INVITE, so no
             // remote tag was established. Rebuild as an initial INVITE with
             // the same Call-ID (dialog.create_request_template carries it).
-            let local_address = self.local_address_for_uri(&template.target_uri);
+            let local_address =
+                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     Some("User"),
@@ -764,6 +776,12 @@ impl DialogManager {
                 header_name,
                 HeaderValue::Raw(auth_header_value.into_bytes()),
             ));
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request)
         };
@@ -836,11 +854,12 @@ impl DialogManager {
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await.ok_or_else(|| {
-                crate::errors::DialogError::routing_error(
-                    "No remote target address available for 422 retry",
-                )
-            })?;
+            let fallback_destination =
+                dialog.get_remote_target_address().await.ok_or_else(|| {
+                    crate::errors::DialogError::routing_error(
+                        "No remote target address available for 422 retry",
+                    )
+                })?;
 
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
 
@@ -856,7 +875,8 @@ impl DialogManager {
                 }
             };
 
-            let local_address = self.local_address_for_uri(&template.target_uri);
+            let local_address =
+                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     Some("User"),
@@ -895,6 +915,12 @@ impl DialogManager {
             // required Min-SE floor.
             inject_100rel_policy(&mut request, self.config_100rel_policy());
             inject_session_timer_headers(&mut request, session_secs, min_se);
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request)
         };
@@ -977,11 +1003,12 @@ impl DialogManager {
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await.ok_or_else(|| {
-                crate::errors::DialogError::routing_error(
-                    "No remote target address available for initial INVITE",
-                )
-            })?;
+            let fallback_destination =
+                dialog.get_remote_target_address().await.ok_or_else(|| {
+                    crate::errors::DialogError::routing_error(
+                        "No remote target address available for initial INVITE",
+                    )
+                })?;
 
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
 
@@ -997,7 +1024,8 @@ impl DialogManager {
                 }
             };
 
-            let local_address = self.local_address_for_uri(&template.target_uri);
+            let local_address =
+                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
             let mut invite_builder = InviteBuilder::new()
                 .from_detailed(
                     Some("User"),
@@ -1040,6 +1068,12 @@ impl DialogManager {
             if let Some((secs, min_se)) = self.config_session_timer_settings() {
                 inject_session_timer_headers(&mut request, secs, min_se);
             }
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request)
         };
@@ -2010,11 +2044,12 @@ impl DialogManager {
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog.get_remote_target_address().await.ok_or_else(|| {
-                crate::errors::DialogError::routing_error(
-                    "No remote target address available for PRACK",
-                )
-            })?;
+            let fallback_destination =
+                dialog.get_remote_target_address().await.ok_or_else(|| {
+                    crate::errors::DialogError::routing_error(
+                        "No remote target address available for PRACK",
+                    )
+                })?;
 
             let invite_cseq = dialog.invite_cseq.ok_or_else(|| {
                 crate::errors::DialogError::protocol_error(
@@ -2040,7 +2075,7 @@ impl DialogManager {
             let local_uri = dialog.local_uri.to_string();
             let target_uri = dialog.remote_uri.clone();
             let remote_uri = dialog.remote_uri.to_string();
-            let local_address = self.local_address_for_uri(&target_uri);
+            let local_address = self.local_address_for_target_and_routes(&target_uri, &route_set);
 
             let request = crate::transaction::dialog::prack_for_dialog(
                 call_id,
@@ -2062,6 +2097,12 @@ impl DialogManager {
                 message: format!("Failed to build PRACK: {}", e),
                 context: None,
             })?;
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request)
         };

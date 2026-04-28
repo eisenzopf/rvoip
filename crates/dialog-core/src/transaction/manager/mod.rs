@@ -199,7 +199,9 @@ use crate::transaction::server::{
 };
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::{Timer, TimerFactory, TimerManager, TimerSettings};
-use crate::transaction::transport::multiplexed::select_transport_for_request;
+use crate::transaction::transport::multiplexed::{
+    next_hop_uri_for_request, select_transport_for_request, top_route_uri,
+};
 use crate::transaction::transport::{
     NetworkInfoForSdp, TransportCapabilities, TransportCapabilitiesExt, TransportInfo,
     WebSocketStatus,
@@ -2041,9 +2043,15 @@ impl TransactionManager {
 
         if sip_diagnostics_enabled() {
             if let Some(via) = modified_request.first_via() {
+                let top_route = top_route_uri(&modified_request)
+                    .map(|uri| uri.to_string())
+                    .unwrap_or_else(|| "<none>".to_string());
                 info!(
                     method = %modified_request.method(),
                     uri = %modified_request.uri(),
+                    top_route = %top_route,
+                    next_hop = %next_hop_uri_for_request(&modified_request),
+                    destination = %destination,
                     top_via = %via,
                     "RVOIP_SIP_DIAG final outgoing request after transaction normalization"
                 );
@@ -2147,8 +2155,12 @@ impl TransactionManager {
         // Create the ACK request
         let ack_request = self.create_ack_for_2xx(invite_tx_id, response).await?;
 
-        // Try to get a destination from the Contact header first
-        let destination =
+        // ACK follows the established dialog route set: top Route if present,
+        // otherwise the remote target in the Contact-derived Request-URI.
+        let destination = utils::socket_addr_from_uri(&next_hop_uri_for_request(&ack_request));
+
+        // If the ACK has no route-set destination, try Contact explicitly.
+        let contact_destination =
             if let Some(TypedHeader::Contact(contact)) = response.header(&HeaderName::Contact) {
                 if let Some(contact_addr) = contact.addresses().next() {
                     // Try to parse the URI as a socket address
@@ -2164,8 +2176,8 @@ impl TransactionManager {
                 None
             };
 
-        // If we couldn't get a destination from the Contact header, use the original destination
-        let destination = if let Some(dest) = destination {
+        // If we couldn't get a route or Contact destination, use the original destination.
+        let destination = if let Some(dest) = destination.or(contact_destination) {
             dest
         } else {
             // Fall back to the original destination

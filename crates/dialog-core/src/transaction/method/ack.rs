@@ -199,9 +199,17 @@ pub fn create_ack_for_2xx(
         .header(TypedHeader::MaxForwards(MaxForwards::new(70)))
         .header(TypedHeader::ContentLength(ContentLength::new(0)));
 
-    // Copy Route headers from the response if any
-    if let Some(route_header) = ok_response.header(&HeaderName::RecordRoute) {
-        builder = builder.header(route_header.clone());
+    // Build the ACK route set from Record-Route. For a UAC-created dialog,
+    // the route set is the response Record-Route values in reverse order
+    // (RFC 3261 §12.1.2). Do not copy Record-Route itself into the ACK.
+    let mut route_set = Vec::new();
+    for header in &ok_response.headers {
+        if let TypedHeader::RecordRoute(record_route) = header {
+            route_set.extend(record_route.iter().map(|entry| entry.address().clone()));
+        }
+    }
+    for route_address in route_set.into_iter().rev() {
+        builder = builder.header(TypedHeader::Route(Route::with_address(route_address)));
     }
 
     Ok(builder.build())
@@ -407,6 +415,62 @@ mod tests {
         let ack_via = ack.header(&HeaderName::Via).unwrap();
         let invite_via = invite.header(&HeaderName::Via).unwrap();
         assert_ne!(ack_via, invite_via);
+    }
+
+    #[test]
+    fn ack_for_2xx_builds_route_from_record_route_without_copying_record_route() {
+        let invite = SimpleRequestBuilder::new(Method::Invite, "sips:bob@example.com")
+            .expect("request builder")
+            .from("Alice", "sips:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sips:bob@example.com", None)
+            .call_id("test-call-id-tls-ack")
+            .cseq(101)
+            .via(
+                "192.0.2.10:5071",
+                "TLS",
+                Some("z9hG4bK.originalbranchvalue"),
+            )
+            .max_forwards(70)
+            .build();
+        let mut ok_response =
+            SimpleResponseBuilder::response_from_request(&invite, StatusCode::Ok, Some("OK"))
+                .to("Bob", "sips:bob@example.com", Some("bob-tag-resp"))
+                .contact("sips:bob@192.0.2.20:5071;transport=tls", Some("Bob"))
+                .build();
+        ok_response.headers.push(TypedHeader::RecordRoute(
+            RecordRoute::from_str(
+                "<sip:proxy1.example.com;lr>, <sips:proxy2.example.com;lr;transport=tls>",
+            )
+            .unwrap(),
+        ));
+        let local_addr = SocketAddr::from_str("192.0.2.10:5071").unwrap();
+
+        let ack = create_ack_for_2xx(&invite, &ok_response, &local_addr).unwrap();
+
+        assert_eq!(ack.first_via_transport(), Some("TLS"));
+        assert!(
+            ack.header(&HeaderName::RecordRoute).is_none(),
+            "ACK must not copy Record-Route"
+        );
+
+        let route_uris: Vec<String> = ack
+            .headers
+            .iter()
+            .filter_map(|header| {
+                if let TypedHeader::Route(route) = header {
+                    Some(route.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            route_uris,
+            vec![
+                "<sips:proxy2.example.com>;lr;transport=tls".to_string(),
+                "<sip:proxy1.example.com>;lr".to_string(),
+            ]
+        );
     }
 
     #[test]

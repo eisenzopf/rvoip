@@ -8,6 +8,7 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_transport::transport::TransportType;
 
 /// Template for creating dialog-aware SIP requests
 ///
@@ -46,8 +47,9 @@ pub fn generate_branch() -> String {
 /// This helper allows dialog-core to delegate request creation to transaction-core
 /// for proper RFC 3261 compliance and architectural separation.
 ///
-/// **NOTE**: This is a simplified implementation that provides basic functionality.
-/// For production use, consider using more sophisticated request builders.
+/// **Deprecated legacy helper**: prefer the transport-aware request builders in
+/// `transaction::dialog` / `transaction::client`. This fallback still preserves
+/// TLS/SIPS transport metadata for callers that have not migrated yet.
 pub fn create_request_from_dialog_template(
     template: &DialogRequestTemplate,
     local_address: std::net::SocketAddr,
@@ -87,14 +89,24 @@ pub fn create_request_from_dialog_template(
         template.method.clone(),
     )));
 
+    let next_hop_uri = template.route_set.first().unwrap_or(&template.target_uri);
+    let via_transport =
+        match crate::transaction::transport::multiplexed::select_transport_for_uri(next_hop_uri) {
+            TransportType::Udp => "UDP",
+            TransportType::Tcp => "TCP",
+            TransportType::Tls => "TLS",
+            TransportType::Ws => "WS",
+            TransportType::Wss => "WSS",
+        };
+
     // Via header with local address and new branch
     let via = Via::new(
         "SIP",
         "2.0",
-        "UDP",
+        via_transport,
         &local_address.ip().to_string(),
         Some(local_address.port()),
-        vec![Param::branch(&generate_branch())],
+        vec![Param::branch(&generate_branch()), Param::Rport(None)],
     )
     .unwrap_or_else(|e| {
         // Log the error for debugging
@@ -108,7 +120,7 @@ pub fn create_request_from_dialog_template(
         Via::new(
             "SIP",
             "2.0",
-            "UDP",
+            via_transport,
             &local_address.ip().to_string(),
             Some(local_address.port()),
             vec![],
@@ -137,8 +149,25 @@ pub fn create_request_from_dialog_template(
         template.method,
         Method::Invite | Method::Subscribe | Method::Update
     ) {
-        let contact_uri = Uri::new(Scheme::Sip, Host::Address(local_address.ip()))
-            .with_port(local_address.port());
+        let user = template
+            .local_uri
+            .user
+            .as_ref()
+            .map(|user| user.as_str())
+            .unwrap_or("user");
+        let mut contact_uri = Uri::new(
+            if via_transport == "TLS" {
+                Scheme::Sips
+            } else {
+                Scheme::Sip
+            },
+            Host::Address(local_address.ip()),
+        )
+        .with_user(user)
+        .with_port(local_address.port());
+        if via_transport == "TLS" {
+            contact_uri = contact_uri.with_parameter(Param::transport("tls"));
+        }
 
         let contact_addr = Address::new(contact_uri);
         let contact_info = ContactParamInfo {
@@ -185,4 +214,42 @@ pub fn create_request_from_dialog_template(
     }
 
     request
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_template_helper_uses_tls_for_sips_route() {
+        let template = DialogRequestTemplate {
+            method: Method::Update,
+            target_uri: "sip:bob@example.com".parse().unwrap(),
+            call_id: "legacy-template-tls".to_string(),
+            local_uri: "sip:alice@example.com".parse().unwrap(),
+            remote_uri: "sip:bob@example.com".parse().unwrap(),
+            local_tag: Some("local-tag".to_string()),
+            remote_tag: Some("remote-tag".to_string()),
+            cseq_number: 2,
+            route_set: vec!["sips:proxy.example.com:5061;lr;transport=tls"
+                .parse()
+                .unwrap()],
+        };
+
+        let request = create_request_from_dialog_template(
+            &template,
+            "192.0.2.10:5071".parse().unwrap(),
+            None,
+            None,
+        );
+
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+        let contact = request.header(&HeaderName::Contact).unwrap().to_string();
+        assert!(
+            contact.contains("sips:alice@192.0.2.10:5071;transport=tls"),
+            "unexpected Contact: {}",
+            contact
+        );
+        rvoip_sip_core::validation::validate_wire_request(&request).unwrap();
+    }
 }

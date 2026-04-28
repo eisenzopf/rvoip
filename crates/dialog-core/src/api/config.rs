@@ -181,7 +181,7 @@ impl Default for RelUsage {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialogConfig {
-    /// Local address for SIP communication
+    /// Local bind address for SIP communication
     ///
     /// The socket address that this dialog instance will bind to for
     /// sending and receiving SIP messages. Use "0.0.0.0:5060" for servers
@@ -189,16 +189,30 @@ pub struct DialogConfig {
     /// addresses like "192.168.1.100:5060" for targeted binding.
     pub local_address: SocketAddr,
 
+    /// Optional SIP address to advertise in Via sent-by and fallback
+    /// Contact generation for non-TLS requests. When unset, dialog-core
+    /// preserves the legacy behavior of using `local_address`.
+    #[serde(default)]
+    pub advertised_local_address: Option<SocketAddr>,
+
     /// Optional local Contact URI to advertise in dialog-creating and
     /// target-refresh messages. When unset, dialog-core falls back to
     /// method-specific defaults derived from the local address.
     #[serde(default)]
     pub local_contact_uri: Option<String>,
 
-    /// Optional local address for SIP TLS sent-by and fallback Contact
-    /// construction. When unset, TLS requests use `local_address`.
+    /// Optional local bind address for SIP TLS listener mode. When unset,
+    /// TLS listener modes derive their legacy bind address from
+    /// `local_address`.
     #[serde(default)]
     pub tls_local_address: Option<SocketAddr>,
+
+    /// Optional SIP TLS address to advertise in Via sent-by and fallback
+    /// Contact generation. When unset, dialog-core uses
+    /// `tls_local_address` and then `local_address` as a compatibility
+    /// fallback.
+    #[serde(default)]
+    pub tls_advertised_local_address: Option<SocketAddr>,
 
     /// User agent string to include in SIP messages
     ///
@@ -265,8 +279,10 @@ impl Default for DialogConfig {
     fn default() -> Self {
         Self {
             local_address: "0.0.0.0:5060".parse().unwrap(),
+            advertised_local_address: None,
             local_contact_uri: None,
             tls_local_address: None,
+            tls_advertised_local_address: None,
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),

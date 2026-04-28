@@ -136,6 +136,40 @@ fn reachable_tls_helper_sets_listener_requirements() {
         .expect("reachable TLS helper should produce a valid config shape");
 }
 
+#[test]
+fn advertised_signaling_addresses_are_distinct_from_bind_addresses() {
+    let mut config = test_config(15239);
+    config.bind_addr = "0.0.0.0:15239".parse().unwrap();
+    config.sip_advertised_addr = Some("192.0.2.10:15239".parse().unwrap());
+    config.tls_bind_addr = Some("0.0.0.0:15240".parse().unwrap());
+    config.tls_advertised_addr = Some("192.0.2.10:15240".parse().unwrap());
+
+    assert_eq!(config.bind_addr.to_string(), "0.0.0.0:15239");
+    assert_eq!(
+        config.sip_advertised_addr.unwrap().to_string(),
+        "192.0.2.10:15239"
+    );
+    assert_eq!(config.tls_bind_addr.unwrap().to_string(), "0.0.0.0:15240");
+    assert_eq!(
+        config.tls_advertised_addr.unwrap().to_string(),
+        "192.0.2.10:15240"
+    );
+}
+
+#[test]
+fn reachable_tls_helper_defaults_advertised_tls_addr_when_bind_is_specific() {
+    let config = test_config(15241).tls_reachable_contact(
+        "192.0.2.10:15242".parse().unwrap(),
+        "/tmp/rvoip-test-cert.pem",
+        "/tmp/rvoip-test-key.pem",
+    );
+
+    assert_eq!(
+        config.tls_advertised_addr.unwrap().to_string(),
+        "192.0.2.10:15242"
+    );
+}
+
 #[tokio::test]
 async fn tls_listener_modes_require_endpoint_certificates() {
     let mut config = test_config(15230);

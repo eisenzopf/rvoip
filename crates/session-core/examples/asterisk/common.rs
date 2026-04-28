@@ -162,6 +162,11 @@ impl EndpointConfig {
         let mut config = Config::on(&self.username, self.local_ip, self.local_port);
         config.local_uri = self.aor_uri();
         config.contact_uri = Some(self.contact_uri());
+        config.sip_advertised_addr = Some(SocketAddr::new(self.advertised_ip, self.local_port));
+        if self.is_tls() {
+            config.tls_advertised_addr =
+                Some(SocketAddr::new(self.advertised_ip, self.contact_port()));
+        }
         config.sip_contact_mode = if self.is_tls() {
             self.tls_contact_mode.sip_contact_mode()
         } else {
@@ -349,6 +354,10 @@ pub async fn register_endpoint(
         "[{}] Local bind: {}:{}",
         cfg.username, cfg.local_ip, cfg.local_port
     );
+    println!(
+        "[{}] SIP Via:    {}:{}",
+        cfg.username, cfg.advertised_ip, cfg.local_port
+    );
     if cfg.is_tls() {
         println!(
             "[{}] TLS mode:   {}{}",
@@ -357,6 +366,12 @@ pub async fn register_endpoint(
             cfg.tls_local_port
                 .map(|port| format!(" (listener {}:{})", cfg.local_ip, port))
                 .unwrap_or_default()
+        );
+        println!(
+            "[{}] TLS Via:    {}:{}",
+            cfg.username,
+            cfg.advertised_ip,
+            cfg.contact_port()
         );
     }
     println!("[{}] AOR:        {}", cfg.username, cfg.aor_uri());

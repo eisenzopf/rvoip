@@ -26,7 +26,8 @@ pub struct DialogManager {
     /// Reference to transaction manager (handles transport for us)
     pub(crate) transaction_manager: Arc<TransactionManager>,
 
-    /// Local address for this dialog manager (used in Via headers)
+    /// Local bind address for this dialog manager. Via sent-by uses this
+    /// only when no advertised address is configured.
     pub(crate) local_address: SocketAddr,
 
     /// **NEW**: Optional unified configuration for behavioral modes
@@ -722,10 +723,20 @@ impl DialogManager {
 
     /// Get the configured local address
     ///
-    /// Returns the local address that this DialogManager uses for Via headers
-    /// and Contact headers when creating SIP requests.
+    /// Returns the bind address that this DialogManager uses for sockets.
+    /// Outbound Via sent-by and fallback Contact generation should use
+    /// [`Self::local_address_for_uri`] so configured advertised addresses
+    /// are honored.
     pub fn local_address(&self) -> SocketAddr {
         self.local_address
+    }
+
+    /// Configured SIP advertised sent-by address, if supplied.
+    pub fn advertised_local_address(&self) -> Option<SocketAddr> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.advertised_local_address()))
     }
 
     /// Configured local Contact URI, if the application supplied one.
@@ -745,15 +756,38 @@ impl DialogManager {
             .and_then(|g| g.as_ref().and_then(|c| c.tls_local_address()))
     }
 
+    /// Configured SIP TLS advertised sent-by address, if supplied.
+    pub fn tls_advertised_local_address(&self) -> Option<SocketAddr> {
+        self.config
+            .read()
+            .ok()
+            .and_then(|g| g.as_ref().and_then(|c| c.tls_advertised_local_address()))
+    }
+
     /// Local sent-by address for an outbound request targeting `uri`.
-    /// TLS requests use the configured TLS local address when present;
-    /// other transports use the dialog manager's base local address.
+    /// TLS requests prefer the configured TLS advertised address, then the
+    /// TLS bind address, then the base bind address. Other transports prefer
+    /// the configured SIP advertised address, then the base bind address.
     pub fn local_address_for_uri(&self, uri: &Uri) -> SocketAddr {
         if select_transport_for_uri(uri) == TransportType::Tls {
-            self.tls_local_address().unwrap_or(self.local_address)
+            self.tls_advertised_local_address()
+                .or_else(|| self.tls_local_address())
+                .unwrap_or(self.local_address)
         } else {
-            self.local_address
+            self.advertised_local_address()
+                .unwrap_or(self.local_address)
         }
+    }
+
+    /// Local sent-by address for an outbound request with an optional route
+    /// set. The top Route URI is the next hop when present; otherwise the
+    /// Request-URI determines the transport and advertised sent-by address.
+    pub fn local_address_for_target_and_routes(
+        &self,
+        target_uri: &Uri,
+        route_set: &[Uri],
+    ) -> SocketAddr {
+        self.local_address_for_uri(route_set.first().unwrap_or(target_uri))
     }
 
     // REMOVED: set_session_coordinator() - Use GlobalEventCoordinator instead
@@ -1439,7 +1473,7 @@ impl DialogManager {
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog
+            let fallback_destination = dialog
                 .get_remote_target_address()
                 .await
                 .ok_or_else(|| DialogError::routing_error("No remote target address available"))?;
@@ -1469,7 +1503,7 @@ impl DialogManager {
                 &template.remote_uri.to_string(),
                 &remote_tag,
                 template.cseq_number,
-                self.local_address,
+                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set),
                 if template.route_set.is_empty() {
                     None
                 } else {
@@ -1481,6 +1515,12 @@ impl DialogManager {
                 message: format!("Failed to build BYE request: {}", e),
                 context: None,
             })?;
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request)
         };
@@ -1532,7 +1572,7 @@ impl DialogManager {
         let (destination, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let destination = dialog
+            let fallback_destination = dialog
                 .get_remote_target_address()
                 .await
                 .ok_or_else(|| DialogError::routing_error("No remote target address available"))?;
@@ -1565,7 +1605,7 @@ impl DialogManager {
                 body_str,
                 Some(content_type),
                 template.cseq_number,
-                self.local_address,
+                self.local_address_for_target_and_routes(&template.target_uri, &template.route_set),
                 if template.route_set.is_empty() {
                     None
                 } else {
@@ -1576,6 +1616,12 @@ impl DialogManager {
                 message: format!("Failed to build INFO request: {}", e),
                 context: None,
             })?;
+
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .unwrap_or(fallback_destination);
 
             (destination, request)
         };

@@ -68,9 +68,10 @@ users share the single `SIP_PASSWORD` value from `.env`; endpoint auth
 usernames default to the endpoint number.
 
 `LOCAL_IP=0.0.0.0` is valid as a local bind address only. The examples use
-`ADVERTISED_IP` for SIP Contact routing and `MEDIA_ADVERTISED_IP` for SDP
-media addresses; `MEDIA_ADVERTISED_IP` defaults to `ADVERTISED_IP`. Both must
-be routable from Asterisk when the bind address is unspecified.
+`ADVERTISED_IP` for SIP Via sent-by and Contact routing, and
+`MEDIA_ADVERTISED_IP` for SDP media addresses; `MEDIA_ADVERTISED_IP` defaults
+to `ADVERTISED_IP`. Both advertised addresses must be routable from Asterisk
+when the bind address is unspecified.
 
 For the TLS/SRTP Asterisk example, configure Asterisk PJSIP with a TLS
 transport and endpoint media encryption set to mandatory SDES/SRTP. The default
