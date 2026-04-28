@@ -434,6 +434,11 @@ pub enum DialogToSessionEvent {
         refer_to: String,
         transfer_type: TransferType,
         transaction_id: String,
+        /// Optional Referred-By header value from the REFER request.
+        referred_by: Option<String>,
+        /// Optional Replaces value, either from a Replaces header or the
+        /// Refer-To URI for attended-transfer primitives.
+        replaces: Option<String>,
     },
 
     /// ACK received (for UAS state transitions)
@@ -950,7 +955,7 @@ mod tests {
             None,
         );
 
-        assert_eq!(event.event_type(), "session_to_dialog");
+        assert_eq!(CrossCrateEvent::event_type(&event), "session_to_dialog");
         assert_eq!(event.source_plane(), PlaneType::Signaling);
         assert_eq!(event.target_plane(), PlaneType::Signaling);
         assert_eq!(event.priority(), EventPriority::High);
@@ -968,6 +973,9 @@ mod tests {
         let serialized = serde_json::to_string(&event).unwrap();
         let deserialized: RvoipCrossCrateEvent = serde_json::from_str(&serialized).unwrap();
 
-        assert_eq!(deserialized.event_type(), event.event_type());
+        assert_eq!(
+            CrossCrateEvent::event_type(&deserialized),
+            CrossCrateEvent::event_type(&event)
+        );
     }
 }

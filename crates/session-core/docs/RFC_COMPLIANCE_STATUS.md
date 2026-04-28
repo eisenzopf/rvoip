@@ -83,7 +83,7 @@ closed or a new gap is identified.
 | BYE | ✅ | ✅ | |
 | CANCEL | ✅ | ✅ | |
 | REGISTER | ✅ | ✅ | With digest auth + 423 auto-retry |
-| REFER | ✅ | ✅ | Blind transfer (`SessionHandle::transfer_blind`) + REFER-with-Replaces primitive (`SessionHandle::transfer_attended`, RFC 3891). Attended-transfer *orchestration* (original + consultation session linkage) is a higher-layer concern outside this crate. |
+| REFER | ✅ | ✅ | Blind transfer (`SessionHandle::transfer_blind`) + REFER-with-Replaces primitive (`SessionHandle::transfer_attended`, RFC 3891). Inbound REFER surfaces `Refer-To`, `Referred-By`, and `Replaces` when present. Attended-transfer *orchestration* (original + consultation session linkage) is a higher-layer concern outside this crate. |
 | NOTIFY | ✅ | ✅ | Public send: `SessionHandle::send_notify(event_package, body, subscription_state)` + `UnifiedCoordinator::send_notify` delegate to `DialogAdapter::send_notify` (`src/adapters/dialog_adapter.rs:929`). RFC 3515 §2.4.5 progress NOTIFYs are driven by the state machine for transfer legs: `UnifiedCoordinator::make_transfer_leg(from, to, transferor_session_id)` atomically sets `SessionState.transferor_session_id` before `MakeCall` dispatches, so the `SendRefer100Trying` (on REFER acceptance) and `SendTransferNotify{Ringing,Success}` (on the transfer leg's `Dialog180Ringing` / `Dialog200OK`) actions fire sipfrag NOTIFYs back on the transferor's REFER subscription. Failure-side NOTIFY (and `Event::TransferFailed`) is published from `session_event_handler::handle_call_failed` when the failed leg has a `transferor_session_id`. Inbound NOTIFY surfaces on the public event stream as `Event::NotifyReceived`; for `event_package == "refer"` with `message/sipfrag`, the sipfrag status line is parsed into `Event::TransferProgress` / `TransferCompleted` / `TransferFailed` — symmetric on send and receive sides, so a b2bua wrapper observes the same events whether it's the transferor or the transferee. Dialog-core's inbound NOTIFY handler publishes `DialogToSessionEvent::NotifyReceived` (raw `Subscription-State`, `Content-Type`, body) via the existing `publish_cross_crate_event` path. Covered by `tests/notify_send_integration.rs` (send round-trip), `tests/transfer_notify_wiring_tests.rs` (state-table wiring), and `src/adapters/session_event_handler.rs::tests` (sipfrag parser). |
 | OPTIONS | ⚠️ | ✅ | Incoming responds 200 OK; no outbound helper in public API |
 | UPDATE | ✅ (dialog-core) | ✅ | RFC 3311 UPDATE inbound is now state-machine-driven. dialog-core's `process_update_in_dialog` emits the same cross-crate `ReinviteReceived` event with `method: "UPDATE"`; session-core dispatches to `EventType::UpdateReceived` and the `Active + UpdateReceived` / `OnHold + UpdateReceived` transitions answer 200 OK. UPDATE for RFC 4028 session-timer refresh carries no SDP (no `NegotiateSDPAsUAS` on those transitions). Outbound UPDATE for session modification from session-core's public API is still unused (hold/resume goes through re-INVITE — see `docs/UPDATE_STATUS.md`). |
@@ -165,6 +165,11 @@ file references below.
 - **UAC behind NAT reaching a public carrier**: ⚠️ partial — outgoing Via now requests `rport` and response `received=`/`rport=` is honored, so short-lived calls and fresh REGISTER round-trips work through NAT. Contact rewrite from discovered NAT address is still pending, so long-duration registrations and inbound in-dialog requests after the pinhole expires remain brittle.
 
 **Recommendation**: the "ship path" is (1) ~~DNS in REGISTER~~ ✅, (2) ~~outgoing rport~~ ✅ / Contact rewrite from received/rport, (3) TLS. Items 1 and the outgoing-rport half of item 2 are now done (v0.2 hardening pass). Contact rewrite, TLS, RFC 3263 SRV/NAPTR, STUN, and SIP Outbound are follow-on work for the edges that need them.
+
+See `COMPATIBILITY_MATRIX.md` and `TOPOLOGY_PROFILES.md` for release-facing
+interop status. Asterisk is validated; FreeSWITCH/Sofia, proxy/RTPengine,
+carrier SBC, ICE, DTLS-SRTP, and WebRTC edge behavior remain planned or future
+work unless those documents say otherwise.
 
 ### Audit findings (resolved — see docs)
 

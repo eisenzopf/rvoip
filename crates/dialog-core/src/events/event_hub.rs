@@ -584,8 +584,8 @@ impl DialogEventHub {
                 dialog_id,
                 transaction_id,
                 refer_to,
+                referred_by,
                 replaces,
-                ..
             } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     // Convert ReferTo to string
@@ -604,6 +604,8 @@ impl DialogEventHub {
                             refer_to: refer_to_uri,
                             transfer_type,
                             transaction_id: transaction_id.to_string(),
+                            referred_by,
+                            replaces,
                         },
                     ))
                 } else {

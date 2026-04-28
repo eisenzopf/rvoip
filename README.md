@@ -219,7 +219,7 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 <summary><strong>🎛️ session-core</strong> - Session Management Hub</summary>
 
 **Purpose**: Central coordination for SIP sessions, media, and call control  
-**Status**: ✅ **Alpha Quality** - Core session management with comprehensive API for SIP and media coordination. API will change significantly as we move toward production readiness. Missing authentication and encryption which are available in rtp-core but not yet exposed in session-core.
+**Status**: ✅ **Alpha Quality** - Core session management with `StreamPeer`, `CallbackPeer`, and `UnifiedCoordinator` APIs. Asterisk interop covers registration, TLS/SDES-SRTP, registered-flow reuse, hold/resume, CANCEL, DTMF, blind transfer, and audio verification. Broader PBX, carrier SBC, and WebRTC edge compatibility remain active hardening work.
 
 **🎯 Key Features**:
 - 🔄 Session lifecycle management from creation to termination
@@ -228,7 +228,8 @@ rvoip is organized into 9 core crates, each with specific responsibilities in th
 - ⚡ Event-driven architecture with session state management
 - 👥 Multi-party call coordination and conference support
 
-**💼 Use Cases**: VoIP platform foundation, session coordination, call control
+**💼 Use Cases**: VoIP platform foundation, session coordination, call control  
+**📚 Docs**: [`crates/session-core/README.md`](crates/session-core/README.md)
 
 </details>
 

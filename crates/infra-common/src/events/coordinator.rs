@@ -594,11 +594,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_monolithic_coordinator_creation() {
-        let coordinator = rvoip_infra_common::events::global_coordinator().await;
+        let coordinator = crate::events::global_coordinator().await;
 
         assert!(matches!(
             coordinator.deployment_mode(),
-            DeploymentMode::Monolithic
+            DeploymentConfig::Monolithic
         ));
 
         let stats = coordinator.stats().await;

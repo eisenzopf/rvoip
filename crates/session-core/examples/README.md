@@ -18,6 +18,14 @@ Single-process example (two peers in one binary — good for a quick intro):
 |---------|-------------|
 | `cargo run --example hello` | Make and receive a SIP call |
 
+## Which API should I start with?
+
+| API | Best fit |
+|-----|----------|
+| `StreamPeer` | Sequential clients, scripts, softphones, and test tools |
+| `CallbackPeer` | Reactive servers, IVR, routing, and endpoint applications |
+| `UnifiedCoordinator` | Lower-level orchestration, bridges, gateways, and B2BUA-style code |
+
 ## StreamPeer — sequential / client-side API
 
 Use `StreamPeer` for clients, scripts, and test tools. Call methods, await results.
@@ -49,6 +57,7 @@ Use `CallbackPeer` for servers, proxies, and IVR systems. Implement the `CallHan
 |------------------|-------------|
 | `./examples/advanced/concurrent_calls/run.sh` | 5 concurrent callers + 1 answerer |
 | `cargo run --example advanced_registrar_server` | Standalone registrar server (pair with `streampeer_registration_client`) |
+| `./examples/streampeer/bridge/run.sh` | `UnifiedCoordinator::bridge()` packet bridge with audio verification |
 
 ## Asterisk
 
@@ -61,6 +70,10 @@ credentials, local bind address, and media ports.
 | `./examples/asterisk/registration/run.sh` | Register secure user 1001 over SIP TLS, then UDP user 2001 |
 | `./examples/asterisk/tls_srtp_hold_resume/run.sh` | Register TLS/SRTP users 1001/1002 over SIP TLS, require SDES-SRTP, exercise hold/resume, and verify pre/post-resume audio |
 | `./examples/asterisk/udp_hold_resume/run.sh` | Register UDP users 2001/2002, exercise hold/resume, and verify pre/post-resume audio |
+
+The StreamPeer and CallbackPeer Asterisk suites are the current external PBX
+release evidence. See `../docs/COMPATIBILITY_MATRIX.md` for the validated and
+planned interoperability matrix.
 
 The Asterisk lab profile uses users `1001` and `1002` for SIP TLS with
 mandatory SDES-SRTP, and users `2001` and `2002` for UDP/plain RTP. All four

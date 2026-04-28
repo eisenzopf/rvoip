@@ -1,5 +1,14 @@
 # Attended Transfer Implementation Plan
 
+## Status
+
+This is a historical/planning document. The current release exposes
+attended-transfer primitives (`DialogIdentity`, `Replaces` value construction,
+and `SessionHandle::transfer_attended`) plus inbound REFER metadata
+(`Referred-By` / `Replaces`) when present. Full consultation-call
+orchestration is not a release claim unless this plan is completed and backed
+by interop tests.
+
 ## Overview
 This document provides a detailed plan to implement fully functional attended transfer in session-core-v2, making the `start_attended_transfer()` and `complete_attended_transfer()` API methods work correctly.
 

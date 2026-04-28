@@ -17,7 +17,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, DialogToSessionEvent, RvoipCrossCrateEvent,
+    CrossCrateEvent, DialogToSessionEvent, MediaToSessionEvent, RvoipCrossCrateEvent,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,7 +64,347 @@ pub struct SessionCrossCrateEventHandler {
     outbound_flow_last_refresh: Arc<DashMap<String, Instant>>,
 }
 
+#[allow(dead_code)]
+#[allow(dead_code)]
+#[allow(dead_code)]
 impl SessionCrossCrateEventHandler {
+    async fn handle_dialog_to_session_event(&self, event: &DialogToSessionEvent) -> Result<()> {
+        match event {
+            DialogToSessionEvent::DialogCreated { dialog_id, call_id } => {
+                self.handle_dialog_created_parts(dialog_id.clone(), call_id.clone())
+                    .await
+            }
+            DialogToSessionEvent::IncomingCall {
+                session_id,
+                call_id,
+                from,
+                to,
+                sdp_offer,
+                headers,
+                transaction_id,
+                source_addr,
+            } => {
+                self.handle_incoming_call_parts(
+                    session_id.clone(),
+                    call_id.clone(),
+                    from.clone(),
+                    to.clone(),
+                    sdp_offer.clone(),
+                    headers,
+                    transaction_id,
+                    source_addr,
+                )
+                .await
+            }
+            DialogToSessionEvent::CallStateChanged {
+                session_id,
+                new_state,
+                ..
+            } => {
+                self.handle_call_state_changed_parts(SessionId(session_id.clone()), new_state)
+                    .await
+            }
+            DialogToSessionEvent::CallEstablished {
+                session_id,
+                sdp_answer,
+            } => {
+                self.handle_call_established_parts(
+                    SessionId(session_id.clone()),
+                    sdp_answer.clone(),
+                )
+                .await
+            }
+            DialogToSessionEvent::CallTerminated { session_id, reason } => {
+                self.handle_call_terminated_parts(
+                    SessionId(session_id.clone()),
+                    termination_reason_to_string(reason),
+                )
+                .await
+            }
+            DialogToSessionEvent::CallFailed {
+                session_id,
+                status_code,
+                reason_phrase,
+            } => {
+                self.handle_call_failed_parts(
+                    SessionId(session_id.clone()),
+                    *status_code,
+                    reason_phrase.clone(),
+                )
+                .await
+            }
+            DialogToSessionEvent::CallCancelled { session_id } => {
+                self.handle_call_cancelled_session(SessionId(session_id.clone()))
+                    .await
+            }
+            DialogToSessionEvent::SessionRefreshed {
+                session_id,
+                expires_secs,
+            } => {
+                self.handle_session_refreshed_parts(SessionId(session_id.clone()), *expires_secs)
+                    .await
+            }
+            DialogToSessionEvent::SessionRefreshFailed { session_id, reason } => {
+                self.handle_session_refresh_failed_parts(
+                    SessionId(session_id.clone()),
+                    reason.clone(),
+                )
+                .await
+            }
+            DialogToSessionEvent::AuthRequired {
+                session_id,
+                status_code,
+                challenge,
+                ..
+            } => {
+                self.handle_auth_required_parts(
+                    SessionId(session_id.clone()),
+                    *status_code,
+                    challenge.clone(),
+                )
+                .await
+            }
+            DialogToSessionEvent::CallRedirected {
+                session_id,
+                status_code,
+                targets,
+                q_values,
+            } => {
+                self.handle_call_redirected_typed(session_id, *status_code, targets, q_values)
+                    .await
+            }
+            DialogToSessionEvent::ReinviteGlare { session_id } => {
+                self.handle_reinvite_glare_session(SessionId(session_id.clone()))
+                    .await
+            }
+            DialogToSessionEvent::SessionIntervalTooSmall {
+                session_id,
+                min_se_secs,
+            } => {
+                self.handle_session_interval_too_small_parts(
+                    SessionId(session_id.clone()),
+                    *min_se_secs,
+                )
+                .await
+            }
+            DialogToSessionEvent::DtmfReceived { session_id, tones } => {
+                self.handle_dtmf_received_parts(SessionId(session_id.clone()), tones.clone())
+                    .await
+            }
+            DialogToSessionEvent::DialogError {
+                session_id, error, ..
+            } => {
+                self.handle_dialog_error_parts(SessionId(session_id.clone()), error.clone())
+                    .await
+            }
+            DialogToSessionEvent::DialogStateChanged {
+                session_id,
+                old_state,
+                new_state,
+            } => {
+                self.handle_dialog_state_changed_parts(
+                    SessionId(session_id.clone()),
+                    format!("{:?}", old_state),
+                    format!("{:?}", new_state),
+                )
+                .await
+            }
+            DialogToSessionEvent::ReinviteReceived {
+                session_id,
+                sdp,
+                method,
+            } => {
+                self.handle_reinvite_received_parts(
+                    SessionId(session_id.clone()),
+                    sdp.clone(),
+                    method.clone(),
+                )
+                .await
+            }
+            DialogToSessionEvent::TransferRequested {
+                session_id,
+                refer_to,
+                transfer_type,
+                transaction_id,
+                referred_by,
+                replaces,
+            } => {
+                self.handle_transfer_requested_parts(
+                    SessionId(session_id.clone()),
+                    refer_to.clone(),
+                    transfer_type_to_string(transfer_type),
+                    transaction_id.clone(),
+                    referred_by.clone(),
+                    replaces.clone(),
+                )
+                .await
+            }
+            DialogToSessionEvent::AckReceived { session_id, .. } => {
+                self.handle_ack_received_session(SessionId(session_id.clone()))
+                    .await
+            }
+            DialogToSessionEvent::RegistrationSuccess { session_id } => {
+                self.handle_registration_success_parts(SessionId(session_id.clone()))
+                    .await
+            }
+            DialogToSessionEvent::RegistrationFailed {
+                session_id,
+                status_code,
+            } => {
+                self.handle_registration_failed_parts(SessionId(session_id.clone()), *status_code)
+                    .await
+            }
+            DialogToSessionEvent::SubscriptionAccepted { session_id } => {
+                self.handle_state_event_if_ours(
+                    SessionId(session_id.clone()),
+                    EventType::SubscriptionAccepted,
+                    "SubscriptionAccepted",
+                )
+                .await
+            }
+            DialogToSessionEvent::SubscriptionFailed {
+                session_id,
+                status_code,
+            } => {
+                self.handle_state_event_if_ours(
+                    SessionId(session_id.clone()),
+                    EventType::SubscriptionFailed(*status_code),
+                    "SubscriptionFailed",
+                )
+                .await
+            }
+            DialogToSessionEvent::NotifyReceived {
+                session_id,
+                event_package,
+                subscription_state,
+                content_type,
+                body,
+            } => {
+                self.handle_notify_received_parts(
+                    SessionId(session_id.clone()),
+                    event_package.clone(),
+                    subscription_state.clone(),
+                    content_type.clone(),
+                    body.clone(),
+                )
+                .await
+            }
+            DialogToSessionEvent::MessageDelivered { session_id } => {
+                self.handle_state_event_if_ours(
+                    SessionId(session_id.clone()),
+                    EventType::MessageDelivered,
+                    "MessageDelivered",
+                )
+                .await
+            }
+            DialogToSessionEvent::MessageFailed {
+                session_id,
+                status_code,
+            } => {
+                self.handle_state_event_if_ours(
+                    SessionId(session_id.clone()),
+                    EventType::MessageFailed(*status_code),
+                    "MessageFailed",
+                )
+                .await
+            }
+            DialogToSessionEvent::IncomingRegister { .. } => {
+                debug!("IncomingRegister is handled by dialog registration paths");
+                Ok(())
+            }
+            DialogToSessionEvent::OutboundFlowFailed { aor, reason, .. } => {
+                self.handle_outbound_flow_failed_parts(aor.clone(), reason.clone())
+                    .await
+            }
+        }
+    }
+
+    async fn handle_media_to_session_event(&self, event: &MediaToSessionEvent) -> Result<()> {
+        match event {
+            MediaToSessionEvent::MediaStreamStarted { session_id, .. } => {
+                self.handle_media_stream_started_session(SessionId(session_id.clone()))
+                    .await
+            }
+            MediaToSessionEvent::MediaStreamStopped { session_id, reason } => {
+                self.handle_media_stream_stopped_parts(
+                    SessionId(session_id.clone()),
+                    reason.clone(),
+                )
+                .await
+            }
+            MediaToSessionEvent::MediaQualityUpdate {
+                session_id,
+                quality_metrics,
+            } => {
+                self.handle_media_quality_update_parts(
+                    SessionId(session_id.clone()),
+                    quality_metrics,
+                )
+                .await
+            }
+            MediaToSessionEvent::RecordingStarted { .. }
+            | MediaToSessionEvent::RecordingStopped { .. }
+            | MediaToSessionEvent::AudioPlaybackFinished { .. } => {
+                debug!(
+                    "Media lifecycle event has no session-core state transition: {:?}",
+                    event
+                );
+                Ok(())
+            }
+            MediaToSessionEvent::MediaError {
+                session_id, error, ..
+            } => {
+                self.handle_media_error_parts(SessionId(session_id.clone()), error.clone())
+                    .await
+            }
+            MediaToSessionEvent::MediaFlowEstablished { session_id } => {
+                self.handle_media_flow_established_session(SessionId(session_id.clone()))
+                    .await
+            }
+            MediaToSessionEvent::MediaQualityDegraded {
+                session_id,
+                metrics,
+                severity,
+            } => {
+                self.handle_media_quality_degraded_parts(
+                    SessionId(session_id.clone()),
+                    (metrics.packet_loss * 100.0) as u32,
+                    metrics.jitter_ms as u32,
+                    format!("{:?}", severity).to_ascii_lowercase(),
+                )
+                .await
+            }
+            MediaToSessionEvent::DtmfDetected {
+                session_id,
+                digit,
+                duration_ms,
+            } => {
+                self.handle_dtmf_detected_parts(SessionId(session_id.clone()), *digit, *duration_ms)
+                    .await
+            }
+            MediaToSessionEvent::RtpTimeout {
+                session_id,
+                last_packet_time,
+            } => {
+                self.handle_rtp_timeout_parts(
+                    SessionId(session_id.clone()),
+                    last_packet_time.to_string(),
+                )
+                .await
+            }
+            MediaToSessionEvent::PacketLossThresholdExceeded {
+                session_id,
+                loss_percentage,
+            } => {
+                self.handle_packet_loss_threshold_exceeded_parts(
+                    SessionId(session_id.clone()),
+                    (*loss_percentage * 100.0) as u32,
+                )
+                .await
+            }
+        }
+    }
+
     pub fn new(
         state_machine: Arc<StateMachineExecutor>,
         global_coordinator: Arc<GlobalEventCoordinator>,
@@ -346,180 +686,24 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
     async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
         debug!("Handling cross-crate event: {}", event.event_type());
 
-        // E5: typed fast path. `CrossCrateEvent::as_any()` lets us
-        // downcast to the concrete `RvoipCrossCrateEvent` enum and
-        // dispatch typed variants without going through debug-string
-        // parsing. The legacy string-match branches further down are
-        // still in place for variants that haven't been migrated yet —
-        // new typed dispatches go here. Returning early avoids
-        // double-handling.
-        if let Some(RvoipCrossCrateEvent::DialogToSession(typed)) =
-            event.as_any().downcast_ref::<RvoipCrossCrateEvent>()
-        {
-            match typed {
-                DialogToSessionEvent::CallRedirected {
-                    session_id,
-                    status_code,
-                    targets,
-                    q_values,
-                } => {
-                    self.handle_call_redirected_typed(session_id, *status_code, targets, q_values)
-                        .await?;
-                    return Ok(());
-                }
-                DialogToSessionEvent::CallCancelled { session_id } => {
-                    self.handle_call_cancelled_session(SessionId(session_id.clone()))
-                        .await?;
-                    return Ok(());
-                }
-                DialogToSessionEvent::CallFailed {
-                    session_id,
-                    status_code,
-                    reason_phrase,
-                } => {
-                    self.handle_call_failed_parts(
-                        SessionId(session_id.clone()),
-                        *status_code,
-                        reason_phrase.clone(),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                DialogToSessionEvent::CallTerminated { session_id, reason } => {
-                    self.handle_call_terminated_parts(
-                        SessionId(session_id.clone()),
-                        format!("{:?}", reason),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                DialogToSessionEvent::TransferRequested {
-                    session_id,
-                    refer_to,
-                    transfer_type,
-                    transaction_id,
-                } => {
-                    self.handle_transfer_requested_parts(
-                        SessionId(session_id.clone()),
-                        refer_to.clone(),
-                        format!("{:?}", transfer_type).to_ascii_lowercase(),
-                        transaction_id.clone(),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                DialogToSessionEvent::NotifyReceived {
-                    session_id,
-                    event_package,
-                    subscription_state,
-                    content_type,
-                    body,
-                } => {
-                    self.handle_notify_received_parts(
-                        SessionId(session_id.clone()),
-                        event_package.clone(),
-                        subscription_state.clone(),
-                        content_type.clone(),
-                        body.clone(),
-                    )
-                    .await?;
-                    return Ok(());
-                }
-                _ => {}
+        match event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
+            Some(RvoipCrossCrateEvent::DialogToSession(typed)) => {
+                self.handle_dialog_to_session_event(typed).await?;
             }
-        }
-
-        // Legacy fallback: stringify and match on substrings. The
-        // outstanding migration is tracked as part of E5's follow-up
-        // — variants are moved into the typed path above one at a
-        // time as their consumers are touched.
-        let event_str = format!("{:?}", event);
-
-        match event.event_type() {
-            "dialog_to_session" => {
-                info!("Processing dialog-to-session event");
-
-                // Parse the debug output to determine the specific event variant
-                if event_str.contains("DialogCreated") {
-                    self.handle_dialog_created(&event_str).await?;
-                } else if event_str.contains("IncomingCall") {
-                    self.handle_incoming_call(&event_str).await?;
-                } else if event_str.contains("CallEstablished") {
-                    self.handle_call_established(&event_str).await?;
-                } else if event_str.contains("CallCancelled") {
-                    self.handle_call_cancelled(&event_str).await?;
-                } else if event_str.contains("ReinviteGlare") {
-                    self.handle_reinvite_glare(&event_str).await?;
-                } else if event_str.contains("SessionRefreshFailed") {
-                    // Check this BEFORE SessionRefreshed — the latter is a
-                    // substring of the former and `contains()` would match
-                    // either.
-                    self.handle_session_refresh_failed(&event_str).await?;
-                } else if event_str.contains("SessionRefreshed") {
-                    self.handle_session_refreshed(&event_str).await?;
-                } else if event_str.contains("AuthRequired") {
-                    // Check BEFORE CallFailed — both could otherwise match via
-                    // substring on future enrichment.
-                    self.handle_auth_required(&event_str).await?;
-                } else if event_str.contains("SessionIntervalTooSmall") {
-                    // RFC 4028 §6 — 422 retry with bumped Session-Expires.
-                    // Check BEFORE CallFailed so a substring match on
-                    // "Failed" (future enrichment) won't swallow it.
-                    self.handle_session_interval_too_small(&event_str).await?;
-                } else if event_str.contains("CallFailed") {
-                    self.handle_call_failed(&event_str).await?;
-                } else if event_str.contains("CallStateChanged") {
-                    self.handle_call_state_changed(&event_str).await?;
-                } else if event_str.contains("CallTerminated") {
-                    self.handle_call_terminated(&event_str).await?;
-                } else if event_str.contains("DialogError") {
-                    self.handle_dialog_error(&event_str).await?;
-                } else if event_str.contains("DialogStateChanged") {
-                    self.handle_dialog_state_changed(&event_str).await?;
-                } else if event_str.contains("ReinviteReceived") {
-                    self.handle_reinvite_received(&event_str).await?;
-                } else if event_str.contains("TransferRequested") {
-                    self.handle_transfer_requested(&event_str).await?;
-                } else if event_str.contains("AckSent") {
-                    self.handle_ack_sent(&event_str).await?;
-                } else if event_str.contains("AckReceived") {
-                    self.handle_ack_received(&event_str).await?;
-                } else if event_str.contains("NotifyReceived") {
-                    self.handle_notify_received(&event_str).await?;
-                } else if event_str.contains("OutboundFlowFailed") {
-                    // RFC 5626 §4.4.1: keep-alive flow died — trigger a
-                    // fresh REGISTER for the AoR so the UA re-establishes
-                    // the flow without waiting for registration expiry.
-                    self.handle_outbound_flow_failed(&event_str).await?;
-                } else {
-                    debug!("Unhandled dialog-to-session event: {}", event_str);
-                }
+            Some(RvoipCrossCrateEvent::MediaToSession(typed)) => {
+                self.handle_media_to_session_event(typed).await?;
             }
-            "media_to_session" => {
-                info!("Processing media-to-session event");
-
-                // Parse the debug output to determine the specific event variant
-                if event_str.contains("MediaStreamStarted") {
-                    self.handle_media_stream_started(&event_str).await?;
-                } else if event_str.contains("MediaStreamStopped") {
-                    self.handle_media_stream_stopped(&event_str).await?;
-                } else if event_str.contains("MediaFlowEstablished") {
-                    self.handle_media_flow_established(&event_str).await?;
-                } else if event_str.contains("MediaError") {
-                    self.handle_media_error(&event_str).await?;
-                } else if event_str.contains("MediaQualityDegraded") {
-                    self.handle_media_quality_degraded(&event_str).await?;
-                } else if event_str.contains("DtmfDetected") {
-                    self.handle_dtmf_detected(&event_str).await?;
-                } else if event_str.contains("RtpTimeout") {
-                    self.handle_rtp_timeout(&event_str).await?;
-                } else if event_str.contains("PacketLossThresholdExceeded") {
-                    self.handle_packet_loss_threshold_exceeded(&event_str)
-                        .await?;
-                }
+            Some(other) => {
+                debug!(
+                    "Ignoring cross-crate event not targeted at session-core: {:?}",
+                    other
+                );
             }
-            _ => {
-                debug!("Unhandled event type: {}", event.event_type());
+            None => {
+                debug!(
+                    "Ignoring non-rvoip cross-crate event on session-core handler: {}",
+                    event.event_type()
+                );
             }
         }
 
@@ -527,6 +711,7 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
     }
 }
 
+#[allow(dead_code)]
 impl SessionCrossCrateEventHandler {
     /// Check if a session belongs to this handler's store.
     /// Returns false (and logs at debug) if the session was created by a different peer.
@@ -602,6 +787,296 @@ impl SessionCrossCrateEventHandler {
         }
 
         None
+    }
+
+    async fn handle_state_event_if_ours(
+        &self,
+        session_id: SessionId,
+        event_type: EventType,
+        label: &str,
+    ) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring {} for session {} - not in our store",
+                label, session_id
+            );
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, event_type)
+            .await
+        {
+            error!(
+                "Failed to process {} for session {}: {}",
+                label, session_id, e
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_dialog_created_parts(&self, dialog_id: String, call_id: String) -> Result<()> {
+        if call_id.contains("@session-core") {
+            if let Some(session_id_str) = call_id.split('@').next() {
+                let session_id = SessionId(session_id_str.to_string());
+                if self
+                    .state_machine
+                    .store
+                    .get_session(&session_id)
+                    .await
+                    .is_err()
+                {
+                    debug!("DialogCreated event arrived before session {} was fully created, will be handled by state machine later", session_id);
+                    return Ok(());
+                }
+
+                if let Err(e) = self
+                    .state_machine
+                    .process_event(&session_id, EventType::DialogCreated { dialog_id, call_id })
+                    .await
+                {
+                    error!("Failed to process DialogCreated event: {}", e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_incoming_call_parts(
+        &self,
+        session_id_str: String,
+        call_id: String,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        headers: &std::collections::HashMap<String, String>,
+        _transaction_id: &str,
+        _source_addr: &str,
+    ) -> Result<()> {
+        let dialog_id_str = headers
+            .get("X-Dialog-Id")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+        let p_asserted_identity = headers.get("P-Asserted-Identity").cloned();
+
+        if let Ok(dialog_uuid) = uuid::Uuid::parse_str(&dialog_id_str) {
+            let rvoip_dialog_id = rvoip_dialog_core::DialogId(dialog_uuid);
+
+            if self
+                .dialog_adapter
+                .dialog_to_session
+                .contains_key(&rvoip_dialog_id)
+            {
+                debug!(
+                    "Ignoring IncomingCall for dialog {} - already handled by another peer",
+                    dialog_id_str
+                );
+                return Ok(());
+            }
+
+            if !self
+                .dialog_adapter
+                .dialog_api
+                .dialog_manager()
+                .core()
+                .has_dialog(&rvoip_dialog_id)
+            {
+                debug!(
+                    "Ignoring IncomingCall for dialog {} - not in our dialog-core",
+                    dialog_id_str
+                );
+                return Ok(());
+            }
+        }
+
+        let session_id = SessionId(session_id_str);
+
+        self.state_machine
+            .store
+            .create_session(session_id.clone(), Role::UAS, true)
+            .await
+            .map_err(|e| SessionError::InternalError(format!("Failed to create session: {}", e)))?;
+
+        let mut session = self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .map_err(|e| {
+                SessionError::InternalError(format!("Failed to get newly created session: {}", e))
+            })?;
+        session.local_uri = Some(to.clone());
+        session.remote_uri = Some(from.clone());
+        let session_remote_sdp = session.remote_sdp.clone();
+
+        self.state_machine
+            .store
+            .update_session(session)
+            .await
+            .map_err(|e| {
+                SessionError::InternalError(format!("Failed to update session URIs: {}", e))
+            })?;
+
+        let dialog_uuid =
+            uuid::Uuid::parse_str(&dialog_id_str).unwrap_or_else(|_| uuid::Uuid::new_v4());
+
+        self.registry
+            .map_dialog(session_id.clone(), DialogId(dialog_uuid))
+            .await;
+        self.registry
+            .store_pending_incoming_call(
+                session_id.clone(),
+                crate::types::IncomingCallInfo {
+                    session_id: session_id.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    call_id: call_id.clone(),
+                    dialog_id: DialogId(dialog_uuid),
+                    p_asserted_identity: p_asserted_identity.clone(),
+                },
+            )
+            .await;
+
+        let our_dialog_id = DialogId(dialog_uuid);
+        let rvoip_dialog_id = rvoip_dialog_core::DialogId::from(our_dialog_id.clone());
+        self.dialog_adapter
+            .session_to_dialog
+            .insert(session_id.clone(), rvoip_dialog_id.clone());
+        self.dialog_adapter
+            .dialog_to_session
+            .insert(rvoip_dialog_id, session_id.clone());
+
+        let event =
+            rvoip_infra_common::events::cross_crate::SessionToDialogEvent::StoreDialogMapping {
+                session_id: session_id.0.clone(),
+                dialog_id: dialog_uuid.to_string(),
+            };
+        if let Err(e) = self
+            .dialog_adapter
+            .global_coordinator
+            .publish(Arc::new(
+                rvoip_infra_common::events::cross_crate::RvoipCrossCrateEvent::SessionToDialog(
+                    event,
+                ),
+            ))
+            .await
+        {
+            error!("Failed to publish StoreDialogMapping for UAS: {}", e);
+        }
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(
+                &session_id,
+                EventType::IncomingCall {
+                    from: from.clone(),
+                    sdp,
+                },
+            )
+            .await
+        {
+            error!("Failed to process incoming call event: {}", e);
+            let _ = self.state_machine.store.remove_session(&session_id).await;
+            self.registry.remove_session(&session_id).await;
+        } else {
+            publish_api_event(
+                &self.global_coordinator,
+                crate::api::events::Event::IncomingCall {
+                    call_id: session_id.clone(),
+                    from: from.clone(),
+                    to: to.clone(),
+                    sdp: session_remote_sdp,
+                },
+            );
+
+            if let Some(ref tx) = self.incoming_call_tx {
+                let call_info = crate::types::IncomingCallInfo {
+                    session_id: session_id.clone(),
+                    from,
+                    to,
+                    call_id,
+                    dialog_id: DialogId(dialog_uuid),
+                    p_asserted_identity,
+                };
+                if let Err(e) = tx.send(call_info).await {
+                    error!("Failed to send incoming call notification: {}", e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn handle_call_established_parts(
+        &self,
+        session_id: SessionId,
+        sdp_answer: Option<String>,
+    ) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring CallEstablished for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        if let Some(sdp) = &sdp_answer {
+            if let Ok(mut session) = self.state_machine.store.get_session(&session_id).await {
+                session.remote_sdp = Some(sdp.clone());
+                let _ = self.state_machine.store.update_session(session).await;
+            }
+        }
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::Dialog200OK)
+            .await
+        {
+            error!("Failed to process CallEstablished as Dialog200OK: {}", e);
+        }
+
+        publish_api_event(
+            &self.global_coordinator,
+            crate::api::events::Event::CallAnswered {
+                call_id: session_id,
+                sdp: sdp_answer,
+            },
+        );
+
+        Ok(())
+    }
+
+    async fn handle_auth_required_parts(
+        &self,
+        session_id: SessionId,
+        status: u16,
+        challenge: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring AuthRequired for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(
+                &session_id,
+                EventType::AuthRequired {
+                    status_code: status,
+                    challenge,
+                },
+            )
+            .await
+        {
+            error!(
+                "Failed to process AuthRequired({}) for session {}: {}",
+                status, session_id, e
+            );
+        }
+        Ok(())
     }
 
     // Dialog event handlers
@@ -1268,6 +1743,178 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    async fn handle_session_interval_too_small_parts(
+        &self,
+        session_id: SessionId,
+        min_se_secs: u32,
+    ) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring SessionIntervalTooSmall for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        const CAP: u8 = 2;
+        let current_retries = self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .map(|s| s.session_timer_retry_count)
+            .unwrap_or(CAP);
+        let can_retry = min_se_secs > 0 && current_retries < CAP;
+
+        if can_retry {
+            if let Err(e) = self
+                .state_machine
+                .process_event(
+                    &session_id,
+                    EventType::SessionIntervalTooSmall { min_se_secs },
+                )
+                .await
+            {
+                error!(
+                    "Failed to dispatch SessionIntervalTooSmall retry for session {}: {}",
+                    session_id, e
+                );
+            } else {
+                return Ok(());
+            }
+        }
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::Dialog4xxFailure(422))
+            .await
+        {
+            error!(
+                "Failed to process 422 SessionIntervalTooSmall fallback for session {}: {}",
+                session_id, e
+            );
+        }
+
+        let api_event = crate::api::events::Event::CallFailed {
+            call_id: session_id.clone(),
+            status_code: 422,
+            reason: format!(
+                "Session Interval Too Small (required Min-SE: {}s)",
+                min_se_secs
+            ),
+        };
+        self.publish_and_release_session(api_event, session_id)
+            .await;
+
+        Ok(())
+    }
+
+    async fn handle_reinvite_glare_session(&self, session_id: SessionId) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring ReinviteGlare for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::ReinviteGlare)
+            .await
+        {
+            error!(
+                "Failed to process ReinviteGlare for session {}: {}",
+                session_id, e
+            );
+        }
+        Ok(())
+    }
+
+    async fn handle_session_refreshed_parts(
+        &self,
+        session_id: SessionId,
+        expires_secs: u32,
+    ) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            return Ok(());
+        }
+        publish_api_event(
+            &self.global_coordinator,
+            crate::api::events::Event::SessionRefreshed {
+                call_id: session_id,
+                expires_secs,
+            },
+        );
+        Ok(())
+    }
+
+    async fn handle_session_refresh_failed_parts(
+        &self,
+        session_id: SessionId,
+        reason: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            return Ok(());
+        }
+        publish_api_event(
+            &self.global_coordinator,
+            crate::api::events::Event::SessionRefreshFailed {
+                call_id: session_id,
+                reason,
+            },
+        );
+        Ok(())
+    }
+
+    async fn handle_outbound_flow_failed_parts(&self, aor: String, reason: String) -> Result<()> {
+        let now = Instant::now();
+        if let Some(prev) = self
+            .outbound_flow_last_refresh
+            .get(&aor)
+            .map(|e| *e.value())
+        {
+            if now.duration_since(prev) < OUTBOUND_FLOW_REFRESH_DEBOUNCE {
+                debug!(
+                    "OutboundFlowFailed (aor={}, reason={}) debounced - prior refresh {}ms ago",
+                    aor,
+                    reason,
+                    now.duration_since(prev).as_millis()
+                );
+                return Ok(());
+            }
+        }
+        self.outbound_flow_last_refresh.insert(aor.clone(), now);
+
+        let matching_session_id = self.state_machine.store.sessions.iter().find_map(|entry| {
+            let state = entry.value();
+            match state.local_uri.as_deref() {
+                Some(uri) if uri == aor.as_str() => Some(entry.key().clone()),
+                _ => None,
+            }
+        });
+
+        let Some(session_id) = matching_session_id else {
+            warn!(
+                "OutboundFlowFailed (aor={}) but no registration session found - dropping",
+                aor
+            );
+            return Ok(());
+        };
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::RefreshRegistration)
+            .await
+        {
+            warn!(
+                "Failed to dispatch RefreshRegistration for session {} after flow failure: {}",
+                session_id, e
+            );
+        }
+        Ok(())
+    }
+
     /// Handle RFC 4028 §6 — 422 Session Interval Too Small. The UAS requires
     /// a session interval larger than we offered; its `Min-SE:` header
     /// (surfaced as `min_se_secs`) carries the floor.
@@ -1642,6 +2289,37 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    async fn handle_call_state_changed_parts(
+        &self,
+        sid: SessionId,
+        new_state: &rvoip_infra_common::events::cross_crate::CallState,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            debug!(
+                "Ignoring CallStateChanged for session {} - not in our store",
+                sid
+            );
+            return Ok(());
+        }
+
+        let event_type = match new_state {
+            rvoip_infra_common::events::cross_crate::CallState::Ringing => {
+                Some(EventType::Dialog180Ringing)
+            }
+            rvoip_infra_common::events::cross_crate::CallState::Terminated => {
+                Some(EventType::DialogBYE)
+            }
+            _ => None,
+        };
+
+        if let Some(event_type) = event_type {
+            if let Err(e) = self.state_machine.process_event(&sid, event_type).await {
+                error!("Failed to process CallStateChanged for {}: {}", sid, e);
+            }
+        }
+        Ok(())
+    }
+
     async fn handle_call_terminated(&self, event_str: &str) -> Result<()> {
         info!(
             "🎯 [handle_call_terminated] Called with event: {}",
@@ -1747,6 +2425,40 @@ impl SessionCrossCrateEventHandler {
             {
                 error!("Failed to process dialog error: {}", e);
             }
+        }
+        Ok(())
+    }
+
+    async fn handle_dialog_error_parts(&self, sid: SessionId, error: String) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            debug!(
+                "Ignoring DialogError for session {} - not in our store",
+                sid
+            );
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(&sid, EventType::DialogError(error))
+            .await
+        {
+            error!("Failed to process dialog error: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_dtmf_received_parts(&self, sid: SessionId, tones: String) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        for digit in tones.chars() {
+            publish_api_event(
+                &self.global_coordinator,
+                crate::api::events::Event::DtmfReceived {
+                    call_id: sid.clone(),
+                    digit,
+                },
+            );
         }
         Ok(())
     }
@@ -1859,6 +2571,31 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    async fn handle_dialog_state_changed_parts(
+        &self,
+        sid: SessionId,
+        old_state: String,
+        new_state: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(
+                &sid,
+                EventType::DialogStateChanged {
+                    old_state,
+                    new_state,
+                },
+            )
+            .await
+        {
+            error!("Failed to process DialogStateChanged: {}", e);
+        }
+        Ok(())
+    }
+
     async fn handle_reinvite_received(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let sid = SessionId(session_id);
@@ -1899,6 +2636,40 @@ impl SessionCrossCrateEventHandler {
                 self.apply_inbound_reinvite_media_direction(&sid, previous_remote_direction)
                     .await;
             }
+        }
+        Ok(())
+    }
+
+    async fn handle_reinvite_received_parts(
+        &self,
+        sid: SessionId,
+        sdp: Option<String>,
+        method: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        let previous_remote_direction = self
+            .state_machine
+            .store
+            .get_session(&sid)
+            .await
+            .ok()
+            .map(|session| session.remote_media_direction);
+        let has_sdp = sdp.is_some();
+        let event = if method.eq_ignore_ascii_case("UPDATE") {
+            EventType::UpdateReceived { sdp }
+        } else {
+            EventType::ReinviteReceived { sdp }
+        };
+        if let Err(e) = self.state_machine.process_event(&sid, event).await {
+            error!(
+                "Failed to process ReinviteReceived/UpdateReceived (method {}): {}",
+                method, e
+            );
+        } else if method.eq_ignore_ascii_case("INVITE") && has_sdp {
+            self.apply_inbound_reinvite_media_direction(&sid, previous_remote_direction)
+                .await;
         }
         Ok(())
     }
@@ -1963,6 +2734,8 @@ impl SessionCrossCrateEventHandler {
                 refer_to,
                 transfer_type,
                 transaction_id,
+                None,
+                None,
             )
             .await?;
         }
@@ -1975,6 +2748,8 @@ impl SessionCrossCrateEventHandler {
         refer_to: String,
         transfer_type: String,
         transaction_id: String,
+        referred_by: Option<String>,
+        replaces: Option<String>,
     ) -> Result<()> {
         // Skip if this session isn't ours
         if self
@@ -1995,6 +2770,8 @@ impl SessionCrossCrateEventHandler {
             session.transfer_target = Some(refer_to.clone());
             session.transfer_notify_dialog = session.dialog_id.clone();
             session.refer_transaction_id = Some(transaction_id.clone());
+            session.referred_by = referred_by.clone();
+            session.replaces_header = replaces.clone();
             if let Err(e) = self.state_machine.store.update_session(session).await {
                 error!("Failed to store transfer request fields: {}", e);
             }
@@ -2006,8 +2783,8 @@ impl SessionCrossCrateEventHandler {
             let api_event = crate::api::events::Event::ReferReceived {
                 call_id: session_id.clone(),
                 refer_to: refer_to.clone(),
-                referred_by: None, // TODO: Extract from event if available
-                replaces: None,    // TODO: Extract from event if available
+                referred_by: referred_by.clone(),
+                replaces: replaces.clone(),
                 transaction_id: transaction_id.clone(),
                 transfer_type: transfer_type.clone(),
             };
@@ -2167,7 +2944,215 @@ impl SessionCrossCrateEventHandler {
         Ok(())
     }
 
+    async fn handle_ack_received_session(&self, session_id: SessionId) -> Result<()> {
+        if !self.is_our_session(&session_id).await {
+            debug!(
+                "Ignoring AckReceived for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        if let Err(e) = self
+            .state_machine
+            .process_event(&session_id, EventType::DialogACK)
+            .await
+        {
+            error!("Failed to process DialogACK event after AckReceived: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_registration_success_parts(&self, session_id: SessionId) -> Result<()> {
+        self.handle_state_event_if_ours(
+            session_id,
+            EventType::Registration200OK,
+            "RegistrationSuccess",
+        )
+        .await
+    }
+
+    async fn handle_registration_failed_parts(
+        &self,
+        session_id: SessionId,
+        status_code: u16,
+    ) -> Result<()> {
+        self.handle_state_event_if_ours(
+            session_id,
+            EventType::RegistrationFailed(status_code),
+            "RegistrationFailed",
+        )
+        .await
+    }
+
     // New media event handlers
+    async fn handle_media_stream_started_session(&self, sid: SessionId) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(&sid, EventType::MediaSessionReady)
+            .await
+        {
+            error!("Failed to process media stream started: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_media_stream_stopped_parts(
+        &self,
+        sid: SessionId,
+        reason: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(
+                &sid,
+                EventType::MediaError(format!("Media stream stopped: {}", reason)),
+            )
+            .await
+        {
+            error!("Failed to process media stream stopped: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_media_flow_established_session(&self, sid: SessionId) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(&sid, EventType::MediaFlowEstablished)
+            .await
+        {
+            error!("Failed to process media flow established: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_media_error_parts(&self, sid: SessionId, error: String) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(&sid, EventType::MediaError(error))
+            .await
+        {
+            error!("Failed to process media error: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_media_quality_update_parts(
+        &self,
+        sid: SessionId,
+        metrics: &rvoip_infra_common::events::cross_crate::MediaQualityMetrics,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        publish_api_event(
+            &self.global_coordinator,
+            crate::api::events::Event::MediaQualityChanged {
+                call_id: sid,
+                packet_loss_percent: (metrics.packet_loss * 100.0) as u32,
+                jitter_ms: metrics.jitter_ms as u32,
+            },
+        );
+        Ok(())
+    }
+
+    async fn handle_media_quality_degraded_parts(
+        &self,
+        sid: SessionId,
+        packet_loss_percent: u32,
+        jitter_ms: u32,
+        severity: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(
+                &sid,
+                EventType::MediaQualityDegraded {
+                    packet_loss_percent,
+                    jitter_ms,
+                    severity,
+                },
+            )
+            .await
+        {
+            error!("Failed to process MediaQualityDegraded: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_dtmf_detected_parts(
+        &self,
+        sid: SessionId,
+        digit: char,
+        duration_ms: u32,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(&sid, EventType::DtmfDetected { digit, duration_ms })
+            .await
+        {
+            error!("Failed to process DtmfDetected: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_rtp_timeout_parts(
+        &self,
+        sid: SessionId,
+        last_packet_time: String,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(&sid, EventType::RtpTimeout { last_packet_time })
+            .await
+        {
+            error!("Failed to process RtpTimeout: {}", e);
+        }
+        Ok(())
+    }
+
+    async fn handle_packet_loss_threshold_exceeded_parts(
+        &self,
+        sid: SessionId,
+        loss_percentage: u32,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .state_machine
+            .process_event(
+                &sid,
+                EventType::PacketLossThresholdExceeded { loss_percentage },
+            )
+            .await
+        {
+            error!("Failed to process PacketLossThresholdExceeded: {}", e);
+        }
+        Ok(())
+    }
+
     async fn handle_media_quality_degraded(&self, event_str: &str) -> Result<()> {
         if let Some(session_id) = self.extract_session_id(event_str) {
             let sid = SessionId(session_id);
@@ -2442,6 +3427,37 @@ fn remote_direction_is_hold(direction: crate::types::MediaDirection) -> bool {
         direction,
         crate::types::MediaDirection::SendOnly | crate::types::MediaDirection::Inactive
     )
+}
+
+fn termination_reason_to_string(
+    reason: &rvoip_infra_common::events::cross_crate::TerminationReason,
+) -> String {
+    match reason {
+        rvoip_infra_common::events::cross_crate::TerminationReason::LocalHangup => {
+            "LocalHangup".to_string()
+        }
+        rvoip_infra_common::events::cross_crate::TerminationReason::RemoteHangup => {
+            "RemoteHangup".to_string()
+        }
+        rvoip_infra_common::events::cross_crate::TerminationReason::Rejected(reason) => {
+            format!("Rejected: {}", reason)
+        }
+        rvoip_infra_common::events::cross_crate::TerminationReason::Error(error) => {
+            format!("Error: {}", error)
+        }
+        rvoip_infra_common::events::cross_crate::TerminationReason::Timeout => {
+            "Timeout".to_string()
+        }
+    }
+}
+
+fn transfer_type_to_string(
+    transfer_type: &rvoip_infra_common::events::cross_crate::TransferType,
+) -> String {
+    match transfer_type {
+        rvoip_infra_common::events::cross_crate::TransferType::Blind => "blind".to_string(),
+        rvoip_infra_common::events::cross_crate::TransferType::Attended => "attended".to_string(),
+    }
 }
 
 /// Parse an RFC 3515 §2.4.5 sipfrag status line of the form

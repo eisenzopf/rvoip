@@ -24,6 +24,11 @@ TLS/SRTP requirements:
 The examples use `CallbackPeer`, `CallbackPeerControl`, `CallHandler`, and
 `SessionHandle`. They intentionally do not use `StreamPeer`.
 
+This suite is the CallbackPeer parity gate for the StreamPeer Asterisk suite:
+registration, answered calls, reject, hold/resume, ring/cancel, DTMF, blind
+transfer, and SRTP audio analysis should remain aligned unless a PBX profile
+limitation is called out explicitly.
+
 The suite validates these callback hooks:
 
 | Hook | Scenario |

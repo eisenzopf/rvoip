@@ -1,8 +1,8 @@
 # Asterisk Interop Examples
 
-These examples validate `rvoip-session-core` against a real Asterisk PBX. They
-use `examples/asterisk/.env` for PBX address, credentials, bind addresses,
-advertised addresses, media ports, and TLS options.
+These examples validate the `StreamPeer` API surface against a real Asterisk
+PBX. They use `examples/asterisk/.env` for PBX address, credentials, bind
+addresses, advertised addresses, media ports, and TLS options.
 
 This directory exercises the StreamPeer API. The companion
 `examples/asterisk_callback` suite exercises the CallbackPeer API against the
@@ -30,6 +30,23 @@ same Asterisk profile and should also pass before release.
 | `./tls_srtp_registered_flow/run.sh` | `1001` calls `1002` over TLS/SRTP while both endpoints receive inbound SIP requests on the REGISTER TLS flow | Registered-flow mode and keep-alive evidence is logged, no rvoip TLS listener cert is generated, pre/post-resume audio passes analysis |
 | `./udp_hold_resume/run.sh` | `2001` calls `2002` over UDP/RTP, holds, resumes, exchanges tones | Optional remote hold/resume events pass when enabled, pre/post-resume audio passes analysis |
 | `./run.sh` | Full default sequence | Registration plus reachable-contact TLS/SRTP hold/resume and UDP hold/resume pass |
+
+## Release Evidence
+
+| Capability | Evidence |
+|------------|----------|
+| Registration / unregister | `./registration/run.sh` |
+| TLS/SDES-SRTP call setup | `./tls_srtp_hold_resume/run.sh` |
+| Registered TLS flow reuse | `./tls_srtp_registered_flow/run.sh` |
+| Hold/resume | TLS/SRTP and UDP hold/resume scripts |
+| CANCEL | TLS/SRTP and UDP ring/cancel extended scripts |
+| DTMF | TLS/SRTP and UDP DTMF extended scripts |
+| Blind transfer | TLS/SRTP and UDP blind-transfer extended scripts |
+| REFER/NOTIFY progress | blind-transfer scripts observe REFER completion |
+| Audio verification | WAV tone analysis in TLS/SRTP and UDP answered scenarios |
+
+The broader support matrix is tracked in
+`../../docs/COMPATIBILITY_MATRIX.md`.
 
 Hold/resume re-INVITE propagation to the callee is PBX-profile dependent.
 The current default verifies caller-side hold/resume plus audio continuity.
