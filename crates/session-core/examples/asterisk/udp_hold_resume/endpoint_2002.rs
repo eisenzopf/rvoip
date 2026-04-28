@@ -11,7 +11,8 @@ use std::sync::{
 use std::time::Duration;
 
 use common::{
-    endpoint_config, generate_tone, init_tracing, load_env, register_endpoint, save_wav,
+    endpoint_config, expect_remote_hold_events, generate_tone, init_tracing, load_env,
+    register_endpoint, save_wav, wait_for_remote_hold_on_events, wait_for_remote_resume_on_events,
     ExampleResult, ENDPOINT_2002_TONE_HZ, FRAME_SIZE, SAMPLE_RATE,
 };
 use rvoip_media_core::types::AudioFrame;
@@ -32,6 +33,7 @@ async fn main() -> ExampleResult<()> {
     println!("[2002] Incoming call from {}", incoming.from);
     let handle = incoming.accept().await?;
     println!("[2002] Call answered.");
+    let mut call_events = handle.events().await?;
 
     let audio = handle.audio().await?;
     let (sender, mut receiver) = audio.split();
@@ -64,6 +66,17 @@ async fn main() -> ExampleResult<()> {
             sleep(Duration::from_millis(20)).await;
         }
     });
+
+    if expect_remote_hold_events()? {
+        println!("[2002] Waiting for caller hold indication.");
+        wait_for_remote_hold_on_events(&mut call_events, Duration::from_secs(15)).await?;
+        println!("[2002] Waiting for caller resume indication.");
+        wait_for_remote_resume_on_events(&mut call_events, Duration::from_secs(15)).await?;
+    } else {
+        println!(
+            "[2002] Remote hold/resume event assertion disabled; set ASTERISK_EXPECT_REMOTE_HOLD_EVENTS=1 for PBX profiles that forward hold re-INVITEs."
+        );
+    }
 
     let reason = handle.wait_for_end(Some(Duration::from_secs(30))).await?;
     println!("[2002] Call ended: {}", reason);

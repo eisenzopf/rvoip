@@ -8,11 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{
-    endpoint_config, generate_tone, init_tracing, load_env, post_register_settle_duration,
-    register_endpoint, save_wav, ExampleResult, FRAME_SIZE, SAMPLE_RATE,
+    endpoint_config, init_tracing, load_env, post_register_settle_duration, register_endpoint,
+    save_wav, send_tone_segment, ExampleResult,
 };
-use rvoip_media_core::types::AudioFrame;
-use rvoip_session_core::{AudioSender, SessionHandle, StreamPeer};
+use rvoip_session_core::{SessionHandle, StreamPeer};
 use tokio::time::sleep;
 
 const PRE_HOLD_TONE_HZ: f32 = 440.0;
@@ -124,26 +123,6 @@ async fn main() -> ExampleResult<()> {
 
     peer.unregister(&registration).await.ok();
     println!("[2001] Done.");
-    Ok(())
-}
-
-async fn send_tone_segment(
-    sender: &AudioSender,
-    tone_hz: f32,
-    frames: usize,
-    frame_index: &mut usize,
-) -> ExampleResult<()> {
-    for _ in 0..frames {
-        let frame = AudioFrame::new(
-            generate_tone(tone_hz, *frame_index),
-            SAMPLE_RATE,
-            1,
-            (*frame_index * FRAME_SIZE) as u32,
-        );
-        sender.send(frame).await?;
-        *frame_index += 1;
-        sleep(Duration::from_millis(20)).await;
-    }
     Ok(())
 }
 

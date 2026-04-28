@@ -162,7 +162,7 @@ path = "examples/advanced/concurrent_calls/client.rs"
 name = "advanced_registrar_server"
 path = "examples/advanced/registrar_server.rs"
 
-# Remote Asterisk examples
+# Asterisk interop examples
 [[example]]
 name = "asterisk_registration"
 path = "examples/asterisk/registration/register.rs"
@@ -184,6 +184,48 @@ path = "examples/asterisk/tls_srtp_hold_resume/endpoint_1002.rs"
 [[example]]
 name = "asterisk_tls_srtp_hold_resume_analyze"
 path = "examples/asterisk/tls_srtp_hold_resume/analyze.rs"
+[[example]]
+name = "asterisk_tls_srtp_ring_remote_1001"
+path = "examples/asterisk/tls_srtp_ring_remote/endpoint_1001.rs"
+[[example]]
+name = "asterisk_tls_srtp_ring_remote_1003"
+path = "examples/asterisk/tls_srtp_ring_remote/endpoint_1003.rs"
+[[example]]
+name = "asterisk_udp_ring_remote_2001"
+path = "examples/asterisk/udp_ring_remote/endpoint_2001.rs"
+[[example]]
+name = "asterisk_udp_ring_remote_2003"
+path = "examples/asterisk/udp_ring_remote/endpoint_2003.rs"
+[[example]]
+name = "asterisk_tls_srtp_dtmf_1001"
+path = "examples/asterisk/tls_srtp_dtmf/endpoint_1001.rs"
+[[example]]
+name = "asterisk_tls_srtp_dtmf_1002"
+path = "examples/asterisk/tls_srtp_dtmf/endpoint_1002.rs"
+[[example]]
+name = "asterisk_udp_dtmf_2001"
+path = "examples/asterisk/udp_dtmf/endpoint_2001.rs"
+[[example]]
+name = "asterisk_udp_dtmf_2002"
+path = "examples/asterisk/udp_dtmf/endpoint_2002.rs"
+[[example]]
+name = "asterisk_tls_srtp_blind_transfer_remote_transferor"
+path = "examples/asterisk/tls_srtp_blind_transfer_remote/transferor_1001.rs"
+[[example]]
+name = "asterisk_tls_srtp_blind_transfer_remote_transferee"
+path = "examples/asterisk/tls_srtp_blind_transfer_remote/transferee_1002.rs"
+[[example]]
+name = "asterisk_tls_srtp_blind_transfer_remote_target"
+path = "examples/asterisk/tls_srtp_blind_transfer_remote/target_1003.rs"
+[[example]]
+name = "asterisk_udp_blind_transfer_remote_transferor"
+path = "examples/asterisk/udp_blind_transfer_remote/transferor_2001.rs"
+[[example]]
+name = "asterisk_udp_blind_transfer_remote_transferee"
+path = "examples/asterisk/udp_blind_transfer_remote/transferee_2002.rs"
+[[example]]
+name = "asterisk_udp_blind_transfer_remote_target"
+path = "examples/asterisk/udp_blind_transfer_remote/target_2003.rs"
 
 
 [dependencies]

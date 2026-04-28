@@ -349,7 +349,7 @@ impl TransactionIntegration for DialogManager {
                         "sip:unknown".to_string()
                     };
 
-                    dialog_quick::refer_for_dialog(
+                    dialog_quick::refer_for_dialog_with_contact(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
@@ -358,7 +358,8 @@ impl TransactionIntegration for DialogManager {
                         &target_uri,
                         template.cseq_number,
                         local_address,
-                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                        self.local_contact_uri(),
                     )
                 },
 

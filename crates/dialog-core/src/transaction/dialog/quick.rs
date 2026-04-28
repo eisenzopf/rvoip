@@ -211,6 +211,33 @@ pub fn refer_for_dialog(
     local_address: SocketAddr,
     route_set: Option<Vec<Uri>>,
 ) -> Result<Request> {
+    refer_for_dialog_with_contact(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        target_uri,
+        cseq,
+        local_address,
+        route_set,
+        None,
+    )
+}
+
+/// Quick REFER request creation with an optional Contact header.
+pub fn refer_for_dialog_with_contact(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    target_uri: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact_uri: Option<String>,
+) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let target_uri_str = target_uri.into();
 
@@ -224,7 +251,7 @@ pub fn refer_for_dialog(
         cseq,
         local_address,
         route_set: route_set.unwrap_or_default(),
-        contact: None,
+        contact: contact_uri,
     };
 
     // Build the REFER request without a body - we'll add the Refer-To header separately

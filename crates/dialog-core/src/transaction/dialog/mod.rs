@@ -23,8 +23,9 @@ use std::net::SocketAddr;
 // Re-export quick functions for convenience
 pub use quick::{
     bye_for_dialog, info_for_dialog, message_for_dialog, message_out_of_dialog, notify_for_dialog,
-    prack_for_dialog, refer_for_dialog, reinvite_for_dialog, response_for_dialog_transaction,
-    subscribe_out_of_dialog, update_for_dialog, update_for_dialog_with_contact,
+    prack_for_dialog, refer_for_dialog, refer_for_dialog_with_contact, reinvite_for_dialog,
+    response_for_dialog_transaction, subscribe_out_of_dialog, update_for_dialog,
+    update_for_dialog_with_contact,
 };
 
 /// Dialog request template containing extracted dialog context

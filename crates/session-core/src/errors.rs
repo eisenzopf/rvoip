@@ -96,6 +96,7 @@ impl SessionError {
     pub fn is_session_gone(&self) -> bool {
         matches!(self, SessionError::SessionNotFound(_))
             || matches!(self, SessionError::Other(msg) if msg.starts_with("Session not found"))
+            || matches!(self, SessionError::Other(msg) if msg.starts_with("Session ") && msg.ends_with(" not found"))
     }
 }
 
