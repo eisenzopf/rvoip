@@ -926,7 +926,6 @@ transitions:
     next_state: "Cancelled"
     actions:
       - type: "SendCANCEL"
-      - type: "CleanupDialog"
       - type: "CleanupMedia"
     publish:
       - "CallCancelled"
@@ -939,7 +938,6 @@ transitions:
     next_state: "Cancelled"
     actions:
       - type: "SendCANCEL"
-      - type: "CleanupDialog"
       - type: "CleanupMedia"
     publish:
       - "CallCancelled"
@@ -972,7 +970,6 @@ transitions:
     next_state: "Cancelled"
     actions:
       - type: "SendCANCEL"
-      - type: "CleanupDialog"
       - type: "CleanupMedia"
     publish:
       - "CallCancelled"
@@ -987,7 +984,6 @@ transitions:
     next_state: "Cancelled"
     actions:
       - type: "SendCANCEL"
-      - type: "CleanupDialog"
       - type: "CleanupMedia"
     publish:
       - "CallCancelled"

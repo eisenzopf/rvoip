@@ -315,6 +315,14 @@ impl SessionCrossCrateEventHandler {
         let api_event = match event {
             crate::state_machine::executor::SessionEvent::Custom { session_id, event } => {
                 match event.as_str() {
+                    "CallCancelled" => {
+                        let api_event = crate::api::events::Event::CallCancelled {
+                            call_id: session_id.clone(),
+                        };
+                        self.publish_and_release_session(api_event, session_id)
+                            .await;
+                        return;
+                    }
                     "CallOnHold" => Some(crate::api::events::Event::CallOnHold {
                         call_id: session_id,
                     }),

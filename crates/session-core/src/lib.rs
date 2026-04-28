@@ -31,7 +31,8 @@ pub mod types;
 
 // Peer types
 pub use api::callback_peer::{
-    CallHandler, CallHandlerDecision, CallbackPeer, ClosureHandler, EndReason, ShutdownHandle,
+    CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerControl, ClosureHandler, EndReason,
+    ShutdownHandle,
 };
 pub use api::stream_peer::{EventReceiver, PeerControl, StreamPeer, StreamPeerBuilder};
 
@@ -69,9 +70,9 @@ pub use types::CallState;
 pub mod prelude {
     pub use crate::{
         AudioReceiver, AudioSender, AudioStream, CallHandler, CallHandlerDecision, CallId,
-        CallState, CallbackPeer, Config, EndReason, Event, EventReceiver, IncomingCall,
-        IncomingCallGuard, PeerControl, Registration, RegistrationHandle, Result, SessionError,
-        SessionHandle, SipContactMode, SipTlsMode, StreamPeer, StreamPeerBuilder,
+        CallState, CallbackPeer, CallbackPeerControl, Config, EndReason, Event, EventReceiver,
+        IncomingCall, IncomingCallGuard, PeerControl, Registration, RegistrationHandle, Result,
+        SessionError, SessionHandle, SipContactMode, SipTlsMode, StreamPeer, StreamPeerBuilder,
     };
 }
 

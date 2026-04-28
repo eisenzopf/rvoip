@@ -4,6 +4,10 @@ These examples validate `rvoip-session-core` against a real Asterisk PBX. They
 use `examples/asterisk/.env` for PBX address, credentials, bind addresses,
 advertised addresses, media ports, and TLS options.
 
+This directory exercises the StreamPeer API. The companion
+`examples/asterisk_callback` suite exercises the CallbackPeer API against the
+same Asterisk profile and should also pass before release.
+
 ## Endpoint Map
 
 | User | Role | Transport / media | Notes |

@@ -232,6 +232,12 @@ path = "examples/asterisk/udp_blind_transfer_remote/transferee_2002.rs"
 [[example]]
 name = "asterisk_udp_blind_transfer_remote_target"
 path = "examples/asterisk/udp_blind_transfer_remote/target_2003.rs"
+[[example]]
+name = "asterisk_callback_endpoint"
+path = "examples/asterisk_callback/endpoint.rs"
+[[example]]
+name = "asterisk_callback_analyze"
+path = "examples/asterisk_callback/analyze.rs"
 
 
 [dependencies]

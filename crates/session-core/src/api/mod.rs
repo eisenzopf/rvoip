@@ -194,4 +194,6 @@ pub use incoming::{IncomingCall, IncomingCallGuard};
 pub use stream_peer::{EventReceiver, PeerControl, StreamPeer};
 
 // CallbackPeer (reactive server-style)
-pub use callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, EndReason};
+pub use callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerControl, EndReason,
+};

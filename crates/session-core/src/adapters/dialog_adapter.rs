@@ -130,6 +130,16 @@ impl DialogAdapter {
         self.state_machine.set(state_machine)
     }
 
+    fn publish_api_event(&self, api_event: crate::api::events::Event) {
+        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+        let coordinator = self.global_coordinator.clone();
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.publish(wrapped).await {
+                tracing::warn!("Failed to publish app-level dialog adapter event: {}", e);
+            }
+        });
+    }
+
     // ===== Direct Dialog Operations =====
     // NOTE: Removed confusing create_dialog() and send_invite() methods
     // Use send_invite_with_details() to create a dialog and send INVITE in one operation
@@ -1054,11 +1064,19 @@ impl DialogAdapter {
                         "✅ Unregistration successful - session {} marked as unregistered",
                         session_id.0
                     );
+                    self.publish_api_event(crate::api::events::Event::UnregistrationSuccess {
+                        registrar: registrar_uri.to_string(),
+                    });
                 } else {
                     tracing::info!(
                         "✅ Registration successful - session {} marked as registered",
                         session_id.0
                     );
+                    self.publish_api_event(crate::api::events::Event::RegistrationSuccess {
+                        registrar: registrar_uri.to_string(),
+                        expires,
+                        contact: contact_uri.to_string(),
+                    });
                     self.start_symmetric_registration_keepalive(from_uri, registrar_uri)
                         .await;
                 }
