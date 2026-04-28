@@ -98,6 +98,25 @@ fn local_direction_from_remote_answer(
     }
 }
 
+fn srtp_diagnostics_enabled() -> bool {
+    std::env::var("RVOIP_SRTP_DIAGNOSTICS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn audio_transport(session: &SdpSession) -> Option<&str> {
+    session
+        .media_descriptions
+        .iter()
+        .find(|m| m.media == "audio")
+        .map(|m| m.protocol.as_str())
+}
+
 /// Audio format for recording
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub enum AudioFormat {
@@ -409,6 +428,19 @@ impl MediaAdapter {
     ) -> Result<NegotiatedConfig> {
         // Parse remote SDP to extract IP and port
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+        let diagnostics = srtp_diagnostics_enabled();
+        if diagnostics {
+            if let Ok(parsed) = SdpSession::from_str(remote_sdp) {
+                tracing::info!(
+                    "SRTP_DIAG remote_sdp_answer session={} media={}:{} transport={} crypto_attrs={}",
+                    session_id.0,
+                    remote_ip,
+                    remote_port,
+                    audio_transport(&parsed).unwrap_or("unknown"),
+                    Self::extract_audio_crypto(&parsed).len()
+                );
+            }
+        }
 
         // SDES answer-side handling (RFC 4568 §7.5).
         // The state machine path that calls us doesn't expose a
@@ -433,6 +465,13 @@ impl MediaAdapter {
                     chosen.tag,
                     chosen.suite
                 );
+                if diagnostics {
+                    tracing::info!(
+                        "SRTP_DIAG sdes_answer_accepted session={} suite={:?}",
+                        session_id.0,
+                        chosen.suite
+                    );
+                }
             } else if self.srtp_required {
                 return Err(SessionError::SDPNegotiationFailed(
                     "srtp_required is set but the SDP answer carries no a=crypto: line".into(),
@@ -477,6 +516,13 @@ impl MediaAdapter {
                     session_id.0,
                     pair.suite
                 );
+                if diagnostics {
+                    tracing::info!(
+                        "SRTP_DIAG srtp_contexts_installed session={} role=uac suite={:?}",
+                        session_id.0,
+                        pair.suite
+                    );
+                }
             }
 
             // Establish media flow (this starts audio transmission)
@@ -524,6 +570,17 @@ impl MediaAdapter {
             SessionError::SDPNegotiationFailed(format!("Failed to parse remote SDP: {}", e))
         })?;
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
+        let diagnostics = srtp_diagnostics_enabled();
+        if diagnostics {
+            tracing::info!(
+                "SRTP_DIAG remote_sdp_offer session={} media={}:{} transport={} crypto_attrs={}",
+                session_id.0,
+                remote_ip,
+                remote_port,
+                audio_transport(&parsed_offer).unwrap_or("unknown"),
+                Self::extract_audio_crypto(&parsed_offer).len()
+            );
+        }
 
         // SDES UAS-side handling. Per RFC 4568 §7.3, if we require
         // SRTP and the offer doesn't include any `a=crypto:` lines we
@@ -542,6 +599,13 @@ impl MediaAdapter {
                 chosen.tag,
                 chosen.suite
             );
+            if diagnostics {
+                tracing::info!(
+                    "SRTP_DIAG sdes_offer_accepted session={} suite={:?}",
+                    session_id.0,
+                    chosen.suite
+                );
+            }
             (Some(chosen), true)
         } else if offered_crypto.is_empty() && self.srtp_required {
             return Err(SessionError::SDPNegotiationFailed(
@@ -597,6 +661,13 @@ impl MediaAdapter {
                     session_id.0,
                     pair.suite
                 );
+                if diagnostics {
+                    tracing::info!(
+                        "SRTP_DIAG srtp_contexts_installed session={} role=uas suite={:?}",
+                        session_id.0,
+                        pair.suite
+                    );
+                }
             }
 
             self.controller
@@ -650,6 +721,17 @@ impl MediaAdapter {
         )?;
         let offered_direction = audio_direction(&parsed_offer);
         let answer_direction = answer_direction_for_offer(&offered_direction);
+        if diagnostics {
+            tracing::info!(
+                "SRTP_DIAG local_sdp_answer session={} media={}:{} transport={} crypto_attrs={} direction={}",
+                session_id.0,
+                advertised_ip,
+                advertised_port,
+                answer_transport,
+                usize::from(answer_attr.is_some()),
+                direction_attribute(answer_direction)
+            );
+        }
 
         let formats_str: Vec<&str> = formats.iter().map(|s| s.as_str()).collect();
         let mut media_builder = SdpBuilder::new("Session")
@@ -1144,6 +1226,18 @@ impl MediaAdapter {
         } else {
             ("RTP/AVP", Vec::new())
         };
+        let crypto_attr_count = crypto_attrs.len();
+        if srtp_diagnostics_enabled() {
+            tracing::info!(
+                "SRTP_DIAG local_sdp_offer session={} media={}:{} transport={} crypto_attrs={} direction={}",
+                session_id.0,
+                advertised_ip,
+                port,
+                transport,
+                crypto_attr_count,
+                direction_attribute(direction)
+            );
+        }
 
         // Build the m-section. Always offer PCMU (0) + PCMA (8) +
         // telephone-event (101). Sprint 3 C1: append `13` + an

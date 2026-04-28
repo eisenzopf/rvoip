@@ -26,6 +26,17 @@ use tracing::{debug, error, info, trace, warn};
 /// while keeping the seen-set bounded under sustained DTMF traffic.
 const DTMF_DEDUP_TTL: Duration = Duration::from_millis(500);
 
+fn srtp_diagnostics_enabled() -> bool {
+    std::env::var("RVOIP_SRTP_DIAGNOSTICS")
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 use super::allocator::{GlobalPortAllocator, PairingStrategy};
 use super::validation::{PlatformSocketStrategy, RtpSocketValidator};
 use super::{RtpTransport, RtpTransportConfig};
@@ -246,9 +257,13 @@ impl UdpRtpTransport {
         let active_state = self.active.clone();
         let srtp_recv = self.srtp_recv.clone();
         let dtmf_seen = self.dtmf_seen.clone();
+        let diagnostics = srtp_diagnostics_enabled();
+        let local_rtp_addr = rtp_socket.local_addr().ok();
 
         let rtp_receiver = tokio::spawn(async move {
             let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
+            let mut first_inbound_rtp_logged = false;
+            let mut srtp_unprotect_failures = 0_u64;
             debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
 
             loop {
@@ -296,19 +311,43 @@ impl UdpRtpTransport {
                             // leaking timing or distinguishing failure
                             // modes to a network attacker.
                             let mut srtp_guard = srtp_recv.lock().await;
-                            let parse_result: Result<RtpPacket> =
-                                if let Some(ctx) = srtp_guard.as_mut() {
-                                    match ctx.unprotect(&buffer[0..size]) {
-                                        Ok(packet) => Ok(packet),
-                                        Err(_) => {
-                                            trace!("SRTP unprotect failed; dropping packet");
-                                            drop(srtp_guard);
-                                            continue;
+                            if diagnostics && !first_inbound_rtp_logged {
+                                info!(
+                                    "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
+                                    local_rtp_addr,
+                                    addr,
+                                    size,
+                                    srtp_guard.is_some()
+                                );
+                                first_inbound_rtp_logged = true;
+                            }
+                            let parse_result: Result<RtpPacket> = if let Some(ctx) =
+                                srtp_guard.as_mut()
+                            {
+                                match ctx.unprotect(&buffer[0..size]) {
+                                    Ok(packet) => Ok(packet),
+                                    Err(_) => {
+                                        srtp_unprotect_failures += 1;
+                                        if diagnostics
+                                            && (srtp_unprotect_failures <= 5
+                                                || srtp_unprotect_failures % 50 == 0)
+                                        {
+                                            info!(
+                                                    "SRTP_DIAG unprotect_failed local={:?} source={} size={} failures={}",
+                                                    local_rtp_addr,
+                                                    addr,
+                                                    size,
+                                                    srtp_unprotect_failures
+                                                );
                                         }
+                                        trace!("SRTP unprotect failed; dropping packet");
+                                        drop(srtp_guard);
+                                        continue;
                                     }
-                                } else {
-                                    RtpPacket::parse(&buffer[0..size])
-                                };
+                                }
+                            } else {
+                                RtpPacket::parse(&buffer[0..size])
+                            };
                             drop(srtp_guard);
                             match parse_result {
                                 Ok(packet) => {
@@ -613,6 +652,12 @@ impl UdpRtpTransport {
     ) {
         *self.srtp_send.lock().await = Some(send);
         *self.srtp_recv.lock().await = Some(recv);
+        if srtp_diagnostics_enabled() {
+            info!(
+                "SRTP_DIAG contexts_installed local={:?}",
+                self.rtp_socket.local_addr().ok()
+            );
+        }
     }
 
     /// Whether SRTP is currently configured on this transport. Used by

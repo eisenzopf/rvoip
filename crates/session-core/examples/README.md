@@ -67,6 +67,11 @@ mandatory SDES-SRTP, and users `2001` and `2002` for UDP/plain RTP. All four
 users share the single `SIP_PASSWORD` value from `.env`; endpoint auth
 usernames default to the endpoint number.
 
+`LOCAL_IP=0.0.0.0` is valid as a local bind address only. The examples use
+`ADVERTISED_IP` for SIP Contact routing and `MEDIA_ADVERTISED_IP` for SDP
+media addresses; `MEDIA_ADVERTISED_IP` defaults to `ADVERTISED_IP`. Both must
+be routable from Asterisk when the bind address is unspecified.
+
 For the TLS/SRTP Asterisk example, configure Asterisk PJSIP with a TLS
 transport and endpoint media encryption set to mandatory SDES/SRTP. The default
 example mode is a reachable TLS Contact: RVOIP registers over TLS and also

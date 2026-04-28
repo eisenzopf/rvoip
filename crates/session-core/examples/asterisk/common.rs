@@ -88,6 +88,7 @@ pub struct EndpointConfig {
     pub transport: String,
     pub local_ip: IpAddr,
     pub advertised_ip: IpAddr,
+    pub media_advertised_ip: IpAddr,
     pub local_port: u16,
     pub tls_local_port: Option<u16>,
     pub tls_contact_mode: TlsContactMode,
@@ -169,6 +170,7 @@ impl EndpointConfig {
         config.credentials = Some(Credentials::new(&self.auth_username, &self.password));
         config.media_port_start = self.media_port_start;
         config.media_port_end = self.media_port_end;
+        config.media_public_addr = Some(SocketAddr::new(self.media_advertised_ip, 0));
         config
     }
 
@@ -293,6 +295,10 @@ pub fn endpoint_config(
             return Err("ADVERTISED_IP is required when LOCAL_IP is 0.0.0.0 or ::".into());
         }
     };
+    let media_advertised_ip = match std::env::var("MEDIA_ADVERTISED_IP") {
+        Ok(value) if !value.trim().is_empty() => value.trim().parse()?,
+        _ => advertised_ip,
+    };
     let local_port = env_u16(&format!("{}_LOCAL_PORT", prefix), default_local_port)?;
     let tls_contact_mode = TlsContactMode::from_env()?;
     let tls_local_port = if transport == "tls" {
@@ -318,6 +324,7 @@ pub fn endpoint_config(
         transport,
         local_ip,
         advertised_ip,
+        media_advertised_ip,
         local_port,
         tls_local_port,
         tls_contact_mode,
@@ -355,6 +362,10 @@ pub async fn register_endpoint(
     println!("[{}] AOR:        {}", cfg.username, cfg.aor_uri());
     println!("[{}] Contact:    {}", cfg.username, cfg.contact_uri());
     println!("[{}] Registrar:  {}", cfg.username, cfg.registrar_uri());
+    println!(
+        "[{}] Media SDP:  {} with allocated RTP ports",
+        cfg.username, cfg.media_advertised_ip
+    );
     println!(
         "[{}] Media ports: {}-{}",
         cfg.username, cfg.media_port_start, cfg.media_port_end
