@@ -414,13 +414,18 @@ pub async fn register_endpoint(
         cfg.username, cfg.advertised_ip, cfg.local_port
     );
     if cfg.is_tls() {
+        let listener_note = if cfg.tls_contact_mode.uses_listener() {
+            cfg.tls_local_port
+                .map(|port| format!(" (listener {}:{})", cfg.local_ip, port))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         println!(
             "[{}] TLS mode:   {}{}",
             cfg.username,
             cfg.tls_contact_mode.label(),
-            cfg.tls_local_port
-                .map(|port| format!(" (listener {}:{})", cfg.local_ip, port))
-                .unwrap_or_default()
+            listener_note
         );
         println!(
             "[{}] TLS Via:    {}:{}",

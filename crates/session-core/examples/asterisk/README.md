@@ -27,8 +27,9 @@ same Asterisk profile and should also pass before release.
 |---------|----------|------------------|
 | `./registration/run.sh` | Registers TLS user `1001`, then UDP user `2001` | REGISTER succeeds, each endpoint unregisters cleanly |
 | `./tls_srtp_hold_resume/run.sh` | `1001` calls `1002` over TLS/SRTP, holds, resumes, exchanges tones | TLS/SIPS and SRTP wire evidence is logged, optional remote hold/resume events pass when enabled, pre/post-resume audio passes analysis |
+| `./tls_srtp_registered_flow/run.sh` | `1001` calls `1002` over TLS/SRTP while both endpoints receive inbound SIP requests on the REGISTER TLS flow | Registered-flow mode and keep-alive evidence is logged, no rvoip TLS listener cert is generated, pre/post-resume audio passes analysis |
 | `./udp_hold_resume/run.sh` | `2001` calls `2002` over UDP/RTP, holds, resumes, exchanges tones | Optional remote hold/resume events pass when enabled, pre/post-resume audio passes analysis |
-| `./run.sh` | Full default sequence | Registration plus both hold/resume variants pass |
+| `./run.sh` | Full default sequence | Registration plus reachable-contact TLS/SRTP hold/resume and UDP hold/resume pass |
 
 Hold/resume re-INVITE propagation to the callee is PBX-profile dependent.
 The current default verifies caller-side hold/resume plus audio continuity.
@@ -57,6 +58,7 @@ sequence unless `ASTERISK_RUN_EXTENDED_TESTS=1` is set. The older
 | Test | WAV assertions |
 |------|----------------|
 | TLS/SRTP hold/resume | `1001` receives `1002`'s `880 Hz` tone; `1002` receives `1001`'s pre-hold `440 Hz` and post-resume `660 Hz` tones |
+| TLS/SRTP registered-flow | Same audio assertions as TLS/SRTP hold/resume, plus registered-flow mode and keep-alive log assertions |
 | TLS/SRTP DTMF | `1001` receives `1002`'s `880 Hz` tone; `1002` receives `1001`'s `440 Hz` tone while DTMF is sent |
 | TLS/SRTP blind transfer | `1001` receives `1002`'s `880 Hz` initial-leg tone; `1003` receives `1002`'s `880 Hz` transferred-leg tone; `1002` receives `1001`'s `440 Hz` before transfer and `1003`'s `660 Hz` after transfer |
 | TLS/SRTP ring/cancel | Signaling-only; no media assertion because the target intentionally never answers |
@@ -104,3 +106,35 @@ ASTERISK_TLS_CONTACT_MODE=registered-flow-symmetric
 
 These modes reuse the outbound registration flow and do not require an endpoint
 listener certificate/key.
+
+The registered-flow integration test is available as:
+
+```sh
+./tls_srtp_registered_flow/run.sh
+```
+
+It forces:
+
+```sh
+ASTERISK_TLS_CONTACT_MODE=registered-flow-symmetric
+ASTERISK_TLS_FLOW_REUSE=1
+SIP_TRANSPORT=TLS
+ASTERISK_TLS_SRTP_REQUIRED=1
+```
+
+The test verifies that registered-flow mode is active, symmetric keep-alive is
+started, no local rvoip TLS listener certificate is generated, and the usual
+TLS/SRTP hold/resume audio assertions pass.
+
+The default `./run.sh` sequence leaves this test disabled because the Asterisk
+profile must route TLS Contacts back over the registration flow. Set
+`ASTERISK_RUN_FLOW_REUSE_TESTS=1` to include it in the top-level runner. For
+the local Docker Asterisk profile in `/Users/jonathan/Developer/asterisk`, use:
+
+```sh
+/Users/jonathan/Developer/asterisk/scripts/run-rvoip-flow-reuse-tests.sh
+```
+
+That helper temporarily enables `rewrite_contact = yes` for the TLS endpoint
+template, runs this example, and restores the default reachable-contact
+configuration afterward.
