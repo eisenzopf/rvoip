@@ -66,6 +66,15 @@ pub enum SessionEvent {
     CallTerminated {
         session_id: SessionId,
     },
+    CallCancelled {
+        session_id: SessionId,
+    },
+    CallOnHold {
+        session_id: SessionId,
+    },
+    CallResumed {
+        session_id: SessionId,
+    },
     Custom {
         session_id: SessionId,
         event: String,
@@ -551,6 +560,15 @@ impl StateMachine {
                 session_id: session.session_id.clone(),
             },
             EventTemplate::CallTerminated => SessionEvent::CallTerminated {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::CallCancelled => SessionEvent::CallCancelled {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::CallOnHold => SessionEvent::CallOnHold {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::CallResumed => SessionEvent::CallResumed {
                 session_id: session.session_id.clone(),
             },
             EventTemplate::Custom(event) => SessionEvent::Custom {

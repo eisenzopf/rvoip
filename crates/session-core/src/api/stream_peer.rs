@@ -12,6 +12,10 @@
 //! application tests and single-peer clients. Split the peer when one task
 //! should receive events while other tasks issue commands.
 //!
+//! Registration uses the same lifecycle as the lower-level coordinator:
+//! successful REGISTER responses store accepted expiry and refresh timing, and
+//! `StreamPeer::shutdown` performs best-effort graceful unregister by default.
+//!
 //! For reactive server code (proxies, IVR engines) use [`CallbackPeer`] instead.
 //!
 //! [`CallbackPeer`]: crate::api::callback_peer::CallbackPeer
@@ -35,12 +39,17 @@ pub use crate::api::unified::Config as PeerConfig;
 
 /// A receiver for session API events.
 ///
-/// Obtained via [`StreamPeer::next_event()`], [`SessionHandle::events()`], or
-/// [`PeerControl::subscribe_events()`]. Each `EventReceiver` is independent —
-/// slow consumers do not affect others.
+/// Obtained via [`StreamPeer::next_event()`], [`SessionHandle::events()`],
+/// [`UnifiedCoordinator::events`](crate::UnifiedCoordinator::events), or
+/// [`PeerControl::subscribe_events()`]. Each `EventReceiver` is independent,
+/// so slow consumers do not affect others.
 ///
 /// Events flow through the [`GlobalEventCoordinator`]'s `"session_to_app"` channel,
 /// which uses a lock-free broadcast internally.
+///
+/// Filter helpers such as [`next_transfer`](Self::next_transfer) consume and
+/// discard non-matching events. Create a separate receiver when another task
+/// also needs to observe those events.
 ///
 /// # Consuming events
 ///
@@ -272,6 +281,8 @@ impl PeerControl {
     /// Subscribe to all events from this coordinator.
     ///
     /// Each call returns an independent receiver (broadcast semantics).
+    /// Registration lifecycle events are visible here because they do not
+    /// belong to a specific call session.
     pub async fn subscribe_events(&self) -> Result<EventReceiver> {
         let rx = self.coordinator.subscribe_events().await?;
         Ok(EventReceiver::new(rx))
@@ -288,15 +299,17 @@ impl PeerControl {
 /// A sequential SIP peer with event-stream-style access.
 ///
 /// Use this when your application wants to drive SIP as an async workflow:
-/// make a call, wait for it to answer, send DTMF, wait for hangup; or wait for
-/// an incoming call and resolve it inline.
+/// make a call, wait for it to answer, send DTMF, wait for hangup; register to
+/// a PBX; or wait for an incoming call and resolve it inline.
 ///
 /// `StreamPeer` owns one event receiver. Methods such as
 /// [`wait_for_incoming`](Self::wait_for_incoming) and
 /// [`wait_for_answered`](Self::wait_for_answered) consume and discard unrelated
 /// events while they wait. If multiple tasks need to observe events, use
 /// [`split`](Self::split) or [`PeerControl::subscribe_events`] to create
-/// independent receivers.
+/// independent receivers. Use the underlying coordinator through
+/// [`control`](Self::control) for detailed registration metadata or
+/// deterministic unregister helpers.
 ///
 /// # Quick start
 ///
@@ -469,7 +482,9 @@ impl StreamPeer {
     /// Register with a SIP server (6-arg form).
     ///
     /// Prefer [`register_with()`](Self::register_with) which uses a builder and
-    /// derives `from_uri`/`contact_uri` from the peer's config.
+    /// derives `from_uri`/`contact_uri` from the peer's config. Successful
+    /// registration stores registrar-accepted expiry and may schedule
+    /// automatic refresh according to [`Config::registration_auto_refresh`].
     pub async fn register(
         &mut self,
         registrar_uri: &str,
@@ -493,6 +508,12 @@ impl StreamPeer {
     }
 
     /// Register with a SIP server using a [`Registration`](crate::Registration) builder.
+    ///
+    /// The returned handle identifies the registration lifecycle. Use
+    /// [`is_registered`](Self::is_registered) for a simple boolean or
+    /// [`UnifiedCoordinator::registration_info`](crate::UnifiedCoordinator::registration_info)
+    /// through [`control`](Self::control) for accepted expiry, refresh timing,
+    /// Service-Route, GRUU, and failure metadata.
     ///
     /// # Example
     ///
@@ -519,7 +540,8 @@ impl StreamPeer {
     /// Returns `true` once the registrar has replied 200 OK to the REGISTER
     /// (including after a 423 Interval Too Brief retry or 401 auth retry),
     /// and `false` if the registration was rejected, unregistered, or has
-    /// not yet completed.
+    /// not yet completed. This is intentionally coarse; use
+    /// `control().coordinator().registration_info(handle)` for richer state.
     pub async fn is_registered(
         &self,
         handle: &crate::api::unified::RegistrationHandle,
@@ -528,19 +550,27 @@ impl StreamPeer {
     }
 
     /// Unregister (sends REGISTER with `Expires: 0`).
+    ///
+    /// Returns after the unregister request is accepted by the state machine.
+    /// Use [`UnifiedCoordinator::unregister_and_wait`](crate::UnifiedCoordinator::unregister_and_wait)
+    /// through [`control`](Self::control) when the caller needs to wait for
+    /// the registrar response.
     pub async fn unregister(&self, handle: &crate::api::unified::RegistrationHandle) -> Result<()> {
         self.control.coordinator.unregister(handle).await
     }
 
-    /// Graceful shutdown — stops background tasks and drops resources.
+    /// Graceful shutdown: unregister active registrations, stop background
+    /// tasks, and drop resources.
     ///
-    /// Previously `SimplePeer::shutdown()` called `process::exit(0)`. This version
-    /// cleanly drops the coordinator, causing background tasks to terminate when
-    /// they next observe their channels are closed.
+    /// This calls [`UnifiedCoordinator::shutdown_gracefully`] with the
+    /// configured unregister timeout. Set
+    /// [`Config::unregister_on_shutdown_timeout_secs`] to `0` to skip the
+    /// best-effort unregister phase.
     pub async fn shutdown(self) -> Result<()> {
-        // Signal the coordinator to stop its background event loops,
-        // then drop self so remaining Arc references decrease.
-        self.control.coordinator.shutdown();
+        // Gracefully unregister active registrations, signal the coordinator
+        // to stop background event loops, then drop self so remaining Arc
+        // references decrease.
+        self.control.coordinator.shutdown_gracefully(None).await?;
         drop(self);
         Ok(())
     }
@@ -559,7 +589,7 @@ impl StreamPeer {
     ///     // ... do some work ...
     ///     stop.shutdown();
     /// });
-    /// // peer.run_event_loop().await;
+    /// // peer.next_event().await;
     /// # Ok(())
     /// # }
     /// ```

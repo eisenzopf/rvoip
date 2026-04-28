@@ -3,7 +3,7 @@
 //! Run standalone:  cargo run -p rvoip-session-core --example streampeer_blind_transfer_bob
 //! Or with others:  ./examples/streampeer/blind_transfer/run.sh
 
-use rvoip_session_core::{Config, StreamPeer};
+use rvoip_session_core::{Config, Event, StreamPeer};
 use tokio::time::{sleep, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
@@ -34,13 +34,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Talk for 2 seconds, then transfer
     sleep(Duration::from_secs(2)).await;
     println!("[BOB] Transferring Alice to Charlie...");
-    handle
-        .transfer_blind(&format!("sip:charlie@127.0.0.1:{}", charlie_port))
+    let transfer_outcome = handle
+        .transfer_blind_and_wait(
+            &format!("sip:charlie@127.0.0.1:{}", charlie_port),
+            Some(Duration::from_secs(10)),
+        )
         .await?;
+    match transfer_outcome {
+        Event::TransferCompleted { .. } => {}
+        Event::TransferFailed {
+            status_code,
+            reason,
+            ..
+        } => {
+            return Err(format!("transfer failed with {status_code}: {reason}").into());
+        }
+        other => return Err(format!("unexpected transfer outcome: {other:?}").into()),
+    }
 
     sleep(Duration::from_secs(1)).await;
-    handle.hangup().await?;
-    bob.wait_for_ended(handle.id()).await?;
+    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
     println!("[BOB] Done.");
 
     std::process::exit(0);

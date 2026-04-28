@@ -149,9 +149,9 @@ file references below.
 | **Outgoing `rport` (RFC 3581)** | ✅ | `create_via_header` at `crates/dialog-core/src/transaction/manager/handlers.rs` now emits `Via: … ;branch=… ;rport` unconditionally. Responses with `received=`/`rport=` echoed back are already honored (handlers.rs:564-587), so NAT response routing works end-to-end. |
 | **Incoming `received` / `rport` honored** | ✅ | Response handler reads both at `handlers.rs:564-587` and uses them for ACK routing. This is the subset of NAT that does work today. |
 | **Contact header rewrite from discovered NAT address** | ❌ | `Contact:` is built once from `local_ip:sip_port` (see `InviteBuilder` in `crates/dialog-core/src/transaction/client/builders.rs:690-728`) and never updated. A UAC behind NAT that discovers its public IP via a `received=` param has no way to propagate that into subsequent registrations or re-INVITEs. |
-| **STUN / ICE** | ❌ | No implementation anywhere. A `stun_server` field exists in the older session-core v1 builder but is dead code — never read. |
+| **STUN / ICE** | ⚠️ / ❌ | `Config::stun_server` performs a best-effort startup probe with a fresh UDP socket bound to `local_ip` and can populate the public RTP address for SDP. This is useful for simple cone-NAT labs but is not ICE and does not guarantee the mapping of later per-call RTP sockets. ICE/TURN is still not implemented. |
 | **SIP Outbound (RFC 5626) keepalive + flow-id** | ❌ | Not implemented. Required by some carriers for registration behind NAT. CRLF keepalive on TCP/TLS is the common ask. |
-| **`public_address` / `external_ip` config knob** | ❌ | `Config` only exposes `local_ip` (the bind address). No way to tell the stack "I'm behind NAT, my public address is X" short of STUN. |
+| **`public_address` / `external_ip` config knob** | ✅ | `Config::media_public_addr` statically overrides the RTP address advertised in SDP. `Config::sip_advertised_addr` / `tls_advertised_addr` cover signaling Via/Contact advertisement. |
 | **Digest `nc` counter tracking** | ⚠️ | Hard-coded `00000001` at `auth-core/src/sip_digest.rs:354`. Some strict servers reject duplicate `nc` across multi-challenge sequences. |
 | **Digest `auth-int` qop** | ❌ | Only `qop=auth`. Rare requirement. |
 | **Digest algorithms** | ⚠️ | MD5 and SHA-256 present; `-sess` variants (RFC 8760) not implemented. |
@@ -164,7 +164,7 @@ file references below.
 - **Carrier requiring TLS 5061**: ❌ blocked on TLS transport (sip-transport consolidation + session-core config wiring). Multi-day fix.
 - **UAC behind NAT reaching a public carrier**: ⚠️ partial — outgoing Via now requests `rport` and response `received=`/`rport=` is honored, so short-lived calls and fresh REGISTER round-trips work through NAT. Contact rewrite from discovered NAT address is still pending, so long-duration registrations and inbound in-dialog requests after the pinhole expires remain brittle.
 
-**Recommendation**: the "ship path" is (1) ~~DNS in REGISTER~~ ✅, (2) ~~outgoing rport~~ ✅ / Contact rewrite from received/rport, (3) TLS. Items 1 and the outgoing-rport half of item 2 are now done (v0.2 hardening pass). Contact rewrite, TLS, RFC 3263 SRV/NAPTR, STUN, and SIP Outbound are follow-on work for the edges that need them.
+**Recommendation**: the "ship path" is (1) ~~DNS in REGISTER~~ ✅, (2) ~~outgoing rport~~ ✅ / Contact rewrite from received/rport, (3) TLS. Items 1 and the outgoing-rport half of item 2 are now done (v0.2 hardening pass). Contact rewrite from observed NAT parameters, RFC 3263 SRV/NAPTR, ICE/TURN, and broader carrier profiles are follow-on work for the edges that need them.
 
 See `COMPATIBILITY_MATRIX.md` and `TOPOLOGY_PROFILES.md` for release-facing
 interop status. Asterisk is validated; FreeSWITCH/Sofia, proxy/RTPengine,

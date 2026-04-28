@@ -12,8 +12,8 @@
 //! surfaces that as a distinct `CallCancelled` event (not `CallFailed`)
 //! so UIs can render "missed call" differently.
 
-use rvoip_session_core::{Config, Event, StreamPeer};
-use tokio::time::{sleep, timeout, Duration};
+use rvoip_session_core::{Config, StreamPeer};
+use tokio::time::{sleep, Duration};
 
 fn env_port(key: &str, default: u16) -> u16 {
     std::env::var(key)
@@ -35,7 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = Config::local("alice", alice_port);
     let mut alice = StreamPeer::with_config(config).await?;
-    let mut events = alice.control().subscribe_events().await?;
 
     println!("[ALICE] Calling Bob on port {}…", bob_port);
     let handle = alice
@@ -64,47 +63,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("[ALICE] call never reached Ringing state within 4s");
         std::process::exit(1);
     }
-    println!("[ALICE] Reached Ringing state — sending CANCEL via handle.hangup()…");
+    println!("[ALICE] Reached Ringing state — sending CANCEL via handle.hangup_and_wait()…");
 
-    // `hangup()` from Ringing routes to the CANCEL wire path.
-    handle.hangup().await?;
-
-    let outcome = timeout(Duration::from_secs(8), async {
-        loop {
-            match events.next().await {
-                Some(Event::CallCancelled { .. }) => return Outcome::Cancelled,
-                Some(Event::CallFailed { status_code, .. }) => {
-                    return Outcome::Failed(status_code);
-                }
-                Some(Event::CallEnded { .. }) => return Outcome::Ended,
-                Some(_) => continue,
-                None => return Outcome::StreamClosed,
-            }
-        }
-    })
-    .await;
-
-    match outcome {
-        Ok(Outcome::Cancelled) => {
+    // `hangup_and_wait()` from Ringing routes to the CANCEL wire path and
+    // waits for the terminal CallCancelled event.
+    match handle.hangup_and_wait(Some(Duration::from_secs(8))).await {
+        Ok(reason) if reason == "Cancelled" => {
             println!("[ALICE] Got CallCancelled — expected outcome.");
             std::process::exit(0);
         }
         Ok(other) => {
-            eprintln!("[ALICE] expected CallCancelled, got {:?}", other);
+            eprintln!("[ALICE] expected CallCancelled, got terminal reason {other:?}");
             std::process::exit(1);
         }
-        Err(_) => {
-            eprintln!("[ALICE] timed out waiting for CallCancelled");
+        Err(err) => {
+            eprintln!("[ALICE] hangup_and_wait failed: {err}");
             std::process::exit(1);
         }
     }
-}
-
-#[derive(Debug)]
-#[allow(dead_code)]
-enum Outcome {
-    Cancelled,
-    Failed(u16),
-    Ended,
-    StreamClosed,
 }

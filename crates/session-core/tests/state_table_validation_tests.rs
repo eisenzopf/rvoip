@@ -7,7 +7,7 @@
 //! - Is compatible with the current state table loader
 
 use rvoip_session_core::state_table::{
-    Action, EventType, Role, StateKey, StateTable, YamlTableLoader,
+    Action, EventTemplate, EventType, Role, StateKey, StateTable, YamlTableLoader,
 };
 use rvoip_session_core::types::CallState;
 use std::path::Path;
@@ -122,6 +122,12 @@ fn test_hold_resume_transitions() {
         matches!(hold_commit.actions.first(), Some(Action::NegotiateSDPAsUAC)),
         "Hold commit must negotiate the re-INVITE SDP answer before suspending media"
     );
+    assert!(
+        hold_commit
+            .publish_events
+            .contains(&EventTemplate::CallOnHold),
+        "Hold commit must publish typed CallOnHold event"
+    );
 
     let resume_commit_key = StateKey {
         role: Role::Both,
@@ -137,6 +143,12 @@ fn test_hold_resume_transitions() {
             Some(Action::NegotiateSDPAsUAC)
         ),
         "Resume commit must negotiate the re-INVITE SDP answer before resuming media"
+    );
+    assert!(
+        resume_commit
+            .publish_events
+            .contains(&EventTemplate::CallResumed),
+        "Resume commit must publish typed CallResumed event"
     );
 }
 

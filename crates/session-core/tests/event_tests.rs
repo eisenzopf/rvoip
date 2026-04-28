@@ -3,7 +3,7 @@
 //! Tests Event enum construction, helper methods, and the call_id accessor.
 
 use rvoip_session_core::state_table::types::SessionId;
-use rvoip_session_core::Event;
+use rvoip_session_core::{Event, SubscriptionState, TransferKind};
 
 fn test_id() -> SessionId {
     SessionId::new()
@@ -76,6 +76,15 @@ fn test_refer_received_event() {
     assert_eq!(e.call_id(), Some(&id));
     assert!(e.is_transfer_event());
     assert!(!e.is_call_event());
+    assert_eq!(e.transfer_kind(), Some(TransferKind::Blind));
+}
+
+#[test]
+fn test_subscription_state_parse_helper() {
+    let parsed = SubscriptionState::parse("terminated;reason=noresource;expires=0");
+    assert_eq!(parsed.state, "terminated");
+    assert_eq!(parsed.reason.as_deref(), Some("noresource"));
+    assert_eq!(parsed.expires, Some(0));
 }
 
 #[test]

@@ -162,6 +162,17 @@ path = "examples/advanced/concurrent_calls/client.rs"
 name = "advanced_registrar_server"
 path = "examples/advanced/registrar_server.rs"
 
+# FreeSWITCH interop examples
+[[example]]
+name = "freeswitch_registration"
+path = "examples/freeswitch/registration/register.rs"
+[[example]]
+name = "freeswitch_udp_call_caller"
+path = "examples/freeswitch/udp_call/caller.rs"
+[[example]]
+name = "freeswitch_udp_call_callee"
+path = "examples/freeswitch/udp_call/callee.rs"
+
 # Asterisk interop examples
 [[example]]
 name = "asterisk_registration"

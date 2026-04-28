@@ -213,6 +213,7 @@ pub struct RegisterRequestOptions {
     pub call_id: Option<String>,
     pub cseq: Option<u32>,
     pub outbound_contact: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
+    pub outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
 }
 
 /// Build a RFC 5626 outbound-aware Contact header from a raw URI string and
@@ -1188,6 +1189,11 @@ impl UnifiedDialogApi {
         self.manager.core().gruu_for_aor(aor).await
     }
 
+    /// Whether at least one RFC 5626 outbound-flow monitor is active for an AoR.
+    pub fn outbound_flow_active_for_aor(&self, aor: &str) -> bool {
+        self.manager.core().outbound_flow_active_for_aor(aor)
+    }
+
     pub async fn send_register(
         &self,
         registrar_uri: &str,
@@ -1205,6 +1211,7 @@ impl UnifiedDialogApi {
             call_id: None,
             cseq: None,
             outbound_contact: None,
+            outbound_proxy_uri: None,
         })
         .await
     }
@@ -1236,6 +1243,7 @@ impl UnifiedDialogApi {
             call_id: None,
             cseq: None,
             outbound_contact: Some(outbound_params.clone()),
+            outbound_proxy_uri: None,
         })
         .await
     }
@@ -1251,19 +1259,21 @@ impl UnifiedDialogApi {
         let cseq = options.cseq.unwrap_or(1);
 
         debug!(
-            "Building REGISTER request to {} (expires={}, cseq={}, auth={}, outbound={})",
+            "Building REGISTER request to {} (expires={}, cseq={}, auth={}, outbound={}, outbound_proxy={})",
             options.registrar_uri,
             options.expires,
             cseq,
             options.authorization.is_some(),
-            options.outbound_contact.is_some()
+            options.outbound_contact.is_some(),
+            options.outbound_proxy_uri.is_some()
         );
 
         let registrar = options
             .registrar_uri
             .parse::<rvoip_sip_core::Uri>()
             .map_err(|e| ApiError::protocol(format!("Invalid REGISTER registrar URI: {}", e)))?;
-        let local_addr = self.manager.core().local_address_for_uri(&registrar);
+        let destination_uri = options.outbound_proxy_uri.as_ref().unwrap_or(&registrar);
+        let local_addr = self.manager.core().local_address_for_uri(destination_uri);
 
         let mut builder = RegisterBuilder::new()
             .registrar(&options.registrar_uri)
@@ -1288,6 +1298,11 @@ impl UnifiedDialogApi {
             builder = builder.contact_header(contact);
         }
 
+        if let Some(proxy_uri) = &options.outbound_proxy_uri {
+            use rvoip_sip_core::types::{route::Route, TypedHeader};
+            builder = builder.header(TypedHeader::Route(Route::with_uri(proxy_uri.clone())));
+        }
+
         if let Some(auth) = options.authorization {
             builder = builder.header(TypedHeader::Other(
                 HeaderName::Authorization,
@@ -1300,17 +1315,12 @@ impl UnifiedDialogApi {
             .build()
             .map_err(|e| ApiError::protocol(format!("Failed to build REGISTER request: {}", e)))?;
 
-        let dest_uri = options
-            .registrar_uri
-            .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| ApiError::protocol(format!("Invalid registrar URI: {}", e)))?;
-
-        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(destination_uri)
             .await
             .ok_or_else(|| {
                 ApiError::protocol(format!(
-                    "Failed to resolve registrar URI: {}",
-                    options.registrar_uri
+                    "Failed to resolve REGISTER destination URI: {}",
+                    destination_uri
                 ))
             })?;
 

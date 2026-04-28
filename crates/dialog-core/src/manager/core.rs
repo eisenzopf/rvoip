@@ -1414,6 +1414,12 @@ impl DialogManager {
         self.gruu_by_aor.read().await.get(aor).cloned()
     }
 
+    /// Returns true when at least one RFC 5626 outbound-flow monitor is
+    /// active for the given AoR.
+    pub fn outbound_flow_active_for_aor(&self, aor: &str) -> bool {
+        self.outbound_flows.iter().any(|entry| entry.key().0 == aor)
+    }
+
     pub async fn handle_response(
         &self,
         response: Response,

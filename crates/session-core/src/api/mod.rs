@@ -18,14 +18,19 @@
 //! ## Common Building Blocks
 //!
 //! - [`Config`] configures SIP transports, contact behavior, TLS, SRTP,
-//!   registration, NAT/media address advertisement, session timers, 100rel,
-//!   and codec negotiation policy.
-//! - [`SessionHandle`] controls a single call once it exists.
+//!   registration refresh/unregister behavior, outbound proxy routing,
+//!   NAT/media address advertisement, session timers, 100rel, and codec
+//!   negotiation policy.
+//! - [`SessionHandle`] controls a single call once it exists, including
+//!   deterministic wait helpers for teardown and blind transfer.
 //! - [`IncomingCall`] represents a ringing inbound INVITE that must be accepted,
 //!   rejected, redirected, or deferred.
 //! - [`Event`] is the typed application event enum used by `StreamPeer` and
-//!   lower-level coordinator subscribers.
-//! - [`Registration`] describes outbound SIP REGISTER attempts.
+//!   lower-level coordinator subscribers, with helper views for transfer kind
+//!   and NOTIFY subscription state.
+//! - [`Registration`] describes outbound SIP REGISTER attempts; query
+//!   [`RegistrationInfo`] for accepted expiry, refresh timing, GRUU, and
+//!   Service-Route metadata.
 //!
 //! ## StreamPeer: Making a Call
 //!
@@ -66,7 +71,8 @@
 //!
 //! ## Per-Call Control
 //!
-//! [`SessionHandle`] provides hold, resume, transfer, DTMF, and audio:
+//! [`SessionHandle`] provides hold, resume, transfer, DTMF, audio, and
+//! deterministic wait helpers:
 //!
 //! ```rust,no_run
 //! # use rvoip_session_core::*;
@@ -74,7 +80,7 @@
 //! handle.hold().await?;
 //! handle.resume().await?;
 //! handle.send_dtmf('1').await?;
-//! handle.transfer_blind("sip:charlie@example.com").await?;
+//! handle.transfer_blind_and_wait("sip:charlie@example.com", None).await?;
 //!
 //! let audio = handle.audio().await?;
 //! let (sender, receiver) = audio.split();
@@ -108,7 +114,8 @@
 //! ## UnifiedCoordinator: Custom Orchestration
 //!
 //! Use the coordinator directly when you need to build a higher-level
-//! application runtime, bridge legs, or subscribe to filtered event streams:
+//! application runtime, bridge legs, subscribe to filtered event streams, or
+//! inspect registration lifecycle state:
 //!
 //! ```rust,no_run
 //! use rvoip_session_core::{Config, Event, Result, UnifiedCoordinator};
@@ -130,6 +137,33 @@
 //!     }
 //! }
 //! # drop(events);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Registration Lifecycle
+//!
+//! Registration helpers return a [`RegistrationHandle`]. Use
+//! [`UnifiedCoordinator::registration_info`] for richer lifecycle metadata and
+//! [`UnifiedCoordinator::unregister_and_wait`] when tests or servers need
+//! deterministic teardown:
+//!
+//! ```rust,no_run
+//! use rvoip_session_core::{Config, Registration, RegistrationStatus, Result, UnifiedCoordinator};
+//!
+//! # async fn example() -> Result<()> {
+//! let coordinator = UnifiedCoordinator::new(Config::local("alice", 5060)).await?;
+//! let handle = coordinator.register_with(
+//!     Registration::new("sip:registrar.example.com", "alice", "secret")
+//!         .expires(600)
+//! ).await?;
+//!
+//! let info = coordinator.registration_info(&handle).await?;
+//! if info.status == RegistrationStatus::Registered {
+//!     println!("accepted expiry: {:?}", info.accepted_expires_secs);
+//! }
+//!
+//! coordinator.unregister_and_wait(&handle, None).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -206,13 +240,16 @@ pub use types::{
 pub use crate::types::CallState;
 
 // Re-export the unified API
-pub use unified::{Config, RegistrationHandle, SipContactMode, SipTlsMode, UnifiedCoordinator};
+pub use unified::{
+    Config, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode, SipTlsMode,
+    UnifiedCoordinator,
+};
 
 // Re-export the simple API (legacy)
 pub use simple::SimplePeer;
 
 // Re-export event types
-pub use events::{CallHandle, CallId, Event};
+pub use events::{CallHandle, CallId, Event, SubscriptionState, TransferKind};
 
 // Re-export builder
 pub use builder::SessionBuilder;

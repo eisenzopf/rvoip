@@ -159,6 +159,13 @@ pub struct SessionState {
     pub registration_contact: Option<String>, // Contact URI for registration
     pub registration_call_id: Option<String>, // Stable Call-ID for this registration lifecycle
     pub registration_cseq: u32,        // Last CSeq used for this registration lifecycle
+    pub registration_accepted_expires: Option<u32>, // Registrar-accepted expiry in seconds
+    pub registration_registered_at: Option<Instant>, // Time of last successful registration
+    pub registration_next_refresh_at: Option<Instant>, // Scheduled automatic refresh time
+    pub registration_last_failure: Option<String>, // Last registration failure summary
+    pub registration_service_route: Option<Vec<String>>, // Registrar Service-Route URIs
+    pub registration_pub_gruu: Option<String>, // Registrar-assigned public GRUU
+    pub registration_temp_gruu: Option<String>, // Registrar-assigned temporary GRUU
     pub credentials: Option<crate::types::Credentials>, // User credentials for authentication
     /// Optional `P-Asserted-Identity` URI (RFC 3325 §9.1) to attach to the
     /// outgoing INVITE for this session. When `Some`, the `SendINVITE` action
@@ -242,6 +249,13 @@ impl SessionState {
             registration_contact: None,
             registration_call_id: None,
             registration_cseq: 0,
+            registration_accepted_expires: None,
+            registration_registered_at: None,
+            registration_next_refresh_at: None,
+            registration_last_failure: None,
+            registration_service_route: None,
+            registration_pub_gruu: None,
+            registration_temp_gruu: None,
             credentials: None,
             pai_uri: None,
             is_registered: false,

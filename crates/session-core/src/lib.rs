@@ -18,8 +18,8 @@
 //!
 //! Most applications should start with [`StreamPeer`] or [`CallbackPeer`].
 //! Use [`UnifiedCoordinator`] when you need to compose multiple call legs,
-//! bridge media, subscribe to filtered event streams, or build your own peer
-//! abstraction.
+//! bridge media, subscribe to filtered event streams, inspect registration
+//! lifecycle metadata, or build your own peer abstraction.
 //!
 //! ## StreamPeer: Sequential Client or Test Code
 //!
@@ -117,10 +117,12 @@
 //! [`SessionHandle`] is the per-call control object shared by all three
 //! surfaces. It currently exposes:
 //!
-//! - call teardown with [`SessionHandle::hangup`]
+//! - call teardown with [`SessionHandle::hangup`] or deterministic
+//!   [`SessionHandle::hangup_and_wait`]
 //! - local hold/resume with [`SessionHandle::hold`] and [`SessionHandle::resume`]
 //! - RFC 4733 DTMF send with [`SessionHandle::send_dtmf`]
-//! - blind transfer with [`SessionHandle::transfer_blind`]
+//! - blind transfer with [`SessionHandle::transfer_blind`] or
+//!   [`SessionHandle::transfer_blind_and_wait`]
 //! - attended-transfer primitives with [`SessionHandle::dialog_identity`] and
 //!   [`SessionHandle::transfer_attended`]
 //! - inbound REFER accept/reject with [`SessionHandle::accept_refer`] and
@@ -131,11 +133,17 @@
 //! ## Configuration and Interop
 //!
 //! [`Config`] controls SIP binding, advertised addresses, TLS, registration
-//! contact behavior, SRTP, session timers, 100rel, P-Asserted-Identity,
-//! outbound proxy routing for INVITEs, STUN/static media address overrides,
-//! and codec matching policy. The Asterisk examples under
-//! `examples/asterisk` and `examples/asterisk_callback` are the best current
-//! executable reference for PBX interop with UDP/RTP and TLS/SDES-SRTP.
+//! contact behavior, registration auto-refresh and graceful unregister,
+//! SRTP, session timers, 100rel, P-Asserted-Identity, outbound proxy routing
+//! for INVITEs and REGISTERs, STUN/static media address overrides, and codec
+//! matching policy. Deployment profile constructors cover local labs, LAN PBX
+//! use, Asterisk TLS registered-flow, FreeSWITCH internal profile, and
+//! carrier/SBC starting points.
+//!
+//! The Asterisk examples under `examples/asterisk` and
+//! `examples/asterisk_callback`, plus the FreeSWITCH scaffolding under
+//! `examples/freeswitch`, are the current executable references for PBX
+//! interop.
 //!
 //! See the [`api`] module docs for the complete module map and additional
 //! quick-start examples.
@@ -176,10 +184,13 @@ pub use api::incoming::{IncomingCall, IncomingCallGuard};
 
 // Configuration & registration
 pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
-pub use api::{Config, RegistrationHandle, SipContactMode, SipTlsMode, UnifiedCoordinator};
+pub use api::{
+    Config, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode, SipTlsMode,
+    UnifiedCoordinator,
+};
 
 // Events
-pub use api::events::Event;
+pub use api::events::{Event, SubscriptionState, TransferKind};
 
 // Errors
 pub use errors::{Result, SessionError};
@@ -199,8 +210,9 @@ pub mod prelude {
     pub use crate::{
         AudioReceiver, AudioSender, AudioStream, CallHandler, CallHandlerDecision, CallId,
         CallState, CallbackPeer, CallbackPeerControl, Config, EndReason, Event, EventReceiver,
-        IncomingCall, IncomingCallGuard, PeerControl, Registration, RegistrationHandle, Result,
-        SessionError, SessionHandle, SipContactMode, SipTlsMode, StreamPeer, StreamPeerBuilder,
+        IncomingCall, IncomingCallGuard, PeerControl, Registration, RegistrationHandle,
+        RegistrationInfo, RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode,
+        SipTlsMode, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferKind,
     };
 }
 

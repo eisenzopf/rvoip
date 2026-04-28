@@ -5,6 +5,8 @@
 //! [`UnifiedCoordinator`](crate::UnifiedCoordinator) subscribers. Events are
 //! translated from lower-level dialog/media notifications into
 //! application-facing call, registration, transfer, NOTIFY, and media events.
+//! Helper methods provide typed views over compatibility fields such as REFER
+//! transfer kind and NOTIFY subscription state.
 //!
 //! [`StreamPeer`]: crate::StreamPeer
 
@@ -14,6 +16,84 @@ use tokio::sync::mpsc;
 
 /// Type alias for call ID (same as SessionId)
 pub type CallId = SessionId;
+
+/// Typed classification for REFER transfer requests.
+///
+/// The wire-facing `Event::ReferReceived::transfer_type` field remains a
+/// string for compatibility. Use [`Event::transfer_kind`] when application
+/// code wants a typed view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferKind {
+    /// Standard blind transfer REFER.
+    Blind,
+    /// REFER carrying attended-transfer context such as `Replaces`.
+    Attended,
+    /// Unrecognized or vendor-specific transfer flavor.
+    Unknown,
+}
+
+impl TransferKind {
+    /// Convert the raw transfer type field into a typed classification.
+    pub fn from_header_value(value: &str) -> Self {
+        match value.to_ascii_lowercase().as_str() {
+            "blind" => Self::Blind,
+            "attended" => Self::Attended,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Stable lowercase label for logs and UI display.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Blind => "blind",
+            Self::Attended => "attended",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Parsed view of a `Subscription-State` header.
+///
+/// This intentionally preserves the raw header value while extracting the
+/// common `state`, `expires`, and `reason` parameters. Use
+/// [`Event::subscription_state`] to parse a NOTIFY event on demand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionState {
+    /// Primary state token, such as `active`, `pending`, or `terminated`.
+    pub state: String,
+    /// Parsed `expires` parameter, if present and numeric.
+    pub expires: Option<u32>,
+    /// Parsed `reason` parameter, if present.
+    pub reason: Option<String>,
+    /// Original header value.
+    pub raw: String,
+}
+
+impl SubscriptionState {
+    /// Parse a raw `Subscription-State` header value.
+    pub fn parse(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        let mut parts = raw.split(';').map(str::trim);
+        let state = parts.next().unwrap_or_default().to_string();
+        let mut expires = None;
+        let mut reason = None;
+
+        for part in parts {
+            if let Some(value) = part.strip_prefix("expires=") {
+                expires = value.parse::<u32>().ok();
+            } else if let Some(value) = part.strip_prefix("reason=") {
+                reason = Some(value.to_string());
+            }
+        }
+
+        Self {
+            state,
+            expires,
+            reason,
+            raw,
+        }
+    }
+}
 
 /// Handle for managing a specific call
 ///
@@ -215,7 +295,8 @@ pub enum Event {
         replaces: Option<String>,
         /// Dialog-core transaction ID used to correlate REFER response/NOTIFY.
         transaction_id: String, // For NOTIFY correlation
-        /// Transfer flavor, currently `"blind"` or `"attended"`.
+        /// Raw transfer flavor. Prefer [`Event::transfer_kind`] for typed
+        /// classification.
         transfer_type: String, // "blind" or "attended"
     },
 
@@ -281,12 +362,16 @@ pub enum Event {
 
     // ===== Call State Events =====
     /// Local hold was accepted by the remote peer.
+    ///
+    /// Emitted after the hold re-INVITE/answer exchange succeeds.
     CallOnHold {
         /// Session identifier for the held call.
         call_id: CallId,
     },
 
     /// Local resume was accepted by the remote peer.
+    ///
+    /// Emitted after the resume re-INVITE/answer exchange succeeds.
     CallResumed {
         /// Session identifier for the resumed call.
         call_id: CallId,
@@ -336,7 +421,12 @@ pub enum Event {
     },
 
     // ===== Registration Events =====
-    /// Registration successful
+    /// Registration successful.
+    ///
+    /// `expires` is the registrar-accepted expiry, not necessarily the value
+    /// requested by the application. Use
+    /// [`UnifiedCoordinator::registration_info`](crate::UnifiedCoordinator::registration_info)
+    /// for refresh timing, Service-Route, GRUU, and failure metadata.
     RegistrationSuccess {
         /// Registrar URI used for the REGISTER.
         registrar: String,
@@ -346,7 +436,10 @@ pub enum Event {
         contact: String,
     },
 
-    /// Registration failed
+    /// Registration failed.
+    ///
+    /// Final failure after any supported retry path, such as digest auth retry
+    /// or 423 Interval Too Brief retry.
     RegistrationFailed {
         /// Registrar URI used for the failed REGISTER.
         registrar: String,
@@ -356,13 +449,15 @@ pub enum Event {
         reason: String,
     },
 
-    /// Unregistration successful
+    /// Unregistration successful.
+    ///
+    /// Automatic refresh for the registration has been aborted.
     UnregistrationSuccess {
         /// Registrar URI used for the unregistration.
         registrar: String,
     },
 
-    /// Unregistration failed
+    /// Unregistration failed.
     UnregistrationFailed {
         /// Registrar URI used for the failed unregistration.
         registrar: String,
@@ -467,5 +562,30 @@ impl Event {
             self,
             Event::DtmfReceived { .. } | Event::MediaQualityChanged { .. }
         )
+    }
+
+    /// Typed transfer kind for `ReferReceived`.
+    ///
+    /// Returns `None` for non-REFER events.
+    pub fn transfer_kind(&self) -> Option<TransferKind> {
+        match self {
+            Event::ReferReceived { transfer_type, .. } => {
+                Some(TransferKind::from_header_value(transfer_type))
+            }
+            _ => None,
+        }
+    }
+
+    /// Parsed `Subscription-State` for `NotifyReceived`.
+    ///
+    /// Returns `None` when the event is not NOTIFY or the header was absent.
+    pub fn subscription_state(&self) -> Option<SubscriptionState> {
+        match self {
+            Event::NotifyReceived {
+                subscription_state: Some(raw),
+                ..
+            } => Some(SubscriptionState::parse(raw.clone())),
+            _ => None,
+        }
     }
 }

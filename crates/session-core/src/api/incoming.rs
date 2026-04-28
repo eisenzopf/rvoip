@@ -1,9 +1,13 @@
 //! Incoming call handling — accept, reject, redirect, or defer.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
+use crate::api::events::Event;
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
@@ -267,30 +271,34 @@ pub struct IncomingCallGuard {
     call_id: CallId,
     coordinator: Arc<UnifiedCoordinator>,
     deadline: Instant,
-    resolved: bool,
+    resolved: Arc<AtomicBool>,
 }
 
 impl IncomingCallGuard {
     fn new(call_id: CallId, coordinator: Arc<UnifiedCoordinator>, timeout: Duration) -> Self {
         let deadline = Instant::now() + timeout;
+        let resolved = Arc::new(AtomicBool::new(false));
 
         // Spawn a watchdog that auto-rejects if the deadline passes
         let coordinator_clone = coordinator.clone();
         let call_id_clone = call_id.clone();
+        let watchdog_resolved = resolved.clone();
         tokio::spawn(async move {
             let remaining = deadline.saturating_duration_since(Instant::now());
             tokio::time::sleep(remaining).await;
-            // The coordinator will silently ignore this if the session is already gone
-            let _ = coordinator_clone
-                .reject_call(&call_id_clone, 503, "Service Unavailable")
-                .await;
+            if !watchdog_resolved.swap(true, Ordering::SeqCst) {
+                // The coordinator will silently ignore this if the session is already gone
+                let _ = coordinator_clone
+                    .reject_call(&call_id_clone, 503, "Service Unavailable")
+                    .await;
+            }
         });
 
         Self {
             call_id,
             coordinator,
             deadline,
-            resolved: false,
+            resolved,
         }
     }
 
@@ -305,13 +313,18 @@ impl IncomingCallGuard {
     }
 
     /// Accept the call now. Returns a [`SessionHandle`].
-    pub async fn accept(mut self) -> Result<SessionHandle> {
+    pub async fn accept(self) -> Result<SessionHandle> {
         if Instant::now() >= self.deadline {
             return Err(SessionError::Timeout(
                 "IncomingCallGuard deadline exceeded before accept".to_string(),
             ));
         }
-        self.resolved = true;
+        if self.resolved.swap(true, Ordering::SeqCst) {
+            return Err(SessionError::InvalidTransition(format!(
+                "IncomingCallGuard for {} is already resolved",
+                self.call_id
+            )));
+        }
         self.coordinator.accept_call(&self.call_id).await?;
         Ok(SessionHandle::new(
             self.call_id.clone(),
@@ -320,8 +333,10 @@ impl IncomingCallGuard {
     }
 
     /// Reject the call now with the given SIP status code and reason phrase.
-    pub fn reject(mut self, status: u16, reason: &str) {
-        self.resolved = true;
+    pub fn reject(self, status: u16, reason: &str) {
+        if self.resolved.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let coordinator = self.coordinator.clone();
         let call_id = self.call_id.clone();
         let reason = reason.to_string();
@@ -329,11 +344,60 @@ impl IncomingCallGuard {
             let _ = coordinator.reject_call(&call_id, status, &reason).await;
         });
     }
+
+    /// Reject the call and wait for the matching terminal event.
+    ///
+    /// This is the deterministic variant for queues and tests that need to
+    /// know when the rejection has been observed by session-core's event
+    /// stream. The event subscription is opened before the reject is sent.
+    pub async fn reject_and_wait(
+        self,
+        status: u16,
+        reason: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Event> {
+        if self.resolved.swap(true, Ordering::SeqCst) {
+            return Err(SessionError::InvalidTransition(format!(
+                "IncomingCallGuard for {} is already resolved",
+                self.call_id
+            )));
+        }
+
+        let mut events = self.coordinator.events_for_session(&self.call_id).await?;
+        self.coordinator
+            .reject_call(&self.call_id, status, reason)
+            .await?;
+
+        let fut = async {
+            loop {
+                match events.next().await {
+                    Some(
+                        event @ (Event::CallFailed { .. }
+                        | Event::CallEnded { .. }
+                        | Event::CallCancelled { .. }),
+                    ) => return Ok(event),
+                    Some(_) => {}
+                    None => {
+                        return Err(SessionError::Other(
+                            "Event channel closed while waiting for reject".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        match timeout {
+            Some(duration) => tokio::time::timeout(duration, fut)
+                .await
+                .map_err(|_| SessionError::Timeout("reject_and_wait timed out".to_string()))?,
+            None => fut.await,
+        }
+    }
 }
 
 impl Drop for IncomingCallGuard {
     fn drop(&mut self) {
-        if !self.resolved {
+        if !self.resolved.swap(true, Ordering::SeqCst) {
             let coordinator = self.coordinator.clone();
             let call_id = self.call_id.clone();
             tokio::spawn(async move {
@@ -342,5 +406,50 @@ impl Drop for IncomingCallGuard {
                     .await;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::unified::Config;
+
+    #[tokio::test]
+    async fn deferred_guard_reject_marks_shared_resolution_before_watchdog() {
+        let coordinator = UnifiedCoordinator::new(Config::local("guard-test", 35990))
+            .await
+            .expect("coordinator starts");
+        let guard = IncomingCallGuard::new(CallId::new(), coordinator, Duration::from_millis(25));
+        let resolved = guard.resolved.clone();
+
+        guard.reject(486, "Busy Here");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            resolved.load(Ordering::SeqCst),
+            "explicit reject should resolve the guard before the watchdog fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_guard_accept_attempt_marks_shared_resolution_before_watchdog() {
+        let coordinator = UnifiedCoordinator::new(Config::local("guard-test", 35991))
+            .await
+            .expect("coordinator starts");
+        let guard = IncomingCallGuard::new(CallId::new(), coordinator, Duration::from_millis(25));
+        let resolved = guard.resolved.clone();
+
+        let result = guard.accept().await;
+        assert!(
+            result.is_err(),
+            "fake guard has no backing session, so accept should surface that error"
+        );
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert!(
+            resolved.load(Ordering::SeqCst),
+            "accept should resolve the guard before the watchdog can auto-reject"
+        );
     }
 }

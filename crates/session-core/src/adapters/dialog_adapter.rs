@@ -35,6 +35,7 @@ use rvoip_infra_common::events::{
 };
 use rvoip_sip_core::{Response, StatusCode};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
@@ -85,6 +86,11 @@ pub struct DialogAdapter {
     /// outbound Contact parameters.
     pub(crate) symmetric_flow_params:
         Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
+
+    /// Automatic registration refresh settings and task registry.
+    registration_auto_refresh: bool,
+    registration_refresh_jitter_percent: u8,
+    registration_refresh_tasks: Arc<DashMap<SessionId, tokio::task::AbortHandle>>,
 }
 
 impl DialogAdapter {
@@ -104,6 +110,8 @@ impl DialogAdapter {
         outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
         outbound_contact_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
         symmetric_flow_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
+        registration_auto_refresh: bool,
+        registration_refresh_jitter_percent: u8,
     ) -> Self {
         Self {
             dialog_api,
@@ -117,6 +125,9 @@ impl DialogAdapter {
             outbound_proxy_uri,
             outbound_contact_params,
             symmetric_flow_params,
+            registration_auto_refresh,
+            registration_refresh_jitter_percent,
+            registration_refresh_tasks: Arc::new(DashMap::new()),
         }
     }
 
@@ -138,6 +149,274 @@ impl DialogAdapter {
                 tracing::warn!("Failed to publish app-level dialog adapter event: {}", e);
             }
         });
+    }
+
+    pub(crate) fn abort_registration_refresh(&self, session_id: &SessionId) {
+        if let Some((_, handle)) = self.registration_refresh_tasks.remove(session_id) {
+            handle.abort();
+        }
+    }
+
+    pub(crate) fn abort_all_registration_refreshes(&self) {
+        let handles: Vec<_> = self
+            .registration_refresh_tasks
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        self.registration_refresh_tasks.clear();
+        for handle in handles {
+            handle.abort();
+        }
+    }
+
+    fn compute_registration_refresh_at(&self, now: Instant, accepted_expires: u32) -> Instant {
+        let base_secs = ((accepted_expires as f64) * 0.85).floor().max(1.0) as u64;
+        let jitter_cap_secs =
+            (base_secs * u64::from(self.registration_refresh_jitter_percent)) / 100;
+        let jitter_secs = if jitter_cap_secs == 0 {
+            0
+        } else {
+            use rand::Rng;
+            rand::thread_rng().gen_range(0..=jitter_cap_secs)
+        };
+        now + Duration::from_secs(base_secs.saturating_sub(jitter_secs).max(1))
+    }
+
+    fn schedule_registration_refresh(
+        &self,
+        session_id: SessionId,
+        next_refresh_at: Option<Instant>,
+    ) {
+        self.abort_registration_refresh(&session_id);
+
+        if !self.registration_auto_refresh {
+            return;
+        }
+
+        let Some(next_refresh_at) = next_refresh_at else {
+            return;
+        };
+        let Some(state_machine) = self.state_machine.get().cloned() else {
+            return;
+        };
+
+        let session_id_for_task = session_id.clone();
+        let tasks = self.registration_refresh_tasks.clone();
+        let adapter = self.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(next_refresh_at)).await;
+            tasks.remove(&session_id_for_task);
+
+            match state_machine
+                .process_event(
+                    &session_id_for_task,
+                    crate::state_table::types::EventType::RefreshRegistration,
+                )
+                .await
+            {
+                Ok(result) if result.transition.is_some() => {}
+                Ok(_) => {
+                    tracing::warn!(
+                        "Automatic registration refresh had no state-table transition for session {}; falling back to direct REGISTER",
+                        session_id_for_task
+                    );
+                    if let Err(e) = adapter
+                        .send_registration_refresh_direct(&session_id_for_task)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Automatic direct registration refresh failed for session {}: {}",
+                            session_id_for_task,
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Automatic registration refresh failed for session {}: {}",
+                        session_id_for_task,
+                        e
+                    );
+                }
+            }
+        })
+        .abort_handle();
+
+        self.registration_refresh_tasks.insert(session_id, handle);
+    }
+
+    async fn send_registration_refresh_direct(&self, session_id: &SessionId) -> Result<()> {
+        let session = self.store.get_session(session_id).await?;
+        if !session.is_registered {
+            tracing::debug!(
+                "Skipping automatic registration refresh for unregistered session {}",
+                session_id
+            );
+            return Ok(());
+        }
+
+        let from_uri = session
+            .local_uri
+            .clone()
+            .ok_or_else(|| SessionError::InternalError("local_uri not set for refresh".into()))?;
+        let registrar_uri = session
+            .registrar_uri
+            .clone()
+            .or_else(|| session.remote_uri.clone())
+            .ok_or_else(|| {
+                SessionError::InternalError("registrar_uri not set for refresh".into())
+            })?;
+        let contact_uri = session
+            .registration_contact
+            .clone()
+            .or_else(|| session.local_uri.clone())
+            .ok_or_else(|| SessionError::InternalError("contact_uri not set for refresh".into()))?;
+        let expires = session.registration_expires.unwrap_or(3600);
+        let credentials = session.credentials.clone();
+        drop(session);
+
+        self.send_register(
+            session_id,
+            &registrar_uri,
+            &from_uri,
+            &contact_uri,
+            expires,
+            credentials.as_ref(),
+        )
+        .await
+    }
+
+    fn accepted_registration_expires(
+        response: &Response,
+        requested_contact_uri: &str,
+        fallback_expires: u32,
+    ) -> u32 {
+        use rvoip_sip_core::types::headers::HeaderAccess;
+        use rvoip_sip_core::types::{header::HeaderName, TypedHeader};
+
+        let requested = requested_contact_uri.trim().trim_matches(['<', '>']);
+
+        let mut first_contact_expires = None;
+        for contact in response.headers.iter().filter_map(|header| match header {
+            TypedHeader::Contact(contact) => Some(contact),
+            _ => None,
+        }) {
+            for address in contact.addresses() {
+                let expires = address
+                    .get_param("expires")
+                    .flatten()
+                    .and_then(|value| value.parse::<u32>().ok());
+                if first_contact_expires.is_none() {
+                    first_contact_expires = expires;
+                }
+                if address.uri.to_string() == requested {
+                    if let Some(expires) = expires {
+                        return expires;
+                    }
+                }
+            }
+        }
+
+        first_contact_expires
+            .or_else(|| {
+                response
+                    .raw_header_value(&HeaderName::Expires)
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+            })
+            .unwrap_or(fallback_expires)
+    }
+
+    fn response_registration_metadata(
+        response: &Response,
+    ) -> (Option<Vec<String>>, Option<String>, Option<String>) {
+        use rvoip_sip_core::types::outbound::read_gruu_contact_params;
+        use rvoip_sip_core::types::TypedHeader;
+
+        let service_route = {
+            let routes: Vec<String> = response
+                .headers
+                .iter()
+                .filter_map(|header| match header {
+                    TypedHeader::ServiceRoute(route) => Some(route.uris()),
+                    _ => None,
+                })
+                .flatten()
+                .map(|uri| uri.to_string())
+                .collect();
+            if routes.is_empty() {
+                None
+            } else {
+                Some(routes)
+            }
+        };
+
+        let mut pub_gruu = None;
+        let mut temp_gruu = None;
+        for contact in response.headers.iter().filter_map(|header| match header {
+            TypedHeader::Contact(contact) => Some(contact),
+            _ => None,
+        }) {
+            for address in contact.addresses() {
+                let params = read_gruu_contact_params(address);
+                if pub_gruu.is_none() {
+                    pub_gruu = params.pub_gruu;
+                }
+                if temp_gruu.is_none() {
+                    temp_gruu = params.temp_gruu;
+                }
+            }
+        }
+
+        (service_route, pub_gruu, temp_gruu)
+    }
+
+    async fn mark_registration_failed(
+        &self,
+        session_id: &SessionId,
+        registrar_uri: &str,
+        status_code: u16,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        self.abort_registration_refresh(session_id);
+        let reason = reason.into();
+        let mut session = self.store.get_session(session_id).await?;
+        let failure_summary = if session.registration_retry_count > 0 {
+            format!(
+                "{} after {} retry attempt(s)",
+                reason, session.registration_retry_count
+            )
+        } else {
+            reason.clone()
+        };
+        session.is_registered = false;
+        session.registration_accepted_expires = None;
+        session.registration_registered_at = None;
+        session.registration_next_refresh_at = None;
+        session.registration_last_failure = Some(failure_summary.clone());
+        session.registration_service_route = None;
+        session.registration_pub_gruu = None;
+        session.registration_temp_gruu = None;
+        self.store.update_session(session).await?;
+
+        self.publish_api_event(crate::api::events::Event::RegistrationFailed {
+            registrar: registrar_uri.to_string(),
+            status_code,
+            reason: failure_summary,
+        });
+        if let Some(state_machine) = self.state_machine.get() {
+            Box::pin(state_machine.process_event(
+                session_id,
+                crate::state_table::types::EventType::RegistrationFailed(status_code),
+            ))
+            .await
+            .map_err(|e| {
+                SessionError::InternalError(format!(
+                    "REGISTER failure event dispatch failed: {}",
+                    e
+                ))
+            })?;
+        }
+        Ok(())
     }
 
     // ===== Direct Dialog Operations =====
@@ -1040,6 +1319,7 @@ impl DialogAdapter {
                 call_id: Some(registration_call_id),
                 cseq: Some(registration_cseq),
                 outbound_contact: self.outbound_contact_params.clone(),
+                outbound_proxy_uri: self.outbound_proxy_uri.clone(),
             })
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
@@ -1056,11 +1336,47 @@ impl DialogAdapter {
             200..=299 => {
                 // Registration or unregistration successful.
                 let is_unregister = expires == 0;
+                let accepted_expires = if is_unregister {
+                    0
+                } else {
+                    Self::accepted_registration_expires(&response, contact_uri, expires)
+                };
+                let (service_route, pub_gruu, temp_gruu) = if is_unregister {
+                    (None, None, None)
+                } else {
+                    Self::response_registration_metadata(&response)
+                };
+                let now = Instant::now();
+                let next_refresh_at =
+                    if !is_unregister && self.registration_auto_refresh && accepted_expires > 0 {
+                        Some(self.compute_registration_refresh_at(now, accepted_expires))
+                    } else {
+                        None
+                    };
                 let mut session = self.store.get_session(session_id).await?;
                 session.is_registered = !is_unregister;
+                if is_unregister {
+                    session.registration_accepted_expires = None;
+                    session.registration_registered_at = None;
+                    session.registration_next_refresh_at = None;
+                    session.registration_last_failure = None;
+                    session.registration_service_route = None;
+                    session.registration_pub_gruu = None;
+                    session.registration_temp_gruu = None;
+                } else {
+                    session.registration_expires = Some(accepted_expires);
+                    session.registration_accepted_expires = Some(accepted_expires);
+                    session.registration_registered_at = Some(now);
+                    session.registration_next_refresh_at = next_refresh_at;
+                    session.registration_last_failure = None;
+                    session.registration_service_route = service_route;
+                    session.registration_pub_gruu = pub_gruu;
+                    session.registration_temp_gruu = temp_gruu;
+                }
                 self.store.update_session(session).await?;
 
                 if is_unregister {
+                    self.abort_registration_refresh(session_id);
                     tracing::info!(
                         "✅ Unregistration successful - session {} marked as unregistered",
                         session_id.0
@@ -1075,9 +1391,10 @@ impl DialogAdapter {
                     );
                     self.publish_api_event(crate::api::events::Event::RegistrationSuccess {
                         registrar: registrar_uri.to_string(),
-                        expires,
+                        expires: accepted_expires,
                         contact: contact_uri.to_string(),
                     });
+                    self.schedule_registration_refresh(session_id.clone(), next_refresh_at);
                     self.start_symmetric_registration_keepalive(from_uri, registrar_uri)
                         .await;
                 }
@@ -1132,9 +1449,13 @@ impl DialogAdapter {
                             "❌ REGISTER auth failed (retry count {}); invalid credentials",
                             retry_count
                         );
-                        let mut session = self.store.get_session(session_id).await?;
-                        session.is_registered = false;
-                        self.store.update_session(session).await?;
+                        self.mark_registration_failed(
+                            session_id,
+                            registrar_uri,
+                            response.status_code(),
+                            response.reason_phrase().to_string(),
+                        )
+                        .await?;
                         return Ok(());
                     }
                     {
@@ -1175,9 +1496,13 @@ impl DialogAdapter {
                         "REGISTER {} without challenge header — marking unregistered",
                         response.status_code()
                     );
-                    let mut session = self.store.get_session(session_id).await?;
-                    session.is_registered = false;
-                    self.store.update_session(session).await?;
+                    self.mark_registration_failed(
+                        session_id,
+                        registrar_uri,
+                        response.status_code(),
+                        "REGISTER challenge response did not include challenge header",
+                    )
+                    .await?;
                 }
             }
             423 => {
@@ -1197,9 +1522,13 @@ impl DialogAdapter {
                         "❌ Registration failed with repeated 423 — giving up (retry count {})",
                         session.registration_retry_count
                     );
-                    let mut session = self.store.get_session(session_id).await?;
-                    session.is_registered = false;
-                    self.store.update_session(session).await?;
+                    self.mark_registration_failed(
+                        session_id,
+                        registrar_uri,
+                        response.status_code(),
+                        "Registration failed with repeated 423 Interval Too Brief responses",
+                    )
+                    .await?;
                     return Ok(());
                 }
 
@@ -1216,9 +1545,13 @@ impl DialogAdapter {
                         tracing::error!(
                             "423 Interval Too Brief without Min-Expires header — cannot retry"
                         );
-                        let mut session = self.store.get_session(session_id).await?;
-                        session.is_registered = false;
-                        self.store.update_session(session).await?;
+                        self.mark_registration_failed(
+                            session_id,
+                            registrar_uri,
+                            response.status_code(),
+                            "423 Interval Too Brief without Min-Expires header",
+                        )
+                        .await?;
                         return Ok(());
                     }
                 };
@@ -1254,9 +1587,13 @@ impl DialogAdapter {
                     "❌ Registration failed with status {}",
                     response.status_code()
                 );
-                let mut session = self.store.get_session(session_id).await?;
-                session.is_registered = false;
-                self.store.update_session(session).await?;
+                self.mark_registration_failed(
+                    session_id,
+                    registrar_uri,
+                    response.status_code(),
+                    response.reason_phrase().to_string(),
+                )
+                .await?;
             }
         }
 
@@ -1491,6 +1828,9 @@ impl Clone for DialogAdapter {
             outbound_proxy_uri: self.outbound_proxy_uri.clone(),
             outbound_contact_params: self.outbound_contact_params.clone(),
             symmetric_flow_params: self.symmetric_flow_params.clone(),
+            registration_auto_refresh: self.registration_auto_refresh,
+            registration_refresh_jitter_percent: self.registration_refresh_jitter_percent,
+            registration_refresh_tasks: self.registration_refresh_tasks.clone(),
         }
     }
 }

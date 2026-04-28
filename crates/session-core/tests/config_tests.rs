@@ -2,8 +2,8 @@
 //!
 //! Tests Config constructors, defaults, and field values.
 
-use rvoip_session_core::Config;
-use std::net::IpAddr;
+use rvoip_session_core::{Config, SipContactMode, SipTlsMode};
+use std::net::{IpAddr, SocketAddr};
 
 // ── Config::local ───────────────────────────────────────────────────────────
 
@@ -86,4 +86,46 @@ fn test_config_name_in_uri() {
     assert!(c1.local_uri.contains("alice"));
     assert!(c2.local_uri.contains("bob"));
     assert_ne!(c1.local_uri, c2.local_uri);
+}
+
+#[test]
+fn test_config_lan_pbx_profile_sets_advertised_addresses() {
+    let bind: SocketAddr = "0.0.0.0:5060".parse().unwrap();
+    let advertised: SocketAddr = "192.0.2.10:5060".parse().unwrap();
+    let c = Config::lan_pbx("alice", bind, advertised);
+    assert_eq!(c.bind_addr, bind);
+    assert_eq!(c.sip_advertised_addr, Some(advertised));
+    assert_eq!(c.media_public_addr.unwrap().ip(), advertised.ip());
+}
+
+#[test]
+fn test_config_asterisk_registered_flow_profile() {
+    let c = Config::asterisk_tls_registered_flow(
+        "alice",
+        "127.0.0.1:5060".parse().unwrap(),
+        "urn:uuid:00000000-0000-0000-0000-000000000001",
+    );
+    assert_eq!(c.sip_tls_mode, SipTlsMode::ClientOnly);
+    assert_eq!(c.sip_contact_mode, SipContactMode::RegisteredFlowSymmetric);
+    assert!(c.offer_srtp);
+    assert!(c.srtp_required);
+}
+
+#[test]
+fn test_config_carrier_sbc_profile() {
+    let c = Config::carrier_sbc(
+        "trunk",
+        "0.0.0.0:5060".parse().unwrap(),
+        "198.51.100.20:5061".parse().unwrap(),
+        "sips:sbc.example.com:5061;lr",
+        "urn:uuid:00000000-0000-0000-0000-000000000002",
+    );
+    assert_eq!(c.sip_tls_mode, SipTlsMode::ClientOnly);
+    assert_eq!(c.sip_contact_mode, SipContactMode::RegisteredFlowRfc5626);
+    assert_eq!(
+        c.outbound_proxy_uri.as_deref(),
+        Some("sips:sbc.example.com:5061;lr")
+    );
+    assert!(c.offer_srtp);
+    assert!(c.srtp_required);
 }

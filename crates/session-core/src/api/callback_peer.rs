@@ -8,15 +8,17 @@
 //! event loop and call user code when something happens: incoming calls,
 //! established calls, DTMF, hold/resume, transfer, NOTIFY, registration, and
 //! auth retry notifications. The peer also exposes [`CallbackPeerControl`] so
-//! supervisors and handler-owned tasks can place outbound calls, register, and
-//! shut down the running peer.
+//! supervisors and handler-owned tasks can place outbound calls, register,
+//! inspect registration metadata through the coordinator, and shut down the
+//! running peer.
 //!
 //! # Use cases
 //!
 //! - **Proxy server**: `on_incoming_call` makes a fast routing decision and returns
 //!   `Accept`, `Reject`, or `Redirect`.
 //! - **IVR / call center**: `on_incoming_call` returns `Defer`, storing the
-//!   [`IncomingCallGuard`] in a queue until an agent is available.
+//!   [`IncomingCallGuard`] in a queue until an agent is available. Resolving
+//!   the guard cancels the deferred-call watchdog.
 //! - **B2BUA leg**: `on_call_established` bridges the accepted session to a second
 //!   outgoing leg managed in the higher-layer b2bua crate.
 //!
@@ -315,16 +317,30 @@ impl CallbackPeerControl {
     }
 
     /// Register with a SIP server.
+    ///
+    /// Successful registration uses the same lifecycle as
+    /// [`UnifiedCoordinator::register_with`]: accepted expiry and refresh
+    /// timing are stored, automatic refresh may be scheduled, and the handler
+    /// receives `on_registration_success`.
     pub async fn register_with(&self, reg: Registration) -> Result<RegistrationHandle> {
         self.coordinator.register_with(reg).await
     }
 
     /// Query whether a registration handle is currently registered.
+    ///
+    /// This is a coarse boolean. Use
+    /// [`coordinator`](Self::coordinator) and
+    /// [`UnifiedCoordinator::registration_info`] for lifecycle metadata.
     pub async fn is_registered(&self, handle: &RegistrationHandle) -> Result<bool> {
         self.coordinator.is_registered(handle).await
     }
 
     /// Unregister.
+    ///
+    /// Returns after the state machine accepts the unregister request. Use
+    /// [`UnifiedCoordinator::unregister_and_wait`] through
+    /// [`coordinator`](Self::coordinator) for deterministic registrar
+    /// confirmation.
     pub async fn unregister(&self, handle: &RegistrationHandle) -> Result<()> {
         self.coordinator.unregister(handle).await
     }
@@ -336,6 +352,10 @@ impl CallbackPeerControl {
     }
 
     /// Signal the owning [`CallbackPeer`] event loop to stop.
+    ///
+    /// This is a stop signal for the event loop. For deterministic graceful
+    /// unregister, call [`UnifiedCoordinator::shutdown_gracefully`] through
+    /// [`coordinator`](Self::coordinator).
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
@@ -463,10 +483,13 @@ impl<H: CallHandler> CallbackPeer<H> {
     //
     // A CallbackPeer acting as a B2BUA leg may need to register itself
     // upstream (with a carrier / SBC) before or while answering inbound
-    // calls. These are thin wrappers over the coordinator — same surface
-    // as `StreamPeer::register_with` / `is_registered` / `unregister`.
+    // calls. These are thin wrappers over the coordinator; use
+    // `coordinator()` for metadata and deterministic wait helpers.
 
     /// Register with a SIP server using a [`Registration`] builder.
+    ///
+    /// Registration success/failure is surfaced through the corresponding
+    /// [`CallHandler`] hooks and through the coordinator event stream.
     pub async fn register_with(
         &self,
         reg: crate::api::unified::Registration,
@@ -479,7 +502,8 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// Returns `true` once the registrar has replied 200 OK to the REGISTER
     /// (including after a 423 Interval Too Brief retry or 401 auth retry),
     /// and `false` if the registration was rejected, unregistered, or has
-    /// not yet completed.
+    /// not yet completed. Use [`coordinator`](Self::coordinator) and
+    /// [`UnifiedCoordinator::registration_info`] for richer lifecycle details.
     pub async fn is_registered(
         &self,
         handle: &crate::api::unified::RegistrationHandle,
@@ -488,12 +512,21 @@ impl<H: CallHandler> CallbackPeer<H> {
     }
 
     /// Unregister (sends REGISTER with `Expires: 0`).
+    ///
+    /// Returns after the state machine accepts the request. Use
+    /// [`UnifiedCoordinator::unregister_and_wait`] through
+    /// [`coordinator`](Self::coordinator) when the caller needs to wait for
+    /// the registrar response.
     pub async fn unregister(&self, handle: &crate::api::unified::RegistrationHandle) -> Result<()> {
         self.coordinator.unregister(handle).await
     }
 
     /// Signal shutdown. The `run()` future will return after the current event
     /// is processed.
+    ///
+    /// This does not wait for unregister. For deterministic unregister before
+    /// stopping, call [`UnifiedCoordinator::shutdown_gracefully`] through
+    /// [`coordinator`](Self::coordinator).
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
@@ -529,6 +562,12 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// "all user callbacks have observed their final events and returned." This
     /// matters for tests (and b2bua) that tear down and re-create peers and
     /// need to guarantee no user-code is still mutating shared state.
+    ///
+    /// After draining handlers, `run()` signals coordinator shutdown. That
+    /// shutdown path performs best-effort unregister when configured. Callers
+    /// that need deterministic unregister completion should invoke
+    /// [`UnifiedCoordinator::shutdown_gracefully`] before or instead of
+    /// signalling this event loop.
     ///
     /// [`shutdown()`]: Self::shutdown
     pub async fn run(self) -> Result<()> {

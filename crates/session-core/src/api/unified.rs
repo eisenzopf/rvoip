@@ -2,14 +2,18 @@
 //!
 //! [`UnifiedCoordinator`] is the shared engine underneath [`StreamPeer`] and
 //! [`CallbackPeer`]. It exposes explicit [`SessionId`] values and direct
-//! methods for call creation, incoming-call resolution, registration, event
-//! subscription, transfer primitives, audio bridging, and media control.
+//! methods for call creation, incoming-call resolution, registration
+//! lifecycle management, event subscription, transfer primitives, audio
+//! bridging, and media control.
 //!
 //! Use this module directly when you are building an application framework on
 //! top of `session-core`: B2BUA logic, gateways, carrier-facing services,
-//! custom peer abstractions, or multi-leg call orchestration. For ordinary
-//! client/test code, [`StreamPeer`] is usually more ergonomic. For reactive
-//! server endpoints, [`CallbackPeer`] is usually the better starting point.
+//! custom peer abstractions, or multi-leg call orchestration. It is also the
+//! surface that exposes deterministic registration shutdown and metadata such
+//! as registrar-accepted expiry, refresh timing, Service-Route, and GRUU. For
+//! ordinary client/test code, [`StreamPeer`] is usually more ergonomic. For
+//! reactive server endpoints, [`CallbackPeer`] is usually the better starting
+//! point.
 //!
 //! # Example
 //!
@@ -55,6 +59,7 @@ use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_media_core::types::AudioFrame;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
 pub use rvoip_dialog_core::api::RelUsage;
@@ -109,13 +114,16 @@ impl Default for SipContactMode {
 /// Runtime configuration for [`UnifiedCoordinator`].
 ///
 /// `Config` controls SIP and media binding, advertised addresses, TLS,
-/// registration Contact behavior, SRTP policy, session timers, reliable
-/// provisionals, caller identity headers, outbound INVITE routing, NAT/media
-/// address discovery, and codec negotiation.
+/// registration Contact behavior, registration refresh/unregister policy, SRTP
+/// policy, session timers, reliable provisionals, caller identity headers,
+/// outbound proxy routing for INVITEs and REGISTERs, NAT/media address
+/// discovery, and codec negotiation.
 ///
 /// Start with [`Config::local`] for loopback examples, [`Config::on`] for a
 /// specific LAN/host address, then adjust the feature-specific fields for the
-/// deployment profile.
+/// deployment profile. The profile constructors are conservative starting
+/// points for common interop targets; they do not imply carrier certification
+/// or full RFC 5626 multi-flow behavior.
 ///
 /// # Examples
 ///
@@ -197,11 +205,11 @@ pub struct Config {
     /// proxy (RFC 3261 §16.12.1.1). Session-core does **not** auto-add `;lr`
     /// — set it explicitly in the URI string.
     ///
-    /// **Current scope**: applied to outgoing INVITEs via the `extra_headers`
-    /// path. Outbound REGISTER is not yet routed through this proxy; the
-    /// RFC 5626 SIP Outbound work (A5) will integrate REGISTER + keep-alive
-    /// flow-tokens separately. `None` (the default) suppresses the header
-    /// entirely. Per-INVITE override is not yet exposed.
+    /// Applied to outgoing INVITEs and REGISTERs. For REGISTER, the registrar
+    /// remains the SIP Request-URI while the network destination is the
+    /// outbound proxy and a loose Route header is included. `None` (the
+    /// default) suppresses the header entirely. Per-request override is not
+    /// yet exposed.
     pub outbound_proxy_uri: Option<String>,
 
     /// Enable RFC 5626 "SIP Outbound" behaviour on outgoing REGISTERs.
@@ -248,6 +256,24 @@ pub struct Config {
     /// This is honored when outbound registration flow support is
     /// enabled with a stable [`Config::sip_instance`].
     pub outbound_keepalive_interval_secs: u64,
+
+    /// Automatically refresh successful registrations before they expire.
+    ///
+    /// When enabled, session-core schedules a re-REGISTER after a successful
+    /// REGISTER 2xx using the registrar-accepted expiry. Default: `true`.
+    pub registration_auto_refresh: bool,
+
+    /// Maximum percentage of the refresh interval to subtract as jitter.
+    ///
+    /// The base refresh interval is 85% of the accepted expiry. Jitter is
+    /// applied earlier, never later, so a value of 5 means the refresh fires
+    /// between 80.75% and 85% of the accepted expiry. Default: `5`.
+    pub registration_refresh_jitter_percent: u8,
+
+    /// Timeout for best-effort unregister during graceful shutdown.
+    ///
+    /// `0` disables unregister-on-shutdown. Default: `3` seconds.
+    pub unregister_on_shutdown_timeout_secs: u64,
 
     /// SIP TLS signalling mode.
     pub sip_tls_mode: SipTlsMode,
@@ -400,12 +426,15 @@ pub struct Config {
     /// (default port 3478). Common public servers:
     /// `stun.l.google.com:19302`, `stun.cloudflare.com:3478`.
     ///
-    /// The probe runs once at startup using the bound RTP socket so
-    /// the discovered NAT binding matches the binding outgoing audio
-    /// will traverse. Failure mode: probe timeout / unreachable /
-    /// unparseable response → log a warning and fall back to the
-    /// local interface address. STUN is intentionally soft-fail —
-    /// the call path is never blocked on it.
+    /// The probe runs once at startup using a fresh UDP socket bound to
+    /// [`Config::local_ip`]. This is best-effort address discovery: it is
+    /// useful for simple cone-NAT labs, but it does not guarantee the exact
+    /// mapping of a later per-call RTP socket. Symmetric NATs and production
+    /// Internet edges should use a static [`Config::media_public_addr`] today
+    /// or ICE in a future WebRTC/edge layer. Failure mode: probe timeout /
+    /// unreachable / unparseable response → log a warning and fall back to
+    /// the local interface address. STUN is intentionally soft-fail — the
+    /// call path is never blocked on it.
     ///
     /// Default: `None` — no probe runs (today's behaviour).
     pub stun_server: Option<String>,
@@ -469,6 +498,9 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            registration_auto_refresh: true,
+            registration_refresh_jitter_percent: 5,
+            unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
@@ -520,6 +552,9 @@ impl Config {
             sip_outbound_enabled: false,
             sip_instance: None,
             outbound_keepalive_interval_secs: 25,
+            registration_auto_refresh: true,
+            registration_refresh_jitter_percent: 5,
+            unregister_on_shutdown_timeout_secs: 3,
             sip_tls_mode: SipTlsMode::Disabled,
             sip_contact_mode: SipContactMode::ReachableContact,
             tls_bind_addr: None,
@@ -543,6 +578,84 @@ impl Config {
             comfort_noise_enabled: false,
             strict_codec_matching: true,
         }
+    }
+
+    /// Deployment profile for local examples and integration tests.
+    pub fn local_lab(name: &str, port: u16) -> Self {
+        Self::local(name, port)
+    }
+
+    /// Deployment profile for a directly reachable LAN PBX endpoint.
+    pub fn lan_pbx(name: &str, bind_addr: SocketAddr, advertised_addr: SocketAddr) -> Self {
+        let mut config = Self::on(name, bind_addr.ip(), bind_addr.port());
+        config.bind_addr = bind_addr;
+        config.sip_advertised_addr = Some(advertised_addr);
+        config.media_public_addr = Some(SocketAddr::new(advertised_addr.ip(), 0));
+        config
+    }
+
+    /// Deployment profile for Asterisk TLS + SDES-SRTP with registered-flow
+    /// reuse over the outbound registration connection.
+    pub fn asterisk_tls_registered_flow(
+        name: &str,
+        bind_addr: SocketAddr,
+        sip_instance: impl Into<String>,
+    ) -> Self {
+        let mut config = Self::on(name, bind_addr.ip(), bind_addr.port())
+            .tls_registered_flow_symmetric(sip_instance);
+        config.bind_addr = bind_addr;
+        config.offer_srtp = true;
+        config.srtp_required = true;
+        config
+    }
+
+    /// Deployment profile for FreeSWITCH/Sofia's internal LAN profile.
+    pub fn freeswitch_internal(name: &str, bind_addr: SocketAddr) -> Self {
+        let mut config = Self::on(name, bind_addr.ip(), bind_addr.port());
+        config.bind_addr = bind_addr;
+        config.strict_codec_matching = true;
+        config
+    }
+
+    /// Deployment profile for carrier/SBC style outbound proxy operation.
+    ///
+    /// This is a conservative starting point: TLS client mode, registered-flow
+    /// Contact behavior, mandatory SDES-SRTP, explicit public media address,
+    /// and a preloaded outbound proxy route for INVITEs. REGISTER proxy,
+    /// Service-Route/Path, SRV/NAPTR, and ICE remain separate hardening work.
+    pub fn carrier_sbc(
+        name: &str,
+        bind_addr: SocketAddr,
+        public_addr: SocketAddr,
+        outbound_proxy_uri: impl Into<String>,
+        sip_instance: impl Into<String>,
+    ) -> Self {
+        let mut config = Self::on(name, bind_addr.ip(), bind_addr.port())
+            .tls_registered_flow_rfc5626(sip_instance);
+        config.bind_addr = bind_addr;
+        config.sip_advertised_addr = Some(public_addr);
+        config.tls_advertised_addr = Some(public_addr);
+        config.media_public_addr = Some(SocketAddr::new(public_addr.ip(), 0));
+        config.outbound_proxy_uri = Some(outbound_proxy_uri.into());
+        config.offer_srtp = true;
+        config.srtp_required = true;
+        config
+    }
+
+    /// Placeholder deployment profile for a SIP proxy plus RTPengine lab.
+    ///
+    /// The signaling side preloads the outbound proxy route; media relay
+    /// integration remains explicit because RTPengine control belongs above
+    /// session-core.
+    pub fn proxy_rtpengine(
+        name: &str,
+        bind_addr: SocketAddr,
+        advertised_addr: SocketAddr,
+        outbound_proxy_uri: impl Into<String>,
+    ) -> Self {
+        let mut config = Self::lan_pbx(name, bind_addr, advertised_addr);
+        config.outbound_proxy_uri = Some(outbound_proxy_uri.into());
+        config
     }
 
     /// Configure SIP TLS as a directly reachable Contact listener.
@@ -601,6 +714,11 @@ impl Config {
         if self.tls_client_cert_path.is_some() ^ self.tls_client_key_path.is_some() {
             return Err(SessionError::ConfigError(
                 "TLS client certificate and key must be provided together".to_string(),
+            ));
+        }
+        if self.registration_refresh_jitter_percent > 50 {
+            return Err(SessionError::ConfigError(
+                "registration_refresh_jitter_percent must be <= 50".to_string(),
             ));
         }
         if matches!(
@@ -837,6 +955,8 @@ impl UnifiedCoordinator {
             outbound_proxy_uri,
             outbound_contact_params,
             symmetric_flow_params,
+            config.registration_auto_refresh,
+            config.registration_refresh_jitter_percent,
         ));
 
         let media_controller =
@@ -976,11 +1096,96 @@ impl UnifiedCoordinator {
 
     /// Shut down this coordinator and all its background tasks.
     ///
-    /// After calling this, the coordinator stops processing events. Existing
-    /// call sessions are not explicitly terminated; use [`hangup`](Self::hangup)
-    /// first if you need clean call teardown.
+    /// This is a non-blocking best-effort shutdown. When
+    /// [`Config::unregister_on_shutdown_timeout_secs`] is non-zero, active
+    /// registrations are asked to unregister before the shutdown signal is
+    /// sent. Use [`shutdown_gracefully`](Self::shutdown_gracefully) when the
+    /// caller needs deterministic unregister completion.
     pub fn shutdown(&self) {
+        let timeout = Duration::from_secs(self.config.unregister_on_shutdown_timeout_secs);
+        let shutdown_tx = self.shutdown_tx.clone();
+        let helpers = self.helpers.clone();
+        let dialog_adapter = self.dialog_adapter.clone();
+
+        if timeout.is_zero() {
+            dialog_adapter.abort_all_registration_refreshes();
+            let _ = shutdown_tx.send(true);
+            return;
+        }
+
+        tokio::spawn(async move {
+            Self::unregister_registered_sessions_best_effort(helpers, timeout).await;
+            dialog_adapter.abort_all_registration_refreshes();
+            let _ = shutdown_tx.send(true);
+        });
+    }
+
+    /// Gracefully unregister active registrations, then stop background tasks.
+    ///
+    /// The timeout applies per registration. Pass `None` to use
+    /// [`Config::unregister_on_shutdown_timeout_secs`]. A zero timeout skips
+    /// unregister and behaves like an immediate shutdown.
+    pub async fn shutdown_gracefully(&self, timeout: Option<Duration>) -> Result<()> {
+        let timeout = timeout.unwrap_or_else(|| {
+            Duration::from_secs(self.config.unregister_on_shutdown_timeout_secs)
+        });
+        if !timeout.is_zero() {
+            self.unregister_registered_sessions(timeout).await;
+        }
+        self.dialog_adapter.abort_all_registration_refreshes();
         let _ = self.shutdown_tx.send(true);
+        Ok(())
+    }
+
+    async fn unregister_registered_sessions(&self, timeout: Duration) {
+        let sessions = self.helpers.state_machine.store.get_all_sessions().await;
+        for session in sessions {
+            if !session.is_registered {
+                continue;
+            }
+            let handle = RegistrationHandle {
+                session_id: session.session_id.clone(),
+            };
+            if let Err(e) = self.unregister_and_wait(&handle, Some(timeout)).await {
+                tracing::warn!(
+                    "Graceful shutdown unregister failed for session {}: {}",
+                    session.session_id,
+                    e
+                );
+            }
+        }
+    }
+
+    async fn unregister_registered_sessions_best_effort(
+        helpers: Arc<StateMachineHelpers>,
+        timeout: Duration,
+    ) {
+        let sessions = helpers.state_machine.store.get_all_sessions().await;
+        for session in sessions {
+            if !session.is_registered {
+                continue;
+            }
+            let session_id = session.session_id.clone();
+            let unregister = helpers
+                .state_machine
+                .process_event(&session_id, EventType::StartUnregistration);
+            match tokio::time::timeout(timeout, unregister).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        "Best-effort shutdown unregister failed for session {}: {}",
+                        session_id,
+                        e
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "Best-effort shutdown unregister timed out for session {}",
+                        session_id
+                    );
+                }
+            }
+        }
     }
 
     /// Return a cloneable handle that can signal
@@ -1023,11 +1228,12 @@ impl UnifiedCoordinator {
     }
 
     /// Return a typed, unfiltered [`EventReceiver`](crate::api::stream_peer::EventReceiver) that yields
-    /// [`crate::api::events::Event`] values across all sessions.
+    /// [`crate::api::events::Event`] values across all sessions and
+    /// registration lifecycles owned by this coordinator.
     ///
-    /// Use when a single consumer needs every session API event (b2bua
-    /// coordinator, activity log). For per-leg logic prefer
-    /// [`events_for_session`][Self::events_for_session].
+    /// Use when a single consumer needs every session API event, for example
+    /// a b2bua coordinator, activity log, or registration monitor. For
+    /// per-leg call logic prefer [`events_for_session`][Self::events_for_session].
     ///
     /// The returned receiver already handles the downcast from the raw
     /// cross-crate broadcast and exposes filtering helpers like
@@ -1043,6 +1249,9 @@ impl UnifiedCoordinator {
     /// Return an [`EventReceiver`](crate::api::stream_peer::EventReceiver) that only yields events whose
     /// `call_id` matches `id`. Per-session filtering happens in the
     /// receiver's `next()` loop.
+    ///
+    /// Registration lifecycle events do not carry a call id, so they are only
+    /// visible on [`events`](Self::events), not on per-session receivers.
     ///
     /// Intended for b2bua-style consumers that need to watch both legs of
     /// a bridged call independently:
@@ -1978,7 +2187,17 @@ impl UnifiedCoordinator {
 
 /// Registration API
 impl UnifiedCoordinator {
-    /// Register with SIP server
+    /// Register with a SIP server.
+    ///
+    /// This low-level form requires explicit AoR and Contact URIs. Prefer
+    /// [`register_with`](Self::register_with) for new code so the peer config
+    /// can provide defaults.
+    ///
+    /// On a 2xx response, session-core stores the registrar-accepted expiry.
+    /// It prefers the echoed matching Contact `expires` parameter, then the
+    /// response `Expires` header, then the requested `expires` value. When
+    /// [`Config::registration_auto_refresh`] is enabled, a refresh REGISTER is
+    /// scheduled from that accepted expiry.
     ///
     /// # Arguments
     /// * `registrar_uri` - URI of the registrar server (e.g., "sip:registrar.example.com")
@@ -1989,7 +2208,8 @@ impl UnifiedCoordinator {
     /// * `expires` - Registration expiry in seconds (typically 3600)
     ///
     /// # Returns
-    /// A `RegistrationHandle` that can be used to unregister or refresh
+    /// A `RegistrationHandle` that can be used to query status, refresh, or
+    /// unregister.
     pub async fn register(
         &self,
         registrar_uri: &str,
@@ -2041,8 +2261,15 @@ impl UnifiedCoordinator {
 
     /// Register with a SIP server using a [`Registration`] builder.
     ///
-    /// This is the preferred way to register — `from_uri` and `contact_uri`
-    /// default to the peer's `local_uri` from [`Config`].
+    /// This is the preferred way to register. `from_uri` and `contact_uri`
+    /// default to the peer's `local_uri` from [`Config`], unless overridden on
+    /// the builder.
+    ///
+    /// Successful registration starts the same lifecycle as
+    /// [`register`](Self::register): accepted expiry is stored, automatic
+    /// refresh may be scheduled, and `RegistrationSuccess` is published on the
+    /// coordinator event stream. Use [`registration_info`](Self::registration_info)
+    /// to inspect the negotiated values.
     ///
     /// # Example
     ///
@@ -2074,9 +2301,13 @@ impl UnifiedCoordinator {
         .await
     }
 
-    /// Unregister from SIP server
+    /// Unregister from the SIP server.
     ///
-    /// Sends REGISTER with expires=0 to remove registration
+    /// Sends REGISTER with `Expires: 0` to remove the binding and aborts any
+    /// pending automatic refresh task when the registrar confirms success.
+    /// This method returns after the state machine accepts the request. Use
+    /// [`unregister_and_wait`](Self::unregister_and_wait) when the caller must
+    /// wait for `UnregistrationSuccess` or `UnregistrationFailed`.
     pub async fn unregister(&self, handle: &RegistrationHandle) -> Result<()> {
         // Trigger unregistration via state machine
         let result = self
@@ -2109,9 +2340,11 @@ impl UnifiedCoordinator {
         Ok(())
     }
 
-    /// Refresh registration before it expires
+    /// Refresh registration before it expires.
     ///
-    /// Sends a new REGISTER request with the same expiry time
+    /// Sends a new REGISTER request using the stored registration expiry and
+    /// registration Call-ID. Successful refresh responses replace the stored
+    /// accepted expiry and next automatic refresh time.
     pub async fn refresh_registration(&self, handle: &RegistrationHandle) -> Result<()> {
         // Trigger refresh via state machine
         let _result = self
@@ -2128,7 +2361,12 @@ impl UnifiedCoordinator {
         Ok(())
     }
 
-    /// Get registration status
+    /// Return whether the registration is currently marked registered.
+    ///
+    /// This is a coarse boolean for simple clients. Use
+    /// [`registration_info`](Self::registration_info) for status, accepted
+    /// expiry, next refresh timing, failure metadata, Service-Route, GRUU, and
+    /// outbound-flow information.
     pub async fn is_registered(&self, handle: &RegistrationHandle) -> Result<bool> {
         let session = self
             .helpers
@@ -2144,12 +2382,211 @@ impl UnifiedCoordinator {
         );
         Ok(session.is_registered)
     }
+
+    /// Return detailed registration lifecycle information for a handle.
+    ///
+    /// `accepted_expires_secs`, `registered_at`, and `next_refresh_at` are
+    /// populated from successful REGISTER responses. `service_route`,
+    /// `pub_gruu`, and `temp_gruu` are populated when supplied by the
+    /// registrar. Failure and unregister paths clear refresh metadata and keep
+    /// a stable status snapshot for diagnostics.
+    pub async fn registration_info(&self, handle: &RegistrationHandle) -> Result<RegistrationInfo> {
+        let session = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(&handle.session_id)
+            .await?;
+
+        let status = if session.is_registered {
+            RegistrationStatus::Registered
+        } else {
+            match session.call_state {
+                CallState::Registering => RegistrationStatus::Registering,
+                CallState::Unregistering => RegistrationStatus::Unregistering,
+                _ if session.registration_last_failure.is_some() => RegistrationStatus::Failed,
+                _ if session.registration_retry_count > 0 => RegistrationStatus::Failed,
+                _ => RegistrationStatus::Unregistered,
+            }
+        };
+
+        let next_refresh_in = session
+            .registration_next_refresh_at
+            .map(|when| when.saturating_duration_since(Instant::now()));
+
+        let last_failure = if let Some(reason) = session.registration_last_failure.clone() {
+            Some(reason)
+        } else if matches!(status, RegistrationStatus::Failed) {
+            Some(format!(
+                "registration failed after {} retry attempt(s)",
+                session.registration_retry_count
+            ))
+        } else {
+            None
+        };
+
+        let aor = session.local_uri.clone();
+        let (dialog_service_route, dialog_pub_gruu, dialog_temp_gruu, outbound_flow_active) =
+            if let Some(aor) = aor.as_deref() {
+                let dialog_service_route = self
+                    .dialog_adapter
+                    .dialog_api
+                    .service_route_for_aor(aor)
+                    .await
+                    .map(|uris| uris.into_iter().map(|uri| uri.to_string()).collect());
+                let gruu = self.dialog_adapter.dialog_api.gruu_for_aor(aor).await;
+                let outbound_flow_active = self
+                    .dialog_adapter
+                    .dialog_api
+                    .outbound_flow_active_for_aor(aor);
+                (
+                    dialog_service_route,
+                    gruu.as_ref().and_then(|params| params.pub_gruu.clone()),
+                    gruu.and_then(|params| params.temp_gruu),
+                    outbound_flow_active,
+                )
+            } else {
+                (None, None, None, false)
+            };
+        let service_route = session
+            .registration_service_route
+            .clone()
+            .or(dialog_service_route);
+        let pub_gruu = session.registration_pub_gruu.clone().or(dialog_pub_gruu);
+        let temp_gruu = session.registration_temp_gruu.clone().or(dialog_temp_gruu);
+
+        Ok(RegistrationInfo {
+            session_id: handle.session_id.clone(),
+            status,
+            registrar: session.registrar_uri.clone(),
+            contact: session.registration_contact.clone(),
+            expires_secs: session.registration_expires,
+            next_refresh_in,
+            retry_count: session.registration_retry_count,
+            last_failure,
+            accepted_expires_secs: session.registration_accepted_expires,
+            registered_at: session.registration_registered_at,
+            next_refresh_at: session.registration_next_refresh_at,
+            service_route,
+            pub_gruu,
+            temp_gruu,
+            outbound_flow_active,
+        })
+    }
+
+    /// Unregister and wait for the matching registration lifecycle event.
+    ///
+    /// This subscribes to the coordinator event stream before sending
+    /// unregister, then returns after `UnregistrationSuccess` or converts
+    /// `UnregistrationFailed` into an error. Registration events are global
+    /// coordinator events, not per-registration handle streams.
+    pub async fn unregister_and_wait(
+        &self,
+        handle: &RegistrationHandle,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<()> {
+        let registrar = self
+            .registration_info(handle)
+            .await?
+            .registrar
+            .unwrap_or_default();
+        let mut events = self.events().await?;
+        self.unregister(handle).await?;
+
+        let fut = async {
+            loop {
+                match events.next().await {
+                    Some(crate::api::events::Event::UnregistrationSuccess { registrar: r })
+                        if registrar.is_empty() || r == registrar =>
+                    {
+                        return Ok(())
+                    }
+                    Some(crate::api::events::Event::UnregistrationFailed {
+                        registrar: r,
+                        reason,
+                    }) if registrar.is_empty() || r == registrar => {
+                        return Err(SessionError::Other(format!(
+                            "Unregistration failed for {}: {}",
+                            r, reason
+                        )))
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Err(SessionError::Other(
+                            "Event channel closed while waiting for unregister".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        match timeout {
+            Some(duration) => tokio::time::timeout(duration, fut)
+                .await
+                .map_err(|_| SessionError::Timeout("unregister_and_wait timed out".to_string()))?,
+            None => fut.await,
+        }
+    }
 }
 
-/// Handle for managing a registration
+/// Handle for managing a registration.
+///
+/// Registration lifecycle events are emitted through
+/// [`UnifiedCoordinator::events`] and [`UnifiedCoordinator::events_for_session`].
+/// This handle deliberately does not expose a separate event stream today,
+/// because doing so cleanly would require a per-registration event bus split.
 #[derive(Debug, Clone)]
 pub struct RegistrationHandle {
     pub session_id: SessionId,
+}
+
+/// Coarse registration lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistrationStatus {
+    Registering,
+    Registered,
+    Unregistering,
+    Unregistered,
+    Failed,
+}
+
+/// Query result for a registration handle.
+///
+/// This is a snapshot of the current client-side registration lifecycle. It
+/// combines session-core state with metadata learned from dialog-core REGISTER
+/// responses.
+#[derive(Debug, Clone)]
+pub struct RegistrationInfo {
+    /// Session id backing this registration lifecycle.
+    pub session_id: SessionId,
+    /// Coarse lifecycle status.
+    pub status: RegistrationStatus,
+    /// Registrar URI originally used for REGISTER.
+    pub registrar: Option<String>,
+    /// Contact URI currently associated with the registration.
+    pub contact: Option<String>,
+    /// Last expiry value session-core will request on refresh.
+    pub expires_secs: Option<u32>,
+    /// Duration until the currently scheduled automatic refresh.
+    pub next_refresh_in: Option<Duration>,
+    /// Number of retry attempts used by the current/last registration flow.
+    pub retry_count: u32,
+    /// Last failure summary, if the lifecycle is failed.
+    pub last_failure: Option<String>,
+    /// Expiry accepted by the registrar in the most recent successful 2xx.
+    pub accepted_expires_secs: Option<u32>,
+    /// Local time when the most recent successful registration completed.
+    pub registered_at: Option<Instant>,
+    /// Local time when automatic refresh is scheduled.
+    pub next_refresh_at: Option<Instant>,
+    /// Registrar-provided Service-Route URIs, if supplied.
+    pub service_route: Option<Vec<String>>,
+    /// Registrar-assigned public GRUU, if supplied.
+    pub pub_gruu: Option<String>,
+    /// Registrar-assigned temporary GRUU, if supplied.
+    pub temp_gruu: Option<String>,
+    /// Whether dialog-core currently has an RFC 5626 outbound flow monitor.
+    pub outbound_flow_active: bool,
 }
 
 /// Configuration for SIP registration.

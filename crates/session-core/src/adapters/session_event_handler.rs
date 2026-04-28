@@ -653,24 +653,23 @@ impl SessionCrossCrateEventHandler {
         event: crate::state_machine::executor::SessionEvent,
     ) {
         let api_event = match event {
-            crate::state_machine::executor::SessionEvent::Custom { session_id, event } => {
-                match event.as_str() {
-                    "CallCancelled" => {
-                        let api_event = crate::api::events::Event::CallCancelled {
-                            call_id: session_id.clone(),
-                        };
-                        self.publish_and_release_session(api_event, session_id)
-                            .await;
-                        return;
-                    }
-                    "CallOnHold" => Some(crate::api::events::Event::CallOnHold {
-                        call_id: session_id,
-                    }),
-                    "CallResumed" => Some(crate::api::events::Event::CallResumed {
-                        call_id: session_id,
-                    }),
-                    _ => None,
-                }
+            crate::state_machine::executor::SessionEvent::CallCancelled { session_id } => {
+                let api_event = crate::api::events::Event::CallCancelled {
+                    call_id: session_id.clone(),
+                };
+                self.publish_and_release_session(api_event, session_id)
+                    .await;
+                return;
+            }
+            crate::state_machine::executor::SessionEvent::CallOnHold { session_id } => {
+                Some(crate::api::events::Event::CallOnHold {
+                    call_id: session_id,
+                })
+            }
+            crate::state_machine::executor::SessionEvent::CallResumed { session_id } => {
+                Some(crate::api::events::Event::CallResumed {
+                    call_id: session_id,
+                })
             }
             _ => None,
         };

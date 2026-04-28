@@ -33,7 +33,10 @@ pub type CallId = SessionId;
 /// Most methods are thin call-control operations; the event stream is available
 /// through [`events`](Self::events) when the caller needs to observe the result
 /// of asynchronous SIP behavior such as remote hangup, REFER progress, DTMF,
-/// or hold/resume completion.
+/// or hold/resume completion. Deterministic helpers such as
+/// [`hangup_and_wait`](Self::hangup_and_wait) and
+/// [`transfer_blind_and_wait`](Self::transfer_blind_and_wait) subscribe before
+/// sending the command so tests and servers can wait for terminal events.
 ///
 /// # Example
 ///
@@ -47,8 +50,8 @@ pub type CallId = SessionId;
 /// // Get audio stream
 /// let audio = handle.audio().await?;
 ///
-/// // Hang up
-/// handle.hangup().await?;
+/// // Hang up and wait for the terminal call event.
+/// handle.hangup_and_wait(None).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -75,8 +78,10 @@ impl SessionHandle {
 
     /// Hang up the call.
     ///
-    /// Fire-and-forget: sends BYE in the background and returns immediately.
-    /// Subscribe to events to know when `CallEnded` arrives.
+    /// Fire-and-forget: schedules BYE/CANCEL and returns immediately.
+    /// Subscribe to events or use [`hangup_and_wait`](Self::hangup_and_wait)
+    /// when the caller needs to observe `CallEnded`, `CallFailed`, or
+    /// `CallCancelled`.
     pub async fn hangup(&self) -> Result<()> {
         let coordinator = self.coordinator.clone();
         let call_id = self.call_id.clone();
@@ -97,6 +102,39 @@ impl SessionHandle {
             }
         });
         Ok(())
+    }
+
+    /// Hang up the call and wait for the terminal event.
+    ///
+    /// Unlike [`hangup`](Self::hangup), this subscribes to the call's event
+    /// stream before sending BYE/CANCEL and returns only after
+    /// `CallEnded`, `CallFailed`, or `CallCancelled` is observed.
+    pub async fn hangup_and_wait(&self, timeout: Option<Duration>) -> Result<String> {
+        let mut events = self.events().await?;
+        self.coordinator.hangup(&self.call_id).await?;
+
+        let fut = async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallEnded { reason, .. }) => return Ok(reason),
+                    Some(Event::CallFailed { reason, .. }) => return Ok(reason),
+                    Some(Event::CallCancelled { .. }) => return Ok("Cancelled".to_string()),
+                    Some(_) => {}
+                    None => {
+                        return Err(SessionError::Other(
+                            "Event channel closed while waiting for hangup".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        match timeout {
+            Some(duration) => tokio::time::timeout(duration, fut)
+                .await
+                .map_err(|_| SessionError::Timeout("hangup_and_wait timed out".to_string()))?,
+            None => fut.await,
+        }
     }
 
     /// Put the call on hold with a target-refresh re-INVITE.
@@ -143,10 +181,48 @@ impl SessionHandle {
 
     /// Initiate a blind transfer by sending REFER to the remote party.
     ///
-    /// The remote party is expected to call the `target` URI and then send a NOTIFY
-    /// back when it has connected. Session ends after a successful transfer.
+    /// The remote party is expected to call the `target` URI and then send
+    /// REFER progress NOTIFYs. Use
+    /// [`transfer_blind_and_wait`](Self::transfer_blind_and_wait) when the
+    /// caller needs to wait for terminal transfer success/failure.
     pub async fn transfer_blind(&self, target: &str) -> Result<()> {
         self.coordinator.send_refer(&self.call_id, target).await
+    }
+
+    /// Initiate a blind transfer and wait for a terminal transfer event.
+    ///
+    /// Returns `TransferCompleted` on success or `TransferFailed` on failure.
+    /// Intermediate progress events are consumed while waiting, so create a
+    /// separate event receiver if another task also needs to observe them.
+    pub async fn transfer_blind_and_wait(
+        &self,
+        target: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Event> {
+        let mut events = self.events().await?;
+        self.transfer_blind(target).await?;
+
+        let fut = async {
+            loop {
+                match events.next().await {
+                    Some(event @ Event::TransferCompleted { .. })
+                    | Some(event @ Event::TransferFailed { .. }) => return Ok(event),
+                    Some(_) => {}
+                    None => {
+                        return Err(SessionError::Other(
+                            "Event channel closed while waiting for transfer".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        match timeout {
+            Some(duration) => tokio::time::timeout(duration, fut).await.map_err(|_| {
+                SessionError::Timeout("transfer_blind_and_wait timed out".to_string())
+            })?,
+            None => fut.await,
+        }
     }
 
     /// Accept a pending inbound REFER on this call.
@@ -311,6 +387,9 @@ impl SessionHandle {
     /// pre-filtered to this session's [`CallId`].
     /// Each call returns an independent receiver — all subscribers receive the
     /// same events (broadcast semantics via the global event bus).
+    ///
+    /// Open the receiver before sending a command if the first resulting event
+    /// matters. The bus does not replay old events.
     pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {
         let rx = self.coordinator.subscribe_events().await?;
         Ok(crate::api::stream_peer::EventReceiver::filtered(
