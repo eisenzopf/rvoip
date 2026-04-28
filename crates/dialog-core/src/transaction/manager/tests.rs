@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
+    use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
     use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
     use crate::transaction::error::{Error, Result};
     use crate::transaction::manager::ClientTransaction;
@@ -130,6 +131,209 @@ mod tests {
         SimpleResponseBuilder::response_from_request(request, status, reason)
             .to("Bob", "sip:bob@example.com", Some("bob-tag-resp"))
             .build()
+    }
+
+    async fn send_through_client_transaction(request: Request) -> Result<Request> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+        let destination = SocketAddr::from_str("192.0.2.200:5061").unwrap();
+
+        let tx_id = manager
+            .create_client_transaction(request, destination)
+            .await?;
+        manager.send_request(&tx_id).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let sent_messages = transport.get_sent_messages().await;
+        manager.shutdown().await;
+
+        assert_eq!(
+            sent_messages.len(),
+            1,
+            "Expected exactly one request to be sent"
+        );
+        match &sent_messages[0].0 {
+            Message::Request(sent_request) => Ok(sent_request.clone()),
+            Message::Response(_) => Err(Error::Other("Expected request, got response".into())),
+        }
+    }
+
+    fn top_via_branch(request: &Request) -> Option<String> {
+        request.first_via().and_then(|via| {
+            via.0
+                .first()
+                .and_then(|top| top.branch().map(str::to_string))
+        })
+    }
+
+    fn top_via_port(request: &Request) -> Option<u16> {
+        request
+            .first_via()
+            .and_then(|via| via.0.first().and_then(|top| top.sent_by_port))
+    }
+
+    fn top_via_has_rport(request: &Request) -> bool {
+        request
+            .first_via()
+            .and_then(|via| {
+                via.0.first().map(|top| {
+                    top.params.iter().any(|param| match param {
+                        Param::Rport(_) => true,
+                        Param::Other(name, _) => name.eq_ignore_ascii_case("rport"),
+                        _ => false,
+                    })
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn client_transaction_preserves_tls_register_via() -> Result<()> {
+        let request = RegisterBuilder::new()
+            .registrar("sips:192.0.2.200:5061;transport=tls")
+            .aor("sips:1001@192.0.2.200")
+            .user_info("sips:1001@192.0.2.200", "")
+            .contact("sips:1001@192.0.2.10:5071;transport=tls")
+            .local_address("192.0.2.10:5071".parse().unwrap())
+            .expires(3600)
+            .call_id("tls-register-transaction-test")
+            .cseq(1)
+            .build()?;
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+
+        let sent_request = send_through_client_transaction(request).await?;
+
+        assert_eq!(sent_request.first_via_transport(), Some("TLS"));
+        assert_eq!(top_via_port(&sent_request), Some(5071));
+        assert!(top_via_branch(&sent_request)
+            .as_deref()
+            .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE)));
+        assert!(top_via_has_rport(&sent_request));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_transaction_preserves_tls_invite_via() -> Result<()> {
+        let request = InviteBuilder::new()
+            .from_to("sips:1001@192.0.2.200", "sips:1002@192.0.2.200")
+            .request_uri("sips:1002@192.0.2.200:5061;transport=tls")
+            .contact("sips:1001@192.0.2.10:5071;transport=tls")
+            .local_address("192.0.2.10:5071".parse().unwrap())
+            .call_id("tls-invite-transaction-test")
+            .cseq(1)
+            .build()?;
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+
+        let sent_request = send_through_client_transaction(request).await?;
+
+        assert_eq!(sent_request.first_via_transport(), Some("TLS"));
+        assert_eq!(top_via_port(&sent_request), Some(5071));
+        assert!(top_via_has_rport(&sent_request));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_transaction_preserves_tls_bye_via() -> Result<()> {
+        let request = ByeBuilder::new()
+            .from_dialog(
+                "tls-bye-transaction-test",
+                "sips:1001@192.0.2.200",
+                "from-tag",
+                "sips:1002@192.0.2.200",
+                "to-tag",
+            )
+            .request_uri("sips:1002@192.0.2.200:5061;transport=tls")
+            .local_address("192.0.2.10:5071".parse().unwrap())
+            .cseq(2)
+            .build()?;
+        assert_eq!(request.first_via_transport(), Some("TLS"));
+
+        let sent_request = send_through_client_transaction(request).await?;
+
+        assert_eq!(sent_request.first_via_transport(), Some("TLS"));
+        assert_eq!(top_via_port(&sent_request), Some(5071));
+        assert!(top_via_has_rport(&sent_request));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_transaction_preserves_udp_register_via() -> Result<()> {
+        let request = RegisterBuilder::new()
+            .registrar("sip:192.0.2.200:5060")
+            .aor("sip:2001@192.0.2.200")
+            .user_info("sip:2001@192.0.2.200", "")
+            .contact("sip:2001@192.0.2.10:5080")
+            .local_address("192.0.2.10:5080".parse().unwrap())
+            .expires(3600)
+            .call_id("udp-register-transaction-test")
+            .cseq(1)
+            .build()?;
+
+        let sent_request = send_through_client_transaction(request).await?;
+
+        assert_eq!(sent_request.first_via_transport(), Some("UDP"));
+        assert_eq!(top_via_port(&sent_request), Some(5080));
+        assert!(top_via_has_rport(&sent_request));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn client_transaction_adds_branch_and_rport_without_changing_tls_via() -> Result<()> {
+        let request =
+            SimpleRequestBuilder::new(Method::Options, "sips:192.0.2.200:5061;transport=tls")
+                .map_err(|e| Error::Other(e.to_string()))?
+                .from("User", "sips:1001@192.0.2.200", Some("from-tag"))
+                .to("User", "sips:1002@192.0.2.200", None)
+                .call_id("tls-options-missing-via-params")
+                .cseq(1)
+                .via("192.0.2.10:5071", "TLS", None)
+                .max_forwards(70)
+                .header(TypedHeader::ContentLength(ContentLength::new(0)))
+                .build();
+
+        let sent_request = send_through_client_transaction(request).await?;
+
+        assert_eq!(sent_request.first_via_transport(), Some("TLS"));
+        assert_eq!(top_via_port(&sent_request), Some(5071));
+        assert!(top_via_branch(&sent_request)
+            .as_deref()
+            .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE)));
+        assert!(top_via_has_rport(&sent_request));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_preserves_original_tls_invite_via_exactly() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+        let destination = SocketAddr::from_str("192.0.2.200:5061").unwrap();
+        let invite = InviteBuilder::new()
+            .from_to("sips:1001@192.0.2.200", "sips:1002@192.0.2.200")
+            .request_uri("sips:1002@192.0.2.200:5061;transport=tls")
+            .contact("sips:1001@192.0.2.10:5071;transport=tls")
+            .local_address("192.0.2.10:5071".parse().unwrap())
+            .call_id("tls-cancel-transaction-test")
+            .cseq(1)
+            .build()?;
+
+        let invite_tx_id = manager
+            .create_client_transaction(invite, destination)
+            .await?;
+        let invite_request = manager.original_request(&invite_tx_id).await?.unwrap();
+        let invite_via = invite_request.first_via().unwrap().to_string();
+        let cancel_tx_id = manager.cancel_invite_transaction(&invite_tx_id).await?;
+        let cancel = manager.original_request(&cancel_tx_id).await?.unwrap();
+
+        assert_eq!(cancel.method(), Method::Cancel);
+        assert_eq!(cancel.first_via().unwrap().to_string(), invite_via);
+        assert_eq!(cancel.first_via_transport(), Some("TLS"));
+
+        manager.shutdown().await;
+        Ok(())
     }
 
     /// Test the socket_addr_from_uri utility function

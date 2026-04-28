@@ -663,7 +663,7 @@ async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> O
     }
 }
 
-/// Create a Via header with a branch parameter for a local address.
+/// Create a UDP Via header with a branch parameter for a local address.
 ///
 /// Always requests `rport` (RFC 3581) with no value — carriers and NAT
 /// gateways use this to echo back the received port in responses so we
@@ -671,13 +671,23 @@ async fn resolve_host_to_socketaddr(host: &rvoip_sip_core::Host, port: u16) -> O
 /// path honors `received=` / `rport=` echoed on responses (see the
 /// response handler earlier in this module).
 pub fn create_via_header(local_addr: &SocketAddr, branch: &str) -> Result<TypedHeader> {
+    create_via_header_for_transport(local_addr, branch, "UDP")
+}
+
+/// Create a Via header with a branch parameter for a local address and transport.
+///
+/// This is used by the transaction layer only when a request reaches it without
+/// an existing Via. Request builders normally choose the correct transport
+/// first; transaction normalization must preserve that choice.
+pub fn create_via_header_for_transport(
+    local_addr: &SocketAddr,
+    branch: &str,
+    transport: &str,
+) -> Result<TypedHeader> {
     use rvoip_sip_core::types::via::Via;
     use rvoip_sip_core::types::Param;
 
-    let via_params = vec![
-        Param::branch(branch.to_string()),
-        Param::Other("rport".to_string(), None),
-    ];
+    let via_params = vec![Param::branch(branch.to_string()), Param::Rport(None)];
 
     let local_host = local_addr.ip().to_string();
     let local_port = local_addr.port();
@@ -685,7 +695,7 @@ pub fn create_via_header(local_addr: &SocketAddr, branch: &str) -> Result<TypedH
     let via = Via::new(
         "SIP",
         "2.0",
-        "UDP",
+        transport.to_ascii_uppercase(),
         &local_host,
         Some(local_port),
         via_params,
@@ -704,6 +714,34 @@ mod via_header_tests {
         let local: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let header = create_via_header(&local, "z9hG4bK-test").expect("create_via_header");
         let serialized = format!("{}", header);
+        assert!(
+            serialized.contains("SIP/2.0/UDP"),
+            "Via header should default to UDP, got: {}",
+            serialized
+        );
+        assert!(
+            serialized.contains(";rport"),
+            "Via header should include rport param, got: {}",
+            serialized
+        );
+        assert!(
+            serialized.contains(";branch=z9hG4bK-test"),
+            "Via header should include branch param, got: {}",
+            serialized
+        );
+    }
+
+    #[test]
+    fn via_header_uses_requested_transport() {
+        let local: SocketAddr = "127.0.0.1:5061".parse().unwrap();
+        let header = create_via_header_for_transport(&local, "z9hG4bK-test", "tls")
+            .expect("create_via_header_for_transport");
+        let serialized = format!("{}", header);
+        assert!(
+            serialized.contains("SIP/2.0/TLS"),
+            "Via header should use requested transport, got: {}",
+            serialized
+        );
         assert!(
             serialized.contains(";rport"),
             "Via header should include rport param, got: {}",

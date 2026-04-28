@@ -426,6 +426,7 @@ transitions:
       type: "Dialog200OK"
     next_state: "OnHold"
     actions:
+      - type: "NegotiateSDPAsUAC"
       - type: "SendACK"
       - type: "SuspendMedia"
       - type: "ClearPendingReinvite"
@@ -488,6 +489,7 @@ transitions:
       type: "Dialog200OK"
     next_state: "Active"
     actions:
+      - type: "NegotiateSDPAsUAC"
       - type: "SendACK"
       - type: "ResumeMedia"
       - type: "ClearPendingReinvite"

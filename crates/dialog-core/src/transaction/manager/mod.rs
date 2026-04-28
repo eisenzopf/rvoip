@@ -199,6 +199,7 @@ use crate::transaction::server::{
 };
 use crate::transaction::state::TransactionLifecycle;
 use crate::transaction::timer::{Timer, TimerFactory, TimerManager, TimerSettings};
+use crate::transaction::transport::multiplexed::select_transport_for_request;
 use crate::transaction::transport::{
     NetworkInfoForSdp, TransportCapabilities, TransportCapabilitiesExt, TransportInfo,
     WebSocketStatus,
@@ -217,6 +218,58 @@ type BoxedTransaction = Box<dyn Transaction + Send>;
 type BoxedClientTransaction = Box<dyn ClientTransaction + Send>;
 /// Type alias for an Arc wrapped server transaction
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
+
+fn transport_token_for_request(request: &Request) -> &'static str {
+    match select_transport_for_request(request) {
+        TransportType::Udp => "UDP",
+        TransportType::Tcp => "TCP",
+        TransportType::Tls => "TLS",
+        TransportType::Ws => "WS",
+        TransportType::Wss => "WSS",
+    }
+}
+
+fn is_rport_param(param: &Param) -> bool {
+    match param {
+        Param::Rport(_) => true,
+        Param::Other(name, _) => name.eq_ignore_ascii_case("rport"),
+        _ => false,
+    }
+}
+
+fn normalize_top_client_via(request: &mut Request, branch: &str) -> bool {
+    for header in &mut request.headers {
+        if let TypedHeader::Via(via) = header {
+            let Some(top_via) = via.0.first_mut() else {
+                return false;
+            };
+
+            top_via
+                .params
+                .retain(|param| !matches!(param, Param::Branch(_)));
+            top_via.params.push(Param::branch(branch.to_string()));
+
+            if !top_via.params.iter().any(is_rport_param) {
+                top_via.params.push(Param::Rport(None));
+            }
+
+            return true;
+        }
+    }
+
+    false
+}
+
+fn sip_diagnostics_enabled() -> bool {
+    std::env::var("RVOIP_SIP_DIAGNOSTICS")
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
 
 /// Defines the public API for the RFC 3261 SIP Transaction Manager.
 ///
@@ -1971,24 +2024,29 @@ impl TransactionManager {
             // we don't need to modify it further
             tracing::trace!("CANCEL request detected - not adding Via header");
         } else {
-            // For other methods, ensure the request has a Via header with our branch
-            // Create a Via header with the branch parameter
-            let local_addr = self.transport.local_addr().map_err(|e| {
-                Error::transport_error(e, "Failed to get local address for Via header")
-            })?;
-
-            let via_header = handlers::create_via_header(&local_addr, &branch)?;
-
-            // Check if there's already a Via header
-            if request.first_via().is_some() {
-                // Replace it to ensure the branch is correct
-                modified_request
-                    .headers
-                    .retain(|h| !matches!(h, TypedHeader::Via(_)));
+            // For non-CANCEL methods, preserve the request builder's selected
+            // Via transport and sent-by address. The transaction layer owns only
+            // the branch/rport normalization needed for transaction matching and
+            // symmetric response routing.
+            if !normalize_top_client_via(&mut modified_request, &branch) {
+                let local_addr = self.transport.local_addr().map_err(|e| {
+                    Error::transport_error(e, "Failed to get local address for Via header")
+                })?;
+                let via_transport = transport_token_for_request(&modified_request);
+                let via_header =
+                    handlers::create_via_header_for_transport(&local_addr, &branch, via_transport)?;
                 modified_request = modified_request.with_header(via_header);
-            } else {
-                // Add a new Via header
-                modified_request = modified_request.with_header(via_header);
+            }
+        }
+
+        if sip_diagnostics_enabled() {
+            if let Some(via) = modified_request.first_via() {
+                info!(
+                    method = %modified_request.method(),
+                    uri = %modified_request.uri(),
+                    top_via = %via,
+                    "RVOIP_SIP_DIAG final outgoing request after transaction normalization"
+                );
             }
         }
 

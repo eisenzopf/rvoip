@@ -1,6 +1,5 @@
 use super::crypto::SrtpCryptoKey;
 use crate::error::Error;
-use crate::packet::RtpPacket;
 use crate::Result;
 use aes::{
     cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit},
@@ -54,10 +53,6 @@ pub fn srtp_kdf(
     params: &SrtpKeyDerivationParams,
     output_len: usize,
 ) -> Result<Vec<u8>> {
-    // Create the IV for key derivation according to RFC 3711 Section 4.3.1
-    let mut iv = Vec::with_capacity(16);
-
-    // Copy the salt and pad with zeros if necessary
     if master_key.salt().len() < 14 {
         return Err(Error::SrtpError(format!(
             "Salt too short: expected at least 14 bytes, got {}",
@@ -65,12 +60,26 @@ pub fn srtp_kdf(
         )));
     }
 
-    // Copy the salt (first 14 bytes)
-    iv.extend_from_slice(&master_key.salt()[0..14]);
+    let r = if params.key_derivation_rate == 0 {
+        0
+    } else {
+        params.index / params.key_derivation_rate
+    };
+    if r > 0x0000_FFFF_FFFF_FFFF {
+        return Err(Error::SrtpError(format!(
+            "Key derivation index too large for 48-bit SRTP key-id: {}",
+            r
+        )));
+    }
 
-    // Add the label byte
-    iv.push(0x00);
-    iv.push(params.label as u8);
+    // RFC 3711 Section 4.3.1: x = key_id XOR master_salt, where key_id is the
+    // right-aligned 7-octet value label || (index DIV key_derivation_rate).
+    let mut x = [0u8; 14];
+    x.copy_from_slice(&master_key.salt()[0..14]);
+    x[7] ^= params.label as u8;
+    for i in 0..6 {
+        x[8 + i] ^= ((r >> (8 * (5 - i))) & 0xFF) as u8;
+    }
 
     // Determine number of blocks needed
     let num_blocks = (output_len + 15) / 16;
@@ -84,7 +93,8 @@ pub fn srtp_kdf(
 
     // Generate key material
     for i in 0..num_blocks {
-        // Update the IV with the index
+        let mut iv = [0u8; 16];
+        iv[0..14].copy_from_slice(&x);
         iv[14] = ((i >> 8) & 0xFF) as u8;
         iv[15] = (i & 0xFF) as u8;
 
@@ -173,6 +183,14 @@ impl KeyRotationFrequency {
 mod tests {
     use super::*;
 
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
     #[test]
     fn test_key_rotation_frequency() {
         // Never rotate
@@ -226,6 +244,54 @@ mod tests {
 
         // Assert that the derived key is not equal to our deliberately different key
         assert_ne!(key, different_key);
+        assert_ne!(key, key2);
+    }
+
+    #[test]
+    fn test_rfc3711_appendix_b3_key_derivation_vectors() {
+        let master_key = SrtpCryptoKey::new(
+            hex_bytes("E1F97A0D3E018BE0D64FA32C06DE4139"),
+            hex_bytes("0EC675AD498AFEEBB6960B3AABE6"),
+        );
+
+        let enc_key = srtp_kdf(
+            &master_key,
+            &SrtpKeyDerivationParams {
+                label: KeyDerivationLabel::RtpEncryption,
+                key_derivation_rate: 0,
+                index: 0,
+            },
+            16,
+        )
+        .unwrap();
+        assert_eq!(enc_key, hex_bytes("C61E7A93744F39EE10734AFE3FF7A087"));
+
+        let salt = srtp_kdf(
+            &master_key,
+            &SrtpKeyDerivationParams {
+                label: KeyDerivationLabel::RtpSalt,
+                key_derivation_rate: 0,
+                index: 0,
+            },
+            14,
+        )
+        .unwrap();
+        assert_eq!(salt, hex_bytes("30CBBC08863D8C85D49DB34A9AE1"));
+
+        let auth_key = srtp_kdf(
+            &master_key,
+            &SrtpKeyDerivationParams {
+                label: KeyDerivationLabel::RtpAuthentication,
+                key_derivation_rate: 0,
+                index: 0,
+            },
+            20,
+        )
+        .unwrap();
+        assert_eq!(
+            auth_key,
+            hex_bytes("CEBE321F6FF7716B6FD4AB49AF256A156D38BAA4")
+        );
     }
 
     #[test]

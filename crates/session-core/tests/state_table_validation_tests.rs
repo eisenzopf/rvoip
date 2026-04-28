@@ -109,6 +109,35 @@ fn test_hold_resume_transitions() {
         table.has_transition(&resume_key),
         "Missing resume transition from OnHold state"
     );
+
+    let hold_commit_key = StateKey {
+        role: Role::Both,
+        state: CallState::HoldPending,
+        event: EventType::Dialog200OK,
+    };
+    let hold_commit = table
+        .get(&hold_commit_key)
+        .expect("Missing hold commit transition");
+    assert!(
+        matches!(hold_commit.actions.first(), Some(Action::NegotiateSDPAsUAC)),
+        "Hold commit must negotiate the re-INVITE SDP answer before suspending media"
+    );
+
+    let resume_commit_key = StateKey {
+        role: Role::Both,
+        state: CallState::Resuming,
+        event: EventType::Dialog200OK,
+    };
+    let resume_commit = table
+        .get(&resume_commit_key)
+        .expect("Missing resume commit transition");
+    assert!(
+        matches!(
+            resume_commit.actions.first(),
+            Some(Action::NegotiateSDPAsUAC)
+        ),
+        "Resume commit must negotiate the re-INVITE SDP answer before resuming media"
+    );
 }
 
 #[test]

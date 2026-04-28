@@ -104,6 +104,15 @@ export SIP_TRANSPORT=TLS
 export SIP_TLS_PORT="${SIP_TLS_PORT:-5061}"
 export ASTERISK_TLS_CONTACT_MODE="${ASTERISK_TLS_CONTACT_MODE:-reachable-contact}"
 export ASTERISK_TLS_SRTP_REQUIRED="${ASTERISK_TLS_SRTP_REQUIRED:-1}"
+export RVOIP_SIP_DIAGNOSTICS="${RVOIP_SIP_DIAGNOSTICS:-1}"
+case "$RVOIP_SIP_DIAGNOSTICS" in
+  1|true|TRUE|yes|YES|on|ON)
+    export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn},rvoip_dialog_core::transaction::manager=info"
+    ;;
+  *)
+    export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn}"
+    ;;
+esac
 
 ensure_asterisk_tls_listener_cert "$OUT_DIR/tls"
 

@@ -674,6 +674,14 @@ fn hmac_sha1(data: &[u8], key: &[u8], tag_length: usize) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn hex_bytes(hex: &str) -> Vec<u8> {
+        assert_eq!(hex.len() % 2, 0);
+        (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
     #[test]
     fn test_srtp_key_from_base64() {
         // Example base64 key
@@ -751,6 +759,17 @@ mod tests {
 
         // Data should now be decrypted back to the original
         assert_eq!(data, vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[test]
+    fn test_rfc3711_appendix_b2_aes_cm_vector() {
+        let key = hex_bytes("2B7E151628AED2A6ABF7158809CF4F3C");
+        let iv = hex_bytes("F0F1F2F3F4F5F6F7F8F9FAFBFCFD0000");
+        let mut data = vec![0u8; 16];
+
+        aes_cm_encrypt(&mut data, &key, &iv).unwrap();
+
+        assert_eq!(data, hex_bytes("E03EAD0935C95E80E166B16DD92B4EB4"));
     }
 
     #[test]
