@@ -3,7 +3,7 @@ use crate::error::Error;
 use crate::Result;
 use aes::{
     cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit},
-    Aes128,
+    Aes128, Aes256,
 };
 
 /// SRTP key derivation parameters
@@ -87,25 +87,41 @@ pub fn srtp_kdf(
     // Create buffer for key material
     let mut key_material = Vec::with_capacity(num_blocks * 16);
 
-    // Create AES cipher from master key
-    let cipher = Aes128::new_from_slice(master_key.key())
-        .map_err(|e| Error::SrtpError(format!("Failed to create AES cipher: {}", e)))?;
+    match master_key.key().len() {
+        16 => {
+            let cipher = Aes128::new_from_slice(master_key.key())
+                .map_err(|e| Error::SrtpError(format!("Failed to create AES-128 cipher: {}", e)))?;
+            for i in 0..num_blocks {
+                let mut iv = [0u8; 16];
+                iv[0..14].copy_from_slice(&x);
+                iv[14] = ((i >> 8) & 0xFF) as u8;
+                iv[15] = (i & 0xFF) as u8;
 
-    // Generate key material
-    for i in 0..num_blocks {
-        let mut iv = [0u8; 16];
-        iv[0..14].copy_from_slice(&x);
-        iv[14] = ((i >> 8) & 0xFF) as u8;
-        iv[15] = (i & 0xFF) as u8;
+                let mut block = GenericArray::clone_from_slice(&iv);
+                cipher.encrypt_block(&mut block);
+                key_material.extend_from_slice(&block);
+            }
+        }
+        32 => {
+            let cipher = Aes256::new_from_slice(master_key.key())
+                .map_err(|e| Error::SrtpError(format!("Failed to create AES-256 cipher: {}", e)))?;
+            for i in 0..num_blocks {
+                let mut iv = [0u8; 16];
+                iv[0..14].copy_from_slice(&x);
+                iv[14] = ((i >> 8) & 0xFF) as u8;
+                iv[15] = (i & 0xFF) as u8;
 
-        // Convert to block
-        let mut block = GenericArray::clone_from_slice(&iv);
-
-        // Encrypt the block
-        cipher.encrypt_block(&mut block);
-
-        // Add to key material
-        key_material.extend_from_slice(&block);
+                let mut block = GenericArray::clone_from_slice(&iv);
+                cipher.encrypt_block(&mut block);
+                key_material.extend_from_slice(&block);
+            }
+        }
+        len => {
+            return Err(Error::SrtpError(format!(
+                "unsupported SRTP KDF master key length: {} bytes",
+                len
+            )));
+        }
     }
 
     // Truncate to the requested size
@@ -350,5 +366,33 @@ mod tests {
         // The first 16 bytes should be the same
         assert_eq!(key16, key20[0..16]);
         assert_eq!(key16, key32[0..16]);
+    }
+
+    #[test]
+    fn test_kdf_with_aes256_master_key() {
+        let master_key = SrtpCryptoKey::new(
+            (1..=32).collect(),
+            vec![21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34],
+        );
+        let params = SrtpKeyDerivationParams {
+            label: KeyDerivationLabel::RtpEncryption,
+            key_derivation_rate: 0,
+            index: 0,
+        };
+
+        let key32 = srtp_kdf(&master_key, &params, 32).unwrap();
+        assert_eq!(key32.len(), 32);
+
+        let auth_key = srtp_kdf(
+            &master_key,
+            &SrtpKeyDerivationParams {
+                label: KeyDerivationLabel::RtpAuthentication,
+                key_derivation_rate: 0,
+                index: 0,
+            },
+            20,
+        )
+        .unwrap();
+        assert_eq!(auth_key.len(), 20);
     }
 }

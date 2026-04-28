@@ -164,8 +164,15 @@ pub fn parse_attribute(value: &str) -> Result<ParsedAttribute> {
                 let suite_str = parts.next().ok_or_else(|| {
                     Error::SdpParsingError("a=crypto: missing crypto-suite".to_string())
                 })?;
-                let suite = CryptoSuite::from_str(suite_str)
-                    .map_err(|e| Error::SdpParsingError(format!("a=crypto: {}", e)))?;
+                let suite = match CryptoSuite::from_str(suite_str) {
+                    Ok(suite) => suite,
+                    Err(_) => {
+                        return Ok(ParsedAttribute::Value(
+                            "crypto".to_string(),
+                            val.to_string(),
+                        ));
+                    }
+                };
                 let key_param = parts.next().ok_or_else(|| {
                     Error::SdpParsingError("a=crypto: missing inline= parameter".to_string())
                 })?;
@@ -731,6 +738,35 @@ mod tests {
             assert_eq!(value, "some-value");
         } else {
             panic!("Expected Value attribute");
+        }
+    }
+
+    #[test]
+    fn test_parse_crypto_accepts_rfc6188_aes256_name() {
+        let result = parse_attribute(
+            "crypto:2 AES_256_CM_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        )
+        .unwrap();
+        if let ParsedAttribute::Crypto(attr) = result {
+            assert_eq!(attr.tag, 2);
+            assert_eq!(
+                attr.suite,
+                crate::types::sdp::CryptoSuite::AesCm256HmacSha1_80
+            );
+        } else {
+            panic!("Expected Crypto attribute");
+        }
+    }
+
+    #[test]
+    fn test_parse_crypto_preserves_unknown_suite_as_value_attribute() {
+        let raw = "3 AEAD_AES_128_GCM inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+        let result = parse_attribute(&format!("crypto:{}", raw)).unwrap();
+        if let ParsedAttribute::Value(key, value) = result {
+            assert_eq!(key, "crypto");
+            assert_eq!(value, raw);
+        } else {
+            panic!("Expected generic Value attribute for unsupported crypto suite");
         }
     }
 }

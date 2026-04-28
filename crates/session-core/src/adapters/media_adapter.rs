@@ -2403,6 +2403,48 @@ mod sdp_format_tests {
         assert_eq!(extracted[1].tag, 2);
     }
 
+    #[test]
+    fn extract_audio_crypto_ignores_unknown_crypto_suite_and_keeps_supported_lines() {
+        let sdp = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 127.0.0.1\r\n",
+            "s=Session\r\n",
+            "c=IN IP4 127.0.0.1\r\n",
+            "t=0 0\r\n",
+            "m=audio 16000 RTP/SAVP 0 8 101\r\n",
+            "a=rtpmap:0 PCMU/8000\r\n",
+            "a=crypto:99 AEAD_AES_128_GCM inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\r\n",
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n",
+            "a=sendrecv\r\n",
+        );
+        let parsed = SdpSession::from_str(sdp).expect("unknown crypto suite should not fail SDP");
+        let extracted = MediaAdapter::extract_audio_crypto(&parsed);
+        assert_eq!(extracted.len(), 1);
+        assert_eq!(extracted[0].tag, 1);
+        assert_eq!(extracted[0].suite, CryptoSuite::AesCm128HmacSha1_80);
+    }
+
+    #[test]
+    fn extract_audio_crypto_parses_asterisk_default_aes256_name() {
+        let sdp = concat!(
+            "v=0\r\n",
+            "o=- 1 0 IN IP4 127.0.0.1\r\n",
+            "s=Session\r\n",
+            "c=IN IP4 127.0.0.1\r\n",
+            "t=0 0\r\n",
+            "m=audio 16000 RTP/SAVP 0 8 101\r\n",
+            "a=rtpmap:0 PCMU/8000\r\n",
+            "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n",
+            "a=crypto:2 AES_256_CM_HMAC_SHA1_80 inline:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\r\n",
+            "a=sendrecv\r\n",
+        );
+        let parsed = SdpSession::from_str(sdp).expect("Asterisk AES-256 crypto name parses");
+        let extracted = MediaAdapter::extract_audio_crypto(&parsed);
+        assert_eq!(extracted.len(), 2);
+        assert_eq!(extracted[0].suite, CryptoSuite::AesCm128HmacSha1_80);
+        assert_eq!(extracted[1].suite, CryptoSuite::AesCm256HmacSha1_80);
+    }
+
     /// Sprint 3 A6 — when a public RTP address is configured (static
     /// or STUN-discovered), the offer's c=/o=/m= lines must advertise
     /// it instead of the local interface IP/port. Mirrors what the

@@ -70,6 +70,22 @@ pub const SRTP_AES128_CM_SHA1_32: SrtpCryptoSuite = SrtpCryptoSuite {
     tag_length: 4,  // 32 bits
 };
 
+/// AES-CM-256 + HMAC-SHA1-80 (RFC 6188)
+pub const SRTP_AES256_CM_SHA1_80: SrtpCryptoSuite = SrtpCryptoSuite {
+    encryption: SrtpEncryptionAlgorithm::AesCm,
+    authentication: SrtpAuthenticationAlgorithm::HmacSha1_80,
+    key_length: 32, // 256 bits
+    tag_length: 10, // 80 bits
+};
+
+/// AES-CM-256 + HMAC-SHA1-32 (RFC 6188)
+pub const SRTP_AES256_CM_SHA1_32: SrtpCryptoSuite = SrtpCryptoSuite {
+    encryption: SrtpEncryptionAlgorithm::AesCm,
+    authentication: SrtpAuthenticationAlgorithm::HmacSha1_32,
+    key_length: 32, // 256 bits
+    tag_length: 4,  // 32 bits
+};
+
 /// Null encryption/authentication (for testing/debugging only)
 pub const SRTP_NULL_SHA1_80: SrtpCryptoSuite = SrtpCryptoSuite {
     encryption: SrtpEncryptionAlgorithm::Null,

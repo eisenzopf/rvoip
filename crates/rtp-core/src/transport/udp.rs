@@ -1282,6 +1282,21 @@ mod tests {
         (a, b)
     }
 
+    fn make_aes256_srtp_ctx_pair() -> (crate::srtp::SrtpContext, crate::srtp::SrtpContext) {
+        use crate::srtp::{SrtpCryptoKey, SRTP_AES256_CM_SHA1_80};
+        let key = vec![3u8; 32];
+        let salt = vec![4u8; 14];
+        let a = crate::srtp::SrtpContext::new(
+            SRTP_AES256_CM_SHA1_80,
+            SrtpCryptoKey::new(key.clone(), salt.clone()),
+        )
+        .expect("AES-256 ctx A");
+        let b =
+            crate::srtp::SrtpContext::new(SRTP_AES256_CM_SHA1_80, SrtpCryptoKey::new(key, salt))
+                .expect("AES-256 ctx B");
+        (a, b)
+    }
+
     #[tokio::test]
     async fn srtp_round_trip_through_real_udp_sockets() {
         // Two transports, both with SRTP enabled (matched key pair).
@@ -1343,6 +1358,55 @@ mod tests {
                     &payload[..],
                     "B should see the decrypted plaintext payload"
                 );
+            }
+            other => panic!("expected MediaReceived, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn srtp_aes256_round_trip_through_real_udp_sockets() {
+        let cfg_a = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("srtp-aes256-a".to_string()),
+            use_port_allocator: false,
+        };
+        let cfg_b = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("srtp-aes256-b".to_string()),
+            use_port_allocator: false,
+        };
+        let transport_a = UdpRtpTransport::new(cfg_a).await.unwrap();
+        let transport_b = UdpRtpTransport::new(cfg_b).await.unwrap();
+
+        let (a_send, b_recv) = make_aes256_srtp_ctx_pair();
+        let (b_send, a_recv) = make_aes256_srtp_ctx_pair();
+        transport_a.set_srtp_contexts(a_send, a_recv).await;
+        transport_b.set_srtp_contexts(b_send, b_recv).await;
+
+        let mut events = transport_b.subscribe();
+        let header = RtpHeader::new(0, 1, 12345, 0xdead_beef);
+        let payload = Bytes::from_static(b"hello aes-256 srtp wire");
+        let packet = RtpPacket::new(header, payload.clone());
+
+        let addr_b = transport_b.local_rtp_addr().unwrap();
+        transport_a.send_rtp(&packet, addr_b).await.unwrap();
+
+        match tokio::time::timeout(tokio::time::Duration::from_millis(500), events.recv()).await {
+            Ok(Ok(RtpEvent::MediaReceived {
+                payload: received_payload,
+                payload_type,
+                timestamp,
+                ..
+            })) => {
+                assert_eq!(payload_type, 0);
+                assert_eq!(timestamp, 12345);
+                assert_eq!(&received_payload[..], &payload[..]);
             }
             other => panic!("expected MediaReceived, got {:?}", other),
         }

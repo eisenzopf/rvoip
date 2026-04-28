@@ -138,7 +138,7 @@ pub struct SsrcAttribute {
     pub value: Option<String>,
 }
 
-/// SDES crypto suites (RFC 4568 §6.2.1, RFC 6188 for SHA1_80/256 names).
+/// SDES crypto suites (RFC 4568 §6.2.1, RFC 6188 for AES-256 names).
 ///
 /// Listed in rough order of carrier preference. The string forms below
 /// are the wire-format names used in `a=crypto:<tag> <suite> ...`. A
@@ -165,8 +165,8 @@ impl CryptoSuite {
         match self {
             CryptoSuite::AesCm128HmacSha1_80 => "AES_CM_128_HMAC_SHA1_80",
             CryptoSuite::AesCm128HmacSha1_32 => "AES_CM_128_HMAC_SHA1_32",
-            CryptoSuite::AesCm256HmacSha1_80 => "AES_CM_256_HMAC_SHA1_80",
-            CryptoSuite::AesCm256HmacSha1_32 => "AES_CM_256_HMAC_SHA1_32",
+            CryptoSuite::AesCm256HmacSha1_80 => "AES_256_CM_HMAC_SHA1_80",
+            CryptoSuite::AesCm256HmacSha1_32 => "AES_256_CM_HMAC_SHA1_32",
         }
     }
 }
@@ -181,11 +181,18 @@ impl std::str::FromStr for CryptoSuite {
     type Err = crate::error::Error;
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
+        let normalized = s.to_ascii_uppercase();
+        match normalized.as_str() {
             "AES_CM_128_HMAC_SHA1_80" => Ok(CryptoSuite::AesCm128HmacSha1_80),
             "AES_CM_128_HMAC_SHA1_32" => Ok(CryptoSuite::AesCm128HmacSha1_32),
-            "AES_CM_256_HMAC_SHA1_80" => Ok(CryptoSuite::AesCm256HmacSha1_80),
-            "AES_CM_256_HMAC_SHA1_32" => Ok(CryptoSuite::AesCm256HmacSha1_32),
+            // RFC 6188 names are AES_256_CM_..., but accept the old
+            // AES_CM_256_... spelling for compatibility with earlier rvoip.
+            "AES_256_CM_HMAC_SHA1_80" | "AES_CM_256_HMAC_SHA1_80" => {
+                Ok(CryptoSuite::AesCm256HmacSha1_80)
+            }
+            "AES_256_CM_HMAC_SHA1_32" | "AES_CM_256_HMAC_SHA1_32" => {
+                Ok(CryptoSuite::AesCm256HmacSha1_32)
+            }
             other => Err(crate::error::Error::ParseError(format!(
                 "unknown SRTP crypto-suite: {}",
                 other

@@ -34,6 +34,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use rand::{rngs::OsRng, RngCore};
 use rvoip_rtp_core::srtp::{
     SrtpContext, SrtpCryptoKey, SrtpCryptoSuite, SRTP_AES128_CM_SHA1_32, SRTP_AES128_CM_SHA1_80,
+    SRTP_AES256_CM_SHA1_32, SRTP_AES256_CM_SHA1_80,
 };
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite};
 
@@ -44,16 +45,13 @@ use crate::errors::{Result, SessionError};
 const SDES_SALT_LEN: usize = 14;
 
 /// Map a typed sip-core `CryptoSuite` to the matching rtp-core
-/// `SrtpCryptoSuite` constant. Returns an error for suites rtp-core
-/// can't yet realise (currently all AES-256 + AEAD-GCM variants).
-fn rtp_suite_for(suite: CryptoSuite) -> Result<SrtpCryptoSuite> {
+/// `SrtpCryptoSuite` constant.
+fn rtp_suite_for(suite: CryptoSuite) -> SrtpCryptoSuite {
     match suite {
-        CryptoSuite::AesCm128HmacSha1_80 => Ok(SRTP_AES128_CM_SHA1_80),
-        CryptoSuite::AesCm128HmacSha1_32 => Ok(SRTP_AES128_CM_SHA1_32),
-        s => Err(SessionError::SDPNegotiationFailed(format!(
-            "SDES suite {:?} is not yet wired into rtp-core's SrtpContext",
-            s
-        ))),
+        CryptoSuite::AesCm128HmacSha1_80 => SRTP_AES128_CM_SHA1_80,
+        CryptoSuite::AesCm128HmacSha1_32 => SRTP_AES128_CM_SHA1_32,
+        CryptoSuite::AesCm256HmacSha1_80 => SRTP_AES256_CM_SHA1_80,
+        CryptoSuite::AesCm256HmacSha1_32 => SRTP_AES256_CM_SHA1_32,
     }
 }
 
@@ -146,7 +144,7 @@ impl SrtpNegotiator {
         let mut attrs = Vec::with_capacity(suites.len());
         for (i, &suite) in suites.iter().enumerate() {
             let tag = (i + 1) as u32;
-            let rtp_suite = rtp_suite_for(suite)?;
+            let rtp_suite = rtp_suite_for(suite);
             let (key, salt, inline) = generate_keysalt(&rtp_suite);
             attrs.push(CryptoAttribute::new(tag, suite, inline));
             offered.insert(
@@ -213,20 +211,12 @@ impl SrtpNegotiator {
             ));
         }
         // First-supported wins (D2 — offerer ranked, we honour their preference).
-        let chosen = attrs
-            .iter()
-            .find(|a| {
-                matches!(
-                    a.suite,
-                    CryptoSuite::AesCm128HmacSha1_80 | CryptoSuite::AesCm128HmacSha1_32
-                )
-            })
-            .ok_or_else(|| {
-                SessionError::SDPNegotiationFailed(
-                    "no offered a=crypto suite is supported by this responder".into(),
-                )
-            })?;
-        let rtp_suite = rtp_suite_for(chosen.suite)?;
+        let chosen = attrs.first().ok_or_else(|| {
+            SessionError::SDPNegotiationFailed(
+                "no offered a=crypto suite is supported by this responder".into(),
+            )
+        })?;
+        let rtp_suite = rtp_suite_for(chosen.suite);
         let (peer_key, peer_salt) = decode_keysalt(&chosen.key_inline, &rtp_suite)?;
         let (our_key, our_salt, our_inline) = generate_keysalt(&rtp_suite);
 
@@ -363,18 +353,26 @@ mod tests {
     }
 
     #[test]
-    fn process_offer_errors_when_no_supported_suite() {
-        // Offer only AES-256 (not yet supported by rtp-core's SDES path).
+    fn process_offer_errors_when_no_crypto_suites_are_available() {
+        let answerer = SrtpNegotiator::new_answerer();
+        let result = answerer.process_offer(&[]);
+        assert!(
+            matches!(&result, Err(e) if format!("{:?}", e).contains("no offered a=crypto suite"))
+        );
+    }
+
+    #[test]
+    fn process_offer_accepts_aes256_when_offered_alone() {
         let attrs = vec![CryptoAttribute::new(
             1,
             CryptoSuite::AesCm256HmacSha1_80,
             STANDARD.encode(vec![0u8; 46]),
         )];
         let answerer = SrtpNegotiator::new_answerer();
-        let result = answerer.process_offer(&attrs);
-        assert!(
-            matches!(&result, Err(e) if format!("{:?}", e).contains("no offered a=crypto suite"))
-        );
+        let (chosen, pair) = answerer.process_offer(&attrs).unwrap();
+        assert_eq!(chosen.tag, 1);
+        assert_eq!(chosen.suite, CryptoSuite::AesCm256HmacSha1_80);
+        assert_eq!(pair.suite, CryptoSuite::AesCm256HmacSha1_80);
     }
 
     #[test]
@@ -389,28 +387,45 @@ mod tests {
     }
 
     #[test]
-    fn process_offer_picks_first_supported_when_unsupported_listed_first() {
-        // Offerer's first preference is AES-256 (unsupported), second is _80.
-        // Per D2 we prefer the offerer's order; since the first they want
-        // isn't supported, fall through to the next supported.
-        let (mut offerer, mut attrs) =
-            SrtpNegotiator::new_offerer(&[CryptoSuite::AesCm128HmacSha1_80]).unwrap();
-        // Splice in an unsupported AES-256 at position 0 with tag 99.
-        let unsupported = CryptoAttribute::new(
-            99,
-            CryptoSuite::AesCm256HmacSha1_80,
-            STANDARD.encode(vec![0u8; 46]),
-        );
-        attrs.insert(0, unsupported);
-        // Re-tag offerer's _80 to tag=1 (it was already tag=1).
-        let _ = (&mut offerer, &mut attrs); // silence unused-mut
+    fn process_offer_honors_asterisk_default_order_with_aes256_second() {
+        let attrs = vec![
+            CryptoAttribute::new(
+                1,
+                CryptoSuite::AesCm128HmacSha1_80,
+                STANDARD.encode(vec![0u8; 30]),
+            ),
+            CryptoAttribute::new(
+                2,
+                CryptoSuite::AesCm256HmacSha1_80,
+                STANDARD.encode(vec![0u8; 46]),
+            ),
+        ];
 
         let answerer = SrtpNegotiator::new_answerer();
         let (chosen, _) = answerer.process_offer(&attrs).unwrap();
-        assert_eq!(
-            chosen.tag, 1,
-            "answerer should fall through to first supported"
-        );
+        assert_eq!(chosen.tag, 1, "answerer should honor offerer order");
         assert_eq!(chosen.suite, CryptoSuite::AesCm128HmacSha1_80);
+    }
+
+    #[test]
+    fn process_offer_picks_aes256_when_it_is_first_supported() {
+        let attrs = vec![
+            CryptoAttribute::new(
+                1,
+                CryptoSuite::AesCm256HmacSha1_80,
+                STANDARD.encode(vec![0u8; 46]),
+            ),
+            CryptoAttribute::new(
+                2,
+                CryptoSuite::AesCm128HmacSha1_80,
+                STANDARD.encode(vec![0u8; 30]),
+            ),
+        ];
+
+        let answerer = SrtpNegotiator::new_answerer();
+        let (chosen, pair) = answerer.process_offer(&attrs).unwrap();
+        assert_eq!(chosen.tag, 1);
+        assert_eq!(chosen.suite, CryptoSuite::AesCm256HmacSha1_80);
+        assert_eq!(pair.suite, CryptoSuite::AesCm256HmacSha1_80);
     }
 }

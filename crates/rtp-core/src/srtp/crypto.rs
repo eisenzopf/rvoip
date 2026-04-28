@@ -4,7 +4,7 @@ use crate::packet::RtpPacket;
 use crate::Result;
 use aes::{
     cipher::{generic_array::GenericArray, KeyIvInit, StreamCipher},
-    Aes128,
+    Aes128, Aes256,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ctr::Ctr64BE;
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 // Define types for AES-CM
 type Aes128Ctr64BE = Ctr64BE<Aes128>;
+type Aes256Ctr64BE = Ctr64BE<Aes256>;
 // Define type for HMAC-SHA1
 type HmacSha1 = Hmac<Sha1>;
 
@@ -633,15 +634,32 @@ impl SrtpCrypto {
 
 /// AES Counter Mode encryption for SRTP
 fn aes_cm_encrypt(data: &mut [u8], key: &[u8], iv: &[u8]) -> Result<()> {
-    // Convert key and iv to the format required by the cipher
-    let key = GenericArray::from_slice(key);
+    if iv.len() < 16 {
+        return Err(Error::SrtpError(format!(
+            "AES-CM IV too short: expected 16 bytes, got {}",
+            iv.len()
+        )));
+    }
     let iv = GenericArray::from_slice(&iv[0..16]);
 
-    // Create a new AES-CM cipher instance
-    let mut cipher = Aes128Ctr64BE::new(key, iv);
-
-    // Encrypt data in-place
-    cipher.apply_keystream(data);
+    match key.len() {
+        16 => {
+            let key = GenericArray::from_slice(key);
+            let mut cipher = Aes128Ctr64BE::new(key, iv);
+            cipher.apply_keystream(data);
+        }
+        32 => {
+            let key = GenericArray::from_slice(key);
+            let mut cipher = Aes256Ctr64BE::new(key, iv);
+            cipher.apply_keystream(data);
+        }
+        len => {
+            return Err(Error::SrtpError(format!(
+                "unsupported AES-CM key length: {} bytes",
+                len
+            )));
+        }
+    }
 
     Ok(())
 }
@@ -863,6 +881,46 @@ mod tests {
             let decrypted = decrypted.unwrap();
 
             // Decrypted packet should match original
+            assert_eq!(decrypted.header.payload_type, packet.header.payload_type);
+            assert_eq!(
+                decrypted.header.sequence_number,
+                packet.header.sequence_number
+            );
+            assert_eq!(decrypted.header.timestamp, packet.header.timestamp);
+            assert_eq!(decrypted.header.ssrc, packet.header.ssrc);
+            assert_eq!(decrypted.payload, packet.payload);
+        }
+    }
+
+    #[test]
+    fn test_complete_srtp_process_aes256() {
+        let master_key: Vec<u8> = (1..=32).collect();
+        let master_salt = vec![
+            0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D,
+        ];
+        let srtp_key = SrtpCryptoKey::new(master_key, master_salt);
+        let suites = vec![
+            super::super::SRTP_AES256_CM_SHA1_80,
+            super::super::SRTP_AES256_CM_SHA1_32,
+        ];
+
+        for suite in suites {
+            let crypto = SrtpCrypto::new(suite.clone(), srtp_key.clone()).unwrap();
+            let header = crate::packet::RtpHeader::new(96, 1000, 12345, 0xabcdef01);
+            let payload = Bytes::from_static(b"Hello AES-256 SRTP World");
+            let packet = RtpPacket::new(header, payload);
+
+            let (encrypted_packet, auth_tag) = crypto.encrypt_rtp(&packet).unwrap();
+            assert_ne!(encrypted_packet.payload, packet.payload);
+
+            let serialized = encrypted_packet.serialize().unwrap();
+            let mut protected_data = BytesMut::with_capacity(serialized.len() + suite.tag_length);
+            protected_data.extend_from_slice(&serialized);
+            let tag = auth_tag.expect("AES-256 SRTP suites authenticate RTP");
+            assert_eq!(tag.len(), suite.tag_length);
+            protected_data.extend_from_slice(&tag);
+
+            let decrypted = crypto.decrypt_rtp(&protected_data).unwrap();
             assert_eq!(decrypted.header.payload_type, packet.header.payload_type);
             assert_eq!(
                 decrypted.header.sequence_number,

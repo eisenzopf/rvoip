@@ -1551,12 +1551,28 @@ mod tests {
             let parsed = CryptoSuite::from_str(&printed).expect("round-trip");
             assert_eq!(suite, parsed);
         }
+        assert_eq!(
+            CryptoSuite::AesCm256HmacSha1_80.to_string(),
+            "AES_256_CM_HMAC_SHA1_80"
+        );
+        assert_eq!(
+            CryptoSuite::AesCm256HmacSha1_32.to_string(),
+            "AES_256_CM_HMAC_SHA1_32"
+        );
     }
 
     #[test]
     fn crypto_suite_parser_rejects_unknown() {
         use crate::types::sdp::CryptoSuite;
         use std::str::FromStr;
+        assert_eq!(
+            CryptoSuite::from_str("aes_cm_128_hmac_sha1_80").unwrap(),
+            CryptoSuite::AesCm128HmacSha1_80
+        );
+        assert_eq!(
+            CryptoSuite::from_str("AES_CM_256_HMAC_SHA1_80").unwrap(),
+            CryptoSuite::AesCm256HmacSha1_80
+        );
         assert!(CryptoSuite::from_str("AES_GCM_256").is_err());
         assert!(CryptoSuite::from_str("").is_err());
     }
