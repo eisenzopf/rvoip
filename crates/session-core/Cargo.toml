@@ -203,6 +203,9 @@ path = "examples/asterisk/tls_srtp_dtmf/endpoint_1001.rs"
 name = "asterisk_tls_srtp_dtmf_1002"
 path = "examples/asterisk/tls_srtp_dtmf/endpoint_1002.rs"
 [[example]]
+name = "asterisk_tls_srtp_dtmf_analyze"
+path = "examples/asterisk/tls_srtp_dtmf/analyze.rs"
+[[example]]
 name = "asterisk_udp_dtmf_2001"
 path = "examples/asterisk/udp_dtmf/endpoint_2001.rs"
 [[example]]
@@ -217,6 +220,9 @@ path = "examples/asterisk/tls_srtp_blind_transfer_remote/transferee_1002.rs"
 [[example]]
 name = "asterisk_tls_srtp_blind_transfer_remote_target"
 path = "examples/asterisk/tls_srtp_blind_transfer_remote/target_1003.rs"
+[[example]]
+name = "asterisk_tls_srtp_blind_transfer_remote_analyze"
+path = "examples/asterisk/tls_srtp_blind_transfer_remote/analyze.rs"
 [[example]]
 name = "asterisk_udp_blind_transfer_remote_transferor"
 path = "examples/asterisk/udp_blind_transfer_remote/transferor_2001.rs"

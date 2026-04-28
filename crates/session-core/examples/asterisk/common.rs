@@ -2,7 +2,10 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::Duration;
 
 use rvoip_media_core::types::AudioFrame;
@@ -10,6 +13,7 @@ use rvoip_session_core::{
     api::unified::RegistrationHandle, types::Credentials, AudioSender, CallState, Config, Event,
     EventReceiver, Registration, SessionHandle, SipContactMode, StreamPeer,
 };
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 pub type ExampleResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -21,6 +25,7 @@ pub const ENDPOINT_2001_TONE_HZ: f32 = 440.0;
 pub const ENDPOINT_2002_TONE_HZ: f32 = 880.0;
 pub const ENDPOINT_1001_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
 pub const ENDPOINT_1002_TONE_HZ: f32 = ENDPOINT_2002_TONE_HZ;
+pub const ENDPOINT_1003_TONE_HZ: f32 = 660.0;
 pub const MIN_RECEIVED_SAMPLES: usize = 12_000;
 pub const DOMINANCE_RATIO: f32 = 5.0;
 pub const DEFAULT_POST_REGISTER_SETTLE_SECS: u64 = 5;
@@ -283,6 +288,13 @@ pub struct ToneAnalysis {
     pub ratio: f32,
 }
 
+pub struct ToneRecorder {
+    running: Arc<AtomicBool>,
+    send_task: JoinHandle<()>,
+    recv_task: JoinHandle<()>,
+    received_buf: Arc<Mutex<Vec<i16>>>,
+}
+
 pub fn load_env() {
     let env_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/asterisk/.env");
     let _ = dotenvy::from_filename(env_path);
@@ -477,6 +489,81 @@ pub async fn send_tone_segment(
         sleep(Duration::from_millis(20)).await;
     }
     Ok(())
+}
+
+pub async fn start_tone_recorder(
+    handle: &SessionHandle,
+    tone_hz: f32,
+) -> ExampleResult<ToneRecorder> {
+    let audio = handle.audio().await?;
+    let (sender, mut receiver) = audio.split();
+
+    let received_buf = Arc::new(Mutex::new(Vec::<i16>::new()));
+    let recv_buf = received_buf.clone();
+    let recv_task = tokio::spawn(async move {
+        while let Some(frame) = receiver.recv().await {
+            if let Ok(mut buf) = recv_buf.lock() {
+                buf.extend_from_slice(&frame.samples);
+            }
+        }
+    });
+
+    let running = Arc::new(AtomicBool::new(true));
+    let send_running = running.clone();
+    let send_task = tokio::spawn(async move {
+        let mut frame_index = 0usize;
+        while send_running.load(Ordering::Relaxed) && sender.is_open() {
+            let frame = AudioFrame::new(
+                generate_tone(tone_hz, frame_index),
+                SAMPLE_RATE,
+                1,
+                (frame_index * FRAME_SIZE) as u32,
+            );
+            if sender.send(frame).await.is_err() {
+                break;
+            }
+            frame_index += 1;
+            sleep(Duration::from_millis(20)).await;
+        }
+    });
+
+    Ok(ToneRecorder {
+        running,
+        send_task,
+        recv_task,
+        received_buf,
+    })
+}
+
+impl ToneRecorder {
+    pub async fn stop_and_save(
+        self,
+        output_dir: &Path,
+        output_name: &str,
+    ) -> ExampleResult<PathBuf> {
+        let ToneRecorder {
+            running,
+            send_task,
+            recv_task,
+            received_buf,
+        } = self;
+
+        running.store(false, Ordering::Relaxed);
+        let _ = timeout(Duration::from_secs(2), send_task).await;
+        let _ = timeout(Duration::from_secs(2), async {
+            loop {
+                if recv_task.is_finished() {
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await;
+        recv_task.abort();
+
+        let received = received_buf.lock().map(|g| g.clone()).unwrap_or_default();
+        save_wav(output_dir, output_name, &received)
+    }
 }
 
 pub async fn wait_for_remote_hold_on_events(
@@ -1134,6 +1221,29 @@ pub fn assert_audio_path(
         return Err(format!(
             "{}: {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (expected at least {:.2})",
             path.display(),
+            analysis.expected_hz,
+            analysis.expected_magnitude,
+            analysis.rejected_hz,
+            analysis.rejected_magnitude,
+            analysis.ratio,
+            DOMINANCE_RATIO
+        )
+        .into());
+    }
+    Ok(analysis)
+}
+
+pub fn assert_samples_tone(
+    label: &str,
+    samples: &[i16],
+    expected_hz: f32,
+    rejected_hz: f32,
+) -> ExampleResult<ToneAnalysis> {
+    let analysis = analyze_samples(samples, expected_hz, rejected_hz)?;
+    if analysis.ratio < DOMINANCE_RATIO {
+        return Err(format!(
+            "{}: {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (expected at least {:.2})",
+            label,
             analysis.expected_hz,
             analysis.expected_magnitude,
             analysis.rejected_hz,

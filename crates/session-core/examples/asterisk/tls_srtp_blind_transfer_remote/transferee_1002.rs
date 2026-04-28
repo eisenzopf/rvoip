@@ -7,7 +7,8 @@
 mod common;
 
 use common::{
-    endpoint_config, init_tracing, load_env, register_endpoint, remote_test_timeout, ExampleResult,
+    endpoint_config, init_tracing, load_env, register_endpoint, remote_test_timeout,
+    start_tone_recorder, ExampleResult, ENDPOINT_1002_TONE_HZ,
 };
 use rvoip_session_core::StreamPeer;
 use tokio::time::{sleep, timeout, Duration};
@@ -29,10 +30,19 @@ async fn main() -> ExampleResult<()> {
     println!("[1002] Incoming call from {}", incoming.from);
     let handle = incoming.accept().await?;
     println!("[1002] Call answered; staying up while Asterisk completes the transfer.");
-    sleep(Duration::from_secs(10)).await;
+    let recorder = start_tone_recorder(&handle, ENDPOINT_1002_TONE_HZ).await?;
+    println!(
+        "[1002] Sending anchor/transferee {:.0}Hz tone.",
+        ENDPOINT_1002_TONE_HZ
+    );
+    sleep(Duration::from_secs(12)).await;
     println!("[1002] Transfer window elapsed; hanging up anchor call.");
     handle.hangup().await.ok();
     handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
+    let wav = recorder
+        .stop_and_save(&cfg.output_dir, "tls_srtp_blind_transfer_1002_received.wav")
+        .await?;
+    println!("[1002] Received audio saved to {}", wav.display());
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

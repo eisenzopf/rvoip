@@ -4,8 +4,9 @@
 mod common;
 
 use common::{
-    analyze_samples, assert_audio_path, endpoint_config, init_tracing, load_env, print_analysis,
-    read_wav, ExampleResult, ENDPOINT_2001_TONE_HZ, ENDPOINT_2002_TONE_HZ, SAMPLE_RATE,
+    analyze_samples, assert_audio_path, assert_samples_tone, endpoint_config, init_tracing,
+    load_env, print_analysis, read_wav, ExampleResult, ENDPOINT_2001_TONE_HZ,
+    ENDPOINT_2002_TONE_HZ, SAMPLE_RATE,
 };
 
 const PRE_HOLD_TONE_HZ: f32 = ENDPOINT_2001_TONE_HZ;
@@ -41,13 +42,13 @@ fn main() -> ExampleResult<()> {
 
     let first_window = &endpoint_2002_samples[..WINDOW_SAMPLES];
     let last_window = &endpoint_2002_samples[endpoint_2002_samples.len() - WINDOW_SAMPLES..];
-    let pre_hold = assert_window_tone(
+    let pre_hold = assert_samples_tone(
         "2002 pre-hold window",
         first_window,
         PRE_HOLD_TONE_HZ,
         POST_RESUME_TONE_HZ,
     )?;
-    let post_resume = assert_window_tone(
+    let post_resume = assert_samples_tone(
         "2002 post-resume window",
         last_window,
         POST_RESUME_TONE_HZ,
@@ -78,27 +79,4 @@ fn main() -> ExampleResult<()> {
     println!("Hold/resume audio path verification passed.");
 
     Ok(())
-}
-
-fn assert_window_tone(
-    label: &str,
-    samples: &[i16],
-    expected_hz: f32,
-    rejected_hz: f32,
-) -> ExampleResult<common::ToneAnalysis> {
-    let analysis = analyze_samples(samples, expected_hz, rejected_hz)?;
-    if analysis.ratio < common::DOMINANCE_RATIO {
-        return Err(format!(
-            "{}: {:.0}Hz magnitude {:.1} vs {:.0}Hz magnitude {:.1}, ratio {:.2} (expected at least {:.2})",
-            label,
-            analysis.expected_hz,
-            analysis.expected_magnitude,
-            analysis.rejected_hz,
-            analysis.rejected_magnitude,
-            analysis.ratio,
-            common::DOMINANCE_RATIO
-        )
-        .into());
-    }
-    Ok(analysis)
 }

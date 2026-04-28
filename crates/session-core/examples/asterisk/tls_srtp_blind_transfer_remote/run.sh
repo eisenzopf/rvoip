@@ -8,6 +8,7 @@ OUT_DIR="$SCRIPT_DIR/output"
 LOG_TRANSFEREE="$OUT_DIR/1002.log"
 LOG_TRANSFEROR="$OUT_DIR/1001.log"
 LOG_TARGET="$OUT_DIR/1003.log"
+LOG_ANALYZE="$OUT_DIR/analyze.log"
 PID_TRANSFEREE=""
 PID_TARGET=""
 
@@ -69,7 +70,8 @@ echo "Building TLS/SRTP blind transfer examples..."
 cargo build -p rvoip-session-core --features dev-insecure-tls \
   --example asterisk_tls_srtp_blind_transfer_remote_transferor \
   --example asterisk_tls_srtp_blind_transfer_remote_transferee \
-  --example asterisk_tls_srtp_blind_transfer_remote_target
+  --example asterisk_tls_srtp_blind_transfer_remote_target \
+  --example asterisk_tls_srtp_blind_transfer_remote_analyze
 
 echo "[1003] Starting transfer target"
 AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insecure-tls \
@@ -97,6 +99,11 @@ wait "$PID_TRANSFEREE"
 PID_TRANSFEREE=""
 wait "$PID_TARGET"
 PID_TARGET=""
+
+echo "[ANALYZE] Starting"
+AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insecure-tls \
+  --example asterisk_tls_srtp_blind_transfer_remote_analyze --quiet \
+  >"$LOG_ANALYZE" 2>&1
 
 echo
 echo "=== TLS/SRTP blind transfer test complete ==="

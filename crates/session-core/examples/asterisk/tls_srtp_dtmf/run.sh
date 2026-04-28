@@ -7,6 +7,7 @@ WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 OUT_DIR="$SCRIPT_DIR/output"
 LOG_1001="$OUT_DIR/1001.log"
 LOG_1002="$OUT_DIR/1002.log"
+LOG_ANALYZE="$OUT_DIR/analyze.log"
 PID_1002=""
 
 cleanup() {
@@ -61,7 +62,8 @@ export ASTERISK_TLS_SRTP_REQUIRED="${ASTERISK_TLS_SRTP_REQUIRED:-1}"
 echo "Building TLS/SRTP DTMF examples..."
 cargo build -p rvoip-session-core --features dev-insecure-tls \
   --example asterisk_tls_srtp_dtmf_1001 \
-  --example asterisk_tls_srtp_dtmf_1002
+  --example asterisk_tls_srtp_dtmf_1002 \
+  --example asterisk_tls_srtp_dtmf_analyze
 
 AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insecure-tls \
   --example asterisk_tls_srtp_dtmf_1002 --quiet >"$LOG_1002" 2>&1 &
@@ -73,6 +75,10 @@ AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insec
 
 wait "$PID_1002"
 PID_1002=""
+
+echo "[ANALYZE] Starting"
+AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insecure-tls \
+  --example asterisk_tls_srtp_dtmf_analyze --quiet >"$LOG_ANALYZE" 2>&1
 
 echo
 echo "=== TLS/SRTP DTMF example complete ==="

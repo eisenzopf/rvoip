@@ -5,7 +5,8 @@ mod common;
 
 use common::{
     endpoint_config, init_tracing, load_env, register_endpoint, remote_test_digits,
-    remote_test_timeout, wait_for_dtmf_sequence_on_events, ExampleResult,
+    remote_test_timeout, start_tone_recorder, wait_for_dtmf_sequence_on_events, ExampleResult,
+    ENDPOINT_1002_TONE_HZ,
 };
 use rvoip_session_core::StreamPeer;
 use tokio::time::Duration;
@@ -29,12 +30,17 @@ async fn main() -> ExampleResult<()> {
         "[1002] Call answered; waiting for DTMF digits {}.",
         digits.iter().collect::<String>()
     );
+    let recorder = start_tone_recorder(&handle, ENDPOINT_1002_TONE_HZ).await?;
 
     wait_for_dtmf_sequence_on_events(&mut events, &digits, remote_test_timeout()?).await?;
     handle
         .wait_for_end(Some(Duration::from_secs(10)))
         .await
         .ok();
+    let wav = recorder
+        .stop_and_save(&cfg.output_dir, "tls_srtp_dtmf_1002_received.wav")
+        .await?;
+    println!("[1002] Received audio saved to {}", wav.display());
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

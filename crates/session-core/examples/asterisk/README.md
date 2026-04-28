@@ -42,15 +42,24 @@ sequence unless `ASTERISK_RUN_EXTENDED_TESTS=1` is set. The older
 |---------|-----------|-----------------|------------------|
 | `./tls_srtp_ring_remote/run.sh` | TLS/SRTP | `1003` registers but does not answer | `1001` calls `1003`, reaches `Ringing`, then cancels cleanly |
 | `./udp_ring_remote/run.sh` | UDP/RTP | `2003` registers but does not answer | `2001` calls `2003`, reaches `Ringing`, then cancels cleanly |
-| `./tls_srtp_dtmf/run.sh` | TLS/SRTP | none | `1001` sends `REMOTE_TEST_DIGITS` to `1002` through Asterisk and `1002` receives them |
+| `./tls_srtp_dtmf/run.sh` | TLS/SRTP | none | `1001` sends `REMOTE_TEST_DIGITS` to `1002`, `1002` receives them, and the SRTP audio analyzer verifies exchanged tones |
 | `./udp_dtmf/run.sh` | UDP/RTP | none | `2001` sends `REMOTE_TEST_DIGITS` to `2002` through Asterisk and `2002` receives them |
-| `./tls_srtp_blind_transfer_remote/run.sh` | TLS/SRTP | `1003` registers and answers the transferred call | `1001` calls `1002`, sends REFER to transfer `1002` to `1003`, and observes REFER NOTIFY completion |
+| `./tls_srtp_blind_transfer_remote/run.sh` | TLS/SRTP | `1003` registers and answers the transferred call | `1001` calls `1002`, sends REFER to transfer `1002` to `1003`, observes REFER NOTIFY completion, and the SRTP audio analyzer verifies initial and transferred-leg tones |
 | `./udp_blind_transfer_remote/run.sh` | UDP/RTP | `2003` registers and answers the transferred call | `2001` calls `2002`, sends REFER to transfer `2002` to `2003`, and observes REFER NOTIFY completion |
 | `./run_remote.sh` | TLS/SRTP and UDP/RTP | `1003`/`2003` are rvoip-controlled | All extended scenarios pass |
 
-## Required Extended Test Environment
+## SRTP Audio Verification
 
-Add these values to `.env` or export them before running extended tests:
+| Test | WAV assertions |
+|------|----------------|
+| TLS/SRTP hold/resume | `1001` receives `1002`'s `880 Hz` tone; `1002` receives `1001`'s pre-hold `440 Hz` and post-resume `660 Hz` tones |
+| TLS/SRTP DTMF | `1001` receives `1002`'s `880 Hz` tone; `1002` receives `1001`'s `440 Hz` tone while DTMF is sent |
+| TLS/SRTP blind transfer | `1001` receives `1002`'s `880 Hz` initial-leg tone; `1003` receives `1002`'s `880 Hz` transferred-leg tone; `1002` receives `1001`'s `440 Hz` before transfer and `1003`'s `660 Hz` after transfer |
+| TLS/SRTP ring/cancel | Signaling-only; no media assertion because the target intentionally never answers |
+
+## Extended Test Environment Knobs
+
+These values are optional overrides. The examples default to the values shown:
 
 ```sh
 REMOTE_TLS_USER=1003
@@ -62,10 +71,9 @@ ASTERISK_CALL_RETRY_ATTEMPTS=8
 
 The `REMOTE_*` names are retained for compatibility with the original test
 plan. In the current suite they identify rvoip-controlled third endpoints and
-shared test inputs, not external softphones.
-
-`ASTERISK_CALL_RETRY_ATTEMPTS` covers transient PBX lookup windows immediately
-after registration, where Asterisk can briefly return `404 Not Found` for an
+shared test inputs, not external softphones. `ASTERISK_CALL_RETRY_ATTEMPTS`
+defaults to `8` and covers transient PBX lookup windows immediately after
+registration, where Asterisk can briefly return `404 Not Found` for an
 extension that has just registered.
 
 Optional URI overrides are available when Asterisk dialplan routing differs
