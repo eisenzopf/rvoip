@@ -1059,6 +1059,14 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        let state_before_auth = self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .map(|s| s.call_state)
+            .ok();
+
         if let Err(e) = self
             .state_machine
             .process_event(
@@ -1074,6 +1082,15 @@ impl SessionCrossCrateEventHandler {
                 "Failed to process AuthRequired({}) for session {}: {}",
                 status, session_id, e
             );
+            if matches!(state_before_auth, Some(crate::types::CallState::Initiating)) {
+                let reason = if let Some(session_error) = e.downcast_ref::<SessionError>() {
+                    session_error.to_string()
+                } else {
+                    format!("INVITE authentication failed: {}", e)
+                };
+                self.handle_call_failed_parts(session_id, status, reason)
+                    .await?;
+            }
         }
         Ok(())
     }
@@ -1514,6 +1531,14 @@ impl SessionCrossCrateEventHandler {
             challenge.len()
         );
 
+        let state_before_auth = self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .map(|s| s.call_state)
+            .ok();
+
         if let Err(e) = self
             .state_machine
             .process_event(
@@ -1529,6 +1554,15 @@ impl SessionCrossCrateEventHandler {
                 "Failed to process AuthRequired({}) for session {}: {}",
                 status, session_id, e
             );
+            if matches!(state_before_auth, Some(crate::types::CallState::Initiating)) {
+                let reason = if let Some(session_error) = e.downcast_ref::<SessionError>() {
+                    session_error.to_string()
+                } else {
+                    format!("INVITE authentication failed: {}", e)
+                };
+                self.handle_call_failed_parts(session_id, status, reason)
+                    .await?;
+            }
         }
         Ok(())
     }

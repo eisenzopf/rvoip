@@ -3,6 +3,8 @@
 //! Provides a split duplex audio stream per session. The caller owns the
 //! send/receive loop, enabling flexible bridging in higher layers.
 
+#![deny(missing_docs)]
+
 use crate::errors::{Result, SessionError};
 use rvoip_media_core::types::AudioFrame;
 use tokio::sync::mpsc;

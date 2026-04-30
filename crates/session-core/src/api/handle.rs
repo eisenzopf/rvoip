@@ -6,6 +6,8 @@
 //! once a call exists: hangup, hold/resume, DTMF, transfer, INFO/NOTIFY,
 //! event subscription, state inspection, and audio frames.
 
+#![deny(missing_docs)]
+
 use rvoip_media_core::types::AudioFrame;
 use std::sync::Arc;
 use std::time::Duration;

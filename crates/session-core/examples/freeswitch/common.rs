@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use rvoip_session_core::{Config, Registration};
+use rvoip_session_core::{types::Credentials, Config, Registration};
 use std::env;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -39,6 +39,12 @@ pub fn freeswitch_addr() -> String {
 
 pub fn config(user: &str, default_port: u16) -> Config {
     Config::freeswitch_internal(user, bind_addr(default_port))
+}
+
+pub fn config_with_credentials(user: &str, password: &str, default_port: u16) -> Config {
+    let mut config = config(user, default_port);
+    config.credentials = Some(Credentials::new(user, password));
+    config
 }
 
 pub fn registration(user: &str, password: &str) -> Registration {

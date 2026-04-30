@@ -20,6 +20,8 @@
 //!
 //! [`CallbackPeer`]: crate::api::callback_peer::CallbackPeer
 
+#![deny(missing_docs)]
+
 use std::net::IpAddr;
 use std::sync::Arc;
 

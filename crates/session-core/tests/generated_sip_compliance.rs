@@ -7,10 +7,10 @@ use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
 use rvoip_dialog_core::transaction::utils::response_builders::create_response;
+use rvoip_session_core::api::stream_peer::EventReceiver;
 use rvoip_session_core::api::unified::{Config, Registration, UnifiedCoordinator};
 use rvoip_session_core::types::Credentials;
-use rvoip_session_core::CallState;
-use rvoip_session_core::StreamPeer;
+use rvoip_session_core::{CallState, Event, StreamPeer};
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::parser::parse_message;
 use rvoip_sip_core::types::headers::{HeaderAccess, HeaderValue};
@@ -37,6 +37,39 @@ fn response_bytes(response: Response) -> Vec<u8> {
 
 fn ok_response(request: &Request) -> Vec<u8> {
     response_bytes(create_response(request, StatusCode::Ok))
+}
+
+fn invite_proxy_auth_response(request: &Request, nonce: &str) -> Vec<u8> {
+    let mut response = create_response(request, StatusCode::ProxyAuthenticationRequired);
+    response.headers.push(TypedHeader::Other(
+        HeaderName::ProxyAuthenticate,
+        HeaderValue::Raw(
+            format!(r#"Digest realm="testrealm", nonce="{nonce}", algorithm=MD5, qop="auth""#)
+                .into_bytes(),
+        ),
+    ));
+    response_bytes(response)
+}
+
+async fn wait_for_call_failed(
+    events: &mut EventReceiver,
+    call_id: &rvoip_session_core::CallId,
+) -> (u16, String) {
+    timeout(Duration::from_secs(8), async {
+        loop {
+            match events.next().await {
+                Some(Event::CallFailed {
+                    call_id: id,
+                    status_code,
+                    reason,
+                }) if id == *call_id => return (status_code, reason),
+                Some(_) => continue,
+                None => panic!("event stream closed before CallFailed"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for CallFailed")
 }
 
 async fn wait_for_count(count: &AtomicU32, expected: u32, label: &str) {
@@ -324,6 +357,199 @@ async fn generated_sip_compliance_invite_401_retry_is_generated_valid() {
     );
     assert!(captured[1].cseq().unwrap().seq > captured[0].cseq().unwrap().seq);
     assert!(captured[1].header(&HeaderName::Authorization).is_some());
+
+    uas.abort();
+}
+
+#[tokio::test]
+async fn generated_sip_compliance_invite_407_retry_uses_proxy_authorization() {
+    let uas_port = random_port(38600);
+    let client_port = uas_port + 1200;
+    let socket = Arc::new(
+        UdpSocket::bind(format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("mock uas bind"),
+    );
+    let invite_count = Arc::new(AtomicU32::new(0));
+    let ack_count = Arc::new(AtomicU32::new(0));
+    let captured = Arc::new(Mutex::new(Vec::<Request>::new()));
+
+    let task_socket = socket.clone();
+    let task_invite_count = invite_count.clone();
+    let task_ack_count = ack_count.clone();
+    let task_captured = captured.clone();
+    let uas = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let Some((request, from)) = recv_request(&task_socket, &mut buf).await else {
+                continue;
+            };
+
+            match request.method() {
+                Method::Invite => {
+                    let index = task_invite_count.fetch_add(1, Ordering::SeqCst);
+                    task_captured.lock().await.push(request.clone());
+                    let bytes = if index == 0 {
+                        invite_proxy_auth_response(&request, "proxy-nonce")
+                    } else {
+                        response_bytes(create_response(&request, StatusCode::BusyHere))
+                    };
+                    let _ = task_socket.send_to(&bytes, from).await;
+                }
+                Method::Ack => {
+                    task_ack_count.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let peer = StreamPeer::with_config(config("alice", client_port))
+        .await
+        .expect("peer");
+    let _ = peer
+        .control()
+        .call_with_auth(
+            &format!("sip:bob@127.0.0.1:{uas_port}"),
+            Credentials::new("alice", "password"),
+        )
+        .await;
+
+    wait_for_count(&invite_count, 2, "INVITE proxy-auth retry").await;
+    wait_for_count(&ack_count, 1, "ACK for first 407").await;
+    let captured = captured.lock().await;
+    assert_eq!(captured.len(), 2);
+    assert_eq!(
+        captured[0].call_id().unwrap().value(),
+        captured[1].call_id().unwrap().value()
+    );
+    assert!(captured[1].cseq().unwrap().seq > captured[0].cseq().unwrap().seq);
+    assert!(captured[1].body().len() > 0, "retry must preserve SDP body");
+    assert!(
+        captured[1]
+            .header(&HeaderName::ProxyAuthorization)
+            .is_some(),
+        "407 retry must use Proxy-Authorization"
+    );
+    assert!(
+        captured[1].header(&HeaderName::Authorization).is_none(),
+        "407 retry must not use WWW Authorization"
+    );
+
+    uas.abort();
+}
+
+#[tokio::test]
+async fn generated_sip_compliance_invite_407_without_credentials_fails_fast() {
+    let uas_port = random_port(38800);
+    let client_port = uas_port + 1200;
+    let socket = Arc::new(
+        UdpSocket::bind(format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("mock uas bind"),
+    );
+    let invite_count = Arc::new(AtomicU32::new(0));
+
+    let task_socket = socket.clone();
+    let task_invite_count = invite_count.clone();
+    let uas = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let Some((request, from)) = recv_request(&task_socket, &mut buf).await else {
+                continue;
+            };
+            if request.method() != Method::Invite {
+                continue;
+            }
+            task_invite_count.fetch_add(1, Ordering::SeqCst);
+            let bytes = invite_proxy_auth_response(&request, "missing-creds-nonce");
+            let _ = task_socket.send_to(&bytes, from).await;
+        }
+    });
+
+    let mut peer = StreamPeer::with_config(config("alice", client_port))
+        .await
+        .expect("peer");
+    let mut events = peer.control().subscribe_events().await.expect("events");
+    let handle = peer
+        .call(&format!("sip:bob@127.0.0.1:{uas_port}"))
+        .await
+        .expect("make_call");
+
+    let (status, reason) = wait_for_call_failed(&mut events, handle.id()).await;
+    assert_eq!(status, 407);
+    assert!(
+        reason.contains("no credentials"),
+        "unexpected failure reason: {reason}"
+    );
+    sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        invite_count.load(Ordering::SeqCst),
+        1,
+        "missing credentials must not retry INVITE"
+    );
+
+    uas.abort();
+}
+
+#[tokio::test]
+async fn generated_sip_compliance_invite_407_second_challenge_fails_fast() {
+    let uas_port = random_port(39000);
+    let client_port = uas_port + 1200;
+    let socket = Arc::new(
+        UdpSocket::bind(format!("127.0.0.1:{uas_port}"))
+            .await
+            .expect("mock uas bind"),
+    );
+    let invite_count = Arc::new(AtomicU32::new(0));
+    let captured = Arc::new(Mutex::new(Vec::<Request>::new()));
+
+    let task_socket = socket.clone();
+    let task_invite_count = invite_count.clone();
+    let task_captured = captured.clone();
+    let uas = tokio::spawn(async move {
+        let mut buf = vec![0u8; 8192];
+        loop {
+            let Some((request, from)) = recv_request(&task_socket, &mut buf).await else {
+                continue;
+            };
+            if request.method() != Method::Invite {
+                continue;
+            }
+            let index = task_invite_count.fetch_add(1, Ordering::SeqCst);
+            task_captured.lock().await.push(request.clone());
+            let bytes = invite_proxy_auth_response(&request, &format!("retry-nonce-{index}"));
+            let _ = task_socket.send_to(&bytes, from).await;
+        }
+    });
+
+    let mut cfg = config("alice", client_port);
+    cfg.credentials = Some(Credentials::new("alice", "password"));
+    let mut peer = StreamPeer::with_config(cfg).await.expect("peer");
+    let mut events = peer.control().subscribe_events().await.expect("events");
+    let handle = peer
+        .call(&format!("sip:bob@127.0.0.1:{uas_port}"))
+        .await
+        .expect("make_call");
+
+    let (status, reason) = wait_for_call_failed(&mut events, handle.id()).await;
+    assert_eq!(status, 407);
+    assert!(
+        reason.contains("retry limit"),
+        "unexpected failure reason: {reason}"
+    );
+    wait_for_count(&invite_count, 2, "initial INVITE plus one auth retry").await;
+    sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        invite_count.load(Ordering::SeqCst),
+        2,
+        "retry cap must prevent a third INVITE"
+    );
+    let captured = captured.lock().await;
+    assert_eq!(captured.len(), 2);
+    assert!(captured[1]
+        .header(&HeaderName::ProxyAuthorization)
+        .is_some());
 
     uas.abort();
 }

@@ -10,7 +10,8 @@ async fn main() -> Result<()> {
     let target = common::env_or("FREESWITCH_TARGET_USER", "1001");
     let timeout = common::env_duration_secs("FREESWITCH_TEST_TIMEOUT_SECS", 30);
 
-    let mut peer = StreamPeer::with_config(common::config(&user, 15061)).await?;
+    let mut peer =
+        StreamPeer::with_config(common::config_with_credentials(&user, &password, 15061)).await?;
     let reg = peer
         .register_with(common::registration(&user, &password))
         .await?;

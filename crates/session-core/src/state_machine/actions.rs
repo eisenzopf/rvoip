@@ -1092,11 +1092,9 @@ pub async fn execute_action(
             );
             const CAP: u8 = 1;
             if session.invite_auth_retry_count >= CAP {
-                return Err(format!(
-                    "INVITE auth retry cap ({}) exceeded for session {}",
-                    CAP, session.session_id
-                )
-                .into());
+                return Err(Box::new(
+                    crate::errors::SessionError::InviteAuthRetryExhausted,
+                ));
             }
             session.invite_auth_retry_count += 1;
 
@@ -1107,10 +1105,8 @@ pub async fn execute_action(
                 )
             })?;
             let creds = session.credentials.clone().ok_or_else(|| {
-                format!(
-                    "SendINVITEWithAuth: no credentials on session {} — set via StreamPeer::with_credentials",
-                    session.session_id
-                )
+                Box::new(crate::errors::SessionError::MissingCredentialsForInviteAuth)
+                    as Box<dyn std::error::Error + Send + Sync>
             })?;
             let request_uri = session.remote_uri.clone().ok_or_else(|| {
                 format!(

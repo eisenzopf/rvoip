@@ -46,6 +46,8 @@
 //! # }
 //! ```
 
+#![deny(missing_docs)]
+
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

@@ -214,6 +214,22 @@
 //! [`UnifiedCoordinator`]: unified::UnifiedCoordinator
 //! [`Config`]: unified::Config
 //! [`Registration`]: unified::Registration
+//!
+//! ## Rustdoc Policy
+//!
+//! Rustdoc is the canonical developer documentation for `session-core`.
+//! Public developer-facing APIs in [`unified`], [`stream_peer`],
+//! [`callback_peer`], [`handle`], [`incoming`], and [`audio`] are compiled with
+//! `missing_docs` denied. Each public method should explain what it does, call
+//! out observable events or important failure modes when relevant, and include
+//! a focused `# Examples` section unless it is a trivial accessor or a
+//! callback hook covered by the trait-level example.
+//!
+//! Examples should compile whenever practical. Use `rust,no_run` for SIP,
+//! RTP, or network flows that need a peer at runtime, and ordinary `rust`
+//! examples for pure builders or configuration helpers. Prefer intra-doc links
+//! to item names so refactors break documentation at build time instead of
+//! leaving stale text behind.
 
 // Core modules only
 pub mod builder; // Session builder

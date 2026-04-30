@@ -46,6 +46,8 @@
 //! [`CallbackPeer`]: crate::api::callback_peer::CallbackPeer
 //! [`StreamPeer`]: crate::api::stream_peer::StreamPeer
 
+#![deny(missing_docs)]
+
 use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;

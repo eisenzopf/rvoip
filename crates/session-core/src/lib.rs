@@ -148,6 +148,9 @@
 //! See the [`api`] module docs for the complete module map and additional
 //! quick-start examples.
 
+#![deny(rustdoc::bare_urls)]
+#![deny(rustdoc::broken_intra_doc_links)]
+
 // ── Internal modules (pub for doc visibility, use the re-exports below) ─────
 
 pub mod api;

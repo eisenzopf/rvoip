@@ -1,5 +1,7 @@
 //! Incoming call handling — accept, reject, redirect, or defer.
 
+#![deny(missing_docs)]
+
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
