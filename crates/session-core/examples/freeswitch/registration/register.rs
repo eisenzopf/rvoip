@@ -1,36 +1,62 @@
+//! Register one rvoip endpoint with the local FreeSWITCH parity profiles.
+
 #[path = "../common.rs"]
 mod common;
 
-use rvoip_session_core::{Result, StreamPeer};
+use common::{endpoint_config, init_tracing, load_env, register_endpoint, ExampleResult};
+use rvoip_session_core::StreamPeer;
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let user = common::env_or("FREESWITCH_USER", "1000");
-    let password = common::env_or("FREESWITCH_PASSWORD", "1234");
-    let timeout = common::env_duration_secs("FREESWITCH_TEST_TIMEOUT_SECS", 10);
+async fn main() -> ExampleResult<()> {
+    load_env();
+    init_tracing();
 
-    let mut peer = StreamPeer::with_config(common::config(&user, 15060)).await?;
-    let handle = peer
-        .register_with(common::registration(&user, &password))
-        .await?;
-
-    tokio::time::timeout(timeout, async {
-        loop {
-            if peer.is_registered(&handle).await? {
-                break Ok::<(), rvoip_session_core::SessionError>(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let transport = std::env::var("SIP_TRANSPORT")
+        .or_else(|_| std::env::var("FREESWITCH_TRANSPORT"))
+        .unwrap_or_else(|_| "UDP".to_string());
+    let username = std::env::var("SIP_USERNAME").unwrap_or_else(|_| {
+        if transport.eq_ignore_ascii_case("tls") {
+            "1001".to_string()
+        } else {
+            "2001".to_string()
         }
-    })
-    .await
-    .map_err(|_| {
-        rvoip_session_core::SessionError::Timeout("FreeSWITCH REGISTER timed out".into())
-    })??;
+    });
+    let default_port = if transport.eq_ignore_ascii_case("tls") {
+        15070
+    } else {
+        15080
+    };
+    let default_media_start = if transport.eq_ignore_ascii_case("tls") {
+        16000
+    } else {
+        17000
+    };
 
-    peer.control()
-        .coordinator()
-        .unregister_and_wait(&handle, Some(timeout))
-        .await?;
-    peer.shutdown().await?;
+    let cfg = endpoint_config(
+        &username,
+        default_port,
+        default_media_start,
+        default_media_start + 100,
+    )?;
+    let config = if transport.eq_ignore_ascii_case("tls") {
+        cfg.tls_srtp_stream_config()?
+    } else {
+        cfg.stream_config()
+    };
+    let mut peer = StreamPeer::with_config(config).await?;
+    let registration = register_endpoint(&mut peer, &cfg).await?;
+
+    let idle = common::env_duration_secs("IDLE_SECS", 2);
+    println!(
+        "[registration] Holding {} {} registration for {}s...",
+        transport.to_uppercase(),
+        username,
+        idle.as_secs()
+    );
+    tokio::time::sleep(idle).await;
+
+    peer.unregister(&registration).await.ok();
+    peer.shutdown().await.ok();
+    println!("[registration] Done.");
     Ok(())
 }

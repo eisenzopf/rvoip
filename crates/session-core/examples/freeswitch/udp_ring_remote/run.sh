@@ -5,13 +5,13 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 FREESWITCH_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 OUT_DIR="$SCRIPT_DIR/output"
-LOG_CALLER="$OUT_DIR/2001.log"
-LOG_CALLEE="$OUT_DIR/2002.log"
-PID_CALLEE=""
+LOG_2001="$OUT_DIR/2001.log"
+LOG_2003="$OUT_DIR/2003.log"
+PID_2003=""
 
 cleanup() {
-  if [ -n "$PID_CALLEE" ]; then
-    kill "$PID_CALLEE" 2>/dev/null || true
+  if [ -n "$PID_2003" ]; then
+    kill "$PID_2003" 2>/dev/null || true
   fi
   wait 2>/dev/null || true
 }
@@ -24,7 +24,6 @@ wait_for_log() {
   label=$4
   limit=${5:-30}
   elapsed=0
-
   while [ "$elapsed" -lt "$limit" ]; do
     if grep -q "$pattern" "$file" 2>/dev/null; then
       return 0
@@ -36,9 +35,17 @@ wait_for_log() {
     sleep 1
     elapsed=$((elapsed + 1))
   done
-
   echo "[$label] timed out waiting for '$pattern'"
   return 1
+}
+
+assert_log_contains() {
+  pattern=$1
+  label=$2
+  if ! grep -R -q "$pattern" "$OUT_DIR"; then
+    echo "[VERIFY] missing expected log evidence: $label ($pattern)"
+    return 1
+  fi
 }
 
 if [ -f "$HOME/Developer/freeswitch/freeswitch-local.env" ]; then
@@ -60,23 +67,30 @@ rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
 export SIP_TRANSPORT=UDP
+export SIP_PORT="${SIP_PORT:-5062}"
 
-echo "Building FreeSWITCH UDP call examples..."
+echo "Building UDP ring/cancel example..."
 cargo build -p rvoip-session-core \
-  --example freeswitch_udp_call_caller \
-  --example freeswitch_udp_call_callee
-
-AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core \
-  --example freeswitch_udp_call_callee --quiet >"$LOG_CALLEE" 2>&1 &
-PID_CALLEE=$!
-wait_for_log "$LOG_CALLEE" "Registered; waiting" "$PID_CALLEE" "2002" 30
-
-AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core \
-  --example freeswitch_udp_call_caller --quiet >"$LOG_CALLER" 2>&1
-
-wait "$PID_CALLEE"
-PID_CALLEE=""
+  --example freeswitch_udp_ring_remote_2001 \
+  --example freeswitch_udp_ring_remote_2003
 
 echo
-echo "=== FreeSWITCH UDP call example complete ==="
+echo "[2003] Starting rvoip ring/cancel target."
+AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core \
+  --example freeswitch_udp_ring_remote_2003 --quiet >"$LOG_2003" 2>&1 &
+PID_2003=$!
+wait_for_log "$LOG_2003" "Registered; waiting" "$PID_2003" "2003" 30
+
+echo "[2001] Starting caller."
+AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core \
+  --example freeswitch_udp_ring_remote_2001 --quiet >"$LOG_2001" 2>&1
+
+wait "$PID_2003"
+PID_2003=""
+
+assert_log_contains "Incoming call" "target observed incoming call before cancel"
+assert_log_contains "Ring/cancel test passed." "caller completed cancellation"
+
+echo
+echo "=== UDP ring/cancel example complete ==="
 echo "Logs: $OUT_DIR"

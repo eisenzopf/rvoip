@@ -109,6 +109,19 @@ fn srtp_diagnostics_enabled() -> bool {
         .unwrap_or(false)
 }
 
+fn emit_srtp_diag(line: String) {
+    eprintln!("SRTP_DIAG {}", line);
+    tracing::info!("SRTP_DIAG {}", line);
+}
+
+fn crypto_attribute_diag(count: usize) -> String {
+    if count > 0 {
+        format!("crypto_attrs={} sdp_attribute=a=crypto", count)
+    } else {
+        "crypto_attrs=0".to_string()
+    }
+}
+
 fn audio_transport(session: &SdpSession) -> Option<&str> {
     session
         .media_descriptions
@@ -431,14 +444,14 @@ impl MediaAdapter {
         let diagnostics = srtp_diagnostics_enabled();
         if diagnostics {
             if let Ok(parsed) = SdpSession::from_str(remote_sdp) {
-                tracing::info!(
-                    "SRTP_DIAG remote_sdp_answer session={} media={}:{} transport={} crypto_attrs={}",
+                emit_srtp_diag(format!(
+                    "remote_sdp_answer session={} media={}:{} transport={} {}",
                     session_id.0,
                     remote_ip,
                     remote_port,
                     audio_transport(&parsed).unwrap_or("unknown"),
-                    Self::extract_audio_crypto(&parsed).len()
-                );
+                    crypto_attribute_diag(Self::extract_audio_crypto(&parsed).len())
+                ));
             }
         }
 
@@ -466,11 +479,10 @@ impl MediaAdapter {
                     chosen.suite
                 );
                 if diagnostics {
-                    tracing::info!(
-                        "SRTP_DIAG sdes_answer_accepted session={} suite={:?}",
-                        session_id.0,
-                        chosen.suite
-                    );
+                    emit_srtp_diag(format!(
+                        "sdes_answer_accepted session={} suite={:?}",
+                        session_id.0, chosen.suite
+                    ));
                 }
             } else if self.srtp_required {
                 return Err(SessionError::SDPNegotiationFailed(
@@ -517,11 +529,10 @@ impl MediaAdapter {
                     pair.suite
                 );
                 if diagnostics {
-                    tracing::info!(
-                        "SRTP_DIAG srtp_contexts_installed session={} role=uac suite={:?}",
-                        session_id.0,
-                        pair.suite
-                    );
+                    emit_srtp_diag(format!(
+                        "srtp_contexts_installed session={} role=uac suite={:?}",
+                        session_id.0, pair.suite
+                    ));
                 }
             }
 
@@ -572,14 +583,14 @@ impl MediaAdapter {
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
         let diagnostics = srtp_diagnostics_enabled();
         if diagnostics {
-            tracing::info!(
-                "SRTP_DIAG remote_sdp_offer session={} media={}:{} transport={} crypto_attrs={}",
+            emit_srtp_diag(format!(
+                "remote_sdp_offer session={} media={}:{} transport={} {}",
                 session_id.0,
                 remote_ip,
                 remote_port,
                 audio_transport(&parsed_offer).unwrap_or("unknown"),
-                Self::extract_audio_crypto(&parsed_offer).len()
-            );
+                crypto_attribute_diag(Self::extract_audio_crypto(&parsed_offer).len())
+            ));
         }
 
         // SDES UAS-side handling. Per RFC 4568 §7.3, if we require
@@ -600,11 +611,10 @@ impl MediaAdapter {
                 chosen.suite
             );
             if diagnostics {
-                tracing::info!(
-                    "SRTP_DIAG sdes_offer_accepted session={} suite={:?}",
-                    session_id.0,
-                    chosen.suite
-                );
+                emit_srtp_diag(format!(
+                    "sdes_offer_accepted session={} suite={:?}",
+                    session_id.0, chosen.suite
+                ));
             }
             (Some(chosen), true)
         } else if offered_crypto.is_empty() && self.srtp_required {
@@ -662,11 +672,10 @@ impl MediaAdapter {
                     pair.suite
                 );
                 if diagnostics {
-                    tracing::info!(
-                        "SRTP_DIAG srtp_contexts_installed session={} role=uas suite={:?}",
-                        session_id.0,
-                        pair.suite
-                    );
+                    emit_srtp_diag(format!(
+                        "srtp_contexts_installed session={} role=uas suite={:?}",
+                        session_id.0, pair.suite
+                    ));
                 }
             }
 
@@ -722,15 +731,15 @@ impl MediaAdapter {
         let offered_direction = audio_direction(&parsed_offer);
         let answer_direction = answer_direction_for_offer(&offered_direction);
         if diagnostics {
-            tracing::info!(
-                "SRTP_DIAG local_sdp_answer session={} media={}:{} transport={} crypto_attrs={} direction={}",
+            emit_srtp_diag(format!(
+                "local_sdp_answer session={} media={}:{} transport={} {} direction={}",
                 session_id.0,
                 advertised_ip,
                 advertised_port,
                 answer_transport,
-                usize::from(answer_attr.is_some()),
+                crypto_attribute_diag(usize::from(answer_attr.is_some())),
                 direction_attribute(answer_direction)
-            );
+            ));
         }
 
         let formats_str: Vec<&str> = formats.iter().map(|s| s.as_str()).collect();
@@ -1228,15 +1237,15 @@ impl MediaAdapter {
         };
         let crypto_attr_count = crypto_attrs.len();
         if srtp_diagnostics_enabled() {
-            tracing::info!(
-                "SRTP_DIAG local_sdp_offer session={} media={}:{} transport={} crypto_attrs={} direction={}",
+            emit_srtp_diag(format!(
+                "local_sdp_offer session={} media={}:{} transport={} {} direction={}",
                 session_id.0,
                 advertised_ip,
                 port,
                 transport,
-                crypto_attr_count,
+                crypto_attribute_diag(crypto_attr_count),
                 direction_attribute(direction)
-            );
+            ));
         }
 
         // Build the m-section. Always offer PCMU (0) + PCMA (8) +

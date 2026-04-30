@@ -1,37 +1,39 @@
 #[path = "../common.rs"]
 mod common;
 
-use rvoip_session_core::{Result, StreamPeer};
+use common::{
+    call_with_answer_retry, endpoint_config, init_tracing, load_env,
+    post_register_settle_duration, register_endpoint, ExampleResult,
+};
+use rvoip_session_core::StreamPeer;
+use tokio::time::{sleep, Duration};
 
 #[tokio::main]
-async fn main() -> Result<()> {
-    let user = common::env_or("FREESWITCH_CALLER_USER", "1000");
-    let password = common::env_or("FREESWITCH_CALLER_PASSWORD", "1234");
-    let target = common::env_or("FREESWITCH_TARGET_USER", "1001");
-    let timeout = common::env_duration_secs("FREESWITCH_TEST_TIMEOUT_SECS", 30);
+async fn main() -> ExampleResult<()> {
+    load_env();
+    init_tracing();
 
-    let mut peer =
-        StreamPeer::with_config(common::config_with_credentials(&user, &password, 15061)).await?;
-    let reg = peer
-        .register_with(common::registration(&user, &password))
-        .await?;
-    let call = peer.call(&common::call_uri(&target)).await?;
+    let cfg = endpoint_config("2001", 15080, 17000, 17100)?;
+    let mut peer = StreamPeer::with_config(cfg.stream_config()).await?;
+    let registration = register_endpoint(&mut peer, &cfg).await?;
 
-    let answered = tokio::time::timeout(timeout, peer.wait_for_answered(call.id()))
-        .await
-        .map_err(|_| {
-            rvoip_session_core::SessionError::Timeout("FreeSWITCH call timed out".into())
-        })??;
+    let settle = post_register_settle_duration()?;
+    if !settle.is_zero() {
+        println!(
+            "[2001] Waiting {}s for FreeSWITCH registration propagation before calling...",
+            settle.as_secs()
+        );
+        sleep(settle).await;
+    }
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    answered.hangup_and_wait(Some(timeout)).await?;
+    let target = cfg.outbound_call_uri("2002");
+    println!("[2001] Calling {} for basic UDP call test.", target);
+    let answered = call_with_answer_retry(&mut peer, &target, common::remote_test_timeout()?).await?;
 
-    let _ = peer
-        .control()
-        .coordinator()
-        .unregister_and_wait(&reg, Some(timeout))
-        .await;
+    sleep(Duration::from_secs(2)).await;
+    answered.hangup_and_wait(Some(Duration::from_secs(8))).await?;
 
-    peer.shutdown().await?;
+    peer.unregister(&registration).await.ok();
+    peer.shutdown().await.ok();
     Ok(())
 }

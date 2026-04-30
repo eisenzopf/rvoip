@@ -172,6 +172,72 @@ path = "examples/freeswitch/udp_call/caller.rs"
 [[example]]
 name = "freeswitch_udp_call_callee"
 path = "examples/freeswitch/udp_call/callee.rs"
+[[example]]
+name = "freeswitch_udp_hold_resume_2001"
+path = "examples/freeswitch/udp_hold_resume/endpoint_2001.rs"
+[[example]]
+name = "freeswitch_udp_hold_resume_2002"
+path = "examples/freeswitch/udp_hold_resume/endpoint_2002.rs"
+[[example]]
+name = "freeswitch_udp_hold_resume_analyze"
+path = "examples/freeswitch/udp_hold_resume/analyze.rs"
+[[example]]
+name = "freeswitch_tls_srtp_hold_resume_1001"
+path = "examples/freeswitch/tls_srtp_hold_resume/endpoint_1001.rs"
+[[example]]
+name = "freeswitch_tls_srtp_hold_resume_1002"
+path = "examples/freeswitch/tls_srtp_hold_resume/endpoint_1002.rs"
+[[example]]
+name = "freeswitch_tls_srtp_hold_resume_analyze"
+path = "examples/freeswitch/tls_srtp_hold_resume/analyze.rs"
+[[example]]
+name = "freeswitch_tls_srtp_ring_remote_1001"
+path = "examples/freeswitch/tls_srtp_ring_remote/endpoint_1001.rs"
+[[example]]
+name = "freeswitch_tls_srtp_ring_remote_1003"
+path = "examples/freeswitch/tls_srtp_ring_remote/endpoint_1003.rs"
+[[example]]
+name = "freeswitch_udp_ring_remote_2001"
+path = "examples/freeswitch/udp_ring_remote/endpoint_2001.rs"
+[[example]]
+name = "freeswitch_udp_ring_remote_2003"
+path = "examples/freeswitch/udp_ring_remote/endpoint_2003.rs"
+[[example]]
+name = "freeswitch_tls_srtp_dtmf_1001"
+path = "examples/freeswitch/tls_srtp_dtmf/endpoint_1001.rs"
+[[example]]
+name = "freeswitch_tls_srtp_dtmf_1002"
+path = "examples/freeswitch/tls_srtp_dtmf/endpoint_1002.rs"
+[[example]]
+name = "freeswitch_tls_srtp_dtmf_analyze"
+path = "examples/freeswitch/tls_srtp_dtmf/analyze.rs"
+[[example]]
+name = "freeswitch_udp_dtmf_2001"
+path = "examples/freeswitch/udp_dtmf/endpoint_2001.rs"
+[[example]]
+name = "freeswitch_udp_dtmf_2002"
+path = "examples/freeswitch/udp_dtmf/endpoint_2002.rs"
+[[example]]
+name = "freeswitch_tls_srtp_blind_transfer_remote_transferor"
+path = "examples/freeswitch/tls_srtp_blind_transfer_remote/transferor_1001.rs"
+[[example]]
+name = "freeswitch_tls_srtp_blind_transfer_remote_transferee"
+path = "examples/freeswitch/tls_srtp_blind_transfer_remote/transferee_1002.rs"
+[[example]]
+name = "freeswitch_tls_srtp_blind_transfer_remote_target"
+path = "examples/freeswitch/tls_srtp_blind_transfer_remote/target_1003.rs"
+[[example]]
+name = "freeswitch_tls_srtp_blind_transfer_remote_analyze"
+path = "examples/freeswitch/tls_srtp_blind_transfer_remote/analyze.rs"
+[[example]]
+name = "freeswitch_udp_blind_transfer_remote_transferor"
+path = "examples/freeswitch/udp_blind_transfer_remote/transferor_2001.rs"
+[[example]]
+name = "freeswitch_udp_blind_transfer_remote_transferee"
+path = "examples/freeswitch/udp_blind_transfer_remote/transferee_2002.rs"
+[[example]]
+name = "freeswitch_udp_blind_transfer_remote_target"
+path = "examples/freeswitch/udp_blind_transfer_remote/target_2003.rs"
 
 # Asterisk interop examples
 [[example]]

@@ -1,28 +1,38 @@
 # FreeSWITCH Interop Examples
 
-This directory is the starter FreeSWITCH/Sofia profile for `session-core`.
-It intentionally stays smaller than the Asterisk harness while the B2BUA
-wrapper design is still being sketched.
+These examples validate `session-core` against the local FreeSWITCH/Sofia
+profiles in `/Users/jonathan/Developer/freeswitch`.
 
-## Current Scope
+They mirror the Asterisk StreamPeer examples:
 
-- UDP/RTP registration smoke test.
-- UDP/RTP two-endpoint call smoke test.
-- Config defaults target the FreeSWITCH internal profile on `127.0.0.1:5060`.
+| Users | Profile | Transport / media |
+| --- | --- | --- |
+| `1001-1004` | `rvoip_tls_srtp` | SIP TLS + mandatory SDES-SRTP |
+| `2001-2004` | `rvoip_udp` | SIP UDP/TCP + plain RTP |
+
+The TLS/SRTP profile requires SRTP but leaves the crypto suite list at the
+FreeSWITCH default so SDP negotiation is exercised instead of pinned.
 
 ## Environment
 
+The examples automatically load:
+
 ```sh
-FREESWITCH_ADDR=127.0.0.1:5060
-FREESWITCH_USER=1000
+/Users/jonathan/Developer/freeswitch/freeswitch-local.env
+crates/session-core/examples/freeswitch/.env
+```
+
+Important defaults:
+
+```sh
+FREESWITCH_UDP_ADDR=127.0.0.1:5062
+FREESWITCH_TLS_ADDR=127.0.0.1:5063
 FREESWITCH_PASSWORD=1234
-FREESWITCH_CALLER_USER=1000
-FREESWITCH_CALLER_PASSWORD=1234
-FREESWITCH_CALLEE_USER=1001
-FREESWITCH_CALLEE_PASSWORD=1234
-FREESWITCH_TARGET_USER=1001
 RVOIP_LOCAL_IP=127.0.0.1
-FREESWITCH_TEST_TIMEOUT_SECS=30
+RVOIP_ADVERTISED_IP=127.0.0.1
+RVOIP_MEDIA_ADVERTISED_IP=127.0.0.1
+FREESWITCH_TEST_TIMEOUT_SECS=60
+FREESWITCH_TEST_DIGITS=1234#
 ```
 
 ## Commands
@@ -30,7 +40,22 @@ FREESWITCH_TEST_TIMEOUT_SECS=30
 ```sh
 ./registration/run.sh
 ./udp_call/run.sh
+./udp_hold_resume/run.sh
+./tls_srtp_hold_resume/run.sh
+./run.sh
 ```
 
-Next coverage should add DTMF, hold/resume, CANCEL, blind transfer, then
-TLS/SDES-SRTP once the local FreeSWITCH profile is pinned down.
+Extended scenarios:
+
+```sh
+./udp_ring_remote/run.sh
+./tls_srtp_ring_remote/run.sh
+./udp_dtmf/run.sh
+./tls_srtp_dtmf/run.sh
+./udp_blind_transfer_remote/run.sh
+./tls_srtp_blind_transfer_remote/run.sh
+./run_remote.sh
+```
+
+Set `FREESWITCH_RUN_EXTENDED_TESTS=1` when running `./run.sh` to include the
+extended suite.

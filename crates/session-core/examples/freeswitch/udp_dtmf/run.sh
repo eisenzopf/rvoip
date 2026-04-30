@@ -5,13 +5,13 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 FREESWITCH_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 WORKSPACE_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../.." && pwd)
 OUT_DIR="$SCRIPT_DIR/output"
-LOG_CALLER="$OUT_DIR/2001.log"
-LOG_CALLEE="$OUT_DIR/2002.log"
-PID_CALLEE=""
+LOG_2001="$OUT_DIR/2001.log"
+LOG_2002="$OUT_DIR/2002.log"
+PID_2002=""
 
 cleanup() {
-  if [ -n "$PID_CALLEE" ]; then
-    kill "$PID_CALLEE" 2>/dev/null || true
+  if [ -n "$PID_2002" ]; then
+    kill "$PID_2002" 2>/dev/null || true
   fi
   wait 2>/dev/null || true
 }
@@ -24,7 +24,6 @@ wait_for_log() {
   label=$4
   limit=${5:-30}
   elapsed=0
-
   while [ "$elapsed" -lt "$limit" ]; do
     if grep -q "$pattern" "$file" 2>/dev/null; then
       return 0
@@ -36,7 +35,6 @@ wait_for_log() {
     sleep 1
     elapsed=$((elapsed + 1))
   done
-
   echo "[$label] timed out waiting for '$pattern'"
   return 1
 }
@@ -60,23 +58,24 @@ rm -rf "$OUT_DIR"
 mkdir -p "$OUT_DIR"
 
 export SIP_TRANSPORT=UDP
+export SIP_PORT="${SIP_PORT:-5062}"
 
-echo "Building FreeSWITCH UDP call examples..."
+echo "Building UDP DTMF examples..."
 cargo build -p rvoip-session-core \
-  --example freeswitch_udp_call_caller \
-  --example freeswitch_udp_call_callee
+  --example freeswitch_udp_dtmf_2001 \
+  --example freeswitch_udp_dtmf_2002
 
 AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core \
-  --example freeswitch_udp_call_callee --quiet >"$LOG_CALLEE" 2>&1 &
-PID_CALLEE=$!
-wait_for_log "$LOG_CALLEE" "Registered; waiting" "$PID_CALLEE" "2002" 30
+  --example freeswitch_udp_dtmf_2002 --quiet >"$LOG_2002" 2>&1 &
+PID_2002=$!
+wait_for_log "$LOG_2002" "Registered; waiting" "$PID_2002" "2002" 30
 
 AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core \
-  --example freeswitch_udp_call_caller --quiet >"$LOG_CALLER" 2>&1
+  --example freeswitch_udp_dtmf_2001 --quiet >"$LOG_2001" 2>&1
 
-wait "$PID_CALLEE"
-PID_CALLEE=""
+wait "$PID_2002"
+PID_2002=""
 
 echo
-echo "=== FreeSWITCH UDP call example complete ==="
+echo "=== UDP DTMF example complete ==="
 echo "Logs: $OUT_DIR"
