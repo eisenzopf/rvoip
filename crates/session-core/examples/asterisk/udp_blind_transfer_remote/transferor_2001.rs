@@ -8,9 +8,9 @@ mod common;
 
 use common::{
     call_with_answer_retry, endpoint_config, init_tracing, load_env, post_register_settle_duration,
-    register_endpoint, remote_test_timeout, wait_for_transfer_completion_on_events, ExampleResult,
+    register_endpoint, remote_test_timeout, ExampleResult,
 };
-use rvoip_session_core::StreamPeer;
+use rvoip_session_core::{StreamPeer, TransferWaitMode};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -40,9 +40,17 @@ async fn main() -> ExampleResult<()> {
         transfer_target
     );
 
-    let mut events = handle.events().await?;
-    handle.transfer_blind(&transfer_target).await?;
-    wait_for_transfer_completion_on_events(&mut events, remote_test_timeout()?).await?;
+    let transfer_event = handle
+        .transfer_blind_and_wait_for(
+            &transfer_target,
+            TransferWaitMode::TargetAnswered,
+            Some(remote_test_timeout()?),
+        )
+        .await?;
+    println!(
+        "[2001] Transfer target answered with Asterisk progress evidence: {:?}",
+        transfer_event
+    );
     handle
         .wait_for_end(Some(std::time::Duration::from_secs(8)))
         .await

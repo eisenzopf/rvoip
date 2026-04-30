@@ -47,6 +47,15 @@ wait_for_log() {
   return 1
 }
 
+assert_log_contains() {
+  pattern=$1
+  label=$2
+  if ! grep -R -q "$pattern" "$OUT_DIR"; then
+    echo "[VERIFY] missing expected log evidence: $label ($pattern)"
+    return 1
+  fi
+}
+
 if [ -f "$ASTERISK_DIR/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -65,6 +74,15 @@ ensure_asterisk_tls_listener_cert "$OUT_DIR/tls"
 export SIP_TRANSPORT=TLS
 export SIP_TLS_PORT="${SIP_TLS_PORT:-5061}"
 export ASTERISK_TLS_SRTP_REQUIRED="${ASTERISK_TLS_SRTP_REQUIRED:-1}"
+export RVOIP_SIP_DIAGNOSTICS="${RVOIP_SIP_DIAGNOSTICS:-1}"
+case "$RVOIP_SIP_DIAGNOSTICS" in
+  1|true|TRUE|yes|YES|on|ON)
+    export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn},rvoip_dialog_core::transaction::manager=info"
+    ;;
+  *)
+    export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn}"
+    ;;
+esac
 
 echo "Building TLS/SRTP blind transfer examples..."
 cargo build -p rvoip-session-core --features dev-insecure-tls \
@@ -104,6 +122,19 @@ echo "[ANALYZE] Starting"
 AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insecure-tls \
   --example asterisk_tls_srtp_blind_transfer_remote_analyze --quiet \
   >"$LOG_ANALYZE" 2>&1
+
+assert_log_contains "sips:" "TLS/SIPS URI"
+assert_log_contains "transport=tls" "TLS transport URI parameter"
+assert_log_contains "SIP/2.0/TLS" "TLS Via transport"
+assert_log_contains "SRTP media security negotiated" "typed negotiated SRTP media security"
+assert_log_contains "keying=SDES" "typed SDES-SRTP keying"
+assert_log_contains "profile=RTP/SAVP" "typed SRTP media profile"
+assert_log_contains "suite=" "typed negotiated SRTP suite"
+assert_log_contains "contexts_installed=true" "typed installed SRTP contexts"
+if grep -R -q "proceeding plaintext" "$OUT_DIR"; then
+  echo "[VERIFY] plaintext RTP fallback was logged despite mandatory SRTP"
+  exit 1
+fi
 
 echo
 echo "=== TLS/SRTP blind transfer test complete ==="

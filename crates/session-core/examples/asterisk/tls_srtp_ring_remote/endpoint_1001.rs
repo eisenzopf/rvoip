@@ -5,8 +5,7 @@
 mod common;
 
 use common::{
-    call_with_ringing_retry, endpoint_config, init_tracing, load_env,
-    post_register_settle_duration, register_endpoint, remote_test_timeout, wait_for_cancel_cleanup,
+    endpoint_config, init_tracing, load_env, post_register_settle_duration, register_endpoint,
     ExampleResult,
 };
 use rvoip_session_core::StreamPeer;
@@ -35,10 +34,27 @@ async fn main() -> ExampleResult<()> {
         "[1001] Calling rvoip TLS/SRTP target {}. It should ring; no answer required.",
         target
     );
-    let handle = call_with_ringing_retry(&mut peer, &target, remote_test_timeout()?).await?;
-    println!("[1001] Target is ringing; cancelling call.");
-    handle.hangup().await?;
-    wait_for_cancel_cleanup(&handle, Duration::from_secs(12)).await?;
+    let handle = peer.call(&target).await?;
+    let progress = handle
+        .wait_for_progress(
+            |event| {
+                matches!(
+                    event,
+                    rvoip_session_core::Event::CallProgress {
+                        status_code: 180 | 183,
+                        ..
+                    }
+                )
+            },
+            Some(Duration::from_secs(8)),
+        )
+        .await?;
+    println!("[1001] Observed call progress: {:?}", progress);
+    println!("[1001] Cancelling call after typed progress.");
+    let reason = handle
+        .hangup_and_wait(Some(Duration::from_secs(12)))
+        .await?;
+    println!("[1001] Cancellation completed: {}", reason);
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

@@ -6,15 +6,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{
-    call_with_answer_retry, callback_runtime, expect_remote_hold_events, load_env,
-    post_register_settle_duration, register_callback_endpoint, remote_test_digits,
-    remote_test_timeout, send_tone_segment, start_tone_recorder, unregister_callback_endpoint,
-    wait_for_call_failed, wait_for_cancel_cleanup, wait_for_cancelled, wait_for_dtmf_sequence,
-    wait_for_local_hold_resume, wait_for_next_established, wait_for_remote_hold_resume,
-    wait_for_transfer_completion, CallbackEvent, ExampleResult, IncomingMode,
-    ENDPOINT_1001_TONE_HZ, ENDPOINT_1002_TONE_HZ, ENDPOINT_1003_TONE_HZ, ENDPOINT_2002_TONE_HZ,
+    assert_srtp_media_security, call_with_answer_retry, callback_runtime,
+    expect_remote_hold_events, load_env, post_register_settle_duration, register_callback_endpoint,
+    remote_test_digits, remote_test_timeout, send_tone_segment, start_tone_recorder,
+    unregister_callback_endpoint, wait_for_call_failed, wait_for_cancelled, wait_for_dtmf_sequence,
+    wait_for_local_hold_on_events, wait_for_local_hold_resume, wait_for_local_resume_on_events,
+    wait_for_next_established, wait_for_remote_hold_resume, CallbackEvent, ExampleResult,
+    IncomingMode, ENDPOINT_1001_TONE_HZ, ENDPOINT_1002_TONE_HZ, ENDPOINT_1003_TONE_HZ,
+    ENDPOINT_2002_TONE_HZ,
 };
-use rvoip_session_core::SessionHandle;
+use rvoip_session_core::TransferWaitMode;
 use tokio::time::sleep;
 
 const PRE_HOLD_TONE_HZ: f32 = ENDPOINT_1001_TONE_HZ;
@@ -87,6 +88,10 @@ async fn run_hold_caller(
     let target = runtime.cfg.outbound_call_uri(target_user);
     println!("[{}] Calling {} for callback hold/resume.", user, target);
     let handle = call_with_answer_retry(&mut runtime, &target, remote_test_timeout()?).await?;
+    if tls {
+        assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    }
+    let mut call_events = handle.events().await?;
     let audio = handle.audio().await?;
     let (sender, mut receiver) = audio.split();
     let received_buf = Arc::new(Mutex::new(Vec::<i16>::new()));
@@ -108,7 +113,7 @@ async fn run_hold_caller(
     )
     .await?;
     handle.hold().await?;
-    wait_for_hold_state(&handle).await?;
+    wait_for_local_hold_on_events(&mut call_events, Duration::from_secs(8)).await?;
     send_tone_segment(
         &sender,
         DURING_HOLD_TONE_HZ,
@@ -118,7 +123,7 @@ async fn run_hold_caller(
     .await?;
     sleep(Duration::from_millis(500)).await;
     handle.resume().await?;
-    wait_for_active_state(&handle).await?;
+    wait_for_local_resume_on_events(&mut call_events, Duration::from_secs(8)).await?;
     send_tone_segment(
         &sender,
         POST_RESUME_TONE_HZ,
@@ -129,7 +134,10 @@ async fn run_hold_caller(
     wait_for_local_hold_resume(&mut runtime.events, Duration::from_secs(15)).await?;
 
     drop(sender);
-    handle.hangup().await?;
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
     sleep(Duration::from_secs(1)).await;
     stop_recv_task(recv_task).await;
     let received = received_buf.lock().map(|g| g.clone()).unwrap_or_default();
@@ -157,6 +165,9 @@ async fn run_hold_callee(
     let registration = register_callback_endpoint(&mut runtime).await?;
     println!("[{}] Waiting for callback hold/resume call.", user);
     let handle = wait_for_next_established(&mut runtime.events, remote_test_timeout()?).await?;
+    if tls {
+        assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    }
     let tone = if tls {
         ENDPOINT_1002_TONE_HZ
     } else {
@@ -194,9 +205,24 @@ async fn run_ring_caller(
     let target = runtime.cfg.remote_call_uri();
     println!("[{}] Calling callback ring target {}.", user, target);
     let handle = runtime.control.call(&target).await?;
-    wait_for_ringing_state(&handle, remote_test_timeout()?).await?;
-    runtime.control.hangup(&handle).await?;
-    wait_for_cancel_cleanup(&handle, Duration::from_secs(12)).await?;
+    let progress = handle
+        .wait_for_progress(
+            |event| {
+                matches!(
+                    event,
+                    rvoip_session_core::Event::CallProgress {
+                        status_code: 180 | 183,
+                        ..
+                    }
+                )
+            },
+            Some(remote_test_timeout()?),
+        )
+        .await?;
+    println!("[{}] Observed callback call progress: {:?}", user, progress);
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(12)))
+        .await?;
     wait_for_cancelled(&mut runtime.events, Duration::from_secs(12)).await?;
     unregister_callback_endpoint(&mut runtime, &registration)
         .await
@@ -247,6 +273,9 @@ async fn run_dtmf_caller(
     settle_after_register().await?;
     let target = runtime.cfg.outbound_call_uri(target_user);
     let handle = call_with_answer_retry(&mut runtime, &target, remote_test_timeout()?).await?;
+    if tls {
+        assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    }
     let recorder = if tls {
         Some(start_tone_recorder(&handle, ENDPOINT_1001_TONE_HZ).await?)
     } else {
@@ -280,6 +309,9 @@ async fn run_dtmf_callee(
         callback_runtime(user, port, media_start, media_end, IncomingMode::Accept).await?;
     let registration = register_callback_endpoint(&mut runtime).await?;
     let handle = wait_for_next_established(&mut runtime.events, remote_test_timeout()?).await?;
+    if tls {
+        assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    }
     let recorder = if tls {
         Some(start_tone_recorder(&handle, ENDPOINT_1002_TONE_HZ).await?)
     } else {
@@ -366,14 +398,26 @@ async fn run_transferor(
     let target = runtime.cfg.outbound_call_uri(target_user);
     let transfer_target = runtime.cfg.remote_call_uri();
     let handle = call_with_answer_retry(&mut runtime, &target, remote_test_timeout()?).await?;
+    if tls {
+        assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    }
     let recorder = if tls {
         Some(start_tone_recorder(&handle, ENDPOINT_1001_TONE_HZ).await?)
     } else {
         None
     };
     sleep(Duration::from_secs(3)).await;
-    handle.transfer_blind(&transfer_target).await?;
-    wait_for_transfer_completion(&mut runtime.events, remote_test_timeout()?).await?;
+    let transfer_event = handle
+        .transfer_blind_and_wait_for(
+            &transfer_target,
+            TransferWaitMode::TargetAnswered,
+            Some(remote_test_timeout()?),
+        )
+        .await?;
+    println!(
+        "[{}] Transfer target answered with Asterisk progress evidence: {:?}",
+        user, transfer_event
+    );
     if let Some(recorder) = recorder {
         recorder
             .stop_and_save(
@@ -399,6 +443,9 @@ async fn run_transferee(
         callback_runtime(user, port, media_start, media_end, IncomingMode::Accept).await?;
     let registration = register_callback_endpoint(&mut runtime).await?;
     let handle = wait_for_next_established(&mut runtime.events, remote_test_timeout()?).await?;
+    if tls {
+        assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    }
     let recorder = if tls {
         Some(start_tone_recorder(&handle, ENDPOINT_1002_TONE_HZ).await?)
     } else {
@@ -431,6 +478,9 @@ async fn run_transfer_target(
         callback_runtime(user, port, media_start, media_end, IncomingMode::Accept).await?;
     let registration = register_callback_endpoint(&mut runtime).await?;
     let handle = wait_for_next_established(&mut runtime.events, Duration::from_secs(90)).await?;
+    if tls {
+        assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    }
     let recorder = if tls {
         Some(start_tone_recorder(&handle, ENDPOINT_1003_TONE_HZ).await?)
     } else {
@@ -505,46 +555,6 @@ async fn wait_for_callback_end(
             timeout_duration
         )
     })?
-}
-
-async fn wait_for_ringing_state(
-    handle: &SessionHandle,
-    timeout_duration: Duration,
-) -> ExampleResult<()> {
-    tokio::time::timeout(timeout_duration, async {
-        loop {
-            match handle.state().await {
-                Ok(rvoip_session_core::CallState::Ringing) => return Ok(()),
-                Ok(rvoip_session_core::CallState::Active) => {
-                    return Err("call answered before ringing could be asserted".into())
-                }
-                Ok(_) => sleep(Duration::from_millis(100)).await,
-                Err(e) => return Err(format!("failed to read call state: {}", e).into()),
-            }
-        }
-    })
-    .await
-    .map_err(|_| format!("timed out after {:?} waiting for ringing", timeout_duration))?
-}
-
-async fn wait_for_hold_state(handle: &SessionHandle) -> ExampleResult<()> {
-    for _ in 0..30 {
-        if handle.is_on_hold().await {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(200)).await;
-    }
-    Err("call did not reach OnHold within 6s".into())
-}
-
-async fn wait_for_active_state(handle: &SessionHandle) -> ExampleResult<()> {
-    for _ in 0..30 {
-        if handle.is_active().await {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(200)).await;
-    }
-    Err("call did not return to Active within 6s".into())
 }
 
 async fn settle_after_register() -> ExampleResult<()> {

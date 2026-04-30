@@ -11,9 +11,10 @@ use std::sync::{
 use std::time::Duration;
 
 use common::{
-    endpoint_config, expect_remote_hold_events, generate_tone, init_tracing, load_env,
-    register_endpoint, save_wav, wait_for_remote_hold_on_events, wait_for_remote_resume_on_events,
-    ExampleResult, ENDPOINT_1002_TONE_HZ, FRAME_SIZE, SAMPLE_RATE,
+    assert_srtp_media_security, endpoint_config, expect_remote_hold_events, generate_tone,
+    init_tracing, load_env, register_endpoint, save_wav, wait_for_remote_hold_on_events,
+    wait_for_remote_resume_on_events, ExampleResult, ENDPOINT_1002_TONE_HZ, FRAME_SIZE,
+    SAMPLE_RATE,
 };
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::StreamPeer;
@@ -36,6 +37,7 @@ async fn main() -> ExampleResult<()> {
     println!("[1002] Incoming call from {}", incoming.from);
     let handle = incoming.accept().await?;
     println!("[1002] Call answered with mandatory SRTP.");
+    assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
     let mut call_events = handle.events().await?;
 
     let audio = handle.audio().await?;

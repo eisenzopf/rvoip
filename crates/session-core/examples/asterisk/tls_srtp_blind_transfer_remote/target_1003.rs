@@ -5,8 +5,8 @@
 mod common;
 
 use common::{
-    endpoint_config, init_tracing, load_env, register_endpoint, start_tone_recorder, ExampleResult,
-    ENDPOINT_1003_TONE_HZ,
+    assert_srtp_media_security, endpoint_config, init_tracing, load_env, register_endpoint,
+    start_tone_recorder, ExampleResult, ENDPOINT_1003_TONE_HZ,
 };
 use rvoip_session_core::StreamPeer;
 use tokio::time::{sleep, timeout, Duration};
@@ -27,6 +27,7 @@ async fn main() -> ExampleResult<()> {
     println!("[1003] Incoming transferred call from {}", incoming.from);
     let handle = incoming.accept().await?;
     println!("[1003] Transferred call answered.");
+    assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
     let recorder = start_tone_recorder(&handle, ENDPOINT_1003_TONE_HZ).await?;
     println!(
         "[1003] Sending transferred-leg {:.0}Hz tone.",

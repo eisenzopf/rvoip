@@ -7,11 +7,11 @@
 mod common;
 
 use common::{
-    call_with_answer_retry, endpoint_config, init_tracing, load_env, post_register_settle_duration,
-    register_endpoint, remote_test_timeout, start_tone_recorder,
-    wait_for_transfer_completion_on_events, ExampleResult, ENDPOINT_1001_TONE_HZ,
+    assert_srtp_media_security, call_with_answer_retry, endpoint_config, init_tracing, load_env,
+    post_register_settle_duration, register_endpoint, remote_test_timeout, start_tone_recorder,
+    ExampleResult, ENDPOINT_1001_TONE_HZ,
 };
-use rvoip_session_core::StreamPeer;
+use rvoip_session_core::{StreamPeer, TransferWaitMode};
 use tokio::time::{sleep, Duration};
 
 #[tokio::main]
@@ -36,6 +36,7 @@ async fn main() -> ExampleResult<()> {
     let transfer_target = cfg.remote_call_uri();
     println!("[1001] Calling {} before transfer.", call_target);
     let handle = call_with_answer_retry(&mut peer, &call_target, remote_test_timeout()?).await?;
+    assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
     println!(
         "[1001] Call established; transferring peer to rvoip target {}.",
         transfer_target
@@ -47,9 +48,17 @@ async fn main() -> ExampleResult<()> {
     );
     sleep(Duration::from_secs(3)).await;
 
-    let mut events = handle.events().await?;
-    handle.transfer_blind(&transfer_target).await?;
-    wait_for_transfer_completion_on_events(&mut events, remote_test_timeout()?).await?;
+    let transfer_event = handle
+        .transfer_blind_and_wait_for(
+            &transfer_target,
+            TransferWaitMode::TargetAnswered,
+            Some(remote_test_timeout()?),
+        )
+        .await?;
+    println!(
+        "[1001] Transfer target answered with Asterisk progress evidence: {:?}",
+        transfer_event
+    );
     handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
     let wav = recorder
         .stop_and_save(&cfg.output_dir, "tls_srtp_blind_transfer_1001_received.wav")

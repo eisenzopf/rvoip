@@ -167,8 +167,11 @@ assert_log_contains "symmetric registered-flow: keep-alive ping started" "symmet
 assert_log_contains "sips:" "TLS/SIPS URI"
 assert_log_contains "transport=tls" "TLS transport URI parameter"
 assert_log_contains "SIP/2.0/TLS" "TLS Via transport"
-assert_log_contains "RTP/SAVP" "SRTP media profile"
-assert_log_contains "a=crypto" "SDES-SRTP crypto attribute"
+assert_log_contains "SRTP media security negotiated" "typed negotiated SRTP media security"
+assert_log_contains "keying=SDES" "typed SDES-SRTP keying"
+assert_log_contains "profile=RTP/SAVP" "typed SRTP media profile"
+assert_log_contains "suite=" "typed negotiated SRTP suite"
+assert_log_contains "contexts_installed=true" "typed installed SRTP contexts"
 assert_log_not_contains "Generated self-signed SIP TLS listener cert" "listener certificate generation"
 assert_log_not_contains "TLS mode:   registered-flow-symmetric (listener" "registered-flow listener note"
 if grep -R -q "proceeding plaintext" "$OUT_DIR"; then

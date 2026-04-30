@@ -39,6 +39,15 @@ wait_for_log() {
   return 1
 }
 
+assert_log_contains() {
+  pattern=$1
+  label=$2
+  if ! grep -R -q "$pattern" "$OUT_DIR"; then
+    echo "[VERIFY] missing expected log evidence: $label ($pattern)"
+    return 1
+  fi
+}
+
 if [ -f "$ASTERISK_DIR/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -57,6 +66,15 @@ ensure_asterisk_tls_listener_cert "$OUT_DIR/tls"
 export SIP_TRANSPORT=TLS
 export SIP_TLS_PORT="${SIP_TLS_PORT:-5061}"
 export ASTERISK_TLS_SRTP_REQUIRED="${ASTERISK_TLS_SRTP_REQUIRED:-1}"
+export RVOIP_SIP_DIAGNOSTICS="${RVOIP_SIP_DIAGNOSTICS:-1}"
+case "$RVOIP_SIP_DIAGNOSTICS" in
+  1|true|TRUE|yes|YES|on|ON)
+    export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn},rvoip_dialog_core::transaction::manager=info"
+    ;;
+  *)
+    export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn}"
+    ;;
+esac
 
 echo "Building TLS/SRTP ring/cancel example..."
 cargo build -p rvoip-session-core --features dev-insecure-tls \
@@ -76,6 +94,13 @@ AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insec
 
 wait "$PID_1003"
 PID_1003=""
+
+assert_log_contains "Incoming call" "target observed incoming call before cancel"
+assert_log_contains "Observed call progress" "typed provisional call progress"
+assert_log_contains "Ring/cancel test passed." "caller completed cancellation"
+assert_log_contains "sips:" "TLS/SIPS URI"
+assert_log_contains "transport=tls" "TLS transport URI parameter"
+assert_log_contains "SIP/2.0/TLS" "TLS Via transport"
 
 echo
 echo "=== TLS/SRTP ring/cancel example complete ==="
