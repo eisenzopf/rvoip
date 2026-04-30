@@ -71,6 +71,15 @@ pub struct ShutdownHandle {
 
 impl ShutdownHandle {
     /// Signal the peer to stop its event loop.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>) {
+    /// let stop = peer.shutdown_handle();
+    /// stop.shutdown();
+    /// # }
+    /// ```
     pub fn shutdown(&self) {
         let _ = self.tx.send(true);
     }
@@ -300,12 +309,35 @@ pub struct CallbackPeerControl {
 
 impl CallbackPeerControl {
     /// Initiate an outgoing call from this peer's configured local URI.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::CallbackPeerControl) -> rvoip_session_core::Result<()> {
+    /// let call = control.call("sip:bob@example.com").await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn call(&self, target: &str) -> Result<SessionHandle> {
         let id = self.coordinator.make_call(&self.local_uri, target).await?;
         Ok(SessionHandle::new(id, self.coordinator.clone()))
     }
 
     /// Initiate an outgoing call with explicit digest-auth credentials.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::CallbackPeerControl) -> rvoip_session_core::Result<()> {
+    /// let call = control.call_with_auth(
+    ///     "sip:bob@example.com",
+    ///     rvoip_session_core::types::Credentials::new("alice", "secret"),
+    /// ).await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn call_with_auth(
         &self,
         target: &str,
@@ -324,6 +356,18 @@ impl CallbackPeerControl {
     /// [`UnifiedCoordinator::register_with`]: accepted expiry and refresh
     /// timing are stored, automatic refresh may be scheduled, and the handler
     /// receives `on_registration_success`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::CallbackPeerControl) -> rvoip_session_core::Result<()> {
+    /// let handle = control.register_with(
+    ///     rvoip_session_core::Registration::new("sip:registrar.example.com", "alice", "secret")
+    /// ).await?;
+    /// # let _ = handle;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn register_with(&self, reg: Registration) -> Result<RegistrationHandle> {
         self.coordinator.register_with(reg).await
     }
@@ -333,6 +377,16 @@ impl CallbackPeerControl {
     /// This is a coarse boolean. Use
     /// [`coordinator`](Self::coordinator) and
     /// [`UnifiedCoordinator::registration_info`] for lifecycle metadata.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::CallbackPeerControl, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// let active = control.is_registered(&handle).await?;
+    /// # let _ = active;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn is_registered(&self, handle: &RegistrationHandle) -> Result<bool> {
         self.coordinator.is_registered(handle).await
     }
@@ -343,12 +397,30 @@ impl CallbackPeerControl {
     /// [`UnifiedCoordinator::unregister_and_wait`] through
     /// [`coordinator`](Self::coordinator) for deterministic registrar
     /// confirmation.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::CallbackPeerControl, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// control.unregister(&handle).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn unregister(&self, handle: &RegistrationHandle) -> Result<()> {
         self.coordinator.unregister(handle).await
     }
 
     /// Hang up or cancel a call and wait until the state machine has accepted
     /// the request.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::CallbackPeerControl, call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// control.hangup(&call).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn hangup(&self, handle: &SessionHandle) -> Result<()> {
         self.coordinator.hangup(handle.id()).await
     }
@@ -358,11 +430,22 @@ impl CallbackPeerControl {
     /// This is a stop signal for the event loop. For deterministic graceful
     /// unregister, call [`UnifiedCoordinator::shutdown_gracefully`] through
     /// [`coordinator`](Self::coordinator).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(control: rvoip_session_core::CallbackPeerControl) {
+    /// control.shutdown();
+    /// # }
+    /// ```
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
 
     /// Access the underlying coordinator for advanced operations.
+    ///
+    /// This accessor is intentionally trivial and returns the shared
+    /// [`UnifiedCoordinator`] handle.
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
         &self.coordinator
     }
@@ -426,6 +509,8 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// Set `config.credentials` to enable automatic RFC 3261 §22.2 INVITE
     /// digest-auth retry on 401/407 challenges from the server:
     ///
+    /// # Examples
+    ///
     /// ```rust,no_run
     /// # async fn example() -> rvoip_session_core::Result<()> {
     /// use rvoip_session_core::{CallbackPeer, Config, types::Credentials};
@@ -465,6 +550,16 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// registration from outside the event loop. Use the coordinator directly
     /// when you need lower-level methods such as media bridging,
     /// per-session event receivers, or custom transfer orchestration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>) {
+    /// let coordinator = peer.coordinator().clone();
+    /// let mut events = coordinator.events().await.unwrap();
+    /// # let _ = events.next().await;
+    /// # }
+    /// ```
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
         &self.coordinator
     }
@@ -473,6 +568,18 @@ impl<H: CallHandler> CallbackPeer<H> {
     ///
     /// This is the ergonomic way to place outbound calls or unregister while
     /// the peer is running in another task.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>) -> rvoip_session_core::Result<()> {
+    /// let control = peer.control();
+    /// tokio::spawn(async move { peer.run().await });
+    /// let call = control.call("sip:bob@example.com").await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn control(&self) -> CallbackPeerControl {
         CallbackPeerControl {
             coordinator: self.coordinator.clone(),
@@ -492,6 +599,18 @@ impl<H: CallHandler> CallbackPeer<H> {
     ///
     /// Registration success/failure is surfaced through the corresponding
     /// [`CallHandler`] hooks and through the coordinator event stream.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>) -> rvoip_session_core::Result<()> {
+    /// let handle = peer.register_with(
+    ///     rvoip_session_core::Registration::new("sip:registrar.example.com", "alice", "secret")
+    /// ).await?;
+    /// # let _ = handle;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn register_with(
         &self,
         reg: crate::api::unified::Registration,
@@ -506,6 +625,16 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// and `false` if the registration was rejected, unregistered, or has
     /// not yet completed. Use [`coordinator`](Self::coordinator) and
     /// [`UnifiedCoordinator::registration_info`] for richer lifecycle details.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// let active = peer.is_registered(&handle).await?;
+    /// # let _ = active;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn is_registered(
         &self,
         handle: &crate::api::unified::RegistrationHandle,
@@ -519,6 +648,15 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// [`UnifiedCoordinator::unregister_and_wait`] through
     /// [`coordinator`](Self::coordinator) when the caller needs to wait for
     /// the registrar response.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// peer.unregister(&handle).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn unregister(&self, handle: &crate::api::unified::RegistrationHandle) -> Result<()> {
         self.coordinator.unregister(handle).await
     }
@@ -529,6 +667,14 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// This does not wait for unregister. For deterministic unregister before
     /// stopping, call [`UnifiedCoordinator::shutdown_gracefully`] through
     /// [`coordinator`](Self::coordinator).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>) {
+    /// peer.shutdown();
+    /// # }
+    /// ```
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(true);
     }
@@ -536,6 +682,8 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// Return a handle that can signal shutdown from another task.
     ///
     /// Obtain this **before** calling [`run()`], which consumes `self`.
+    ///
+    /// # Examples
     ///
     /// ```rust,no_run
     /// # async fn demo() -> rvoip_session_core::Result<()> {
@@ -572,6 +720,17 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// signalling this event loop.
     ///
     /// [`shutdown()`]: Self::shutdown
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::CallbackPeer<rvoip_session_core::AutoAnswerHandler>) -> rvoip_session_core::Result<()> {
+    /// let stop = peer.shutdown_handle();
+    /// tokio::spawn(async move { peer.run().await });
+    /// stop.shutdown();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn run(self) -> Result<()> {
         let mut event_rx = self.coordinator.subscribe_events().await?;
         let mut shutdown_rx = self.shutdown_rx.clone();
@@ -925,6 +1084,20 @@ use crate::api::handlers::{AutoAnswerHandler, RejectAllHandler};
 
 impl CallbackPeer<AutoAnswerHandler> {
     /// Create a peer that auto-answers all incoming calls and allows transfers.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::CallbackPeer::with_auto_answer(
+    ///     rvoip_session_core::Config::default(),
+    /// ).await?;
+    /// let stop = peer.shutdown_handle();
+    /// tokio::spawn(async move { peer.run().await });
+    /// stop.shutdown();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn with_auto_answer(config: Config) -> Result<Self> {
         Self::new(AutoAnswerHandler, config).await
     }
@@ -998,11 +1171,39 @@ impl CallbackPeer<ClosureHandler> {
 
 impl CallbackPeer<RejectAllHandler> {
     /// Create a peer that rejects all incoming calls with `486 Busy Here`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::CallbackPeer::with_reject_all(
+    ///     rvoip_session_core::Config::default(),
+    /// ).await?;
+    /// let stop = peer.shutdown_handle();
+    /// tokio::spawn(async move { peer.run().await });
+    /// stop.shutdown();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn with_reject_all(config: Config) -> Result<Self> {
         Self::new(RejectAllHandler::default(), config).await
     }
 
     /// Create a peer that rejects all calls with a custom status and reason.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::CallbackPeer::with_reject(
+    ///     rvoip_session_core::Config::default(),
+    ///     603,
+    ///     "Decline",
+    /// ).await?;
+    /// # let _ = peer;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn with_reject(
         config: Config,
         status: u16,

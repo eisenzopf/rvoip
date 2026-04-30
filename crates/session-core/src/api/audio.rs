@@ -53,6 +53,18 @@ impl AudioStream {
     }
 
     /// Split into independent sender and receiver halves.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let stream = call.audio().await?;
+    /// let (sender, mut receiver) = stream.split();
+    /// # let _ = sender.is_open();
+    /// # let _ = receiver.try_recv();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn split(self) -> (AudioSender, AudioReceiver) {
         (self.sender, self.receiver)
     }
@@ -75,6 +87,16 @@ impl AudioSender {
     /// Send an audio frame to the remote party.
     ///
     /// Returns `Err` only if the session has ended and the channel is closed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(sender: rvoip_session_core::AudioSender) -> rvoip_session_core::Result<()> {
+    /// let frame = rvoip_media_core::types::AudioFrame::new(vec![0i16; 160], 8000, 1, 0);
+    /// sender.send(frame).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send(&self, frame: AudioFrame) -> Result<()> {
         self.tx.send(frame).await.map_err(|_| {
             SessionError::Other("Audio send channel closed (session ended)".to_string())
@@ -82,6 +104,16 @@ impl AudioSender {
     }
 
     /// Returns `true` if the underlying session is still active.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(sender: rvoip_session_core::AudioSender) {
+    /// if sender.is_open() {
+    ///     println!("audio send channel is open");
+    /// }
+    /// # }
+    /// ```
     pub fn is_open(&self) -> bool {
         !self.tx.is_closed()
     }
@@ -100,6 +132,16 @@ impl AudioReceiver {
     /// Wait for the next audio frame from the remote party.
     ///
     /// Returns `None` when the session ends and no more frames will arrive.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut receiver: rvoip_session_core::AudioReceiver) {
+    /// while let Some(frame) = receiver.recv().await {
+    ///     println!("received {} samples", frame.samples.len());
+    /// }
+    /// # }
+    /// ```
     pub async fn recv(&mut self) -> Option<AudioFrame> {
         self.rx.recv().await
     }
@@ -107,6 +149,16 @@ impl AudioReceiver {
     /// Try to receive an audio frame without blocking.
     ///
     /// Returns `None` if no frame is available right now.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(mut receiver: rvoip_session_core::AudioReceiver) {
+    /// if let Some(frame) = receiver.try_recv() {
+    ///     println!("received {} samples", frame.samples.len());
+    /// }
+    /// # }
+    /// ```
     pub fn try_recv(&mut self) -> Option<AudioFrame> {
         self.rx.try_recv().ok()
     }

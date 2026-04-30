@@ -84,6 +84,15 @@ impl SessionHandle {
     /// Subscribe to events or use [`hangup_and_wait`](Self::hangup_and_wait)
     /// when the caller needs to observe `CallEnded`, `CallFailed`, or
     /// `CallCancelled`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.hangup().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn hangup(&self) -> Result<()> {
         let coordinator = self.coordinator.clone();
         let call_id = self.call_id.clone();
@@ -111,6 +120,18 @@ impl SessionHandle {
     /// Unlike [`hangup`](Self::hangup), this subscribes to the call's event
     /// stream before sending BYE/CANCEL and returns only after
     /// `CallEnded`, `CallFailed`, or `CallCancelled` is observed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let reason = call
+    ///     .hangup_and_wait(Some(std::time::Duration::from_secs(3)))
+    ///     .await?;
+    /// println!("call ended: {reason}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn hangup_and_wait(&self, timeout: Option<Duration>) -> Result<String> {
         let mut events = self.events().await?;
         self.coordinator.hangup(&self.call_id).await?;
@@ -143,6 +164,15 @@ impl SessionHandle {
     ///
     /// On success, applications observe [`Event::CallOnHold`] through the
     /// peer/coordinator event stream.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.hold().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn hold(&self) -> Result<()> {
         self.coordinator.hold(&self.call_id).await
     }
@@ -150,6 +180,15 @@ impl SessionHandle {
     /// Resume a held call with a target-refresh re-INVITE.
     ///
     /// On success, applications observe [`Event::CallResumed`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.resume().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn resume(&self) -> Result<()> {
         self.coordinator.resume(&self.call_id).await
     }
@@ -158,6 +197,15 @@ impl SessionHandle {
     ///
     /// This is a local media-state transition; it does not place the SIP dialog
     /// on hold. Use [`hold`](Self::hold) when the remote peer must be signalled.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.mute().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn mute(&self) -> Result<()> {
         use crate::state_table::types::EventType;
         self.coordinator
@@ -169,6 +217,15 @@ impl SessionHandle {
     }
 
     /// Unmute local audio.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.unmute().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn unmute(&self) -> Result<()> {
         use crate::state_table::types::EventType;
         self.coordinator
@@ -187,6 +244,15 @@ impl SessionHandle {
     /// REFER progress NOTIFYs. Use
     /// [`transfer_blind_and_wait`](Self::transfer_blind_and_wait) when the
     /// caller needs to wait for terminal transfer success/failure.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.transfer_blind("sip:charlie@example.com").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn transfer_blind(&self, target: &str) -> Result<()> {
         self.coordinator.send_refer(&self.call_id, target).await
     }
@@ -196,6 +262,18 @@ impl SessionHandle {
     /// Returns `TransferCompleted` on success or `TransferFailed` on failure.
     /// Intermediate progress events are consumed while waiting, so create a
     /// separate event receiver if another task also needs to observe them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let terminal = call
+    ///     .transfer_blind_and_wait("sip:charlie@example.com", Some(std::time::Duration::from_secs(10)))
+    ///     .await?;
+    /// # let _ = terminal;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn transfer_blind_and_wait(
         &self,
         target: &str,
@@ -232,11 +310,30 @@ impl SessionHandle {
     /// Use this from `StreamPeer` or direct coordinator event handling after an
     /// [`Event::ReferReceived`] event. `CallbackPeer` usually drives this from
     /// [`CallHandler::on_transfer_request`](crate::api::callback_peer::CallHandler::on_transfer_request).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// // Call after receiving Event::ReferReceived for this session.
+    /// call.accept_refer().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept_refer(&self) -> Result<()> {
         self.coordinator.accept_refer(&self.call_id).await
     }
 
     /// Reject a pending inbound REFER on this call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.reject_refer(603, "Decline").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn reject_refer(&self, status_code: u16, reason: &str) -> Result<()> {
         self.coordinator
             .reject_refer(&self.call_id, status_code, reason)
@@ -255,6 +352,19 @@ impl SessionHandle {
     /// progress, and tearing down the consultation after success are all
     /// orchestration concerns for a higher layer (application code or a
     /// dedicated multi-session coordinator).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(original: rvoip_session_core::SessionHandle, consultation: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// if let Some(identity) = consultation.dialog_identity().await? {
+    ///     if let Some(replaces) = identity.to_replaces_value() {
+    ///         original.transfer_attended("sip:charlie@example.com", &replaces).await?;
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn transfer_attended(&self, target: &str, replaces: &str) -> Result<()> {
         self.coordinator
             .send_refer_with_replaces(&self.call_id, target, replaces)
@@ -267,6 +377,17 @@ impl SessionHandle {
     ///
     /// Intended for orchestrators building a `Replaces` header for
     /// attended transfer — see [`transfer_attended`](Self::transfer_attended).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// if let Some(identity) = call.dialog_identity().await? {
+    ///     println!("dialog call-id: {}", identity.call_id);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn dialog_identity(&self) -> Result<Option<crate::api::types::DialogIdentity>> {
         self.coordinator.dialog_identity(&self.call_id).await
     }
@@ -274,6 +395,15 @@ impl SessionHandle {
     // ===== DTMF =====
 
     /// Send a single RFC 4733 DTMF digit over the active media session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.send_dtmf('1').await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_dtmf(&self, digit: char) -> Result<()> {
         self.coordinator.send_dtmf(&self.call_id, digit).await
     }
@@ -284,6 +414,18 @@ impl SessionHandle {
     /// carrier prefers SIP-INFO over RFC 2833, `application/sipfrag` for
     /// fax (T.38) flow control, or `application/media_control+xml` for
     /// video FIR/PLI requests. The body is sent verbatim.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.send_info(
+    ///     "application/dtmf-relay",
+    ///     b"Signal=1\r\nDuration=100\r\n",
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_info(&self, content_type: &str, body: &[u8]) -> Result<()> {
         self.coordinator
             .send_info(&self.call_id, content_type, body)
@@ -306,6 +448,19 @@ impl SessionHandle {
     /// when a session is linked as a transfer leg via
     /// [`UnifiedCoordinator::make_transfer_leg`], so apps do not need to
     /// call this helper for transfer progress.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// call.send_notify(
+    ///     "message-summary",
+    ///     Some("Messages-Waiting: no\r\n".to_string()),
+    ///     Some("active;expires=3600".to_string()),
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_notify(
         &self,
         event_package: &str,
@@ -324,6 +479,18 @@ impl SessionHandle {
     /// Calling this multiple times creates independent send channels that all
     /// feed the same media session, but only one `AudioReceiver` is valid at a time
     /// (each call creates a new subscription that consumes from that point forward).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let audio = call.audio().await?;
+    /// let (sender, mut receiver) = audio.split();
+    /// # let _ = sender;
+    /// # let _ = receiver.try_recv();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn audio(&self) -> Result<AudioStream> {
         // Subscribe to receive audio frames from media layer
         let mut subscriber = self.coordinator.subscribe_to_audio(&self.call_id).await?;
@@ -360,11 +527,31 @@ impl SessionHandle {
     // ===== State / info =====
 
     /// Get the current call state from the session store.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let state = call.state().await?;
+    /// println!("state: {state:?}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn state(&self) -> Result<CallState> {
         self.coordinator.get_state(&self.call_id).await
     }
 
     /// Get detailed session information from the session store.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let info = call.info().await?;
+    /// println!("{} -> {}", info.from, info.to);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn info(&self) -> Result<SessionInfo> {
         self.coordinator.get_session_info(&self.call_id).await
     }
@@ -372,11 +559,31 @@ impl SessionHandle {
     // ===== State predicates =====
 
     /// Check whether the call is currently active (connected and not on hold).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) {
+    /// if call.is_active().await {
+    ///     println!("call is active");
+    /// }
+    /// # }
+    /// ```
     pub async fn is_active(&self) -> bool {
         matches!(self.state().await, Ok(CallState::Active))
     }
 
     /// Check whether the call is currently on hold.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) {
+    /// if call.is_on_hold().await {
+    ///     println!("call is on hold");
+    /// }
+    /// # }
+    /// ```
     pub async fn is_on_hold(&self) -> bool {
         matches!(self.state().await, Ok(CallState::OnHold))
     }
@@ -392,6 +599,17 @@ impl SessionHandle {
     ///
     /// Open the receiver before sending a command if the first resulting event
     /// matters. The bus does not replay old events.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let mut events = call.events().await?;
+    /// call.hold().await?;
+    /// # let _ = events.next().await;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {
         let rx = self.coordinator.subscribe_events().await?;
         Ok(crate::api::stream_peer::EventReceiver::filtered(
@@ -404,6 +622,16 @@ impl SessionHandle {
     ///
     /// Returns the reason the call ended, or a `Timeout` error if the deadline
     /// is reached first.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let reason = call.wait_for_end(Some(std::time::Duration::from_secs(30))).await?;
+    /// println!("call ended: {reason}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn wait_for_end(&self, timeout: Option<Duration>) -> Result<String> {
         let mut rx = self.events().await?;
         let fut = async {

@@ -85,6 +85,16 @@ impl IncomingCall {
     /// Accept the call and return a [`SessionHandle`] for controlling it.
     ///
     /// Completes SDP negotiation and sends 200 OK.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(incoming: rvoip_session_core::IncomingCall) -> rvoip_session_core::Result<()> {
+    /// let call = incoming.accept().await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept(mut self) -> Result<SessionHandle> {
         self.resolved = true;
         self.coordinator.accept_call(&self.call_id).await?;
@@ -95,6 +105,19 @@ impl IncomingCall {
     }
 
     /// Accept the call with a custom SDP answer.
+    ///
+    /// This is intended for B2BUA or gateway flows where the application has
+    /// already obtained an answer body from another leg.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(incoming: rvoip_session_core::IncomingCall, answer_sdp: String) -> rvoip_session_core::Result<()> {
+    /// let call = incoming.accept_with_sdp(answer_sdp).await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept_with_sdp(mut self, _sdp: String) -> Result<SessionHandle> {
         // TODO: pass custom SDP through the state machine
         self.resolved = true;
@@ -110,11 +133,16 @@ impl IncomingCall {
     /// Does NOT consume the call — you still need to call [`accept()`] or
     /// [`reject()`] afterward. Typical sequence:
     ///
-    /// ```ignore
-    /// let incoming = peer.wait_for_incoming().await?;
-    /// incoming.send_early_media(None).await?;   // 183 + negotiated SDP
-    /// sleep(Duration::from_secs(2)).await;      // play ringback
-    /// let session = incoming.accept().await?;   // 200 OK (reuses SDP)
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(incoming: rvoip_session_core::IncomingCall) -> rvoip_session_core::Result<()> {
+    /// incoming.send_early_media(None).await?;
+    /// tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    /// let session = incoming.accept().await?;
+    /// # let _ = session;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// See [`PeerControl::send_early_media`] for the full semantics and the
@@ -144,7 +172,7 @@ impl IncomingCall {
     ///
     /// Same 100rel precondition as [`send_early_media`][Self::send_early_media].
     ///
-    /// # Example
+    /// # Examples
     ///
     /// ```no_run
     /// # use rvoip_session_core::{AudioSource, IncomingCall};
@@ -171,6 +199,16 @@ impl IncomingCall {
     }
 
     /// Reject the call immediately with an explicit SIP status code and reason.
+    ///
+    /// This spawns the reject operation and returns immediately.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(incoming: rvoip_session_core::IncomingCall) {
+    /// incoming.reject(486, "Busy Here");
+    /// # }
+    /// ```
     pub fn reject(mut self, status: u16, reason: &str) {
         self.resolved = true;
         let coordinator = self.coordinator.clone();
@@ -184,11 +222,27 @@ impl IncomingCall {
     }
 
     /// Reject with **486 Busy Here**.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(incoming: rvoip_session_core::IncomingCall) {
+    /// incoming.reject_busy();
+    /// # }
+    /// ```
     pub fn reject_busy(self) {
         self.reject(486, "Busy Here");
     }
 
     /// Reject with **603 Decline** (user explicitly declined).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(incoming: rvoip_session_core::IncomingCall) {
+    /// incoming.reject_decline();
+    /// # }
+    /// ```
     pub fn reject_decline(self) {
         self.reject(603, "Decline");
     }
@@ -197,6 +251,14 @@ impl IncomingCall {
     ///
     /// Note: redirect support requires dialog-core to send a 3xx response; this
     /// currently falls back to a rejection and logs a warning.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(incoming: rvoip_session_core::IncomingCall) {
+    /// incoming.redirect("sip:voicemail@example.com");
+    /// # }
+    /// ```
     pub fn redirect(self, target: &str) {
         // TODO: implement 3xx support in dialog_adapter
         tracing::warn!(
@@ -214,6 +276,16 @@ impl IncomingCall {
     ///
     /// If the guard is dropped without being resolved, the call is rejected with
     /// **503 Service Unavailable**.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(incoming: rvoip_session_core::IncomingCall) {
+    /// let guard = incoming.defer(std::time::Duration::from_secs(30));
+    /// // Store `guard` in a queue and later call guard.accept().await.
+    /// # let _ = guard;
+    /// # }
+    /// ```
     pub fn defer(mut self, timeout: Duration) -> IncomingCallGuard {
         self.resolved = true; // prevent Drop from also rejecting
         IncomingCallGuard::new(self.call_id.clone(), self.coordinator.clone(), timeout)
@@ -305,16 +377,30 @@ impl IncomingCallGuard {
     }
 
     /// The call identifier for this deferred call (use as queue key).
+    ///
+    /// This accessor is trivial and can be used to index a queue or map.
     pub fn call_id(&self) -> &CallId {
         &self.call_id
     }
 
     /// When the guard expires and the call is auto-rejected.
+    ///
+    /// This accessor is trivial and is useful for queue ordering.
     pub fn deadline(&self) -> Instant {
         self.deadline
     }
 
     /// Accept the call now. Returns a [`SessionHandle`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(guard: rvoip_session_core::IncomingCallGuard) -> rvoip_session_core::Result<()> {
+    /// let call = guard.accept().await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept(self) -> Result<SessionHandle> {
         if Instant::now() >= self.deadline {
             return Err(SessionError::Timeout(
@@ -335,6 +421,14 @@ impl IncomingCallGuard {
     }
 
     /// Reject the call now with the given SIP status code and reason phrase.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(guard: rvoip_session_core::IncomingCallGuard) {
+    /// guard.reject(503, "Service Unavailable");
+    /// # }
+    /// ```
     pub fn reject(self, status: u16, reason: &str) {
         if self.resolved.swap(true, Ordering::SeqCst) {
             return;
@@ -352,6 +446,18 @@ impl IncomingCallGuard {
     /// This is the deterministic variant for queues and tests that need to
     /// know when the rejection has been observed by session-core's event
     /// stream. The event subscription is opened before the reject is sent.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(guard: rvoip_session_core::IncomingCallGuard) -> rvoip_session_core::Result<()> {
+    /// let terminal = guard
+    ///     .reject_and_wait(503, "Service Unavailable", Some(std::time::Duration::from_secs(3)))
+    ///     .await?;
+    /// # let _ = terminal;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn reject_and_wait(
         self,
         status: u16,

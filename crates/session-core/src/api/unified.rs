@@ -475,6 +475,8 @@ pub struct Config {
 impl Config {
     /// Create a config for local development/testing on 127.0.0.1.
     ///
+    /// # Examples
+    ///
     /// ```
     /// # use rvoip_session_core::Config;
     /// let config = Config::local("alice", 5060);
@@ -530,6 +532,8 @@ impl Config {
 
     /// Create a config bound to a specific IP address (e.g. for LAN or production).
     ///
+    /// # Examples
+    ///
     /// ```
     /// # use rvoip_session_core::Config;
     /// let config = Config::on("alice", "192.168.1.50".parse().unwrap(), 5060);
@@ -583,11 +587,29 @@ impl Config {
     }
 
     /// Deployment profile for local examples and integration tests.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::Config;
+    /// let config = Config::local_lab("alice", 5060);
+    /// assert_eq!(config.local_uri, "sip:alice@127.0.0.1:5060");
+    /// ```
     pub fn local_lab(name: &str, port: u16) -> Self {
         Self::local(name, port)
     }
 
     /// Deployment profile for a directly reachable LAN PBX endpoint.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::Config;
+    /// let bind = "0.0.0.0:5060".parse().unwrap();
+    /// let advertised = "192.168.1.50:5060".parse().unwrap();
+    /// let config = Config::lan_pbx("alice", bind, advertised);
+    /// assert_eq!(config.sip_advertised_addr, Some(advertised));
+    /// ```
     pub fn lan_pbx(name: &str, bind_addr: SocketAddr, advertised_addr: SocketAddr) -> Self {
         let mut config = Self::on(name, bind_addr.ip(), bind_addr.port());
         config.bind_addr = bind_addr;
@@ -598,6 +620,20 @@ impl Config {
 
     /// Deployment profile for Asterisk TLS + SDES-SRTP with registered-flow
     /// reuse over the outbound registration connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::{Config, SipTlsMode};
+    /// let bind = "0.0.0.0:5061".parse().unwrap();
+    /// let config = Config::asterisk_tls_registered_flow(
+    ///     "alice",
+    ///     bind,
+    ///     "urn:uuid:00000000-0000-0000-0000-000000000001",
+    /// );
+    /// assert_eq!(config.sip_tls_mode, SipTlsMode::ClientOnly);
+    /// assert!(config.srtp_required);
+    /// ```
     pub fn asterisk_tls_registered_flow(
         name: &str,
         bind_addr: SocketAddr,
@@ -612,6 +648,15 @@ impl Config {
     }
 
     /// Deployment profile for FreeSWITCH/Sofia's internal LAN profile.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::Config;
+    /// let bind = "192.168.1.50:5060".parse().unwrap();
+    /// let config = Config::freeswitch_internal("alice", bind);
+    /// assert!(config.strict_codec_matching);
+    /// ```
     pub fn freeswitch_internal(name: &str, bind_addr: SocketAddr) -> Self {
         let mut config = Self::on(name, bind_addr.ip(), bind_addr.port());
         config.bind_addr = bind_addr;
@@ -625,6 +670,23 @@ impl Config {
     /// Contact behavior, mandatory SDES-SRTP, explicit public media address,
     /// and a preloaded outbound proxy route for INVITEs. REGISTER proxy,
     /// Service-Route/Path, SRV/NAPTR, and ICE remain separate hardening work.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::{Config, SipContactMode};
+    /// let bind = "0.0.0.0:5061".parse().unwrap();
+    /// let public = "203.0.113.10:5061".parse().unwrap();
+    /// let config = Config::carrier_sbc(
+    ///     "alice",
+    ///     bind,
+    ///     public,
+    ///     "sips:sbc.example.com:5061;lr",
+    ///     "urn:uuid:00000000-0000-0000-0000-000000000001",
+    /// );
+    /// assert_eq!(config.sip_contact_mode, SipContactMode::RegisteredFlowRfc5626);
+    /// assert!(config.srtp_required);
+    /// ```
     pub fn carrier_sbc(
         name: &str,
         bind_addr: SocketAddr,
@@ -649,6 +711,21 @@ impl Config {
     /// The signaling side preloads the outbound proxy route; media relay
     /// integration remains explicit because RTPengine control belongs above
     /// session-core.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::Config;
+    /// let bind = "0.0.0.0:5060".parse().unwrap();
+    /// let advertised = "192.168.1.50:5060".parse().unwrap();
+    /// let config = Config::proxy_rtpengine(
+    ///     "alice",
+    ///     bind,
+    ///     advertised,
+    ///     "sip:proxy.example.com;lr",
+    /// );
+    /// assert_eq!(config.outbound_proxy_uri.as_deref(), Some("sip:proxy.example.com;lr"));
+    /// ```
     pub fn proxy_rtpengine(
         name: &str,
         bind_addr: SocketAddr,
@@ -664,6 +741,17 @@ impl Config {
     ///
     /// The UA will both dial outbound TLS and listen on `tls_bind_addr` for
     /// inbound TLS requests sent to its advertised Contact.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::{Config, SipContactMode, SipTlsMode};
+    /// let tls_addr = "0.0.0.0:5061".parse().unwrap();
+    /// let config = Config::local("alice", 5060)
+    ///     .tls_reachable_contact(tls_addr, "cert.pem", "key.pem");
+    /// assert_eq!(config.sip_tls_mode, SipTlsMode::ClientAndServer);
+    /// assert_eq!(config.sip_contact_mode, SipContactMode::ReachableContact);
+    /// ```
     pub fn tls_reachable_contact(
         mut self,
         tls_bind_addr: SocketAddr,
@@ -685,6 +773,16 @@ impl Config {
     ///
     /// No TLS listener certificate/key is required because inbound requests
     /// are expected on the outbound registration flow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::{Config, SipContactMode};
+    /// let config = Config::local("alice", 5060)
+    ///     .tls_registered_flow_rfc5626("urn:uuid:00000000-0000-0000-0000-000000000001");
+    /// assert_eq!(config.sip_contact_mode, SipContactMode::RegisteredFlowRfc5626);
+    /// assert!(config.sip_outbound_enabled);
+    /// ```
     pub fn tls_registered_flow_rfc5626(mut self, sip_instance: impl Into<String>) -> Self {
         self.sip_tls_mode = SipTlsMode::ClientOnly;
         self.sip_contact_mode = SipContactMode::RegisteredFlowRfc5626;
@@ -697,6 +795,15 @@ impl Config {
     ///
     /// This mode keeps the registration flow alive but does not require the
     /// registrar to echo RFC 5626 Contact parameters.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::{Config, SipContactMode};
+    /// let config = Config::local("alice", 5060)
+    ///     .tls_registered_flow_symmetric("urn:uuid:00000000-0000-0000-0000-000000000001");
+    /// assert_eq!(config.sip_contact_mode, SipContactMode::RegisteredFlowSymmetric);
+    /// ```
     pub fn tls_registered_flow_symmetric(mut self, sip_instance: impl Into<String>) -> Self {
         self.sip_tls_mode = SipTlsMode::ClientOnly;
         self.sip_contact_mode = SipContactMode::RegisteredFlowSymmetric;
@@ -705,6 +812,14 @@ impl Config {
     }
 
     /// Validate the SIP TLS/contact-mode configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::Config;
+    /// let config = Config::local("alice", 5060);
+    /// config.validate().unwrap();
+    /// ```
     pub fn validate(&self) -> Result<()> {
         let effective_tls_mode = self.effective_tls_mode();
 
@@ -863,6 +978,18 @@ impl UnifiedCoordinator {
     /// starts the central event handler, and returns a shared coordinator
     /// handle. Background tasks are stopped by calling [`shutdown`](Self::shutdown)
     /// or by dropping all coordinator owners.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// use rvoip_session_core::{Config, UnifiedCoordinator};
+    ///
+    /// let coordinator = UnifiedCoordinator::new(Config::local("alice", 5060)).await?;
+    /// coordinator.shutdown_gracefully(None).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn new(config: Config) -> Result<Arc<Self>> {
         config.validate()?;
 
@@ -1086,6 +1213,22 @@ impl UnifiedCoordinator {
     ///
     /// **Deprecated** — use [`UnifiedCoordinator::new()`] then [`subscribe_events()`][Self::subscribe_events].
     /// The `simple_peer_event_tx` parameter is ignored; events are now broadcast internally.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// use rvoip_session_core::{Config, Event, UnifiedCoordinator};
+    ///
+    /// let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(8);
+    /// let coordinator = UnifiedCoordinator::with_simple_peer_events(
+    ///     Config::local("alice", 5060),
+    ///     tx,
+    /// ).await?;
+    /// coordinator.shutdown();
+    /// # Ok(())
+    /// # }
+    /// ```
     #[deprecated(note = "Use UnifiedCoordinator::new() then subscribe_events()")]
     pub async fn with_simple_peer_events(
         config: Config,
@@ -1103,6 +1246,14 @@ impl UnifiedCoordinator {
     /// registrations are asked to unregister before the shutdown signal is
     /// sent. Use [`shutdown_gracefully`](Self::shutdown_gracefully) when the
     /// caller needs deterministic unregister completion.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) {
+    /// coordinator.shutdown();
+    /// # }
+    /// ```
     pub fn shutdown(&self) {
         let timeout = Duration::from_secs(self.config.unregister_on_shutdown_timeout_secs);
         let shutdown_tx = self.shutdown_tx.clone();
@@ -1127,6 +1278,15 @@ impl UnifiedCoordinator {
     /// The timeout applies per registration. Pass `None` to use
     /// [`Config::unregister_on_shutdown_timeout_secs`]. A zero timeout skips
     /// unregister and behaves like an immediate shutdown.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// coordinator.shutdown_gracefully(Some(std::time::Duration::from_secs(2))).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn shutdown_gracefully(&self, timeout: Option<Duration>) -> Result<()> {
         let timeout = timeout.unwrap_or_else(|| {
             Duration::from_secs(self.config.unregister_on_shutdown_timeout_secs)
@@ -1195,6 +1355,17 @@ impl UnifiedCoordinator {
     /// [`CallbackPeer::shutdown_handle`].
     ///
     /// [`CallbackPeer::shutdown_handle`]: crate::api::callback_peer::CallbackPeer::shutdown_handle
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) {
+    /// let stop = coordinator.shutdown_handle();
+    /// tokio::spawn(async move {
+    ///     stop.shutdown();
+    /// });
+    /// # }
+    /// ```
     pub fn shutdown_handle(&self) -> crate::api::callback_peer::ShutdownHandle {
         crate::api::callback_peer::ShutdownHandle::from_sender(self.shutdown_tx.clone())
     }
@@ -1211,6 +1382,20 @@ impl UnifiedCoordinator {
     ///
     /// Use this method only when building a custom peer type or diagnostic
     /// tool that needs access to the raw event envelope.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// let mut raw_events = coordinator.subscribe_events().await?;
+    /// tokio::spawn(async move {
+    ///     while let Some(_event) = raw_events.recv().await {
+    ///         // Downcast to SessionApiCrossCrateEvent for diagnostics.
+    ///     }
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn subscribe_events(
         &self,
     ) -> crate::errors::Result<
@@ -1243,6 +1428,20 @@ impl UnifiedCoordinator {
     /// [`EventReceiver::next_incoming`](crate::api::stream_peer::EventReceiver::next_incoming),
     /// and
     /// [`EventReceiver::next_transfer`](crate::api::stream_peer::EventReceiver::next_transfer).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// use rvoip_session_core::Event;
+    ///
+    /// let mut events = coordinator.events().await?;
+    /// if let Some(Event::RegistrationSuccess { registrar, .. }) = events.next().await {
+    ///     println!("registered with {registrar}");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn events(&self) -> Result<crate::api::stream_peer::EventReceiver> {
         let rx = self.subscribe_events().await?;
         Ok(crate::api::stream_peer::EventReceiver::new(rx))
@@ -1282,6 +1481,11 @@ impl UnifiedCoordinator {
     /// 2. Open `events_for_session(&id)` with the new `SessionId`.
     /// 3. Call `accept_call_with_sdp()` (post-acceptance events then
     ///    reach the filtered receiver).
+    ///
+    /// # Examples
+    ///
+    /// See the b2bua-style event split above for a complete `tokio::select!`
+    /// example.
     pub async fn events_for_session(
         &self,
         id: &SessionId,
@@ -1301,6 +1505,20 @@ impl UnifiedCoordinator {
     /// (RFC 3261 §22.2). Likewise, if `Config.pai_uri` is set, a typed
     /// `P-Asserted-Identity` (RFC 3325) header is attached to the very
     /// first INVITE.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// let call_id = coordinator
+    ///     .make_call("sip:alice@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
+    ///     .await?;
+    /// let mut events = coordinator.events_for_session(&call_id).await?;
+    /// // Wait for Event::CallAnswered before assuming media is established.
+    /// # let _ = events.next().await;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
         self.helpers
             .make_call_with_credentials_and_pai(
@@ -1315,6 +1533,22 @@ impl UnifiedCoordinator {
     /// Make an outgoing call with explicit credentials, overriding the
     /// per-peer default. Useful for multi-tenant clients where each call
     /// authenticates with a different user.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// use rvoip_session_core::types::Credentials;
+    ///
+    /// let call_id = coordinator.make_call_with_auth(
+    ///     "sip:alice@127.0.0.1:5060",
+    ///     "sip:bob@example.com",
+    ///     Credentials::new("alice", "secret"),
+    /// ).await?;
+    /// # let _ = call_id;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn make_call_with_auth(
         &self,
         from: &str,
@@ -1335,6 +1569,20 @@ impl UnifiedCoordinator {
     /// (RFC 3325 §9.1), overriding `Config::pai_uri`. Useful for
     /// multi-tenant trunking where each call asserts a different identity.
     /// Pass `None` for `pai` to suppress the header for this call only.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// let call_id = coordinator.make_call_with_pai(
+    ///     "sip:alice@127.0.0.1:5060",
+    ///     "sip:+15551234567@carrier.example.com",
+    ///     Some("sip:+15557654321@example.com".to_string()),
+    /// ).await?;
+    /// # let _ = call_id;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn make_call_with_pai(
         &self,
         from: &str,
@@ -1353,6 +1601,20 @@ impl UnifiedCoordinator {
     /// `Dialog200OK` / failure fires a progress NOTIFY back on the
     /// transferor's REFER subscription. This is the b2bua wrapper crate's
     /// primary REFER-forwarding entry point.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, transferor: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// let new_leg = coordinator.make_transfer_leg(
+    ///     "sip:service@127.0.0.1:5060",
+    ///     "sip:target@example.com",
+    ///     &transferor,
+    /// ).await?;
+    /// # let _ = new_leg;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn make_transfer_leg(
         &self,
         from: &str,
@@ -1369,6 +1631,15 @@ impl UnifiedCoordinator {
     /// lower-level primitive accepts a race window in which dialog
     /// events fired before the linkage is set silently drop their
     /// corresponding progress NOTIFY.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, leg: rvoip_session_core::SessionId, transferor: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.set_transferor_session(&leg, &transferor).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn set_transferor_session(
         &self,
         leg_session_id: &SessionId,
@@ -1379,7 +1650,16 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Accept an incoming call
+    /// Accept an incoming call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, incoming: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.accept_call(&incoming).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept_call(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.accept_call(session_id).await
     }
@@ -1388,11 +1668,29 @@ impl UnifiedCoordinator {
     /// local media negotiation — intended for b2bua flows where the answer
     /// body comes from the outbound leg's 200 OK. See
     /// [`StateMachineHelpers::accept_call_with_sdp`] for the mechanism.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, incoming: rvoip_session_core::SessionId, answer_sdp: String) -> rvoip_session_core::Result<()> {
+    /// coordinator.accept_call_with_sdp(&incoming, answer_sdp).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept_call_with_sdp(&self, session_id: &SessionId, sdp: String) -> Result<()> {
         self.helpers.accept_call_with_sdp(session_id, sdp).await
     }
 
     /// Reject an incoming call with a specific SIP status code and reason phrase.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, incoming: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.reject_call(&incoming, 486, "Busy Here").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn reject_call(
         &self,
         session_id: &SessionId,
@@ -1406,6 +1704,19 @@ impl UnifiedCoordinator {
     /// §8.1.3.4 / §21.3). Sends a 3xx response with a `Contact:` header
     /// listing the supplied URIs. `status` should be 300-399; `contacts`
     /// must be non-empty.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, incoming: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.redirect_call(
+    ///     &incoming,
+    ///     302,
+    ///     vec!["sip:voicemail@example.com".to_string()],
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn redirect_call(
         &self,
         session_id: &SessionId,
@@ -1417,7 +1728,19 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Hangup a call
+    /// Hang up or cancel a call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// let mut events = coordinator.events_for_session(&call_id).await?;
+    /// coordinator.hangup(&call_id).await?;
+    /// // Wait for Event::CallEnded / CallFailed / CallCancelled if needed.
+    /// # let _ = events.next().await;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
         self.helpers.hangup(session_id).await
     }
@@ -1440,6 +1763,17 @@ impl UnifiedCoordinator {
     /// Dropping the returned [`BridgeHandle`] tears the bridge down. DTMF
     /// (RFC 2833) rides the RTP stream and is forwarded transparently;
     /// RTCP is not bridged — each leg keeps generating its own reports.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, a: rvoip_session_core::SessionId, b: rvoip_session_core::SessionId) -> Result<(), rvoip_session_core::BridgeError> {
+    /// let bridge = coordinator.bridge(&a, &b).await?;
+    /// // Keep `bridge` alive for as long as the RTP relay should run.
+    /// drop(bridge);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn bridge(
         &self,
         session_a: &SessionId,
@@ -1460,6 +1794,16 @@ impl UnifiedCoordinator {
     /// did not advertise `Supported: 100rel` on the INVITE. Transitions the
     /// session to `CallState::EarlyMedia`. Valid from `Ringing` and
     /// `EarlyMedia` (re-emission updates the SDP and bumps `RSeq`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, incoming: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.send_early_media(&incoming, None).await?;
+    /// coordinator.accept_call(&incoming).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_early_media(
         &self,
         session_id: &SessionId,
@@ -1485,6 +1829,20 @@ impl UnifiedCoordinator {
     /// Apps that want a *different* source after answer (e.g., continued
     /// announcement playback over an active call) should call this method
     /// again *after* the `CallEstablished` event fires.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// use rvoip_session_core::AudioSource;
+    ///
+    /// coordinator.set_audio_source(
+    ///     &call_id,
+    ///     AudioSource::Tone { frequency: 440.0, amplitude: 0.4 },
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn set_audio_source(
         &self,
         session_id: &SessionId,
@@ -1495,7 +1853,16 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Put a call on hold
+    /// Put a call on hold.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.hold(&call_id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn hold(&self, session_id: &SessionId) -> Result<()> {
         self.helpers
             .state_machine
@@ -1504,7 +1871,16 @@ impl UnifiedCoordinator {
         Ok(())
     }
 
-    /// Resume a call from hold
+    /// Resume a call from hold.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.resume(&call_id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn resume(&self, session_id: &SessionId) -> Result<()> {
         self.helpers
             .state_machine
@@ -1515,12 +1891,30 @@ impl UnifiedCoordinator {
 
     // ===== Conference Operations =====
 
-    /// Create a conference from an active call
+    /// Create a conference from an active call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, host: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.create_conference(&host, "support-bridge").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn create_conference(&self, session_id: &SessionId, name: &str) -> Result<()> {
         self.helpers.create_conference(session_id, name).await
     }
 
-    /// Add a participant to a conference
+    /// Add a participant to a conference hosted by another active session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, host: rvoip_session_core::SessionId, participant: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.add_to_conference(&host, &participant).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn add_to_conference(
         &self,
         host_session_id: &SessionId,
@@ -1531,7 +1925,16 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Join an existing conference
+    /// Join an existing conference by conference id.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.join_conference(&call_id, "support-bridge").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn join_conference(&self, session_id: &SessionId, conference_id: &str) -> Result<()> {
         self.helpers
             .state_machine
@@ -1548,7 +1951,20 @@ impl UnifiedCoordinator {
     // ===== Event System Integration =====
     // Callback registry removed - using event-driven approach via SimplePeer
 
-    /// Terminate the current session (for single session constraint)
+    /// Terminate the current session tracked by the session store.
+    ///
+    /// This is an advanced compatibility helper for single-session flows. New
+    /// code should usually hold the specific [`SessionId`] and call
+    /// [`hangup`](Self::hangup).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// coordinator.terminate_current_session().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn terminate_current_session(&self) -> Result<()> {
         // Get the current session ID
         if let Some(session_id) = self
@@ -1564,7 +1980,21 @@ impl UnifiedCoordinator {
         }
     }
 
-    /// Send REFER message to initiate transfer (this will trigger callback on recipient)
+    /// Send REFER to initiate a blind transfer.
+    ///
+    /// The remote peer should report progress with NOTIFY. Higher-level callers
+    /// can observe [`Event::TransferAccepted`](crate::api::events::Event::TransferAccepted),
+    /// transfer progress, and transfer completion/failure through the event
+    /// stream.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.send_refer(&call_id, "sip:charlie@example.com").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_refer(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
         if let Ok(mut session) = self
             .helpers
@@ -1589,6 +2019,16 @@ impl UnifiedCoordinator {
 
     /// Accept a pending inbound REFER request and send RFC 3515 acceptance
     /// responses/NOTIFYs through the state machine.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// // Call this after receiving Event::ReferReceived for `call_id`.
+    /// coordinator.accept_refer(&call_id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept_refer(&self, session_id: &SessionId) -> Result<()> {
         let session = self
             .helpers
@@ -1642,6 +2082,15 @@ impl UnifiedCoordinator {
     }
 
     /// Reject a pending inbound REFER request with a final response.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.reject_refer(&call_id, 603, "Decline").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn reject_refer(
         &self,
         session_id: &SessionId,
@@ -1710,6 +2159,19 @@ impl UnifiedCoordinator {
     /// The call must already be in an established dialog (past `Active`).
     /// The supplied `body` is sent verbatim; the method does not transcode
     /// or validate it against the declared content type.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.send_info(
+    ///     &call_id,
+    ///     "application/dtmf-relay",
+    ///     b"Signal=1\r\nDuration=100\r\n",
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_info(
         &self,
         session_id: &SessionId,
@@ -1731,6 +2193,20 @@ impl UnifiedCoordinator {
     /// [`UnifiedCoordinator::make_transfer_leg`]. This method is the
     /// escape hatch for other event packages (dialog, message-summary,
     /// presence, custom) and for non-standard REFER orchestration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.send_notify(
+    ///     &call_id,
+    ///     "message-summary",
+    ///     Some("Messages-Waiting: no\r\n".to_string()),
+    ///     Some("active;expires=3600".to_string()),
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_notify(
         &self,
         session_id: &SessionId,
@@ -1743,7 +2219,20 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Send NOTIFY message for REFER status (used after handling transfer)
+    /// Send a REFER progress NOTIFY with a SIP status code and reason.
+    ///
+    /// This is the low-level helper for custom REFER orchestration. Transfer
+    /// legs created with [`make_transfer_leg`](Self::make_transfer_leg)
+    /// emit ordinary REFER progress automatically.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.send_refer_notify(&call_id, 180, "Ringing").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_refer_notify(
         &self,
         session_id: &SessionId,
@@ -1761,6 +2250,21 @@ impl UnifiedCoordinator {
     /// sessions (original + consultation) constructs the Replaces value from
     /// the consultation session's [`DialogIdentity`](crate::api::types::DialogIdentity) and passes it here for
     /// the original session to send.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, original: rvoip_session_core::SessionId, consultation: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// if let Some(identity) = coordinator.dialog_identity(&consultation).await? {
+    ///     if let Some(replaces) = identity.to_replaces_value() {
+    ///         coordinator
+    ///             .send_refer_with_replaces(&original, "sip:charlie@example.com", &replaces)
+    ///             .await?;
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_refer_with_replaces(
         &self,
         session_id: &SessionId,
@@ -1792,6 +2296,19 @@ impl UnifiedCoordinator {
     /// Fetch the SIP-level identity (`Call-ID`, local/remote tags) of a
     /// session's dialog. Returns `None` if the dialog isn't established
     /// yet or has already been cleaned up.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// if let Some(identity) = coordinator.dialog_identity(&call_id).await? {
+    ///     if let Some(replaces) = identity.to_replaces_value() {
+    ///         println!("Replaces value: {replaces}");
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn dialog_identity(
         &self,
         session_id: &SessionId,
@@ -1812,6 +2329,15 @@ impl UnifiedCoordinator {
     /// `session_id → dialog_id`, encodes the RFC 4733 telephone-event
     /// payload, and transmits with PT 101 over the existing RTP
     /// session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.send_dtmf(&call_id, '5').await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_dtmf(&self, session_id: &SessionId, digit: char) -> Result<()> {
         self.media_adapter
             .send_dtmf_rfc4733(session_id, digit, 100)
@@ -1820,7 +2346,16 @@ impl UnifiedCoordinator {
 
     // ===== Recording Operations =====
 
-    /// Start recording a call
+    /// Start recording a call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.start_recording(&call_id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn start_recording(&self, session_id: &SessionId) -> Result<()> {
         self.helpers
             .state_machine
@@ -1829,7 +2364,16 @@ impl UnifiedCoordinator {
         Ok(())
     }
 
-    /// Stop recording a call
+    /// Stop recording a call.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// coordinator.stop_recording(&call_id).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn stop_recording(&self, session_id: &SessionId) -> Result<()> {
         self.helpers
             .state_machine
@@ -1840,29 +2384,83 @@ impl UnifiedCoordinator {
 
     // ===== Query Operations =====
 
-    /// Get session information
+    /// Get detailed session information.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// let info = coordinator.get_session_info(&call_id).await?;
+    /// println!("session state: {:?}", info.state);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_session_info(&self, session_id: &SessionId) -> Result<SessionInfo> {
         self.helpers.get_session_info(session_id).await
     }
 
-    /// List all active sessions
+    /// List all active sessions.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) {
+    /// let sessions = coordinator.list_sessions().await;
+    /// println!("active sessions: {}", sessions.len());
+    /// # }
+    /// ```
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
         self.helpers.list_sessions().await
     }
 
-    /// Get current state of a session
+    /// Get the current state of a session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// let state = coordinator.get_state(&call_id).await?;
+    /// println!("call state: {state:?}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
         self.helpers.get_state(session_id).await
     }
 
-    /// Check if session is in conference
+    /// Check whether a session is in a conference.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// if coordinator.is_in_conference(&call_id).await? {
+    ///     println!("call is in a conference");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn is_in_conference(&self, session_id: &SessionId) -> Result<bool> {
         self.helpers.is_in_conference(session_id).await
     }
 
     // ===== Audio Operations =====
 
-    /// Subscribe to audio frames for a session
+    /// Subscribe to decoded audio frames for a session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// let mut audio = coordinator.subscribe_to_audio(&call_id).await?;
+    /// tokio::spawn(async move {
+    ///     while let Some(frame) = audio.receiver.recv().await {
+    ///         println!("received {} samples", frame.samples.len());
+    ///     }
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn subscribe_to_audio(
         &self,
         session_id: &SessionId,
@@ -1872,14 +2470,37 @@ impl UnifiedCoordinator {
             .await
     }
 
-    /// Send audio frame to a session
+    /// Send an encoded/decoded audio frame to a session's media path.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) -> rvoip_session_core::Result<()> {
+    /// let frame = rvoip_media_core::types::AudioFrame::new(vec![0i16; 160], 8000, 1, 0);
+    /// coordinator.send_audio(&call_id, frame).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_audio(&self, session_id: &SessionId, frame: AudioFrame) -> Result<()> {
         self.media_adapter.send_audio_frame(session_id, frame).await
     }
 
     // ===== Event Subscriptions =====
 
-    /// Subscribe to session events
+    /// Subscribe a callback to low-level state-machine session events.
+    ///
+    /// This is an advanced compatibility hook. New application code should
+    /// prefer [`events`](Self::events) or [`events_for_session`](Self::events_for_session).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) {
+    /// coordinator.subscribe(call_id, |_event| {
+    ///     // Observe low-level state-machine events.
+    /// }).await;
+    /// # }
+    /// ```
     pub async fn subscribe<F>(&self, session_id: SessionId, callback: F)
     where
         F: Fn(crate::state_machine::helpers::SessionEvent) + Send + Sync + 'static,
@@ -1887,14 +2508,35 @@ impl UnifiedCoordinator {
         self.helpers.subscribe(session_id, callback).await
     }
 
-    /// Unsubscribe from session events
+    /// Unsubscribe from low-level state-machine events for a session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, call_id: rvoip_session_core::SessionId) {
+    /// coordinator.unsubscribe(&call_id).await;
+    /// # }
+    /// ```
     pub async fn unsubscribe(&self, session_id: &SessionId) {
         self.helpers.unsubscribe(session_id).await
     }
 
     // ===== Incoming Call Handling =====
 
-    /// Get the next incoming call
+    /// Get the next low-level incoming call notification.
+    ///
+    /// This is the coordinator primitive underneath
+    /// [`StreamPeer::wait_for_incoming`](crate::api::stream_peer::StreamPeer::wait_for_incoming).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) {
+    /// if let Some(incoming) = coordinator.get_incoming_call().await {
+    ///     println!("incoming call from {}", incoming.from);
+    /// }
+    /// # }
+    /// ```
     pub async fn get_incoming_call(&self) -> Option<IncomingCallInfo> {
         self.incoming_rx.write().await.recv().await
     }
@@ -1903,6 +2545,14 @@ impl UnifiedCoordinator {
 
     /// Enable automatic blind transfer handling - DISABLED
     /// Auto-transfer now handled in SessionEventHandler to avoid event stealing
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) {
+    /// coordinator.enable_auto_transfer();
+    /// # }
+    /// ```
     pub fn enable_auto_transfer(self: &Arc<Self>) {
         tracing::info!("🔄 Auto-transfer: handled by SessionEventHandler");
     }
@@ -1924,6 +2574,19 @@ impl UnifiedCoordinator {
     /// # Returns
     ///
     /// `Arc<RegistrarService>` for inspecting and managing registrations.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// let users = std::collections::HashMap::from([
+    ///     ("alice".to_string(), "secret".to_string()),
+    /// ]);
+    /// let registrar = coordinator.start_registration_server("example.com", users).await?;
+    /// # let _ = registrar;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn start_registration_server(
         &self,
         realm: &str,
@@ -2182,6 +2845,18 @@ impl UnifiedCoordinator {
 /// Simple helper to create a session and make a call
 impl UnifiedCoordinator {
     /// Quick method to create a UAC session and make a call
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// let call_id = coordinator
+    ///     .quick_call("sip:alice@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
+    ///     .await?;
+    /// # let _ = call_id;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn quick_call(&self, from: &str, to: &str) -> Result<SessionId> {
         self.make_call(from, to).await
     }
@@ -2212,6 +2887,23 @@ impl UnifiedCoordinator {
     /// # Returns
     /// A `RegistrationHandle` that can be used to query status, refresh, or
     /// unregister.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>) -> rvoip_session_core::Result<()> {
+    /// let handle = coordinator.register(
+    ///     "sip:registrar.example.com",
+    ///     "sip:alice@example.com",
+    ///     "sip:alice@192.168.1.50:5060",
+    ///     "alice",
+    ///     "secret",
+    ///     3600,
+    /// ).await?;
+    /// # let _ = handle;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn register(
         &self,
         registrar_uri: &str,
@@ -2310,6 +3002,15 @@ impl UnifiedCoordinator {
     /// This method returns after the state machine accepts the request. Use
     /// [`unregister_and_wait`](Self::unregister_and_wait) when the caller must
     /// wait for `UnregistrationSuccess` or `UnregistrationFailed`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// coordinator.unregister(&handle).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn unregister(&self, handle: &RegistrationHandle) -> Result<()> {
         // Trigger unregistration via state machine
         let result = self
@@ -2347,6 +3048,15 @@ impl UnifiedCoordinator {
     /// Sends a new REGISTER request using the stored registration expiry and
     /// registration Call-ID. Successful refresh responses replace the stored
     /// accepted expiry and next automatic refresh time.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// coordinator.refresh_registration(&handle).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn refresh_registration(&self, handle: &RegistrationHandle) -> Result<()> {
         // Trigger refresh via state machine
         let _result = self
@@ -2369,6 +3079,17 @@ impl UnifiedCoordinator {
     /// [`registration_info`](Self::registration_info) for status, accepted
     /// expiry, next refresh timing, failure metadata, Service-Route, GRUU, and
     /// outbound-flow information.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// if coordinator.is_registered(&handle).await? {
+    ///     println!("registration is active");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn is_registered(&self, handle: &RegistrationHandle) -> Result<bool> {
         let session = self
             .helpers
@@ -2392,6 +3113,16 @@ impl UnifiedCoordinator {
     /// `pub_gruu`, and `temp_gruu` are populated when supplied by the
     /// registrar. Failure and unregister paths clear refresh metadata and keep
     /// a stable status snapshot for diagnostics.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// let info = coordinator.registration_info(&handle).await?;
+    /// println!("status: {:?}", info.status);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn registration_info(&self, handle: &RegistrationHandle) -> Result<RegistrationInfo> {
         let session = self
             .helpers
@@ -2482,6 +3213,17 @@ impl UnifiedCoordinator {
     /// unregister, then returns after `UnregistrationSuccess` or converts
     /// `UnregistrationFailed` into an error. Registration events are global
     /// coordinator events, not per-registration handle streams.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_session_core::UnifiedCoordinator>, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// coordinator
+    ///     .unregister_and_wait(&handle, Some(std::time::Duration::from_secs(3)))
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn unregister_and_wait(
         &self,
         handle: &RegistrationHandle,
@@ -2539,16 +3281,22 @@ impl UnifiedCoordinator {
 /// because doing so cleanly would require a per-registration event bus split.
 #[derive(Debug, Clone)]
 pub struct RegistrationHandle {
+    /// Session id backing this registration lifecycle.
     pub session_id: SessionId,
 }
 
 /// Coarse registration lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegistrationStatus {
+    /// REGISTER has been sent and the registrar response is still pending.
     Registering,
+    /// Registrar accepted the binding and the contact is currently active.
     Registered,
+    /// REGISTER with `Expires: 0` has been sent and the registrar response is pending.
     Unregistering,
+    /// No active binding is known for this registration handle.
     Unregistered,
+    /// The most recent registration or refresh attempt failed.
     Failed,
 }
 
@@ -2624,6 +3372,15 @@ impl Registration {
     /// Create a registration with the minimum required fields.
     ///
     /// `from_uri` and `contact_uri` will be derived from the peer's config.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_session_core::Registration;
+    ///
+    /// let reg = Registration::new("sip:registrar.example.com", "alice", "secret");
+    /// assert_eq!(reg.expires, 3600);
+    /// ```
     pub fn new(
         registrar: impl Into<String>,
         username: impl Into<String>,
@@ -2640,18 +3397,48 @@ impl Registration {
     }
 
     /// Set the registration expiry in seconds (default: 3600).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_session_core::Registration;
+    ///
+    /// let reg = Registration::new("sip:registrar.example.com", "alice", "secret")
+    ///     .expires(600);
+    /// assert_eq!(reg.expires, 600);
+    /// ```
     pub fn expires(mut self, secs: u32) -> Self {
         self.expires = secs;
         self
     }
 
-    /// Override the From URI (defaults to the peer's local_uri).
+    /// Override the From URI (defaults to the peer's local URI).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_session_core::Registration;
+    ///
+    /// let reg = Registration::new("sip:registrar.example.com", "alice", "secret")
+    ///     .from_uri("sip:alice@example.com");
+    /// assert_eq!(reg.from_uri.as_deref(), Some("sip:alice@example.com"));
+    /// ```
     pub fn from_uri(mut self, uri: impl Into<String>) -> Self {
         self.from_uri = Some(uri.into());
         self
     }
 
-    /// Override the Contact URI (defaults to the peer's local_uri).
+    /// Override the Contact URI (defaults to the peer's local URI).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rvoip_session_core::Registration;
+    ///
+    /// let reg = Registration::new("sip:registrar.example.com", "alice", "secret")
+    ///     .contact_uri("sip:alice@192.168.1.50:5060");
+    /// assert_eq!(reg.contact_uri.as_deref(), Some("sip:alice@192.168.1.50:5060"));
+    /// ```
     pub fn contact_uri(mut self, uri: impl Into<String>) -> Self {
         self.contact_uri = Some(uri.into());
         self

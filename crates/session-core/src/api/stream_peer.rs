@@ -92,6 +92,16 @@ impl EventReceiver {
     /// Wait for the next event (optionally filtered to one session).
     ///
     /// Returns `None` when the coordinator shuts down.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut events: rvoip_session_core::EventReceiver) {
+    /// while let Some(event) = events.next().await {
+    ///     println!("session event: {event:?}");
+    /// }
+    /// # }
+    /// ```
     pub async fn next(&mut self) -> Option<Event> {
         loop {
             let raw = self.rx.recv().await?;
@@ -109,6 +119,16 @@ impl EventReceiver {
     }
 
     /// Non-blocking: return the next event if one is immediately available.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # fn example(mut events: rvoip_session_core::EventReceiver) {
+    /// if let Some(event) = events.try_next() {
+    ///     println!("ready event: {event:?}");
+    /// }
+    /// # }
+    /// ```
     pub fn try_next(&mut self) -> Option<Event> {
         loop {
             let raw = self.rx.try_recv().ok()?;
@@ -132,6 +152,16 @@ impl EventReceiver {
     /// Wait for the next incoming call event, skipping all others.
     ///
     /// Returns `(call_id, from, to, sdp)` or `None` on channel close.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut events: rvoip_session_core::EventReceiver) {
+    /// if let Some((call_id, from, to, sdp)) = events.next_incoming().await {
+    ///     println!("incoming {call_id} from {from} to {to}; sdp={}", sdp.is_some());
+    /// }
+    /// # }
+    /// ```
     pub async fn next_incoming(&mut self) -> Option<(CallId, String, String, Option<String>)> {
         loop {
             match self.next().await? {
@@ -151,6 +181,16 @@ impl EventReceiver {
     /// Wait for the next DTMF digit on any call, skipping all others.
     ///
     /// Returns `(call_id, digit)` or `None` on channel close.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut events: rvoip_session_core::EventReceiver) {
+    /// if let Some((call_id, digit)) = events.next_dtmf().await {
+    ///     println!("{call_id} sent DTMF {digit}");
+    /// }
+    /// # }
+    /// ```
     pub async fn next_dtmf(&mut self) -> Option<(CallId, char)> {
         loop {
             match self.next().await? {
@@ -166,6 +206,16 @@ impl EventReceiver {
     ///
     /// Matches `ReferReceived`, `TransferAccepted`, `TransferCompleted`,
     /// `TransferFailed`, and `TransferProgress`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut events: rvoip_session_core::EventReceiver) {
+    /// if let Some(event) = events.next_transfer().await {
+    ///     println!("transfer event: {event:?}");
+    /// }
+    /// # }
+    /// ```
     pub async fn next_transfer(&mut self) -> Option<Event> {
         loop {
             let event = self.next().await?;
@@ -178,6 +228,17 @@ impl EventReceiver {
     /// Wait for the next event matching `predicate`, discarding non-matches.
     ///
     /// Returns `None` on channel close.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut events: rvoip_session_core::EventReceiver) {
+    /// let ended = events
+    ///     .next_where(|event| matches!(event, rvoip_session_core::Event::CallEnded { .. }))
+    ///     .await;
+    /// # let _ = ended;
+    /// # }
+    /// ```
     pub async fn next_where<F: FnMut(&Event) -> bool>(
         &mut self,
         mut predicate: F,
@@ -191,6 +252,16 @@ impl EventReceiver {
     }
 
     /// Wait for the next event belonging to `call_id`, skipping others.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut events: rvoip_session_core::EventReceiver, call_id: rvoip_session_core::CallId) {
+    /// if let Some(event) = events.next_for_call(&call_id).await {
+    ///     println!("event for {call_id}: {event:?}");
+    /// }
+    /// # }
+    /// ```
     pub async fn next_for_call(&mut self, call_id: &CallId) -> Option<Event> {
         loop {
             let event = self.next().await?;
@@ -227,6 +298,18 @@ impl PeerControl {
     /// [`subscribe_events()`]: Self::subscribe_events
     /// [`Config.credentials`]: crate::api::unified::Config::credentials
     /// [`StreamPeerBuilder::with_credentials`]: StreamPeerBuilder::with_credentials
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::PeerControl) -> rvoip_session_core::Result<()> {
+    /// let call = control.call("sip:bob@example.com").await?;
+    /// let mut events = control.subscribe_events().await?;
+    /// // Wait for Event::CallAnswered for `call.id()` before using media.
+    /// # let _ = (call, events.next().await);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn call(&self, target: &str) -> Result<SessionHandle> {
         let id = self.coordinator.make_call(&self.local_uri, target).await?;
         Ok(SessionHandle::new(id, self.coordinator.clone()))
@@ -235,6 +318,19 @@ impl PeerControl {
     /// Initiate an outgoing call with explicit digest-auth credentials,
     /// overriding any per-peer default. Useful for multi-tenant clients
     /// where each call authenticates as a different user.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::PeerControl) -> rvoip_session_core::Result<()> {
+    /// let call = control.call_with_auth(
+    ///     "sip:bob@example.com",
+    ///     rvoip_session_core::types::Credentials::new("alice", "secret"),
+    /// ).await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn call_with_auth(
         &self,
         target: &str,
@@ -248,6 +344,16 @@ impl PeerControl {
     }
 
     /// Accept an incoming call that was presented as an event.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::PeerControl, call_id: rvoip_session_core::CallId) -> rvoip_session_core::Result<()> {
+    /// let handle = control.accept(&call_id).await?;
+    /// # let _ = handle;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn accept(&self, call_id: &CallId) -> Result<SessionHandle> {
         self.coordinator.accept_call(call_id).await?;
         Ok(SessionHandle::new(
@@ -257,6 +363,15 @@ impl PeerControl {
     }
 
     /// Reject an incoming call with the given SIP status code and reason phrase.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::PeerControl, call_id: rvoip_session_core::CallId) -> rvoip_session_core::Result<()> {
+    /// control.reject(&call_id, 486, "Busy Here").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn reject(&self, call_id: &CallId, status: u16, reason: &str) -> Result<()> {
         self.coordinator.reject_call(call_id, status, reason).await
     }
@@ -276,6 +391,17 @@ impl PeerControl {
     /// the remote peer did not advertise `Supported: 100rel` on the INVITE.
     ///
     /// [`accept()`]: Self::accept
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::PeerControl, call_id: rvoip_session_core::CallId) -> rvoip_session_core::Result<()> {
+    /// control.send_early_media(&call_id, None).await?;
+    /// let handle = control.accept(&call_id).await?;
+    /// # let _ = handle;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn send_early_media(&self, call_id: &CallId, sdp: Option<String>) -> Result<()> {
         self.coordinator.send_early_media(call_id, sdp).await
     }
@@ -285,12 +411,29 @@ impl PeerControl {
     /// Each call returns an independent receiver (broadcast semantics).
     /// Registration lifecycle events are visible here because they do not
     /// belong to a specific call session.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_session_core::PeerControl) -> rvoip_session_core::Result<()> {
+    /// let mut events = control.subscribe_events().await?;
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = events.next().await {
+    ///         println!("{event:?}");
+    ///     }
+    /// });
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn subscribe_events(&self) -> Result<EventReceiver> {
         let rx = self.coordinator.subscribe_events().await?;
         Ok(EventReceiver::new(rx))
     }
 
-    /// Access the underlying `UnifiedCoordinator` for advanced use.
+    /// Access the underlying [`UnifiedCoordinator`] for advanced use.
+    ///
+    /// This accessor is intentionally trivial and does not clone the
+    /// coordinator.
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
         &self.coordinator
     }
@@ -354,6 +497,16 @@ impl StreamPeer {
     /// interop tests, prefer [`with_config`](Self::with_config) or
     /// [`builder`](Self::builder) so bind addresses, media ports, TLS, SRTP,
     /// registration credentials, and advertised addresses are explicit.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeer::new("alice").await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn new(name: &str) -> Result<Self> {
         let mut config = Config::default();
         config.local_uri = format!("sip:{}@{}:{}", name, config.local_ip, config.sip_port);
@@ -364,6 +517,18 @@ impl StreamPeer {
     ///
     /// The coordinator starts immediately. Subscribe or split the peer before
     /// triggering work if your code must not miss early events.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// use rvoip_session_core::{Config, StreamPeer};
+    ///
+    /// let peer = StreamPeer::with_config(Config::local("alice", 5060)).await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn with_config(config: Config) -> Result<Self> {
         let local_uri = config.local_uri.clone();
         let coordinator = UnifiedCoordinator::new(config).await?;
@@ -381,11 +546,29 @@ impl StreamPeer {
     ///
     /// Useful when you want to drive the event loop in one task while issuing
     /// commands from another.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::StreamPeer) {
+    /// let (control, mut events) = peer.split();
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = events.next().await {
+    ///         println!("{event:?}");
+    ///     }
+    /// });
+    /// # let _ = control;
+    /// # }
+    /// ```
     pub fn split(self) -> (PeerControl, EventReceiver) {
         (self.control, self.events)
     }
 
     /// Access the command half without consuming the peer.
+    ///
+    /// This accessor is trivial; use it when one task owns the sequential
+    /// receiver but another helper needs to issue commands through a cloned
+    /// [`PeerControl`].
     pub fn control(&self) -> &PeerControl {
         &self.control
     }
@@ -397,6 +580,17 @@ impl StreamPeer {
     /// The handle is returned as soon as the INVITE has been dispatched; wait
     /// for [`Event::CallAnswered`] with [`wait_for_answered`](Self::wait_for_answered)
     /// before assuming media is established.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut peer: rvoip_session_core::StreamPeer) -> rvoip_session_core::Result<()> {
+    /// let call = peer.call("sip:bob@example.com").await?;
+    /// let answered = peer.wait_for_answered(call.id()).await?;
+    /// # let _ = answered;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn call(&mut self, target: &str) -> Result<SessionHandle> {
         self.control.call(target).await
     }
@@ -405,6 +599,17 @@ impl StreamPeer {
     ///
     /// Blocks until an [`Event::IncomingCall`] is received. The returned
     /// [`IncomingCall`] must be resolved (accepted, rejected, or deferred).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut peer: rvoip_session_core::StreamPeer) -> rvoip_session_core::Result<()> {
+    /// let incoming = peer.wait_for_incoming().await?;
+    /// let call = incoming.accept().await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn wait_for_incoming(&mut self) -> Result<IncomingCall> {
         loop {
             match self.events.next().await {
@@ -429,6 +634,18 @@ impl StreamPeer {
     }
 
     /// Wait for a previously initiated call to be answered.
+    ///
+    /// Returns an error if the matching call fails before it is answered.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut peer: rvoip_session_core::StreamPeer, call_id: rvoip_session_core::CallId) -> rvoip_session_core::Result<()> {
+    /// let handle = peer.wait_for_answered(&call_id).await?;
+    /// # let _ = handle;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn wait_for_answered(&mut self, call_id: &CallId) -> Result<SessionHandle> {
         loop {
             match self.events.next().await {
@@ -458,6 +675,16 @@ impl StreamPeer {
     }
 
     /// Wait for a specific call to end (BYE received/sent).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut peer: rvoip_session_core::StreamPeer, call_id: rvoip_session_core::CallId) -> rvoip_session_core::Result<()> {
+    /// let reason = peer.wait_for_ended(&call_id).await?;
+    /// println!("call ended: {reason}");
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn wait_for_ended(&mut self, call_id: &CallId) -> Result<String> {
         loop {
             match self.events.next().await {
@@ -477,6 +704,16 @@ impl StreamPeer {
     ///
     /// Returns `None` when the coordinator shuts down or the event channel
     /// closes.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut peer: rvoip_session_core::StreamPeer) {
+    /// if let Some(event) = peer.next_event().await {
+    ///     println!("{event:?}");
+    /// }
+    /// # }
+    /// ```
     pub async fn next_event(&mut self) -> Option<Event> {
         self.events.next().await
     }
@@ -487,6 +724,23 @@ impl StreamPeer {
     /// derives `from_uri`/`contact_uri` from the peer's config. Successful
     /// registration stores registrar-accepted expiry and may schedule
     /// automatic refresh according to [`Config::registration_auto_refresh`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut peer: rvoip_session_core::StreamPeer) -> rvoip_session_core::Result<()> {
+    /// let handle = peer.register(
+    ///     "sip:registrar.example.com",
+    ///     "sip:alice@example.com",
+    ///     "sip:alice@192.168.1.50:5060",
+    ///     "alice",
+    ///     "secret",
+    ///     3600,
+    /// ).await?;
+    /// # let _ = handle;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn register(
         &mut self,
         registrar_uri: &str,
@@ -544,6 +798,16 @@ impl StreamPeer {
     /// and `false` if the registration was rejected, unregistered, or has
     /// not yet completed. This is intentionally coarse; use
     /// `control().coordinator().registration_info(handle)` for richer state.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::StreamPeer, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// let active = peer.is_registered(&handle).await?;
+    /// # let _ = active;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn is_registered(
         &self,
         handle: &crate::api::unified::RegistrationHandle,
@@ -557,6 +821,15 @@ impl StreamPeer {
     /// Use [`UnifiedCoordinator::unregister_and_wait`](crate::UnifiedCoordinator::unregister_and_wait)
     /// through [`control`](Self::control) when the caller needs to wait for
     /// the registrar response.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::StreamPeer, handle: rvoip_session_core::RegistrationHandle) -> rvoip_session_core::Result<()> {
+    /// peer.unregister(&handle).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn unregister(&self, handle: &crate::api::unified::RegistrationHandle) -> Result<()> {
         self.control.coordinator.unregister(handle).await
     }
@@ -568,6 +841,15 @@ impl StreamPeer {
     /// configured unregister timeout. Set
     /// [`Config::unregister_on_shutdown_timeout_secs`] to `0` to skip the
     /// best-effort unregister phase.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(peer: rvoip_session_core::StreamPeer) -> rvoip_session_core::Result<()> {
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn shutdown(self) -> Result<()> {
         // Gracefully unregister active registrations, signal the coordinator
         // to stop background event loops, then drop self so remaining Arc
@@ -581,6 +863,8 @@ impl StreamPeer {
     ///
     /// Mirrors [`CallbackPeer::shutdown_handle`]. Useful when the peer is owned
     /// by an event loop and a supervisor task needs to stop it:
+    ///
+    /// # Examples
     ///
     /// ```rust,no_run
     /// # async fn demo() -> rvoip_session_core::Result<()> {
@@ -602,6 +886,20 @@ impl StreamPeer {
     }
 
     /// Start building a new `StreamPeer` with configuration options.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeer::builder()
+    ///     .name("alice")
+    ///     .sip_port(5080)
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn builder() -> StreamPeerBuilder {
         StreamPeerBuilder::new()
     }
@@ -632,6 +930,13 @@ pub struct StreamPeerBuilder {
 
 impl StreamPeerBuilder {
     /// Create a new builder with default configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let builder = rvoip_session_core::StreamPeerBuilder::new();
+    /// # let _ = builder;
+    /// ```
     pub fn new() -> Self {
         Self {
             config: Config::default(),
@@ -640,12 +945,38 @@ impl StreamPeerBuilder {
     }
 
     /// Set the display name (auto-generates a SIP URI from it).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeer::builder()
+    ///     .name("alice")
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn name(mut self, name: &str) -> Self {
         self.name = Some(name.to_string());
         self
     }
 
     /// Set the SIP port.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeer::builder()
+    ///     .sip_port(5080)
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn sip_port(mut self, port: u16) -> Self {
         self.config.sip_port = port;
         self.config.bind_addr.set_port(port);
@@ -653,6 +984,19 @@ impl StreamPeerBuilder {
     }
 
     /// Set the local IP address.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeer::builder()
+    ///     .local_ip("127.0.0.1".parse().unwrap())
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn local_ip(mut self, ip: IpAddr) -> Self {
         self.config.local_ip = ip;
         self.config.bind_addr.set_ip(ip);
@@ -660,6 +1004,19 @@ impl StreamPeerBuilder {
     }
 
     /// Set the media port range.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeer::builder()
+    ///     .media_ports(16000, 17000)
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn media_ports(mut self, start: u16, end: u16) -> Self {
         self.config.media_port_start = start;
         self.config.media_port_end = end;
@@ -667,6 +1024,20 @@ impl StreamPeerBuilder {
     }
 
     /// Use a fully custom config (overrides all previous settings).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let config = rvoip_session_core::Config::local("alice", 5060);
+    /// let peer = rvoip_session_core::StreamPeer::builder()
+    ///     .config(config)
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn config(mut self, config: Config) -> Self {
         self.config = config;
         self
@@ -678,12 +1049,39 @@ impl StreamPeerBuilder {
     /// recover without intervention.
     ///
     /// Per-call override via [`PeerControl::call_with_auth`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeer::builder()
+    ///     .name("alice")
+    ///     .with_credentials("alice", "secret")
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_credentials(mut self, username: &str, password: &str) -> Self {
         self.config.credentials = Some(crate::types::Credentials::new(username, password));
         self
     }
 
-    /// Build the `StreamPeer`.
+    /// Build the [`StreamPeer`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// let peer = rvoip_session_core::StreamPeerBuilder::new()
+    ///     .name("alice")
+    ///     .build()
+    ///     .await?;
+    /// peer.shutdown().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn build(mut self) -> Result<StreamPeer> {
         if let Some(name) = self.name {
             self.config.local_uri = format!(
