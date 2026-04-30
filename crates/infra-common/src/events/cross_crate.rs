@@ -147,6 +147,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::DialogToSession(event) => match event {
                 DialogToSessionEvent::IncomingCall { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallStateChanged { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::CallProgress { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallEstablished { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallTerminated { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallFailed { session_id, .. } => Some(session_id),
@@ -307,6 +308,17 @@ pub enum DialogToSessionEvent {
         session_id: String,
         new_state: CallState,
         reason: Option<String>,
+    },
+
+    /// Provisional 1xx call progress response received for an outgoing call.
+    CallProgress {
+        session_id: String,
+        /// SIP provisional status code.
+        status_code: u16,
+        /// SIP reason phrase.
+        reason_phrase: String,
+        /// SDP body carried by the provisional response, if present.
+        sdp: Option<String>,
     },
 
     /// Call successfully established
@@ -923,6 +935,21 @@ impl RvoipCrossCrateEvent {
             session_id,
             new_state,
             reason,
+        })
+    }
+
+    /// Create a provisional call progress event.
+    pub fn call_progress(
+        session_id: String,
+        status_code: u16,
+        reason_phrase: String,
+        sdp: Option<String>,
+    ) -> Self {
+        RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallProgress {
+            session_id,
+            status_code,
+            reason_phrase,
+            sdp,
         })
     }
 

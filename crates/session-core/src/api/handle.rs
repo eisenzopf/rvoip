@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::api::audio::{AudioReceiver, AudioSender, AudioStream};
-use crate::api::events::Event;
+use crate::api::events::{Event, MediaSecurityState};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
 use crate::state_table::types::SessionId;
@@ -22,6 +22,20 @@ use crate::types::{CallState, SessionInfo};
 
 /// Type alias so callers can refer to a session by `CallId`.
 pub type CallId = SessionId;
+
+/// Evidence level required by blind-transfer wait helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferWaitMode {
+    /// Return when a terminal REFER NOTIFY is received, regardless of whether
+    /// target-leg progress was observed first.
+    NotifyFinal,
+    /// Return only after the REFER subscription reports a provisional target
+    /// status such as `180 Ringing` or `183 Session Progress`.
+    TargetRinging,
+    /// Return only after a terminal successful REFER NOTIFY that was preceded
+    /// by target progress evidence.
+    TargetAnswered,
+}
 
 /// Handle for controlling an active SIP call session.
 ///
@@ -257,9 +271,14 @@ impl SessionHandle {
         self.coordinator.send_refer(&self.call_id, target).await
     }
 
-    /// Initiate a blind transfer and wait for a terminal transfer event.
+    /// Initiate a blind transfer and wait for a terminal REFER NOTIFY.
     ///
-    /// Returns `TransferCompleted` on success or `TransferFailed` on failure.
+    /// Returns `TransferCompleted` on a final 2xx sipfrag or `TransferFailed`
+    /// on a final failure sipfrag. `TransferCompleted` means the REFER
+    /// subscription reached a terminal success state; it does not prove the
+    /// transfer target answered. Use
+    /// [`transfer_blind_and_wait_for`](Self::transfer_blind_and_wait_for)
+    /// with [`TransferWaitMode::TargetAnswered`] when target evidence matters.
     /// Intermediate progress events are consumed while waiting, so create a
     /// separate event receiver if another task also needs to observe them.
     ///
@@ -279,14 +298,74 @@ impl SessionHandle {
         target: &str,
         timeout: Option<Duration>,
     ) -> Result<Event> {
+        self.transfer_blind_and_wait_for(target, TransferWaitMode::NotifyFinal, timeout)
+            .await
+    }
+
+    /// Initiate a blind transfer and wait for a specific transfer evidence mode.
+    ///
+    /// `NotifyFinal` matches terminal REFER NOTIFY semantics. `TargetRinging`
+    /// requires a provisional target sipfrag. `TargetAnswered` requires a
+    /// terminal successful sipfrag that was preceded by target progress
+    /// evidence, preventing an immediate PBX `200 OK` NOTIFY from being
+    /// interpreted as a proven target answer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use rvoip_session_core::TransferWaitMode;
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let event = call
+    ///     .transfer_blind_and_wait_for(
+    ///         "sip:charlie@example.com",
+    ///         TransferWaitMode::TargetAnswered,
+    ///         Some(std::time::Duration::from_secs(15)),
+    ///     )
+    ///     .await?;
+    /// # let _ = event;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn transfer_blind_and_wait_for(
+        &self,
+        target: &str,
+        mode: TransferWaitMode,
+        timeout: Option<Duration>,
+    ) -> Result<Event> {
         let mut events = self.events().await?;
         self.transfer_blind(target).await?;
 
         let fut = async {
+            let mut target_progress_seen = false;
             loop {
                 match events.next().await {
-                    Some(event @ Event::TransferCompleted { .. })
-                    | Some(event @ Event::TransferFailed { .. }) => return Ok(event),
+                    Some(event @ Event::TransferProgress { status_code, .. })
+                        if (180..=199).contains(&status_code) =>
+                    {
+                        target_progress_seen = true;
+                        if mode == TransferWaitMode::TargetRinging {
+                            return Ok(event);
+                        }
+                    }
+                    Some(event @ Event::TransferCompleted { .. }) => match mode {
+                        TransferWaitMode::NotifyFinal => return Ok(event),
+                        TransferWaitMode::TargetRinging => {
+                            return Err(SessionError::Other(
+                                "terminal REFER NOTIFY arrived before target ringing evidence"
+                                    .to_string(),
+                            ))
+                        }
+                        TransferWaitMode::TargetAnswered if target_progress_seen => {
+                            return Ok(event)
+                        }
+                        TransferWaitMode::TargetAnswered => {
+                            return Err(SessionError::Other(
+                                "terminal REFER NOTIFY arrived before target-answer evidence"
+                                    .to_string(),
+                            ))
+                        }
+                    },
+                    Some(event @ Event::TransferFailed { .. }) => return Ok(event),
                     Some(_) => {}
                     None => {
                         return Err(SessionError::Other(
@@ -556,6 +635,33 @@ impl SessionHandle {
         self.coordinator.get_session_info(&self.call_id).await
     }
 
+    /// Get the current negotiated media-security state for this call.
+    ///
+    /// Returns `Ok(None)` when media is plaintext or SRTP has not been
+    /// negotiated/installed yet.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// if let Some(security) = call.media_security().await? {
+    ///     println!("SRTP suite: {:?}", security.suite);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn media_security(&self) -> Result<Option<MediaSecurityState>> {
+        let session = self
+            .coordinator
+            .helpers
+            .state_machine
+            .store
+            .get_session(&self.call_id)
+            .await
+            .map_err(|e| SessionError::SessionNotFound(e.to_string()))?;
+        Ok(session.media_security)
+    }
+
     // ===== State predicates =====
 
     /// Check whether the call is currently active (connected and not on hold).
@@ -616,6 +722,70 @@ impl SessionHandle {
             rx,
             self.call_id.clone(),
         ))
+    }
+
+    /// Wait for matching provisional progress on this call.
+    ///
+    /// The predicate is evaluated only for [`Event::CallProgress`] events.
+    /// Terminal call events fail the wait immediately; a fast `200 OK`
+    /// therefore does not masquerade as progress.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_session_core::SessionHandle) -> rvoip_session_core::Result<()> {
+    /// let progress = call
+    ///     .wait_for_progress(
+    ///         |event| matches!(event, rvoip_session_core::Event::CallProgress { status_code: 180 | 183, .. }),
+    ///         Some(std::time::Duration::from_secs(5)),
+    ///     )
+    ///     .await?;
+    /// # let _ = progress;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn wait_for_progress<F>(
+        &self,
+        predicate: F,
+        timeout: Option<Duration>,
+    ) -> Result<Event>
+    where
+        F: Fn(&Event) -> bool,
+    {
+        let mut rx = self.events().await?;
+        let fut = async {
+            loop {
+                match rx.next().await {
+                    Some(event @ Event::CallProgress { .. }) if predicate(&event) => {
+                        return Ok(event)
+                    }
+                    Some(Event::CallAnswered { .. }) => {
+                        return Err(SessionError::Other(
+                            "call answered before matching provisional progress".to_string(),
+                        ))
+                    }
+                    Some(Event::CallFailed { reason, .. }) => {
+                        return Err(SessionError::Other(reason))
+                    }
+                    Some(Event::CallCancelled { .. }) => {
+                        return Err(SessionError::Other(
+                            "call cancelled before matching provisional progress".to_string(),
+                        ))
+                    }
+                    Some(Event::CallEnded { reason, .. }) => {
+                        return Err(SessionError::Other(reason))
+                    }
+                    Some(_) => {}
+                    None => return Err(SessionError::Other("Event channel closed".to_string())),
+                }
+            }
+        };
+        match timeout {
+            Some(d) => tokio::time::timeout(d, fut)
+                .await
+                .map_err(|_| SessionError::Timeout("wait_for_progress timed out".to_string()))?,
+            None => fut.await,
+        }
     }
 
     /// Wait for this specific call to end, with optional timeout.

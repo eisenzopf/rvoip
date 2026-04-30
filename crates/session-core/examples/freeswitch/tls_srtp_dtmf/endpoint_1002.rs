@@ -4,9 +4,9 @@
 mod common;
 
 use common::{
-    endpoint_config, init_tracing, load_env, register_endpoint, remote_test_digits,
-    remote_test_timeout, start_tone_recorder, wait_for_dtmf_sequence_on_events, ExampleResult,
-    ENDPOINT_1002_TONE_HZ,
+    assert_srtp_media_security, endpoint_config, init_tracing, load_env, register_endpoint,
+    remote_test_digits, remote_test_timeout, start_tone_recorder, wait_for_dtmf_sequence_on_events,
+    ExampleResult, ENDPOINT_1002_TONE_HZ,
 };
 use rvoip_session_core::StreamPeer;
 use tokio::time::Duration;
@@ -24,6 +24,7 @@ async fn main() -> ExampleResult<()> {
     let incoming = peer.wait_for_incoming().await?;
     println!("[1002] Incoming call from {}", incoming.from);
     let handle = incoming.accept().await?;
+    assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
     let mut events = handle.events().await?;
     let digits = remote_test_digits();
     println!(

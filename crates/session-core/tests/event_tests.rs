@@ -3,7 +3,10 @@
 //! Tests Event enum construction, helper methods, and the call_id accessor.
 
 use rvoip_session_core::state_table::types::SessionId;
-use rvoip_session_core::{Event, SubscriptionState, TransferKind};
+use rvoip_session_core::{
+    Event, MediaSecurityKeying, MediaSecurityProfile, SubscriptionState, TransferKind,
+};
+use rvoip_sip_core::types::sdp::CryptoSuite;
 
 fn test_id() -> SessionId {
     SessionId::new()
@@ -32,6 +35,19 @@ fn test_call_answered_event() {
     let e = Event::CallAnswered {
         call_id: id.clone(),
         sdp: None,
+    };
+    assert_eq!(e.call_id(), Some(&id));
+    assert!(e.is_call_event());
+}
+
+#[test]
+fn test_call_progress_event() {
+    let id = test_id();
+    let e = Event::CallProgress {
+        call_id: id.clone(),
+        status_code: 183,
+        reason: "Session Progress".into(),
+        sdp: Some("v=0\r\n".into()),
     };
     assert_eq!(e.call_id(), Some(&id));
     assert!(e.is_call_event());
@@ -123,6 +139,24 @@ fn test_transfer_progress_event() {
     assert!(e.is_transfer_event());
 }
 
+#[test]
+fn test_transfer_notify_event() {
+    let id = test_id();
+    let e = Event::TransferNotify {
+        call_id: id.clone(),
+        status_code: 200,
+        reason: "OK".into(),
+        subscription_state: Some(SubscriptionState::parse("terminated;reason=noresource")),
+        body: Some("SIP/2.0 200 OK\r\n".into()),
+    };
+    assert_eq!(e.call_id(), Some(&id));
+    assert!(e.is_transfer_event());
+    assert_eq!(
+        e.subscription_state().and_then(|s| s.reason),
+        Some("noresource".into())
+    );
+}
+
 // ── Call state events ───────────────────────────────────────────────────────
 
 #[test]
@@ -204,6 +238,20 @@ fn test_media_quality_changed_event() {
         packet_loss_percent: 5,
         jitter_ms: 30,
     };
+    assert!(e.is_media_event());
+}
+
+#[test]
+fn test_media_security_negotiated_event() {
+    let id = test_id();
+    let e = Event::MediaSecurityNegotiated {
+        call_id: id.clone(),
+        keying: MediaSecurityKeying::Sdes,
+        suite: CryptoSuite::AesCm256HmacSha1_80,
+        profile: MediaSecurityProfile::RtpSavp,
+        contexts_installed: true,
+    };
+    assert_eq!(e.call_id(), Some(&id));
     assert!(e.is_media_event());
 }
 

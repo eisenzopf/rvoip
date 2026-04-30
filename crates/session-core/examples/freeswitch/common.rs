@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::{
-    api::unified::RegistrationHandle, types::Credentials, AudioSender, CallState, Config, Event,
-    EventReceiver, Registration, SessionHandle, SipContactMode, StreamPeer,
+    api::unified::RegistrationHandle, types::Credentials, AudioSender, Config, Event,
+    EventReceiver, MediaSecurityKeying, MediaSecurityProfile, Registration, SessionHandle,
+    SipContactMode, SrtpSuitePolicy, StreamPeer,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -237,6 +238,7 @@ impl EndpointConfig {
         }
         config.offer_srtp = true;
         config.srtp_required = env_bool("FREESWITCH_TLS_SRTP_REQUIRED", true)?;
+        config = config.with_srtp_suite_policy(SrtpSuitePolicy::FreeSwitchCompatible);
         Ok(config)
     }
 
@@ -722,49 +724,39 @@ pub async fn wait_for_refer_received_on_events(
     .map_err(|_| format!("timed out after {:?} waiting for REFER", timeout_duration))?
 }
 
-pub async fn wait_for_ringing_state(
-    handle: &SessionHandle,
-    timeout_duration: Duration,
-) -> ExampleResult<()> {
-    timeout(timeout_duration, async {
-        loop {
-            match handle.state().await {
-                Ok(CallState::Ringing) => return Ok(()),
-                Ok(CallState::Active) => {
-                    return Err("call answered before Ringing state could be asserted".into());
-                }
-                Ok(_) => sleep(Duration::from_millis(100)).await,
-                Err(e) => return Err(format!("failed to read call state: {}", e).into()),
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "timed out after {:?} waiting for Ringing state",
-            timeout_duration
-        )
-    })?
-}
-
 pub async fn call_with_ringing_retry(
     peer: &mut StreamPeer,
     target: &str,
     timeout_duration: Duration,
 ) -> ExampleResult<SessionHandle> {
     let attempts = call_retry_attempts()?.max(1);
-    let mut last_error = None;
+    let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
 
     for attempt in 1..=attempts {
         let handle = peer.call(target).await?;
-        match wait_for_ringing_state(&handle, timeout_duration).await {
+        match handle
+            .wait_for_progress(
+                |event| {
+                    matches!(
+                        event,
+                        Event::CallProgress {
+                            status_code: 180 | 183,
+                            ..
+                        }
+                    )
+                },
+                Some(timeout_duration),
+            )
+            .await
+            .map(|_| ())
+        {
             Ok(()) => return Ok(handle),
             Err(e) => {
                 println!(
-                    "[call] Attempt {}/{} to {} did not reach Ringing: {}",
+                    "[call] Attempt {}/{} to {} did not report provisional progress: {}",
                     attempt, attempts, target, e
                 );
-                last_error = Some(e);
+                last_error = Some(Box::new(e));
                 if attempt < attempts {
                     sleep(Duration::from_secs(2)).await;
                 }
@@ -815,202 +807,62 @@ pub async fn call_with_answer_retry(
         .unwrap_or_else(|| "call was not answered and no retry error was captured".into()))
 }
 
-pub async fn wait_for_call_cancelled_on_events(
-    events: &mut EventReceiver,
-    timeout_duration: Duration,
-) -> ExampleResult<()> {
-    timeout(timeout_duration, async {
-        loop {
-            match events.next().await {
-                Some(Event::CallCancelled { .. }) => return Ok(()),
-                Some(Event::CallEnded { reason, .. }) => {
-                    return Err(
-                        format!("call ended while waiting for CallCancelled: {}", reason).into(),
-                    );
-                }
-                Some(Event::CallFailed {
-                    status_code,
-                    reason,
-                    ..
-                }) => {
-                    return Err(format!(
-                        "call failed while waiting for CallCancelled: {} {}",
-                        status_code, reason
-                    )
-                    .into());
-                }
-                Some(_) => {}
-                None => return Err("event stream closed while waiting for CallCancelled".into()),
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "timed out after {:?} waiting for CallCancelled",
-            timeout_duration
-        )
-    })?
-}
-
-pub async fn wait_for_cancel_cleanup(
+pub async fn assert_srtp_media_security(
     handle: &SessionHandle,
     timeout_duration: Duration,
 ) -> ExampleResult<()> {
     timeout(timeout_duration, async {
         loop {
-            match handle.state().await {
-                Ok(CallState::Cancelled | CallState::Terminated) => return Ok(()),
-                Ok(CallState::Active) => {
-                    return Err("call answered before cancellation cleanup completed".into());
-                }
-                Ok(CallState::Failed(reason)) => {
-                    return Err(
-                        format!("call failed during cancellation cleanup: {}", reason).into(),
-                    );
-                }
-                Ok(_) => sleep(Duration::from_millis(100)).await,
-                Err(e) if e.is_session_gone() => return Ok(()),
-                Err(e) => {
-                    return Err(format!(
-                        "failed to read call state during cancellation cleanup: {}",
-                        e
-                    )
-                    .into());
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "timed out after {:?} waiting for cancellation cleanup",
-            timeout_duration
-        )
-    })?
-}
-
-pub async fn wait_for_transfer_ringing_or_completion_on_events(
-    events: &mut EventReceiver,
-    timeout_duration: Duration,
-) -> ExampleResult<()> {
-    timeout(timeout_duration, async {
-        loop {
-            match events.next().await {
-                Some(Event::TransferAccepted { refer_to, .. }) => {
-                    println!("[transfer] REFER accepted for {}", refer_to);
-                }
-                Some(Event::TransferProgress {
-                    status_code,
-                    reason,
-                    ..
-                }) => {
-                    println!("[transfer] progress: {} {}", status_code, reason);
-                    if status_code == 180 || status_code == 183 {
-                        return Ok(());
+            match handle.media_security().await {
+                Ok(Some(security)) => {
+                    if security.keying != MediaSecurityKeying::Sdes {
+                        return Err(format!("expected SDES keying, got {:?}", security.keying).into());
                     }
-                }
-                Some(Event::TransferCompleted { target, .. }) => {
-                    println!("[transfer] completed to {}", target);
+                    if security.profile != MediaSecurityProfile::RtpSavp {
+                        return Err(format!("expected RTP/SAVP profile, got {:?}", security.profile).into());
+                    }
+                    if !security.contexts_installed {
+                        return Err("SRTP media security exists but contexts_installed=false".into());
+                    }
+                    println!(
+                        "[security] SRTP media security negotiated: keying=SDES suite={} profile=RTP/SAVP contexts_installed={}",
+                        security.suite,
+                        security.contexts_installed
+                    );
                     return Ok(());
                 }
-                Some(Event::TransferFailed {
-                    status_code,
-                    reason,
-                    ..
-                }) => {
-                    return Err(format!("transfer failed: {} {}", status_code, reason).into());
-                }
-                Some(Event::CallEnded { reason, .. }) => {
-                    return Err(format!(
-                        "call ended before transfer ringing/completion was observed: {}",
-                        reason
-                    )
-                    .into());
-                }
-                Some(Event::CallFailed {
-                    status_code,
-                    reason,
-                    ..
-                }) => {
-                    return Err(format!(
-                        "call failed before transfer ringing/completion was observed: {} {}",
-                        status_code, reason
-                    )
-                    .into());
-                }
-                Some(_) => {}
-                None => return Err("event stream closed while waiting for transfer".into()),
+                Ok(None) => sleep(Duration::from_millis(100)).await,
+                Err(e) => return Err(format!("failed to read media security state: {}", e).into()),
             }
         }
     })
     .await
     .map_err(|_| {
         format!(
-            "timed out after {:?} waiting for transfer ringing/completion",
+            "timed out after {:?} waiting for typed SRTP media security",
             timeout_duration
         )
     })?
 }
 
-pub async fn wait_for_transfer_completion_on_events(
+pub async fn wait_for_local_hold_on_events(
     events: &mut EventReceiver,
     timeout_duration: Duration,
 ) -> ExampleResult<()> {
-    timeout(timeout_duration, async {
-        loop {
-            match events.next().await {
-                Some(Event::TransferAccepted { refer_to, .. }) => {
-                    println!("[transfer] REFER accepted for {}", refer_to);
-                }
-                Some(Event::TransferProgress {
-                    status_code,
-                    reason,
-                    ..
-                }) => {
-                    println!("[transfer] progress: {} {}", status_code, reason);
-                }
-                Some(Event::TransferCompleted { target, .. }) => {
-                    println!("[transfer] completed to {}", target);
-                    return Ok(());
-                }
-                Some(Event::TransferFailed {
-                    status_code,
-                    reason,
-                    ..
-                }) => {
-                    return Err(format!("transfer failed: {} {}", status_code, reason).into());
-                }
-                Some(Event::CallEnded { reason, .. }) => {
-                    return Err(format!(
-                        "call ended before transfer completion was observed: {}",
-                        reason
-                    )
-                    .into());
-                }
-                Some(Event::CallFailed {
-                    status_code,
-                    reason,
-                    ..
-                }) => {
-                    return Err(format!(
-                        "call failed before transfer completion was observed: {} {}",
-                        status_code, reason
-                    )
-                    .into());
-                }
-                Some(_) => {}
-                None => return Err("event stream closed while waiting for transfer".into()),
-            }
-        }
+    wait_for_named_event(events, timeout_duration, "CallOnHold", |event| {
+        matches!(event, Event::CallOnHold { .. })
     })
     .await
-    .map_err(|_| {
-        format!(
-            "timed out after {:?} waiting for transfer completion",
-            timeout_duration
-        )
-    })?
+}
+
+pub async fn wait_for_local_resume_on_events(
+    events: &mut EventReceiver,
+    timeout_duration: Duration,
+) -> ExampleResult<()> {
+    wait_for_named_event(events, timeout_duration, "CallResumed", |event| {
+        matches!(event, Event::CallResumed { .. })
+    })
+    .await
 }
 
 pub async fn wait_for_call_ended_on_events(

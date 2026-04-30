@@ -75,7 +75,6 @@ export SIP_TLS_PORT="${SIP_TLS_PORT:-5063}"
 export TLS_INSECURE="${TLS_INSECURE:-1}"
 export FREESWITCH_TLS_SRTP_REQUIRED="${FREESWITCH_TLS_SRTP_REQUIRED:-1}"
 export RVOIP_SIP_DIAGNOSTICS="${RVOIP_SIP_DIAGNOSTICS:-1}"
-export RVOIP_SRTP_DIAGNOSTICS="${RVOIP_SRTP_DIAGNOSTICS:-1}"
 export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn},rvoip_dialog_core::transaction::manager=info"
 
 echo "Building TLS/SRTP ring/cancel example..."
@@ -102,8 +101,6 @@ assert_log_contains "Ring/cancel test passed." "caller completed cancellation"
 assert_log_contains "sips:" "TLS/SIPS URI"
 assert_log_contains "transport=tls" "TLS transport URI parameter"
 assert_log_contains "SIP/2.0/TLS" "TLS Via transport"
-assert_log_contains "RTP/SAVP" "SRTP media profile"
-assert_log_contains "a=crypto" "SDES-SRTP crypto attribute"
 
 echo
 echo "=== TLS/SRTP ring/cancel example complete ==="

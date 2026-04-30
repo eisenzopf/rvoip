@@ -258,14 +258,17 @@ pub use crate::types::CallState;
 // Re-export the unified API
 pub use unified::{
     Config, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode, SipTlsMode,
-    UnifiedCoordinator,
+    SrtpSuitePolicy, UnifiedCoordinator,
 };
 
 // Re-export the simple API (legacy)
 pub use simple::SimplePeer;
 
 // Re-export event types
-pub use events::{CallHandle, CallId, Event, SubscriptionState, TransferKind};
+pub use events::{
+    CallHandle, CallId, Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
+    SubscriptionState, TransferKind,
+};
 
 // Re-export builder
 pub use builder::SessionBuilder;
@@ -282,7 +285,7 @@ pub use crate::errors::{Result, SessionError};
 pub use audio::{AudioReceiver, AudioSender, AudioStream};
 
 // SessionHandle
-pub use handle::SessionHandle;
+pub use handle::{SessionHandle, TransferWaitMode};
 
 // DialogIdentity (used when orchestrating attended transfer from a higher layer)
 pub use types::DialogIdentity;

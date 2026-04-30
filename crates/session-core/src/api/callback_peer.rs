@@ -1068,9 +1068,12 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                 Event::SessionRefreshed { .. }
                 | Event::SessionRefreshFailed { .. }
+                | Event::CallProgress { .. }
                 | Event::CallMuted { .. }
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }
+                | Event::MediaSecurityNegotiated { .. }
+                | Event::TransferNotify { .. }
                 | Event::NetworkError { .. }
                 | Event::AuthenticationRequired { .. } => {}
             }

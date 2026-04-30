@@ -210,6 +210,32 @@ transitions:
       - "CallEstablished"
     description: "Call answered and event published to SimplePeer"
 
+  # UAC receives 200 OK after 183 Session Progress. The dialog is now
+  # confirmed; media may already be running from early media, so StartMediaSession
+  # is idempotent and ACK/BYE semantics must move to Active.
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "Dialog200OK"
+    next_state: "Active"
+    actions:
+      - type: "StoreRemoteSDP"
+      - type: "NegotiateSDPAsUAC"
+      - type: "SendACK"
+      - type: "StartMediaSession"
+      - type: "SwitchToPassThroughOnActive"
+      # RFC 3515 §2.4.5 — transfer-leg final success NOTIFY. No-op for
+      # normal calls; required when the transferred call receives 183 before
+      # final answer.
+      - type: "SendTransferNotifySuccess"
+    conditions:
+      dialog_established: true
+      sdp_negotiated: true
+      media_session_ready: true
+    publish:
+      - "CallEstablished"
+    description: "Call answered after early media and event published to SimplePeer"
+
   # UAS receives incoming call
   - role: "UAS"
     state: "Idle"

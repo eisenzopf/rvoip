@@ -4,6 +4,7 @@
 //! Focuses only on essential media operations and events.
 
 use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
+use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 use crate::state_table::types::SessionId;
@@ -517,6 +518,7 @@ impl MediaAdapter {
             // RFC 4568 SDES: install per-direction contexts before the
             // first wire packet flows.
             if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
+                let suite = pair.suite;
                 self.controller
                     .install_srtp_contexts(&dialog_id, pair.send_ctx, pair.recv_ctx)
                     .await
@@ -526,12 +528,14 @@ impl MediaAdapter {
                 tracing::info!(
                     "🔒 SRTP contexts installed for session {} (suite {:?})",
                     session_id.0,
-                    pair.suite
+                    suite
                 );
+                self.record_media_security_negotiated(session_id, suite, true)
+                    .await;
                 if diagnostics {
                     emit_srtp_diag(format!(
                         "srtp_contexts_installed session={} role=uac suite={:?}",
-                        session_id.0, pair.suite
+                        session_id.0, suite
                     ));
                 }
             }
@@ -657,6 +661,7 @@ impl MediaAdapter {
                 })?;
 
             if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
+                let suite = pair.suite;
                 self.controller
                     .install_srtp_contexts(&dialog_id, pair.send_ctx, pair.recv_ctx)
                     .await
@@ -669,12 +674,14 @@ impl MediaAdapter {
                 tracing::info!(
                     "🔒 SRTP contexts installed for session {} (UAS, suite {:?})",
                     session_id.0,
-                    pair.suite
+                    suite
                 );
+                self.record_media_security_negotiated(session_id, suite, true)
+                    .await;
                 if diagnostics {
                     emit_srtp_diag(format!(
                         "srtp_contexts_installed session={} role=uas suite={:?}",
-                        session_id.0, pair.suite
+                        session_id.0, suite
                     ));
                 }
             }
@@ -809,6 +816,62 @@ impl MediaAdapter {
         // Media flow is already represented by MediaStreamStarted above
 
         Ok((sdp_answer, config))
+    }
+
+    async fn record_media_security_negotiated(
+        &self,
+        session_id: &SessionId,
+        suite: CryptoSuite,
+        contexts_installed: bool,
+    ) {
+        let state = MediaSecurityState {
+            keying: MediaSecurityKeying::Sdes,
+            suite,
+            profile: MediaSecurityProfile::RtpSavp,
+            contexts_installed,
+        };
+
+        match self.store.get_session(session_id).await {
+            Ok(mut session) => {
+                session.media_security = Some(state.clone());
+                if let Err(e) = self.store.update_session(session).await {
+                    tracing::warn!(
+                        "Failed to persist media security state for session {}: {}",
+                        session_id.0,
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Session {} was gone before media security state could be persisted: {}",
+                    session_id.0,
+                    e
+                );
+            }
+        }
+
+        let Some(coordinator) = self.global_coordinator.read().await.clone() else {
+            tracing::debug!(
+                "MediaSecurityNegotiated publish skipped for session {}: no global coordinator yet",
+                session_id.0
+            );
+            return;
+        };
+
+        let api_event = Event::MediaSecurityNegotiated {
+            call_id: session_id.clone(),
+            keying: state.keying,
+            suite: state.suite,
+            profile: state.profile,
+            contexts_installed: state.contexts_installed,
+        };
+        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.publish(wrapped).await {
+                tracing::warn!("Failed to publish MediaSecurityNegotiated event: {}", e);
+            }
+        });
     }
 
     /// Play an audio file to the remote party

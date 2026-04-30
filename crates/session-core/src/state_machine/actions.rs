@@ -1384,6 +1384,16 @@ pub async fn execute_action(
                 }
                 publish_transfer_event(
                     dialog_adapter,
+                    Event::TransferNotify {
+                        call_id: transferor.clone(),
+                        status_code: 180,
+                        reason: "Ringing".to_string(),
+                        subscription_state: None,
+                        body: Some("SIP/2.0 180 Ringing\r\n".to_string()),
+                    },
+                );
+                publish_transfer_event(
+                    dialog_adapter,
                     Event::TransferProgress {
                         call_id: transferor,
                         status_code: 180,
@@ -1413,6 +1423,16 @@ pub async fn execute_action(
                         transferor, e
                     );
                 }
+                publish_transfer_event(
+                    dialog_adapter,
+                    Event::TransferNotify {
+                        call_id: transferor.clone(),
+                        status_code: 200,
+                        reason: "OK".to_string(),
+                        subscription_state: None,
+                        body: Some("SIP/2.0 200 OK\r\n".to_string()),
+                    },
+                );
                 publish_transfer_event(
                     dialog_adapter,
                     Event::TransferCompleted {
@@ -1452,6 +1472,16 @@ pub async fn execute_action(
                         status_code, reason, transferor, e
                     );
                 }
+                publish_transfer_event(
+                    dialog_adapter,
+                    Event::TransferNotify {
+                        call_id: transferor.clone(),
+                        status_code,
+                        reason: reason.clone(),
+                        subscription_state: None,
+                        body: Some(format!("SIP/2.0 {} {}\r\n", status_code, reason)),
+                    },
+                );
                 publish_transfer_event(
                     dialog_adapter,
                     Event::TransferFailed {

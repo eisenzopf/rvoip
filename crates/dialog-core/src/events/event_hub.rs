@@ -373,35 +373,21 @@ impl DialogEventHub {
                                 },
                             ))
                         }
-                        180 | 183 => {
-                            // 180 Ringing / 183 Session Progress (early media)
-                            Some(RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::CallStateChanged {
-                                    session_id,
-                                    new_state: CallState::Ringing,
-                                    reason: None,
-                                },
-                            ))
-                        }
-                        181 | 182 | 199 => {
-                            // Less common provisional responses (RFC 3261 §21.1):
-                            //   181 Call Is Being Forwarded
-                            //   182 Queued
-                            //   199 Early Dialog Terminated
-                            // All three keep the dialog in a Ringing-like state
-                            // from the session layer's POV; attach the reason
-                            // phrase so the application can distinguish them.
-                            let reason = match response.status_code() {
-                                181 => Some("Forwarded".to_string()),
-                                182 => Some("Queued".to_string()),
-                                199 => Some("EarlyDialogTerminated".to_string()),
-                                _ => None,
+                        100..=199 => {
+                            // Preserve the actual provisional response. Session-core
+                            // decides how to map it onto call state while apps can
+                            // observe the response code, reason, and early-media SDP.
+                            let sdp = if !response.body().is_empty() {
+                                String::from_utf8(response.body().to_vec()).ok()
+                            } else {
+                                None
                             };
                             Some(RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::CallStateChanged {
+                                DialogToSessionEvent::CallProgress {
                                     session_id,
-                                    new_state: CallState::Ringing,
-                                    reason,
+                                    status_code: response.status_code(),
+                                    reason_phrase: response.reason_phrase().to_string(),
+                                    sdp,
                                 },
                             ))
                         }
@@ -677,19 +663,45 @@ impl DialogEventHub {
                 }
             }
 
-            // 180 Ringing reached the UAC. Surface it to session-core as a
-            // `CallStateChanged { Ringing }` so the state machine can
-            // transition Initiating → Ringing (which is what the
-            // `UAC/Ringing/HangupCall → CANCEL` path and the public
-            // ringback signals rely on).
+            // 180 Ringing reached the UAC. Surface the exact provisional
+            // status; session-core will also drive the Ringing state change.
             SessionCoordinationEvent::CallRinging { dialog_id } => self
                 .dialog_manager
                 .get_session_id(&dialog_id)
                 .map(|session_id| {
-                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallStateChanged {
+                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallProgress {
                         session_id,
-                        new_state: CallState::Ringing,
-                        reason: Some("180 Ringing".to_string()),
+                        status_code: 180,
+                        reason_phrase: "Ringing".to_string(),
+                        sdp: None,
+                    })
+                }),
+
+            SessionCoordinationEvent::EarlyMedia { dialog_id, sdp } => self
+                .dialog_manager
+                .get_session_id(&dialog_id)
+                .map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallProgress {
+                        session_id,
+                        status_code: 183,
+                        reason_phrase: "Session Progress".to_string(),
+                        sdp: Some(sdp),
+                    })
+                }),
+
+            SessionCoordinationEvent::CallProgress {
+                dialog_id,
+                status_code,
+                reason_phrase,
+            } => self
+                .dialog_manager
+                .get_session_id(&dialog_id)
+                .map(|session_id| {
+                    RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallProgress {
+                        session_id,
+                        status_code,
+                        reason_phrase,
+                        sdp: None,
                     })
                 }),
 

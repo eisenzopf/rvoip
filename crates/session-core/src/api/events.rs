@@ -12,6 +12,7 @@
 
 use crate::errors::Result;
 use crate::state_table::types::SessionId;
+use rvoip_sip_core::types::sdp::CryptoSuite;
 use tokio::sync::mpsc;
 
 /// Type alias for call ID (same as SessionId)
@@ -93,6 +94,33 @@ impl SubscriptionState {
             raw,
         }
     }
+}
+
+/// Media-security keying mechanism negotiated for a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSecurityKeying {
+    /// SDP Security Descriptions (RFC 4568).
+    Sdes,
+}
+
+/// RTP profile negotiated for protected media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSecurityProfile {
+    /// Secure RTP Audio/Video Profile (`RTP/SAVP`).
+    RtpSavp,
+}
+
+/// Current negotiated media-security state for a call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSecurityState {
+    /// Keying mechanism used to derive SRTP contexts.
+    pub keying: MediaSecurityKeying,
+    /// Negotiated SDES crypto suite.
+    pub suite: CryptoSuite,
+    /// RTP profile used by the negotiated media stream.
+    pub profile: MediaSecurityProfile,
+    /// Whether SRTP send/receive contexts have been installed in media-core.
+    pub contexts_installed: bool,
 }
 
 /// Handle for managing a specific call
@@ -219,6 +247,24 @@ pub enum Event {
         sdp: Option<String>,
     },
 
+    /// Provisional call progress response received for an outgoing call.
+    ///
+    /// Emitted for SIP 1xx responses such as `180 Ringing` and
+    /// `183 Session Progress`. The state machine still maintains
+    /// `CallState::Ringing` / `CallState::EarlyMedia`, but applications can
+    /// observe the actual response code, phrase, and early-media SDP here
+    /// without polling state.
+    CallProgress {
+        /// Session identifier for the call.
+        call_id: CallId,
+        /// SIP provisional status code.
+        status_code: u16,
+        /// SIP reason phrase.
+        reason: String,
+        /// SDP body carried by the provisional response, if present.
+        sdp: Option<String>,
+    },
+
     /// Call ended (BYE sent/received)
     CallEnded {
         /// Session identifier for the ended call.
@@ -308,7 +354,12 @@ pub enum Event {
         refer_to: String,
     },
 
-    /// Transfer completed successfully
+    /// Terminal successful REFER NOTIFY received.
+    ///
+    /// This means the REFER subscription reported a final 2xx sipfrag. It is
+    /// not, by itself, proof that a transferred target leg has answered; use
+    /// the explicit transfer wait modes on `SessionHandle` when target-leg
+    /// evidence matters.
     TransferCompleted {
         /// Original session being transferred.
         old_call_id: CallId,
@@ -336,6 +387,24 @@ pub enum Event {
         status_code: u16,
         /// Reason phrase from the progress NOTIFY sipfrag.
         reason: String,
+    },
+
+    /// Parsed REFER NOTIFY status surfaced before derived transfer events.
+    ///
+    /// This preserves the PBX-specific REFER subscription report so
+    /// applications can distinguish an immediate terminal NOTIFY from real
+    /// target progress.
+    TransferNotify {
+        /// Session identifier for the REFER subscription/dialog.
+        call_id: CallId,
+        /// SIP status code parsed from the `message/sipfrag` body.
+        status_code: u16,
+        /// Reason phrase parsed from the `message/sipfrag` body.
+        reason: String,
+        /// Parsed `Subscription-State`, if the NOTIFY carried one.
+        subscription_state: Option<SubscriptionState>,
+        /// Raw NOTIFY body, if any.
+        body: Option<String>,
     },
 
     // ===== Subscription / NOTIFY =====
@@ -420,6 +489,20 @@ pub enum Event {
         jitter_ms: u32,
     },
 
+    /// SRTP media security was negotiated and installed.
+    MediaSecurityNegotiated {
+        /// Session identifier for the protected media stream.
+        call_id: CallId,
+        /// Keying mechanism used to derive SRTP contexts.
+        keying: MediaSecurityKeying,
+        /// Negotiated SDES crypto suite.
+        suite: CryptoSuite,
+        /// RTP profile used by the negotiated media stream.
+        profile: MediaSecurityProfile,
+        /// Whether SRTP send/receive contexts have been installed in media-core.
+        contexts_installed: bool,
+    },
+
     // ===== Registration Events =====
     /// Registration successful.
     ///
@@ -489,6 +572,7 @@ impl Event {
         match self {
             Event::IncomingCall { call_id, .. }
             | Event::CallAnswered { call_id, .. }
+            | Event::CallProgress { call_id, .. }
             | Event::CallEnded { call_id, .. }
             | Event::CallFailed { call_id, .. }
             | Event::CallCancelled { call_id, .. }
@@ -499,6 +583,7 @@ impl Event {
             | Event::TransferAccepted { call_id, .. }
             | Event::TransferFailed { call_id, .. }
             | Event::TransferProgress { call_id, .. }
+            | Event::TransferNotify { call_id, .. }
             | Event::CallOnHold { call_id, .. }
             | Event::CallResumed { call_id, .. }
             | Event::RemoteCallOnHold { call_id, .. }
@@ -507,6 +592,7 @@ impl Event {
             | Event::CallUnmuted { call_id, .. }
             | Event::DtmfReceived { call_id, .. }
             | Event::MediaQualityChanged { call_id, .. }
+            | Event::MediaSecurityNegotiated { call_id, .. }
             | Event::NotifyReceived { call_id, .. }
             | Event::AuthenticationRequired { call_id, .. } => Some(call_id),
             Event::TransferCompleted { old_call_id, .. } => Some(old_call_id),
@@ -525,6 +611,7 @@ impl Event {
             self,
             Event::IncomingCall { .. }
                 | Event::CallAnswered { .. }
+                | Event::CallProgress { .. }
                 | Event::CallEnded { .. }
                 | Event::CallFailed { .. }
                 | Event::CallCancelled { .. }
@@ -553,6 +640,7 @@ impl Event {
                 | Event::TransferCompleted { .. }
                 | Event::TransferFailed { .. }
                 | Event::TransferProgress { .. }
+                | Event::TransferNotify { .. }
         )
     }
 
@@ -560,7 +648,9 @@ impl Event {
     pub fn is_media_event(&self) -> bool {
         matches!(
             self,
-            Event::DtmfReceived { .. } | Event::MediaQualityChanged { .. }
+            Event::DtmfReceived { .. }
+                | Event::MediaQualityChanged { .. }
+                | Event::MediaSecurityNegotiated { .. }
         )
     }
 
@@ -585,6 +675,10 @@ impl Event {
                 subscription_state: Some(raw),
                 ..
             } => Some(SubscriptionState::parse(raw.clone())),
+            Event::TransferNotify {
+                subscription_state: Some(parsed),
+                ..
+            } => Some(parsed.clone()),
             _ => None,
         }
     }

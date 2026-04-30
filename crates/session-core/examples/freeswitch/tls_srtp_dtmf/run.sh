@@ -76,7 +76,6 @@ export SIP_TLS_PORT="${SIP_TLS_PORT:-5063}"
 export TLS_INSECURE="${TLS_INSECURE:-1}"
 export FREESWITCH_TLS_SRTP_REQUIRED="${FREESWITCH_TLS_SRTP_REQUIRED:-1}"
 export RVOIP_SIP_DIAGNOSTICS="${RVOIP_SIP_DIAGNOSTICS:-1}"
-export RVOIP_SRTP_DIAGNOSTICS="${RVOIP_SRTP_DIAGNOSTICS:-1}"
 export RUST_LOG="${RUST_LOG:-info,rvoip_dialog_core=warn},rvoip_dialog_core::transaction::manager=info"
 
 echo "Building TLS/SRTP DTMF examples..."
@@ -103,10 +102,11 @@ AUDIO_OUTPUT_DIR="$OUT_DIR" cargo run -p rvoip-session-core --features dev-insec
 assert_log_contains "sips:" "TLS/SIPS URI"
 assert_log_contains "transport=tls" "TLS transport URI parameter"
 assert_log_contains "SIP/2.0/TLS" "TLS Via transport"
-assert_log_contains "RTP/SAVP" "SRTP media profile"
-assert_log_contains "a=crypto" "SDES-SRTP crypto attribute"
-assert_log_contains "SRTP_DIAG sdes_" "negotiated SRTP suite diagnostics"
-assert_log_contains "SRTP_DIAG srtp_contexts_installed" "installed SRTP contexts"
+assert_log_contains "SRTP media security negotiated" "typed negotiated SRTP media security"
+assert_log_contains "keying=SDES" "typed SDES-SRTP keying"
+assert_log_contains "profile=RTP/SAVP" "typed SRTP media profile"
+assert_log_contains "suite=" "typed negotiated SRTP suite"
+assert_log_contains "contexts_installed=true" "typed installed SRTP contexts"
 if grep -R -q "proceeding plaintext" "$OUT_DIR"; then
   echo "[VERIFY] plaintext RTP fallback was logged despite mandatory SRTP"
   exit 1

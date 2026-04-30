@@ -8,10 +8,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::{
-    endpoint_config, init_tracing, load_env, post_register_settle_duration, register_endpoint,
-    save_wav, send_tone_segment, ExampleResult,
+    assert_srtp_media_security, endpoint_config, init_tracing, load_env,
+    post_register_settle_duration, register_endpoint, save_wav, send_tone_segment,
+    wait_for_local_hold_on_events, wait_for_local_resume_on_events, ExampleResult,
 };
-use rvoip_session_core::{SessionHandle, StreamPeer};
+use rvoip_session_core::StreamPeer;
 use tokio::time::sleep;
 
 const PRE_HOLD_TONE_HZ: f32 = 440.0;
@@ -46,6 +47,8 @@ async fn main() -> ExampleResult<()> {
     let handle = peer.call(&target).await?;
     peer.wait_for_answered(handle.id()).await?;
     println!("[1001] Call established over TLS with mandatory SRTP.");
+    assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
+    let mut call_events = handle.events().await?;
 
     let audio = handle.audio().await?;
     let (sender, mut receiver) = audio.split();
@@ -71,7 +74,7 @@ async fn main() -> ExampleResult<()> {
 
     println!("[1001] Putting call on hold...");
     handle.hold().await?;
-    wait_for_hold_state(&handle).await?;
+    wait_for_local_hold_on_events(&mut call_events, Duration::from_secs(8)).await?;
     println!("[1001] On hold: {}", handle.is_on_hold().await);
 
     println!(
@@ -89,7 +92,7 @@ async fn main() -> ExampleResult<()> {
 
     println!("[1001] Resuming call...");
     handle.resume().await?;
-    wait_for_active_state(&handle).await?;
+    wait_for_local_resume_on_events(&mut call_events, Duration::from_secs(8)).await?;
     println!("[1001] Active again: {}", handle.is_active().await);
 
     println!(
@@ -131,24 +134,4 @@ async fn main() -> ExampleResult<()> {
     peer.unregister(&registration).await.ok();
     println!("[1001] Done.");
     Ok(())
-}
-
-async fn wait_for_hold_state(handle: &SessionHandle) -> ExampleResult<()> {
-    for _ in 0..30 {
-        if handle.is_on_hold().await {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(200)).await;
-    }
-    Err("call did not reach OnHold within 6s".into())
-}
-
-async fn wait_for_active_state(handle: &SessionHandle) -> ExampleResult<()> {
-    for _ in 0..30 {
-        if handle.is_active().await {
-            return Ok(());
-        }
-        sleep(Duration::from_millis(200)).await;
-    }
-    Err("call did not return to Active within 6s".into())
 }

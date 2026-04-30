@@ -8,10 +8,9 @@ mod common;
 
 use common::{
     call_with_answer_retry, endpoint_config, env_duration_secs, init_tracing, load_env,
-    post_register_settle_duration, register_endpoint, remote_test_timeout,
-    wait_for_transfer_completion_on_events, ExampleResult,
+    post_register_settle_duration, register_endpoint, remote_test_timeout, ExampleResult,
 };
-use rvoip_session_core::StreamPeer;
+use rvoip_session_core::{StreamPeer, TransferWaitMode};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -49,9 +48,17 @@ async fn main() -> ExampleResult<()> {
         sleep(transfer_settle).await;
     }
 
-    let mut events = handle.events().await?;
-    handle.transfer_blind(&transfer_target).await?;
-    wait_for_transfer_completion_on_events(&mut events, remote_test_timeout()?).await?;
+    let transfer_event = handle
+        .transfer_blind_and_wait_for(
+            &transfer_target,
+            TransferWaitMode::NotifyFinal,
+            Some(remote_test_timeout()?),
+        )
+        .await?;
+    println!(
+        "[2001] Terminal REFER NOTIFY observed: {:?}",
+        transfer_event
+    );
     handle
         .wait_for_end(Some(std::time::Duration::from_secs(8)))
         .await

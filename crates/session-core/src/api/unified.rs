@@ -59,6 +59,7 @@ use crate::types::{IncomingCallInfo, SessionInfo};
 // Callback system removed - using event-driven approach
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_media_core::types::AudioFrame;
+use rvoip_sip_core::types::sdp::CryptoSuite;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -110,6 +111,35 @@ pub enum SipContactMode {
 impl Default for SipContactMode {
     fn default() -> Self {
         Self::ReachableContact
+    }
+}
+
+/// Named SRTP suite offer policies for common PBX/carrier interop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SrtpSuitePolicy {
+    /// Conservative default: AES-128 CM suites, strongest auth tag first.
+    Default,
+    /// FreeSWITCH-compatible SDES policy: offer AES-256 CM and AES-128 CM
+    /// suites in a deliberate preference order while avoiding AEAD-GCM until
+    /// rtp-core supports it end to end.
+    FreeSwitchCompatible,
+}
+
+impl SrtpSuitePolicy {
+    /// Suites to advertise for this policy, in local preference order.
+    pub fn suites(self) -> Vec<CryptoSuite> {
+        match self {
+            Self::Default => vec![
+                CryptoSuite::AesCm128HmacSha1_80,
+                CryptoSuite::AesCm128HmacSha1_32,
+            ],
+            Self::FreeSwitchCompatible => vec![
+                CryptoSuite::AesCm256HmacSha1_80,
+                CryptoSuite::AesCm128HmacSha1_80,
+                CryptoSuite::AesCm256HmacSha1_32,
+                CryptoSuite::AesCm128HmacSha1_32,
+            ],
+        }
     }
 }
 
@@ -406,7 +436,7 @@ pub struct Config {
     /// `_32` (smaller auth tag for bandwidth-conscious carriers).
     /// Modify when a specific carrier requires a non-default
     /// preference.
-    pub srtp_offered_suites: Vec<rvoip_sip_core::types::sdp::CryptoSuite>,
+    pub srtp_offered_suites: Vec<CryptoSuite>,
 
     /// Override the RTP-side public address advertised in SDP `c=` /
     /// `o=` and `m=audio <port>` lines. Use when:
@@ -519,10 +549,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
-            srtp_offered_suites: vec![
-                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80,
-                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_32,
-            ],
+            srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             stun_server: None,
             comfort_noise_enabled: false,
@@ -575,10 +602,7 @@ impl Config {
             tls_insecure_skip_verify: false,
             offer_srtp: false,
             srtp_required: false,
-            srtp_offered_suites: vec![
-                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_80,
-                rvoip_sip_core::types::sdp::CryptoSuite::AesCm128HmacSha1_32,
-            ],
+            srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             stun_server: None,
             comfort_noise_enabled: false,
@@ -664,6 +688,45 @@ impl Config {
         config
     }
 
+    /// Deployment profile for FreeSWITCH TLS + mandatory SDES-SRTP with a
+    /// directly reachable TLS Contact.
+    ///
+    /// The profile enables SIP TLS listener mode, mandatory SRTP, strict codec
+    /// matching, and the FreeSWITCH-compatible SDES suite policy. It does not
+    /// pin a single crypto suite; SDP offer/answer decides the negotiated
+    /// suite.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::Config;
+    /// let udp_bind = "0.0.0.0:5060".parse().unwrap();
+    /// let tls_bind = "0.0.0.0:5061".parse().unwrap();
+    /// let config = Config::freeswitch_tls_srtp_reachable_contact(
+    ///     "alice",
+    ///     udp_bind,
+    ///     tls_bind,
+    ///     "cert.pem",
+    ///     "key.pem",
+    /// );
+    /// assert!(config.offer_srtp);
+    /// assert!(config.srtp_required);
+    /// ```
+    pub fn freeswitch_tls_srtp_reachable_contact(
+        name: &str,
+        bind_addr: SocketAddr,
+        tls_bind_addr: SocketAddr,
+        cert_path: impl Into<std::path::PathBuf>,
+        key_path: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let mut config = Self::freeswitch_internal(name, bind_addr)
+            .tls_reachable_contact(tls_bind_addr, cert_path, key_path)
+            .with_srtp_suite_policy(SrtpSuitePolicy::FreeSwitchCompatible);
+        config.offer_srtp = true;
+        config.srtp_required = true;
+        config
+    }
+
     /// Deployment profile for carrier/SBC style outbound proxy operation.
     ///
     /// This is a conservative starting point: TLS client mode, registered-flow
@@ -735,6 +798,25 @@ impl Config {
         let mut config = Self::lan_pbx(name, bind_addr, advertised_addr);
         config.outbound_proxy_uri = Some(outbound_proxy_uri.into());
         config
+    }
+
+    /// Replace the SDES-SRTP offer suite list with a named policy.
+    ///
+    /// This only changes the advertised suite order/list. Callers still choose
+    /// whether SRTP is offered or mandatory with [`Config::offer_srtp`] and
+    /// [`Config::srtp_required`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use rvoip_session_core::{Config, SrtpSuitePolicy};
+    /// let config = Config::local("alice", 5060)
+    ///     .with_srtp_suite_policy(SrtpSuitePolicy::FreeSwitchCompatible);
+    /// assert_eq!(config.srtp_offered_suites.len(), 4);
+    /// ```
+    pub fn with_srtp_suite_policy(mut self, policy: SrtpSuitePolicy) -> Self {
+        self.srtp_offered_suites = policy.suites();
+        self
     }
 
     /// Configure SIP TLS as a directly reachable Contact listener.

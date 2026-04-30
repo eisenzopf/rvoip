@@ -155,6 +155,28 @@ fn uac_initiating_200_fires_transfer_notify_success() {
 }
 
 #[test]
+fn uac_early_media_200_fires_transfer_notify_success() {
+    let table = load_default();
+    let key = StateKey {
+        role: Role::UAC,
+        state: CallState::EarlyMedia,
+        event: EventType::Dialog200OK,
+    };
+    let actions = actions_at(&table, &key);
+    assert_contains(
+        &actions,
+        &Action::SendTransferNotifySuccess,
+        "UAC/EarlyMedia/Dialog200OK",
+    );
+    assert_ordered(
+        &actions,
+        &Action::SendACK,
+        &Action::SendTransferNotifySuccess,
+        "UAC/EarlyMedia/Dialog200OK ordering",
+    );
+}
+
+#[test]
 fn transfer_notify_actions_do_not_change_next_state() {
     // Non-transfer calls must be unaffected by the newly-appended actions:
     // the `Dialog180Ringing → Ringing` and `Dialog200OK → Active` target
@@ -168,6 +190,14 @@ fn transfer_notify_actions_do_not_change_next_state() {
                 event: EventType::Dialog180Ringing,
             },
             CallState::Ringing,
+        ),
+        (
+            StateKey {
+                role: Role::UAC,
+                state: CallState::EarlyMedia,
+                event: EventType::Dialog200OK,
+            },
+            CallState::Active,
         ),
         (
             StateKey {

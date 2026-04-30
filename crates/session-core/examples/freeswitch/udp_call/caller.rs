@@ -2,8 +2,8 @@
 mod common;
 
 use common::{
-    call_with_answer_retry, endpoint_config, init_tracing, load_env,
-    post_register_settle_duration, register_endpoint, ExampleResult,
+    call_with_answer_retry, endpoint_config, init_tracing, load_env, post_register_settle_duration,
+    register_endpoint, ExampleResult,
 };
 use rvoip_session_core::StreamPeer;
 use tokio::time::{sleep, Duration};
@@ -28,10 +28,13 @@ async fn main() -> ExampleResult<()> {
 
     let target = cfg.outbound_call_uri("2002");
     println!("[2001] Calling {} for basic UDP call test.", target);
-    let answered = call_with_answer_retry(&mut peer, &target, common::remote_test_timeout()?).await?;
+    let answered =
+        call_with_answer_retry(&mut peer, &target, common::remote_test_timeout()?).await?;
 
     sleep(Duration::from_secs(2)).await;
-    answered.hangup_and_wait(Some(Duration::from_secs(8))).await?;
+    answered
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await?;
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

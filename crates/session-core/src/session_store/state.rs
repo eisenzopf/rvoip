@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use super::history::{HistoryConfig, SessionHistory, TransitionRecord};
+use crate::api::events::MediaSecurityState;
 use crate::state_table::{ConditionUpdates, Role};
 use crate::types::{CallState, MediaDirection};
 
@@ -60,6 +61,8 @@ pub struct SessionState {
     pub local_sdp: Option<String>,
     pub remote_sdp: Option<String>,
     pub negotiated_config: Option<NegotiatedConfig>,
+    /// Negotiated media security, populated after SRTP contexts install.
+    pub media_security: Option<MediaSecurityState>,
     /// Stable numeric SDP origin session id used in the `o=` line for
     /// every local offer/answer on this session.
     pub sdp_origin_session_id: String,
@@ -210,6 +213,7 @@ impl SessionState {
             local_sdp: None,
             remote_sdp: None,
             negotiated_config: None,
+            media_security: None,
             sdp_origin_session_id,
             sdp_origin_version: 0,
             local_media_direction: MediaDirection::SendRecv,

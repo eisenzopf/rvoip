@@ -104,6 +104,20 @@ impl SessionCrossCrateEventHandler {
                 self.handle_call_state_changed_parts(SessionId(session_id.clone()), new_state)
                     .await
             }
+            DialogToSessionEvent::CallProgress {
+                session_id,
+                status_code,
+                reason_phrase,
+                sdp,
+            } => {
+                self.handle_call_progress_parts(
+                    SessionId(session_id.clone()),
+                    *status_code,
+                    reason_phrase.clone(),
+                    sdp.clone(),
+                )
+                .await
+            }
             DialogToSessionEvent::CallEstablished {
                 session_id,
                 sdp_answer,
@@ -2302,13 +2316,8 @@ impl SessionCrossCrateEventHandler {
                 return Ok(());
             }
             if event_str.contains("Ringing") {
-                if let Err(e) = self
-                    .state_machine
-                    .process_event(&sid, EventType::Dialog180Ringing)
-                    .await
-                {
-                    error!("Failed to process Dialog180Ringing: {}", e);
-                }
+                self.handle_call_progress_parts(sid, 180, "Ringing".to_string(), None)
+                    .await?;
             } else if event_str.contains("Terminated") {
                 if let Err(e) = self
                     .state_machine
@@ -2319,6 +2328,51 @@ impl SessionCrossCrateEventHandler {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn handle_call_progress_parts(
+        &self,
+        sid: SessionId,
+        status_code: u16,
+        reason: String,
+        sdp: Option<String>,
+    ) -> Result<()> {
+        if !self.is_our_session(&sid).await {
+            debug!(
+                "Ignoring CallProgress for session {} - not in our store",
+                sid
+            );
+            return Ok(());
+        }
+
+        if let Some(ref sdp_body) = sdp {
+            if let Ok(mut session) = self.state_machine.store.get_session(&sid).await {
+                session.remote_sdp = Some(sdp_body.clone());
+                let _ = self.state_machine.store.update_session(session).await;
+            }
+        }
+
+        let state_event = match status_code {
+            183 if sdp.is_some() => Some(EventType::Dialog183SessionProgress),
+            101..=199 => Some(EventType::Dialog180Ringing),
+            _ => None,
+        };
+
+        if let Some(event_type) = state_event {
+            if let Err(e) = self.state_machine.process_event(&sid, event_type).await {
+                error!("Failed to process CallProgress for {}: {}", sid, e);
+            }
+        }
+
+        let api_event = crate::api::events::Event::CallProgress {
+            call_id: sid,
+            status_code,
+            reason,
+            sdp,
+        };
+        publish_api_event(&self.global_coordinator, api_event);
+
         Ok(())
     }
 
@@ -2337,7 +2391,9 @@ impl SessionCrossCrateEventHandler {
 
         let event_type = match new_state {
             rvoip_infra_common::events::cross_crate::CallState::Ringing => {
-                Some(EventType::Dialog180Ringing)
+                return self
+                    .handle_call_progress_parts(sid, 180, "Ringing".to_string(), None)
+                    .await;
             }
             rvoip_infra_common::events::cross_crate::CallState::Terminated => {
                 Some(EventType::DialogBYE)
@@ -3339,6 +3395,18 @@ impl SessionCrossCrateEventHandler {
             if is_sipfrag {
                 if let Some(body) = body {
                     if let Some((status_code, reason)) = parse_sipfrag_status_line(&body) {
+                        publish_api_event(
+                            &self.global_coordinator,
+                            crate::api::events::Event::TransferNotify {
+                                call_id: session_id.clone(),
+                                status_code,
+                                reason: reason.clone(),
+                                subscription_state: subscription_state
+                                    .clone()
+                                    .map(crate::api::events::SubscriptionState::parse),
+                                body: Some(body.clone()),
+                            },
+                        );
                         let transfer_target = self
                             .state_machine
                             .store

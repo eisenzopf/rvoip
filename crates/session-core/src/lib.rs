@@ -182,18 +182,21 @@ pub use api::handlers::{
 
 // Call control
 pub use api::audio::{AudioReceiver, AudioSender, AudioStream};
-pub use api::handle::{CallId, SessionHandle};
+pub use api::handle::{CallId, SessionHandle, TransferWaitMode};
 pub use api::incoming::{IncomingCall, IncomingCallGuard};
 
 // Configuration & registration
 pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
 pub use api::{
     Config, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode, SipTlsMode,
-    UnifiedCoordinator,
+    SrtpSuitePolicy, UnifiedCoordinator,
 };
 
 // Events
-pub use api::events::{Event, SubscriptionState, TransferKind};
+pub use api::events::{
+    Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, SubscriptionState,
+    TransferKind,
+};
 
 // Errors
 pub use errors::{Result, SessionError};
@@ -213,9 +216,11 @@ pub mod prelude {
     pub use crate::{
         AudioReceiver, AudioSender, AudioStream, CallHandler, CallHandlerDecision, CallId,
         CallState, CallbackPeer, CallbackPeerControl, Config, EndReason, Event, EventReceiver,
-        IncomingCall, IncomingCallGuard, PeerControl, Registration, RegistrationHandle,
-        RegistrationInfo, RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode,
-        SipTlsMode, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferKind,
+        IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
+        MediaSecurityState, PeerControl, Registration, RegistrationHandle, RegistrationInfo,
+        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipTlsMode,
+        SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferKind,
+        TransferWaitMode,
     };
 }
 

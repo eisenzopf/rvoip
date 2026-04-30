@@ -4,9 +4,9 @@
 mod common;
 
 use common::{
-    call_with_answer_retry, endpoint_config, init_tracing, load_env, post_register_settle_duration,
-    register_endpoint, remote_test_digits, remote_test_timeout, start_tone_recorder, ExampleResult,
-    ENDPOINT_1001_TONE_HZ,
+    assert_srtp_media_security, call_with_answer_retry, endpoint_config, init_tracing, load_env,
+    post_register_settle_duration, register_endpoint, remote_test_digits, remote_test_timeout,
+    start_tone_recorder, ExampleResult, ENDPOINT_1001_TONE_HZ,
 };
 use rvoip_session_core::StreamPeer;
 use tokio::time::{sleep, Duration};
@@ -33,6 +33,7 @@ async fn main() -> ExampleResult<()> {
     let digits = remote_test_digits();
     println!("[1001] Calling {} for DTMF test.", target);
     let handle = call_with_answer_retry(&mut peer, &target, remote_test_timeout()?).await?;
+    assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
     println!(
         "[1001] Connected; sending DTMF digits {}.",
         digits.iter().collect::<String>()
