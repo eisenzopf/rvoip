@@ -494,17 +494,21 @@ pub async fn wait_for_call_failed(
 
 pub async fn wait_for_cancelled(
     events: &mut mpsc::UnboundedReceiver<CallbackEvent>,
+    call_id: Option<&CallId>,
     timeout_duration: Duration,
 ) -> ExampleResult<()> {
     timeout(timeout_duration, async {
         loop {
             match events.recv().await {
-                Some(CallbackEvent::Cancelled { .. }) => return Ok(()),
+                Some(CallbackEvent::Cancelled {
+                    call_id: cancelled_id,
+                }) if call_id.is_none_or(|expected| expected == &cancelled_id) => return Ok(()),
                 Some(CallbackEvent::Failed {
+                    call_id: failed_id,
                     status_code,
                     reason,
                     ..
-                }) => {
+                }) if call_id.is_none_or(|expected| expected == &failed_id) => {
                     return Err(format!(
                         "call failed while waiting for cancellation: {} {}",
                         status_code, reason

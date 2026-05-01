@@ -11,7 +11,7 @@ use common::{
     post_register_settle_duration, register_endpoint, remote_test_timeout, start_tone_recorder,
     ExampleResult, ENDPOINT_1001_TONE_HZ,
 };
-use rvoip_session_core::{StreamPeer, TransferWaitMode};
+use rvoip_session_core::{StreamPeer, TransferOutcome, TransferWaitMode};
 use tokio::time::{sleep, Duration};
 
 #[tokio::main]
@@ -48,17 +48,29 @@ async fn main() -> ExampleResult<()> {
     );
     sleep(Duration::from_secs(3)).await;
 
-    let transfer_event = handle
-        .transfer_blind_and_wait_for(
+    let transfer_outcome = handle
+        .transfer_blind_and_wait_for_outcome(
             &transfer_target,
-            TransferWaitMode::TargetAnswered,
+            TransferWaitMode::NotifyFinal,
             Some(remote_test_timeout()?),
         )
         .await?;
-    println!(
-        "[1001] Transfer target answered with Asterisk progress evidence: {:?}",
-        transfer_event
-    );
+    match transfer_outcome {
+        TransferOutcome::ReferCompleted {
+            status_code,
+            reason,
+            ..
+        } => println!(
+            "[1001] REFER completed with final NOTIFY: {} {}",
+            status_code, reason
+        ),
+        TransferOutcome::Failed {
+            status_code,
+            reason,
+            ..
+        } => return Err(format!("REFER failed: {} {}", status_code, reason).into()),
+        other => return Err(format!("unexpected transfer outcome: {:?}", other).into()),
+    }
     handle
         .hangup_and_wait(Some(Duration::from_secs(8)))
         .await

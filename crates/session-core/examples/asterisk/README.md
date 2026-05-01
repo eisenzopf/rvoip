@@ -53,6 +53,35 @@ The current default verifies caller-side hold/resume plus audio continuity.
 Set `ASTERISK_EXPECT_REMOTE_HOLD_EVENTS=1` only when the Asterisk profile is
 expected to forward hold/resume target-refreshes to the callee.
 
+## Recommended API Style
+
+These StreamPeer examples intentionally use the handle-first session-core style:
+
+```rust
+let call = peer.call("sip:2002@192.168.1.103:5060").await?;
+call.wait_for_progress(|event| matches!(event, Event::CallProgress { status_code: 180 | 183, .. }), Some(timeout)).await?;
+let call = call.wait_for_answered(Some(timeout)).await?;
+let security = call.wait_for_media_security(Some(timeout)).await?;
+call.hangup_and_wait(Some(timeout)).await?;
+```
+
+`StreamPeer` owns endpoint lifecycle, registration, and incoming-call delivery.
+`SessionHandle` owns per-call progress, answer, SRTP, transfer, audio, and
+teardown waits. Ring/cancel target examples defer with `IncomingCallGuard` and
+call `wait_for_cancelled(...)`; some Asterisk profiles complete cancellation
+server-side without forwarding a target-side CANCEL, so the caller-side
+progress/cancel assertion remains the required release gate.
+
+Blind transfer examples use
+`transfer_blind_and_wait_for_outcome(..., TransferWaitMode::NotifyFinal, ...)`.
+`NotifyFinal` means the final RFC 3515 REFER NOTIFY was received; it does not
+claim replacement-call lifecycle proof. The examples separately validate the
+transferred media path where applicable.
+
+The examples stay on public session-core surfaces: `StreamPeer`,
+`IncomingCallGuard`, `SessionHandle`, typed `Event`, and typed
+`TransferOutcome`. Lower SIP dialog internals are not used directly.
+
 ## Extended Multi-Endpoint Tests
 
 Extended tests use additional rvoip-controlled endpoints `1003` for TLS/SRTP

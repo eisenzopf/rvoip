@@ -22,7 +22,10 @@ TLS/SRTP requirements:
 ## Callback API Surfaces Exercised
 
 The examples use `CallbackPeer`, `CallbackPeerControl`, `CallHandler`, and
-`SessionHandle`. They intentionally do not use `StreamPeer`.
+`SessionHandle`. They intentionally do not use `StreamPeer` or lower SIP
+dialog internals. Callback hooks are the developer-facing observation path;
+the internal event queue in these examples exists only so the runner can assert
+that each hook fired.
 
 This suite is the CallbackPeer parity gate for the StreamPeer Asterisk suite:
 registration, answered calls, reject, hold/resume, ring/cancel, DTMF, blind
@@ -44,9 +47,15 @@ The suite validates these callback hooks:
 | `on_media_security_negotiated` | TLS/SRTP scenarios; typed SDES suite/profile/context state without key material |
 | `on_transfer_accepted`, `on_refer_progress`, `on_refer_completed`, `on_transfer_failed` | blind transfer tests |
 
-The examples stay on the session-core public surfaces: `CallbackPeer`,
-`CallbackPeerControl`, `SessionHandle`, and typed callback events. Lower SIP
-dialog internals are not used directly.
+Commands issued from callbacks or scenario code still use handle-first APIs:
+`SessionHandle::wait_for_media_security`, `hangup_and_wait`, and
+`transfer_blind_and_wait_for_outcome`. Answer/progress observation stays
+callback-native through `on_call_established` and `on_call_progress`.
+
+Blind transfer scenarios wait for
+`transfer_blind_and_wait_for_outcome(..., TransferWaitMode::NotifyFinal, ...)`
+and validate `TransferOutcome::ReferCompleted`. `NotifyFinal` is REFER
+subscription completion evidence, not proof of replacement-call lifecycle.
 
 ## Audio Verification
 

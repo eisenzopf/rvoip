@@ -11,8 +11,7 @@ use std::time::Duration;
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::{
     api::unified::RegistrationHandle, types::Credentials, AudioSender, Config, Event,
-    EventReceiver, MediaSecurityKeying, MediaSecurityProfile, Registration, SessionHandle,
-    SipContactMode, StreamPeer,
+    EventReceiver, Registration, SessionHandle, SipContactMode, StreamPeer,
 };
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
@@ -768,38 +767,24 @@ pub async fn assert_srtp_media_security(
     handle: &SessionHandle,
     timeout_duration: Duration,
 ) -> ExampleResult<()> {
-    timeout(timeout_duration, async {
-        loop {
-            match handle.media_security().await {
-                Ok(Some(security)) => {
-                    if security.keying != MediaSecurityKeying::Sdes {
-                        return Err(format!("expected SDES keying, got {:?}", security.keying).into());
-                    }
-                    if security.profile != MediaSecurityProfile::RtpSavp {
-                        return Err(format!("expected RTP/SAVP profile, got {:?}", security.profile).into());
-                    }
-                    if !security.contexts_installed {
-                        return Err("SRTP media security exists but contexts_installed=false".into());
-                    }
-                    println!(
-                        "[security] SRTP media security negotiated: keying=SDES suite={} profile=RTP/SAVP contexts_installed={}",
-                        security.suite,
-                        security.contexts_installed
-                    );
-                    return Ok(());
-                }
-                Ok(None) => sleep(Duration::from_millis(100)).await,
-                Err(e) => return Err(format!("failed to read media security state: {}", e).into()),
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "timed out after {:?} waiting for typed SRTP media security",
-            timeout_duration
-        )
-    })?
+    let security = handle
+        .wait_for_media_security(Some(timeout_duration))
+        .await?;
+    if security.keying != rvoip_session_core::MediaSecurityKeying::Sdes {
+        return Err(format!("expected SDES keying, got {:?}", security.keying).into());
+    }
+    if security.profile != rvoip_session_core::MediaSecurityProfile::RtpSavp {
+        return Err(format!("expected RTP/SAVP profile, got {:?}", security.profile).into());
+    }
+    if !security.contexts_installed {
+        return Err("SRTP media security exists but contexts_installed=false".into());
+    }
+    println!(
+        "[security] SRTP media security negotiated: keying=SDES suite={} profile=RTP/SAVP contexts_installed={}",
+        security.suite,
+        security.contexts_installed
+    );
+    Ok(())
 }
 
 pub async fn wait_for_local_hold_on_events(

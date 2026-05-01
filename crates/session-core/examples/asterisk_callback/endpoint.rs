@@ -15,7 +15,7 @@ use common::{
     wait_for_remote_hold_resume, CallbackEvent, ExampleResult, IncomingMode, ENDPOINT_1001_TONE_HZ,
     ENDPOINT_1002_TONE_HZ, ENDPOINT_1003_TONE_HZ, ENDPOINT_2002_TONE_HZ,
 };
-use rvoip_session_core::TransferWaitMode;
+use rvoip_session_core::{TransferOutcome, TransferWaitMode};
 use tokio::time::sleep;
 
 const PRE_HOLD_TONE_HZ: f32 = ENDPOINT_1001_TONE_HZ;
@@ -209,7 +209,12 @@ async fn run_ring_caller(
     handle
         .hangup_and_wait(Some(Duration::from_secs(12)))
         .await?;
-    wait_for_cancelled(&mut runtime.events, Duration::from_secs(12)).await?;
+    wait_for_cancelled(
+        &mut runtime.events,
+        Some(handle.id()),
+        Duration::from_secs(12),
+    )
+    .await?;
     unregister_callback_endpoint(&mut runtime, &registration)
         .await
         .ok();
@@ -231,8 +236,8 @@ async fn run_ring_target(
     )
     .await?;
     let registration = register_callback_endpoint(&mut runtime).await?;
-    wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
-    match wait_for_cancelled(&mut runtime.events, Duration::from_secs(12)).await {
+    let call_id = wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
+    match wait_for_cancelled(&mut runtime.events, Some(&call_id), Duration::from_secs(12)).await {
         Ok(()) => println!("[{}] Observed callback cancellation on ringing target.", user),
         Err(e) => println!(
             "[{}] No endpoint CANCEL callback observed before timeout ({e}); caller-side callback cancellation remains the required assertion for this Asterisk profile.",
@@ -272,7 +277,7 @@ async fn run_dtmf_caller(
         handle.send_dtmf(digit).await?;
     }
     sleep(Duration::from_secs(1)).await;
-    handle.hangup().await?;
+    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
     if let Some(recorder) = recorder {
         recorder
             .stop_and_save(&runtime.cfg.output_dir, "tls_srtp_dtmf_1001_received.wav")
@@ -361,7 +366,7 @@ async fn run_reject_callee(
     let mut runtime =
         callback_runtime(user, port, media_start, media_end, IncomingMode::RejectBusy).await?;
     let registration = register_callback_endpoint(&mut runtime).await?;
-    wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
+    let _call_id = wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
     sleep(Duration::from_secs(1)).await;
     unregister_callback_endpoint(&mut runtime, &registration)
         .await
@@ -393,17 +398,29 @@ async fn run_transferor(
         None
     };
     sleep(Duration::from_secs(3)).await;
-    let transfer_event = handle
-        .transfer_blind_and_wait_for(
+    let transfer_outcome = handle
+        .transfer_blind_and_wait_for_outcome(
             &transfer_target,
-            TransferWaitMode::TargetAnswered,
+            TransferWaitMode::NotifyFinal,
             Some(remote_test_timeout()?),
         )
         .await?;
-    println!(
-        "[{}] Transfer target answered with Asterisk progress evidence: {:?}",
-        user, transfer_event
-    );
+    match transfer_outcome {
+        TransferOutcome::ReferCompleted {
+            status_code,
+            reason,
+            ..
+        } => println!(
+            "[{}] REFER completed with final NOTIFY: {} {}",
+            user, status_code, reason
+        ),
+        TransferOutcome::Failed {
+            status_code,
+            reason,
+            ..
+        } => return Err(format!("REFER failed: {} {}", status_code, reason).into()),
+        other => return Err(format!("unexpected transfer outcome: {:?}", other).into()),
+    }
     if let Some(recorder) = recorder {
         recorder
             .stop_and_save(
@@ -438,7 +455,10 @@ async fn run_transferee(
         None
     };
     sleep(Duration::from_secs(12)).await;
-    handle.hangup().await.ok();
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
     if let Some(recorder) = recorder {
         recorder
             .stop_and_save(
@@ -473,7 +493,10 @@ async fn run_transfer_target(
         None
     };
     sleep(Duration::from_secs(4)).await;
-    handle.hangup().await.ok();
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
     if let Some(recorder) = recorder {
         recorder
             .stop_and_save(
@@ -491,13 +514,13 @@ async fn run_transfer_target(
 async fn wait_for_incoming_notice(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<CallbackEvent>,
     timeout_duration: Duration,
-) -> ExampleResult<()> {
+) -> ExampleResult<rvoip_session_core::CallId> {
     tokio::time::timeout(timeout_duration, async {
         loop {
             match events.recv().await {
-                Some(CallbackEvent::Incoming { from, to, .. }) => {
+                Some(CallbackEvent::Incoming { call_id, from, to }) => {
                     println!("[callback] incoming call {} -> {}", from, to);
-                    return Ok(());
+                    return Ok(call_id);
                 }
                 Some(_) => {}
                 None => return Err("callback event channel closed".into()),
