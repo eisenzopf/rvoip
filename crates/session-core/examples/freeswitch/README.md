@@ -76,8 +76,8 @@ call.hangup_and_wait(Some(timeout)).await?;
 `SessionHandle` owns per-call progress, answer, SRTP, transfer, audio, and
 teardown waits. Deferred incoming calls use `IncomingCallGuard`, including
 `wait_for_cancelled(...)` when testing ring/cancel behavior. Wait timeouts are
-observational only: examples explicitly call `hangup_and_wait`, `reject`, or
-`abandon` when they want to change local SIP/guard lifecycle.
+observational only: examples explicitly call `hangup_and_wait` or `reject`
+when they want to change local SIP/guard lifecycle.
 
 FreeSWITCH blind transfer examples use
 `transfer_blind_and_wait_for_outcome(..., TransferWaitMode::NotifyFinal, ...)`.

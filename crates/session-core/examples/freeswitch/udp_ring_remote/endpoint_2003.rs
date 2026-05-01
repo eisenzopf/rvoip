@@ -26,18 +26,10 @@ async fn main() -> ExampleResult<()> {
         incoming.from
     );
     let guard = incoming.defer(Duration::from_secs(30));
-    match guard
+    guard
         .wait_for_cancelled(Some(Duration::from_secs(12)))
-        .await
-    {
-        Ok(()) => println!("[2003] Observed typed cancellation for deferred incoming call."),
-        Err(e) => {
-            println!(
-                "[2003] No target-side cancellation event observed before timeout ({e}); caller-side cancellation remains the required FreeSWITCH assertion."
-            );
-            guard.abandon();
-        }
-    }
+        .await?;
+    println!("[2003] Observed typed cancellation for deferred incoming call.");
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

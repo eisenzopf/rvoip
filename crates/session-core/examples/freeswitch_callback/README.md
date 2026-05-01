@@ -47,7 +47,7 @@ The suite validates these callback hooks:
 | `on_call_established`, `on_call_ended` | answered calls |
 | `on_call_progress` | ring/cancel caller progress (`180` / `183`) |
 | `on_call_failed` | callback reject tests with `486 Busy Here` |
-| `on_call_cancelled` | ring/cancel caller; endpoint-side CANCEL is logged when FreeSWITCH forwards it, but the caller-side callback cancellation remains the required assertion |
+| `on_call_cancelled` | ring/cancel caller and target-side deferred-call cancellation |
 | `on_call_on_hold`, `on_call_resumed` | hold/resume caller |
 | `on_remote_call_on_hold`, `on_remote_call_resumed` | optional callee assertion when `FREESWITCH_EXPECT_REMOTE_HOLD_EVENTS=1` |
 | `on_dtmf` | DTMF tests |

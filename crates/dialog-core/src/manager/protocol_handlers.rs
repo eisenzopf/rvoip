@@ -218,7 +218,7 @@ impl ProtocolHandlers for DialogManager {
             })?;
 
         // Terminate the dialog and notify the session layer.
-        self.terminate_dialog_for_tx(&invite_tx_id, "CANCEL received")
+        self.terminate_dialog_for_tx_and_emit_cancelled(&invite_tx_id, "CANCEL received")
             .await;
 
         debug!(

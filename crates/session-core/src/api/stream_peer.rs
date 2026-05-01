@@ -517,8 +517,8 @@ impl PeerControl {
 /// // UAC: make a call
 /// let mut uac = StreamPeer::new("alice").await?;
 /// let handle = uac.call("sip:bob@192.168.1.100:5060").await?;
-/// let handle = uac.wait_for_answered(handle.id()).await?;
-/// handle.hangup().await?;
+/// let handle = handle.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
+/// handle.hangup_and_wait(Some(std::time::Duration::from_secs(5))).await?;
 ///
 /// // UAS: answer a call
 /// let mut uas = StreamPeer::new("bob").await?;
@@ -630,15 +630,18 @@ impl StreamPeer {
     /// Initiate an outgoing call and return a [`SessionHandle`].
     ///
     /// The handle is returned as soon as the INVITE has been dispatched; wait
-    /// for [`Event::CallAnswered`] with [`wait_for_answered`](Self::wait_for_answered)
-    /// before assuming media is established.
+    /// for [`Event::CallAnswered`] with
+    /// [`SessionHandle::wait_for_answered`] before assuming media is
+    /// established. The stream-style [`wait_for_answered`](Self::wait_for_answered)
+    /// helper remains useful when a single task owns and consumes the peer's
+    /// event stream.
     ///
     /// # Examples
     ///
     /// ```rust,no_run
     /// # async fn example(mut peer: rvoip_session_core::StreamPeer) -> rvoip_session_core::Result<()> {
     /// let call = peer.call("sip:bob@example.com").await?;
-    /// let answered = peer.wait_for_answered(call.id()).await?;
+    /// let answered = call.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
     /// # let _ = answered;
     /// # Ok(())
     /// # }
@@ -777,8 +780,9 @@ impl StreamPeer {
 
     /// Wait for typed media-security negotiation on a specific call.
     ///
-    /// This is the stream-style equivalent of [`SessionHandle::media_security`]
-    /// when an application prefers to consume events instead of polling state.
+    /// This is the stream-style equivalent of
+    /// [`SessionHandle::wait_for_media_security`] when an application prefers
+    /// to consume events from the peer's sequential event receiver.
     pub async fn wait_for_media_security(
         &mut self,
         call_id: &CallId,

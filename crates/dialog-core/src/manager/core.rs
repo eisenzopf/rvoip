@@ -704,13 +704,16 @@ impl DialogManager {
             // protocol handler so we send 200 OK to CANCEL, 487 to the
             // pending INVITE, and terminate the dialog.
             TransactionEvent::CancelRequest {
-                request, source, ..
+                request,
+                target_transaction_id,
+                ..
             } => {
                 debug!(
                     "Processing unassociated CANCEL request from transaction {}",
                     transaction_id
                 );
-                self.handle_cancel(request).await
+                self.handle_cancel_request_event(transaction_id, &target_transaction_id, request)
+                    .await
             }
 
             _ => {
@@ -719,6 +722,51 @@ impl DialogManager {
                 Ok(())
             }
         }
+    }
+
+    async fn handle_cancel_request_event(
+        &self,
+        cancel_tx_id: &TransactionKey,
+        invite_tx_id: &TransactionKey,
+        request: Request,
+    ) -> DialogResult<()> {
+        let ok = crate::transaction::utils::response_builders::create_response(
+            &request,
+            rvoip_sip_core::StatusCode::Ok,
+        );
+        self.transaction_manager
+            .send_response(cancel_tx_id, ok)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to send 200 OK to CANCEL: {}", e),
+            })?;
+
+        let original_invite = self
+            .transaction_manager
+            .get_server_transaction_request(invite_tx_id)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to fetch pending INVITE for 487: {}", e),
+            })?;
+        let terminated = crate::transaction::utils::response_builders::create_response(
+            &original_invite,
+            rvoip_sip_core::StatusCode::RequestTerminated,
+        );
+        self.transaction_manager
+            .send_response(invite_tx_id, terminated)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to send 487 Request Terminated: {}", e),
+            })?;
+
+        self.terminate_dialog_for_tx_and_emit_cancelled(invite_tx_id, "CANCEL received")
+            .await;
+
+        debug!(
+            "CANCEL processed for INVITE server transaction {} (200 CANCEL, 487 INVITE sent)",
+            invite_tx_id
+        );
+        Ok(())
     }
 
     /// Get the configured local address

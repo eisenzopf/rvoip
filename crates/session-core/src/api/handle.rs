@@ -224,8 +224,9 @@ impl Default for TransferLifecycleOptions {
 /// of asynchronous SIP behavior such as remote hangup, REFER progress, DTMF,
 /// or hold/resume completion. Deterministic helpers such as
 /// [`hangup_and_wait`](Self::hangup_and_wait) and
-/// [`transfer_blind_and_wait`](Self::transfer_blind_and_wait) subscribe before
-/// sending the command so tests and servers can wait for terminal events.
+/// [`transfer_blind_and_wait_for_outcome`](Self::transfer_blind_and_wait_for_outcome)
+/// subscribe before sending the command so tests and servers can wait for typed
+/// terminal evidence.
 /// Wait helpers observe typed events and lifecycle state; their optional
 /// timeout only bounds the wait. Timeouts never send SIP messages, change call
 /// state, or suppress later events. Use command methods such as
@@ -488,8 +489,8 @@ impl SessionHandle {
     ///
     /// The remote party is expected to call the `target` URI and then send
     /// REFER progress NOTIFYs. Use
-    /// [`transfer_blind_and_wait`](Self::transfer_blind_and_wait) when the
-    /// caller needs to wait for terminal transfer success/failure.
+    /// [`transfer_blind_and_wait_for_outcome`](Self::transfer_blind_and_wait_for_outcome)
+    /// when the caller needs to wait for typed transfer success/failure.
     ///
     /// # Examples
     ///
@@ -503,13 +504,20 @@ impl SessionHandle {
         self.coordinator.send_refer(&self.call_id, target).await
     }
 
-    /// Initiate a blind transfer and wait for a terminal REFER NOTIFY.
+    /// Initiate a blind transfer and wait for a raw terminal transfer event.
     ///
-    /// Returns `ReferCompleted` on a final 2xx sipfrag or `TransferFailed`
-    /// on a final failure sipfrag. `ReferCompleted` means the REFER
+    /// Prefer
+    /// [`transfer_blind_and_wait_for_outcome`](Self::transfer_blind_and_wait_for_outcome)
+    /// for application code. This lower-level helper returns the raw
+    /// [`Event`] for callers that need debugging detail or custom event
+    /// handling.
+    ///
+    /// Returns `Event::ReferCompleted` on a final 2xx sipfrag or
+    /// `Event::TransferFailed` on a final failure sipfrag. `ReferCompleted`
+    /// means the REFER
     /// subscription reached a terminal success state; it does not prove the
     /// transfer target answered. Use
-    /// [`transfer_blind_and_wait_for`](Self::transfer_blind_and_wait_for)
+    /// [`transfer_blind_and_wait_for_outcome`](Self::transfer_blind_and_wait_for_outcome)
     /// with [`TransferWaitMode::TargetAnswered`] when target evidence matters.
     /// Intermediate progress events are consumed while waiting, so create a
     /// separate event receiver if another task also needs to observe them.
@@ -991,15 +999,7 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn media_security(&self) -> Result<Option<MediaSecurityState>> {
-        let session = self
-            .coordinator
-            .helpers
-            .state_machine
-            .store
-            .get_session(&self.call_id)
-            .await
-            .map_err(|e| SessionError::SessionNotFound(e.to_string()))?;
-        Ok(session.media_security)
+        Ok(self.lifecycle().await?.media_security)
     }
 
     /// Get the current event-bus-backed lifecycle snapshot for this call.

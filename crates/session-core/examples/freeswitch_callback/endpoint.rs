@@ -212,7 +212,12 @@ async fn run_ring_caller(
     handle
         .hangup_and_wait(Some(Duration::from_secs(12)))
         .await?;
-    wait_for_cancelled(&mut runtime.events, Duration::from_secs(12)).await?;
+    wait_for_cancelled(
+        &mut runtime.events,
+        Some(handle.id()),
+        Duration::from_secs(12),
+    )
+    .await?;
     unregister_callback_endpoint(&mut runtime, &registration)
         .await
         .ok();
@@ -234,14 +239,12 @@ async fn run_ring_target(
     )
     .await?;
     let registration = register_callback_endpoint(&mut runtime).await?;
-    wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
-    match wait_for_cancelled(&mut runtime.events, Duration::from_secs(12)).await {
-        Ok(()) => println!("[{}] Observed callback cancellation on ringing target.", user),
-        Err(e) => println!(
-            "[{}] No endpoint CANCEL callback observed before timeout ({e}); caller-side callback cancellation remains the required assertion for this FreeSWITCH profile.",
-            user
-        ),
-    }
+    let call_id = wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
+    wait_for_cancelled(&mut runtime.events, Some(&call_id), Duration::from_secs(12)).await?;
+    println!(
+        "[{}] Observed callback cancellation on ringing target.",
+        user
+    );
     unregister_callback_endpoint(&mut runtime, &registration)
         .await
         .ok();
@@ -364,7 +367,7 @@ async fn run_reject_callee(
     let mut runtime =
         callback_runtime(user, port, media_start, media_end, IncomingMode::RejectBusy).await?;
     let registration = register_callback_endpoint(&mut runtime).await?;
-    wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
+    let _call_id = wait_for_incoming_notice(&mut runtime.events, remote_test_timeout()?).await?;
     sleep(Duration::from_secs(1)).await;
     unregister_callback_endpoint(&mut runtime, &registration)
         .await
@@ -512,13 +515,13 @@ async fn run_transfer_target(
 async fn wait_for_incoming_notice(
     events: &mut tokio::sync::mpsc::UnboundedReceiver<CallbackEvent>,
     timeout_duration: Duration,
-) -> ExampleResult<()> {
+) -> ExampleResult<rvoip_session_core::CallId> {
     tokio::time::timeout(timeout_duration, async {
         loop {
             match events.recv().await {
-                Some(CallbackEvent::Incoming { from, to, .. }) => {
+                Some(CallbackEvent::Incoming { call_id, from, to }) => {
                     println!("[callback] incoming call {} -> {}", from, to);
-                    return Ok(());
+                    return Ok(call_id);
                 }
                 Some(_) => {}
                 None => return Err("callback event channel closed".into()),

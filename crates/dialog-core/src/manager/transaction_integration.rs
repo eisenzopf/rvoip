@@ -1365,6 +1365,16 @@ impl DialogManager {
                     .await
             }
 
+            TransactionEvent::CancelReceived { .. } => {
+                // RFC 3261 §9.2. The transaction layer has already handled
+                // the wire responses for this matched UAS-side CANCEL
+                // (200 to CANCEL, 487 to INVITE). Dialog-core still owns the
+                // dialog/session lifecycle notification.
+                self.terminate_dialog_for_tx_and_emit_cancelled(transaction_id, "CANCEL received")
+                    .await;
+                Ok(())
+            }
+
             _ => {
                 debug!(
                     "Unhandled transaction event type for dialog {}: {:?}",
@@ -1924,6 +1934,18 @@ impl DialogManager {
         transaction_id: &TransactionKey,
         request: rvoip_sip_core::Request,
     ) -> DialogResult<()> {
+        if self
+            .get_dialog_state(dialog_id)
+            .map(|state| state.is_terminated())
+            .unwrap_or(false)
+        {
+            debug!(
+                "Ignoring ACK for terminated dialog {} on transaction {}",
+                dialog_id, transaction_id
+            );
+            return Ok(());
+        }
+
         info!("✅ RFC 3261: ACK received for transaction {} in dialog {} - time to start media (UAS side)", transaction_id, dialog_id);
 
         // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
@@ -2019,18 +2041,65 @@ impl DialogManager {
     }
 
     /// Terminate the dialog associated with an INVITE transaction and
-    /// emit a `CallCancelled` session-coordination event.
+    /// optionally emit a `CallCancelled` session-coordination event.
     ///
-    /// Shared between the client-side CANCEL path (we sent CANCEL) and
-    /// the server-side CANCEL handler (peer sent us CANCEL). Extracted
-    /// so both paths converge on a single definition of "cancel means
-    /// terminate the dialog + notify the upper layer."
-    pub async fn terminate_dialog_for_tx(&self, invite_tx_id: &TransactionKey, reason: &str) {
-        let Some(dialog_id) = self
+    /// UAC and UAS CANCEL differ:
+    /// - UAC-side user cancel sends CANCEL and waits for the INVITE's final
+    ///   outcome before session-core publishes `CallCancelled`.
+    /// - UAS-side inbound CANCEL is already terminal for the pending INVITE
+    ///   once 200(CANCEL)/487(INVITE) has been sent, so dialog-core must
+    ///   publish `CallCancelled` to session-core.
+    async fn dialog_id_for_invite_tx(&self, invite_tx_id: &TransactionKey) -> Option<DialogId> {
+        if let Some(dialog_id) = self
             .transaction_to_dialog
             .get(invite_tx_id)
             .map(|d| d.clone())
-        else {
+        {
+            return Some(dialog_id);
+        } else {
+            match self
+                .transaction_manager
+                .get_server_transaction_request(invite_tx_id)
+                .await
+            {
+                Ok(request) => match self.find_dialog_for_request(&request).await {
+                    Some(dialog_id) => return Some(dialog_id),
+                    None => {
+                        warn!(
+                            "Cannot emit CallCancelled for {}: no dialog mapping or request match",
+                            invite_tx_id
+                        );
+                        return None;
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        "Cannot emit CallCancelled for {}: failed to fetch INVITE request: {}",
+                        invite_tx_id, e
+                    );
+                    return None;
+                }
+            }
+        }
+    }
+
+    pub async fn terminate_dialog_for_tx(&self, invite_tx_id: &TransactionKey, _reason: &str) {
+        let Some(dialog_id) = self.dialog_id_for_invite_tx(invite_tx_id).await else {
+            return;
+        };
+
+        if let Ok(mut dialog) = self.get_dialog_mut(&dialog_id) {
+            dialog.terminate();
+            debug!("Terminated dialog {} due to INVITE cancellation", dialog_id);
+        }
+    }
+
+    pub async fn terminate_dialog_for_tx_and_emit_cancelled(
+        &self,
+        invite_tx_id: &TransactionKey,
+        reason: &str,
+    ) {
+        let Some(dialog_id) = self.dialog_id_for_invite_tx(invite_tx_id).await else {
             return;
         };
 
@@ -2039,16 +2108,11 @@ impl DialogManager {
             debug!("Terminated dialog {} due to INVITE cancellation", dialog_id);
         }
 
-        if let Some(coordinator) = self.session_coordinator.read().await.as_ref() {
-            let event = crate::events::SessionCoordinationEvent::CallCancelled {
-                dialog_id: dialog_id.clone(),
-                reason: reason.to_string(),
-            };
-
-            if let Err(e) = coordinator.send(event).await {
-                warn!("Failed to send call cancellation event: {}", e);
-            }
-        }
+        self.emit_session_coordination_event(SessionCoordinationEvent::CallCancelled {
+            dialog_id,
+            reason: reason.to_string(),
+        })
+        .await;
     }
 
     /// Cancel an INVITE transaction using transaction-core

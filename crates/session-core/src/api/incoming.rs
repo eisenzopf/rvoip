@@ -11,8 +11,10 @@ use std::time::{Duration, Instant};
 
 use crate::api::events::Event;
 use crate::api::handle::{CallId, SessionHandle};
+use crate::api::lifecycle::{CallLifecycleSnapshot, CallTerminalInfo};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
+use crate::types::CallState;
 
 /// An incoming SIP INVITE that must be handled.
 ///
@@ -538,6 +540,14 @@ impl IncomingCallGuard {
             )));
         }
 
+        let resolved = self.resolved.clone();
+        if let Some(result) = cancellation_result_from_snapshot(
+            &self.coordinator.lifecycle_snapshot(&self.call_id).await,
+        ) {
+            resolved.store(true, Ordering::SeqCst);
+            return result;
+        }
+
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(SessionError::Timeout(
@@ -547,7 +557,13 @@ impl IncomingCallGuard {
 
         let wait_duration = timeout.map_or(remaining, |duration| duration.min(remaining));
         let mut events = self.coordinator.events_for_session(&self.call_id).await?;
-        let resolved = self.resolved.clone();
+
+        if let Some(result) = cancellation_result_from_snapshot(
+            &self.coordinator.lifecycle_snapshot(&self.call_id).await,
+        ) {
+            resolved.store(true, Ordering::SeqCst);
+            return result;
+        }
 
         let fut = async {
             loop {
@@ -604,6 +620,59 @@ impl IncomingCallGuard {
                 }
             }
         }
+    }
+}
+
+fn cancellation_result_from_snapshot(snapshot: &CallLifecycleSnapshot) -> Option<Result<()>> {
+    match snapshot.terminal.as_ref() {
+        Some(CallTerminalInfo::Cancelled) => return Some(Ok(())),
+        Some(CallTerminalInfo::Failed {
+            status_code,
+            reason,
+        }) => {
+            return Some(Err(SessionError::Other(format!(
+                "incoming call failed before cancellation: {} {}",
+                status_code, reason
+            ))))
+        }
+        Some(CallTerminalInfo::Ended { reason }) => {
+            return Some(Err(SessionError::Other(format!(
+                "incoming call ended before cancellation: {}",
+                reason
+            ))))
+        }
+        None => {}
+    }
+
+    if snapshot.answered.is_some() {
+        return Some(Err(SessionError::Other(
+            "incoming call was answered before cancellation".to_string(),
+        )));
+    }
+
+    match snapshot.state.as_ref()? {
+        CallState::Cancelled => Some(Ok(())),
+        CallState::Failed(reason) => Some(Err(SessionError::Other(format!(
+            "incoming call failed before cancellation: {:?}",
+            reason
+        )))),
+        CallState::Terminated => Some(Err(SessionError::Other(
+            "incoming call ended before cancellation".to_string(),
+        ))),
+        CallState::Answering
+        | CallState::AnsweringHangupPending
+        | CallState::Active
+        | CallState::HoldPending
+        | CallState::OnHold
+        | CallState::Resuming
+        | CallState::Muted
+        | CallState::Bridged
+        | CallState::Transferring
+        | CallState::TransferringCall
+        | CallState::ConsultationCall => Some(Err(SessionError::Other(
+            "incoming call was answered before cancellation".to_string(),
+        ))),
+        _ => None,
     }
 }
 
