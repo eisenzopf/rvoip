@@ -1547,7 +1547,10 @@ impl UnifiedDialogApi {
         self.manager.get_dialog_state(dialog_id).await
     }
 
-    /// Terminate a dialog
+    /// Terminate a dialog and clean up local resources.
+    ///
+    /// This bypasses SIP call teardown. Use explicit BYE/CANCEL operations, or
+    /// session-core teardown APIs, when application intent is to hang up a call.
     pub async fn terminate_dialog(&self, dialog_id: &DialogId) -> ApiResult<()> {
         self.manager.terminate_dialog(dialog_id).await
     }

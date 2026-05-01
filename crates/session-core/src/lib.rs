@@ -33,12 +33,12 @@
 //! # async fn example() -> Result<()> {
 //! let mut alice = StreamPeer::new("alice").await?;
 //! let call = alice.call("sip:bob@192.168.1.50:5060").await?;
-//! let call = alice.wait_for_answered(call.id()).await?;
+//! let call = call.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
 //!
 //! call.send_dtmf('1').await?;
 //! call.hold().await?;
 //! call.resume().await?;
-//! call.hangup().await?;
+//! call.hangup_and_wait(Some(std::time::Duration::from_secs(5))).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -120,17 +120,19 @@
 //! - call teardown with [`SessionHandle::hangup`] or deterministic
 //!   [`SessionHandle::hangup_and_wait`]
 //! - provisional progress with [`SessionHandle::wait_for_progress`]
+//! - answered-call waits with [`SessionHandle::wait_for_answered`]
 //! - local hold/resume with [`SessionHandle::hold`] and [`SessionHandle::resume`]
 //! - RFC 4733 DTMF send with [`SessionHandle::send_dtmf`]
 //! - blind transfer with [`SessionHandle::transfer_blind`] or
-//!   [`SessionHandle::transfer_blind_and_wait`]
+//!   [`SessionHandle::transfer_blind_and_wait_for_outcome`]
 //! - typed transfer lifecycle events that distinguish REFER completion from
 //!   target-leg evidence
 //! - attended-transfer primitives with [`SessionHandle::dialog_identity`] and
 //!   [`SessionHandle::transfer_attended`]
 //! - inbound REFER accept/reject with [`SessionHandle::accept_refer`] and
 //!   [`SessionHandle::reject_refer`]
-//! - typed SRTP negotiation state with [`SessionHandle::media_security`]
+//! - typed SRTP negotiation state with [`SessionHandle::media_security`] or
+//!   [`SessionHandle::wait_for_media_security`]
 //! - typed per-call events with [`SessionHandle::events`]
 //! - decoded/encoded audio frames with [`SessionHandle::audio`]
 //!
@@ -196,9 +198,12 @@ pub use api::handlers::{
 pub use api::audio::{AudioReceiver, AudioSender, AudioStream};
 pub use api::handle::{
     CallId, SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions,
-    TransferWaitMode,
+    TransferOutcome, TransferWaitMode,
 };
 pub use api::incoming::{IncomingCall, IncomingCallGuard};
+pub use api::lifecycle::{
+    CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo,
+};
 
 // Configuration & registration
 pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
@@ -233,15 +238,16 @@ pub use types::CallState;
 /// ```
 pub mod prelude {
     pub use crate::{
-        AudioReceiver, AudioSender, AudioStream, CallHandler, CallHandlerDecision, CallId,
-        CallState, CallbackPeer, CallbackPeerControl, Config, DialogInfo, DialogInfoDocument,
-        DialogPackageEvent, DialogPackageState, DialogSubscriptionHandle, EndReason, Event,
-        EventReceiver, IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
-        MediaSecurityState, PeerControl, Registration, RegistrationHandle, RegistrationInfo,
-        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipReason,
-        SipTlsMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
-        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferTargetEvidence,
-        TransferWaitMode,
+        AudioReceiver, AudioSender, AudioStream, CallAnsweredInfo, CallHandler,
+        CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
+        CallTerminalInfo, CallbackPeer, CallbackPeerControl, Config, DialogInfo,
+        DialogInfoDocument, DialogPackageEvent, DialogPackageState, DialogSubscriptionHandle,
+        EndReason, Event, EventReceiver, IncomingCall, IncomingCallGuard, MediaSecurityKeying,
+        MediaSecurityProfile, MediaSecurityState, PeerControl, Registration, RegistrationHandle,
+        RegistrationInfo, RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode,
+        SipReason, SipTlsMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
+        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
+        TransferTargetEvidence, TransferWaitMode,
     };
 }
 

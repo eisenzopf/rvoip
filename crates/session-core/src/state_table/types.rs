@@ -164,6 +164,7 @@ pub enum EventType {
         min_se_secs: u32,
     },
     HangupCall,
+    CancelCall,
     HoldCall,
     ResumeCall,
     MuteCall,
@@ -386,6 +387,9 @@ impl EventType {
                 status: 0,
                 targets: Vec::new(),
             },
+            EventType::Dialog4xxFailure(_) => EventType::Dialog4xxFailure(400),
+            EventType::Dialog5xxFailure(_) => EventType::Dialog5xxFailure(500),
+            EventType::Dialog6xxFailure(_) => EventType::Dialog6xxFailure(600),
 
             // Mid-dialog re-INVITE / UPDATE — strip the SDP body so the
             // state table can match on variant regardless of SDP contents.
@@ -691,7 +695,11 @@ pub enum EventTemplate {
 const CORE_STATES_REQUIRING_EXITS: &[CallState] = &[
     CallState::Idle,
     CallState::Initiating,
+    CallState::CancelPending,
+    CallState::Cancelling,
     CallState::Ringing,
+    CallState::Answering,
+    CallState::AnsweringHangupPending,
     CallState::Active,
 ];
 

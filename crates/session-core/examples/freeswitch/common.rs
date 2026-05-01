@@ -778,23 +778,14 @@ pub async fn call_with_answer_retry(
 
     for attempt in 1..=attempts {
         let handle = peer.call(target).await?;
-        let result = timeout(timeout_duration, peer.wait_for_answered(handle.id())).await;
-        match result {
-            Ok(Ok(answered)) => return Ok(answered),
-            Ok(Err(e)) => {
+        match handle.wait_for_answered(Some(timeout_duration)).await {
+            Ok(answered) => return Ok(answered),
+            Err(e) => {
                 println!(
                     "[call] Attempt {}/{} to {} was not answered: {}",
                     attempt, attempts, target, e
                 );
                 last_error = Some(Box::new(e));
-            }
-            Err(_) => {
-                let msg = format!(
-                    "timed out after {:?} waiting for {} to answer",
-                    timeout_duration, target
-                );
-                println!("[call] Attempt {}/{}: {}", attempt, attempts, msg);
-                last_error = Some(msg.into());
             }
         }
 
@@ -811,38 +802,24 @@ pub async fn assert_srtp_media_security(
     handle: &SessionHandle,
     timeout_duration: Duration,
 ) -> ExampleResult<()> {
-    timeout(timeout_duration, async {
-        loop {
-            match handle.media_security().await {
-                Ok(Some(security)) => {
-                    if security.keying != MediaSecurityKeying::Sdes {
-                        return Err(format!("expected SDES keying, got {:?}", security.keying).into());
-                    }
-                    if security.profile != MediaSecurityProfile::RtpSavp {
-                        return Err(format!("expected RTP/SAVP profile, got {:?}", security.profile).into());
-                    }
-                    if !security.contexts_installed {
-                        return Err("SRTP media security exists but contexts_installed=false".into());
-                    }
-                    println!(
-                        "[security] SRTP media security negotiated: keying=SDES suite={} profile=RTP/SAVP contexts_installed={}",
-                        security.suite,
-                        security.contexts_installed
-                    );
-                    return Ok(());
-                }
-                Ok(None) => sleep(Duration::from_millis(100)).await,
-                Err(e) => return Err(format!("failed to read media security state: {}", e).into()),
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        format!(
-            "timed out after {:?} waiting for typed SRTP media security",
-            timeout_duration
-        )
-    })?
+    let security = handle
+        .wait_for_media_security(Some(timeout_duration))
+        .await?;
+    if security.keying != MediaSecurityKeying::Sdes {
+        return Err(format!("expected SDES keying, got {:?}", security.keying).into());
+    }
+    if security.profile != MediaSecurityProfile::RtpSavp {
+        return Err(format!("expected RTP/SAVP profile, got {:?}", security.profile).into());
+    }
+    if !security.contexts_installed {
+        return Err("SRTP media security exists but contexts_installed=false".into());
+    }
+    println!(
+        "[security] SRTP media security negotiated: keying=SDES suite={} profile=RTP/SAVP contexts_installed={}",
+        security.suite,
+        security.contexts_installed
+    );
+    Ok(())
 }
 
 pub async fn wait_for_local_hold_on_events(

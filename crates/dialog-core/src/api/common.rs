@@ -381,10 +381,11 @@ impl DialogHandle {
         Ok(())
     }
 
-    /// **NEW**: Terminate dialog directly without sending BYE
+    /// Terminate dialog directly without sending BYE.
     ///
-    /// For cases where you want to clean up the dialog state without
-    /// sending a BYE request (e.g., after receiving a BYE).
+    /// This is local cleanup only. It is appropriate after the wire teardown
+    /// has already completed (for example, after receiving and answering BYE),
+    /// but it is not a call-hangup API and must not replace BYE/CANCEL.
     pub async fn terminate_immediately(&self) -> ApiResult<()> {
         info!("Terminating dialog {} immediately", self.dialog_id);
 

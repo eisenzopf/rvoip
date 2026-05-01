@@ -5,6 +5,7 @@
 
 use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
+use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 use crate::state_table::types::SessionId;
@@ -260,6 +261,9 @@ pub struct MediaAdapter {
         >,
     >,
 
+    /// App-level event publisher that updates lifecycle before bus delivery.
+    pub(crate) app_event_publisher: Arc<tokio::sync::RwLock<Option<SessionEventPublisher>>>,
+
     /// Sprint 3 A6 — public RTP-side address advertised in SDP `c=` /
     /// `o=` / `m=audio` lines. Set at coordinator boot from either
     /// `Config::media_public_addr` (static override) or a successful
@@ -312,6 +316,7 @@ impl MediaAdapter {
             pending_srtp_offerers: Arc::new(DashMap::new()),
             negotiated_srtp: Arc::new(DashMap::new()),
             global_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
+            app_event_publisher: Arc::new(tokio::sync::RwLock::new(None)),
             public_rtp_addr: std::sync::RwLock::new(None),
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -371,7 +376,20 @@ impl MediaAdapter {
         &self,
         coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
     ) {
-        *self.global_coordinator.write().await = Some(coordinator);
+        *self.global_coordinator.write().await = Some(coordinator.clone());
+        let mut publisher = self.app_event_publisher.write().await;
+        if publisher.is_none() {
+            *publisher = Some(SessionEventPublisher::new(
+                coordinator,
+                LifecycleIndex::new(),
+            ));
+        }
+    }
+
+    /// Install the app-level event publisher. This is preferred over direct
+    /// global-coordinator publication because it updates lifecycle first.
+    pub(crate) async fn set_app_event_publisher(&self, publisher: SessionEventPublisher) {
+        *self.app_event_publisher.write().await = Some(publisher);
     }
 
     /// Configure the SRTP offer policy. Called by `UnifiedCoordinator`
@@ -851,14 +869,6 @@ impl MediaAdapter {
             }
         }
 
-        let Some(coordinator) = self.global_coordinator.read().await.clone() else {
-            tracing::debug!(
-                "MediaSecurityNegotiated publish skipped for session {}: no global coordinator yet",
-                session_id.0
-            );
-            return;
-        };
-
         let api_event = Event::MediaSecurityNegotiated {
             call_id: session_id.clone(),
             keying: state.keying,
@@ -866,12 +876,22 @@ impl MediaAdapter {
             profile: state.profile,
             contexts_installed: state.contexts_installed,
         };
-        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.publish(wrapped).await {
-                tracing::warn!("Failed to publish MediaSecurityNegotiated event: {}", e);
-            }
-        });
+
+        if let Some(publisher) = self.app_event_publisher.read().await.clone() {
+            publisher.publish(api_event);
+        } else if let Some(coordinator) = self.global_coordinator.read().await.clone() {
+            let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+            tokio::spawn(async move {
+                if let Err(e) = coordinator.publish(wrapped).await {
+                    tracing::warn!("Failed to publish MediaSecurityNegotiated event: {}", e);
+                }
+            });
+        } else {
+            tracing::debug!(
+                "MediaSecurityNegotiated publish skipped for session {}: no event publisher yet",
+                session_id.0
+            );
+        }
     }
 
     /// Play an audio file to the remote party
@@ -1371,12 +1391,14 @@ impl MediaAdapter {
     /// media-core so PT 101 packets (already deduped to one-per-digit
     /// on the first end-of-event frame) are published as
     /// `Event::DtmfReceived { call_id, digit }` on the session-core
-    /// public API event stream. No-op if the global coordinator has
-    /// not been installed yet (e.g. isolated unit tests).
+    /// public API event stream. No-op if the app event publisher/global
+    /// coordinator has not been installed yet (e.g. isolated unit tests).
     async fn install_dtmf_callback(&self, session_id: SessionId, dialog_id: DialogId) {
-        let Some(coordinator) = self.global_coordinator.read().await.clone() else {
+        let publisher = self.app_event_publisher.read().await.clone();
+        let coordinator = self.global_coordinator.read().await.clone();
+        if publisher.is_none() && coordinator.is_none() {
             tracing::debug!(
-                "DTMF callback install skipped for session {}: no global coordinator yet",
+                "DTMF callback install skipped for session {}: no event publisher yet",
                 session_id.0
             );
             return;
@@ -1408,20 +1430,23 @@ impl MediaAdapter {
                     call_id: sid.clone(),
                     digit: notification.digit,
                 };
-                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-                if let Err(e) = coordinator.publish(wrapped).await {
-                    tracing::warn!(
-                        "Failed to publish DtmfReceived for session {}: {}",
-                        sid.0,
-                        e
-                    );
-                } else {
-                    tracing::info!(
-                        "📢 Published DtmfReceived digit='{}' for session {}",
-                        notification.digit,
-                        sid.0
-                    );
+                if let Some(publisher) = publisher.as_ref() {
+                    publisher.publish(api_event);
+                } else if let Some(coordinator) = coordinator.as_ref() {
+                    let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
+                    if let Err(e) = coordinator.publish(wrapped).await {
+                        tracing::warn!(
+                            "Failed to publish DtmfReceived for session {}: {}",
+                            sid.0,
+                            e
+                        );
+                    }
                 }
+                tracing::info!(
+                    "📢 Published DtmfReceived digit='{}' for session {}",
+                    notification.digit,
+                    sid.0
+                );
             }
             tracing::debug!(
                 "DTMF bridge task exited for session {} (dialog {})",
@@ -2066,6 +2091,7 @@ impl Clone for MediaAdapter {
             pending_srtp_offerers: self.pending_srtp_offerers.clone(),
             negotiated_srtp: self.negotiated_srtp.clone(),
             global_coordinator: self.global_coordinator.clone(),
+            app_event_publisher: self.app_event_publisher.clone(),
             public_rtp_addr: std::sync::RwLock::new(self.public_rtp_addr()),
             comfort_noise_enabled: self.comfort_noise_enabled,
             strict_codec_matching: self.strict_codec_matching,

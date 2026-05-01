@@ -491,8 +491,14 @@ impl CallbackPeerControl {
         self.coordinator.unregister(handle).await
     }
 
-    /// Hang up or cancel a call and wait until the state machine has accepted
-    /// the request.
+    /// Hang up or cancel a call and wait until session-core has accepted the
+    /// request.
+    ///
+    /// This uses the same SIP teardown semantics as [`SessionHandle::hangup`]:
+    /// BYE for established calls, CANCEL for ringing/early outbound calls, and
+    /// delayed CANCEL intent before the first provisional response. Callback
+    /// handlers observe terminal completion through `on_call_ended`,
+    /// `on_call_failed`, or `on_call_cancelled`.
     ///
     /// # Examples
     ///
@@ -800,6 +806,12 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// [`UnifiedCoordinator::shutdown_gracefully`] before or instead of
     /// signalling this event loop.
     ///
+    /// Deferred incoming calls that are still unresolved when shutdown begins
+    /// are marked resolved before the coordinator is stopped. This prevents the
+    /// deferred guard's drop safety net from attempting a late rejection over a
+    /// closing transport. Applications that need to reject queued calls should
+    /// resolve them before calling shutdown.
+    ///
     /// [`shutdown()`]: Self::shutdown
     ///
     /// # Examples
@@ -869,6 +881,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                     );
                 }
             }
+        }
+
+        {
+            let mut deferred = self.deferred_calls.lock().await;
+            for guard in deferred.values() {
+                guard.resolve_without_response();
+            }
+            deferred.clear();
         }
 
         // Shut down the coordinator's background tasks too
@@ -963,7 +983,9 @@ impl<H: CallHandler> CallbackPeer<H> {
                 }
 
                 Event::CallAnswered { call_id, .. } => {
-                    deferred_calls.lock().await.remove(&call_id);
+                    if let Some(guard) = deferred_calls.lock().await.remove(&call_id) {
+                        guard.resolve_without_response();
+                    }
                     let should_notify = {
                         let mut callbacks = established_callbacks.lock().await;
                         callbacks.insert(call_id.clone())
@@ -987,7 +1009,9 @@ impl<H: CallHandler> CallbackPeer<H> {
                 }
 
                 Event::CallEnded { call_id, reason } => {
-                    deferred_calls.lock().await.remove(&call_id);
+                    if let Some(guard) = deferred_calls.lock().await.remove(&call_id) {
+                        guard.resolve_without_response();
+                    }
                     established_callbacks.lock().await.remove(&call_id);
                     let should_notify = {
                         let mut callbacks = terminal_callbacks.lock().await;
@@ -1004,7 +1028,9 @@ impl<H: CallHandler> CallbackPeer<H> {
                     status_code,
                     reason,
                 } => {
-                    deferred_calls.lock().await.remove(&call_id);
+                    if let Some(guard) = deferred_calls.lock().await.remove(&call_id) {
+                        guard.resolve_without_response();
+                    }
                     established_callbacks.lock().await.remove(&call_id);
                     let should_notify = {
                         let mut callbacks = terminal_callbacks.lock().await;
@@ -1016,7 +1042,9 @@ impl<H: CallHandler> CallbackPeer<H> {
                 }
 
                 Event::CallCancelled { call_id } => {
-                    deferred_calls.lock().await.remove(&call_id);
+                    if let Some(guard) = deferred_calls.lock().await.remove(&call_id) {
+                        guard.resolve_without_response();
+                    }
                     established_callbacks.lock().await.remove(&call_id);
                     let should_notify = {
                         let mut callbacks = terminal_callbacks.lock().await;

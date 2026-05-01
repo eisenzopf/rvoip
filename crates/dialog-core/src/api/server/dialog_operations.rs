@@ -101,10 +101,10 @@ impl DialogServer {
             .map_err(ApiError::from)
     }
 
-    /// Terminate a dialog and clean up resources
+    /// Terminate a dialog and clean up local resources.
     ///
-    /// This method provides direct control over dialog termination,
-    /// which is essential for session lifecycle management.
+    /// This method is a local cleanup/admin primitive. It does not send SIP
+    /// BYE/CANCEL and should not be used as a call-hangup substitute.
     ///
     /// # Arguments
     /// * `dialog_id` - The dialog ID to terminate

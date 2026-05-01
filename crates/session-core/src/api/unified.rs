@@ -49,7 +49,7 @@
 #![deny(missing_docs)]
 
 use crate::adapters::{DialogAdapter, MediaAdapter};
-use crate::api::terminal::{cached_terminal_event, TerminalEventCache};
+use crate::api::lifecycle::{CallLifecycleSnapshot, LifecycleIndex, SessionEventPublisher};
 use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::session_store::SessionStore;
@@ -1053,8 +1053,11 @@ pub struct UnifiedCoordinator {
     /// Shutdown signal — send `true` to stop all background tasks.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 
-    /// Short-lived terminal event cache for deterministic late waiters.
-    terminal_events: TerminalEventCache,
+    /// Per-call lifecycle index for deterministic late waiters.
+    lifecycle: LifecycleIndex,
+
+    /// App event publisher that updates lifecycle before global bus delivery.
+    app_event_publisher: SessionEventPublisher,
 }
 
 impl UnifiedCoordinator {
@@ -1262,7 +1265,12 @@ impl UnifiedCoordinator {
         // Create incoming call channel
         let (incoming_tx, incoming_rx) = mpsc::channel(100);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let terminal_events = Arc::new(dashmap::DashMap::new());
+        let lifecycle = LifecycleIndex::new();
+        let app_event_publisher =
+            SessionEventPublisher::new(global_coordinator.clone(), lifecycle.clone());
+        media_adapter
+            .set_app_event_publisher(app_event_publisher.clone())
+            .await;
 
         let coordinator = Arc::new(Self {
             helpers,
@@ -1272,7 +1280,8 @@ impl UnifiedCoordinator {
             global_coordinator: global_coordinator.clone(),
             config,
             shutdown_tx,
-            terminal_events: terminal_events.clone(),
+            lifecycle: lifecycle.clone(),
+            app_event_publisher: app_event_publisher.clone(),
         });
 
         // Start the dialog adapter
@@ -1289,7 +1298,7 @@ impl UnifiedCoordinator {
                 registry.clone(),
                 incoming_tx,
                 state_event_rx,
-                terminal_events,
+                app_event_publisher.clone(),
             );
 
         // Start the event handler (sets up channels and subscriptions)
@@ -1586,8 +1595,16 @@ impl UnifiedCoordinator {
         ))
     }
 
-    pub(crate) fn cached_terminal_reason(&self, id: &SessionId) -> Option<String> {
-        cached_terminal_event(&self.terminal_events, id).map(|event| event.reason())
+    pub(crate) async fn lifecycle_snapshot(&self, id: &SessionId) -> CallLifecycleSnapshot {
+        let (state, media_security) = match self.helpers.state_machine.store.get_session(id).await {
+            Ok(session) => (Some(session.call_state), session.media_security),
+            Err(_) => (None, None),
+        };
+        let mut snapshot = self.lifecycle.snapshot(id, state);
+        if snapshot.media_security.is_none() {
+            snapshot.media_security = media_security;
+        }
+        snapshot
     }
 
     // ===== Simple Call Operations =====
@@ -1822,6 +1839,14 @@ impl UnifiedCoordinator {
     }
 
     /// Hang up or cancel a call.
+    ///
+    /// Established calls send BYE. Ringing or early-media outbound calls send
+    /// CANCEL and do not publish `CallCancelled` until the INVITE reaches a
+    /// terminal outcome. If the outbound INVITE has not received a provisional
+    /// response yet, cancel intent is recorded and CANCEL is sent only if it
+    /// later becomes legal; a fast 200 OK is ACKed and immediately BYE-cleaned.
+    /// Use [`SessionHandle::hangup_and_wait`](crate::api::handle::SessionHandle::hangup_and_wait)
+    /// when the caller needs to wait for the terminal API event.
     ///
     /// # Examples
     ///

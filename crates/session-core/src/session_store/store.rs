@@ -89,9 +89,11 @@ impl SessionStore {
 
         // DashMap: Lock-free update with index management
         // Get old session to check for index changes
-        if let Some(old_entry) = self.sessions.get(&session_id) {
-            let old_session = old_entry.value();
-
+        if let Some(old_session) = self
+            .sessions
+            .get(&session_id)
+            .map(|entry| entry.value().clone())
+        {
             // Update indexes if IDs have changed
             if old_session.dialog_id != session.dialog_id {
                 if let Some(old_id) = &old_session.dialog_id {
@@ -269,8 +271,11 @@ impl SessionStore {
             match session.call_state {
                 CallState::Idle => stats.idle += 1,
                 CallState::Initiating => stats.initiating += 1,
+                CallState::CancelPending => stats.initiating += 1,
+                CallState::Cancelling => stats.terminating += 1,
                 CallState::Ringing => stats.ringing += 1,
                 CallState::Answering => stats.ringing += 1, // Still in setup phase
+                CallState::AnsweringHangupPending => stats.terminating += 1,
                 CallState::EarlyMedia => stats.active += 1, // Count early media as active
                 CallState::Active => stats.active += 1,
                 CallState::HoldPending => stats.active += 1, // Count hold-pending as active until 2xx commits

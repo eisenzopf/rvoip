@@ -42,7 +42,9 @@ async fn main() -> ExampleResult<()> {
     let target = cfg.outbound_call_uri("2002");
     println!("[2001] Calling {}...", target);
     let handle = peer.call(&target).await?;
-    peer.wait_for_answered(handle.id()).await?;
+    let handle = handle
+        .wait_for_answered(Some(Duration::from_secs(20)))
+        .await?;
     println!("[2001] Call established.");
     let mut call_events = handle.events().await?;
 

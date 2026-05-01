@@ -688,6 +688,68 @@ impl TransactionIntegration for DialogManager {
 /// supplies the fully-formatted digest header value via
 /// `auth-core::DigestClient::format_authorization`.
 impl DialogManager {
+    /// Find the newest outbound INVITE transaction for a dialog.
+    ///
+    /// A challenged initial INVITE (401/407) and its authenticated retry share
+    /// the same dialog record but are different transactions. RFC 3261 CANCEL
+    /// must target the currently pending INVITE transaction, so prefer the
+    /// mapped INVITE with the highest CSeq instead of returning an arbitrary
+    /// DashMap entry.
+    pub async fn find_latest_invite_transaction_for_dialog(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Option<TransactionKey> {
+        use rvoip_sip_core::types::cseq::CSeq;
+        use rvoip_sip_core::types::TypedHeader;
+
+        let candidates: Vec<TransactionKey> = self
+            .transaction_to_dialog
+            .iter()
+            .filter_map(|entry| {
+                let (tx_key, mapped_dialog_id) = entry.pair();
+                if mapped_dialog_id == dialog_id
+                    && tx_key.method() == &Method::Invite
+                    && !tx_key.is_server()
+                {
+                    Some(tx_key.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let mut best: Option<(u32, TransactionKey)> = None;
+        for tx_key in candidates {
+            let cseq = self
+                .transaction_manager
+                .original_request(&tx_key)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|request| request.typed_header::<CSeq>().map(|cseq| cseq.seq))
+                .unwrap_or_default();
+
+            match &best {
+                Some((best_cseq, _)) if cseq < *best_cseq => {}
+                _ => best = Some((cseq, tx_key)),
+            }
+        }
+
+        if let Some((cseq, tx_key)) = best {
+            debug!(
+                "Selected latest INVITE transaction {} for dialog {} using CSeq {}",
+                tx_key, dialog_id, cseq
+            );
+            Some(tx_key)
+        } else {
+            debug!(
+                "No outbound INVITE transaction found for dialog {}",
+                dialog_id
+            );
+            None
+        }
+    }
+
     pub async fn send_invite_with_auth(
         &self,
         dialog_id: &DialogId,

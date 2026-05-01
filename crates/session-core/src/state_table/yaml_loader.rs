@@ -449,8 +449,11 @@ impl YamlTableLoader {
         match state {
             "Idle" => Ok(CallState::Idle),
             "Initiating" => Ok(CallState::Initiating),
+            "CancelPending" => Ok(CallState::CancelPending),
+            "Cancelling" => Ok(CallState::Cancelling),
             "Ringing" => Ok(CallState::Ringing),
             "Answering" => Ok(CallState::Answering),
+            "AnsweringHangupPending" => Ok(CallState::AnsweringHangupPending),
             "EarlyMedia" => Ok(CallState::EarlyMedia),
             "Active" => Ok(CallState::Active),
             "HoldPending" => Ok(CallState::HoldPending),
@@ -582,6 +585,7 @@ impl YamlTableLoader {
                 challenge: String::new(),
             }),
             "HangupCall" => Ok(EventType::HangupCall),
+            "CancelCall" => Ok(EventType::CancelCall),
             "HoldCall" => Ok(EventType::HoldCall),
             "ResumeCall" => Ok(EventType::ResumeCall),
 
@@ -590,6 +594,10 @@ impl YamlTableLoader {
             "Dialog183SessionProgress" => Ok(EventType::Dialog183SessionProgress),
             "DialogEstablished" | "Dialog200OK" => Ok(EventType::Dialog200OK),
             "DialogFailed" => Ok(EventType::Dialog4xxFailure(400)),
+            "Dialog4xxFailure" => Ok(EventType::Dialog4xxFailure(400)),
+            "Dialog5xxFailure" => Ok(EventType::Dialog5xxFailure(500)),
+            "Dialog6xxFailure" => Ok(EventType::Dialog6xxFailure(600)),
+            "Dialog487RequestTerminated" => Ok(EventType::Dialog487RequestTerminated),
             "Dialog3xxRedirect" => Ok(EventType::Dialog3xxRedirect {
                 status: 0,
                 targets: Vec::new(),
@@ -603,7 +611,10 @@ impl YamlTableLoader {
             // `EventType::MediaEvent("DialogACK")` and the transition never
             // fires.
             "DialogACK" => Ok(EventType::DialogACK),
-            "DialogTerminated" => Ok(EventType::DialogBYE),
+            "DialogBYE" => Ok(EventType::DialogBYE),
+            "DialogCANCEL" => Ok(EventType::DialogCANCEL),
+            "DialogTimeout" => Ok(EventType::DialogTimeout),
+            "DialogTerminated" => Ok(EventType::DialogTerminated),
 
             // Gateway-specific BYE events
             "InboundBYE" | "OutboundBYE" => Ok(EventType::DialogBYE),

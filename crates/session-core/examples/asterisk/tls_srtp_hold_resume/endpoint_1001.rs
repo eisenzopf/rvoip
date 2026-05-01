@@ -44,8 +44,11 @@ async fn main() -> ExampleResult<()> {
 
     let target = cfg.outbound_call_uri("1002");
     println!("[1001] Calling {}...", target);
-    let handle = peer.call(&target).await?;
-    peer.wait_for_answered(handle.id()).await?;
+    let handle = peer
+        .call(&target)
+        .await?
+        .wait_for_answered(Some(Duration::from_secs(20)))
+        .await?;
     println!("[1001] Call established over TLS with mandatory SRTP.");
     assert_srtp_media_security(&handle, Duration::from_secs(5)).await?;
     let mut call_events = handle.events().await?;

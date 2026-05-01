@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use crate::api::audio::{AudioReceiver, AudioSender, AudioStream};
 use crate::api::dialog_package::{DialogInfo, DialogPackageState};
 use crate::api::events::{Event, MediaSecurityState, TransferTargetEvidence};
+use crate::api::lifecycle::{CallLifecycleSnapshot, CallTerminalInfo};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
 use crate::state_table::types::SessionId;
@@ -39,6 +40,122 @@ pub enum TransferWaitMode {
     /// Return only after a replacement dialog is observed terminated via a
     /// local target leg or RFC 4235 dialog-package evidence.
     ReplacementTerminated,
+}
+
+/// Typed result returned by high-level blind-transfer wait helpers.
+///
+/// This is the ergonomic application-facing view of REFER lifecycle events.
+/// `ReferCompleted` means the REFER subscription reported a final successful
+/// referenced request; it does not by itself prove replacement-call lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferOutcome {
+    /// A final successful REFER NOTIFY was received.
+    ReferCompleted {
+        /// Transfer call/session id.
+        call_id: CallId,
+        /// Transfer target URI reported by session-core.
+        target: String,
+        /// Final sipfrag status code.
+        status_code: u16,
+        /// Final sipfrag reason phrase.
+        reason: String,
+    },
+    /// The transfer target produced provisional ringing or early-media evidence.
+    TargetRinging {
+        /// Transfer call/session id.
+        call_id: CallId,
+        /// Provisional sipfrag status code.
+        status_code: u16,
+        /// Provisional sipfrag reason phrase.
+        reason: String,
+    },
+    /// The transfer target answered with trustworthy evidence.
+    TargetAnswered {
+        /// Transfer call/session id.
+        call_id: CallId,
+        /// Transfer target URI.
+        target_uri: String,
+        /// Evidence used to classify the target as answered.
+        evidence: TransferTargetEvidence,
+    },
+    /// A related replacement dialog was observed terminated.
+    ReplacementTerminated {
+        /// Transfer call/session id.
+        call_id: CallId,
+        /// Dialog-package entry for the replacement dialog.
+        dialog: DialogInfo,
+        /// Optional teardown reason.
+        reason: Option<String>,
+    },
+    /// REFER or transfer processing failed.
+    Failed {
+        /// Transfer call/session id.
+        call_id: CallId,
+        /// SIP status code reported by REFER/NOTIFY handling.
+        status_code: u16,
+        /// Human-readable failure reason.
+        reason: String,
+    },
+}
+
+impl TryFrom<Event> for TransferOutcome {
+    type Error = SessionError;
+
+    fn try_from(event: Event) -> std::result::Result<Self, Self::Error> {
+        match event {
+            Event::ReferCompleted {
+                call_id,
+                target,
+                status_code,
+                reason,
+            } => Ok(Self::ReferCompleted {
+                call_id,
+                target,
+                status_code,
+                reason,
+            }),
+            Event::ReferProgress {
+                call_id,
+                status_code,
+                reason,
+            } => Ok(Self::TargetRinging {
+                call_id,
+                status_code,
+                reason,
+            }),
+            Event::TransferTargetAnswered {
+                transfer_call_id,
+                target_uri,
+                evidence,
+            } => Ok(Self::TargetAnswered {
+                call_id: transfer_call_id,
+                target_uri,
+                evidence,
+            }),
+            Event::TransferReplacementDialogTerminated {
+                transfer_call_id,
+                dialog,
+                reason,
+            } => Ok(Self::ReplacementTerminated {
+                call_id: transfer_call_id,
+                dialog,
+                reason,
+            }),
+            Event::TransferFailed {
+                call_id,
+                status_code,
+                reason,
+            } => Ok(Self::Failed {
+                call_id,
+                status_code,
+                reason,
+            }),
+            other => Err(SessionError::Other(format!(
+                "event is not a transfer outcome: {:?}",
+                other
+            ))),
+        }
+    }
 }
 
 /// RFC 3326 Reason header value for explicit teardown causes.
@@ -109,6 +226,12 @@ impl Default for TransferLifecycleOptions {
 /// [`hangup_and_wait`](Self::hangup_and_wait) and
 /// [`transfer_blind_and_wait`](Self::transfer_blind_and_wait) subscribe before
 /// sending the command so tests and servers can wait for terminal events.
+/// Wait helpers observe typed events and lifecycle state; their optional
+/// timeout only bounds the wait. Timeouts never send SIP messages, change call
+/// state, or suppress later events. Use command methods such as
+/// [`hangup`](Self::hangup), [`hangup_and_wait`](Self::hangup_and_wait), and
+/// [`transfer_blind`](Self::transfer_blind) when the application chooses to
+/// mutate call lifecycle.
 ///
 /// # Example
 ///
@@ -150,10 +273,18 @@ impl SessionHandle {
 
     /// Hang up the call.
     ///
-    /// Fire-and-forget: schedules BYE/CANCEL and returns immediately.
+    /// Fire-and-forget: hands the teardown request to session-core and returns
+    /// after the command is accepted. Established calls send BYE. Ringing or
+    /// early-media calls send CANCEL and wait internally for the final INVITE
+    /// outcome. If the outbound INVITE has not received a provisional response
+    /// yet, session-core records cancel intent and sends CANCEL only if/when
+    /// RFC 3261 makes it legal; a fast 200 OK on that path is ACKed and then
+    /// immediately BYE-cleaned.
+    ///
     /// Subscribe to events or use [`hangup_and_wait`](Self::hangup_and_wait)
     /// when the caller needs to observe `CallEnded`, `CallFailed`, or
-    /// `CallCancelled`.
+    /// `CallCancelled`. `CallCancelled` means SIP cancellation teardown is
+    /// terminal, not merely that the user requested cancel.
     ///
     /// # Examples
     ///
@@ -170,8 +301,14 @@ impl SessionHandle {
     /// Hang up the call and wait for the terminal event.
     ///
     /// Unlike [`hangup`](Self::hangup), this subscribes to the call's event
-    /// stream before sending BYE/CANCEL and returns only after
-    /// `CallEnded`, `CallFailed`, or `CallCancelled` is observed.
+    /// stream before sending BYE/CANCEL and returns only after `CallEnded`,
+    /// `CallFailed`, or `CallCancelled` is observed. For outbound pre-answer
+    /// calls, this follows SIP timing: no CANCEL before provisional response,
+    /// CANCEL waits for the final INVITE outcome, and a late 200 OK after
+    /// cancel is ACKed then BYE-cleaned before `CallCancelled` resolves.
+    ///
+    /// The timeout bounds observation of the terminal event; it does not roll
+    /// back or otherwise alter the SIP teardown already requested.
     ///
     /// # Examples
     ///
@@ -185,17 +322,17 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn hangup_and_wait(&self, timeout: Option<Duration>) -> Result<String> {
-        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+        if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
             return Ok(reason);
         }
         let mut events = self.events().await?;
-        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+        if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
             return Ok(reason);
         }
         match self.coordinator.hangup(&self.call_id).await {
             Ok(()) => {}
             Err(e) if e.is_session_gone() => {
-                if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+                if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
                     return Ok(reason);
                 }
                 return Err(e);
@@ -234,11 +371,11 @@ impl SessionHandle {
         reason: SipReason,
         timeout: Option<Duration>,
     ) -> Result<String> {
-        if let Some(cached) = self.coordinator.cached_terminal_reason(&self.call_id) {
+        if let Some(cached) = terminal_reason(&self.lifecycle().await?) {
             return Ok(cached);
         }
         let mut events = self.events().await?;
-        if let Some(cached) = self.coordinator.cached_terminal_reason(&self.call_id) {
+        if let Some(cached) = terminal_reason(&self.lifecycle().await?) {
             return Ok(cached);
         }
         self.coordinator
@@ -405,6 +542,9 @@ impl SessionHandle {
     /// evidence, preventing an immediate PBX `200 OK` NOTIFY from being
     /// interpreted as a proven target answer.
     ///
+    /// The timeout only cancels this wait; it does not undo or terminate the
+    /// REFER transaction.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -493,6 +633,29 @@ impl SessionHandle {
             })?,
             None => fut.await,
         }
+    }
+
+    /// Initiate a blind transfer and wait for a typed transfer outcome.
+    ///
+    /// This is the preferred high-level API for application code. It wraps
+    /// [`transfer_blind_and_wait_for`](Self::transfer_blind_and_wait_for) but
+    /// returns [`TransferOutcome`] so callers do not need to pattern-match raw
+    /// session events.
+    ///
+    /// `TransferWaitMode::NotifyFinal` returns
+    /// [`TransferOutcome::ReferCompleted`] for a final successful REFER NOTIFY;
+    /// that means RFC 3515 referenced-request completion, not guaranteed
+    /// replacement-call lifecycle. The timeout only cancels this wait.
+    pub async fn transfer_blind_and_wait_for_outcome(
+        &self,
+        target: &str,
+        mode: TransferWaitMode,
+        timeout: Option<Duration>,
+    ) -> Result<TransferOutcome> {
+        let event = self
+            .transfer_blind_and_wait_for(target, mode, timeout)
+            .await?;
+        TransferOutcome::try_from(event)
     }
 
     /// Initiate a blind transfer and wait using optional lifecycle evidence.
@@ -839,6 +1002,76 @@ impl SessionHandle {
         Ok(session.media_security)
     }
 
+    /// Get the current event-bus-backed lifecycle snapshot for this call.
+    ///
+    /// This is a typed inspection view used by the wait helpers. It combines
+    /// current session-store state with lifecycle evidence captured from
+    /// app-level events before they are published on the global event bus.
+    pub async fn lifecycle(&self) -> Result<CallLifecycleSnapshot> {
+        Ok(self.coordinator.lifecycle_snapshot(&self.call_id).await)
+    }
+
+    /// Wait for typed SRTP media-security negotiation on this call.
+    ///
+    /// Returns immediately if the current session state already has negotiated
+    /// media security. Otherwise subscribes to this call's event stream and
+    /// waits for [`Event::MediaSecurityNegotiated`]. The returned state omits
+    /// SRTP key material. The timeout only cancels this wait.
+    pub async fn wait_for_media_security(
+        &self,
+        timeout: Option<Duration>,
+    ) -> Result<MediaSecurityState> {
+        let snapshot = self.lifecycle().await?;
+        if let Some(security) = snapshot.media_security {
+            return Ok(security);
+        }
+        if let Some(err) = terminal_error(&snapshot, "media security was negotiated") {
+            return Err(err);
+        }
+
+        let mut rx = self.events().await?;
+
+        let snapshot = self.lifecycle().await?;
+        if let Some(security) = snapshot.media_security {
+            return Ok(security);
+        }
+        if let Some(err) = terminal_error(&snapshot, "media security was negotiated") {
+            return Err(err);
+        }
+
+        let fut = async {
+            loop {
+                match rx.next().await {
+                    Some(event @ Event::MediaSecurityNegotiated { .. }) => {
+                        if let Some(state) = media_security_state_from_event(event) {
+                            return Ok(state);
+                        }
+                    }
+                    Some(Event::CallFailed { reason, .. }) => {
+                        return Err(SessionError::Other(reason))
+                    }
+                    Some(Event::CallCancelled { .. }) => {
+                        return Err(SessionError::Other(
+                            "call cancelled before media security was negotiated".to_string(),
+                        ))
+                    }
+                    Some(Event::CallEnded { reason, .. }) => {
+                        return Err(SessionError::Other(reason))
+                    }
+                    Some(_) => {}
+                    None => return Err(SessionError::Other("Event channel closed".to_string())),
+                }
+            }
+        };
+
+        match timeout {
+            Some(d) => tokio::time::timeout(d, fut).await.map_err(|_| {
+                SessionError::Timeout("wait_for_media_security timed out".to_string())
+            })?,
+            None => fut.await,
+        }
+    }
+
     // ===== State predicates =====
 
     /// Check whether the call is currently active (connected and not on hold).
@@ -905,7 +1138,8 @@ impl SessionHandle {
     ///
     /// The predicate is evaluated only for [`Event::CallProgress`] events.
     /// Terminal call events fail the wait immediately; a fast `200 OK`
-    /// therefore does not masquerade as progress.
+    /// therefore does not masquerade as progress. The timeout only cancels
+    /// this wait.
     ///
     /// # Examples
     ///
@@ -929,7 +1163,39 @@ impl SessionHandle {
     where
         F: Fn(&Event) -> bool,
     {
+        let snapshot = self.lifecycle().await?;
+        for progress in &snapshot.progress {
+            let event = progress.to_event();
+            if predicate(&event) {
+                return Ok(event);
+            }
+        }
+        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
+            return Err(SessionError::Other(
+                "call answered before matching provisional progress".to_string(),
+            ));
+        }
+        if let Some(err) = terminal_error(&snapshot, "matching provisional progress") {
+            return Err(err);
+        }
+
         let mut rx = self.events().await?;
+        let snapshot = self.lifecycle().await?;
+        for progress in &snapshot.progress {
+            let event = progress.to_event();
+            if predicate(&event) {
+                return Ok(event);
+            }
+        }
+        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
+            return Err(SessionError::Other(
+                "call answered before matching provisional progress".to_string(),
+            ));
+        }
+        if let Some(err) = terminal_error(&snapshot, "matching provisional progress") {
+            return Err(err);
+        }
+
         let fut = async {
             loop {
                 match rx.next().await {
@@ -965,10 +1231,87 @@ impl SessionHandle {
         }
     }
 
+    /// Wait for this call to be answered and return a handle to the same call.
+    ///
+    /// This is the handle-first equivalent of
+    /// [`StreamPeer::wait_for_answered`](crate::StreamPeer::wait_for_answered).
+    /// It returns immediately when the current call state is already
+    /// established, otherwise it waits for [`Event::CallAnswered`]. The
+    /// timeout only cancels this wait.
+    pub async fn wait_for_answered(&self, timeout: Option<Duration>) -> Result<SessionHandle> {
+        let snapshot = self.lifecycle().await?;
+        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
+            return Ok(self.clone());
+        }
+        if let Some(err) = terminal_error(&snapshot, "answer") {
+            return Err(err);
+        }
+        if snapshot.state.is_some_and(|state| state.is_final()) {
+            return Err(SessionError::Other(
+                "call reached terminal state before answer".to_string(),
+            ));
+        }
+
+        let mut rx = self.events().await?;
+
+        let snapshot = self.lifecycle().await?;
+        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
+            return Ok(self.clone());
+        }
+        if let Some(err) = terminal_error(&snapshot, "answer") {
+            return Err(err);
+        }
+        if snapshot.state.is_some_and(|state| state.is_final()) {
+            return Err(SessionError::Other(
+                "call reached terminal state before answer".to_string(),
+            ));
+        }
+
+        let fut = async {
+            loop {
+                match rx.next().await {
+                    Some(Event::CallAnswered { call_id, .. }) => {
+                        return Ok(SessionHandle::new(call_id, self.coordinator.clone()))
+                    }
+                    Some(Event::CallFailed {
+                        status_code,
+                        reason,
+                        ..
+                    }) => {
+                        return Err(SessionError::Other(format!(
+                            "call failed before answer: {} {}",
+                            status_code, reason
+                        )))
+                    }
+                    Some(Event::CallCancelled { .. }) => {
+                        return Err(SessionError::Other(
+                            "call cancelled before answer".to_string(),
+                        ))
+                    }
+                    Some(Event::CallEnded { reason, .. }) => {
+                        return Err(SessionError::Other(format!(
+                            "call ended before answer: {}",
+                            reason
+                        )))
+                    }
+                    Some(_) => {}
+                    None => return Err(SessionError::Other("Event channel closed".to_string())),
+                }
+            }
+        };
+
+        match timeout {
+            Some(d) => tokio::time::timeout(d, fut)
+                .await
+                .map_err(|_| SessionError::Timeout("wait_for_answered timed out".to_string()))?,
+            None => fut.await,
+        }
+    }
+
     /// Wait for this specific call to end, with optional timeout.
     ///
     /// Returns the reason the call ended, or a `Timeout` error if the deadline
-    /// is reached first.
+    /// is reached first. The timeout only cancels this wait.
     ///
     /// # Examples
     ///
@@ -980,11 +1323,11 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn wait_for_end(&self, timeout: Option<Duration>) -> Result<String> {
-        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+        if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
             return Ok(reason);
         }
         let mut rx = self.events().await?;
-        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+        if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
             return Ok(reason);
         }
         let fut = async {
@@ -992,6 +1335,7 @@ impl SessionHandle {
                 match rx.next().await {
                     Some(Event::CallEnded { reason, .. }) => return Ok(reason),
                     Some(Event::CallFailed { reason, .. }) => return Ok(reason),
+                    Some(Event::CallCancelled { .. }) => return Ok("Cancelled".to_string()),
                     None => return Err(SessionError::Other("Event channel closed".to_string())),
                     _ => {}
                 }
@@ -1144,6 +1488,204 @@ fn dialog_matches_target(
                 .map(|uri| normalize_uri_for_match(uri))
                 .any(|uri| uri == target || uri.contains(&target) || target.contains(&uri))
         }
+    }
+}
+
+fn is_answered_state(state: CallState) -> bool {
+    matches!(
+        state,
+        CallState::Active
+            | CallState::HoldPending
+            | CallState::OnHold
+            | CallState::Resuming
+            | CallState::Muted
+            | CallState::Bridged
+            | CallState::Transferring
+            | CallState::TransferringCall
+            | CallState::ConsultationCall
+    )
+}
+
+fn terminal_reason(snapshot: &CallLifecycleSnapshot) -> Option<String> {
+    snapshot.terminal.as_ref().map(|terminal| terminal.reason())
+}
+
+fn terminal_error(snapshot: &CallLifecycleSnapshot, context: &str) -> Option<SessionError> {
+    match snapshot.terminal.as_ref()? {
+        CallTerminalInfo::Ended { reason } => Some(SessionError::Other(format!(
+            "call ended before {context}: {reason}"
+        ))),
+        CallTerminalInfo::Failed {
+            status_code,
+            reason,
+        } => Some(SessionError::Other(format!(
+            "call failed before {context}: {status_code} {reason}"
+        ))),
+        CallTerminalInfo::Cancelled => Some(SessionError::Other(format!(
+            "call cancelled before {context}"
+        ))),
+    }
+}
+
+fn media_security_state_from_event(event: Event) -> Option<MediaSecurityState> {
+    match event {
+        Event::MediaSecurityNegotiated {
+            keying,
+            suite,
+            profile,
+            contexts_installed,
+            ..
+        } => Some(MediaSecurityState {
+            keying,
+            suite,
+            profile,
+            contexts_installed,
+        }),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::SessionApiCrossCrateEvent;
+    use crate::api::events::{MediaSecurityKeying, MediaSecurityProfile};
+    use crate::api::unified::Config;
+    use rvoip_sip_core::types::sdp::CryptoSuite;
+
+    fn test_config(port: u16) -> Config {
+        let mut config = Config::local("handle-api-test", port);
+        config.media_port_start = port + 1000;
+        config.media_port_end = port + 1100;
+        config
+    }
+
+    async fn publish_synthetic(event: Event) {
+        let wrapped = SessionApiCrossCrateEvent::new(event);
+        let coord = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+        coord
+            .publish(wrapped)
+            .await
+            .expect("publish synthetic event");
+    }
+
+    #[tokio::test]
+    async fn session_handle_wait_for_answered_observes_typed_event() {
+        let coordinator = UnifiedCoordinator::new(test_config(35680)).await.unwrap();
+        let call_id = SessionId::new();
+        let handle = SessionHandle::new(call_id.clone(), coordinator.clone());
+
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.wait_for_answered(Some(Duration::from_secs(2))).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        publish_synthetic(Event::CallAnswered {
+            call_id: call_id.clone(),
+            sdp: None,
+        })
+        .await;
+
+        let answered = waiter.await.unwrap().unwrap();
+        assert_eq!(answered.id(), &call_id);
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn session_handle_wait_for_media_security_observes_typed_event() {
+        let coordinator = UnifiedCoordinator::new(test_config(35690)).await.unwrap();
+        let call_id = SessionId::new();
+        let handle = SessionHandle::new(call_id.clone(), coordinator.clone());
+
+        let waiter = tokio::spawn({
+            let handle = handle.clone();
+            async move {
+                handle
+                    .wait_for_media_security(Some(Duration::from_secs(2)))
+                    .await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        publish_synthetic(Event::MediaSecurityNegotiated {
+            call_id,
+            keying: MediaSecurityKeying::Sdes,
+            suite: CryptoSuite::AesCm128HmacSha1_80,
+            profile: MediaSecurityProfile::RtpSavp,
+            contexts_installed: true,
+        })
+        .await;
+
+        let security = waiter.await.unwrap().unwrap();
+        assert_eq!(security.keying, MediaSecurityKeying::Sdes);
+        assert_eq!(security.suite, CryptoSuite::AesCm128HmacSha1_80);
+        assert_eq!(security.profile, MediaSecurityProfile::RtpSavp);
+        assert!(security.contexts_installed);
+        coordinator.shutdown();
+    }
+
+    #[test]
+    fn transfer_outcome_maps_raw_transfer_events() {
+        let call_id = SessionId::new();
+
+        let outcome = TransferOutcome::try_from(Event::ReferCompleted {
+            call_id: call_id.clone(),
+            target: "sip:1003@example.com".into(),
+            status_code: 200,
+            reason: "OK".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            TransferOutcome::ReferCompleted {
+                status_code: 200,
+                ..
+            }
+        ));
+
+        let outcome = TransferOutcome::try_from(Event::ReferProgress {
+            call_id: call_id.clone(),
+            status_code: 180,
+            reason: "Ringing".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            TransferOutcome::TargetRinging {
+                status_code: 180,
+                ..
+            }
+        ));
+
+        let outcome = TransferOutcome::try_from(Event::TransferTargetAnswered {
+            transfer_call_id: call_id.clone(),
+            target_uri: "sip:1003@example.com".into(),
+            evidence: TransferTargetEvidence::ReferProgressThenFinal {
+                progress_status_code: 180,
+                progress_reason: "Ringing".into(),
+                final_status_code: 200,
+                final_reason: "OK".into(),
+            },
+        })
+        .unwrap();
+        assert!(matches!(outcome, TransferOutcome::TargetAnswered { .. }));
+
+        let outcome = TransferOutcome::try_from(Event::TransferFailed {
+            call_id,
+            status_code: 603,
+            reason: "Decline".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            TransferOutcome::Failed {
+                status_code: 603,
+                ..
+            }
+        ));
     }
 }
 

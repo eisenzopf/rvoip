@@ -46,9 +46,9 @@
 //!     let handle = peer.call("sip:bob@192.168.1.100:5060").await?;
 //!
 //!     // Wait for the remote side to answer
-//!     peer.wait_for_answered(handle.id()).await?;
+//!     let handle = handle.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
 //!     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-//!     handle.hangup().await?;
+//!     handle.hangup_and_wait(Some(std::time::Duration::from_secs(5))).await?;
 //!
 //!     Ok(())
 //! }
@@ -83,7 +83,13 @@
 //! handle.hold().await?;
 //! handle.resume().await?;
 //! handle.send_dtmf('1').await?;
-//! handle.transfer_blind_and_wait("sip:charlie@example.com", None).await?;
+//! handle
+//!     .transfer_blind_and_wait_for_outcome(
+//!         "sip:charlie@example.com",
+//!         TransferWaitMode::NotifyFinal,
+//!         None,
+//!     )
+//!     .await?;
 //!
 //! let audio = handle.audio().await?;
 //! let (sender, receiver) = audio.split();
@@ -240,7 +246,6 @@ pub mod dialog_package;
 pub mod dialog_subscription;
 pub mod events; // Event-driven API for v3
 pub mod simple;
-pub(crate) mod terminal;
 pub mod types; // Core types (legacy)
 pub mod unified; // Unified API // Simple peer API (legacy — use StreamPeer instead)
 
@@ -250,6 +255,7 @@ pub mod callback_peer; // CallbackPeer, CallHandler, CallHandlerDecision, EndRea
 pub mod handle; // SessionHandle, CallId
 pub mod handlers;
 pub mod incoming; // IncomingCall, IncomingCallGuard
+pub mod lifecycle;
 pub mod stream_peer; // StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
 
 // Re-export the main types
@@ -294,7 +300,8 @@ pub use audio::{AudioReceiver, AudioSender, AudioStream};
 
 // SessionHandle
 pub use handle::{
-    SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions, TransferWaitMode,
+    SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions, TransferOutcome,
+    TransferWaitMode,
 };
 
 // DialogIdentity (used when orchestrating attended transfer from a higher layer)
@@ -302,6 +309,7 @@ pub use types::DialogIdentity;
 
 // IncomingCall / IncomingCallGuard
 pub use incoming::{IncomingCall, IncomingCallGuard};
+pub use lifecycle::{CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo};
 
 // StreamPeer (replaces SimplePeer for new code)
 pub use stream_peer::{EventReceiver, PeerControl, StreamPeer};

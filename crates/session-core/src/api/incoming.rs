@@ -383,6 +383,13 @@ impl IncomingCallGuard {
         &self.call_id
     }
 
+    /// Mark this deferred call as resolved because session-core already
+    /// observed a terminal event for it. This prevents the drop safety net
+    /// from sending a late rejection for a call that no longer exists.
+    pub(crate) fn resolve_without_response(&self) {
+        self.resolved.store(true, Ordering::SeqCst);
+    }
+
     /// When the guard expires and the call is auto-rejected.
     ///
     /// This accessor is trivial and is useful for queue ordering.
@@ -439,6 +446,16 @@ impl IncomingCallGuard {
         tokio::spawn(async move {
             let _ = coordinator.reject_call(&call_id, status, &reason).await;
         });
+    }
+
+    /// Abandon the deferred call locally without sending a SIP response.
+    ///
+    /// This is an explicit escape hatch for tests or external policy engines
+    /// that know the INVITE is already being resolved elsewhere. Normal
+    /// applications should prefer [`accept`](Self::accept),
+    /// [`reject`](Self::reject), or waiting for a real cancellation event.
+    pub fn abandon(self) {
+        self.resolved.store(true, Ordering::SeqCst);
     }
 
     /// Reject the call and wait for the matching terminal event.
@@ -501,6 +518,93 @@ impl IncomingCallGuard {
             None => fut.await,
         }
     }
+
+    /// Wait for the caller to cancel this deferred ringing call.
+    ///
+    /// This is useful for ring/cancel tests, queues, and callback-style
+    /// applications that intentionally keep an INVITE in ringing state. The
+    /// method resolves only on [`Event::CallCancelled`]. It returns an error
+    /// if the call is answered, rejected, failed, normally ended, the guard
+    /// deadline expires, or the event stream closes.
+    ///
+    /// A caller-supplied timeout only cancels this wait. It does not mark the
+    /// guard resolved, reject the call, abandon the call, or suppress the
+    /// drop-time safety rejection.
+    pub async fn wait_for_cancelled(&self, timeout: Option<Duration>) -> Result<()> {
+        if self.resolved.load(Ordering::SeqCst) {
+            return Err(SessionError::InvalidTransition(format!(
+                "IncomingCallGuard for {} is already resolved",
+                self.call_id
+            )));
+        }
+
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(SessionError::Timeout(
+                "IncomingCallGuard deadline elapsed before cancellation".to_string(),
+            ));
+        }
+
+        let wait_duration = timeout.map_or(remaining, |duration| duration.min(remaining));
+        let mut events = self.coordinator.events_for_session(&self.call_id).await?;
+        let resolved = self.resolved.clone();
+
+        let fut = async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallCancelled { .. }) => {
+                        resolved.store(true, Ordering::SeqCst);
+                        return Ok(());
+                    }
+                    Some(Event::CallAnswered { .. }) => {
+                        resolved.store(true, Ordering::SeqCst);
+                        return Err(SessionError::Other(
+                            "incoming call was answered before cancellation".to_string(),
+                        ));
+                    }
+                    Some(Event::CallFailed {
+                        status_code,
+                        reason,
+                        ..
+                    }) => {
+                        resolved.store(true, Ordering::SeqCst);
+                        return Err(SessionError::Other(format!(
+                            "incoming call failed before cancellation: {} {}",
+                            status_code, reason
+                        )));
+                    }
+                    Some(Event::CallEnded { reason, .. }) => {
+                        resolved.store(true, Ordering::SeqCst);
+                        return Err(SessionError::Other(format!(
+                            "incoming call ended before cancellation: {}",
+                            reason
+                        )));
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Err(SessionError::Other(
+                            "Event channel closed while waiting for cancellation".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        match tokio::time::timeout(wait_duration, fut).await {
+            Ok(result) => result,
+            Err(_) => {
+                if Instant::now() >= self.deadline {
+                    Err(SessionError::Timeout(
+                        "IncomingCallGuard deadline elapsed before cancellation".to_string(),
+                    ))
+                } else {
+                    Err(SessionError::Timeout(
+                        "wait_for_cancelled timed out".to_string(),
+                    ))
+                }
+            }
+        }
+    }
 }
 
 impl Drop for IncomingCallGuard {
@@ -520,7 +624,19 @@ impl Drop for IncomingCallGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::SessionApiCrossCrateEvent;
     use crate::api::unified::Config;
+
+    async fn publish_synthetic(event: Event) {
+        let wrapped = SessionApiCrossCrateEvent::new(event);
+        let coord = rvoip_infra_common::events::global_coordinator()
+            .await
+            .clone();
+        coord
+            .publish(wrapped)
+            .await
+            .expect("publish synthetic event");
+    }
 
     #[tokio::test]
     async fn deferred_guard_reject_marks_shared_resolution_before_watchdog() {
@@ -559,5 +675,98 @@ mod tests {
             resolved.load(Ordering::SeqCst),
             "accept should resolve the guard before the watchdog can auto-reject"
         );
+    }
+
+    #[tokio::test]
+    async fn deferred_guard_wait_for_cancelled_observes_call_cancelled() {
+        let coordinator = UnifiedCoordinator::new(Config::local("guard-test", 35992))
+            .await
+            .expect("coordinator starts");
+        let call_id = CallId::new();
+        let guard =
+            IncomingCallGuard::new(call_id.clone(), coordinator.clone(), Duration::from_secs(5));
+        let resolved = guard.resolved.clone();
+
+        let waiter = tokio::spawn({
+            let guard = guard;
+            async move { guard.wait_for_cancelled(Some(Duration::from_secs(2))).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        publish_synthetic(Event::CallCancelled { call_id }).await;
+
+        waiter.await.unwrap().unwrap();
+        assert!(resolved.load(Ordering::SeqCst));
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn deferred_guard_wait_for_cancelled_errors_on_answer() {
+        let coordinator = UnifiedCoordinator::new(Config::local("guard-test", 35993))
+            .await
+            .expect("coordinator starts");
+        let call_id = CallId::new();
+        let guard =
+            IncomingCallGuard::new(call_id.clone(), coordinator.clone(), Duration::from_secs(5));
+        let resolved = guard.resolved.clone();
+
+        let waiter = tokio::spawn({
+            let guard = guard;
+            async move { guard.wait_for_cancelled(Some(Duration::from_secs(2))).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        publish_synthetic(Event::CallAnswered { call_id, sdp: None }).await;
+
+        let err = waiter.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("answered before cancellation"));
+        assert!(resolved.load(Ordering::SeqCst));
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn deferred_guard_wait_for_cancelled_timeout_does_not_resolve_guard() {
+        let coordinator = UnifiedCoordinator::new(Config::local("guard-test", 35994))
+            .await
+            .expect("coordinator starts");
+        let guard =
+            IncomingCallGuard::new(CallId::new(), coordinator.clone(), Duration::from_secs(5));
+        let resolved = guard.resolved.clone();
+
+        let err = guard
+            .wait_for_cancelled(Some(Duration::from_millis(25)))
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, SessionError::Timeout(_)),
+            "caller timeout should surface as a timeout"
+        );
+        assert!(
+            !resolved.load(Ordering::SeqCst),
+            "caller timeout must not resolve or mutate the guard"
+        );
+
+        guard.abandon();
+        assert!(
+            resolved.load(Ordering::SeqCst),
+            "abandon is the explicit local policy decision"
+        );
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn deferred_guard_abandon_resolves_without_sip_response() {
+        let coordinator = UnifiedCoordinator::new(Config::local("guard-test", 35995))
+            .await
+            .expect("coordinator starts");
+        let guard =
+            IncomingCallGuard::new(CallId::new(), coordinator.clone(), Duration::from_secs(5));
+        let resolved = guard.resolved.clone();
+
+        guard.abandon();
+
+        assert!(resolved.load(Ordering::SeqCst));
+        coordinator.shutdown();
     }
 }

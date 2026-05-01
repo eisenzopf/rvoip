@@ -10,7 +10,7 @@ use common::{
     call_with_answer_retry, endpoint_config, env_duration_secs, init_tracing, load_env,
     post_register_settle_duration, register_endpoint, remote_test_timeout, ExampleResult,
 };
-use rvoip_session_core::{StreamPeer, TransferWaitMode};
+use rvoip_session_core::{StreamPeer, TransferOutcome, TransferWaitMode};
 use tokio::time::sleep;
 
 #[tokio::main]
@@ -48,17 +48,29 @@ async fn main() -> ExampleResult<()> {
         sleep(transfer_settle).await;
     }
 
-    let transfer_event = handle
-        .transfer_blind_and_wait_for(
+    let transfer_outcome = handle
+        .transfer_blind_and_wait_for_outcome(
             &transfer_target,
             TransferWaitMode::NotifyFinal,
             Some(remote_test_timeout()?),
         )
         .await?;
-    println!(
-        "[2001] Terminal REFER NOTIFY observed: {:?}",
-        transfer_event
-    );
+    match transfer_outcome {
+        TransferOutcome::ReferCompleted {
+            status_code,
+            reason,
+            ..
+        } => println!(
+            "[2001] REFER completed with final NOTIFY: {} {}",
+            status_code, reason
+        ),
+        TransferOutcome::Failed {
+            status_code,
+            reason,
+            ..
+        } => return Err(format!("REFER failed: {} {}", status_code, reason).into()),
+        other => return Err(format!("unexpected transfer outcome: {:?}", other).into()),
+    }
     handle
         .hangup_and_wait(Some(std::time::Duration::from_secs(8)))
         .await

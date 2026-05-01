@@ -1408,10 +1408,13 @@ impl UnifiedDialogManager {
             }
         }
 
-        // Find the INVITE transaction for this dialog
+        // Find the currently pending outbound INVITE transaction for this dialog.
+        // Auth/session-timer retries create newer INVITE transactions under the
+        // same dialog, and RFC 3261 CANCEL must target that latest transaction.
         let invite_tx_id = self
             .core
-            .find_invite_transaction_for_dialog(dialog_id)
+            .find_latest_invite_transaction_for_dialog(dialog_id)
+            .await
             .ok_or_else(|| {
                 error!("No INVITE transaction found for dialog {}", dialog_id);
                 ApiError::Protocol {

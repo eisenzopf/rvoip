@@ -744,23 +744,14 @@ pub async fn call_with_answer_retry(
 
     for attempt in 1..=attempts {
         let handle = peer.call(target).await?;
-        let result = timeout(timeout_duration, peer.wait_for_answered(handle.id())).await;
-        match result {
-            Ok(Ok(answered)) => return Ok(answered),
-            Ok(Err(e)) => {
+        match handle.wait_for_answered(Some(timeout_duration)).await {
+            Ok(answered) => return Ok(answered),
+            Err(e) => {
                 println!(
                     "[call] Attempt {}/{} to {} was not answered: {}",
                     attempt, attempts, target, e
                 );
                 last_error = Some(Box::new(e));
-            }
-            Err(_) => {
-                let msg = format!(
-                    "timed out after {:?} waiting for {} to answer",
-                    timeout_duration, target
-                );
-                println!("[call] Attempt {}/{}: {}", attempt, attempts, msg);
-                last_error = Some(msg.into());
             }
         }
 

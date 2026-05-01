@@ -1551,10 +1551,12 @@ impl DialogClient {
             .map_err(ApiError::from)
     }
 
-    /// Terminate a dialog and clean up resources
+    /// Terminate a dialog and clean up local resources.
     ///
-    /// This method provides direct control over dialog termination,
-    /// which is essential for session lifecycle management.
+    /// This is a local cleanup/admin primitive. It does not perform SIP call
+    /// teardown and must not be used as a substitute for sending BYE/CANCEL.
+    /// Call-like application code should use session-core teardown APIs, or
+    /// dialog-core's explicit BYE helpers when working at this layer directly.
     ///
     /// # Arguments
     /// * `dialog_id` - The dialog ID to terminate

@@ -45,8 +45,15 @@ impl fmt::Display for FailureReason {
 pub enum CallState {
     Idle,
     Initiating,
+    /// Local user requested cancel before a provisional response. RFC 3261
+    /// forbids sending CANCEL until a provisional response has arrived.
+    CancelPending,
+    /// CANCEL has been sent, or a late 200 OK is being ACK/BYE cleaned up.
+    Cancelling,
     Ringing,
     Answering, // UAS accepted call, sending 200 OK, waiting for ACK
+    /// UAS sent 200 OK and local hangup was requested before ACK arrived.
+    AnsweringHangupPending,
     EarlyMedia,
     Active,
     /// Sent a hold re-INVITE, awaiting 2xx (RFC 3261 §14.1). Session
@@ -95,7 +102,11 @@ impl CallState {
         matches!(
             self,
             CallState::Initiating
+                | CallState::CancelPending
+                | CallState::Cancelling
                 | CallState::Ringing
+                | CallState::Answering
+                | CallState::AnsweringHangupPending
                 | CallState::Active
                 | CallState::HoldPending
                 | CallState::OnHold
@@ -115,8 +126,11 @@ impl fmt::Display for CallState {
         match self {
             CallState::Idle => write!(f, "Idle"),
             CallState::Initiating => write!(f, "Initiating"),
+            CallState::CancelPending => write!(f, "CancelPending"),
+            CallState::Cancelling => write!(f, "Cancelling"),
             CallState::Ringing => write!(f, "Ringing"),
             CallState::Answering => write!(f, "Answering"),
+            CallState::AnsweringHangupPending => write!(f, "AnsweringHangupPending"),
             CallState::EarlyMedia => write!(f, "EarlyMedia"),
             CallState::Active => write!(f, "Active"),
             CallState::HoldPending => write!(f, "HoldPending"),

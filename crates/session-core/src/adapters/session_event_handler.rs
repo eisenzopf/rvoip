@@ -8,12 +8,12 @@
 //! NO OTHER MODULE should interact with the GlobalEventCoordinator directly.
 
 use crate::adapters::{DialogAdapter, MediaAdapter};
-use crate::api::terminal::{remember_terminal_event, TerminalEventCache};
+use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
 use crate::errors::{Result as SessionResult, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::state_machine::StateMachine as StateMachineExecutor;
-use crate::state_table::types::{EventType, Role, SessionId};
-use crate::types::DialogId;
+use crate::state_table::types::{EventTemplate, EventType, Role, SessionId};
+use crate::types::{CallState, DialogId};
 use anyhow::Result;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
@@ -64,9 +64,8 @@ pub struct SessionCrossCrateEventHandler {
     /// the peer has ever registered, which in practice is 1.
     outbound_flow_last_refresh: Arc<DashMap<String, Instant>>,
 
-    /// Short-lived cache of terminal call events so late waiters can still
-    /// observe completed teardown deterministically.
-    terminal_events: TerminalEventCache,
+    /// App-level event publisher. Updates lifecycle before global bus delivery.
+    app_event_publisher: SessionEventPublisher,
 }
 
 #[allow(dead_code)]
@@ -433,14 +432,17 @@ impl SessionCrossCrateEventHandler {
     ) -> Self {
         Self {
             state_machine,
-            global_coordinator,
+            global_coordinator: global_coordinator.clone(),
             dialog_adapter,
             media_adapter,
             registry,
             incoming_call_tx: None,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
-            terminal_events: Arc::new(DashMap::new()),
+            app_event_publisher: SessionEventPublisher::new(
+                global_coordinator.clone(),
+                LifecycleIndex::new(),
+            ),
         }
     }
 
@@ -451,18 +453,18 @@ impl SessionCrossCrateEventHandler {
         media_adapter: Arc<MediaAdapter>,
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
-        terminal_events: TerminalEventCache,
+        app_event_publisher: SessionEventPublisher,
     ) -> Self {
         Self {
             state_machine,
-            global_coordinator,
+            global_coordinator: global_coordinator.clone(),
             dialog_adapter,
             media_adapter,
             registry,
             incoming_call_tx: Some(incoming_call_tx),
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
-            terminal_events,
+            app_event_publisher,
         }
     }
 
@@ -475,7 +477,7 @@ impl SessionCrossCrateEventHandler {
         media_adapter: Arc<MediaAdapter>,
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
-        terminal_events: TerminalEventCache,
+        app_event_publisher: SessionEventPublisher,
     ) -> Self {
         Self::with_incoming_call_channel(
             state_machine,
@@ -484,7 +486,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx,
-            terminal_events,
+            app_event_publisher,
         )
     }
 
@@ -499,7 +501,7 @@ impl SessionCrossCrateEventHandler {
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
         state_machine_event_rx: mpsc::Receiver<crate::state_machine::executor::SessionEvent>,
-        terminal_events: TerminalEventCache,
+        app_event_publisher: SessionEventPublisher,
     ) -> Self {
         let mut handler = Self::with_incoming_call_channel(
             state_machine,
@@ -508,7 +510,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx,
-            terminal_events,
+            app_event_publisher,
         );
         handler.state_machine_event_rx = Some(Arc::new(Mutex::new(state_machine_event_rx)));
         handler
@@ -525,6 +527,8 @@ impl SessionCrossCrateEventHandler {
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
         _simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>,
     ) -> Self {
+        let app_event_publisher =
+            SessionEventPublisher::new(global_coordinator.clone(), LifecycleIndex::new());
         Self::with_incoming_call_channel(
             state_machine,
             global_coordinator,
@@ -532,7 +536,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx,
-            Arc::new(DashMap::new()),
+            app_event_publisher,
         )
     }
 
@@ -550,13 +554,11 @@ impl SessionCrossCrateEventHandler {
         api_event: crate::api::events::Event,
         session_id: SessionId,
     ) {
-        remember_terminal_event(&self.terminal_events, &api_event);
-        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-        let coordinator = self.global_coordinator.clone();
+        let publisher = self.app_event_publisher.clone();
         let store = self.state_machine.store.clone();
         let registry = self.registry.clone();
         tokio::spawn(async move {
-            if let Err(e) = coordinator.publish(wrapped).await {
+            if let Err(e) = publisher.publish_now(api_event).await {
                 tracing::warn!(
                     "Failed to publish terminal event to global coordinator: {}",
                     e
@@ -682,11 +684,10 @@ impl SessionCrossCrateEventHandler {
     ) {
         let api_event = match event {
             crate::state_machine::executor::SessionEvent::CallCancelled { session_id } => {
-                let api_event = crate::api::events::Event::CallCancelled {
-                    call_id: session_id.clone(),
-                };
-                self.publish_and_release_session(api_event, session_id)
-                    .await;
+                debug!(
+                    "Ignoring state-machine CallCancelled for {}; terminal cancellation is published by the dialog event handler after wire teardown",
+                    session_id
+                );
                 return;
             }
             crate::state_machine::executor::SessionEvent::CallOnHold { session_id } => {
@@ -703,7 +704,7 @@ impl SessionCrossCrateEventHandler {
         };
 
         if let Some(api_event) = api_event {
-            publish_api_event(&self.global_coordinator, api_event);
+            publish_api_event(&self.app_event_publisher, api_event);
         }
     }
 }
@@ -1007,7 +1008,7 @@ impl SessionCrossCrateEventHandler {
             self.registry.remove_session(&session_id).await;
         } else {
             publish_api_event(
-                &self.global_coordinator,
+                &self.app_event_publisher,
                 crate::api::events::Event::IncomingCall {
                     call_id: session_id.clone(),
                     from: from.clone(),
@@ -1054,21 +1055,46 @@ impl SessionCrossCrateEventHandler {
             }
         }
 
-        if let Err(e) = self
+        let mut publish_answered = true;
+        match self
             .state_machine
             .process_event(&session_id, EventType::Dialog200OK)
             .await
         {
-            error!("Failed to process CallEstablished as Dialog200OK: {}", e);
+            Ok(result) => {
+                publish_answered = !matches!(
+                    result.old_state,
+                    CallState::CancelPending | CallState::Cancelling
+                ) && !matches!(
+                    result.next_state,
+                    Some(CallState::CancelPending | CallState::Cancelling | CallState::Cancelled)
+                );
+            }
+            Err(e) => {
+                error!("Failed to process CallEstablished as Dialog200OK: {}", e);
+                if let Ok(session) = self.state_machine.store.get_session(&session_id).await {
+                    publish_answered = !matches!(
+                        session.call_state,
+                        CallState::CancelPending | CallState::Cancelling | CallState::Cancelled
+                    );
+                }
+            }
         }
 
-        publish_api_event(
-            &self.global_coordinator,
-            crate::api::events::Event::CallAnswered {
-                call_id: session_id,
-                sdp: sdp_answer,
-            },
-        );
+        if publish_answered {
+            publish_api_event(
+                &self.app_event_publisher,
+                crate::api::events::Event::CallAnswered {
+                    call_id: session_id,
+                    sdp: sdp_answer,
+                },
+            );
+        } else {
+            info!(
+                "Suppressing CallAnswered for {} because INVITE answer is on cancel cleanup path",
+                session_id
+            );
+        }
 
         Ok(())
     }
@@ -1372,25 +1398,14 @@ impl SessionCrossCrateEventHandler {
         } else {
             // Publish IncomingCall event to the global coordinator's "session_to_app" channel.
             // All active subscribers (StreamPeer, CallbackPeer, etc.) will receive it.
-            {
-                debug!("🔍 [DEBUG] Publishing IncomingCall event to global coordinator");
-                let api_event = crate::api::events::Event::IncomingCall {
+            debug!("🔍 [DEBUG] Publishing IncomingCall event to global coordinator");
+            self.app_event_publisher
+                .publish(crate::api::events::Event::IncomingCall {
                     call_id: session_id.clone(),
                     from: from.clone(),
                     to: to.clone(),
                     sdp: session_remote_sdp,
-                };
-                let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-                let coordinator = self.global_coordinator.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = coordinator.publish(wrapped).await {
-                        tracing::warn!(
-                            "Failed to publish IncomingCall to global coordinator: {}",
-                            e
-                        );
-                    }
                 });
-            }
 
             // Legacy incoming call notification (keep for compatibility)
             if let Some(ref tx) = self.incoming_call_tx {
@@ -1485,32 +1500,49 @@ impl SessionCrossCrateEventHandler {
             }
         }
 
-        // CallEstablished maps to Dialog200OK for state machine processing
-        if let Err(e) = self
+        // CallEstablished maps to Dialog200OK for state machine processing.
+        // If this is a late 200 OK after local cancel intent, dialog-core has
+        // already sent the required ACK; the state table sends BYE and we must
+        // not surface the call as answered.
+        let mut publish_answered = true;
+        match self
             .state_machine
             .process_event(&session_id, EventType::Dialog200OK)
             .await
         {
-            error!("Failed to process CallEstablished as Dialog200OK: {}", e);
+            Ok(result) => {
+                publish_answered = !matches!(
+                    result.old_state,
+                    CallState::CancelPending | CallState::Cancelling
+                ) && !matches!(
+                    result.next_state,
+                    Some(CallState::CancelPending | CallState::Cancelling | CallState::Cancelled)
+                );
+            }
+            Err(e) => {
+                error!("Failed to process CallEstablished as Dialog200OK: {}", e);
+                if let Ok(session) = self.state_machine.store.get_session(&session_id).await {
+                    publish_answered = !matches!(
+                        session.call_state,
+                        CallState::CancelPending | CallState::Cancelling | CallState::Cancelled
+                    );
+                }
+            }
         }
 
         // Publish CallAnswered event to the global coordinator's "session_to_app" channel.
-        {
+        if publish_answered {
             debug!("🔍 [DEBUG] Publishing CallAnswered event to global coordinator");
             let api_event = crate::api::events::Event::CallAnswered {
                 call_id: session_id.clone(),
                 sdp: sdp_answer,
             };
-            let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-            let coordinator = self.global_coordinator.clone();
-            tokio::spawn(async move {
-                if let Err(e) = coordinator.publish(wrapped).await {
-                    tracing::warn!(
-                        "Failed to publish CallAnswered to global coordinator: {}",
-                        e
-                    );
-                }
-            });
+            self.app_event_publisher.publish(api_event);
+        } else {
+            info!(
+                "Suppressing CallAnswered for {} because INVITE answer is on cancel cleanup path",
+                session_id
+            );
         }
 
         Ok(())
@@ -1670,15 +1702,24 @@ impl SessionCrossCrateEventHandler {
             _ => EventType::DialogError(format!("unexpected CallFailed status {}", status)),
         };
 
-        if let Err(e) = self
+        let mut state_machine_published_cancelled = false;
+        match self
             .state_machine
             .process_event(&session_id, event_type)
             .await
         {
-            error!(
-                "Failed to process CallFailed({}) for session {}: {}",
-                status, session_id, e
-            );
+            Ok(result) => {
+                state_machine_published_cancelled = result
+                    .events_published
+                    .iter()
+                    .any(|event| matches!(event, EventTemplate::CallCancelled));
+            }
+            Err(e) => {
+                error!(
+                    "Failed to process CallFailed({}) for session {}: {}",
+                    status, session_id, e
+                );
+            }
         }
 
         if is_mid_call_reinvite_failure {
@@ -1693,18 +1734,24 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        if state_machine_published_cancelled {
+            let api_event = crate::api::events::Event::CallCancelled {
+                call_id: session_id.clone(),
+            };
+            self.publish_and_release_session(api_event, session_id.clone())
+                .await;
+            return Ok(());
+        }
+
         // RFC 3515 §2.4.5 — if this session is a transfer leg, surface
         // the failure back to the transferor via a final sipfrag NOTIFY
         // and publish `Event::TransferFailed`. Done here rather than in
-        // the state-machine action because the YAML `Dialog4xxFailure`
-        // transitions on `Initiating` don't fire at runtime (the yaml
-        // loader maps the name to `MediaEvent` — see yaml_loader.rs).
-        // The adapter-level path below reliably runs for every terminal
-        // failure routed through `handle_call_failed`.
+        // the state-machine action so this adapter-level path reliably runs
+        // for every terminal failure routed through `handle_call_failed`.
         if let Ok(sess) = self.state_machine.store.get_session(&session_id).await {
             if let Some(transferor) = sess.transferor_session_id.clone() {
                 let dialog_adapter = self.dialog_adapter.clone();
-                let coordinator = self.global_coordinator.clone();
+                let app_event_publisher = self.app_event_publisher.clone();
                 let reason_for_task = reason.clone();
                 tokio::spawn(async move {
                     if let Err(e) = dialog_adapter
@@ -1722,8 +1769,7 @@ impl SessionCrossCrateEventHandler {
                         reason: reason_for_task,
                         status_code: status,
                     };
-                    let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-                    if let Err(e) = coordinator.publish(wrapped).await {
+                    if let Err(e) = app_event_publisher.publish_now(api_event).await {
                         tracing::warn!("Failed to publish TransferFailed event: {}", e);
                     }
                 });
@@ -1901,7 +1947,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
         publish_api_event(
-            &self.global_coordinator,
+            &self.app_event_publisher,
             crate::api::events::Event::SessionRefreshed {
                 call_id: session_id,
                 expires_secs,
@@ -1919,7 +1965,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
         publish_api_event(
-            &self.global_coordinator,
+            &self.app_event_publisher,
             crate::api::events::Event::SessionRefreshFailed {
                 call_id: session_id,
                 reason,
@@ -2163,13 +2209,7 @@ impl SessionCrossCrateEventHandler {
             call_id: session_id.clone(),
             expires_secs,
         };
-        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-        let coordinator = self.global_coordinator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.publish(wrapped).await {
-                tracing::warn!("Failed to publish SessionRefreshed: {}", e);
-            }
-        });
+        self.app_event_publisher.publish(api_event);
         Ok(())
     }
 
@@ -2266,13 +2306,7 @@ impl SessionCrossCrateEventHandler {
             call_id: session_id.clone(),
             reason,
         };
-        let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-        let coordinator = self.global_coordinator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.publish(wrapped).await {
-                tracing::warn!("Failed to publish SessionRefreshFailed: {}", e);
-            }
-        });
+        self.app_event_publisher.publish(api_event);
         Ok(())
     }
 
@@ -2296,20 +2330,38 @@ impl SessionCrossCrateEventHandler {
 
         info!("🎯 [handle_call_cancelled] session={}", session_id);
 
-        // Drive the existing Dialog487RequestTerminated state transition.
-        if let Err(e) = self
+        // Drive the Dialog487RequestTerminated transition. UAC cancellation
+        // publishes only when the INVITE transaction is terminal; inbound UAS
+        // CANCEL still falls back to direct publication after dialog-core has
+        // already sent 200(CANCEL)+487(INVITE).
+        let mut state_machine_published_cancelled = false;
+        match self
             .state_machine
             .process_event(&session_id, EventType::Dialog487RequestTerminated)
             .await
         {
-            error!(
-                "Failed to process CallCancelled for session {}: {}",
-                session_id, e
-            );
+            Ok(result) => {
+                state_machine_published_cancelled = result
+                    .events_published
+                    .iter()
+                    .any(|event| matches!(event, EventTemplate::CallCancelled));
+            }
+            Err(e) => {
+                error!(
+                    "Failed to process CallCancelled for session {}: {}",
+                    session_id, e
+                );
+            }
         }
 
         // Publish app-level CallCancelled for StreamPeer/CallbackPeer
         // subscribers, then release the session from the store + registry.
+        if state_machine_published_cancelled {
+            debug!(
+                "Publishing CallCancelled for {} after terminal state-table cancellation transition",
+                session_id
+            );
+        }
         let api_event = crate::api::events::Event::CallCancelled {
             call_id: session_id.clone(),
         };
@@ -2385,7 +2437,7 @@ impl SessionCrossCrateEventHandler {
             reason,
             sdp,
         };
-        publish_api_event(&self.global_coordinator, api_event);
+        publish_api_event(&self.app_event_publisher, api_event);
 
         Ok(())
     }
@@ -2475,19 +2527,45 @@ impl SessionCrossCrateEventHandler {
         info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}",
                   session_id, reason);
 
-        // Process DialogTerminated to complete Terminating → Terminated transition
-        // (DialogBYE was already processed when hangup was initiated)
-        if let Err(e) = self
+        // Process DialogTerminated to complete Terminating → Terminated, or
+        // Cancelling → Cancelled for the late-200/ACK/BYE cleanup path.
+        let mut state_machine_published_cancelled = false;
+        let mut cancel_cleanup_fallback = false;
+        match self
             .state_machine
             .process_event(&session_id, EventType::DialogTerminated)
             .await
         {
-            error!("Failed to process dialog terminated: {}", e);
-        } else {
-            info!(
-                "✅ [handle_call_terminated] DialogTerminated processed successfully for {}",
-                session_id
-            );
+            Ok(result) => {
+                state_machine_published_cancelled = result
+                    .events_published
+                    .iter()
+                    .any(|event| matches!(event, EventTemplate::CallCancelled));
+                cancel_cleanup_fallback = matches!(result.old_state, CallState::Cancelling)
+                    || matches!(result.next_state, Some(CallState::Cancelled));
+                info!(
+                    "✅ [handle_call_terminated] DialogTerminated processed successfully for {}",
+                    session_id
+                );
+            }
+            Err(e) => {
+                error!("Failed to process dialog terminated: {}", e);
+                if let Ok(session) = self.state_machine.store.get_session(&session_id).await {
+                    cancel_cleanup_fallback = matches!(
+                        session.call_state,
+                        CallState::Cancelling | CallState::Cancelled
+                    );
+                }
+            }
+        }
+
+        if state_machine_published_cancelled || cancel_cleanup_fallback {
+            let api_event = crate::api::events::Event::CallCancelled {
+                call_id: session_id.clone(),
+            };
+            self.publish_and_release_session(api_event, session_id.clone())
+                .await;
+            return Ok(());
         }
 
         // Publish CallEnded to the global coordinator's "session_to_app"
@@ -2556,7 +2634,7 @@ impl SessionCrossCrateEventHandler {
         }
         for digit in tones.chars() {
             publish_api_event(
-                &self.global_coordinator,
+                &self.app_event_publisher,
                 crate::api::events::Event::DtmfReceived {
                     call_id: sid.clone(),
                     digit,
@@ -2816,7 +2894,7 @@ impl SessionCrossCrateEventHandler {
         };
 
         if let Some(api_event) = api_event {
-            publish_api_event(&self.global_coordinator, api_event);
+            publish_api_event(&self.app_event_publisher, api_event);
         }
     }
 
@@ -2881,27 +2959,16 @@ impl SessionCrossCrateEventHandler {
         }
 
         // Publish ReferReceived event to the global coordinator's "session_to_app" channel.
-        {
-            debug!("🔍 [DEBUG] Publishing ReferReceived event to global coordinator");
-            let api_event = crate::api::events::Event::ReferReceived {
+        debug!("🔍 [DEBUG] Publishing ReferReceived event to global coordinator");
+        self.app_event_publisher
+            .publish(crate::api::events::Event::ReferReceived {
                 call_id: session_id.clone(),
                 refer_to: refer_to.clone(),
                 referred_by: referred_by.clone(),
                 replaces: replaces.clone(),
                 transaction_id: transaction_id.clone(),
                 transfer_type: transfer_type.clone(),
-            };
-            let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-            let coordinator = self.global_coordinator.clone();
-            tokio::spawn(async move {
-                if let Err(e) = coordinator.publish(wrapped).await {
-                    tracing::warn!(
-                        "Failed to publish ReferReceived to global coordinator: {}",
-                        e
-                    );
-                }
             });
-        }
 
         let state_machine = self.state_machine.clone();
         let session_for_default = session_id.clone();
@@ -3161,7 +3228,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
         publish_api_event(
-            &self.global_coordinator,
+            &self.app_event_publisher,
             crate::api::events::Event::MediaQualityChanged {
                 call_id: sid,
                 packet_loss_percent: (metrics.packet_loss * 100.0) as u32,
@@ -3395,7 +3462,7 @@ impl SessionCrossCrateEventHandler {
             content_type: content_type.clone(),
             body: body.clone(),
         };
-        publish_api_event(&self.global_coordinator, api_event);
+        publish_api_event(&self.app_event_publisher, api_event);
 
         if event_package.eq_ignore_ascii_case("dialog") {
             let is_dialog_info = content_type
@@ -3411,7 +3478,7 @@ impl SessionCrossCrateEventHandler {
                         Ok(document) => {
                             let dialogs = document.dialogs.clone();
                             publish_api_event(
-                                &self.global_coordinator,
+                                &self.app_event_publisher,
                                 crate::api::events::Event::DialogPackageNotify {
                                     subscription_id: session_id.clone(),
                                     entity: document.entity.clone(),
@@ -3422,7 +3489,7 @@ impl SessionCrossCrateEventHandler {
                             );
                             for dialog in dialogs {
                                 publish_api_event(
-                                    &self.global_coordinator,
+                                    &self.app_event_publisher,
                                     crate::api::events::Event::DialogStateChanged {
                                         subscription_id: session_id.clone(),
                                         dialog: dialog.clone(),
@@ -3454,7 +3521,7 @@ impl SessionCrossCrateEventHandler {
                 if let Some(body) = body {
                     if let Some((status_code, reason)) = parse_sipfrag_status_line(&body) {
                         publish_api_event(
-                            &self.global_coordinator,
+                            &self.app_event_publisher,
                             crate::api::events::Event::ReferNotify {
                                 call_id: session_id.clone(),
                                 status_code,
@@ -3516,7 +3583,7 @@ impl SessionCrossCrateEventHandler {
                                     let _ = self.state_machine.store.update_session(session).await;
                                 }
                                 if let Some(event) = target_answered {
-                                    publish_api_event(&self.global_coordinator, event);
+                                    publish_api_event(&self.app_event_publisher, event);
                                 }
                                 Some(crate::api::events::Event::ReferCompleted {
                                     call_id: session_id.clone(),
@@ -3533,7 +3600,7 @@ impl SessionCrossCrateEventHandler {
                             _ => None,
                         };
                         if let Some(ev) = transfer_event {
-                            publish_api_event(&self.global_coordinator, ev);
+                            publish_api_event(&self.app_event_publisher, ev);
                         }
                     } else {
                         debug!(
@@ -3601,17 +3668,8 @@ impl SessionCrossCrateEventHandler {
 /// `session_to_app` channel. Terminal events (`CallEnded` / `CallFailed` /
 /// `CallCancelled`) go through `publish_and_release_session` instead,
 /// which also frees the session-store entry after publish.
-fn publish_api_event(
-    coordinator: &Arc<GlobalEventCoordinator>,
-    api_event: crate::api::events::Event,
-) {
-    let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
-    let coordinator = coordinator.clone();
-    tokio::spawn(async move {
-        if let Err(e) = coordinator.publish(wrapped).await {
-            tracing::warn!("Failed to publish app-level event: {}", e);
-        }
-    });
+fn publish_api_event(publisher: &SessionEventPublisher, api_event: crate::api::events::Event) {
+    publisher.publish(api_event);
 }
 
 fn remote_direction_is_hold(direction: crate::types::MediaDirection) -> bool {

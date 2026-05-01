@@ -6,7 +6,7 @@ mod common;
 
 use common::{endpoint_config, init_tracing, load_env, register_endpoint, ExampleResult};
 use rvoip_session_core::StreamPeer;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 
 #[tokio::main]
 async fn main() -> ExampleResult<()> {
@@ -26,8 +26,18 @@ async fn main() -> ExampleResult<()> {
         incoming.from
     );
     let guard = incoming.defer(Duration::from_secs(30));
-    sleep(Duration::from_secs(12)).await;
-    drop(guard);
+    match guard
+        .wait_for_cancelled(Some(Duration::from_secs(12)))
+        .await
+    {
+        Ok(()) => println!("[2003] Observed typed cancellation for deferred incoming call."),
+        Err(e) => {
+            println!(
+                "[2003] No target-side cancellation event observed before timeout ({e}); caller-side cancellation remains the required FreeSWITCH assertion."
+            );
+            guard.abandon();
+        }
+    }
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

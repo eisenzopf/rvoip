@@ -316,6 +316,14 @@ path = "examples/asterisk_callback/endpoint.rs"
 name = "asterisk_callback_analyze"
 path = "examples/asterisk_callback/analyze.rs"
 
+[[example]]
+name = "freeswitch_callback_endpoint"
+path = "examples/freeswitch_callback/endpoint.rs"
+
+[[example]]
+name = "freeswitch_callback_analyze"
+path = "examples/freeswitch_callback/analyze.rs"
+
 
 [dependencies]
 # Core dependencies

@@ -942,11 +942,13 @@ impl DialogAdapter {
 
     /// Send BYE to terminate call (for state machine)
     pub async fn send_bye_session(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self
-            .session_to_dialog
-            .get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
-            .clone();
+        let dialog_id = {
+            let entry = self
+                .session_to_dialog
+                .get(session_id)
+                .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?;
+            entry.value().clone()
+        };
 
         self.dialog_api
             .send_bye(&dialog_id)
@@ -962,11 +964,13 @@ impl DialogAdapter {
         session_id: &SessionId,
         reason: rvoip_sip_core::types::reason::Reason,
     ) -> Result<()> {
-        let dialog_id = self
-            .session_to_dialog
-            .get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
-            .clone();
+        let dialog_id = {
+            let entry = self
+                .session_to_dialog
+                .get(session_id)
+                .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?;
+            entry.value().clone()
+        };
 
         self.dialog_api
             .dialog_manager()
@@ -982,11 +986,13 @@ impl DialogAdapter {
 
     /// Send CANCEL to cancel pending INVITE
     pub async fn send_cancel(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self
-            .session_to_dialog
-            .get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
-            .clone();
+        let dialog_id = {
+            let entry = self
+                .session_to_dialog
+                .get(session_id)
+                .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?;
+            entry.value().clone()
+        };
 
         self.dialog_api
             .send_cancel(&dialog_id)
@@ -1147,13 +1153,13 @@ impl DialogAdapter {
             self.dialog_to_session.remove(&dialog_id.1);
         }
 
-        if let Some(entry) = self
+        let call_ids_to_remove: Vec<_> = self
             .callid_to_session
             .iter()
-            .find(|entry| entry.value() == session_id)
-        {
-            let call_id = entry.key().clone();
-            drop(entry); // Release the reference before removing
+            .filter(|entry| entry.value() == session_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for call_id in call_ids_to_remove {
             self.callid_to_session.remove(&call_id);
         }
 
