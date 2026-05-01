@@ -120,10 +120,11 @@ impl IncomingCall {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn accept_with_sdp(mut self, _sdp: String) -> Result<SessionHandle> {
-        // TODO: pass custom SDP through the state machine
+    pub async fn accept_with_sdp(mut self, sdp: String) -> Result<SessionHandle> {
         self.resolved = true;
-        self.coordinator.accept_call(&self.call_id).await?;
+        self.coordinator
+            .accept_call_with_sdp(&self.call_id, sdp)
+            .await?;
         Ok(SessionHandle::new(
             self.call_id.clone(),
             self.coordinator.clone(),
@@ -271,13 +272,15 @@ impl IncomingCall {
     }
 
     /// Defer the accept/reject decision, keeping the call in `Ringing` state
-    /// until the returned [`IncomingCallGuard`] is resolved or the `timeout` elapses.
+    /// until the returned [`IncomingCallGuard`] is resolved or the `timeout`
+    /// elapses.
     ///
     /// Use this for call queues: store the guard in a queue data structure and
     /// call `guard.accept()` when an agent becomes available.
     ///
-    /// If the guard is dropped without being resolved, the call is rejected with
-    /// **503 Service Unavailable**.
+    /// If the timeout elapses while the guard is unresolved, or the guard is
+    /// dropped without being resolved, the call is rejected with **503 Service
+    /// Unavailable**.
     ///
     /// # Examples
     ///
@@ -338,8 +341,9 @@ impl Drop for IncomingCall {
 /// A deferred incoming call held in `Ringing` state.
 ///
 /// Created by [`IncomingCall::defer()`]. Must be resolved by calling
-/// [`accept()`] or [`reject()`] before the deadline, otherwise the call is
-/// rejected with **503 Service Unavailable** when the guard is dropped.
+/// [`accept()`] or [`reject()`] before the deadline. If the deadline elapses
+/// while the guard is unresolved, or the guard is dropped unresolved, the call
+/// is rejected with **503 Service Unavailable**.
 ///
 /// [`accept()`]: IncomingCallGuard::accept
 /// [`reject()`]: IncomingCallGuard::reject
