@@ -204,8 +204,9 @@ impl EventReceiver {
 
     /// Wait for the next transfer-related event, skipping all others.
     ///
-    /// Matches `ReferReceived`, `TransferAccepted`, `TransferCompleted`,
-    /// `TransferFailed`, and `TransferProgress`.
+    /// Matches `ReferReceived`, `TransferAccepted`, `ReferCompleted`,
+    /// `TransferFailed`, `ReferProgress`, `ReferNotify`, and replacement
+    /// lifecycle transfer events.
     ///
     /// # Examples
     ///
@@ -428,6 +429,17 @@ impl PeerControl {
     pub async fn subscribe_events(&self) -> Result<EventReceiver> {
         let rx = self.coordinator.subscribe_events().await?;
         Ok(EventReceiver::new(rx))
+    }
+
+    /// Subscribe to RFC 4235 dialog-package state for a target URI.
+    pub async fn subscribe_dialogs(
+        &self,
+        target_uri: &str,
+        expires: u32,
+    ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
+        self.coordinator
+            .subscribe_dialogs(target_uri, &self.local_uri, &self.local_uri, expires)
+            .await
     }
 
     /// Access the underlying [`UnifiedCoordinator`] for advanced use.
@@ -716,6 +728,15 @@ impl StreamPeer {
     /// ```
     pub async fn next_event(&mut self) -> Option<Event> {
         self.events.next().await
+    }
+
+    /// Subscribe to RFC 4235 dialog-package state for a target URI.
+    pub async fn subscribe_dialogs(
+        &self,
+        target_uri: &str,
+        expires: u32,
+    ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
+        self.control.subscribe_dialogs(target_uri, expires).await
     }
 
     /// Register with a SIP server (6-arg form).

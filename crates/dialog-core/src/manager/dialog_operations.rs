@@ -9,9 +9,12 @@ use uuid::Uuid;
 
 use super::core::DialogManager;
 use super::utils::DialogUtils;
+use crate::dialog::dialog_utils::extract_uri_from_contact;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
+use rvoip_sip_core::types::TypedHeader;
+use rvoip_sip_core::HeaderName;
 use rvoip_sip_core::{Request, Uri};
 
 /// Trait for dialog storage operations
@@ -122,13 +125,16 @@ impl DialogStore for DialogManager {
             .map(|tag| tag.to_string());
 
         // Create dialog (early state for INVITE)
-        let dialog = Dialog::new_early(
+        let mut dialog = Dialog::new_early(
             call_id, to_uri,     // local_uri (we are the UAS)
             from_uri,   // remote_uri (they are the UAC)
             None,       // local_tag (generated later when we respond)
             remote_tag, // remote_tag (from their From header)
             false,      // is_initiator = false (incoming request, we are UAS)
         );
+        if let Some(remote_target) = remote_target_from_request(request) {
+            dialog.remote_target = remote_target;
+        }
 
         let dialog_id = dialog.id.clone();
         self.store_dialog(dialog).await?;
@@ -551,13 +557,16 @@ impl DialogLookup for DialogManager {
             .map(|tag| tag.to_string());
 
         // For incoming INVITE, we are the UAS (not initiator)
-        let dialog = Dialog::new_early(
+        let mut dialog = Dialog::new_early(
             call_id, to_uri,     // local_uri (we are the UAS)
             from_uri,   // remote_uri (they are the UAC)
             None,       // local_tag (will be generated when we respond)
             remote_tag, // remote_tag (from the From header)
             false,      // is_initiator = false (we're UAS)
         );
+        if let Some(remote_target) = remote_target_from_request(request) {
+            dialog.remote_target = remote_target;
+        }
 
         let dialog_id = dialog.id.clone();
 
@@ -566,6 +575,16 @@ impl DialogLookup for DialogManager {
 
         info!("Created early dialog {} from INVITE request", dialog_id);
         Ok(dialog_id)
+    }
+}
+
+fn remote_target_from_request(request: &Request) -> Option<Uri> {
+    match request.header(&HeaderName::Contact) {
+        Some(TypedHeader::Contact(contacts)) => contacts
+            .0
+            .first()
+            .and_then(|contact| extract_uri_from_contact(contact).ok()),
+        _ => None,
     }
 }
 

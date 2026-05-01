@@ -109,8 +109,7 @@ async fn main() -> ExampleResult<()> {
 
     drop(sender);
     println!("[1001] Tone phases complete; hanging up.");
-    handle.hangup().await?;
-    handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
+    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
 
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         loop {

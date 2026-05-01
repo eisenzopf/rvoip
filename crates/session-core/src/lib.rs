@@ -182,7 +182,10 @@ pub use api::handlers::{
 
 // Call control
 pub use api::audio::{AudioReceiver, AudioSender, AudioStream};
-pub use api::handle::{CallId, SessionHandle, TransferWaitMode};
+pub use api::handle::{
+    CallId, SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions,
+    TransferWaitMode,
+};
 pub use api::incoming::{IncomingCall, IncomingCallGuard};
 
 // Configuration & registration
@@ -193,9 +196,13 @@ pub use api::{
 };
 
 // Events
+pub use api::dialog_package::{
+    DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState,
+};
+pub use api::dialog_subscription::DialogSubscriptionHandle;
 pub use api::events::{
     Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, SubscriptionState,
-    TransferKind,
+    TransferKind, TransferTargetEvidence,
 };
 
 // Errors
@@ -215,11 +222,13 @@ pub use types::CallState;
 pub mod prelude {
     pub use crate::{
         AudioReceiver, AudioSender, AudioStream, CallHandler, CallHandlerDecision, CallId,
-        CallState, CallbackPeer, CallbackPeerControl, Config, EndReason, Event, EventReceiver,
-        IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
+        CallState, CallbackPeer, CallbackPeerControl, Config, DialogInfo, DialogInfoDocument,
+        DialogPackageEvent, DialogPackageState, DialogSubscriptionHandle, EndReason, Event,
+        EventReceiver, IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
         MediaSecurityState, PeerControl, Registration, RegistrationHandle, RegistrationInfo,
-        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipTlsMode,
-        SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState, TransferKind,
+        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipReason,
+        SipTlsMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
+        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferTargetEvidence,
         TransferWaitMode,
     };
 }

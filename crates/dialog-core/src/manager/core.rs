@@ -1502,12 +1502,13 @@ impl DialogManager {
                     DialogError::protocol_error("BYE requires remote tag in established dialog")
                 })?;
 
-            let request = dialog_quick::bye_for_dialog(
+            let request = dialog_quick::bye_for_dialog_with_request_uri(
                 &template.call_id,
                 &template.local_uri.to_string(),
                 &local_tag,
                 &template.remote_uri.to_string(),
                 &remote_tag,
+                &template.target_uri.to_string(),
                 template.cseq_number,
                 self.local_address_for_target_and_routes(&template.target_uri, &template.route_set),
                 if template.route_set.is_empty() {

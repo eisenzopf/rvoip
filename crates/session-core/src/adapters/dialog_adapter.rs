@@ -956,6 +956,30 @@ impl DialogAdapter {
         Ok(())
     }
 
+    /// Send BYE with an RFC 3326 Reason header to terminate a call.
+    pub async fn send_bye_session_with_reason(
+        &self,
+        session_id: &SessionId,
+        reason: rvoip_sip_core::types::reason::Reason,
+    ) -> Result<()> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+
+        self.dialog_api
+            .dialog_manager()
+            .core()
+            .send_bye_with_reason(&dialog_id, reason)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send BYE with Reason: {}", e))
+            })?;
+
+        Ok(())
+    }
+
     /// Send CANCEL to cancel pending INVITE
     pub async fn send_cancel(&self, session_id: &SessionId) -> Result<()> {
         let dialog_id = self
@@ -1650,6 +1674,60 @@ impl DialogAdapter {
             );
             let _ = self.global_coordinator.publish(Arc::new(event)).await;
         }
+
+        Ok(())
+    }
+
+    /// Send an RFC 4235 dialog-package SUBSCRIBE and pre-register the
+    /// session↔dialog mapping so NOTIFY events route back to session-core.
+    pub async fn send_dialog_subscribe(
+        &self,
+        session_id: &SessionId,
+        from_uri: &str,
+        target_uri: &str,
+        contact_uri: &str,
+        expires: u32,
+    ) -> Result<()> {
+        let dialog_id = self
+            .dialog_api
+            .send_subscribe_out_of_dialog_for_session(
+                &session_id.0,
+                target_uri,
+                from_uri,
+                contact_uri,
+                "dialog",
+                expires,
+            )
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to subscribe to dialog package: {}", e))
+            })?;
+
+        self.session_to_dialog
+            .insert(session_id.clone(), dialog_id.clone());
+        self.dialog_to_session
+            .insert(dialog_id.clone(), session_id.clone());
+
+        Ok(())
+    }
+
+    /// Terminate an RFC 4235 dialog-package subscription with Expires: 0.
+    pub async fn unsubscribe_dialog_package(&self, session_id: &SessionId) -> Result<()> {
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+
+        self.dialog_api
+            .send_subscribe_refresh(&dialog_id, "dialog", 0)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!(
+                    "Failed to unsubscribe from dialog package: {}",
+                    e
+                ))
+            })?;
 
         Ok(())
     }

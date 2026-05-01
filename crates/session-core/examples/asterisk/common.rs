@@ -1021,8 +1021,7 @@ pub async fn exchange_tone_and_record(
     drop(sender);
     if hangup_after_tone {
         println!("[audio] Tone complete; hanging up.");
-        handle.hangup().await?;
-        handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
+        handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
     } else {
         handle
             .wait_for_end(Some(Duration::from_secs(10)))

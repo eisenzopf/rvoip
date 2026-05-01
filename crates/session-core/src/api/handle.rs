@@ -14,7 +14,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::api::audio::{AudioReceiver, AudioSender, AudioStream};
-use crate::api::events::{Event, MediaSecurityState};
+use crate::api::dialog_package::{DialogInfo, DialogPackageState};
+use crate::api::events::{Event, MediaSecurityState, TransferTargetEvidence};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
 use crate::state_table::types::SessionId;
@@ -35,6 +36,61 @@ pub enum TransferWaitMode {
     /// Return only after a terminal successful REFER NOTIFY that was preceded
     /// by target progress evidence.
     TargetAnswered,
+    /// Return only after a replacement dialog is observed terminated via a
+    /// local target leg or RFC 4235 dialog-package evidence.
+    ReplacementTerminated,
+}
+
+/// RFC 3326 Reason header value for explicit teardown causes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SipReason {
+    /// Reason protocol, usually `SIP` or `Q.850`.
+    pub protocol: String,
+    /// Numeric cause code.
+    pub cause: u16,
+    /// Optional human-readable cause text.
+    pub text: Option<String>,
+}
+
+impl SipReason {
+    /// Build a SIP-protocol Reason value.
+    pub fn sip(cause: u16, text: impl Into<String>) -> Self {
+        Self {
+            protocol: "SIP".to_string(),
+            cause,
+            text: Some(text.into()),
+        }
+    }
+}
+
+/// How to correlate RFC 4235 dialog entries with a transfer target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferDialogMatcher {
+    /// Match any observed dialog in the supplied subscription.
+    Any,
+    /// Match when the target URI appears in the dialog's local or remote URI.
+    TargetUri,
+}
+
+/// Optional evidence sources for transfer lifecycle waits.
+#[derive(Clone)]
+pub struct TransferLifecycleOptions {
+    /// Optional RFC 4235 dialog subscription to observe third-party replacement legs.
+    pub dialog_subscription: Option<crate::api::dialog_subscription::DialogSubscriptionHandle>,
+    /// Dialog matching policy for RFC 4235 events.
+    pub target_match: TransferDialogMatcher,
+    /// Whether the wait requires replacement-dialog termination.
+    pub wait_for_replacement_termination: bool,
+}
+
+impl Default for TransferLifecycleOptions {
+    fn default() -> Self {
+        Self {
+            dialog_subscription: None,
+            target_match: TransferDialogMatcher::TargetUri,
+            wait_for_replacement_termination: false,
+        }
+    }
 }
 
 /// Handle for controlling an active SIP call session.
@@ -108,25 +164,7 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn hangup(&self) -> Result<()> {
-        let coordinator = self.coordinator.clone();
-        let call_id = self.call_id.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.hangup(&call_id).await {
-                if e.is_session_gone() {
-                    tracing::trace!(
-                        "[SessionHandle] session {} already cleaned up before background hangup ran",
-                        call_id
-                    );
-                } else {
-                    tracing::warn!(
-                        "[SessionHandle] background hangup failed for {}: {}",
-                        call_id,
-                        e
-                    );
-                }
-            }
-        });
-        Ok(())
+        self.coordinator.hangup(&self.call_id).await
     }
 
     /// Hang up the call and wait for the terminal event.
@@ -147,8 +185,23 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn hangup_and_wait(&self, timeout: Option<Duration>) -> Result<String> {
+        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+            return Ok(reason);
+        }
         let mut events = self.events().await?;
-        self.coordinator.hangup(&self.call_id).await?;
+        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+            return Ok(reason);
+        }
+        match self.coordinator.hangup(&self.call_id).await {
+            Ok(()) => {}
+            Err(e) if e.is_session_gone() => {
+                if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+                    return Ok(reason);
+                }
+                return Err(e);
+            }
+            Err(e) => return Err(e),
+        }
 
         let fut = async {
             loop {
@@ -170,6 +223,48 @@ impl SessionHandle {
             Some(duration) => tokio::time::timeout(duration, fut)
                 .await
                 .map_err(|_| SessionError::Timeout("hangup_and_wait timed out".to_string()))?,
+            None => fut.await,
+        }
+    }
+
+    /// Hang up the call with an RFC 3326 `Reason` header and wait for the
+    /// terminal event.
+    pub async fn hangup_with_reason(
+        &self,
+        reason: SipReason,
+        timeout: Option<Duration>,
+    ) -> Result<String> {
+        if let Some(cached) = self.coordinator.cached_terminal_reason(&self.call_id) {
+            return Ok(cached);
+        }
+        let mut events = self.events().await?;
+        if let Some(cached) = self.coordinator.cached_terminal_reason(&self.call_id) {
+            return Ok(cached);
+        }
+        self.coordinator
+            .hangup_with_reason(&self.call_id, reason)
+            .await?;
+
+        let fut = async {
+            loop {
+                match events.next().await {
+                    Some(Event::CallEnded { reason, .. }) => return Ok(reason),
+                    Some(Event::CallFailed { reason, .. }) => return Ok(reason),
+                    Some(Event::CallCancelled { .. }) => return Ok("Cancelled".to_string()),
+                    Some(_) => {}
+                    None => {
+                        return Err(SessionError::Other(
+                            "Event channel closed while waiting for hangup".to_string(),
+                        ))
+                    }
+                }
+            }
+        };
+
+        match timeout {
+            Some(duration) => tokio::time::timeout(duration, fut)
+                .await
+                .map_err(|_| SessionError::Timeout("hangup_with_reason timed out".to_string()))?,
             None => fut.await,
         }
     }
@@ -273,8 +368,8 @@ impl SessionHandle {
 
     /// Initiate a blind transfer and wait for a terminal REFER NOTIFY.
     ///
-    /// Returns `TransferCompleted` on a final 2xx sipfrag or `TransferFailed`
-    /// on a final failure sipfrag. `TransferCompleted` means the REFER
+    /// Returns `ReferCompleted` on a final 2xx sipfrag or `TransferFailed`
+    /// on a final failure sipfrag. `ReferCompleted` means the REFER
     /// subscription reached a terminal success state; it does not prove the
     /// transfer target answered. Use
     /// [`transfer_blind_and_wait_for`](Self::transfer_blind_and_wait_for)
@@ -339,7 +434,7 @@ impl SessionHandle {
             let mut target_progress_seen = false;
             loop {
                 match events.next().await {
-                    Some(event @ Event::TransferProgress { status_code, .. })
+                    Some(event @ Event::ReferProgress { status_code, .. })
                         if (180..=199).contains(&status_code) =>
                     {
                         target_progress_seen = true;
@@ -347,7 +442,7 @@ impl SessionHandle {
                             return Ok(event);
                         }
                     }
-                    Some(event @ Event::TransferCompleted { .. }) => match mode {
+                    Some(event @ Event::ReferCompleted { .. }) => match mode {
                         TransferWaitMode::NotifyFinal => return Ok(event),
                         TransferWaitMode::TargetRinging => {
                             return Err(SessionError::Other(
@@ -364,7 +459,23 @@ impl SessionHandle {
                                     .to_string(),
                             ))
                         }
+                        TransferWaitMode::ReplacementTerminated => {
+                            return Err(SessionError::Other(
+                                "ReplacementTerminated requires transfer lifecycle options"
+                                    .to_string(),
+                            ))
+                        }
                     },
+                    Some(event @ Event::TransferTargetAnswered { .. })
+                        if mode == TransferWaitMode::TargetAnswered =>
+                    {
+                        return Ok(event)
+                    }
+                    Some(event @ Event::TransferReplacementDialogTerminated { .. })
+                        if mode == TransferWaitMode::ReplacementTerminated =>
+                    {
+                        return Ok(event)
+                    }
                     Some(event @ Event::TransferFailed { .. }) => return Ok(event),
                     Some(_) => {}
                     None => {
@@ -379,6 +490,72 @@ impl SessionHandle {
         match timeout {
             Some(duration) => tokio::time::timeout(duration, fut).await.map_err(|_| {
                 SessionError::Timeout("transfer_blind_and_wait timed out".to_string())
+            })?,
+            None => fut.await,
+        }
+    }
+
+    /// Initiate a blind transfer and wait using optional lifecycle evidence.
+    pub async fn transfer_blind_and_wait_for_with_options(
+        &self,
+        target: &str,
+        mode: TransferWaitMode,
+        options: TransferLifecycleOptions,
+        timeout: Option<Duration>,
+    ) -> Result<Event> {
+        if mode != TransferWaitMode::ReplacementTerminated && options.dialog_subscription.is_none()
+        {
+            return self
+                .transfer_blind_and_wait_for(target, mode, timeout)
+                .await;
+        }
+
+        let mut transfer_events = self.events().await?;
+        let mut dialog_events = if let Some(subscription) = options.dialog_subscription.as_ref() {
+            Some(subscription.events().await?)
+        } else {
+            None
+        };
+        self.transfer_blind(target).await?;
+
+        let target = target.to_string();
+        let fut = async {
+            let mut target_progress_seen = false;
+            loop {
+                if let Some(dialog_events) = dialog_events.as_mut() {
+                    tokio::select! {
+                        event = transfer_events.next() => {
+                            if let Some(result) = handle_transfer_wait_event(event, mode, &mut target_progress_seen)? {
+                                return Ok(result);
+                            }
+                        }
+                        event = dialog_events.next() => {
+                            if let Some(result) = handle_dialog_wait_event(
+                                event,
+                                &self.call_id,
+                                &target,
+                                mode,
+                                &options,
+                            )? {
+                                return Ok(result);
+                            }
+                        }
+                    }
+                } else if let Some(result) = handle_transfer_wait_event(
+                    transfer_events.next().await,
+                    mode,
+                    &mut target_progress_seen,
+                )? {
+                    return Ok(result);
+                }
+            }
+        };
+
+        match timeout {
+            Some(duration) => tokio::time::timeout(duration, fut).await.map_err(|_| {
+                SessionError::Timeout(
+                    "transfer_blind_and_wait_for_with_options timed out".to_string(),
+                )
             })?,
             None => fut.await,
         }
@@ -803,7 +980,13 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn wait_for_end(&self, timeout: Option<Duration>) -> Result<String> {
+        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+            return Ok(reason);
+        }
         let mut rx = self.events().await?;
+        if let Some(reason) = self.coordinator.cached_terminal_reason(&self.call_id) {
+            return Ok(reason);
+        }
         let fut = async {
             loop {
                 match rx.next().await {
@@ -821,4 +1004,155 @@ impl SessionHandle {
             None => fut.await,
         }
     }
+}
+
+fn handle_transfer_wait_event(
+    event: Option<Event>,
+    mode: TransferWaitMode,
+    target_progress_seen: &mut bool,
+) -> Result<Option<Event>> {
+    match event {
+        Some(event @ Event::ReferProgress { status_code, .. })
+            if (180..=199).contains(&status_code) =>
+        {
+            *target_progress_seen = true;
+            if mode == TransferWaitMode::TargetRinging {
+                Ok(Some(event))
+            } else {
+                Ok(None)
+            }
+        }
+        Some(event @ Event::ReferCompleted { .. }) => match mode {
+            TransferWaitMode::NotifyFinal => Ok(Some(event)),
+            TransferWaitMode::TargetRinging => Err(SessionError::Other(
+                "terminal REFER NOTIFY arrived before target ringing evidence".to_string(),
+            )),
+            TransferWaitMode::TargetAnswered if *target_progress_seen => Ok(Some(event)),
+            TransferWaitMode::TargetAnswered => Err(SessionError::Other(
+                "terminal REFER NOTIFY arrived before target-answer evidence".to_string(),
+            )),
+            TransferWaitMode::ReplacementTerminated => Ok(None),
+        },
+        Some(event @ Event::TransferTargetAnswered { .. })
+            if mode == TransferWaitMode::TargetAnswered =>
+        {
+            Ok(Some(event))
+        }
+        Some(event @ Event::TransferReplacementDialogTerminated { .. })
+            if mode == TransferWaitMode::ReplacementTerminated =>
+        {
+            Ok(Some(event))
+        }
+        Some(event @ Event::TransferFailed { .. }) => Ok(Some(event)),
+        Some(_) => Ok(None),
+        None => Err(SessionError::Other(
+            "Event channel closed while waiting for transfer".to_string(),
+        )),
+    }
+}
+
+fn handle_dialog_wait_event(
+    event: Option<Event>,
+    transfer_call_id: &CallId,
+    target: &str,
+    mode: TransferWaitMode,
+    options: &TransferLifecycleOptions,
+) -> Result<Option<Event>> {
+    match event {
+        Some(Event::DialogPackageNotify { dialogs, .. }) => {
+            for dialog in dialogs {
+                if let Some(event) =
+                    dialog_lifecycle_event(dialog, transfer_call_id, target, mode, options)
+                {
+                    return Ok(Some(event));
+                }
+            }
+            Ok(None)
+        }
+        Some(Event::DialogStateChanged { dialog, .. }) => Ok(dialog_lifecycle_event(
+            dialog,
+            transfer_call_id,
+            target,
+            mode,
+            options,
+        )),
+        Some(_) => Ok(None),
+        None => Err(SessionError::Other(
+            "Dialog event channel closed while waiting for transfer lifecycle".to_string(),
+        )),
+    }
+}
+
+fn dialog_lifecycle_event(
+    dialog: DialogInfo,
+    transfer_call_id: &CallId,
+    target: &str,
+    mode: TransferWaitMode,
+    options: &TransferLifecycleOptions,
+) -> Option<Event> {
+    if !dialog_matches_target(&dialog, target, &options.target_match) {
+        return None;
+    }
+
+    if dialog.is_terminated() {
+        return Some(Event::TransferReplacementDialogTerminated {
+            transfer_call_id: transfer_call_id.clone(),
+            reason: dialog.raw_event.clone(),
+            dialog,
+        });
+    }
+
+    match mode {
+        TransferWaitMode::TargetRinging
+            if matches!(
+                dialog.state,
+                DialogPackageState::Trying
+                    | DialogPackageState::Proceeding
+                    | DialogPackageState::Early
+                    | DialogPackageState::Confirmed
+            ) =>
+        {
+            Some(Event::TransferReplacementDialogObserved {
+                transfer_call_id: transfer_call_id.clone(),
+                dialog,
+            })
+        }
+        TransferWaitMode::TargetAnswered if dialog.state == DialogPackageState::Confirmed => {
+            Some(Event::TransferTargetAnswered {
+                transfer_call_id: transfer_call_id.clone(),
+                target_uri: target.to_string(),
+                evidence: TransferTargetEvidence::DialogPackage { dialog },
+            })
+        }
+        _ => None,
+    }
+}
+
+fn dialog_matches_target(
+    dialog: &DialogInfo,
+    target: &str,
+    matcher: &TransferDialogMatcher,
+) -> bool {
+    match matcher {
+        TransferDialogMatcher::Any => true,
+        TransferDialogMatcher::TargetUri => {
+            let target = normalize_uri_for_match(target);
+            dialog
+                .local_uri
+                .iter()
+                .chain(dialog.remote_uri.iter())
+                .map(|uri| normalize_uri_for_match(uri))
+                .any(|uri| uri == target || uri.contains(&target) || target.contains(&uri))
+        }
+    }
+}
+
+fn normalize_uri_for_match(uri: &str) -> String {
+    uri.trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .split(';')
+        .next()
+        .unwrap_or(uri)
+        .to_ascii_lowercase()
 }

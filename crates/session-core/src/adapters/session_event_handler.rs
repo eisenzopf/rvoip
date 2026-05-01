@@ -8,6 +8,7 @@
 //! NO OTHER MODULE should interact with the GlobalEventCoordinator directly.
 
 use crate::adapters::{DialogAdapter, MediaAdapter};
+use crate::api::terminal::{remember_terminal_event, TerminalEventCache};
 use crate::errors::{Result as SessionResult, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::state_machine::StateMachine as StateMachineExecutor;
@@ -62,6 +63,10 @@ pub struct SessionCrossCrateEventHandler {
     /// indefinitely — this map grows with the number of unique AoRs
     /// the peer has ever registered, which in practice is 1.
     outbound_flow_last_refresh: Arc<DashMap<String, Instant>>,
+
+    /// Short-lived cache of terminal call events so late waiters can still
+    /// observe completed teardown deterministically.
+    terminal_events: TerminalEventCache,
 }
 
 #[allow(dead_code)]
@@ -435,16 +440,18 @@ impl SessionCrossCrateEventHandler {
             incoming_call_tx: None,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
+            terminal_events: Arc::new(DashMap::new()),
         }
     }
 
-    pub fn with_incoming_call_channel(
+    pub(crate) fn with_incoming_call_channel(
         state_machine: Arc<StateMachineExecutor>,
         global_coordinator: Arc<GlobalEventCoordinator>,
         dialog_adapter: Arc<DialogAdapter>,
         media_adapter: Arc<MediaAdapter>,
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
+        terminal_events: TerminalEventCache,
     ) -> Self {
         Self {
             state_machine,
@@ -455,18 +462,20 @@ impl SessionCrossCrateEventHandler {
             incoming_call_tx: Some(incoming_call_tx),
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
+            terminal_events,
         }
     }
 
     /// Preferred constructor — events are published to the global coordinator's
     /// "session_to_app" channel automatically; no separate broadcast sender needed.
-    pub fn with_event_broadcast(
+    pub(crate) fn with_event_broadcast(
         state_machine: Arc<StateMachineExecutor>,
         global_coordinator: Arc<GlobalEventCoordinator>,
         dialog_adapter: Arc<DialogAdapter>,
         media_adapter: Arc<MediaAdapter>,
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
+        terminal_events: TerminalEventCache,
     ) -> Self {
         Self::with_incoming_call_channel(
             state_machine,
@@ -475,6 +484,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx,
+            terminal_events,
         )
     }
 
@@ -489,6 +499,7 @@ impl SessionCrossCrateEventHandler {
         registry: Arc<SessionRegistry>,
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
         state_machine_event_rx: mpsc::Receiver<crate::state_machine::executor::SessionEvent>,
+        terminal_events: TerminalEventCache,
     ) -> Self {
         let mut handler = Self::with_incoming_call_channel(
             state_machine,
@@ -497,6 +508,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx,
+            terminal_events,
         );
         handler.state_machine_event_rx = Some(Arc::new(Mutex::new(state_machine_event_rx)));
         handler
@@ -520,6 +532,7 @@ impl SessionCrossCrateEventHandler {
             media_adapter,
             registry,
             incoming_call_tx,
+            Arc::new(DashMap::new()),
         )
     }
 
@@ -537,6 +550,7 @@ impl SessionCrossCrateEventHandler {
         api_event: crate::api::events::Event,
         session_id: SessionId,
     ) {
+        remember_terminal_event(&self.terminal_events, &api_event);
         let wrapped = crate::adapters::SessionApiCrossCrateEvent::new(api_event);
         let coordinator = self.global_coordinator.clone();
         let store = self.state_machine.store.clone();
@@ -3331,9 +3345,9 @@ impl SessionCrossCrateEventHandler {
     /// Always emits `Event::NotifyReceived` on the public event stream.
     /// For `event_package == "refer"` with a `message/sipfrag` body
     /// (RFC 3515 §2.4.5) additionally parses the sipfrag status line and
-    /// emits `Event::TransferProgress` / `TransferCompleted` /
-    /// `TransferFailed` so transferor apps (including b2bua wrappers)
-    /// can observe the transferee's progress.
+    /// emits `Event::ReferNotify` plus derived `ReferProgress`,
+    /// `ReferCompleted`, or `TransferFailed` events so transferor apps
+    /// (including b2bua wrappers) can observe the transferee's progress.
     async fn handle_notify_received(&self, event_str: &str) -> Result<()> {
         let Some(session_id_str) = self.extract_session_id(event_str) else {
             warn!("Could not extract session_id from NotifyReceived event");
@@ -3383,6 +3397,50 @@ impl SessionCrossCrateEventHandler {
         };
         publish_api_event(&self.global_coordinator, api_event);
 
+        if event_package.eq_ignore_ascii_case("dialog") {
+            let is_dialog_info = content_type
+                .as_deref()
+                .map(|ct| {
+                    ct.to_ascii_lowercase()
+                        .contains("application/dialog-info+xml")
+                })
+                .unwrap_or(false);
+            if is_dialog_info {
+                if let Some(body) = body.as_deref() {
+                    match crate::api::dialog_package::parse_dialog_info_xml(body) {
+                        Ok(document) => {
+                            let dialogs = document.dialogs.clone();
+                            publish_api_event(
+                                &self.global_coordinator,
+                                crate::api::events::Event::DialogPackageNotify {
+                                    subscription_id: session_id.clone(),
+                                    entity: document.entity.clone(),
+                                    version: document.version,
+                                    dialogs: dialogs.clone(),
+                                    document,
+                                },
+                            );
+                            for dialog in dialogs {
+                                publish_api_event(
+                                    &self.global_coordinator,
+                                    crate::api::events::Event::DialogStateChanged {
+                                        subscription_id: session_id.clone(),
+                                        dialog: dialog.clone(),
+                                    },
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            debug!(
+                                "dialog NOTIFY body for session {} was not parseable dialog-info XML: {}",
+                                session_id, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         // RFC 3515 §2.4.5 progress NOTIFYs carry a `message/sipfrag` body
         // containing the final-response status line of the transferee's
         // INVITE. Parse it so the transferor sees progress events
@@ -3397,7 +3455,7 @@ impl SessionCrossCrateEventHandler {
                     if let Some((status_code, reason)) = parse_sipfrag_status_line(&body) {
                         publish_api_event(
                             &self.global_coordinator,
-                            crate::api::events::Event::TransferNotify {
+                            crate::api::events::Event::ReferNotify {
                                 call_id: session_id.clone(),
                                 status_code,
                                 reason: reason.clone(),
@@ -3416,22 +3474,55 @@ impl SessionCrossCrateEventHandler {
                             .and_then(|session| session.transfer_target.clone())
                             .unwrap_or_default();
                         let transfer_event = match status_code {
-                            100..=199 => Some(crate::api::events::Event::TransferProgress {
-                                call_id: session_id.clone(),
-                                status_code,
-                                reason,
-                            }),
-                            200..=299 => {
+                            100..=199 => {
                                 if let Ok(mut session) =
                                     self.state_machine.store.get_session(&session_id).await
                                 {
+                                    session.transfer_target_progress_seen = true;
+                                    session.transfer_target_last_progress =
+                                        Some((status_code, reason.clone()));
+                                    let _ = self.state_machine.store.update_session(session).await;
+                                }
+                                Some(crate::api::events::Event::ReferProgress {
+                                    call_id: session_id.clone(),
+                                    status_code,
+                                    reason,
+                                })
+                            }
+                            200..=299 => {
+                                let mut target_answered = None;
+                                if let Ok(mut session) =
+                                    self.state_machine.store.get_session(&session_id).await
+                                {
+                                    if session.transfer_target_progress_seen {
+                                        if let Some((progress_status_code, progress_reason)) =
+                                            session.transfer_target_last_progress.clone()
+                                        {
+                                            target_answered = Some(
+                                                crate::api::events::Event::TransferTargetAnswered {
+                                                    transfer_call_id: session_id.clone(),
+                                                    target_uri: transfer_target.clone(),
+                                                    evidence: crate::api::events::TransferTargetEvidence::ReferProgressThenFinal {
+                                                        progress_status_code,
+                                                        progress_reason,
+                                                        final_status_code: status_code,
+                                                        final_reason: reason.clone(),
+                                                    },
+                                                },
+                                            );
+                                        }
+                                    }
                                     session.transfer_state = crate::session_store::state::TransferState::TransferCompleted;
                                     let _ = self.state_machine.store.update_session(session).await;
                                 }
-                                Some(crate::api::events::Event::TransferCompleted {
-                                    old_call_id: session_id.clone(),
-                                    new_call_id: session_id.clone(),
+                                if let Some(event) = target_answered {
+                                    publish_api_event(&self.global_coordinator, event);
+                                }
+                                Some(crate::api::events::Event::ReferCompleted {
+                                    call_id: session_id.clone(),
                                     target: transfer_target,
+                                    status_code,
+                                    reason,
                                 })
                             }
                             300..=699 => Some(crate::api::events::Event::TransferFailed {
@@ -3446,7 +3537,7 @@ impl SessionCrossCrateEventHandler {
                         }
                     } else {
                         debug!(
-                            "NOTIFY sipfrag body for session {} was not a parseable status line; skipping Transfer* emission",
+                            "NOTIFY sipfrag body for session {} was not a parseable status line; skipping REFER-derived emission",
                             session_id
                         );
                     }

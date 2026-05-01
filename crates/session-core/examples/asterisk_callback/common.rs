@@ -61,15 +61,16 @@ pub enum CallbackEvent {
         call_id: CallId,
         refer_to: String,
     },
-    TransferProgress {
+    ReferProgress {
         call_id: CallId,
         status_code: u16,
         reason: String,
     },
-    TransferCompleted {
-        old_call_id: CallId,
-        new_call_id: CallId,
+    ReferCompleted {
+        call_id: CallId,
         target: String,
+        status_code: u16,
+        reason: String,
     },
     TransferFailed {
         call_id: CallId,
@@ -188,24 +189,26 @@ impl CallHandler for EventQueueHandler {
         });
     }
 
-    async fn on_transfer_progress(&self, handle: SessionHandle, status_code: u16, reason: String) {
-        self.send(CallbackEvent::TransferProgress {
+    async fn on_refer_progress(&self, handle: SessionHandle, status_code: u16, reason: String) {
+        self.send(CallbackEvent::ReferProgress {
             call_id: handle.id().clone(),
             status_code,
             reason,
         });
     }
 
-    async fn on_transfer_completed(
+    async fn on_refer_completed(
         &self,
-        old_call_id: CallId,
-        new_call_id: CallId,
+        handle: SessionHandle,
         target: String,
+        status_code: u16,
+        reason: String,
     ) {
-        self.send(CallbackEvent::TransferCompleted {
-            old_call_id,
-            new_call_id,
+        self.send(CallbackEvent::ReferCompleted {
+            call_id: handle.id().clone(),
             target,
+            status_code,
+            reason,
         });
     }
 
@@ -517,15 +520,23 @@ pub async fn wait_for_transfer_completion(
                 Some(CallbackEvent::TransferAccepted { refer_to, .. }) => {
                     println!("[callback-transfer] REFER accepted for {}", refer_to);
                 }
-                Some(CallbackEvent::TransferProgress {
+                Some(CallbackEvent::ReferProgress {
                     status_code,
                     reason,
                     ..
                 }) => {
                     println!("[callback-transfer] progress: {} {}", status_code, reason);
                 }
-                Some(CallbackEvent::TransferCompleted { target, .. }) => {
-                    println!("[callback-transfer] completed to {}", target);
+                Some(CallbackEvent::ReferCompleted {
+                    target,
+                    status_code,
+                    reason,
+                    ..
+                }) => {
+                    println!(
+                        "[callback-transfer] REFER completed to {} with {} {}",
+                        target, status_code, reason
+                    );
                     return Ok(());
                 }
                 Some(CallbackEvent::TransferFailed {

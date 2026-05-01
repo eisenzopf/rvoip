@@ -10,6 +10,7 @@
 //!
 //! [`StreamPeer`]: crate::StreamPeer
 
+use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
 use crate::errors::Result;
 use crate::state_table::types::SessionId;
 use rvoip_sip_core::types::sdp::CryptoSuite;
@@ -31,6 +32,23 @@ pub enum TransferKind {
     Attended,
     /// Unrecognized or vendor-specific transfer flavor.
     Unknown,
+}
+
+/// Evidence that a transfer target actually progressed beyond REFER receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferTargetEvidence {
+    /// A REFER `message/sipfrag` produced provisional target progress before
+    /// the final successful sipfrag.
+    ReferProgressThenFinal {
+        progress_status_code: u16,
+        progress_reason: String,
+        final_status_code: u16,
+        final_reason: String,
+    },
+    /// The target leg is local to this coordinator and reached answered state.
+    LocalTargetLeg { call_id: CallId },
+    /// An RFC 4235 dialog-package NOTIFY reported matching target state.
+    DialogPackage { dialog: DialogInfo },
 }
 
 impl TransferKind {
@@ -356,17 +374,18 @@ pub enum Event {
 
     /// Terminal successful REFER NOTIFY received.
     ///
-    /// This means the REFER subscription reported a final 2xx sipfrag. It is
-    /// not, by itself, proof that a transferred target leg has answered; use
-    /// the explicit transfer wait modes on `SessionHandle` when target-leg
-    /// evidence matters.
-    TransferCompleted {
-        /// Original session being transferred.
-        old_call_id: CallId,
-        /// New session established as part of transfer handling, when known.
-        new_call_id: CallId,
-        /// Transfer target URI.
+    /// This means the REFER subscription reported a final 2xx sipfrag for the
+    /// referenced INVITE. It does not prove that a replacement call later
+    /// remained up or was torn down.
+    ReferCompleted {
+        /// Session identifier for the REFER subscription/dialog.
+        call_id: CallId,
+        /// Transfer target URI, when known.
         target: String,
+        /// Final 2xx status code from the sipfrag.
+        status_code: u16,
+        /// Final reason phrase from the sipfrag.
+        reason: String,
     },
 
     /// Transfer failed
@@ -379,8 +398,8 @@ pub enum Event {
         status_code: u16,
     },
 
-    /// Transfer progress update (for transferor monitoring)
-    TransferProgress {
+    /// REFER progress update from a `message/sipfrag` NOTIFY.
+    ReferProgress {
         /// Session identifier for the REFER subscription/dialog.
         call_id: CallId,
         /// SIP status code from the progress NOTIFY sipfrag.
@@ -394,7 +413,7 @@ pub enum Event {
     /// This preserves the PBX-specific REFER subscription report so
     /// applications can distinguish an immediate terminal NOTIFY from real
     /// target progress.
-    TransferNotify {
+    ReferNotify {
         /// Session identifier for the REFER subscription/dialog.
         call_id: CallId,
         /// SIP status code parsed from the `message/sipfrag` body.
@@ -407,15 +426,35 @@ pub enum Event {
         body: Option<String>,
     },
 
+    /// Evidence that the transfer target answered.
+    TransferTargetAnswered {
+        transfer_call_id: CallId,
+        target_uri: String,
+        evidence: TransferTargetEvidence,
+    },
+
+    /// RFC 4235 observed a replacement dialog that appears related to a transfer.
+    TransferReplacementDialogObserved {
+        transfer_call_id: CallId,
+        dialog: DialogInfo,
+    },
+
+    /// RFC 4235 or local target-leg evidence observed replacement dialog teardown.
+    TransferReplacementDialogTerminated {
+        transfer_call_id: CallId,
+        dialog: DialogInfo,
+        reason: Option<String>,
+    },
+
     // ===== Subscription / NOTIFY =====
     /// Inbound NOTIFY surfaced to the application (RFC 6665).
     ///
     /// Fires for every NOTIFY received on any event package — REFER
     /// progress, dialog, presence, message-summary, etc. The session
     /// layer does not interpret the body; if `event_package == "refer"`
-    /// and `content_type` is `message/sipfrag`, `TransferProgress` /
-    /// `TransferCompleted` / `TransferFailed` are also emitted with the
-    /// parsed status line.
+    /// and `content_type` is `message/sipfrag`, `ReferNotify` plus the
+    /// derived `ReferProgress` / `ReferCompleted` / `TransferFailed` events
+    /// are also emitted with the parsed status line.
     NotifyReceived {
         /// Session identifier for the dialog that received NOTIFY.
         call_id: CallId,
@@ -427,6 +466,21 @@ pub enum Event {
         content_type: Option<String>,
         /// NOTIFY body, if any.
         body: Option<String>,
+    },
+
+    /// Parsed RFC 4235 dialog-package NOTIFY.
+    DialogPackageNotify {
+        subscription_id: CallId,
+        entity: Option<String>,
+        version: Option<u32>,
+        dialogs: Vec<DialogInfo>,
+        document: DialogInfoDocument,
+    },
+
+    /// Derived per-dialog state transition from an RFC 4235 NOTIFY.
+    DialogStateChanged {
+        subscription_id: CallId,
+        dialog: DialogInfo,
     },
 
     // ===== Call State Events =====
@@ -582,8 +636,9 @@ impl Event {
             | Event::ReferReceived { call_id, .. }
             | Event::TransferAccepted { call_id, .. }
             | Event::TransferFailed { call_id, .. }
-            | Event::TransferProgress { call_id, .. }
-            | Event::TransferNotify { call_id, .. }
+            | Event::ReferProgress { call_id, .. }
+            | Event::ReferNotify { call_id, .. }
+            | Event::ReferCompleted { call_id, .. }
             | Event::CallOnHold { call_id, .. }
             | Event::CallResumed { call_id, .. }
             | Event::RemoteCallOnHold { call_id, .. }
@@ -595,7 +650,21 @@ impl Event {
             | Event::MediaSecurityNegotiated { call_id, .. }
             | Event::NotifyReceived { call_id, .. }
             | Event::AuthenticationRequired { call_id, .. } => Some(call_id),
-            Event::TransferCompleted { old_call_id, .. } => Some(old_call_id),
+            Event::TransferTargetAnswered {
+                transfer_call_id, ..
+            }
+            | Event::TransferReplacementDialogObserved {
+                transfer_call_id, ..
+            }
+            | Event::TransferReplacementDialogTerminated {
+                transfer_call_id, ..
+            } => Some(transfer_call_id),
+            Event::DialogPackageNotify {
+                subscription_id, ..
+            }
+            | Event::DialogStateChanged {
+                subscription_id, ..
+            } => Some(subscription_id),
             Event::NetworkError { call_id, .. } => call_id.as_ref(),
             // Registration events don't have call_id
             Event::RegistrationSuccess { .. }
@@ -637,10 +706,13 @@ impl Event {
             self,
             Event::ReferReceived { .. }
                 | Event::TransferAccepted { .. }
-                | Event::TransferCompleted { .. }
+                | Event::ReferCompleted { .. }
                 | Event::TransferFailed { .. }
-                | Event::TransferProgress { .. }
-                | Event::TransferNotify { .. }
+                | Event::ReferProgress { .. }
+                | Event::ReferNotify { .. }
+                | Event::TransferTargetAnswered { .. }
+                | Event::TransferReplacementDialogObserved { .. }
+                | Event::TransferReplacementDialogTerminated { .. }
         )
     }
 
@@ -675,7 +747,7 @@ impl Event {
                 subscription_state: Some(raw),
                 ..
             } => Some(SubscriptionState::parse(raw.clone())),
-            Event::TransferNotify {
+            Event::ReferNotify {
                 subscription_state: Some(parsed),
                 ..
             } => Some(parsed.clone()),

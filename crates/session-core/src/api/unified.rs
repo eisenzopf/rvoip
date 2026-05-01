@@ -49,11 +49,12 @@
 #![deny(missing_docs)]
 
 use crate::adapters::{DialogAdapter, MediaAdapter};
+use crate::api::terminal::{cached_terminal_event, TerminalEventCache};
 use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::session_store::SessionStore;
 use crate::state_machine::{StateMachine, StateMachineHelpers};
-use crate::state_table::types::{Action, EventType, SessionId};
+use crate::state_table::types::{Action, EventType, Role, SessionId};
 use crate::types::CallState;
 use crate::types::{IncomingCallInfo, SessionInfo};
 // Callback system removed - using event-driven approach
@@ -1051,6 +1052,9 @@ pub struct UnifiedCoordinator {
 
     /// Shutdown signal — send `true` to stop all background tasks.
     shutdown_tx: tokio::sync::watch::Sender<bool>,
+
+    /// Short-lived terminal event cache for deterministic late waiters.
+    terminal_events: TerminalEventCache,
 }
 
 impl UnifiedCoordinator {
@@ -1258,6 +1262,7 @@ impl UnifiedCoordinator {
         // Create incoming call channel
         let (incoming_tx, incoming_rx) = mpsc::channel(100);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let terminal_events = Arc::new(dashmap::DashMap::new());
 
         let coordinator = Arc::new(Self {
             helpers,
@@ -1267,6 +1272,7 @@ impl UnifiedCoordinator {
             global_coordinator: global_coordinator.clone(),
             config,
             shutdown_tx,
+            terminal_events: terminal_events.clone(),
         });
 
         // Start the dialog adapter
@@ -1283,6 +1289,7 @@ impl UnifiedCoordinator {
                 registry.clone(),
                 incoming_tx,
                 state_event_rx,
+                terminal_events,
             );
 
         // Start the event handler (sets up channels and subscriptions)
@@ -1579,6 +1586,10 @@ impl UnifiedCoordinator {
         ))
     }
 
+    pub(crate) fn cached_terminal_reason(&self, id: &SessionId) -> Option<String> {
+        cached_terminal_event(&self.terminal_events, id).map(|event| event.reason())
+    }
+
     // ===== Simple Call Operations =====
 
     /// Make an outgoing call. If the `Config.credentials` default is set,
@@ -1824,6 +1835,32 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
+        self.helpers.hangup(session_id).await
+    }
+
+    /// Hang up an established call with an RFC 3326 `Reason` header.
+    ///
+    /// The Reason value is attached to the BYE sent by the normal state-machine
+    /// teardown path, so media cleanup and terminal events match
+    /// [`hangup`](Self::hangup).
+    pub async fn hangup_with_reason(
+        &self,
+        session_id: &SessionId,
+        reason: crate::api::handle::SipReason,
+    ) -> Result<()> {
+        let mut session = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+            .map_err(|_| SessionError::SessionNotFound(session_id.to_string()))?;
+        session.pending_bye_reason = Some((reason.protocol, reason.cause, reason.text));
+        self.helpers
+            .state_machine
+            .store
+            .update_session(session)
+            .await?;
         self.helpers.hangup(session_id).await
     }
 
@@ -2299,6 +2336,64 @@ impl UnifiedCoordinator {
         self.dialog_adapter
             .send_notify(session_id, event_package, body, subscription_state)
             .await
+    }
+
+    /// Subscribe to RFC 4235 dialog-package state for `target_uri`.
+    ///
+    /// The returned handle owns a synthetic session id used to correlate
+    /// dialog-package NOTIFY events.
+    pub async fn subscribe_dialogs(
+        self: &Arc<Self>,
+        target_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        expires: u32,
+    ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
+        let subscription_id = SessionId::new();
+        self.helpers
+            .state_machine
+            .store
+            .create_session(subscription_id.clone(), Role::UAC, true)
+            .await?;
+        let mut session = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(&subscription_id)
+            .await?;
+        session.local_uri = Some(from_uri.to_string());
+        session.remote_uri = Some(target_uri.to_string());
+        session.call_state = CallState::Subscribed;
+        self.helpers
+            .state_machine
+            .store
+            .update_session(session)
+            .await?;
+
+        self.dialog_adapter
+            .send_dialog_subscribe(&subscription_id, from_uri, target_uri, contact_uri, expires)
+            .await?;
+
+        Ok(
+            crate::api::dialog_subscription::DialogSubscriptionHandle::new(
+                subscription_id,
+                target_uri.to_string(),
+                self.clone(),
+            ),
+        )
+    }
+
+    pub(crate) async fn unsubscribe_dialogs(&self, subscription_id: &SessionId) -> Result<()> {
+        self.dialog_adapter
+            .unsubscribe_dialog_package(subscription_id)
+            .await?;
+        self.helpers
+            .state_machine
+            .store
+            .remove_session(subscription_id)
+            .await
+            .ok();
+        Ok(())
     }
 
     /// Send a REFER progress NOTIFY with a SIP status code and reason.

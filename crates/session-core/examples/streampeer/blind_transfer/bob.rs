@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     match transfer_outcome {
-        Event::TransferCompleted { .. } => {}
+        Event::ReferCompleted { .. } => {}
         Event::TransferFailed {
             status_code,
             reason,

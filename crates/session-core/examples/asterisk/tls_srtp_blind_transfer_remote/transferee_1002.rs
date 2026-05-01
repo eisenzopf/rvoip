@@ -38,8 +38,10 @@ async fn main() -> ExampleResult<()> {
     );
     sleep(Duration::from_secs(12)).await;
     println!("[1002] Transfer window elapsed; hanging up anchor call.");
-    handle.hangup().await.ok();
-    handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
     let wav = recorder
         .stop_and_save(&cfg.output_dir, "tls_srtp_blind_transfer_1002_received.wav")
         .await?;

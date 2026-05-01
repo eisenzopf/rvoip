@@ -44,8 +44,7 @@ async fn main() -> ExampleResult<()> {
     }
 
     sleep(Duration::from_secs(1)).await;
-    handle.hangup().await?;
-    handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
+    handle.hangup_and_wait(Some(Duration::from_secs(8))).await?;
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

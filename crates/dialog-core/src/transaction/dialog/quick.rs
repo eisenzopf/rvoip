@@ -157,13 +157,44 @@ pub fn bye_for_dialog(
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
     let to_uri_string = to_uri.into();
+    bye_for_dialog_with_request_uri(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri_string.clone(),
+        to_tag,
+        to_uri_string,
+        cseq,
+        local_address,
+        route_set,
+        extra_headers,
+    )
+}
+
+/// Quick BYE request creation with a distinct Request-URI.
+///
+/// In-dialog BYE uses the dialog remote target as the Request-URI while the
+/// `To:` header keeps the dialog's remote URI. These differ when a PBX uses an
+/// address-of-record in `From`/`To` and a reachable Contact for target refresh.
+pub fn bye_for_dialog_with_request_uri(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    request_uri: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
         from_uri: from_uri.into(),
         from_tag: from_tag.into(),
-        to_uri: to_uri_string.clone(),
+        to_uri: to_uri.into(),
         to_tag: to_tag.into(),
-        request_uri: to_uri_string,
+        request_uri: request_uri.into(),
         cseq,
         local_address,
         route_set: route_set.unwrap_or_default(),
@@ -837,6 +868,45 @@ pub fn subscribe_out_of_dialog(
     Ok(request)
 }
 
+/// Create an out-of-dialog SUBSCRIBE with caller-provided dialog identity.
+pub fn subscribe_out_of_dialog_with_identity(
+    target_uri: impl Into<String>,
+    from_uri: impl Into<String>,
+    contact_uri: impl Into<String>,
+    event_package: impl Into<String>,
+    expires: u32,
+    cseq: u32,
+    local_address: SocketAddr,
+    call_id: impl Into<String>,
+    from_tag: impl Into<String>,
+) -> Result<Request> {
+    let target_uri = target_uri.into();
+    let from_uri = from_uri.into();
+    let contact_uri = contact_uri.into();
+    let event_package = event_package.into();
+    let call_id = call_id.into();
+    let from_tag = from_tag.into();
+    let branch = crate::transaction::utils::dialog_utils::generate_branch();
+    let via_transport = via_transport_for_uris(&target_uri, &from_uri);
+
+    let request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(
+        &target_uri,
+        &event_package,
+        expires,
+    )
+    .map_err(|e| Error::Other(format!("Failed to build SUBSCRIBE request: {}", e)))?
+    .from("", &from_uri, Some(&from_tag))
+    .to("", &target_uri, None)
+    .call_id(&call_id)
+    .cseq(cseq)
+    .via(&local_address.to_string(), via_transport, Some(&branch))
+    .max_forwards(70)
+    .contact(&contact_uri, None)
+    .build();
+
+    Ok(request)
+}
+
 /// Create an out-of-dialog MESSAGE request.
 pub fn message_out_of_dialog(
     target_uri: impl Into<String>,
@@ -978,6 +1048,34 @@ mod tests {
         assert_eq!(bye_request.from().unwrap().tag().unwrap(), "alice-tag");
         assert_eq!(bye_request.to().unwrap().tag().unwrap(), "bob-tag");
         assert_eq!(bye_request.cseq().unwrap().seq, 3);
+    }
+
+    #[tokio::test]
+    async fn test_quick_bye_uses_remote_target_request_uri() {
+        let local_addr: SocketAddr = "127.0.0.1:5060".parse().unwrap();
+
+        let bye_request = bye_for_dialog_with_request_uri(
+            "call-123",
+            "sip:alice@example.com",
+            "alice-tag",
+            "sip:bob@example.com",
+            "bob-tag",
+            "sips:bob@192.0.2.10:5061;transport=tls",
+            3,
+            local_addr,
+            None,
+            None,
+        )
+        .expect("Failed to create BYE");
+
+        assert_eq!(
+            bye_request.uri().to_string(),
+            "sips:bob@192.0.2.10:5061;transport=tls"
+        );
+        assert_eq!(
+            bye_request.to().unwrap().uri().to_string(),
+            "sip:bob@example.com"
+        );
     }
 
     #[tokio::test]

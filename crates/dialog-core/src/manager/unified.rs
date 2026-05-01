@@ -433,6 +433,241 @@ impl UnifiedDialogManager {
             .await
     }
 
+    /// Send a dialog-creating SUBSCRIBE and pre-register a session↔dialog mapping.
+    pub async fn send_subscribe_out_of_dialog_for_session(
+        &self,
+        session_id: &str,
+        target_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        event_package: &str,
+        expires: u32,
+    ) -> ApiResult<DialogId> {
+        use crate::dialog::subscription_state::SubscriptionState;
+        use crate::manager::utils::DialogUtils;
+        use crate::transaction::dialog::quick;
+
+        let from: Uri = from_uri.parse().map_err(|e| ApiError::Configuration {
+            message: format!("Invalid from_uri: {}", e),
+        })?;
+        let target: Uri = target_uri.parse().map_err(|e| ApiError::Configuration {
+            message: format!("Invalid target_uri: {}", e),
+        })?;
+
+        let dialog_id = self
+            .core
+            .create_outgoing_dialog(from, target.clone(), None)
+            .await
+            .map_err(ApiError::from)?;
+
+        self.core
+            .session_to_dialog
+            .insert(session_id.to_string(), dialog_id.clone());
+        self.core
+            .dialog_to_session
+            .insert(dialog_id.clone(), session_id.to_string());
+
+        let (destination, request) = {
+            let mut dialog = self
+                .core
+                .get_dialog_mut(&dialog_id)
+                .map_err(ApiError::from)?;
+            let local_tag = match dialog.local_tag.clone() {
+                Some(tag) if !tag.is_empty() => tag,
+                _ => {
+                    let tag = dialog.generate_local_tag();
+                    dialog.local_tag = Some(tag.clone());
+                    tag
+                }
+            };
+            dialog.local_cseq += 1;
+            dialog.event_package = Some(event_package.to_string());
+            let duration = std::time::Duration::from_secs(expires as u64);
+            dialog.subscription_state = Some(SubscriptionState::Active {
+                remaining_duration: duration,
+                original_duration: duration,
+            });
+
+            let local_address = self
+                .core
+                .local_address_for_target_and_routes(&target, &dialog.route_set);
+            let request = quick::subscribe_out_of_dialog_with_identity(
+                target_uri,
+                from_uri,
+                contact_uri,
+                event_package,
+                expires,
+                dialog.local_cseq,
+                local_address,
+                dialog.call_id.clone(),
+                local_tag,
+            )
+            .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE: {}", e)))?;
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .ok_or_else(|| {
+                ApiError::protocol(format!(
+                    "Failed to resolve SUBSCRIBE target URI: {}",
+                    target_uri
+                ))
+            })?;
+            (destination, request)
+        };
+
+        let transaction_id = self
+            .core
+            .transaction_manager()
+            .create_non_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| {
+                ApiError::internal(format!("Failed to create SUBSCRIBE transaction: {}", e))
+            })?;
+        self.core
+            .transaction_to_dialog
+            .insert(transaction_id.clone(), dialog_id.clone());
+        self.core
+            .transaction_manager()
+            .send_request(&transaction_id)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to send SUBSCRIBE: {}", e)))?;
+
+        let response = self
+            .core
+            .transaction_manager()
+            .wait_for_final_response(&transaction_id, std::time::Duration::from_secs(30))
+            .await
+            .map_err(|e| {
+                ApiError::internal(format!("Failed to wait for SUBSCRIBE response: {}", e))
+            })?
+            .ok_or_else(|| ApiError::network("SUBSCRIBE timed out".to_string()))?;
+
+        if !(200..=299).contains(&response.status_code()) {
+            return Err(ApiError::protocol(format!(
+                "SUBSCRIBE failed with {} {}",
+                response.status_code(),
+                response.reason_phrase()
+            )));
+        }
+
+        {
+            let mut dialog = self
+                .core
+                .get_dialog_mut(&dialog_id)
+                .map_err(ApiError::from)?;
+            dialog.update_from_2xx(&response);
+            if dialog.remote_tag.is_some() {
+                dialog.state = DialogState::Confirmed;
+            }
+            if let Some(tuple) = dialog.dialog_id_tuple() {
+                let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
+                self.core.dialog_lookup.insert(key, dialog_id.clone());
+            }
+        }
+
+        Ok(dialog_id)
+    }
+
+    /// Refresh or terminate an existing SUBSCRIBE dialog.
+    pub async fn send_subscribe_refresh(
+        &self,
+        dialog_id: &DialogId,
+        event_package: &str,
+        expires: u32,
+    ) -> ApiResult<()> {
+        use crate::transaction::dialog::{
+            request_builder_from_dialog_template, DialogRequestTemplate,
+        };
+        use rvoip_sip_core::types::event::{Event, EventType};
+        use rvoip_sip_core::types::expires::Expires;
+        use rvoip_sip_core::types::TypedHeader;
+
+        let (destination, request) = {
+            let mut dialog = self
+                .core
+                .get_dialog_mut(dialog_id)
+                .map_err(ApiError::from)?;
+            let template = dialog.create_request_template(Method::Subscribe);
+            let local_tag = template.local_tag.clone().ok_or_else(|| {
+                ApiError::protocol("SUBSCRIBE refresh requires local tag".to_string())
+            })?;
+            let remote_tag = template.remote_tag.clone().ok_or_else(|| {
+                ApiError::protocol("SUBSCRIBE refresh requires remote tag".to_string())
+            })?;
+            let local_address = self
+                .core
+                .local_address_for_target_and_routes(&template.target_uri, &template.route_set);
+            let template = DialogRequestTemplate {
+                call_id: template.call_id,
+                from_uri: template.local_uri.to_string(),
+                from_tag: local_tag,
+                to_uri: template.remote_uri.to_string(),
+                to_tag: remote_tag,
+                request_uri: template.target_uri.to_string(),
+                cseq: template.cseq_number,
+                local_address,
+                route_set: template.route_set.clone(),
+                contact: self.core.local_contact_uri(),
+            };
+            let mut request = request_builder_from_dialog_template(
+                &template,
+                Method::Subscribe,
+                None,
+                None,
+                None,
+            )
+            .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE refresh: {}", e)))?;
+            request
+                .headers
+                .push(TypedHeader::Event(Event::new(EventType::Token(
+                    event_package.to_string(),
+                ))));
+            request
+                .headers
+                .push(TypedHeader::Expires(Expires::new(expires)));
+            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+            )
+            .await
+            .ok_or_else(|| {
+                ApiError::protocol(format!(
+                    "Failed to resolve SUBSCRIBE refresh URI: {}",
+                    template.request_uri
+                ))
+            })?;
+            (destination, request)
+        };
+
+        let transaction_id = self
+            .core
+            .transaction_manager()
+            .create_non_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| {
+                ApiError::internal(format!(
+                    "Failed to create SUBSCRIBE refresh transaction: {}",
+                    e
+                ))
+            })?;
+        self.core
+            .transaction_to_dialog
+            .insert(transaction_id.clone(), dialog_id.clone());
+        self.core
+            .transaction_manager()
+            .send_request(&transaction_id)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to send SUBSCRIBE refresh: {}", e)))?;
+
+        if expires == 0 {
+            self.core
+                .terminate_dialog(dialog_id)
+                .await
+                .map_err(ApiError::from)?;
+        }
+        Ok(())
+    }
+
     /// Like [`make_call`](Self::make_call) but appends caller-supplied
     /// extra headers to the outgoing INVITE. Intended for headers session-core
     /// can't construct itself: P-Asserted-Identity / P-Preferred-Identity

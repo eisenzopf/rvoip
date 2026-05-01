@@ -52,7 +52,7 @@ async fn main() -> ExampleResult<()> {
         transfer_event
     );
     handle
-        .wait_for_end(Some(std::time::Duration::from_secs(8)))
+        .hangup_and_wait(Some(std::time::Duration::from_secs(8)))
         .await
         .ok();
 

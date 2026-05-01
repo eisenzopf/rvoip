@@ -52,7 +52,8 @@ use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::api::events::Event;
+use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
+use crate::api::events::{Event, SubscriptionState, TransferTargetEvidence};
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::unified::{Config, Registration, RegistrationHandle, UnifiedCoordinator};
@@ -240,23 +241,81 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_transfer_accepted(&self, handle: SessionHandle, refer_to: String) {}
 
-    /// Called when REFER progress NOTIFY is received.
+    /// Called when raw REFER NOTIFY status is received.
     #[allow(unused_variables)]
-    async fn on_transfer_progress(&self, handle: SessionHandle, status_code: u16, reason: String) {}
-
-    /// Called when REFER completion is received.
-    #[allow(unused_variables)]
-    async fn on_transfer_completed(
+    async fn on_refer_notify(
         &self,
-        old_call_id: CallId,
-        new_call_id: CallId,
+        handle: SessionHandle,
+        status_code: u16,
+        reason: String,
+        subscription_state: Option<SubscriptionState>,
+        body: Option<String>,
+    ) {
+    }
+
+    /// Called when provisional REFER progress NOTIFY is received.
+    #[allow(unused_variables)]
+    async fn on_refer_progress(&self, handle: SessionHandle, status_code: u16, reason: String) {}
+
+    /// Called when successful terminal REFER completion is received.
+    #[allow(unused_variables)]
+    async fn on_refer_completed(
+        &self,
+        handle: SessionHandle,
         target: String,
+        status_code: u16,
+        reason: String,
     ) {
     }
 
     /// Called when REFER failure is received.
     #[allow(unused_variables)]
     async fn on_transfer_failed(&self, handle: SessionHandle, status_code: u16, reason: String) {}
+
+    /// Called when session-core has target-answer evidence for a transfer.
+    #[allow(unused_variables)]
+    async fn on_transfer_target_answered(
+        &self,
+        handle: SessionHandle,
+        target_uri: String,
+        evidence: TransferTargetEvidence,
+    ) {
+    }
+
+    /// Called when RFC 4235 observes a candidate replacement dialog.
+    #[allow(unused_variables)]
+    async fn on_transfer_replacement_dialog_observed(
+        &self,
+        handle: SessionHandle,
+        dialog: DialogInfo,
+    ) {
+    }
+
+    /// Called when RFC 4235 or local evidence observes replacement dialog teardown.
+    #[allow(unused_variables)]
+    async fn on_transfer_replacement_dialog_terminated(
+        &self,
+        handle: SessionHandle,
+        dialog: DialogInfo,
+        reason: Option<String>,
+    ) {
+    }
+
+    /// Called for every valid RFC 4235 dialog-package NOTIFY.
+    #[allow(unused_variables)]
+    async fn on_dialog_package_notify(
+        &self,
+        subscription_id: CallId,
+        entity: Option<String>,
+        version: Option<u32>,
+        dialogs: Vec<DialogInfo>,
+        document: DialogInfoDocument,
+    ) {
+    }
+
+    /// Called for each parsed RFC 4235 dialog entry transition.
+    #[allow(unused_variables)]
+    async fn on_dialog_state_changed(&self, subscription_id: CallId, dialog: DialogInfo) {}
 
     /// Called for inbound NOTIFY requests.
     #[allow(unused_variables)]
@@ -979,24 +1038,37 @@ impl<H: CallHandler> CallbackPeer<H> {
                     handler.on_transfer_accepted(handle, refer_to).await;
                 }
 
-                Event::TransferProgress {
+                Event::ReferNotify {
+                    call_id,
+                    status_code,
+                    reason,
+                    subscription_state,
+                    body,
+                } => {
+                    let handle = SessionHandle::new(call_id, coordinator);
+                    handler
+                        .on_refer_notify(handle, status_code, reason, subscription_state, body)
+                        .await;
+                }
+
+                Event::ReferProgress {
                     call_id,
                     status_code,
                     reason,
                 } => {
                     let handle = SessionHandle::new(call_id, coordinator);
-                    handler
-                        .on_transfer_progress(handle, status_code, reason)
-                        .await;
+                    handler.on_refer_progress(handle, status_code, reason).await;
                 }
 
-                Event::TransferCompleted {
-                    old_call_id,
-                    new_call_id,
+                Event::ReferCompleted {
+                    call_id,
                     target,
+                    status_code,
+                    reason,
                 } => {
+                    let handle = SessionHandle::new(call_id, coordinator);
                     handler
-                        .on_transfer_completed(old_call_id, new_call_id, target)
+                        .on_refer_completed(handle, target, status_code, reason)
                         .await;
                 }
 
@@ -1008,6 +1080,59 @@ impl<H: CallHandler> CallbackPeer<H> {
                     let handle = SessionHandle::new(call_id, coordinator);
                     handler
                         .on_transfer_failed(handle, status_code, reason)
+                        .await;
+                }
+
+                Event::TransferTargetAnswered {
+                    transfer_call_id,
+                    target_uri,
+                    evidence,
+                } => {
+                    let handle = SessionHandle::new(transfer_call_id, coordinator);
+                    handler
+                        .on_transfer_target_answered(handle, target_uri, evidence)
+                        .await;
+                }
+
+                Event::TransferReplacementDialogObserved {
+                    transfer_call_id,
+                    dialog,
+                } => {
+                    let handle = SessionHandle::new(transfer_call_id, coordinator);
+                    handler
+                        .on_transfer_replacement_dialog_observed(handle, dialog)
+                        .await;
+                }
+
+                Event::TransferReplacementDialogTerminated {
+                    transfer_call_id,
+                    dialog,
+                    reason,
+                } => {
+                    let handle = SessionHandle::new(transfer_call_id, coordinator);
+                    handler
+                        .on_transfer_replacement_dialog_terminated(handle, dialog, reason)
+                        .await;
+                }
+
+                Event::DialogPackageNotify {
+                    subscription_id,
+                    entity,
+                    version,
+                    dialogs,
+                    document,
+                } => {
+                    handler
+                        .on_dialog_package_notify(subscription_id, entity, version, dialogs, document)
+                        .await;
+                }
+
+                Event::DialogStateChanged {
+                    subscription_id,
+                    dialog,
+                } => {
+                    handler
+                        .on_dialog_state_changed(subscription_id, dialog)
                         .await;
                 }
 
@@ -1073,7 +1198,6 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }
                 | Event::MediaSecurityNegotiated { .. }
-                | Event::TransferNotify { .. }
                 | Event::NetworkError { .. }
                 | Event::AuthenticationRequired { .. } => {}
             }
@@ -1290,22 +1414,34 @@ mod tests {
             self.push("transfer-accepted");
         }
 
-        async fn on_transfer_progress(
+        async fn on_refer_notify(
+            &self,
+            _handle: SessionHandle,
+            status_code: u16,
+            _reason: String,
+            _subscription_state: Option<SubscriptionState>,
+            _body: Option<String>,
+        ) {
+            self.push(format!("refer-notify:{status_code}"));
+        }
+
+        async fn on_refer_progress(
             &self,
             _handle: SessionHandle,
             status_code: u16,
             _reason: String,
         ) {
-            self.push(format!("transfer-progress:{status_code}"));
+            self.push(format!("refer-progress:{status_code}"));
         }
 
-        async fn on_transfer_completed(
+        async fn on_refer_completed(
             &self,
-            _old_call_id: CallId,
-            _new_call_id: CallId,
+            _handle: SessionHandle,
             _target: String,
+            status_code: u16,
+            _reason: String,
         ) {
-            self.push("transfer-completed");
+            self.push(format!("refer-completed:{status_code}"));
         }
 
         async fn on_transfer_failed(
@@ -1433,15 +1569,23 @@ mod tests {
                 call_id: call_id.clone(),
                 refer_to: "sip:c@example.test".into(),
             },
-            Event::TransferProgress {
+            Event::ReferNotify {
+                call_id: call_id.clone(),
+                status_code: 100,
+                reason: "Trying".into(),
+                subscription_state: Some(SubscriptionState::parse("active;expires=60")),
+                body: Some("SIP/2.0 100 Trying".into()),
+            },
+            Event::ReferProgress {
                 call_id: call_id.clone(),
                 status_code: 180,
                 reason: "Ringing".into(),
             },
-            Event::TransferCompleted {
-                old_call_id: call_id.clone(),
-                new_call_id: SessionId::new(),
+            Event::ReferCompleted {
+                call_id: call_id.clone(),
                 target: "sip:c@example.test".into(),
+                status_code: 200,
+                reason: "OK".into(),
             },
             Event::TransferFailed {
                 call_id: call_id.clone(),
@@ -1493,8 +1637,9 @@ mod tests {
             "dtmf:5",
             "refer",
             "transfer-accepted",
-            "transfer-progress:180",
-            "transfer-completed",
+            "refer-notify:100",
+            "refer-progress:180",
+            "refer-completed:200",
             "transfer-failed:503",
             "notify:refer",
             "registration-success",
@@ -1511,7 +1656,7 @@ mod tests {
             seen.iter()
                 .filter(|value| value.as_str() == "event")
                 .count(),
-            22
+            23
         );
         assert_eq!(
             seen.iter()

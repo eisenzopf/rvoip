@@ -40,7 +40,7 @@ The suite validates these callback hooks:
 | `on_call_on_hold`, `on_call_resumed` | hold/resume caller |
 | `on_remote_call_on_hold`, `on_remote_call_resumed` | optional callee assertion when `ASTERISK_EXPECT_REMOTE_HOLD_EVENTS=1` |
 | `on_dtmf` | DTMF tests |
-| `on_transfer_accepted`, `on_transfer_progress`, `on_transfer_completed`, `on_transfer_failed` | blind transfer tests |
+| `on_transfer_accepted`, `on_refer_progress`, `on_refer_completed`, `on_transfer_failed` | blind transfer tests |
 
 ## Audio Verification
 

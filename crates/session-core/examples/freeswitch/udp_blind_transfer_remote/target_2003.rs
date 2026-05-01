@@ -26,8 +26,10 @@ async fn main() -> ExampleResult<()> {
     println!("[2003] Transferred call answered.");
     sleep(Duration::from_secs(2)).await;
     println!("[2003] Hanging up transferred call.");
-    handle.hangup().await.ok();
-    handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
 
     peer.unregister(&registration).await.ok();
     peer.shutdown().await.ok();

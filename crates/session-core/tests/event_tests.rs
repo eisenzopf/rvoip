@@ -4,7 +4,9 @@
 
 use rvoip_session_core::state_table::types::SessionId;
 use rvoip_session_core::{
-    Event, MediaSecurityKeying, MediaSecurityProfile, SubscriptionState, TransferKind,
+    DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState, Event,
+    MediaSecurityKeying, MediaSecurityProfile, SubscriptionState, TransferKind,
+    TransferTargetEvidence,
 };
 use rvoip_sip_core::types::sdp::CryptoSuite;
 
@@ -104,16 +106,15 @@ fn test_subscription_state_parse_helper() {
 }
 
 #[test]
-fn test_transfer_completed_event() {
-    let old_id = test_id();
-    let new_id = test_id();
-    let e = Event::TransferCompleted {
-        old_call_id: old_id.clone(),
-        new_call_id: new_id,
+fn test_refer_completed_event() {
+    let id = test_id();
+    let e = Event::ReferCompleted {
+        call_id: id.clone(),
         target: "sip:charlie@example.com".into(),
+        status_code: 200,
+        reason: "OK".into(),
     };
-    // call_id() returns old_call_id
-    assert_eq!(e.call_id(), Some(&old_id));
+    assert_eq!(e.call_id(), Some(&id));
     assert!(e.is_transfer_event());
 }
 
@@ -129,9 +130,9 @@ fn test_transfer_failed_event() {
 }
 
 #[test]
-fn test_transfer_progress_event() {
+fn test_refer_progress_event() {
     let id = test_id();
-    let e = Event::TransferProgress {
+    let e = Event::ReferProgress {
         call_id: id.clone(),
         status_code: 180,
         reason: "Ringing".into(),
@@ -140,9 +141,9 @@ fn test_transfer_progress_event() {
 }
 
 #[test]
-fn test_transfer_notify_event() {
+fn test_refer_notify_event() {
     let id = test_id();
-    let e = Event::TransferNotify {
+    let e = Event::ReferNotify {
         call_id: id.clone(),
         status_code: 200,
         reason: "OK".into(),
@@ -155,6 +156,63 @@ fn test_transfer_notify_event() {
         e.subscription_state().and_then(|s| s.reason),
         Some("noresource".into())
     );
+}
+
+#[test]
+fn test_transfer_target_answered_event() {
+    let id = test_id();
+    let e = Event::TransferTargetAnswered {
+        transfer_call_id: id.clone(),
+        target_uri: "sip:charlie@example.com".into(),
+        evidence: TransferTargetEvidence::ReferProgressThenFinal {
+            progress_status_code: 180,
+            progress_reason: "Ringing".into(),
+            final_status_code: 200,
+            final_reason: "OK".into(),
+        },
+    };
+    assert_eq!(e.call_id(), Some(&id));
+    assert!(e.is_transfer_event());
+}
+
+#[test]
+fn test_dialog_package_events() {
+    let subscription_id = test_id();
+    let dialog = DialogInfo {
+        id: "dlg-1".into(),
+        call_id: Some("call-a".into()),
+        local_tag: Some("lt".into()),
+        remote_tag: Some("rt".into()),
+        direction: Some("recipient".into()),
+        state: DialogPackageState::Terminated,
+        event: Some(DialogPackageEvent::RemoteBye),
+        local_uri: Some("sip:1003@example.com".into()),
+        remote_uri: Some("sip:1002@example.com".into()),
+        raw_state: "terminated".into(),
+        raw_event: Some("remote-bye".into()),
+    };
+    let document = DialogInfoDocument {
+        entity: Some("sip:pbx@example.com".into()),
+        version: Some(3),
+        state: Some("partial".into()),
+        dialogs: vec![dialog.clone()],
+    };
+
+    let notify = Event::DialogPackageNotify {
+        subscription_id: subscription_id.clone(),
+        entity: document.entity.clone(),
+        version: document.version,
+        dialogs: vec![dialog.clone()],
+        document,
+    };
+    assert_eq!(notify.call_id(), Some(&subscription_id));
+    assert!(!notify.is_transfer_event());
+
+    let changed = Event::DialogStateChanged {
+        subscription_id: subscription_id.clone(),
+        dialog,
+    };
+    assert_eq!(changed.call_id(), Some(&subscription_id));
 }
 
 // ── Call state events ───────────────────────────────────────────────────────

@@ -35,8 +35,10 @@ async fn main() -> ExampleResult<()> {
     );
     sleep(Duration::from_secs(4)).await;
     println!("[1003] Hanging up transferred call.");
-    handle.hangup().await.ok();
-    handle.wait_for_end(Some(Duration::from_secs(8))).await.ok();
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
     let wav = recorder
         .stop_and_save(&cfg.output_dir, "tls_srtp_blind_transfer_1003_received.wav")
         .await?;

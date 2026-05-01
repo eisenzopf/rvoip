@@ -333,7 +333,14 @@ pub async fn execute_action(
             info!("SendACK action: dialog-core handles ACK sending, dialog marked as established for UAC session {}", session.session_id);
         }
         Action::SendBYE => {
-            dialog_adapter.send_bye_session(&session.session_id).await?;
+            if let Some((protocol, cause, text)) = session.pending_bye_reason.take() {
+                let reason = rvoip_sip_core::types::reason::Reason::new(protocol, cause, text);
+                dialog_adapter
+                    .send_bye_session_with_reason(&session.session_id, reason)
+                    .await?;
+            } else {
+                dialog_adapter.send_bye_session(&session.session_id).await?;
+            }
         }
         Action::SendCANCEL => {
             dialog_adapter.send_cancel(&session.session_id).await?;
@@ -1384,7 +1391,7 @@ pub async fn execute_action(
                 }
                 publish_transfer_event(
                     dialog_adapter,
-                    Event::TransferNotify {
+                    Event::ReferNotify {
                         call_id: transferor.clone(),
                         status_code: 180,
                         reason: "Ringing".to_string(),
@@ -1394,7 +1401,7 @@ pub async fn execute_action(
                 );
                 publish_transfer_event(
                     dialog_adapter,
-                    Event::TransferProgress {
+                    Event::ReferProgress {
                         call_id: transferor,
                         status_code: 180,
                         reason: "Ringing".to_string(),
@@ -1425,7 +1432,7 @@ pub async fn execute_action(
                 }
                 publish_transfer_event(
                     dialog_adapter,
-                    Event::TransferNotify {
+                    Event::ReferNotify {
                         call_id: transferor.clone(),
                         status_code: 200,
                         reason: "OK".to_string(),
@@ -1435,10 +1442,21 @@ pub async fn execute_action(
                 );
                 publish_transfer_event(
                     dialog_adapter,
-                    Event::TransferCompleted {
-                        old_call_id: transferor.clone(),
-                        new_call_id: transferor,
+                    Event::TransferTargetAnswered {
+                        transfer_call_id: transferor.clone(),
+                        target_uri: session.remote_uri.clone().unwrap_or_default(),
+                        evidence: crate::api::events::TransferTargetEvidence::LocalTargetLeg {
+                            call_id: session.session_id.clone(),
+                        },
+                    },
+                );
+                publish_transfer_event(
+                    dialog_adapter,
+                    Event::ReferCompleted {
+                        call_id: transferor,
                         target: session.remote_uri.clone().unwrap_or_default(),
+                        status_code: 200,
+                        reason: "OK".to_string(),
                     },
                 );
             } else {
@@ -1474,7 +1492,7 @@ pub async fn execute_action(
                 }
                 publish_transfer_event(
                     dialog_adapter,
-                    Event::TransferNotify {
+                    Event::ReferNotify {
                         call_id: transferor.clone(),
                         status_code,
                         reason: reason.clone(),

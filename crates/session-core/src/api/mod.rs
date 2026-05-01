@@ -233,8 +233,11 @@
 
 // Core modules only
 pub mod builder; // Session builder
+pub mod dialog_package;
+pub mod dialog_subscription;
 pub mod events; // Event-driven API for v3
 pub mod simple;
+pub(crate) mod terminal;
 pub mod types; // Core types (legacy)
 pub mod unified; // Unified API // Simple peer API (legacy — use StreamPeer instead)
 
@@ -265,9 +268,11 @@ pub use unified::{
 pub use simple::SimplePeer;
 
 // Re-export event types
+pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState};
+pub use dialog_subscription::DialogSubscriptionHandle;
 pub use events::{
     CallHandle, CallId, Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
-    SubscriptionState, TransferKind,
+    SubscriptionState, TransferKind, TransferTargetEvidence,
 };
 
 // Re-export builder
@@ -285,7 +290,9 @@ pub use crate::errors::{Result, SessionError};
 pub use audio::{AudioReceiver, AudioSender, AudioStream};
 
 // SessionHandle
-pub use handle::{SessionHandle, TransferWaitMode};
+pub use handle::{
+    SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions, TransferWaitMode,
+};
 
 // DialogIdentity (used when orchestrating attended transfer from a higher layer)
 pub use types::DialogIdentity;

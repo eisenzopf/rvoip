@@ -317,12 +317,13 @@ impl TransactionIntegration for DialogManager {
                         crate::errors::DialogError::protocol_error("BYE request requires remote tag in established dialog")
                     })?;
 
-                    dialog_quick::bye_for_dialog(
+                    dialog_quick::bye_for_dialog_with_request_uri(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
                         &template.remote_uri.to_string(),
                         &remote_tag,
+                        &template.target_uri.to_string(),
                         template.cseq_number,
                         local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
@@ -1597,6 +1598,25 @@ impl DialogManager {
                 .await;
             }
 
+            status
+                if transaction_id.method() == &rvoip_sip_core::Method::Bye
+                    && matches!(status, 408 | 481) =>
+            {
+                // RFC 3261 BYE terminates this endpoint's participation in
+                // the dialog. A 481 means the peer no longer has the dialog;
+                // 408 means the request timed out. Both are terminal for our
+                // local session state.
+                self.emit_session_coordination_event(SessionCoordinationEvent::CallTerminating {
+                    dialog_id: dialog_id.clone(),
+                    reason: format!(
+                        "BYE completed locally after {} {}",
+                        status,
+                        response.reason_phrase()
+                    ),
+                })
+                .await;
+            }
+
             status if status >= 400 && status < 500 && !response_has_auth_challenge(&response) => {
                 // Client error - may require dialog termination
                 warn!(
@@ -1819,9 +1839,18 @@ impl DialogManager {
         // Clean up transaction-dialog association
         self.transaction_to_dialog.remove(transaction_id);
 
-        // Note: We don't automatically terminate dialogs when transactions terminate
-        // because dialogs can have multiple transactions. Dialog termination is
-        // handled by higher-level logic (session-core) or explicit BYE requests.
+        if transaction_id.method() == &rvoip_sip_core::Method::Bye {
+            self.emit_session_coordination_event(SessionCoordinationEvent::CallTerminating {
+                dialog_id: dialog_id.clone(),
+                reason: "BYE transaction terminated".to_string(),
+            })
+            .await;
+        }
+
+        // Note: Other methods do not automatically terminate dialogs when
+        // transactions terminate because dialogs can have multiple
+        // transactions. Dialog termination is handled by higher-level logic
+        // (session-core) or explicit BYE requests.
 
         Ok(())
     }

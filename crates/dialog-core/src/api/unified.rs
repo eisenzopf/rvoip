@@ -1371,6 +1371,40 @@ impl UnifiedDialogApi {
             .await
     }
 
+    /// Send an out-of-dialog SUBSCRIBE and pre-register a session mapping.
+    pub async fn send_subscribe_out_of_dialog_for_session(
+        &self,
+        session_id: &str,
+        target_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        event_package: &str,
+        expires: u32,
+    ) -> ApiResult<crate::dialog::DialogId> {
+        self.manager
+            .send_subscribe_out_of_dialog_for_session(
+                session_id,
+                target_uri,
+                from_uri,
+                contact_uri,
+                event_package,
+                expires,
+            )
+            .await
+    }
+
+    /// Refresh or terminate an existing SUBSCRIBE dialog.
+    pub async fn send_subscribe_refresh(
+        &self,
+        dialog_id: &crate::dialog::DialogId,
+        event_package: &str,
+        expires: u32,
+    ) -> ApiResult<()> {
+        self.manager
+            .send_subscribe_refresh(dialog_id, event_package, expires)
+            .await
+    }
+
     /// Send an out-of-dialog MESSAGE request.
     pub async fn send_message_out_of_dialog(
         &self,
