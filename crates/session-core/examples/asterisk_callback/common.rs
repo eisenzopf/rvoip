@@ -9,7 +9,7 @@ pub use asterisk::*;
 use async_trait::async_trait;
 use rvoip_session_core::{
     CallHandler, CallHandlerDecision, CallId, CallbackPeer, CallbackPeerControl, IncomingCall,
-    RegistrationHandle, SessionHandle,
+    MediaSecurityState, RegistrationHandle, SessionHandle,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -29,6 +29,12 @@ pub enum CallbackEvent {
         to: String,
     },
     Established(SessionHandle),
+    Progress {
+        call_id: CallId,
+        status_code: u16,
+        reason: String,
+        sdp: Option<String>,
+    },
     Ended {
         call_id: CallId,
         reason: String,
@@ -44,6 +50,10 @@ pub enum CallbackEvent {
     Dtmf {
         call_id: CallId,
         digit: char,
+    },
+    MediaSecurity {
+        call_id: CallId,
+        state: MediaSecurityState,
     },
     LocalHold {
         call_id: CallId,
@@ -126,6 +136,27 @@ impl CallHandler for EventQueueHandler {
         self.send(CallbackEvent::Established(handle));
     }
 
+    async fn on_call_progress(
+        &self,
+        handle: SessionHandle,
+        status_code: u16,
+        reason: String,
+        sdp: Option<String>,
+    ) {
+        println!(
+            "[callback] call {} progress: {} {}",
+            handle.id(),
+            status_code,
+            reason
+        );
+        self.send(CallbackEvent::Progress {
+            call_id: handle.id().clone(),
+            status_code,
+            reason,
+            sdp,
+        });
+    }
+
     async fn on_call_ended(&self, call_id: CallId, reason: rvoip_session_core::EndReason) {
         println!("[callback] call {} ended: {:?}", call_id, reason);
         self.send(CallbackEvent::Ended {
@@ -155,6 +186,21 @@ impl CallHandler for EventQueueHandler {
         self.send(CallbackEvent::Dtmf {
             call_id: handle.id().clone(),
             digit,
+        });
+    }
+
+    async fn on_media_security_negotiated(&self, handle: SessionHandle, state: MediaSecurityState) {
+        println!(
+            "[callback] call {} media security: keying={:?} suite={} profile={:?} contexts_installed={}",
+            handle.id(),
+            state.keying,
+            state.suite,
+            state.profile,
+            state.contexts_installed
+        );
+        self.send(CallbackEvent::MediaSecurity {
+            call_id: handle.id().clone(),
+            state,
         });
     }
 
@@ -474,6 +520,48 @@ pub async fn wait_for_cancelled(
     .map_err(|_| {
         format!(
             "timed out after {:?} waiting for CallCancelled",
+            timeout_duration
+        )
+    })?
+}
+
+pub async fn wait_for_callback_progress(
+    events: &mut mpsc::UnboundedReceiver<CallbackEvent>,
+    call_id: &CallId,
+    timeout_duration: Duration,
+) -> ExampleResult<()> {
+    timeout(timeout_duration, async {
+        loop {
+            match events.recv().await {
+                Some(CallbackEvent::Progress {
+                    call_id: progress_id,
+                    status_code: 180 | 183,
+                    reason,
+                    sdp,
+                }) if &progress_id == call_id => {
+                    println!(
+                        "[callback] observed call progress: {} sdp={}",
+                        reason,
+                        sdp.is_some()
+                    );
+                    return Ok(());
+                }
+                Some(CallbackEvent::Failed {
+                    call_id: failed_id,
+                    status_code,
+                    reason,
+                }) if &failed_id == call_id => {
+                    return Err(format!("call failed with {} {}", status_code, reason).into())
+                }
+                Some(_) => {}
+                None => return Err("callback event channel closed".into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "timed out after {:?} waiting for callback call progress",
             timeout_duration
         )
     })?

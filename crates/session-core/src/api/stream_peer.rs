@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::adapters::SessionApiCrossCrateEvent;
-use crate::api::events::Event;
+use crate::api::events::{Event, MediaSecurityState};
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::IncomingCall;
 use crate::api::unified::{Config, UnifiedCoordinator};
@@ -198,6 +198,46 @@ impl EventReceiver {
                     return Some((call_id, digit));
                 }
                 _ => continue,
+            }
+        }
+    }
+
+    /// Wait for the next provisional call-progress event on any call.
+    ///
+    /// Returns `(call_id, status_code, reason, sdp)` or `None` on channel close.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(mut events: rvoip_session_core::EventReceiver) {
+    /// if let Some((call_id, status, reason, _sdp)) = events.next_progress().await {
+    ///     println!("{call_id} received provisional {status} {reason}");
+    /// }
+    /// # }
+    /// ```
+    pub async fn next_progress(&mut self) -> Option<(CallId, u16, String, Option<String>)> {
+        loop {
+            match self.next().await? {
+                Event::CallProgress {
+                    call_id,
+                    status_code,
+                    reason,
+                    sdp,
+                } => return Some((call_id, status_code, reason, sdp)),
+                _ => continue,
+            }
+        }
+    }
+
+    /// Wait for the next typed media-security negotiation event on any call.
+    ///
+    /// Returns `(call_id, state)` or `None` on channel close. The returned
+    /// state does not expose SRTP key material.
+    pub async fn next_media_security_negotiated(&mut self) -> Option<(CallId, MediaSecurityState)> {
+        loop {
+            let event = self.next().await?;
+            if let Some(state) = media_security_state_from_event(event) {
+                return Some(state);
             }
         }
     }
@@ -686,6 +726,76 @@ impl StreamPeer {
         }
     }
 
+    /// Wait for provisional progress on a specific outgoing call.
+    ///
+    /// The predicate is evaluated only for matching [`Event::CallProgress`]
+    /// events. Non-matching events are consumed, matching the other sequential
+    /// `StreamPeer` helpers.
+    pub async fn wait_for_progress<F>(
+        &mut self,
+        call_id: &CallId,
+        mut predicate: F,
+    ) -> Result<Event>
+    where
+        F: FnMut(&Event) -> bool,
+    {
+        loop {
+            match self.events.next().await {
+                Some(event @ Event::CallProgress { .. }) => {
+                    if event.call_id() == Some(call_id) && predicate(&event) {
+                        return Ok(event);
+                    }
+                }
+                Some(Event::CallAnswered {
+                    call_id: answered_id,
+                    ..
+                }) if &answered_id == call_id => {
+                    return Err(SessionError::Other(
+                        "call answered before matching provisional progress".to_string(),
+                    ));
+                }
+                Some(Event::CallFailed {
+                    call_id: failed_id,
+                    reason,
+                    status_code,
+                }) if &failed_id == call_id => {
+                    return Err(SessionError::Other(format!(
+                        "Call failed with {}: {}",
+                        status_code, reason
+                    )));
+                }
+                Some(Event::CallCancelled { call_id: id }) if &id == call_id => {
+                    return Err(SessionError::Other(
+                        "call cancelled before matching provisional progress".to_string(),
+                    ));
+                }
+                None => return Err(SessionError::Other("Event channel closed".to_string())),
+                _ => {}
+            }
+        }
+    }
+
+    /// Wait for typed media-security negotiation on a specific call.
+    ///
+    /// This is the stream-style equivalent of [`SessionHandle::media_security`]
+    /// when an application prefers to consume events instead of polling state.
+    pub async fn wait_for_media_security(
+        &mut self,
+        call_id: &CallId,
+    ) -> Result<MediaSecurityState> {
+        loop {
+            match self.events.next().await {
+                Some(event) if event.call_id() == Some(call_id) => {
+                    if let Some((_, state)) = media_security_state_from_event(event) {
+                        return Ok(state);
+                    }
+                }
+                None => return Err(SessionError::Other("Event channel closed".to_string())),
+                _ => {}
+            }
+        }
+    }
+
     /// Wait for a specific call to end (BYE received/sent).
     ///
     /// # Examples
@@ -923,6 +1033,27 @@ impl StreamPeer {
     /// ```
     pub fn builder() -> StreamPeerBuilder {
         StreamPeerBuilder::new()
+    }
+}
+
+fn media_security_state_from_event(event: Event) -> Option<(CallId, MediaSecurityState)> {
+    match event {
+        Event::MediaSecurityNegotiated {
+            call_id,
+            keying,
+            suite,
+            profile,
+            contexts_installed,
+        } => Some((
+            call_id,
+            MediaSecurityState {
+                keying,
+                suite,
+                profile,
+                contexts_installed,
+            },
+        )),
+        _ => None,
     }
 }
 

@@ -18,10 +18,10 @@ closed or a new gap is identified.
 
 | Code | Status | Behavior |
 |------|--------|----------|
-| 100 Trying | ✅ | Consumed at transaction layer; not surfaced to application (by design — hop-by-hop) |
-| 180 Ringing | ✅ | Emits `CallStateChanged(Ringing)` |
-| 181 Call Is Being Forwarded | ✅ | Emits `CallStateChanged(Ringing, reason="Forwarded")` |
-| 182 Queued | ✅ | Emits `CallStateChanged(Ringing, reason="Queued")` |
+| 100 Trying | ✅ | May surface as `Event::CallProgress { status_code: 100, ... }`; applications that only want user-visible progress should filter for 180/183 or a custom predicate. |
+| 180 Ringing | ✅ | Emits typed `Event::CallProgress { status_code: 180, ... }`; `SessionHandle::wait_for_progress`, `StreamPeer::wait_for_progress`, and `CallHandler::on_call_progress` expose it without state polling. |
+| 181 Call Is Being Forwarded | ✅ | Emits typed `Event::CallProgress { status_code: 181, ... }` |
+| 182 Queued | ✅ | Emits typed `Event::CallProgress { status_code: 182, ... }` |
 | 183 Session Progress (early media) | ✅ | UAS emits reliable 183 with SDP via `PeerControl::send_early_media`/`IncomingCall::send_early_media` (RFC 3262). UAC auto-PRACKs; state transitions through `EarlyMedia` with negotiated SDP preserved into the 200 OK. Local RTP playback of early media is a separate media-adapter capability. |
 | 199 Early Dialog Terminated | ✅ | Emits `CallStateChanged(Ringing, reason="EarlyDialogTerminated")` |
 
@@ -84,7 +84,7 @@ closed or a new gap is identified.
 | CANCEL | ✅ | ✅ | |
 | REGISTER | ✅ | ✅ | With digest auth + 423 auto-retry |
 | REFER | ✅ | ✅ | Blind transfer (`SessionHandle::transfer_blind`) + REFER-with-Replaces primitive (`SessionHandle::transfer_attended`, RFC 3891). Inbound REFER surfaces `Refer-To`, `Referred-By`, and `Replaces` when present. Attended-transfer *orchestration* (original + consultation session linkage) is a higher-layer concern outside this crate. |
-| NOTIFY | ✅ | ✅ | Public send: `SessionHandle::send_notify(event_package, body, subscription_state)` + `UnifiedCoordinator::send_notify` delegate to `DialogAdapter::send_notify`. RFC 3515 §2.4.5 progress NOTIFYs are driven by the state machine for transfer legs: `UnifiedCoordinator::make_transfer_leg(from, to, transferor_session_id)` atomically sets `SessionState.transferor_session_id` before `MakeCall` dispatches, so the `SendRefer100Trying` and `SendTransferNotify{Ringing,Success}` actions fire sipfrag NOTIFYs back on the transferor's REFER subscription. Failure-side NOTIFY and `Event::TransferFailed` are published from `session_event_handler::handle_call_failed` when the failed leg has a `transferor_session_id`. Inbound NOTIFY surfaces as raw `Event::NotifyReceived`; for `event_package == "refer"` with `message/sipfrag`, the sipfrag status line is parsed into `Event::ReferNotify` plus derived `ReferProgress`, `ReferCompleted`, or `TransferFailed`. For `event_package == "dialog"` with `application/dialog-info+xml`, RFC 4235 bodies are parsed into `DialogPackageNotify` and per-dialog `DialogStateChanged` events. Covered by `tests/notify_send_integration.rs`, `tests/transfer_notify_wiring_tests.rs`, `tests/event_tests.rs`, and parser unit tests in `api::dialog_package`. |
+| NOTIFY | ✅ | ✅ | Public send: `SessionHandle::send_notify(event_package, body, subscription_state)` + `UnifiedCoordinator::send_notify`. RFC 3515 §2.4.5 progress NOTIFYs are driven by the state machine for transfer legs: `UnifiedCoordinator::make_transfer_leg(from, to, transferor_session_id)` atomically sets `SessionState.transferor_session_id` before `MakeCall` dispatches, so the `SendRefer100Trying` and `SendTransferNotify{Ringing,Success}` actions fire sipfrag NOTIFYs back on the transferor's REFER subscription. Failure-side NOTIFY and `Event::TransferFailed` are published from `session_event_handler::handle_call_failed` when the failed leg has a `transferor_session_id`. Inbound NOTIFY surfaces as raw `Event::NotifyReceived`; for `event_package == "refer"` with `message/sipfrag`, the sipfrag status line is parsed into `Event::ReferNotify` plus derived `ReferProgress`, `ReferCompleted`, or `TransferFailed`. For `event_package == "dialog"` with `application/dialog-info+xml`, RFC 4235 bodies are parsed into `DialogPackageNotify` and per-dialog `DialogStateChanged` events. Developers access these through `UnifiedCoordinator`, `StreamPeer`, `CallbackPeer`, and `SessionHandle`; lower dialog internals are not part of the application API. Covered by `tests/notify_send_integration.rs`, `tests/transfer_notify_wiring_tests.rs`, `tests/event_tests.rs`, and parser unit tests in `api::dialog_package`. |
 | OPTIONS | ⚠️ | ✅ | Incoming responds 200 OK; no outbound helper in public API |
 | UPDATE | ✅ (dialog-core) | ✅ | RFC 3311 UPDATE inbound is now state-machine-driven. dialog-core's `process_update_in_dialog` emits the same cross-crate `ReinviteReceived` event with `method: "UPDATE"`; session-core dispatches to `EventType::UpdateReceived` and the `Active + UpdateReceived` / `OnHold + UpdateReceived` transitions answer 200 OK. UPDATE for RFC 4028 session-timer refresh carries no SDP (no `NegotiateSDPAsUAS` on those transitions). Outbound UPDATE for session modification from session-core's public API is still unused (hold/resume goes through re-INVITE — see `docs/UPDATE_STATUS.md`). |
 | MESSAGE | ✅ | ✅ | SIP IM (RFC 3428) |
@@ -101,6 +101,7 @@ closed or a new gap is identified.
 |-------|------|
 | `IncomingCall` | UAS receives INVITE |
 | `CallAnswered` | UAC receives 200 OK |
+| `CallProgress` | UAC receives a provisional 1xx response such as 100, 180, or 183 |
 | `CallEnded` | BYE exchanged cleanly |
 | `CallFailed { status_code, reason }` | 3xx (after all redirects failed) / 4xx / 5xx / 6xx final response |
 | `CallCancelled` | 487 Request Terminated |
@@ -110,6 +111,7 @@ closed or a new gap is identified.
 | `CallMuted` / `CallUnmuted` | Local mute |
 | `DtmfReceived` | In-band or SIP INFO DTMF |
 | `MediaQualityChanged` | Periodic media quality samples |
+| `MediaSecurityNegotiated` | SRTP keying/profile/suite/context state is negotiated and installed, without exposing key material |
 | `ReferReceived`, `TransferAccepted`, `ReferNotify`, `ReferProgress`, `ReferCompleted`, `TransferFailed` | REFER / transfer flow. `ReferCompleted` means final successful REFER NOTIFY for the referenced request, not replacement-call teardown. |
 | `TransferTargetAnswered`, `TransferReplacementDialogObserved`, `TransferReplacementDialogTerminated` | Transfer lifecycle evidence derived from trustworthy target-leg progress, local target legs, or RFC 4235 dialog-package state. |
 | `NotifyReceived { event_package, subscription_state, content_type, body }` | Inbound NOTIFY on any event package (RFC 6665). Raw strings remain available. REFER sipfrag bodies also emit typed `Refer*` events; dialog-package XML emits typed dialog events. |

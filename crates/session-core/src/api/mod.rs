@@ -11,9 +11,10 @@
 //! | [`CallbackPeer`] | Servers, IVR, routing endpoints | Reactive [`CallHandler`] hooks |
 //! | [`UnifiedCoordinator`] | B2BUAs, gateways, custom frameworks | Explicit session IDs and orchestration methods |
 //!
-//! All three surfaces drive the same coordinator, state table, dialog adapter,
-//! and media adapter. Choosing a surface is mostly about how your application
-//! wants to structure control flow.
+//! All three surfaces drive the same session coordinator and signaling/media
+//! runtime. Choosing a surface is mostly about how your application wants to
+//! structure control flow; applications should not need lower-layer dialog
+//! plumbing directly.
 //!
 //! ## Common Building Blocks
 //!
@@ -22,12 +23,14 @@
 //!   NAT/media address advertisement, session timers, 100rel, and codec
 //!   negotiation policy.
 //! - [`SessionHandle`] controls a single call once it exists, including
-//!   deterministic wait helpers for teardown and blind transfer.
+//!   deterministic wait helpers for teardown, provisional progress, media
+//!   security, and blind transfer.
 //! - [`IncomingCall`] represents a ringing inbound INVITE that must be accepted,
 //!   rejected, redirected, or deferred.
 //! - [`Event`] is the typed application event enum used by `StreamPeer` and
-//!   lower-level coordinator subscribers, with helper views for transfer kind
-//!   and NOTIFY subscription state.
+//!   lower-level coordinator subscribers, with helper views for transfer kind,
+//!   NOTIFY subscription state, provisional progress, REFER lifecycle, dialog
+//!   package notifications, and SRTP media security.
 //! - [`Registration`] describes outbound SIP REGISTER attempts; query
 //!   [`RegistrationInfo`] for accepted expiry, refresh timing, GRUU, and
 //!   Service-Route metadata.

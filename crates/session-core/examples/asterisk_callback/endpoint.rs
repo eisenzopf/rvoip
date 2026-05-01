@@ -9,11 +9,11 @@ use common::{
     assert_srtp_media_security, call_with_answer_retry, callback_runtime,
     expect_remote_hold_events, load_env, post_register_settle_duration, register_callback_endpoint,
     remote_test_digits, remote_test_timeout, send_tone_segment, start_tone_recorder,
-    unregister_callback_endpoint, wait_for_call_failed, wait_for_cancelled, wait_for_dtmf_sequence,
-    wait_for_local_hold_on_events, wait_for_local_hold_resume, wait_for_local_resume_on_events,
-    wait_for_next_established, wait_for_remote_hold_resume, CallbackEvent, ExampleResult,
-    IncomingMode, ENDPOINT_1001_TONE_HZ, ENDPOINT_1002_TONE_HZ, ENDPOINT_1003_TONE_HZ,
-    ENDPOINT_2002_TONE_HZ,
+    unregister_callback_endpoint, wait_for_call_failed, wait_for_callback_progress,
+    wait_for_cancelled, wait_for_dtmf_sequence, wait_for_local_hold_on_events,
+    wait_for_local_hold_resume, wait_for_local_resume_on_events, wait_for_next_established,
+    wait_for_remote_hold_resume, CallbackEvent, ExampleResult, IncomingMode, ENDPOINT_1001_TONE_HZ,
+    ENDPOINT_1002_TONE_HZ, ENDPOINT_1003_TONE_HZ, ENDPOINT_2002_TONE_HZ,
 };
 use rvoip_session_core::TransferWaitMode;
 use tokio::time::sleep;
@@ -205,21 +205,7 @@ async fn run_ring_caller(
     let target = runtime.cfg.remote_call_uri();
     println!("[{}] Calling callback ring target {}.", user, target);
     let handle = runtime.control.call(&target).await?;
-    let progress = handle
-        .wait_for_progress(
-            |event| {
-                matches!(
-                    event,
-                    rvoip_session_core::Event::CallProgress {
-                        status_code: 180 | 183,
-                        ..
-                    }
-                )
-            },
-            Some(remote_test_timeout()?),
-        )
-        .await?;
-    println!("[{}] Observed callback call progress: {:?}", user, progress);
+    wait_for_callback_progress(&mut runtime.events, handle.id(), remote_test_timeout()?).await?;
     handle
         .hangup_and_wait(Some(Duration::from_secs(12)))
         .await?;

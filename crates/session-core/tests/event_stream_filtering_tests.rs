@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use rvoip_session_core::adapters::SessionApiCrossCrateEvent;
 use rvoip_session_core::api::unified::{Config, UnifiedCoordinator};
-use rvoip_session_core::{Event, SessionId};
+use rvoip_session_core::{Event, MediaSecurityKeying, MediaSecurityProfile, SessionId};
+use rvoip_sip_core::types::sdp::CryptoSuite;
 use tokio::time::timeout;
 
 fn test_config(port: u16) -> Config {
@@ -183,6 +184,56 @@ async fn events_for_session_helpers_filter_dtmf_and_incoming() {
         .expect("channel closed");
     assert_eq!(call_id, id);
     assert_eq!(digit, '7');
+
+    coord.shutdown();
+}
+
+#[tokio::test]
+async fn event_receiver_exposes_progress_and_media_security_helpers() {
+    let coord = UnifiedCoordinator::new(test_config(35430)).await.unwrap();
+
+    let id = SessionId::new();
+    let mut progress_rx = coord.events_for_session(&id).await.unwrap();
+    let mut security_rx = coord.events_for_session(&id).await.unwrap();
+
+    publish_synthetic(Event::CallProgress {
+        call_id: id.clone(),
+        status_code: 180,
+        reason: "Ringing".into(),
+        sdp: None,
+    })
+    .await;
+    publish_synthetic(Event::MediaSecurityNegotiated {
+        call_id: id.clone(),
+        keying: MediaSecurityKeying::Sdes,
+        suite: CryptoSuite::AesCm128HmacSha1_80,
+        profile: MediaSecurityProfile::RtpSavp,
+        contexts_installed: true,
+    })
+    .await;
+
+    let (call_id, status_code, reason, sdp) =
+        timeout(Duration::from_secs(2), progress_rx.next_progress())
+            .await
+            .expect("next_progress timed out")
+            .expect("channel closed");
+    assert_eq!(call_id, id);
+    assert_eq!(status_code, 180);
+    assert_eq!(reason, "Ringing");
+    assert!(sdp.is_none());
+
+    let (call_id, security) = timeout(
+        Duration::from_secs(2),
+        security_rx.next_media_security_negotiated(),
+    )
+    .await
+    .expect("next_media_security_negotiated timed out")
+    .expect("channel closed");
+    assert_eq!(call_id, id);
+    assert_eq!(security.keying, MediaSecurityKeying::Sdes);
+    assert_eq!(security.profile, MediaSecurityProfile::RtpSavp);
+    assert_eq!(security.suite, CryptoSuite::AesCm128HmacSha1_80);
+    assert!(security.contexts_installed);
 
     coord.shutdown();
 }

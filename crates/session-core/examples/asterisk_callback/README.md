@@ -35,12 +35,18 @@ The suite validates these callback hooks:
 |------|----------|
 | `on_registration_success`, `on_unregistration_success` | registration and every registered endpoint |
 | `on_call_established`, `on_call_ended` | answered calls |
+| `on_call_progress` | ring/cancel caller progress (`180` / `183`) |
 | `on_call_failed` | callback reject tests with `486 Busy Here` |
 | `on_call_cancelled` | ring/cancel caller; endpoint-side CANCEL is logged when Asterisk forwards it, but this PBX profile may complete cancellation server-side |
 | `on_call_on_hold`, `on_call_resumed` | hold/resume caller |
 | `on_remote_call_on_hold`, `on_remote_call_resumed` | optional callee assertion when `ASTERISK_EXPECT_REMOTE_HOLD_EVENTS=1` |
 | `on_dtmf` | DTMF tests |
+| `on_media_security_negotiated` | TLS/SRTP scenarios; typed SDES suite/profile/context state without key material |
 | `on_transfer_accepted`, `on_refer_progress`, `on_refer_completed`, `on_transfer_failed` | blind transfer tests |
+
+The examples stay on the session-core public surfaces: `CallbackPeer`,
+`CallbackPeerControl`, `SessionHandle`, and typed callback events. Lower SIP
+dialog internals are not used directly.
 
 ## Audio Verification
 

@@ -53,7 +53,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
-use crate::api::events::{Event, SubscriptionState, TransferTargetEvidence};
+use crate::api::events::{Event, MediaSecurityState, SubscriptionState, TransferTargetEvidence};
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::unified::{Config, Registration, RegistrationHandle, UnifiedCoordinator};
@@ -197,6 +197,21 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_call_established(&self, handle: SessionHandle) {}
 
+    /// Called when an outgoing call receives a provisional 1xx response.
+    ///
+    /// This surfaces SIP progress such as `180 Ringing` and
+    /// `183 Session Progress` without requiring callback applications to
+    /// inspect the catch-all [`on_event`](Self::on_event) hook.
+    #[allow(unused_variables)]
+    async fn on_call_progress(
+        &self,
+        handle: SessionHandle,
+        status_code: u16,
+        reason: String,
+        sdp: Option<String>,
+    ) {
+    }
+
     /// Called when any call (incoming or outgoing) ends.
     #[allow(unused_variables)]
     async fn on_call_ended(&self, call_id: CallId, reason: EndReason) {}
@@ -212,6 +227,13 @@ pub trait CallHandler: Send + Sync + 'static {
     /// Called when a DTMF digit is received on an active call.
     #[allow(unused_variables)]
     async fn on_dtmf(&self, handle: SessionHandle, digit: char) {}
+
+    /// Called when SRTP media security has been negotiated and contexts are installed.
+    ///
+    /// The state is typed and intentionally omits key material.
+    #[allow(unused_variables)]
+    async fn on_media_security_negotiated(&self, handle: SessionHandle, state: MediaSecurityState) {
+    }
 
     /// Called when a locally requested hold is accepted.
     #[allow(unused_variables)]
@@ -952,6 +974,18 @@ impl<H: CallHandler> CallbackPeer<H> {
                     }
                 }
 
+                Event::CallProgress {
+                    call_id,
+                    status_code,
+                    reason,
+                    sdp,
+                } => {
+                    let handle = SessionHandle::new(call_id, coordinator);
+                    handler
+                        .on_call_progress(handle, status_code, reason, sdp)
+                        .await;
+                }
+
                 Event::CallEnded { call_id, reason } => {
                     deferred_calls.lock().await.remove(&call_id);
                     established_callbacks.lock().await.remove(&call_id);
@@ -1016,6 +1050,27 @@ impl<H: CallHandler> CallbackPeer<H> {
                 Event::DtmfReceived { call_id, digit } => {
                     let handle = SessionHandle::new(call_id, coordinator);
                     handler.on_dtmf(handle, digit).await;
+                }
+
+                Event::MediaSecurityNegotiated {
+                    call_id,
+                    keying,
+                    suite,
+                    profile,
+                    contexts_installed,
+                } => {
+                    let handle = SessionHandle::new(call_id, coordinator);
+                    handler
+                        .on_media_security_negotiated(
+                            handle,
+                            MediaSecurityState {
+                                keying,
+                                suite,
+                                profile,
+                                contexts_installed,
+                            },
+                        )
+                        .await;
                 }
 
                 Event::ReferReceived {
@@ -1193,11 +1248,9 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                 Event::SessionRefreshed { .. }
                 | Event::SessionRefreshFailed { .. }
-                | Event::CallProgress { .. }
                 | Event::CallMuted { .. }
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }
-                | Event::MediaSecurityNegotiated { .. }
                 | Event::NetworkError { .. }
                 | Event::AuthenticationRequired { .. } => {}
             }
@@ -1343,7 +1396,9 @@ impl CallbackPeer<RejectAllHandler> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::events::{MediaSecurityKeying, MediaSecurityProfile};
     use crate::state_table::types::SessionId;
+    use rvoip_sip_core::types::sdp::CryptoSuite;
     use std::sync::Mutex;
     use tokio::task::JoinSet;
 
@@ -1373,6 +1428,16 @@ mod tests {
             self.push("answered");
         }
 
+        async fn on_call_progress(
+            &self,
+            _handle: SessionHandle,
+            status_code: u16,
+            _reason: String,
+            _sdp: Option<String>,
+        ) {
+            self.push(format!("progress:{status_code}"));
+        }
+
         async fn on_call_ended(&self, _call_id: CallId, _reason: EndReason) {
             self.push("ended");
         }
@@ -1387,6 +1452,14 @@ mod tests {
 
         async fn on_dtmf(&self, _handle: SessionHandle, digit: char) {
             self.push(format!("dtmf:{digit}"));
+        }
+
+        async fn on_media_security_negotiated(
+            &self,
+            _handle: SessionHandle,
+            state: MediaSecurityState,
+        ) {
+            self.push(format!("media-security:{}", state.contexts_installed));
         }
 
         async fn on_call_on_hold(&self, _handle: SessionHandle) {
@@ -1526,6 +1599,12 @@ mod tests {
                 call_id: call_id.clone(),
                 sdp: None,
             },
+            Event::CallProgress {
+                call_id: call_id.clone(),
+                status_code: 180,
+                reason: "Ringing".into(),
+                sdp: None,
+            },
             Event::CallEnded {
                 call_id: call_id.clone(),
                 reason: "normal".into(),
@@ -1556,6 +1635,13 @@ mod tests {
             Event::DtmfReceived {
                 call_id: call_id.clone(),
                 digit: '5',
+            },
+            Event::MediaSecurityNegotiated {
+                call_id: call_id.clone(),
+                keying: MediaSecurityKeying::Sdes,
+                suite: CryptoSuite::AesCm128HmacSha1_80,
+                profile: MediaSecurityProfile::RtpSavp,
+                contexts_installed: true,
             },
             Event::ReferReceived {
                 call_id: call_id.clone(),
@@ -1627,6 +1713,7 @@ mod tests {
         for expected in [
             "incoming",
             "answered",
+            "progress:180",
             "ended",
             "failed:486",
             "cancelled",
@@ -1635,6 +1722,7 @@ mod tests {
             "remote-hold",
             "remote-resume",
             "dtmf:5",
+            "media-security:true",
             "refer",
             "transfer-accepted",
             "refer-notify:100",
@@ -1656,7 +1744,7 @@ mod tests {
             seen.iter()
                 .filter(|value| value.as_str() == "event")
                 .count(),
-            23
+            25
         );
         assert_eq!(
             seen.iter()

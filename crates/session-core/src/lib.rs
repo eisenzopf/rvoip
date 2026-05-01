@@ -119,14 +119,18 @@
 //!
 //! - call teardown with [`SessionHandle::hangup`] or deterministic
 //!   [`SessionHandle::hangup_and_wait`]
+//! - provisional progress with [`SessionHandle::wait_for_progress`]
 //! - local hold/resume with [`SessionHandle::hold`] and [`SessionHandle::resume`]
 //! - RFC 4733 DTMF send with [`SessionHandle::send_dtmf`]
 //! - blind transfer with [`SessionHandle::transfer_blind`] or
 //!   [`SessionHandle::transfer_blind_and_wait`]
+//! - typed transfer lifecycle events that distinguish REFER completion from
+//!   target-leg evidence
 //! - attended-transfer primitives with [`SessionHandle::dialog_identity`] and
 //!   [`SessionHandle::transfer_attended`]
 //! - inbound REFER accept/reject with [`SessionHandle::accept_refer`] and
 //!   [`SessionHandle::reject_refer`]
+//! - typed SRTP negotiation state with [`SessionHandle::media_security`]
 //! - typed per-call events with [`SessionHandle::events`]
 //! - decoded/encoded audio frames with [`SessionHandle::audio`]
 //!
@@ -156,14 +160,22 @@
 pub mod api;
 pub mod errors;
 
-// These are pub so internal code and advanced users can reach them,
-// but the primary public surface is the re-exports below.
+// These modules remain public for existing internal-style integrations, but
+// they are hidden from generated docs. Application code should use the
+// UnifiedCoordinator, StreamPeer, CallbackPeer, and SessionHandle surfaces.
+#[doc(hidden)]
 pub mod adapters;
+#[doc(hidden)]
 pub mod auth;
+#[doc(hidden)]
 pub mod session_registry;
+#[doc(hidden)]
 pub mod session_store;
+#[doc(hidden)]
 pub mod state_machine;
+#[doc(hidden)]
 pub mod state_table;
+#[doc(hidden)]
 pub mod types;
 
 // ── Primary public API ──────────────────────────────────────────────────────
