@@ -34,14 +34,16 @@ use crate::types::CallState;
 /// | [`reject()`] | 4xx/5xx | Busy, unauthorized, etc. |
 /// | [`reject_busy()`] | 486 | Convenience wrapper |
 /// | [`reject_decline()`] | 603 | User declined |
-/// | [`redirect()`] | 3xx | Proxy / forward-to-voicemail |
+/// | [`redirect_to()`] | 302 | Proxy / forward-to-voicemail |
+/// | [`redirect_with_contacts()`] | 3xx | Multiple redirect choices |
 /// | [`defer()`] | (hold) | Call center queue |
 ///
 /// [`accept()`]: IncomingCall::accept
 /// [`reject()`]: IncomingCall::reject
 /// [`reject_busy()`]: IncomingCall::reject_busy
 /// [`reject_decline()`]: IncomingCall::reject_decline
-/// [`redirect()`]: IncomingCall::redirect
+/// [`redirect_to()`]: IncomingCall::redirect_to
+/// [`redirect_with_contacts()`]: IncomingCall::redirect_with_contacts
 /// [`defer()`]: IncomingCall::defer
 pub struct IncomingCall {
     /// The session / call identifier.
@@ -250,25 +252,66 @@ impl IncomingCall {
         self.reject(603, "Decline");
     }
 
-    /// Redirect the caller to another URI (sends a 3xx response).
+    /// Redirect the caller to another URI with **302 Moved Temporarily**.
     ///
-    /// Note: redirect support requires dialog-core to send a 3xx response; this
-    /// currently falls back to a rejection and logs a warning.
+    /// This sends a SIP 3xx response with a `Contact` header. It is a
+    /// session-core primitive; higher-level B2BUA/routing layers decide
+    /// whether redirect is the right policy for a particular call.
     ///
     /// # Examples
     ///
     /// ```rust,no_run
-    /// # fn example(incoming: rvoip_session_core::IncomingCall) {
-    /// incoming.redirect("sip:voicemail@example.com");
+    /// # async fn example(incoming: rvoip_session_core::IncomingCall) -> rvoip_session_core::Result<()> {
+    /// incoming.redirect_to("sip:voicemail@example.com").await?;
+    /// # Ok(())
     /// # }
     /// ```
+    pub async fn redirect_to(self, target: impl Into<String>) -> Result<()> {
+        self.redirect_with_contacts(302, [target.into()]).await
+    }
+
+    /// Redirect the caller with an explicit 3xx status and Contact list.
+    ///
+    /// `status` must be in `300..=399` and `contacts` must contain at least
+    /// one SIP URI string.
+    pub async fn redirect_with_contacts<I, S>(mut self, status: u16, contacts: I) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        if !(300..=399).contains(&status) {
+            return Err(SessionError::InvalidInput(format!(
+                "redirect status must be 3xx, got {status}"
+            )));
+        }
+        let contacts = contacts.into_iter().map(Into::into).collect::<Vec<_>>();
+        if contacts.is_empty() {
+            return Err(SessionError::InvalidInput(
+                "redirect requires at least one Contact URI".to_string(),
+            ));
+        }
+        self.resolved = true;
+        self.coordinator
+            .redirect_call(&self.call_id, status, contacts)
+            .await
+    }
+
+    /// Redirect the caller to another URI with **302 Moved Temporarily**.
+    ///
+    /// This legacy fire-and-forget method is kept for compatibility. Prefer
+    /// [`redirect_to`](Self::redirect_to) when the caller needs a result.
+    #[deprecated(note = "Use redirect_to(...).await instead")]
     pub fn redirect(self, target: &str) {
-        // TODO: implement 3xx support in dialog_adapter
-        tracing::warn!(
-            "[IncomingCall] redirect to {} not yet fully supported; rejecting with 302",
-            target
-        );
-        self.reject(302, &format!("Moved Temporarily to {}", target));
+        let coordinator = self.coordinator.clone();
+        let call_id = self.call_id.clone();
+        let target = target.to_string();
+        let mut this = self;
+        this.resolved = true;
+        tokio::spawn(async move {
+            if let Err(e) = coordinator.redirect_call(&call_id, 302, vec![target]).await {
+                tracing::warn!("[IncomingCall] redirect failed for {}: {}", call_id, e);
+            }
+        });
     }
 
     /// Defer the accept/reject decision, keeping the call in `Ringing` state
@@ -840,6 +883,49 @@ mod tests {
         guard.abandon();
 
         assert!(resolved.load(Ordering::SeqCst));
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn redirect_with_contacts_rejects_non_3xx_status() {
+        let coordinator = UnifiedCoordinator::new(Config::local("redirect-test", 35996))
+            .await
+            .expect("coordinator starts");
+        let incoming = IncomingCall::new(
+            CallId::new(),
+            "sip:a@example.test".into(),
+            "sip:b@example.test".into(),
+            None,
+            coordinator.clone(),
+        );
+
+        let err = incoming
+            .redirect_with_contacts(486, ["sip:voicemail@example.test"])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::InvalidInput(_)));
+        coordinator.shutdown();
+    }
+
+    #[tokio::test]
+    async fn redirect_with_contacts_rejects_empty_contacts() {
+        let coordinator = UnifiedCoordinator::new(Config::local("redirect-test", 35997))
+            .await
+            .expect("coordinator starts");
+        let incoming = IncomingCall::new(
+            CallId::new(),
+            "sip:a@example.test".into(),
+            "sip:b@example.test".into(),
+            None,
+            coordinator.clone(),
+        );
+
+        let contacts: Vec<String> = Vec::new();
+        let err = incoming
+            .redirect_with_contacts(302, contacts)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, SessionError::InvalidInput(_)));
         coordinator.shutdown();
     }
 }

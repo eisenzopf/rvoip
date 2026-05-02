@@ -19,11 +19,13 @@ use tokio::net::UdpSocket;
 use tokio::time::{sleep, timeout};
 
 use rvoip_session_core::api::unified::Config;
-use rvoip_session_core::StreamPeer;
+use rvoip_session_core::{CallHandlerDecision, CallbackPeer, StreamPeer};
 
+use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::parser::parse_message;
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::types::header::HeaderName;
+use rvoip_sip_core::types::headers::HeaderAccess;
 use rvoip_sip_core::types::headers::HeaderValue;
 
 use rvoip_dialog_core::transaction::utils::response_builders::create_response;
@@ -31,6 +33,7 @@ use rvoip_dialog_core::transaction::utils::response_builders::create_response;
 const REDIRECTOR_PORT: u16 = 35200;
 const ACCEPTOR_PORT: u16 = 35201;
 const CLIENT_PORT: u16 = 35202;
+const UAS_REDIRECT_PORT: u16 = 35203;
 
 #[tokio::test]
 async fn uac_follows_302_and_reissues_invite_to_new_contact() {
@@ -167,4 +170,82 @@ async fn uac_follows_302_and_reissues_invite_to_new_contact() {
 
     redirector_handle.abort();
     acceptor_handle.abort();
+}
+
+#[tokio::test]
+async fn uas_redirect_decision_sends_302_with_contact() {
+    let _ = tracing_subscriber::fmt()
+        .with_test_writer()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+
+    let redirect_target = "sip:voicemail@127.0.0.1:35299";
+    let peer = CallbackPeer::builder(Config::local("redirector", UAS_REDIRECT_PORT))
+        .on_incoming(move |_call| async move {
+            CallHandlerDecision::Redirect(redirect_target.to_string())
+        })
+        .build()
+        .await
+        .expect("redirect peer");
+    let stop = peer.shutdown_handle();
+    let run_task = tokio::spawn(async move { peer.run().await });
+
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("uac bind");
+    let source_addr = socket.local_addr().expect("uac addr");
+    let target_uri = format!("sip:redirector@127.0.0.1:{UAS_REDIRECT_PORT}");
+    let request = SimpleRequestBuilder::new(Method::Invite, &target_uri)
+        .unwrap()
+        .from("Caller", "sip:caller@example.test", Some("caller-tag"))
+        .to("Redirector", &target_uri, None)
+        .call_id("session-core-uas-redirect-call-id")
+        .cseq(1)
+        .via(
+            &source_addr.to_string(),
+            "UDP",
+            Some("z9hG4bK-session-core-uas-redirect"),
+        )
+        .max_forwards(70)
+        .contact(&format!("sip:caller@{}", source_addr), Some("Caller"))
+        .header(TypedHeader::ContentLength(ContentLength::new(0)))
+        .build();
+
+    socket
+        .send_to(
+            &Message::Request(request).to_bytes(),
+            format!("127.0.0.1:{UAS_REDIRECT_PORT}"),
+        )
+        .await
+        .expect("send INVITE");
+
+    let mut buf = [0u8; 8192];
+    let response = timeout(Duration::from_secs(5), async {
+        loop {
+            let (len, _) = socket.recv_from(&mut buf).await.expect("recv response");
+            let message = parse_message(&buf[..len]).expect("parse response");
+            let Message::Response(response) = message else {
+                continue;
+            };
+            if response.status_code() == 302 {
+                return response;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for 302");
+
+    assert_eq!(response.status_code(), 302);
+    let contact = response
+        .raw_header_value(&HeaderName::Contact)
+        .expect("302 Contact");
+    assert!(
+        contact.contains(redirect_target),
+        "302 Contact should contain redirect target, got {contact}"
+    );
+
+    stop.shutdown();
+    timeout(Duration::from_secs(2), run_task)
+        .await
+        .expect("peer shutdown timeout")
+        .expect("peer task panicked")
+        .expect("peer run failed");
 }

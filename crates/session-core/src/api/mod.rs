@@ -3,12 +3,13 @@
 //! Public developer interfaces for building SIP applications on top of
 //! `session-core`.
 //!
-//! This module is organized around three API surfaces:
+//! This module is organized around four API surfaces:
 //!
 //! | API | Best for | Style |
 //! | --- | --- | --- |
+//! | [`Endpoint`] | Softphones, PBX accounts, simple demos | Account/profile builder plus call helpers |
 //! | [`StreamPeer`] | Clients, softphones, scripts, tests | Sequential helpers and typed events |
-//! | [`CallbackPeer`] | Servers, IVR, routing endpoints | Reactive [`CallHandler`] hooks |
+//! | [`CallbackPeer`] | Servers, IVR, routing endpoints | Closure builder or reactive [`CallHandler`] hooks |
 //! | [`UnifiedCoordinator`] | B2BUAs, gateways, custom frameworks | Explicit session IDs and orchestration methods |
 //!
 //! All three surfaces drive the same session coordinator and signaling/media
@@ -34,6 +35,30 @@
 //! - [`Registration`] describes outbound SIP REGISTER attempts; query
 //!   [`RegistrationInfo`] for accepted expiry, refresh timing, GRUU, and
 //!   Service-Route metadata.
+//!
+//! ## Endpoint: PBX Account or Softphone
+//!
+//! ```rust,no_run
+//! use std::time::Duration;
+//! use rvoip_session_core::{Endpoint, EndpointProfile, Result};
+//!
+//! # async fn example() -> Result<()> {
+//! let mut endpoint = Endpoint::builder()
+//!     .name("alice")
+//!     .account("1001")
+//!     .password("secret")
+//!     .registrar("sips:pbx.example.com:5061")
+//!     .profile(EndpointProfile::AsteriskTlsSrtpRegisteredFlow)
+//!     .build()
+//!     .await?;
+//!
+//! endpoint.register().await?;
+//! let call = endpoint.call("1002").await?;
+//! call.wait_for_answered(Some(Duration::from_secs(30))).await?;
+//! call.hangup().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! ## StreamPeer: Making a Call
 //!
@@ -99,7 +124,26 @@
 //!
 //! ## CallbackPeer: Reactive Server
 //!
-//! For servers, implement [`CallHandler`] or use a built-in handler:
+//! For common servers, use the closure builder:
+//!
+//! ```rust,no_run
+//! use rvoip_session_core::{CallHandlerDecision, CallbackPeer, Config, Result};
+//!
+//! # async fn example() -> Result<()> {
+//! let peer = CallbackPeer::builder(Config::default())
+//!     .on_incoming(|_call| async move { CallHandlerDecision::Accept })
+//!     .on_dtmf(|call, digit| async move {
+//!         println!("{} pressed {}", call.id(), digit);
+//!         Ok(())
+//!     })
+//!     .build()
+//!     .await?;
+//! # let _ = peer;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! For full control, implement [`CallHandler`] or use a built-in handler:
 //!
 //! ```rust,no_run
 //! use rvoip_session_core::*;
@@ -201,6 +245,7 @@
 //!
 //! ## Module Structure
 //!
+//! - [`endpoint`] - simplified endpoint wrapper for softphones and PBX accounts.
 //! - [`stream_peer`] - sequential SIP peer for clients and scripts.
 //! - [`callback_peer`] - reactive SIP peer for servers and proxies.
 //! - [`handlers`] - built-in [`CallHandler`] implementations.
@@ -211,6 +256,7 @@
 //! - [`unified`] - [`UnifiedCoordinator`], [`Config`], and [`Registration`].
 //!
 //! [`StreamPeer`]: stream_peer::StreamPeer
+//! [`Endpoint`]: endpoint::Endpoint
 //! [`CallbackPeer`]: callback_peer::CallbackPeer
 //! [`CallHandler`]: callback_peer::CallHandler
 //! [`SessionHandle`]: handle::SessionHandle
@@ -244,6 +290,7 @@
 pub mod builder; // Session builder
 pub mod dialog_package;
 pub mod dialog_subscription;
+pub mod endpoint;
 pub mod events; // Event-driven API for v3
 pub mod simple;
 pub mod types; // Core types (legacy)
@@ -275,6 +322,9 @@ pub use unified::{
 
 // Re-export the simple API (legacy)
 pub use simple::SimplePeer;
+
+// Re-export the simplified Endpoint API
+pub use endpoint::{Endpoint, EndpointAccount, EndpointBuilder, EndpointProfile};
 
 // Re-export event types
 pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState};
@@ -316,5 +366,6 @@ pub use stream_peer::{EventReceiver, PeerControl, StreamPeer};
 
 // CallbackPeer (reactive server-style)
 pub use callback_peer::{
-    CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerControl, EndReason,
+    CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl,
+    EndReason,
 };

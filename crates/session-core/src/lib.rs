@@ -11,15 +11,46 @@
 //!
 //! | Surface | Best for | Programming model |
 //! | --- | --- | --- |
+//! | [`Endpoint`] | Softphones, PBX accounts, demos, simple IVR legs | Account/profile builder plus call helpers |
 //! | [`StreamPeer`] | Clients, scripts, softphones, integration tests | Sequential calls plus an event stream |
 //! | [`CallbackPeer`] | Servers, IVR, routing apps, reactive endpoints | Implement [`CallHandler`] hooks |
 //! | [`UnifiedCoordinator`] | B2BUAs, gateways, custom frameworks | Lower-level call/session orchestration |
 //! | [`SessionHandle`] | Per-call control from any surface | Hold/resume, DTMF, transfer, audio, teardown |
 //!
-//! Most applications should start with [`StreamPeer`] or [`CallbackPeer`].
-//! Use [`UnifiedCoordinator`] when you need to compose multiple call legs,
-//! bridge media, subscribe to filtered event streams, inspect registration
-//! lifecycle metadata, or build your own peer abstraction.
+//! Most applications should start with [`Endpoint`]. Move to [`StreamPeer`]
+//! when you want to own the event stream, [`CallbackPeer`] when you want the
+//! library to dispatch events into hooks, and [`UnifiedCoordinator`] when you
+//! need to compose multiple call legs, bridge media, subscribe to filtered
+//! event streams, inspect registration lifecycle metadata, or build your own
+//! peer abstraction.
+//!
+//! ## Endpoint: PBX Account or Softphone
+//!
+//! [`Endpoint`] wraps [`StreamPeer`] with account/profile setup and bare
+//! extension dialing:
+//!
+//! ```rust,no_run
+//! use std::time::Duration;
+//! use rvoip_session_core::{Endpoint, EndpointProfile, Result};
+//!
+//! # async fn example() -> Result<()> {
+//! let mut endpoint = Endpoint::builder()
+//!     .name("alice")
+//!     .account("1001")
+//!     .password("secret")
+//!     .registrar("sips:pbx.example.com:5061")
+//!     .profile(EndpointProfile::AsteriskTlsSrtpRegisteredFlow)
+//!     .build()
+//!     .await?;
+//!
+//! endpoint.register().await?;
+//! let call = endpoint.call("1002").await?;
+//! call.wait_for_answered(Some(Duration::from_secs(30))).await?;
+//! call.hangup().await?;
+//! endpoint.shutdown().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! ## StreamPeer: Sequential Client or Test Code
 //!
@@ -184,9 +215,10 @@ pub mod types;
 
 // Peer types
 pub use api::callback_peer::{
-    CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerControl, ClosureHandler, EndReason,
-    ShutdownHandle,
+    CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl,
+    ClosureHandler, EndReason, ShutdownHandle,
 };
+pub use api::endpoint::{Endpoint, EndpointAccount, EndpointBuilder, EndpointProfile};
 pub use api::stream_peer::{EventReceiver, PeerControl, StreamPeer, StreamPeerBuilder};
 
 // Built-in handlers
@@ -240,14 +272,15 @@ pub mod prelude {
     pub use crate::{
         AudioReceiver, AudioSender, AudioStream, CallAnsweredInfo, CallHandler,
         CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
-        CallTerminalInfo, CallbackPeer, CallbackPeerControl, Config, DialogInfo,
-        DialogInfoDocument, DialogPackageEvent, DialogPackageState, DialogSubscriptionHandle,
-        EndReason, Event, EventReceiver, IncomingCall, IncomingCallGuard, MediaSecurityKeying,
-        MediaSecurityProfile, MediaSecurityState, PeerControl, Registration, RegistrationHandle,
-        RegistrationInfo, RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode,
-        SipReason, SipTlsMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
-        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
-        TransferTargetEvidence, TransferWaitMode,
+        CallTerminalInfo, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl, Config,
+        DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState,
+        DialogSubscriptionHandle, EndReason, Endpoint, EndpointAccount, EndpointBuilder,
+        EndpointProfile, Event, EventReceiver, IncomingCall, IncomingCallGuard,
+        MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, PeerControl, Registration,
+        RegistrationHandle, RegistrationInfo, RegistrationStatus, Result, SessionError,
+        SessionHandle, SipContactMode, SipReason, SipTlsMode, SrtpSuitePolicy, StreamPeer,
+        StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
+        TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
     };
 }
 

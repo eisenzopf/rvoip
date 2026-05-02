@@ -50,6 +50,8 @@
 
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
@@ -57,7 +59,7 @@ use crate::api::events::{Event, MediaSecurityState, SubscriptionState, TransferT
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::unified::{Config, Registration, RegistrationHandle, UnifiedCoordinator};
-use crate::errors::Result;
+use crate::errors::{Result, SessionError};
 
 // ===== ShutdownHandle =====
 
@@ -109,7 +111,7 @@ pub enum CallHandlerDecision {
         /// SIP reason phrase to send with the final response.
         reason: String,
     },
-    /// Redirect the caller to another URI (sends 3xx).
+    /// Redirect the caller to another URI by sending SIP 302 with a Contact header.
     Redirect(String),
     /// Hold the call in `Ringing` state; the framework waits for the guard to resolve.
     Defer(IncomingCallGuard),
@@ -141,6 +143,173 @@ impl From<String> for EndReason {
             }
             r if r.contains("network") || r.contains("transport") => EndReason::NetworkError,
             _ => EndReason::Other(s),
+        }
+    }
+}
+
+type CallbackFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+type IncomingHook = Arc<dyn Fn(IncomingCall) -> CallbackFuture<CallHandlerDecision> + Send + Sync>;
+type EstablishedHook = Arc<dyn Fn(SessionHandle) -> CallbackFuture<Result<()>> + Send + Sync>;
+type DtmfHook = Arc<dyn Fn(SessionHandle, char) -> CallbackFuture<Result<()>> + Send + Sync>;
+type EndedHook = Arc<dyn Fn(CallId, EndReason) -> CallbackFuture<Result<()>> + Send + Sync>;
+type TransferRequestHook =
+    Arc<dyn Fn(SessionHandle, String) -> CallbackFuture<Result<bool>> + Send + Sync>;
+
+/// Builder for closure-based [`CallbackPeer`] applications.
+///
+/// Use this when a full [`CallHandler`] implementation would be noisy but the
+/// application still wants typed hooks for common lifecycle events.
+pub struct CallbackPeerBuilder {
+    config: Config,
+    incoming: Option<IncomingHook>,
+    established: Option<EstablishedHook>,
+    dtmf: Option<DtmfHook>,
+    ended: Option<EndedHook>,
+    transfer_request: Option<TransferRequestHook>,
+}
+
+impl CallbackPeerBuilder {
+    /// Create a closure builder for the supplied config.
+    pub fn new(config: Config) -> Self {
+        Self {
+            config,
+            incoming: None,
+            established: None,
+            dtmf: None,
+            ended: None,
+            transfer_request: None,
+        }
+    }
+
+    /// Handle incoming calls.
+    ///
+    /// This hook is required because every inbound INVITE needs an explicit
+    /// accept, reject, redirect, or defer decision.
+    pub fn on_incoming<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(IncomingCall) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = CallHandlerDecision> + Send + 'static,
+    {
+        self.incoming = Some(Arc::new(move |call| Box::pin(f(call))));
+        self
+    }
+
+    /// Handle established calls.
+    pub fn on_established<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.established = Some(Arc::new(move |handle| Box::pin(f(handle))));
+        self
+    }
+
+    /// Handle inbound DTMF digits on active calls.
+    pub fn on_dtmf<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, char) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.dtmf = Some(Arc::new(move |handle, digit| Box::pin(f(handle, digit))));
+        self
+    }
+
+    /// Handle call termination.
+    pub fn on_ended<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(CallId, EndReason) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.ended = Some(Arc::new(move |call_id, reason| {
+            Box::pin(f(call_id, reason))
+        }));
+        self
+    }
+
+    /// Decide whether to accept inbound REFER transfer requests.
+    pub fn on_transfer_request<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<bool>> + Send + 'static,
+    {
+        self.transfer_request = Some(Arc::new(move |handle, target| Box::pin(f(handle, target))));
+        self
+    }
+
+    /// Build the [`CallbackPeer`].
+    pub async fn build(self) -> Result<CallbackPeer<CallbackBuilderHandler>> {
+        let incoming = self.incoming.ok_or_else(|| {
+            SessionError::ConfigError(
+                "CallbackPeer::builder requires an on_incoming hook".to_string(),
+            )
+        })?;
+        CallbackPeer::new(
+            CallbackBuilderHandler {
+                incoming,
+                established: self.established,
+                dtmf: self.dtmf,
+                ended: self.ended,
+                transfer_request: self.transfer_request,
+            },
+            self.config,
+        )
+        .await
+    }
+}
+
+/// Internal [`CallHandler`] adapter used by [`CallbackPeerBuilder`].
+#[doc(hidden)]
+pub struct CallbackBuilderHandler {
+    incoming: IncomingHook,
+    established: Option<EstablishedHook>,
+    dtmf: Option<DtmfHook>,
+    ended: Option<EndedHook>,
+    transfer_request: Option<TransferRequestHook>,
+}
+
+#[async_trait]
+impl CallHandler for CallbackBuilderHandler {
+    async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
+        (self.incoming)(call).await
+    }
+
+    async fn on_call_established(&self, handle: SessionHandle) {
+        if let Some(hook) = &self.established {
+            if let Err(err) = hook(handle).await {
+                tracing::warn!("[CallbackPeerBuilder] on_established failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_call_ended(&self, call_id: CallId, reason: EndReason) {
+        if let Some(hook) = &self.ended {
+            if let Err(err) = hook(call_id, reason).await {
+                tracing::warn!("[CallbackPeerBuilder] on_ended failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_dtmf(&self, handle: SessionHandle, digit: char) {
+        if let Some(hook) = &self.dtmf {
+            if let Err(err) = hook(handle, digit).await {
+                tracing::warn!("[CallbackPeerBuilder] on_dtmf failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_transfer_request(&self, handle: SessionHandle, target: String) -> bool {
+        let Some(hook) = &self.transfer_request else {
+            return false;
+        };
+        match hook(handle, target).await {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                tracing::warn!(
+                    "[CallbackPeerBuilder] on_transfer_request failed; rejecting transfer: {}",
+                    err
+                );
+                false
+            }
         }
     }
 }
@@ -588,6 +757,28 @@ pub struct CallbackPeer<H: CallHandler> {
     established_callbacks: Arc<tokio::sync::Mutex<HashSet<CallId>>>,
     terminal_callbacks: Arc<tokio::sync::Mutex<HashSet<CallId>>>,
     deferred_calls: Arc<tokio::sync::Mutex<HashMap<CallId, IncomingCallGuard>>>,
+}
+
+impl CallbackPeer<CallbackBuilderHandler> {
+    /// Create a closure-based [`CallbackPeerBuilder`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example() -> rvoip_session_core::Result<()> {
+    /// use rvoip_session_core::{CallHandlerDecision, CallbackPeer, Config};
+    ///
+    /// let peer = CallbackPeer::builder(Config::default())
+    ///     .on_incoming(|_call| async move { CallHandlerDecision::Accept })
+    ///     .build()
+    ///     .await?;
+    /// # let _ = peer;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn builder(config: Config) -> CallbackPeerBuilder {
+        CallbackPeerBuilder::new(config)
+    }
 }
 
 impl<H: CallHandler> CallbackPeer<H> {
@@ -1317,7 +1508,9 @@ impl CallbackPeer<AutoAnswerHandler> {
 ///
 /// Created by [`CallbackPeer::from_fn()`]. The closure receives a borrowed
 /// [`IncomingCall`] for inspection and returns a [`CallHandlerDecision`].
-/// The peer applies that decision after the closure returns.
+/// The peer applies that decision after the closure returns. Use
+/// [`CallbackPeer::builder`] for async closure hooks, DTMF, ended, transfer,
+/// or defer flows that need to own the [`IncomingCall`].
 pub struct ClosureHandler {
     f: Box<dyn Fn(&IncomingCall) -> CallHandlerDecision + Send + Sync>,
 }
@@ -1786,6 +1979,128 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn callback_builder_invokes_common_closure_hooks() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let peer = CallbackPeer::builder(Config::local("callback-builder", 15441))
+            .on_incoming({
+                let seen = seen.clone();
+                move |_call| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push("incoming".to_string());
+                        CallHandlerDecision::Reject {
+                            status: 486,
+                            reason: "Busy Here".into(),
+                        }
+                    }
+                }
+            })
+            .on_established({
+                let seen = seen.clone();
+                move |_handle| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push("established".to_string());
+                        Ok(())
+                    }
+                }
+            })
+            .on_dtmf({
+                let seen = seen.clone();
+                move |_handle, digit| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(format!("dtmf:{digit}"));
+                        Ok(())
+                    }
+                }
+            })
+            .on_ended({
+                let seen = seen.clone();
+                move |_call_id, _reason| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push("ended".to_string());
+                        Ok(())
+                    }
+                }
+            })
+            .on_transfer_request({
+                let seen = seen.clone();
+                move |_handle, target| {
+                    let seen = seen.clone();
+                    async move {
+                        seen.lock().unwrap().push(format!("refer:{target}"));
+                        Ok(true)
+                    }
+                }
+            })
+            .build()
+            .await
+            .unwrap();
+
+        let mut handlers = JoinSet::new();
+        let call_id = SessionId::new();
+        for event in [
+            Event::IncomingCall {
+                call_id: call_id.clone(),
+                from: "sip:a@example.test".into(),
+                to: "sip:b@example.test".into(),
+                sdp: None,
+            },
+            Event::CallAnswered {
+                call_id: call_id.clone(),
+                sdp: None,
+            },
+            Event::DtmfReceived {
+                call_id: call_id.clone(),
+                digit: '7',
+            },
+            Event::ReferReceived {
+                call_id: call_id.clone(),
+                refer_to: "sip:c@example.test".into(),
+                referred_by: None,
+                replaces: None,
+                transaction_id: "tx-builder".into(),
+                transfer_type: "blind".into(),
+            },
+            Event::CallEnded {
+                call_id,
+                reason: "normal".into(),
+            },
+        ] {
+            peer.dispatch(event, &mut handlers).await;
+        }
+        drain(handlers).await;
+
+        let seen = seen.lock().unwrap().clone();
+        for expected in [
+            "incoming",
+            "established",
+            "dtmf:7",
+            "refer:sip:c@example.test",
+            "ended",
+        ] {
+            assert!(
+                seen.iter().any(|value| value == expected),
+                "missing {expected}; saw {seen:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn callback_builder_requires_incoming_hook() {
+        let result = CallbackPeer::builder(Config::local("callback-builder-missing", 15443))
+            .build()
+            .await;
+        let err = match result {
+            Ok(_) => panic!("builder without on_incoming should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("on_incoming"));
     }
 
     #[tokio::test]

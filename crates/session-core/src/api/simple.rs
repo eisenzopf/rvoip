@@ -1,7 +1,9 @@
-//! Truly Simple API - Sequential blocking-style SIP peer
+//! Legacy sequential SIP peer.
 //!
-//! This is the simplest possible API for developers who don't know SIP.
-//! Just call methods sequentially like you would in any normal program.
+//! New applications should use [`Endpoint`](crate::Endpoint) for the simplest
+//! account/profile API or [`StreamPeer`](crate::StreamPeer) for sequential
+//! event-stream control. `SimplePeer` remains for compatibility with older
+//! examples.
 
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::Result;
@@ -260,13 +262,13 @@ impl SimplePeer {
         ))
     }
 
-    /// Forceful shutdown - stops EVERYTHING and exits
-    pub async fn shutdown(self, _timeout: Duration) -> Result<()> {
-        tracing::info!("[SimplePeer] shutdown() called - exiting immediately");
-
-        // FORCEFUL: Kill the entire process immediately
-        // This stops all tokio tasks, all threads, everything
-        // Background event loop tasks would keep the process alive otherwise
-        std::process::exit(0);
+    /// Gracefully shut down the underlying coordinator.
+    pub async fn shutdown(self, timeout: Duration) -> Result<()> {
+        tracing::info!("[SimplePeer] shutdown() called");
+        self.is_shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.coordinator.shutdown_gracefully(Some(timeout)).await?;
+        drop(self);
+        Ok(())
     }
 }

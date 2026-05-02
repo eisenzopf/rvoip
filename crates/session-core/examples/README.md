@@ -16,15 +16,27 @@ Single-process example (two peers in one binary — good for a quick intro):
 
 | Command | Description |
 |---------|-------------|
-| `cargo run --example hello` | Make and receive a SIP call |
+| `cargo run --example hello` | Make and receive a SIP call with `Endpoint` |
 
 ## Which API should I start with?
 
 | API | Best fit |
 |-----|----------|
+| `Endpoint` | Softphones, PBX accounts, simple demos, and direct IVR legs |
 | `StreamPeer` | Sequential clients, scripts, softphones, and test tools |
 | `CallbackPeer` | Reactive servers, IVR, routing, and endpoint applications |
 | `UnifiedCoordinator` | Lower-level orchestration, bridges, gateways, and B2BUA-style code |
+
+## Endpoint — simplest account/profile API
+
+Use `Endpoint` first when you want calls, registration, incoming-call handling,
+and extension dialing without assembling SIP configuration by hand.
+
+| Command | Description |
+|---------|-------------|
+| `cargo run --example endpoint_local_call` | Two local endpoints make and receive a call |
+| `cargo run --example endpoint_pbx_registered_call` | Register to a PBX and call `SIP_TARGET` |
+| `cargo run --example endpoint_incoming_redirect` | Receive an INVITE and send SIP 302 redirect |
 
 ## StreamPeer — sequential / client-side API
 
@@ -40,12 +52,14 @@ Use `StreamPeer` for clients, scripts, and test tools. Call methods, await resul
 
 ## CallbackPeer — reactive / server-side API
 
-Use `CallbackPeer` for servers, proxies, and IVR systems. Implement the `CallHandler` trait or use a built-in handler.
+Use `CallbackPeer` for servers, proxies, and IVR systems. Use the closure
+builder for common hooks or implement `CallHandler` when you need every event.
 
 | Script | Description |
 |--------|-------------|
 | `./examples/callbackpeer/auto_answer/run.sh` | Auto-answer every call (simplest server) |
 | `./examples/callbackpeer/closure/run.sh` | Closure-based handler, no trait needed |
+| `cargo run --example callbackpeer_builder_ivr` | Builder-style IVR hooks with incoming, DTMF, and ended callbacks |
 | `./examples/callbackpeer/routing/run.sh` | Route calls by URI pattern matching |
 | `./examples/callbackpeer/ivr/run.sh` | IVR menu with DTMF navigation |
 | `./examples/callbackpeer/queue/run.sh` | Call center queue with deferred accept |
@@ -58,6 +72,13 @@ Use `CallbackPeer` for servers, proxies, and IVR systems. Implement the `CallHan
 | `./examples/advanced/concurrent_calls/run.sh` | 5 concurrent callers + 1 answerer |
 | `cargo run --example advanced_registrar_server` | Standalone registrar server (pair with `streampeer_registration_client`) |
 | `./examples/streampeer/bridge/run.sh` | `UnifiedCoordinator::bridge()` packet bridge with audio verification |
+
+## Interop proof / deployment recipes
+
+The Asterisk and FreeSWITCH examples are intentionally verbose. They document
+real PBX deployment details, TLS/SRTP modes, registration behavior, media
+verification, and transfer flows. Use the `Endpoint` examples above for the
+first learning path; use these recipes when validating a specific PBX topology.
 
 ## Asterisk
 

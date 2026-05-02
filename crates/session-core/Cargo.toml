@@ -11,6 +11,17 @@ license = "MIT OR Apache-2.0"
 name = "hello"
 path = "examples/getting_started/hello.rs"
 
+# Endpoint examples (simplest account/profile API)
+[[example]]
+name = "endpoint_local_call"
+path = "examples/endpoint/local_call.rs"
+[[example]]
+name = "endpoint_pbx_registered_call"
+path = "examples/endpoint/pbx_registered_call.rs"
+[[example]]
+name = "endpoint_incoming_redirect"
+path = "examples/endpoint/incoming_redirect.rs"
+
 # StreamPeer examples (sequential / client-side)
 [[example]]
 name = "streampeer_audio_alice"
@@ -114,6 +125,9 @@ path = "examples/callbackpeer/ivr/server.rs"
 [[example]]
 name = "callbackpeer_ivr_client"
 path = "examples/callbackpeer/ivr/client.rs"
+[[example]]
+name = "callbackpeer_builder_ivr"
+path = "examples/callbackpeer/builder_ivr.rs"
 [[example]]
 name = "callbackpeer_queue_server"
 path = "examples/callbackpeer/queue/server.rs"
