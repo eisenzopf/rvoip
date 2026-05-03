@@ -1,23 +1,25 @@
-//! Register alice with the registrar, check status, refresh, and unregister.
+//! Register alice with the registrar, check status, and unregister.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_registration_client
-//! Or with server:  ./examples/streampeer/registration/run.sh
+//! Run with the registrar:
+//!
+//!   ./examples/stream_peer/04_registration/run.sh
 
-use rvoip_session_core::{Config, Registration, UnifiedCoordinator};
-use tokio::time::{sleep, Duration};
+use std::time::Duration;
+
+use rvoip_session_core::{Config, Registration, StreamPeer};
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> rvoip_session_core::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             std::env::var("RUST_LOG").unwrap_or_else(|_| "warn,rvoip_dialog_core=error".into()),
         )
         .init();
 
-    let coordinator = UnifiedCoordinator::new(Config::local("alice", 5061)).await?;
-    println!("Registering alice with sip:127.0.0.1:5060...");
+    let mut peer = StreamPeer::with_config(Config::local("alice", 5061)).await?;
+    println!("[alice] registering with sip:127.0.0.1:5060");
 
-    let handle = coordinator
+    let handle = peer
         .register_with(Registration::new(
             "sip:127.0.0.1:5060",
             "alice",
@@ -25,21 +27,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await?;
 
-    sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    match coordinator.is_registered(&handle).await {
-        Ok(true) => println!("Registered successfully!"),
-        Ok(false) => println!("Registration not completed."),
-        Err(e) => println!("Error checking status: {}", e),
+    if peer.is_registered(&handle).await? {
+        println!("[alice] registered");
+    } else {
+        println!("[alice] registration is still pending");
     }
 
-    println!("Refreshing...");
-    coordinator.refresh_registration(&handle).await?;
-    sleep(Duration::from_secs(2)).await;
-
-    println!("Unregistering...");
-    coordinator.unregister(&handle).await?;
-    println!("Done.");
-
-    std::process::exit(0);
+    peer.unregister(&handle).await?;
+    peer.shutdown().await
 }

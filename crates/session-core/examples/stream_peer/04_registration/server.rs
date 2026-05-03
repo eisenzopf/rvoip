@@ -1,7 +1,8 @@
 //! SIP registrar server with test user alice/password123.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_registration_server
-//! Or with client:  ./examples/streampeer/registration/run.sh
+//! Run with the client:
+//!
+//!   ./examples/stream_peer/04_registration/run.sh
 
 use rvoip_session_core::{Config, UnifiedCoordinator};
 use std::collections::HashMap;

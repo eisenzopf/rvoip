@@ -11,12 +11,12 @@
 //! validate any inbound TLS cert in this one-way TLS setup, so no
 //! insecure-skip-verify knob is needed here.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_tls_server --features dev-insecure-tls
-//! Or with client:  ./examples/streampeer/tls/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example regression_tls_server --features dev-insecure-tls
+//! Or with client:  ./examples/regression/02_tls/run.sh
 
 #[cfg(not(feature = "dev-insecure-tls"))]
 compile_error!(
-    "streampeer/tls example requires --features dev-insecure-tls (self-signed dev cert)"
+    "regression/02_tls example requires --features dev-insecure-tls (self-signed dev cert)"
 );
 
 use async_trait::async_trait;
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     config.contact_uri = Some("sips:tls_server@127.0.0.1:5061;transport=tls".to_string());
     // Server side does no TLS validation in this one-way-TLS demo —
     // it only presents its own cert. The client decides whether to
-    // validate it (the `streampeer_tls_client` example exercises both
+    // validate it (the `regression_tls_client` example exercises both
     // modes).
 
     let peer = CallbackPeer::new(TlsLogger, config).await?;

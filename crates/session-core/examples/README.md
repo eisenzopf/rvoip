@@ -1,145 +1,91 @@
-# Examples
+# Session-Core Examples
 
-Multi-peer examples run each SIP peer as a separate OS process. This models real deployments (SIP peers are typically separate processes or machines) and avoids shared-state issues from running multiple peers in one process.
+The examples are organized by public developer surface. Start with the API that
+matches the shape of your application, then move down the ordered directories
+from basic to more complex.
 
-Each multi-peer example has a `run.sh` script that starts every peer and multiplexes their output with colored prefixes (`[SERVER]`, `[CLIENT]`, etc.):
+| Lane | Purpose |
+| --- | --- |
+| `endpoint/` | Simple account/profile API for softphones, PBX accounts, and demos |
+| `stream_peer/` | Sequential clients, scripts, softphones, and test tools |
+| `callback_peer/` | Reactive servers, IVR, routing, and queue-style applications |
+| `unified/` | Explicit session orchestration for bridges, gateways, and B2BUA-style code |
+| `regression/` | Protocol fixtures and behavior evidence |
+| `pbx/` | Asterisk/FreeSWITCH interop matrix |
 
-```bash
-./examples/<category>/<name>/run.sh
+Run the local developer examples:
+
+```sh
+./crates/session-core/examples/run_all.sh
 ```
 
-You can also run each peer separately in its own terminal for step-by-step debugging. For verbose logging, set `RUST_LOG=rvoip_session_core=debug`.
+Run the protocol regression fixtures:
 
-## Getting Started
+```sh
+./crates/session-core/examples/regression/run_all.sh
+```
 
-Single-process example (two peers in one binary — good for a quick intro):
-
-| Command | Description |
-|---------|-------------|
-| `cargo run --example hello` | Make and receive a SIP call with `Endpoint` |
-
-## Which API should I start with?
-
-| API | Best fit |
-|-----|----------|
-| `Endpoint` | Softphones, PBX accounts, simple demos, and direct IVR legs |
-| `StreamPeer` | Sequential clients, scripts, softphones, and test tools |
-| `CallbackPeer` | Reactive servers, IVR, routing, and endpoint applications |
-| `UnifiedCoordinator` | Lower-level orchestration, bridges, gateways, and B2BUA-style code |
-
-## Endpoint — simplest account/profile API
-
-Use `Endpoint` first when you want calls, registration, incoming-call handling,
-and extension dialing without assembling SIP configuration by hand.
+## Endpoint
 
 | Command | Description |
-|---------|-------------|
-| `cargo run --example endpoint_local_call` | Two local endpoints make and receive a call |
-| `cargo run --example endpoint_pbx_registered_call` | Register to a PBX and call `SIP_TARGET` |
-| `cargo run --example endpoint_incoming_redirect` | Receive an INVITE and send SIP 302 redirect |
+| --- | --- |
+| `cargo run -p rvoip-session-core --example endpoint_local_call` | Two local endpoints make and receive a call |
+| `cargo run -p rvoip-session-core --example endpoint_incoming_redirect` | Receive an INVITE and send SIP 302 redirect |
+| `cargo run -p rvoip-session-core --example endpoint_registered_account` | Register to a PBX and call `SIP_TARGET` |
 
-## StreamPeer — sequential / client-side API
+`endpoint_registered_account` is env-driven and is not part of the local
+`run_all.sh` path. It expects `SIP_REGISTRAR`, `SIP_USERNAME`, `SIP_PASSWORD`,
+and `SIP_TARGET`.
 
-Use `StreamPeer` for clients, scripts, and test tools. Call methods, await results.
-
-| Script | Description |
-|--------|-------------|
-| `./examples/streampeer/dtmf/run.sh` | Send DTMF digits during a call |
-| `./examples/streampeer/hold_resume/run.sh` | Put a call on hold and resume it |
-| `./examples/streampeer/audio/run.sh` | Bidirectional audio exchange with WAV output |
-| `./examples/streampeer/blind_transfer/run.sh` | Three-party blind transfer (REFER) |
-| `./examples/streampeer/registration/run.sh` | Register with a SIP registrar server |
-
-## CallbackPeer — reactive / server-side API
-
-Use `CallbackPeer` for servers, proxies, and IVR systems. Use the closure
-builder for common hooks or implement `CallHandler` when you need every event.
-
-| Script | Description |
-|--------|-------------|
-| `./examples/callbackpeer/auto_answer/run.sh` | Auto-answer every call (simplest server) |
-| `./examples/callbackpeer/closure/run.sh` | Closure-based handler, no trait needed |
-| `cargo run --example callbackpeer_builder_ivr` | Builder-style IVR hooks with incoming, DTMF, and ended callbacks |
-| `./examples/callbackpeer/routing/run.sh` | Route calls by URI pattern matching |
-| `./examples/callbackpeer/ivr/run.sh` | IVR menu with DTMF navigation |
-| `./examples/callbackpeer/queue/run.sh` | Call center queue with deferred accept |
-| `./examples/callbackpeer/custom/run.sh` | Full `CallHandler` trait (all 5 methods) |
-
-## Advanced
+## StreamPeer
 
 | Script / Command | Description |
-|------------------|-------------|
-| `./examples/advanced/concurrent_calls/run.sh` | 5 concurrent callers + 1 answerer |
-| `cargo run --example advanced_registrar_server` | Standalone registrar server (pair with `streampeer_registration_client`) |
-| `./examples/streampeer/bridge/run.sh` | `UnifiedCoordinator::bridge()` packet bridge with audio verification |
+| --- | --- |
+| `cargo run -p rvoip-session-core --example stream_peer_basic_call` | Minimal sequential call flow |
+| `./crates/session-core/examples/stream_peer/02_call_control/run.sh` | Hold, resume, and DTMF using `SessionHandle` |
+| `./crates/session-core/examples/stream_peer/03_audio/run.sh` | Bidirectional audio exchange with optional WAV output |
+| `./crates/session-core/examples/stream_peer/04_registration/run.sh` | Register and unregister through `StreamPeer` |
+| `./crates/session-core/examples/stream_peer/05_blind_transfer/run.sh` | Three-party blind transfer |
+| `./crates/session-core/examples/stream_peer/06_concurrent_calls/run.sh` | Multiple concurrent callers |
 
-## Interop proof / deployment recipes
-
-The Asterisk and FreeSWITCH examples are intentionally verbose. They document
-real PBX deployment details, TLS/SRTP modes, registration behavior, media
-verification, and transfer flows. Use the `Endpoint` examples above for the
-first learning path; use these recipes when validating a specific PBX topology.
-
-## Asterisk
-
-Remote Asterisk examples use `examples/asterisk/.env` for PBX address,
-credentials, local bind address, and media ports.
+## CallbackPeer
 
 | Script | Description |
-|--------|-------------|
-| `./examples/asterisk/run.sh` | Run the full sequence: TLS registration, UDP registration, TLS/SRTP hold/resume, then UDP hold/resume |
-| `./examples/asterisk/registration/run.sh` | Register secure user 1001 over SIP TLS, then UDP user 2001 |
-| `./examples/asterisk/tls_srtp_hold_resume/run.sh` | Register TLS/SRTP users 1001/1002 over SIP TLS, require SDES-SRTP, exercise hold/resume, and verify pre/post-resume audio |
-| `./examples/asterisk/udp_hold_resume/run.sh` | Register UDP users 2001/2002, exercise hold/resume, and verify pre/post-resume audio |
+| --- | --- |
+| `./crates/session-core/examples/callback_peer/01_auto_answer/run.sh` | Built-in auto-answer handler |
+| `./crates/session-core/examples/callback_peer/02_closure_gatekeeper/run.sh` | Closure-based incoming-call decision |
+| `./crates/session-core/examples/callback_peer/03_builder_ivr/run.sh` | Builder hooks for incoming, established, DTMF, and ended events |
+| `./crates/session-core/examples/callback_peer/04_routing_handler/run.sh` | URI-pattern routing handler |
+| `./crates/session-core/examples/callback_peer/05_queue_handler/run.sh` | Deferred accept through a queue handler |
+| `./crates/session-core/examples/callback_peer/06_trait_handler/run.sh` | Custom `CallHandler` implementation |
 
-The StreamPeer and CallbackPeer Asterisk suites are the current external PBX
-release evidence. See `../docs/COMPATIBILITY_MATRIX.md` for the validated and
-planned interoperability matrix.
+## UnifiedCoordinator
 
-The Asterisk lab profile uses users `1001` and `1002` for SIP TLS with
-mandatory SDES-SRTP, and users `2001` and `2002` for UDP/plain RTP. All four
-users share the single `SIP_PASSWORD` value from `.env`; endpoint auth
-usernames default to the endpoint number.
+| Script / Command | Description |
+| --- | --- |
+| `cargo run -p rvoip-session-core --example unified_basic_call` | Minimal explicit-session call flow |
+| `cargo run -p rvoip-session-core --example unified_event_filters` | Global vs per-session event streams |
+| `cargo run -p rvoip-session-core --example unified_registration_server` | Standalone local registrar |
+| `./crates/session-core/examples/unified/04_b2bua_bridge/run.sh` | Two-leg B2BUA-style RTP bridge |
 
-`LOCAL_IP=0.0.0.0` is valid as a local bind address only. The examples use
-`ADVERTISED_IP` for SIP Via sent-by and Contact routing, and
-`MEDIA_ADVERTISED_IP` for SDP media addresses; `MEDIA_ADVERTISED_IP` defaults
-to `ADVERTISED_IP`. Both advertised addresses must be routable from Asterisk
-when the bind address is unspecified.
+`unified_registration_server` is a standalone server and is not included in
+`run_all.sh`.
 
-For the TLS/SRTP Asterisk example, configure Asterisk PJSIP with a TLS
-transport and endpoint media encryption set to mandatory SDES/SRTP. The default
-example mode is a reachable TLS Contact: RVOIP registers over TLS and also
-listens on `ENDPOINT_1001_TLS_LOCAL_PORT` / `ENDPOINT_1002_TLS_LOCAL_PORT` so
-Asterisk can open TLS connections to the registered Contacts for `INVITE`,
-`OPTIONS`, `BYE`, and re-INVITEs. That listener requires `TLS_CERT_PATH` and
-`TLS_KEY_PATH`; if they are unset, `run.sh` generates a short-lived self-signed
-certificate/key under the test output directory. If your Asterisk TLS policy
-verifies the endpoint listener certificate, configure Asterisk to trust that
-certificate or provide a trusted pair explicitly. Outbound verification of
-Asterisk uses system roots, `TLS_CA_PATH`, or dev-only `TLS_INSECURE=1`.
+## Regression Fixtures
 
-Registered-flow modes are also available when Asterisk is configured to send
-inbound requests on the existing registration flow instead of dialing the
-advertised TLS listener Contact. Set
-`ASTERISK_TLS_CONTACT_MODE=registered-flow-rfc5626` for RFC 5626 Contact
-parameters (`;ob`, `+sip.instance`, `reg-id`) or
-`ASTERISK_TLS_CONTACT_MODE=registered-flow-symmetric` for Asterisk
-`rewrite_contact` / `symmetric_transport` labs that reuse the connection
-without echoing RFC 5626 parameters. In these modes RVOIP keeps the outbound
-TLS flow open and does not need a listener certificate/key; it still verifies
-Asterisk with system roots, `TLS_CA_PATH`, or dev-only `TLS_INSECURE=1`.
+The `regression/` lane keeps examples that are useful as executable evidence
+but too protocol-heavy for the first learning path: DTMF round-trip, TLS, SRTP,
+CANCEL, PRACK, session timers, glare retry, and NOTIFY.
 
-## Running peers individually
+## PBX Interop
 
-Each peer is also a separate `cargo` example binary, so you can run them in separate terminals for debugging. For example, for `callbackpeer/auto_answer`:
+`pbx/` is the source of truth for Asterisk and FreeSWITCH interop. It runs the
+same scenario matrix through `Endpoint`, `StreamPeer`, and
+`CallbackPeer::builder`.
 
-```bash
-# Terminal 1
-cargo run -p rvoip-session-core --example callbackpeer_auto_answer_server
-
-# Terminal 2
-cargo run -p rvoip-session-core --example callbackpeer_auto_answer_client
+```sh
+./crates/session-core/examples/pbx/run.sh --pbx asterisk --api all --scenario registration
+./crates/session-core/examples/pbx/run.sh --pbx freeswitch --api all --scenario hold_resume
 ```
 
-Run `cargo run -p rvoip-session-core --example` with no name to see the full list.
+The full PBX matrix is opt-in because it depends on local PBX configuration.

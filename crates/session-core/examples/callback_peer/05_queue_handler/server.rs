@@ -1,7 +1,7 @@
 //! Call center queue server with agent task.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_queue_server
-//! Or with client:  ./examples/callbackpeer/queue/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_queue_handler_server
+//! Or with client:  ./examples/callback_peer/05_queue_handler/run.sh
 
 use std::time::Duration;
 

@@ -9,16 +9,16 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_audio_bob \
-  --example streampeer_audio_alice 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example stream_peer_audio_bob \
+  --example stream_peer_audio_alice 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${GREEN}[BOB]${NC} Starting"
-cargo run -p rvoip-session-core --example streampeer_audio_bob --quiet \
+cargo run -p rvoip-session-core --example stream_peer_audio_bob --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[BOB]$(printf '\033[0m') /" &
 sleep 2
 
 echo -e "${CYAN}[ALICE]${NC} Starting"
-cargo run -p rvoip-session-core --example streampeer_audio_alice --quiet \
+cargo run -p rvoip-session-core --example stream_peer_audio_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[ALICE]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 

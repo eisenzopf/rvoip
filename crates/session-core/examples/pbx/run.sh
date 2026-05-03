@@ -25,7 +25,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --help|-h)
-      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|peer|streampeer|callback|all] [--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all]"
+      echo "Usage: $0 [--pbx asterisk|freeswitch|both] [--api endpoint|stream_peer|callback|all] [--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all]"
       exit 0
       ;;
     *)
@@ -59,9 +59,9 @@ pbx_list() {
 
 api_examples() {
   case "$API_ARG" in
-    all) printf '%s\n' pbx_endpoint pbx_streampeer pbx_callback_builder ;;
+    all) printf '%s\n' pbx_endpoint pbx_stream_peer pbx_callback_builder ;;
     endpoint) printf '%s\n' pbx_endpoint ;;
-    peer|streampeer) printf '%s\n' pbx_streampeer ;;
+    stream_peer|peer|streampeer) printf '%s\n' pbx_stream_peer ;;
     callback|callback_builder) printf '%s\n' pbx_callback_builder ;;
     *) echo "Unknown API: $API_ARG" >&2; exit 2 ;;
   esac
@@ -121,7 +121,7 @@ load_provider_env() {
 example_label() {
   case "$1" in
     pbx_endpoint) printf '%s\n' endpoint ;;
-    pbx_streampeer) printf '%s\n' peer ;;
+    pbx_stream_peer) printf '%s\n' stream_peer ;;
     pbx_callback_builder) printf '%s\n' callback ;;
   esac
 }
@@ -346,7 +346,7 @@ cd "$WORKSPACE_ROOT"
 echo "Building unified PBX examples..."
 cargo build -p rvoip-session-core --features dev-insecure-tls \
   --example pbx_endpoint \
-  --example pbx_streampeer \
+  --example pbx_stream_peer \
   --example pbx_callback_builder \
   --example pbx_analyze
 

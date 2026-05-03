@@ -9,22 +9,22 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_blind_transfer_alice \
-  --example streampeer_blind_transfer_bob \
-  --example streampeer_blind_transfer_charlie 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example stream_peer_blind_transfer_alice \
+  --example stream_peer_blind_transfer_bob \
+  --example stream_peer_blind_transfer_charlie 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${YELLOW}[CHARLIE]${NC} Starting (transfer target) on port 5062"
-cargo run -p rvoip-session-core --example streampeer_blind_transfer_charlie --quiet \
+cargo run -p rvoip-session-core --example stream_peer_blind_transfer_charlie --quiet \
   2>&1 | sed "s/^/$(printf '\033[1;33m')[CHARLIE]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${CYAN}[BOB]${NC} Starting (transferor) on port 5061"
-cargo run -p rvoip-session-core --example streampeer_blind_transfer_bob --quiet \
+cargo run -p rvoip-session-core --example stream_peer_blind_transfer_bob --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[BOB]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${GREEN}[ALICE]${NC} Starting (caller) on port 5060"
-cargo run -p rvoip-session-core --example streampeer_blind_transfer_alice --quiet \
+cargo run -p rvoip-session-core --example stream_peer_blind_transfer_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[ALICE]$(printf '\033[0m') /"
 ALICE_EXIT=$?
 

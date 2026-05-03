@@ -1,7 +1,7 @@
 //! Test callers for the closure gatekeeper server.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_closure_client
-//! Or with server:  ./examples/callbackpeer/closure/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_closure_gatekeeper_client
+//! Or with server:  ./examples/callback_peer/02_closure_gatekeeper/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, timeout, Duration};

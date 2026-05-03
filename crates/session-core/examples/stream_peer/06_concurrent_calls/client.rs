@@ -1,7 +1,7 @@
 //! Spawns 5 concurrent callers to the answerer.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example advanced_concurrent_calls_client
-//! Or with server:  ./examples/advanced/concurrent_calls/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example stream_peer_concurrent_calls_client
+//! Or with server:  ./examples/stream_peer/06_concurrent_calls/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};

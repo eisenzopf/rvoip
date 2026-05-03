@@ -1,7 +1,7 @@
 //! Transferor (Bob) — accepts call from Alice, then transfers her to Charlie.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_blind_transfer_bob
-//! Or with others:  ./examples/streampeer/blind_transfer/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example stream_peer_blind_transfer_bob
+//! Or with others:  ./examples/stream_peer/05_blind_transfer/run.sh
 
 use rvoip_session_core::{Config, Event, StreamPeer};
 use tokio::time::{sleep, Duration};

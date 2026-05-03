@@ -1,7 +1,7 @@
 //! URI-based call routing server.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_routing_server
-//! Or with client:  ./examples/callbackpeer/routing/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_routing_handler_server
+//! Or with client:  ./examples/callback_peer/04_routing_handler/run.sh
 
 use rvoip_session_core::api::handlers::{RoutingAction, RoutingHandler};
 use rvoip_session_core::{CallbackPeer, Config};

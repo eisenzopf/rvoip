@@ -25,8 +25,8 @@ Sprint 4 item.
 
 ## Context — why we're doing this now
 
-Sprint 2's three new examples (`streampeer/dtmf` round-trip,
-`streampeer/tls`, `streampeer/srtp`) exposed pre-existing layering
+Sprint 2's three new examples (`regression/01_dtmf_round_trip` round-trip,
+`regression/02_tls`, `regression/03_srtp`) exposed pre-existing layering
 gaps that had been silently accommodated. Six distinct items were
 identified, all documented below. Everything currently shipped works,
 but:
@@ -257,24 +257,24 @@ insecure verifier can't even be constructed.
 
 ### Step 2.4 — Update example harness
 
-**File:** `crates/session-core/examples/streampeer/tls/run.sh`
+**File:** `crates/session-core/examples/regression/02_tls/run.sh`
 
 Every `cargo run` and `cargo build` invocation for the TLS example
 binaries needs `--features dev-insecure-tls`:
 
 ```bash
 cargo build -p rvoip-session-core \
-    --example streampeer_tls_server \
-    --example streampeer_tls_client \
+    --example regression_tls_server \
+    --example regression_tls_client \
     --features dev-insecure-tls
 
 cargo run -p rvoip-session-core \
-    --example streampeer_tls_server \
+    --example regression_tls_server \
     --features dev-insecure-tls \
     --quiet
 ```
 
-**File:** `crates/session-core/examples/streampeer/tls/server.rs` and
+**File:** `crates/session-core/examples/regression/02_tls/server.rs` and
 `client.rs`
 
 Gate the `config.tls_insecure_skip_verify = true;` line with
@@ -307,7 +307,7 @@ cargo test -p rvoip-session-core --lib
 cargo test -p rvoip-session-core --features dev-insecure-tls --test tls_call_integration
 
 # Example still works.
-./crates/session-core/examples/streampeer/tls/run.sh
+./crates/session-core/examples/regression/02_tls/run.sh
 
 # Grep check: no reference to tls_insecure_skip_verify exists in any
 # non-test, non-cfg-gated code path.
@@ -446,7 +446,7 @@ cargo test -p rvoip-session-core --test '*' --features dev-insecure-tls
 ./crates/session-core/examples/run_all.sh
 ```
 
-Expected: all green. Critically, the `streampeer/dtmf` round-trip
+Expected: all green. Critically, the `regression/01_dtmf_round_trip` round-trip
 must still report "5/5 DTMF digits round-tripped" — the ID-rename
 regression surface is exactly this round-trip path.
 
@@ -583,8 +583,8 @@ cargo build -p rvoip-session-core
 cargo test -p rvoip-session-core --lib
 cargo test -p rvoip-session-core --test srtp_call_integration --features dev-insecure-tls
 cargo test -p rvoip-session-core --test audio_roundtrip_integration
-./crates/session-core/examples/streampeer/srtp/run.sh
-./crates/session-core/examples/streampeer/audio/run.sh
+./crates/session-core/examples/regression/03_srtp/run.sh
+./crates/session-core/examples/stream_peer/03_audio/run.sh
 ./crates/session-core/examples/run_all.sh
 ```
 
@@ -707,7 +707,7 @@ async fn test_pt101_retransmits_dedup_to_single_event() {
 cargo test -p rvoip-rtp-core --lib
 cargo test -p rvoip-media-core --lib
 cargo test -p rvoip-session-core --lib
-./crates/session-core/examples/streampeer/dtmf/run.sh
+./crates/session-core/examples/regression/01_dtmf_round_trip/run.sh
 # Must still assert "5/5 DTMF digits round-tripped".
 ```
 
@@ -921,7 +921,7 @@ pub async fn send_dtmf_packet(
 
 ### Step 6.5 — Update the DTMF example expectations
 
-**File:** `crates/session-core/examples/streampeer/dtmf/run.sh`
+**File:** `crates/session-core/examples/regression/01_dtmf_round_trip/run.sh`
 
 The client currently fires 5 DTMF digits at 500 ms apart. With the
 new §2.5.1.3 pattern, each digit takes 100 ms (the configured
@@ -949,7 +949,7 @@ handle.hangup().await?;
 cargo test -p rvoip-rtp-core --lib
 cargo test -p rvoip-media-core --lib
 cargo test -p rvoip-session-core --lib
-./crates/session-core/examples/streampeer/dtmf/run.sh
+./crates/session-core/examples/regression/01_dtmf_round_trip/run.sh
 # Must still assert "5/5 DTMF digits round-tripped" with the new
 # multi-packet sender + Phase 5 dedup working together.
 ```
@@ -1015,9 +1015,9 @@ cargo test -p rvoip-session-core \
 - All library test suites pass.
 - `audio_roundtrip_integration` passes — lock-in that media round-trip
   still works.
-- `streampeer/dtmf/run.sh` still reports "5/5 DTMF digits round-tripped".
-- `streampeer/tls/run.sh` still observes a TLS-transported INVITE.
-- `streampeer/srtp/run.sh` still negotiates SDES.
+- `regression/01_dtmf_round_trip/run.sh` still reports "5/5 DTMF digits round-tripped".
+- `regression/02_tls/run.sh` still observes a TLS-transported INVITE.
+- `regression/03_srtp/run.sh` still negotiates SDES.
 
 ---
 
@@ -1050,8 +1050,8 @@ Sprint 2.5 is complete when:
    by a hard `SessionError::InternalError` and a regression test —
    so the criterion strengthens to "the YAML loader hard-errors on
    any unknown action name".)
-6. ✅ All three new examples (`streampeer/dtmf`, `streampeer/tls`,
-   `streampeer/srtp`) run green under `run_all.sh`.
+6. ✅ All three new examples (`regression/01_dtmf_round_trip`, `regression/02_tls`,
+   `regression/03_srtp`) run green under `run_all.sh`.
 7. ✅ Sprint 3 (A6 STUN + A7 digest + C1 Comfort Noise + C2 SDP
    offer/answer matching helper) ready to start on the clean base —
    in particular C2 lands on the unified `generate_local_sdp` path

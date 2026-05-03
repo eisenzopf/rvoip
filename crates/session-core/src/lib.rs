@@ -177,10 +177,9 @@
 //! use, Asterisk TLS registered-flow, FreeSWITCH internal profile, and
 //! carrier/SBC starting points.
 //!
-//! The Asterisk examples under `examples/asterisk` and
-//! `examples/asterisk_callback`, plus the FreeSWITCH scaffolding under
-//! `examples/freeswitch`, are the current executable references for PBX
-//! interop.
+//! PBX interop examples live under `examples/pbx`. That unified runner drives
+//! the same Asterisk and FreeSWITCH scenarios through `Endpoint`, `StreamPeer`,
+//! and `CallbackPeer::builder`.
 //!
 //! See the [`api`] module docs for the complete module map and additional
 //! quick-start examples.

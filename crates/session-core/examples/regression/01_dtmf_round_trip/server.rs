@@ -3,8 +3,8 @@
 //! rtp-core PT 101 decode → media-core callback → session-core
 //! `on_dtmf(handle, digit)`.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_dtmf_server
-//! Or with client:  ./examples/streampeer/dtmf/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example regression_dtmf_round_trip_server
+//! Or with client:  ./examples/regression/01_dtmf_round_trip/run.sh
 
 use async_trait::async_trait;
 use std::sync::atomic::{AtomicUsize, Ordering};

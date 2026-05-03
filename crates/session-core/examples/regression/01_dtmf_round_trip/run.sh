@@ -20,16 +20,16 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_dtmf_server \
-  --example streampeer_dtmf_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example regression_dtmf_round_trip_server \
+  --example regression_dtmf_round_trip_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${GREEN}[SERVER]${NC} Starting DTMF-logging server on port 5060"
-cargo run -p rvoip-session-core --example streampeer_dtmf_server --quiet > "$SERVER_LOG" 2>&1 &
+cargo run -p rvoip-session-core --example regression_dtmf_round_trip_server --quiet > "$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 sleep 2
 
 echo -e "${CYAN}[CLIENT]${NC} Starting DTMF sender"
-cargo run -p rvoip-session-core --example streampeer_dtmf_client --quiet \
+cargo run -p rvoip-session-core --example regression_dtmf_round_trip_client --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENT]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 

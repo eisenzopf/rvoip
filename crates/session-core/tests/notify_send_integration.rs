@@ -60,9 +60,9 @@ fn build_examples() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_notify_send_alice",
+            "regression_notify_send_alice",
             "--example",
-            "streampeer_notify_send_bob",
+            "regression_notify_send_bob",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -78,9 +78,9 @@ fn send_notify_surfaces_as_notify_received_on_peer() {
         ("BOB_PORT", BOB_PORT.to_string()),
     ];
 
-    let mut bob = spawn_example("streampeer_notify_send_bob", &envs);
+    let mut bob = spawn_example("regression_notify_send_bob", &envs);
     std::thread::sleep(Duration::from_millis(800));
-    let mut alice = spawn_example("streampeer_notify_send_alice", &envs);
+    let mut alice = spawn_example("regression_notify_send_alice", &envs);
 
     let deadline = Instant::now() + Duration::from_secs(30);
 

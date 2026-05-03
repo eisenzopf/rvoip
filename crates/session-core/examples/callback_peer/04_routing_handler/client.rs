@@ -1,7 +1,7 @@
 //! Test callers for the routing server.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_routing_client
-//! Or with server:  ./examples/callbackpeer/routing/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_routing_handler_client
+//! Or with server:  ./examples/callback_peer/04_routing_handler/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, timeout, Duration};

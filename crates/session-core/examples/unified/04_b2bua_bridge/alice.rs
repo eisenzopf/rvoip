@@ -2,8 +2,8 @@
 //! comes back. A working bridge means Carol's 880 Hz tone lands in
 //! `alice_received.wav`.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_bridge_alice
-//! Or with bridge + carol: ./examples/streampeer/bridge/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example unified_b2bua_bridge_alice
+//! Or with bridge + carol: ./examples/unified/04_b2bua_bridge/run.sh
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::{Config, StreamPeer};

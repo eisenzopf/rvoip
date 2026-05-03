@@ -20,17 +20,17 @@ export ALICE_PORT BOB_PORT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_notify_send_alice \
-  --example streampeer_notify_send_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example regression_notify_send_alice \
+  --example regression_notify_send_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${CYAN}[BOB]${NC} Listening on port $BOB_PORT (auto-accept; expects Event::NotifyReceived)"
-cargo run -p rvoip-session-core --example streampeer_notify_send_bob --quiet \
+cargo run -p rvoip-session-core --example regression_notify_send_bob --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[BOB]$(printf '\033[0m') /" &
 BOB_PID=$!
 sleep 1
 
 echo -e "${GREEN}[ALICE]${NC} Calling Bob on port $BOB_PORT from $ALICE_PORT (sends NOTIFY after 200 OK)"
-cargo run -p rvoip-session-core --example streampeer_notify_send_alice --quiet \
+cargo run -p rvoip-session-core --example regression_notify_send_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[ALICE]$(printf '\033[0m') /"
 ALICE_EXIT=$?
 

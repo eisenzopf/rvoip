@@ -1,7 +1,7 @@
 //! Audio receiver (Bob) — waits for incoming call, sends 880Hz tone, saves received audio.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_audio_bob
-//! Or with alice:   ./examples/streampeer/audio/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example stream_peer_audio_bob
+//! Or with alice:   ./examples/stream_peer/03_audio/run.sh
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::{Config, StreamPeer};

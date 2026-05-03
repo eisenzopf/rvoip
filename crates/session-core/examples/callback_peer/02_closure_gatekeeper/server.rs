@@ -1,7 +1,7 @@
 //! Closure-based SIP gatekeeper server.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_closure_server
-//! Or with client:  ./examples/callbackpeer/closure/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_closure_gatekeeper_server
+//! Or with client:  ./examples/callback_peer/02_closure_gatekeeper/run.sh
 
 use rvoip_session_core::{CallHandlerDecision, CallbackPeer, Config};
 

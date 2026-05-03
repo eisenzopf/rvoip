@@ -7,8 +7,8 @@
 //! answers without accepting any offered suite — this mirrors the
 //! "SDES-only, no plaintext" profile most carriers want.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_srtp_client
-//! Or with server:  ./examples/streampeer/srtp/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example regression_srtp_client
+//! Or with server:  ./examples/regression/03_srtp/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};

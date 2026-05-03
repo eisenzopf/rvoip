@@ -54,9 +54,9 @@ fn build_examples() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_cancel_alice",
+            "regression_cancel_alice",
             "--example",
-            "streampeer_cancel_bob",
+            "regression_cancel_bob",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -72,9 +72,9 @@ fn cancel_emits_callcancelled_event() {
         ("BOB_PORT", BOB_PORT.to_string()),
     ];
 
-    let _bob = spawn_example("streampeer_cancel_bob", &envs);
+    let _bob = spawn_example("regression_cancel_bob", &envs);
     std::thread::sleep(Duration::from_millis(800));
-    let mut alice = spawn_example("streampeer_cancel_alice", &envs);
+    let mut alice = spawn_example("regression_cancel_alice", &envs);
 
     let deadline = Instant::now() + Duration::from_secs(20);
     let exit = loop {

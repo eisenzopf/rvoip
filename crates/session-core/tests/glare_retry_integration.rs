@@ -56,9 +56,9 @@ fn build_examples() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_glare_retry_alice",
+            "regression_glare_retry_alice",
             "--example",
-            "streampeer_glare_retry_bob",
+            "regression_glare_retry_bob",
         ])
         .output()
         .expect("failed to invoke cargo build");
@@ -92,9 +92,9 @@ fn glare_retry_converges_to_on_hold() {
         ("RVOIP_TEST_GLARE_START_MS", start_ms.to_string()),
     ];
 
-    let mut bob = spawn_example("streampeer_glare_retry_bob", &envs);
+    let mut bob = spawn_example("regression_glare_retry_bob", &envs);
     std::thread::sleep(Duration::from_millis(800));
-    let mut alice = spawn_example("streampeer_glare_retry_alice", &envs);
+    let mut alice = spawn_example("regression_glare_retry_alice", &envs);
 
     // The glare path takes longer than a normal call: 8 s synchronize
     // lead, simultaneous hold, 491s, 2.1–4.0 s retry backoff, second

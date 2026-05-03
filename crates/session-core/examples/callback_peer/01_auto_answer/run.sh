@@ -9,16 +9,16 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example callbackpeer_auto_answer_server \
-  --example callbackpeer_auto_answer_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example callback_peer_auto_answer_server \
+  --example callback_peer_auto_answer_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${GREEN}[SERVER]${NC} Starting auto-answer server on port 5060"
-cargo run -p rvoip-session-core --example callbackpeer_auto_answer_server --quiet \
+cargo run -p rvoip-session-core --example callback_peer_auto_answer_server --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[SERVER]$(printf '\033[0m') /" &
 sleep 2
 
 echo -e "${CYAN}[CLIENT]${NC} Starting caller"
-cargo run -p rvoip-session-core --example callbackpeer_auto_answer_client --quiet \
+cargo run -p rvoip-session-core --example callback_peer_auto_answer_client --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENT]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 

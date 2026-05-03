@@ -18,16 +18,16 @@ export ALICE_PORT BOB_PORT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_cancel_alice \
-  --example streampeer_cancel_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example regression_cancel_alice \
+  --example regression_cancel_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${CYAN}[BOB]${NC} Listening on port $BOB_PORT (will hold incoming call without accepting)"
-cargo run -p rvoip-session-core --example streampeer_cancel_bob --quiet \
+cargo run -p rvoip-session-core --example regression_cancel_bob --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[BOB]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${GREEN}[ALICE]${NC} Calling Bob on port $BOB_PORT from $ALICE_PORT (will hangup mid-ring)"
-cargo run -p rvoip-session-core --example streampeer_cancel_alice --quiet \
+cargo run -p rvoip-session-core --example regression_cancel_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[ALICE]$(printf '\033[0m') /"
 ALICE_EXIT=$?
 

@@ -1,7 +1,7 @@
 //! Concurrent calls answerer (StreamPeer).
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example advanced_concurrent_calls_server
-//! Or with client:  ./examples/advanced/concurrent_calls/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example stream_peer_concurrent_calls_server
+//! Or with client:  ./examples/stream_peer/06_concurrent_calls/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::Duration;

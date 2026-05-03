@@ -1083,9 +1083,9 @@ pub async fn unregister_callback_endpoint(
     Ok(())
 }
 
-pub async fn run_streampeer_surface() -> ExampleResult<()> {
+pub async fn run_stream_peer_surface() -> ExampleResult<()> {
     let (provider, scenario, transport, role) = context()?;
-    run_streampeer(provider, scenario, transport, role).await
+    run_stream_peer(provider, scenario, transport, role).await
 }
 
 pub async fn run_endpoint_surface() -> ExampleResult<()> {
@@ -1098,7 +1098,7 @@ pub async fn run_callback_builder_surface() -> ExampleResult<()> {
     run_callback(provider, scenario, transport, role).await
 }
 
-async fn run_streampeer(
+async fn run_stream_peer(
     provider: PbxProvider,
     scenario: Scenario,
     transport: TransportMode,
@@ -1116,10 +1116,10 @@ async fn run_streampeer(
         | Scenario::RingCancel
         | Scenario::Dtmf
         | Scenario::Reject => {
-            run_streampeer_two_party(provider, scenario, transport, role, &cfg, &mut peer).await?;
+            run_stream_peer_two_party(provider, scenario, transport, role, &cfg, &mut peer).await?;
         }
         Scenario::BlindTransfer => {
-            run_streampeer_transfer(provider, transport, role, &cfg, &mut peer).await?;
+            run_stream_peer_transfer(provider, transport, role, &cfg, &mut peer).await?;
         }
     }
     peer.unregister(&registration).await.ok();
@@ -1192,7 +1192,7 @@ async fn run_callback(
     runtime.shutdown().await
 }
 
-async fn run_streampeer_two_party(
+async fn run_stream_peer_two_party(
     provider: PbxProvider,
     scenario: Scenario,
     transport: TransportMode,
@@ -1557,7 +1557,7 @@ async fn run_callback_two_party(
     Ok(())
 }
 
-async fn run_streampeer_transfer(
+async fn run_stream_peer_transfer(
     provider: PbxProvider,
     transport: TransportMode,
     role: Role,

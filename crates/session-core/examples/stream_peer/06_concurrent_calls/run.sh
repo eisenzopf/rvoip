@@ -9,16 +9,16 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example advanced_concurrent_calls_server \
-  --example advanced_concurrent_calls_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example stream_peer_concurrent_calls_server \
+  --example stream_peer_concurrent_calls_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${GREEN}[SERVER]${NC} Starting"
-cargo run -p rvoip-session-core --example advanced_concurrent_calls_server --quiet \
+cargo run -p rvoip-session-core --example stream_peer_concurrent_calls_server --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[SERVER]$(printf '\033[0m') /" &
 sleep 2
 
 echo -e "${CYAN}[CLIENTS]${NC} Starting"
-cargo run -p rvoip-session-core --example advanced_concurrent_calls_client --quiet \
+cargo run -p rvoip-session-core --example stream_peer_concurrent_calls_client --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENTS]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 

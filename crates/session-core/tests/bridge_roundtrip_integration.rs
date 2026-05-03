@@ -1,7 +1,7 @@
 //! Multi-binary 3-peer bridge roundtrip regression test.
 //!
-//! Drives `streampeer_bridge_alice`, `streampeer_bridge_peer`, and
-//! `streampeer_bridge_carol` together, then reads each saved WAV and
+//! Drives `unified_b2bua_bridge_alice`, `unified_b2bua_bridge_peer`, and
+//! `unified_b2bua_bridge_carol` together, then reads each saved WAV and
 //! asserts that the received audio actually carries the *other* endpoint's
 //! tone (Alice's WAV has strong 880 Hz; Carol's has strong 440 Hz).
 //!
@@ -106,11 +106,11 @@ fn bridge_roundtrip_relays_tones_between_legs() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_bridge_alice",
+            "unified_b2bua_bridge_alice",
             "--example",
-            "streampeer_bridge_peer",
+            "unified_b2bua_bridge_peer",
             "--example",
-            "streampeer_bridge_carol",
+            "unified_b2bua_bridge_carol",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -137,11 +137,11 @@ fn bridge_roundtrip_relays_tones_between_legs() {
 
     // Start the callee and bridge first so Alice's INVITE has somewhere
     // to land. Matches the audio_roundtrip ordering.
-    let mut carol = spawn_example("streampeer_bridge_carol", &env_vars);
+    let mut carol = spawn_example("unified_b2bua_bridge_carol", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
-    let mut bridge = spawn_example("streampeer_bridge_peer", &env_vars);
+    let mut bridge = spawn_example("unified_b2bua_bridge_peer", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
-    let mut alice = spawn_example("streampeer_bridge_alice", &env_vars);
+    let mut alice = spawn_example("unified_b2bua_bridge_alice", &env_vars);
 
     let deadline = Instant::now() + Duration::from_secs(60);
     let alice_status = loop {

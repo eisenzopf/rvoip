@@ -63,9 +63,9 @@ fn build_examples() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_prack_alice",
+            "regression_prack_alice",
             "--example",
-            "streampeer_prack_bob",
+            "regression_prack_bob",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -86,11 +86,11 @@ fn run_scenario(
     ];
 
     // Bob listens; give him a moment to bind before Alice INVITEs.
-    let _bob = spawn_example("streampeer_prack_bob", &env_vars);
+    let _bob = spawn_example("regression_prack_bob", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
     let _ = bob_wait_secs;
 
-    let mut alice = spawn_example("streampeer_prack_alice", &env_vars);
+    let mut alice = spawn_example("regression_prack_alice", &env_vars);
 
     let deadline = Instant::now() + Duration::from_secs(alice_wait_secs);
     let exit = loop {

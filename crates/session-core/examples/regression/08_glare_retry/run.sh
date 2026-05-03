@@ -30,16 +30,16 @@ export ALICE_PORT BOB_PORT RVOIP_TEST_GLARE_START_MS
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_glare_retry_alice \
-  --example streampeer_glare_retry_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example regression_glare_retry_alice \
+  --example regression_glare_retry_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${CYAN}[BOB]${NC} Listening on port $BOB_PORT (glare fires at ms=$RVOIP_TEST_GLARE_START_MS)"
-cargo run -p rvoip-session-core --example streampeer_glare_retry_bob --quiet \
+cargo run -p rvoip-session-core --example regression_glare_retry_bob --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[BOB]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${GREEN}[ALICE]${NC} Calling Bob from $ALICE_PORT"
-cargo run -p rvoip-session-core --example streampeer_glare_retry_alice --quiet \
+cargo run -p rvoip-session-core --example regression_glare_retry_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[ALICE]$(printf '\033[0m') /"
 ALICE_EXIT=$?
 

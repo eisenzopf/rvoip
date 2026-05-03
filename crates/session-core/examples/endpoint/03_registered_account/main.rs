@@ -1,4 +1,4 @@
-//! Endpoint registered PBX-call example.
+//! Endpoint registered-account example.
 //!
 //! Required environment:
 //! - `SIP_REGISTRAR`, for example `sip:pbx.example.com` or `sips:pbx.example.com:5061`
@@ -8,7 +8,7 @@
 //!
 //! Run with:
 //!
-//!   cargo run --example endpoint_pbx_registered_call
+//!   cargo run --example endpoint_registered_account
 
 use std::time::Duration;
 

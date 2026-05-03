@@ -31,10 +31,10 @@ also load `$HOME/Developer/freeswitch/freeswitch-local.env` when present.
 Options:
 
 - `--pbx asterisk|freeswitch|both`
-- `--api endpoint|peer|streampeer|callback|all`
+- `--api endpoint|stream_peer|callback|all`
 - `--scenario registration|basic_call|hold_resume|ring_cancel|dtmf|reject|blind_transfer|all`
 
-The runner builds the four unified Cargo examples and stores logs/WAV evidence
+The runner builds the PBX Cargo examples and stores logs/WAV evidence
 under `examples/pbx/output/<provider>/<api>/<scenario>/<transport>/`.
 
 ## Cargo Examples
@@ -43,7 +43,7 @@ The runner orchestrates these examples by setting `PBX_PROVIDER`,
 `PBX_SCENARIO`, `PBX_TRANSPORT`, and `PBX_ROLE`.
 
 ```sh
-cargo run -p rvoip-session-core --features dev-insecure-tls --example pbx_streampeer
+cargo run -p rvoip-session-core --features dev-insecure-tls --example pbx_stream_peer
 cargo run -p rvoip-session-core --features dev-insecure-tls --example pbx_endpoint
 cargo run -p rvoip-session-core --features dev-insecure-tls --example pbx_callback_builder
 cargo run -p rvoip-session-core --features dev-insecure-tls --example pbx_analyze

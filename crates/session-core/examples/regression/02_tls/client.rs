@@ -19,12 +19,12 @@
 //!   the connect target (so the cert's SAN must include `127.0.0.1`).
 //!   Real carrier deployments do exactly this, just with a public CA.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_tls_client --features dev-insecure-tls
-//! Or with server:  ./examples/streampeer/tls/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example regression_tls_client --features dev-insecure-tls
+//! Or with server:  ./examples/regression/02_tls/run.sh
 
 #[cfg(not(feature = "dev-insecure-tls"))]
 compile_error!(
-    "streampeer/tls example requires --features dev-insecure-tls (self-signed dev cert)"
+    "regression/02_tls example requires --features dev-insecure-tls (self-signed dev cert)"
 );
 
 use rvoip_session_core::{Config, StreamPeer};

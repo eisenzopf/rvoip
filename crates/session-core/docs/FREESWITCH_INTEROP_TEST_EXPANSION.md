@@ -2,8 +2,8 @@
 
 ## Summary
 
-The FreeSWITCH examples now target the same endpoint layout as the Asterisk
-StreamPeer examples:
+The FreeSWITCH coverage now runs through the shared `examples/pbx` interop
+matrix:
 
 | Users | FreeSWITCH profile | Transport / media | Purpose |
 | --- | --- | --- | --- |
@@ -65,7 +65,7 @@ does not require installed SRTP contexts.
 Top-level default sequence:
 
 ```sh
-crates/session-core/examples/freeswitch/run.sh
+crates/session-core/examples/pbx/run.sh --pbx freeswitch --api all --scenario all
 ```
 
 Runs:
@@ -78,7 +78,7 @@ Runs:
 Extended sequence:
 
 ```sh
-crates/session-core/examples/freeswitch/run_remote.sh
+crates/session-core/examples/pbx/run_remote.sh --pbx freeswitch --api all
 ```
 
 Runs:
@@ -90,8 +90,7 @@ Runs:
 5. TLS/SRTP blind transfer.
 6. UDP blind transfer.
 
-Set `FREESWITCH_RUN_EXTENDED_TESTS=1` to include the extended sequence from
-`run.sh`.
+Use `run_remote.sh` when you only want the remote-party scenarios.
 
 ## Environment
 
@@ -125,8 +124,8 @@ FREESWITCH_TLS_CONTACT_MODE=reachable-contact
 FREESWITCH_TLS_SRTP_REQUIRED=1
 ```
 
-`examples/freeswitch/.env` and process environment values may override these
-defaults.
+`examples/pbx/env/freeswitch.env`, `examples/pbx/.env.local`, and process
+environment values may override these defaults.
 
 The FreeSWITCH UDP blind-transfer scenario intentionally waits briefly before
 sending REFER. FreeSWITCH can accept an immediate REFER before the bridge has
@@ -139,9 +138,7 @@ target; `FREESWITCH_TRANSFER_SETTLE_SECS` keeps this parity example stable.
   `rvoip_tls_srtp` profiles running.
 - `show registrations` shows the expected users during scenario execution.
 - All Cargo examples listed in `crates/session-core/Cargo.toml` build.
-- `examples/freeswitch/run.sh` passes.
-- `examples/freeswitch/run_remote.sh` passes.
-- `FREESWITCH_RUN_EXTENDED_TESTS=1 examples/freeswitch/run.sh` passes if the
-  full sequence is preferred from one entry point.
+- `examples/pbx/run.sh --pbx freeswitch --api all --scenario all` passes.
+- `examples/pbx/run_remote.sh --pbx freeswitch --api all` passes.
 - Compatibility docs should only move FreeSWITCH from planned to validated
   after those commands pass repeatably on a clean container restart.

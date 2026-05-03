@@ -82,8 +82,8 @@ openssl x509 -req -in "$CERT_DIR/server.csr" \
 
 echo -e "${GREEN}Building…${NC}"
 cargo build -p rvoip-session-core --features dev-insecure-tls \
-  --example streampeer_tls_server \
-  --example streampeer_tls_client 2>&1 \
+  --example regression_tls_server \
+  --example regression_tls_client 2>&1 \
   | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 # Helper: run one pass (insecure or secure). Aborts the script if
@@ -102,13 +102,13 @@ run_pass() {
 
   echo -e "${GREEN}[SERVER]${NC} Starting TLS server on 5060 (+ sips:5061)"
   cargo run -p rvoip-session-core --features dev-insecure-tls \
-    --example streampeer_tls_server --quiet > "$server_log" 2>&1 &
+    --example regression_tls_server --quiet > "$server_log" 2>&1 &
   local server_pid=$!
   sleep 2
 
   echo -e "${CYAN}[CLIENT]${NC} Starting TLS client (TLS_INSECURE=$insecure)"
   TLS_INSECURE="$insecure" cargo run -p rvoip-session-core \
-    --features dev-insecure-tls --example streampeer_tls_client --quiet \
+    --features dev-insecure-tls --example regression_tls_client --quiet \
     2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENT]$(printf '\033[0m') /"
   local client_exit=${PIPESTATUS[0]}
 

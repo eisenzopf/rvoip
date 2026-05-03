@@ -57,9 +57,9 @@ fn session_timer_refresh_emits_event() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_session_timer_alice",
+            "regression_session_timer_alice",
             "--example",
-            "streampeer_session_timer_bob",
+            "regression_session_timer_bob",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -70,10 +70,10 @@ fn session_timer_refresh_emits_event() {
         ("BOB_PORT", BOB_PORT.to_string()),
     ];
 
-    let _bob = spawn_example("streampeer_session_timer_bob", &env_vars);
+    let _bob = spawn_example("regression_session_timer_bob", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
 
-    let mut alice = spawn_example("streampeer_session_timer_alice", &env_vars);
+    let mut alice = spawn_example("regression_session_timer_alice", &env_vars);
 
     // 45s: 30s was too tight when the full cargo-test suite runs many
     // integration test binaries in parallel and Alice's startup is slow.

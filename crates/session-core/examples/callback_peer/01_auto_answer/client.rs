@@ -1,7 +1,7 @@
 //! Test caller for the auto-answer server.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_auto_answer_client
-//! Or with server:  ./examples/callbackpeer/auto_answer/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_auto_answer_client
+//! Or with server:  ./examples/callback_peer/01_auto_answer/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};

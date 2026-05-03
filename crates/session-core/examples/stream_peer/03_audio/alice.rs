@@ -1,7 +1,7 @@
 //! Audio caller (Alice) — calls Bob, sends 440Hz tone, saves received audio.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_audio_alice
-//! Or with bob:     ./examples/streampeer/audio/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example stream_peer_audio_alice
+//! Or with bob:     ./examples/stream_peer/03_audio/run.sh
 
 use rvoip_media_core::types::AudioFrame;
 use rvoip_session_core::{Config, StreamPeer};

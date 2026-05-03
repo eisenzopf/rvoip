@@ -1,12 +1,12 @@
 //! SIP registrar server with digest authentication.
 //!
-//!   cargo run --example advanced_registrar_server
+//!   cargo run --example unified_registration_server
 //!
 //! Starts a registration server on port 5060 with two test users:
 //!   alice / password123
 //!   bob   / secret456
 //!
-//! Test with: cargo run --example streampeer_registration
+//! Test with: ./examples/stream_peer/04_registration/run.sh
 
 use rvoip_session_core::{Config, UnifiedCoordinator};
 use std::collections::HashMap;
@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Users: alice/password123, bob/secret456");
     println!("  Realm: test.local");
     println!();
-    println!("Test with: cargo run --example streampeer_registration");
+    println!("Test with: ./examples/stream_peer/04_registration/run.sh");
     println!("Press Ctrl+C to stop.");
 
     tokio::signal::ctrl_c().await?;

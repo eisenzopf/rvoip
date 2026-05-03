@@ -1,7 +1,7 @@
 //! Send DTMF digits during a call.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_dtmf_client
-//! Or with server:  ./examples/streampeer/dtmf/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example regression_dtmf_round_trip_client
+//! Or with server:  ./examples/regression/01_dtmf_round_trip/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};

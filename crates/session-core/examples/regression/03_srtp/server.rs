@@ -11,8 +11,8 @@
 //! terminal failure, matching Asterisk's `srtp=mandatory` /
 //! FreeSWITCH's `rtp_secure_media=mandatory` behavior.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_srtp_server
-//! Or with client:  ./examples/streampeer/srtp/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example regression_srtp_server
+//! Or with client:  ./examples/regression/03_srtp/run.sh
 
 use async_trait::async_trait;
 use rvoip_session_core::{

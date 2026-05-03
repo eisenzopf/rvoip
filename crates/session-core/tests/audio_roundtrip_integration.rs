@@ -1,6 +1,6 @@
 //! Multi-binary audio-roundtrip regression test.
 //!
-//! Drives the `streampeer_audio_alice` / `streampeer_audio_bob` example
+//! Drives the `stream_peer_audio_alice` / `stream_peer_audio_bob` example
 //! binaries with non-default ports + a scratch output directory, then
 //! reads each peer's saved WAV and asserts that the received audio
 //! actually carries the *other* peer's tone (Alice's file has strong
@@ -57,9 +57,9 @@ fn build_examples() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_audio_alice",
+            "stream_peer_audio_alice",
             "--example",
-            "streampeer_audio_bob",
+            "stream_peer_audio_bob",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -133,9 +133,9 @@ fn audio_roundtrip_delivers_peer_tone() {
         ("AUDIO_OUTPUT_DIR", out_dir.clone()),
     ];
 
-    let mut bob = spawn_example("streampeer_audio_bob", &env_vars);
+    let mut bob = spawn_example("stream_peer_audio_bob", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
-    let mut alice = spawn_example("streampeer_audio_alice", &env_vars);
+    let mut alice = spawn_example("stream_peer_audio_alice", &env_vars);
 
     let deadline = Instant::now() + Duration::from_secs(45);
     let alice_status = loop {

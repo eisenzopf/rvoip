@@ -11,22 +11,22 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_bridge_alice \
-  --example streampeer_bridge_carol \
-  --example streampeer_bridge_peer 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example unified_b2bua_bridge_alice \
+  --example unified_b2bua_bridge_carol \
+  --example unified_b2bua_bridge_peer 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${MAGENTA}[CAROL]${NC} Starting (callee)"
-cargo run -p rvoip-session-core --example streampeer_bridge_carol --quiet \
+cargo run -p rvoip-session-core --example unified_b2bua_bridge_carol --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;35m')[CAROL]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${GREEN}[BRIDGE]${NC} Starting (b2bua)"
-cargo run -p rvoip-session-core --example streampeer_bridge_peer --quiet \
+cargo run -p rvoip-session-core --example unified_b2bua_bridge_peer --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[BRIDGE]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${CYAN}[ALICE]${NC} Starting (caller)"
-cargo run -p rvoip-session-core --example streampeer_bridge_alice --quiet \
+cargo run -p rvoip-session-core --example unified_b2bua_bridge_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[ALICE]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 

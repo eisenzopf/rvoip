@@ -186,7 +186,7 @@ The state machine can keep publishing local custom events, but `UnifiedCoordinat
 
 ### End-to-End Tests
 
-- Existing `streampeer/hold_resume/run.sh` passes.
+- Existing `stream_peer/02_call_control/run.sh` passes.
 - Existing Asterisk two-endpoint audio example passes.
 - New Asterisk hold/resume example passes.
 - Add SRTP hold/resume once plaintext behavior is stable.
@@ -204,4 +204,4 @@ The state machine can keep publishing local custom events, but `UnifiedCoordinat
 - [x] Bridge local hold/resume state-machine events to public API events.
 - [x] Publish remote hold/resume API events from accepted inbound re-INVITEs.
 - [x] Add focused unit tests for direction behavior.
-- [x] Run streampeer and Asterisk hold/resume examples after the implementation settles.
+- [x] Run stream_peer and Asterisk hold/resume examples after the implementation settles.

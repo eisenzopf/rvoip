@@ -166,7 +166,7 @@ Items 1–5 landed in `session-core`, `media-core`, `dialog-core`, and
 `infra-common`. The b2bua crate (6) is now the next repo-level
 milestone; its 3-peer shape is already exercised by
 `tests/bridge_roundtrip_integration.rs` with
-`examples/streampeer/bridge/bridge_peer.rs` as the skeleton. Carrier
+`examples/unified/04_b2bua_bridge/bridge_peer.rs` as the skeleton. Carrier
 track (P) runs alongside and doesn't block b2bua — LAN / Asterisk /
 FreeSWITCH setups work today.
 
@@ -262,7 +262,7 @@ impl UnifiedCoordinator {
 - Tests: `crates/session-core/tests/event_stream_filtering_tests.rs`
   — per-session isolation, unfiltered-sees-all, DTMF helper end-to-end.
 - Used in production-shape by
-  `examples/streampeer/bridge/bridge_peer.rs`, which uses
+  `examples/unified/04_b2bua_bridge/bridge_peer.rs`, which uses
   `events_for_session` to observe the outbound leg's `CallAnswered`
   before accepting the inbound leg.
 
@@ -340,7 +340,7 @@ where `BridgeHandle` teardown unwires the relay.
   partner-map bookkeeping, `stop_media` cleanup) — all in-process,
   millisecond-fast. End-to-end 3-peer SIP test at
   `crates/session-core/tests/bridge_roundtrip_integration.rs` with
-  new examples under `examples/streampeer/bridge/` (`alice.rs`,
+  new examples under `examples/unified/04_b2bua_bridge/` (`alice.rs`,
   `carol.rs`, `bridge_peer.rs`, `run.sh`). Goertzel-asserts tones cross
   the relay in both directions; full run ≈42 s.
 
@@ -519,7 +519,7 @@ What's deferred (see *Follow-ups carved off* below):
 
 Both blockers (Items 1 + 2) have landed — b2bua is unblocked. A working
 skeleton already exists at
-`crates/session-core/examples/streampeer/bridge/bridge_peer.rs`
+`crates/session-core/examples/unified/04_b2bua_bridge/bridge_peer.rs`
 (~100 LOC). The production shape, lifted into `crates/b2bua`, looks
 like:
 
@@ -756,7 +756,7 @@ types, full RFC 4028 §6 422 handling (observability + auto-retry with
 `make_transfer_leg` for RFC 3515 §2.4.5 progress reporting in both
 directions. The `crates/b2bua` crate is unblocked on every known
 prerequisite — a working bridge skeleton already lives at
-`examples/streampeer/bridge/bridge_peer.rs` and is CI-exercised by
+`examples/unified/04_b2bua_bridge/bridge_peer.rs` and is CI-exercised by
 `tests/bridge_roundtrip_integration.rs`.
 
 Carrier track (P1–P7) is multi-week and runs in parallel; LAN /

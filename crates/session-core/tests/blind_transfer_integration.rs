@@ -3,7 +3,7 @@
 //! Blind transfer cannot be tested reliably in-process — two StreamPeers sharing
 //! one Tokio runtime have repeatedly produced socket / state collisions. Instead
 //! we drive the three peers of the scenario (Alice, Bob, Charlie) as separate
-//! child processes, mirroring `examples/streampeer/blind_transfer/run.sh`.
+//! child processes, mirroring `examples/stream_peer/05_blind_transfer/run.sh`.
 //!
 //! Topology:
 //!   Alice   → calls → Bob
@@ -69,11 +69,11 @@ fn blind_transfer_end_to_end() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_blind_transfer_alice",
+            "stream_peer_blind_transfer_alice",
             "--example",
-            "streampeer_blind_transfer_bob",
+            "stream_peer_blind_transfer_bob",
             "--example",
-            "streampeer_blind_transfer_charlie",
+            "stream_peer_blind_transfer_charlie",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -86,15 +86,15 @@ fn blind_transfer_end_to_end() {
     ];
 
     // Charlie first so he's ready to accept the transferred call.
-    let _charlie = spawn_example("streampeer_blind_transfer_charlie", &env_vars);
+    let _charlie = spawn_example("stream_peer_blind_transfer_charlie", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
 
     // Bob next — he waits on an incoming INVITE and issues a REFER after accept.
-    let _bob = spawn_example("streampeer_blind_transfer_bob", &env_vars);
+    let _bob = spawn_example("stream_peer_blind_transfer_bob", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
 
     // Alice starts the flow. Her exit status is our verdict.
-    let mut alice = spawn_example("streampeer_blind_transfer_alice", &env_vars);
+    let mut alice = spawn_example("stream_peer_blind_transfer_alice", &env_vars);
 
     let deadline = Instant::now() + Duration::from_secs(30);
     let exit = loop {

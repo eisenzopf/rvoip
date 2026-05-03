@@ -6,175 +6,170 @@ authors = ["RVoIP Contributors"]
 description = "State table-based session coordination layer for RVoIP"
 license = "MIT OR Apache-2.0"
 
-# Getting started
-[[example]]
-name = "hello"
-path = "examples/getting_started/hello.rs"
-
 # Endpoint examples (simplest account/profile API)
 [[example]]
 name = "endpoint_local_call"
-path = "examples/endpoint/local_call.rs"
-[[example]]
-name = "endpoint_pbx_registered_call"
-path = "examples/endpoint/pbx_registered_call.rs"
+path = "examples/endpoint/01_local_call/main.rs"
 [[example]]
 name = "endpoint_incoming_redirect"
-path = "examples/endpoint/incoming_redirect.rs"
+path = "examples/endpoint/02_incoming_redirect/main.rs"
+[[example]]
+name = "endpoint_registered_account"
+path = "examples/endpoint/03_registered_account/main.rs"
 
-# StreamPeer examples (sequential / client-side)
+# StreamPeer examples (sequential client/test API)
 [[example]]
-name = "streampeer_audio_alice"
-path = "examples/streampeer/audio/alice.rs"
+name = "stream_peer_basic_call"
+path = "examples/stream_peer/01_basic_call/main.rs"
 [[example]]
-name = "streampeer_audio_bob"
-path = "examples/streampeer/audio/bob.rs"
+name = "stream_peer_call_control_server"
+path = "examples/stream_peer/02_call_control/server.rs"
 [[example]]
-name = "streampeer_dtmf_server"
-path = "examples/streampeer/dtmf/server.rs"
+name = "stream_peer_call_control_client"
+path = "examples/stream_peer/02_call_control/client.rs"
 [[example]]
-name = "streampeer_dtmf_client"
-path = "examples/streampeer/dtmf/client.rs"
+name = "stream_peer_audio_alice"
+path = "examples/stream_peer/03_audio/alice.rs"
 [[example]]
-name = "streampeer_tls_server"
-path = "examples/streampeer/tls/server.rs"
+name = "stream_peer_audio_bob"
+path = "examples/stream_peer/03_audio/bob.rs"
+[[example]]
+name = "stream_peer_registration_server"
+path = "examples/stream_peer/04_registration/server.rs"
+[[example]]
+name = "stream_peer_registration_client"
+path = "examples/stream_peer/04_registration/client.rs"
+[[example]]
+name = "stream_peer_blind_transfer_alice"
+path = "examples/stream_peer/05_blind_transfer/alice.rs"
+[[example]]
+name = "stream_peer_blind_transfer_bob"
+path = "examples/stream_peer/05_blind_transfer/bob.rs"
+[[example]]
+name = "stream_peer_blind_transfer_charlie"
+path = "examples/stream_peer/05_blind_transfer/charlie.rs"
+[[example]]
+name = "stream_peer_concurrent_calls_server"
+path = "examples/stream_peer/06_concurrent_calls/server.rs"
+[[example]]
+name = "stream_peer_concurrent_calls_client"
+path = "examples/stream_peer/06_concurrent_calls/client.rs"
+
+# CallbackPeer examples (reactive server API)
+[[example]]
+name = "callback_peer_auto_answer_server"
+path = "examples/callback_peer/01_auto_answer/server.rs"
+[[example]]
+name = "callback_peer_auto_answer_client"
+path = "examples/callback_peer/01_auto_answer/client.rs"
+[[example]]
+name = "callback_peer_closure_gatekeeper_server"
+path = "examples/callback_peer/02_closure_gatekeeper/server.rs"
+[[example]]
+name = "callback_peer_closure_gatekeeper_client"
+path = "examples/callback_peer/02_closure_gatekeeper/client.rs"
+[[example]]
+name = "callback_peer_builder_ivr_server"
+path = "examples/callback_peer/03_builder_ivr/server.rs"
+[[example]]
+name = "callback_peer_builder_ivr_client"
+path = "examples/callback_peer/03_builder_ivr/client.rs"
+[[example]]
+name = "callback_peer_routing_handler_server"
+path = "examples/callback_peer/04_routing_handler/server.rs"
+[[example]]
+name = "callback_peer_routing_handler_client"
+path = "examples/callback_peer/04_routing_handler/client.rs"
+[[example]]
+name = "callback_peer_queue_handler_server"
+path = "examples/callback_peer/05_queue_handler/server.rs"
+[[example]]
+name = "callback_peer_queue_handler_client"
+path = "examples/callback_peer/05_queue_handler/client.rs"
+[[example]]
+name = "callback_peer_trait_handler_server"
+path = "examples/callback_peer/06_trait_handler/server.rs"
+[[example]]
+name = "callback_peer_trait_handler_client"
+path = "examples/callback_peer/06_trait_handler/client.rs"
+
+# UnifiedCoordinator examples (explicit session orchestration API)
+[[example]]
+name = "unified_basic_call"
+path = "examples/unified/01_basic_call/main.rs"
+[[example]]
+name = "unified_event_filters"
+path = "examples/unified/02_event_filters/main.rs"
+[[example]]
+name = "unified_registration_server"
+path = "examples/unified/03_registration_server/main.rs"
+[[example]]
+name = "unified_b2bua_bridge_alice"
+path = "examples/unified/04_b2bua_bridge/alice.rs"
+[[example]]
+name = "unified_b2bua_bridge_carol"
+path = "examples/unified/04_b2bua_bridge/carol.rs"
+[[example]]
+name = "unified_b2bua_bridge_peer"
+path = "examples/unified/04_b2bua_bridge/bridge_peer.rs"
+
+# Regression fixtures (protocol/behavior evidence, not the first learning path)
+[[example]]
+name = "regression_dtmf_round_trip_server"
+path = "examples/regression/01_dtmf_round_trip/server.rs"
+[[example]]
+name = "regression_dtmf_round_trip_client"
+path = "examples/regression/01_dtmf_round_trip/client.rs"
+[[example]]
+name = "regression_tls_server"
+path = "examples/regression/02_tls/server.rs"
 required-features = ["dev-insecure-tls"]
 [[example]]
-name = "streampeer_tls_client"
-path = "examples/streampeer/tls/client.rs"
+name = "regression_tls_client"
+path = "examples/regression/02_tls/client.rs"
 required-features = ["dev-insecure-tls"]
 [[example]]
-name = "streampeer_srtp_server"
-path = "examples/streampeer/srtp/server.rs"
+name = "regression_srtp_server"
+path = "examples/regression/03_srtp/server.rs"
 [[example]]
-name = "streampeer_srtp_client"
-path = "examples/streampeer/srtp/client.rs"
+name = "regression_srtp_client"
+path = "examples/regression/03_srtp/client.rs"
 [[example]]
-name = "streampeer_hold_resume_server"
-path = "examples/streampeer/hold_resume/server.rs"
+name = "regression_cancel_alice"
+path = "examples/regression/04_cancel/alice.rs"
 [[example]]
-name = "streampeer_hold_resume_client"
-path = "examples/streampeer/hold_resume/client.rs"
+name = "regression_cancel_bob"
+path = "examples/regression/04_cancel/bob.rs"
 [[example]]
-name = "streampeer_registration_server"
-path = "examples/streampeer/registration/server.rs"
+name = "regression_prack_alice"
+path = "examples/regression/05_prack/alice.rs"
 [[example]]
-name = "streampeer_registration_client"
-path = "examples/streampeer/registration/client.rs"
+name = "regression_prack_bob"
+path = "examples/regression/05_prack/bob.rs"
 [[example]]
-name = "streampeer_blind_transfer_alice"
-path = "examples/streampeer/blind_transfer/alice.rs"
+name = "regression_session_timer_alice"
+path = "examples/regression/06_session_timer/alice.rs"
 [[example]]
-name = "streampeer_blind_transfer_bob"
-path = "examples/streampeer/blind_transfer/bob.rs"
+name = "regression_session_timer_bob"
+path = "examples/regression/06_session_timer/bob.rs"
 [[example]]
-name = "streampeer_blind_transfer_charlie"
-path = "examples/streampeer/blind_transfer/charlie.rs"
+name = "regression_session_timer_failure_alice"
+path = "examples/regression/07_session_timer_failure/alice.rs"
 [[example]]
-name = "streampeer_prack_alice"
-path = "examples/streampeer/prack/alice.rs"
+name = "regression_session_timer_failure_bob"
+path = "examples/regression/07_session_timer_failure/bob.rs"
 [[example]]
-name = "streampeer_prack_bob"
-path = "examples/streampeer/prack/bob.rs"
+name = "regression_glare_retry_alice"
+path = "examples/regression/08_glare_retry/alice.rs"
 [[example]]
-name = "streampeer_session_timer_alice"
-path = "examples/streampeer/session_timer/alice.rs"
+name = "regression_glare_retry_bob"
+path = "examples/regression/08_glare_retry/bob.rs"
 [[example]]
-name = "streampeer_session_timer_bob"
-path = "examples/streampeer/session_timer/bob.rs"
+name = "regression_notify_send_alice"
+path = "examples/regression/09_notify_send/alice.rs"
 [[example]]
-name = "streampeer_session_timer_failure_alice"
-path = "examples/streampeer/session_timer_failure/alice.rs"
-[[example]]
-name = "streampeer_session_timer_failure_bob"
-path = "examples/streampeer/session_timer_failure/bob.rs"
-
-# 3-peer bridge / b2bua scenario (UnifiedCoordinator::bridge + events_for_session)
-[[example]]
-name = "streampeer_bridge_alice"
-path = "examples/streampeer/bridge/alice.rs"
-[[example]]
-name = "streampeer_bridge_carol"
-path = "examples/streampeer/bridge/carol.rs"
-[[example]]
-name = "streampeer_bridge_peer"
-path = "examples/streampeer/bridge/bridge_peer.rs"
-
-# CallbackPeer examples (reactive / server-side)
-[[example]]
-name = "callbackpeer_auto_answer_server"
-path = "examples/callbackpeer/auto_answer/server.rs"
-[[example]]
-name = "callbackpeer_auto_answer_client"
-path = "examples/callbackpeer/auto_answer/client.rs"
-[[example]]
-name = "callbackpeer_closure_server"
-path = "examples/callbackpeer/closure/server.rs"
-[[example]]
-name = "callbackpeer_closure_client"
-path = "examples/callbackpeer/closure/client.rs"
-[[example]]
-name = "callbackpeer_routing_server"
-path = "examples/callbackpeer/routing/server.rs"
-[[example]]
-name = "callbackpeer_routing_client"
-path = "examples/callbackpeer/routing/client.rs"
-[[example]]
-name = "callbackpeer_ivr_server"
-path = "examples/callbackpeer/ivr/server.rs"
-[[example]]
-name = "callbackpeer_ivr_client"
-path = "examples/callbackpeer/ivr/client.rs"
-[[example]]
-name = "callbackpeer_builder_ivr"
-path = "examples/callbackpeer/builder_ivr.rs"
-[[example]]
-name = "callbackpeer_queue_server"
-path = "examples/callbackpeer/queue/server.rs"
-[[example]]
-name = "callbackpeer_queue_client"
-path = "examples/callbackpeer/queue/client.rs"
-[[example]]
-name = "callbackpeer_custom_server"
-path = "examples/callbackpeer/custom/server.rs"
-[[example]]
-name = "callbackpeer_custom_client"
-path = "examples/callbackpeer/custom/client.rs"
-
-# CANCEL / 487 integration test fixtures
-[[example]]
-name = "streampeer_cancel_alice"
-path = "examples/streampeer/cancel/alice.rs"
-[[example]]
-name = "streampeer_cancel_bob"
-path = "examples/streampeer/cancel/bob.rs"
-
-# 491 glare retry integration test fixtures (RFC 3261 §14.1)
-[[example]]
-name = "streampeer_glare_retry_alice"
-path = "examples/streampeer/glare_retry/alice.rs"
-[[example]]
-name = "streampeer_glare_retry_bob"
-path = "examples/streampeer/glare_retry/bob.rs"
-
-# NOTIFY send integration test fixtures (RFC 6665)
-[[example]]
-name = "streampeer_notify_send_alice"
-path = "examples/streampeer/notify_send/alice.rs"
-[[example]]
-name = "streampeer_notify_send_bob"
-path = "examples/streampeer/notify_send/bob.rs"
-
-# Advanced / multi-peer scenarios
-[[example]]
-name = "advanced_concurrent_calls_server"
-path = "examples/advanced/concurrent_calls/server.rs"
-[[example]]
-name = "advanced_concurrent_calls_client"
-path = "examples/advanced/concurrent_calls/client.rs"
-[[example]]
-name = "advanced_registrar_server"
-path = "examples/advanced/registrar_server.rs"
+name = "regression_notify_send_bob"
+path = "examples/regression/09_notify_send/bob.rs"
 
 # Unified PBX interop examples
 [[example]]
@@ -182,8 +177,8 @@ name = "pbx_endpoint"
 path = "examples/pbx/endpoint.rs"
 required-features = ["dev-insecure-tls"]
 [[example]]
-name = "pbx_streampeer"
-path = "examples/pbx/streampeer.rs"
+name = "pbx_stream_peer"
+path = "examples/pbx/stream_peer.rs"
 required-features = ["dev-insecure-tls"]
 [[example]]
 name = "pbx_callback_builder"
@@ -193,168 +188,6 @@ required-features = ["dev-insecure-tls"]
 name = "pbx_analyze"
 path = "examples/pbx/analyze.rs"
 required-features = ["dev-insecure-tls"]
-
-# FreeSWITCH interop examples
-[[example]]
-name = "freeswitch_registration"
-path = "examples/freeswitch/registration/register.rs"
-[[example]]
-name = "freeswitch_udp_call_caller"
-path = "examples/freeswitch/udp_call/caller.rs"
-[[example]]
-name = "freeswitch_udp_call_callee"
-path = "examples/freeswitch/udp_call/callee.rs"
-[[example]]
-name = "freeswitch_udp_hold_resume_2001"
-path = "examples/freeswitch/udp_hold_resume/endpoint_2001.rs"
-[[example]]
-name = "freeswitch_udp_hold_resume_2002"
-path = "examples/freeswitch/udp_hold_resume/endpoint_2002.rs"
-[[example]]
-name = "freeswitch_udp_hold_resume_analyze"
-path = "examples/freeswitch/udp_hold_resume/analyze.rs"
-[[example]]
-name = "freeswitch_tls_srtp_hold_resume_1001"
-path = "examples/freeswitch/tls_srtp_hold_resume/endpoint_1001.rs"
-[[example]]
-name = "freeswitch_tls_srtp_hold_resume_1002"
-path = "examples/freeswitch/tls_srtp_hold_resume/endpoint_1002.rs"
-[[example]]
-name = "freeswitch_tls_srtp_hold_resume_analyze"
-path = "examples/freeswitch/tls_srtp_hold_resume/analyze.rs"
-[[example]]
-name = "freeswitch_tls_srtp_ring_remote_1001"
-path = "examples/freeswitch/tls_srtp_ring_remote/endpoint_1001.rs"
-[[example]]
-name = "freeswitch_tls_srtp_ring_remote_1003"
-path = "examples/freeswitch/tls_srtp_ring_remote/endpoint_1003.rs"
-[[example]]
-name = "freeswitch_udp_ring_remote_2001"
-path = "examples/freeswitch/udp_ring_remote/endpoint_2001.rs"
-[[example]]
-name = "freeswitch_udp_ring_remote_2003"
-path = "examples/freeswitch/udp_ring_remote/endpoint_2003.rs"
-[[example]]
-name = "freeswitch_tls_srtp_dtmf_1001"
-path = "examples/freeswitch/tls_srtp_dtmf/endpoint_1001.rs"
-[[example]]
-name = "freeswitch_tls_srtp_dtmf_1002"
-path = "examples/freeswitch/tls_srtp_dtmf/endpoint_1002.rs"
-[[example]]
-name = "freeswitch_tls_srtp_dtmf_analyze"
-path = "examples/freeswitch/tls_srtp_dtmf/analyze.rs"
-[[example]]
-name = "freeswitch_udp_dtmf_2001"
-path = "examples/freeswitch/udp_dtmf/endpoint_2001.rs"
-[[example]]
-name = "freeswitch_udp_dtmf_2002"
-path = "examples/freeswitch/udp_dtmf/endpoint_2002.rs"
-[[example]]
-name = "freeswitch_tls_srtp_blind_transfer_remote_transferor"
-path = "examples/freeswitch/tls_srtp_blind_transfer_remote/transferor_1001.rs"
-[[example]]
-name = "freeswitch_tls_srtp_blind_transfer_remote_transferee"
-path = "examples/freeswitch/tls_srtp_blind_transfer_remote/transferee_1002.rs"
-[[example]]
-name = "freeswitch_tls_srtp_blind_transfer_remote_target"
-path = "examples/freeswitch/tls_srtp_blind_transfer_remote/target_1003.rs"
-[[example]]
-name = "freeswitch_tls_srtp_blind_transfer_remote_analyze"
-path = "examples/freeswitch/tls_srtp_blind_transfer_remote/analyze.rs"
-[[example]]
-name = "freeswitch_udp_blind_transfer_remote_transferor"
-path = "examples/freeswitch/udp_blind_transfer_remote/transferor_2001.rs"
-[[example]]
-name = "freeswitch_udp_blind_transfer_remote_transferee"
-path = "examples/freeswitch/udp_blind_transfer_remote/transferee_2002.rs"
-[[example]]
-name = "freeswitch_udp_blind_transfer_remote_target"
-path = "examples/freeswitch/udp_blind_transfer_remote/target_2003.rs"
-
-# Asterisk interop examples
-[[example]]
-name = "asterisk_registration"
-path = "examples/asterisk/registration/register.rs"
-[[example]]
-name = "asterisk_udp_hold_resume_2001"
-path = "examples/asterisk/udp_hold_resume/endpoint_2001.rs"
-[[example]]
-name = "asterisk_udp_hold_resume_2002"
-path = "examples/asterisk/udp_hold_resume/endpoint_2002.rs"
-[[example]]
-name = "asterisk_udp_hold_resume_analyze"
-path = "examples/asterisk/udp_hold_resume/analyze.rs"
-[[example]]
-name = "asterisk_tls_srtp_hold_resume_1001"
-path = "examples/asterisk/tls_srtp_hold_resume/endpoint_1001.rs"
-[[example]]
-name = "asterisk_tls_srtp_hold_resume_1002"
-path = "examples/asterisk/tls_srtp_hold_resume/endpoint_1002.rs"
-[[example]]
-name = "asterisk_tls_srtp_hold_resume_analyze"
-path = "examples/asterisk/tls_srtp_hold_resume/analyze.rs"
-[[example]]
-name = "asterisk_tls_srtp_ring_remote_1001"
-path = "examples/asterisk/tls_srtp_ring_remote/endpoint_1001.rs"
-[[example]]
-name = "asterisk_tls_srtp_ring_remote_1003"
-path = "examples/asterisk/tls_srtp_ring_remote/endpoint_1003.rs"
-[[example]]
-name = "asterisk_udp_ring_remote_2001"
-path = "examples/asterisk/udp_ring_remote/endpoint_2001.rs"
-[[example]]
-name = "asterisk_udp_ring_remote_2003"
-path = "examples/asterisk/udp_ring_remote/endpoint_2003.rs"
-[[example]]
-name = "asterisk_tls_srtp_dtmf_1001"
-path = "examples/asterisk/tls_srtp_dtmf/endpoint_1001.rs"
-[[example]]
-name = "asterisk_tls_srtp_dtmf_1002"
-path = "examples/asterisk/tls_srtp_dtmf/endpoint_1002.rs"
-[[example]]
-name = "asterisk_tls_srtp_dtmf_analyze"
-path = "examples/asterisk/tls_srtp_dtmf/analyze.rs"
-[[example]]
-name = "asterisk_udp_dtmf_2001"
-path = "examples/asterisk/udp_dtmf/endpoint_2001.rs"
-[[example]]
-name = "asterisk_udp_dtmf_2002"
-path = "examples/asterisk/udp_dtmf/endpoint_2002.rs"
-[[example]]
-name = "asterisk_tls_srtp_blind_transfer_remote_transferor"
-path = "examples/asterisk/tls_srtp_blind_transfer_remote/transferor_1001.rs"
-[[example]]
-name = "asterisk_tls_srtp_blind_transfer_remote_transferee"
-path = "examples/asterisk/tls_srtp_blind_transfer_remote/transferee_1002.rs"
-[[example]]
-name = "asterisk_tls_srtp_blind_transfer_remote_target"
-path = "examples/asterisk/tls_srtp_blind_transfer_remote/target_1003.rs"
-[[example]]
-name = "asterisk_tls_srtp_blind_transfer_remote_analyze"
-path = "examples/asterisk/tls_srtp_blind_transfer_remote/analyze.rs"
-[[example]]
-name = "asterisk_udp_blind_transfer_remote_transferor"
-path = "examples/asterisk/udp_blind_transfer_remote/transferor_2001.rs"
-[[example]]
-name = "asterisk_udp_blind_transfer_remote_transferee"
-path = "examples/asterisk/udp_blind_transfer_remote/transferee_2002.rs"
-[[example]]
-name = "asterisk_udp_blind_transfer_remote_target"
-path = "examples/asterisk/udp_blind_transfer_remote/target_2003.rs"
-[[example]]
-name = "asterisk_callback_endpoint"
-path = "examples/asterisk_callback/endpoint.rs"
-[[example]]
-name = "asterisk_callback_analyze"
-path = "examples/asterisk_callback/analyze.rs"
-
-[[example]]
-name = "freeswitch_callback_endpoint"
-path = "examples/freeswitch_callback/endpoint.rs"
-
-[[example]]
-name = "freeswitch_callback_analyze"
-path = "examples/freeswitch_callback/analyze.rs"
 
 
 [dependencies]

@@ -94,7 +94,7 @@ coordinator.set_audio_source(&call_id, AudioSource::CustomSamples {
 - State-machine auto-switchback: `crates/session-core/state_machine/actions.rs`
   (`Action::SwitchToPassThroughOnActive`), wired in `state_tables/default.yaml`.
 - Tests: `crates/session-core/tests/early_media_tests.rs` (state-table
-  wiring), `crates/session-core/examples/streampeer/prack/` (end-to-end).
+  wiring), `crates/session-core/examples/regression/05_prack/` (end-to-end).
 
 ---
 
@@ -157,7 +157,7 @@ coordinator.hangup(&outbound).await?;
   `crates/session-core/src/api/unified.rs`.
 - Tests: `crates/session-core/tests/bridge_roundtrip_integration.rs`
   (3-peer end-to-end with Goertzel-asserted tones).
-- Skeleton: `examples/streampeer/bridge/bridge_peer.rs` (the b2bua
+- Skeleton: `examples/unified/04_b2bua_bridge/bridge_peer.rs` (the b2bua
   skeleton the roadmap calls out as Item 6 — lift into `crates/b2bua`).
 
 ---
@@ -238,7 +238,7 @@ samples explicitly.
 |---------|-----------|
 | Full roadmap incl. Items 1–5 and the two follow-ups | `PRE_B2BUA_ROADMAP.md` |
 | Which peer type to use (`CallbackPeer` / `StreamPeer` / `UnifiedCoordinator`) | `TELCO_USE_CASE_ANALYSIS.md` |
-| B2BUA skeleton (~157 LOC) ready for extraction into `crates/b2bua` | `examples/streampeer/bridge/bridge_peer.rs` |
+| B2BUA skeleton (~157 LOC) ready for extraction into `crates/b2bua` | `examples/unified/04_b2bua_bridge/bridge_peer.rs` |
 | End-to-end RTP test for the bridge primitive | `tests/bridge_roundtrip_integration.rs` |
 | State-table wiring for auto-switchback | `tests/early_media_tests.rs` |
 | 422 session-timer retry (different hardening track, not audio-mode related) | `tests/session_422_retry.rs` |

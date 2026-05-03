@@ -21,16 +21,16 @@ export ALICE_PORT BOB_PORT RVOIP_TEST_TRANSACTION_TIMEOUT_MS
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_session_timer_failure_alice \
-  --example streampeer_session_timer_failure_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example regression_session_timer_failure_alice \
+  --example regression_session_timer_failure_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${CYAN}[BOB]${NC} Listening on port $BOB_PORT (will exit mid-call at ~1.5s)"
-cargo run -p rvoip-session-core --example streampeer_session_timer_failure_bob --quiet \
+cargo run -p rvoip-session-core --example regression_session_timer_failure_bob --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[BOB]$(printf '\033[0m') /" &
 sleep 1
 
 echo -e "${GREEN}[ALICE]${NC} Calling Bob from $ALICE_PORT (expects SessionRefreshFailed ≤ 15s)"
-cargo run -p rvoip-session-core --example streampeer_session_timer_failure_alice --quiet \
+cargo run -p rvoip-session-core --example regression_session_timer_failure_alice --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[ALICE]$(printf '\033[0m') /"
 ALICE_EXIT=$?
 

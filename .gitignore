@@ -39,6 +39,7 @@ Cargo.backup
 *.wav
 # Test output directories
 crates/sip-client/tests/full_roundtrip/
+crates/session-core/examples/pbx/output/
 *.log
 .claude/
 

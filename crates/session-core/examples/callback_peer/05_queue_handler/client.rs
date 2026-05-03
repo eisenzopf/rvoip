@@ -1,7 +1,7 @@
 //! Test callers for the queue server.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_queue_client
-//! Or with server:  ./examples/callbackpeer/queue/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_queue_handler_client
+//! Or with server:  ./examples/callback_peer/05_queue_handler/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::{sleep, Duration};

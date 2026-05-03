@@ -9,16 +9,16 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_registration_server \
-  --example streampeer_registration_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example stream_peer_registration_server \
+  --example stream_peer_registration_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${GREEN}[REGISTRAR]${NC} Starting"
-cargo run -p rvoip-session-core --example streampeer_registration_server --quiet \
+cargo run -p rvoip-session-core --example stream_peer_registration_server --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[REGISTRAR]$(printf '\033[0m') /" &
 sleep 2
 
 echo -e "${CYAN}[CLIENT]${NC} Starting"
-cargo run -p rvoip-session-core --example streampeer_registration_client --quiet \
+cargo run -p rvoip-session-core --example stream_peer_registration_client --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENT]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 

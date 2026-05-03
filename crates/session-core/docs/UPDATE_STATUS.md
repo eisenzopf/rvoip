@@ -7,7 +7,7 @@
 
 ## Why this doc exists
 
-During `streampeer_hold_resume` testing we observed dialog-core warnings:
+During stream-peer hold/resume testing we observed dialog-core warnings:
 ```
 WARN rvoip_dialog_core::transaction::client::non_invite:
   Timer F (Timeout) fired in state Trying ... UPDATE:client

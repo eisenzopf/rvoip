@@ -63,9 +63,9 @@ fn session_timer_refresh_failure_emits_event() {
             "-p",
             "rvoip-session-core",
             "--example",
-            "streampeer_session_timer_failure_alice",
+            "regression_session_timer_failure_alice",
             "--example",
-            "streampeer_session_timer_failure_bob",
+            "regression_session_timer_failure_bob",
         ])
         .status()
         .expect("failed to invoke cargo build");
@@ -79,10 +79,10 @@ fn session_timer_refresh_failure_emits_event() {
         ("RVOIP_TEST_TRANSACTION_TIMEOUT_MS", "2500".to_string()),
     ];
 
-    let _bob = spawn_example("streampeer_session_timer_failure_bob", &env_vars);
+    let _bob = spawn_example("regression_session_timer_failure_bob", &env_vars);
     std::thread::sleep(Duration::from_millis(800));
 
-    let mut alice = spawn_example("streampeer_session_timer_failure_alice", &env_vars);
+    let mut alice = spawn_example("regression_session_timer_failure_alice", &env_vars);
 
     // 45 s outer safety net. Alice's internal assertion uses a 15 s
     // budget from CallEstablished — the outer deadline just guards

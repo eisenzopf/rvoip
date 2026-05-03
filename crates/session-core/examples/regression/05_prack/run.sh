@@ -12,8 +12,8 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example streampeer_prack_alice \
-  --example streampeer_prack_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example regression_prack_alice \
+  --example regression_prack_bob 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 run_scenario() {
   local mode="$1" alice_port="$2" bob_port="$3"
@@ -21,12 +21,12 @@ run_scenario() {
   echo -e "\n${YELLOW}── PRACK mode: ${mode} (Alice ${alice_port} ↔ Bob ${bob_port}) ──${NC}"
 
   PRACK_MODE="$mode" ALICE_PORT="$alice_port" BOB_PORT="$bob_port" \
-    cargo run -p rvoip-session-core --example streampeer_prack_bob --quiet \
+    cargo run -p rvoip-session-core --example regression_prack_bob --quiet \
     2>&1 | sed "s/^/$(printf '\033[0;36m')[BOB.${mode}]$(printf '\033[0m') /" &
   sleep 1
 
   PRACK_MODE="$mode" ALICE_PORT="$alice_port" BOB_PORT="$bob_port" \
-    cargo run -p rvoip-session-core --example streampeer_prack_alice --quiet \
+    cargo run -p rvoip-session-core --example regression_prack_alice --quiet \
     2>&1 | sed "s/^/$(printf '\033[0;32m')[ALICE.${mode}]$(printf '\033[0m') /"
 
   # Let Bob wind down on his own; different ports for each scenario mean any

@@ -23,10 +23,8 @@ Each scenario should assert both SIP wire behavior and public `Event` output.
 
 Automate the current manual release gates:
 
-- `examples/asterisk/run.sh`
-- `ASTERISK_RUN_EXTENDED_TESTS=1 examples/asterisk/run.sh`
-- `examples/asterisk_callback/run.sh`
-- `ASTERISK_RUN_EXTENDED_TESTS=1 examples/asterisk_callback/run.sh`
+- `examples/pbx/run.sh --pbx asterisk --api all --scenario all`
+- `examples/pbx/run_remote.sh --pbx asterisk --api all`
 
 The Docker profile must capture SIP logs, example logs, and audio analysis
 artifacts.

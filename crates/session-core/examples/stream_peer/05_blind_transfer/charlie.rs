@@ -1,7 +1,7 @@
 //! Transfer target (Charlie) — waits for the transferred call from Alice.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example streampeer_blind_transfer_charlie
-//! Or with others:  ./examples/streampeer/blind_transfer/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example stream_peer_blind_transfer_charlie
+//! Or with others:  ./examples/stream_peer/05_blind_transfer/run.sh
 
 use rvoip_session_core::{Config, StreamPeer};
 use tokio::time::Duration;

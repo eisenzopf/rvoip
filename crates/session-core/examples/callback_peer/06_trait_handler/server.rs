@@ -1,7 +1,7 @@
 //! Full CallHandler implementation showing every callback method.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_custom_server
-//! Or with client:  ./examples/callbackpeer/custom/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_trait_handler_server
+//! Or with client:  ./examples/callback_peer/06_trait_handler/run.sh
 
 use async_trait::async_trait;
 

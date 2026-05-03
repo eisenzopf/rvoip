@@ -1,7 +1,7 @@
 //! Auto-answer SIP server.
 //!
-//! Run standalone:  cargo run -p rvoip-session-core --example callbackpeer_auto_answer_server
-//! Or with client:  ./examples/callbackpeer/auto_answer/run.sh
+//! Run standalone:  cargo run -p rvoip-session-core --example callback_peer_auto_answer_server
+//! Or with client:  ./examples/callback_peer/01_auto_answer/run.sh
 
 use rvoip_session_core::{CallbackPeer, Config};
 

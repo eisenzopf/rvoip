@@ -9,16 +9,16 @@ trap cleanup EXIT
 
 echo -e "${GREEN}Building...${NC}"
 cargo build -p rvoip-session-core \
-  --example callbackpeer_custom_server \
-  --example callbackpeer_custom_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
+  --example callback_peer_trait_handler_server \
+  --example callback_peer_trait_handler_client 2>&1 | grep -v '^warning:' | grep -v '^\s' | grep -v '^$' || true
 
 echo -e "${GREEN}[SERVER]${NC} Starting"
-cargo run -p rvoip-session-core --example callbackpeer_custom_server --quiet \
+cargo run -p rvoip-session-core --example callback_peer_trait_handler_server --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;32m')[SERVER]$(printf '\033[0m') /" &
 sleep 2
 
 echo -e "${CYAN}[CLIENT]${NC} Starting"
-cargo run -p rvoip-session-core --example callbackpeer_custom_client --quiet \
+cargo run -p rvoip-session-core --example callback_peer_trait_handler_client --quiet \
   2>&1 | sed "s/^/$(printf '\033[0;36m')[CLIENT]$(printf '\033[0m') /"
 CLIENT_EXIT=$?
 
