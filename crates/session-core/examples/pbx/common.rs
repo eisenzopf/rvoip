@@ -3245,6 +3245,33 @@ mod tests {
     }
 
     #[test]
+    fn canonical_user_sets_are_transport_specific() {
+        let roles = [
+            Role::Registration,
+            Role::Caller,
+            Role::Transferor,
+            Role::Callee,
+            Role::Transferee,
+            Role::Target,
+        ];
+        let mut tls_users = roles
+            .iter()
+            .map(|role| username_for(TransportMode::TlsSrtp, *role))
+            .collect::<Vec<_>>();
+        tls_users.sort_unstable();
+        tls_users.dedup();
+        assert_eq!(tls_users, vec!["1001", "1002", "1003"]);
+
+        let mut udp_users = roles
+            .iter()
+            .map(|role| username_for(TransportMode::Udp, *role))
+            .collect::<Vec<_>>();
+        udp_users.sort_unstable();
+        udp_users.dedup();
+        assert_eq!(udp_users, vec!["2001", "2002", "2003"]);
+    }
+
+    #[test]
     fn auth_username_ignores_global_for_other_endpoint_users() {
         assert_eq!(
             select_auth_username("2001", None, Some("1001"), Some("1001")),

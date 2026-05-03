@@ -7,8 +7,8 @@ They mirror the Asterisk StreamPeer examples:
 
 | Users | Profile | Transport / media |
 | --- | --- | --- |
-| `1001-1004` | `rvoip_tls_srtp` | SIP TLS + mandatory SDES-SRTP |
-| `2001-2004` | `rvoip_udp` | SIP UDP/TCP + plain RTP |
+| `1001-1003` | `rvoip_tls_srtp` | SIP TLS + mandatory SDES-SRTP |
+| `2001-2003` | `rvoip_udp` | SIP UDP/TCP + plain RTP |
 
 The TLS/SRTP profile requires SRTP but leaves the crypto suite list at the
 FreeSWITCH default so SDP negotiation is exercised instead of pinned.

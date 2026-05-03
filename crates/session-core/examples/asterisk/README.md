@@ -15,11 +15,9 @@ same Asterisk profile and should also pass before release.
 | `1001` | rvoip endpoint | SIP TLS + mandatory SDES-SRTP | caller in TLS/SRTP automated tests |
 | `1002` | rvoip endpoint | SIP TLS + mandatory SDES-SRTP | callee in TLS/SRTP automated tests |
 | `1003` | rvoip endpoint | SIP TLS + mandatory SDES-SRTP | third endpoint for ring/cancel and transfer tests |
-| `1004` | optional rvoip endpoint | SIP TLS + SRTP | reserved for bridge/conference expansion |
 | `2001` | rvoip endpoint | UDP + plain RTP | caller in UDP automated tests |
 | `2002` | rvoip endpoint | UDP + plain RTP | callee in UDP automated tests |
 | `2003` | rvoip endpoint | UDP + plain RTP | third endpoint for ring/cancel and transfer tests |
-| `2004` | optional rvoip endpoint | UDP + plain RTP | reserved for bridge/conference expansion |
 
 ## Current Automated Tests
 
