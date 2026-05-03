@@ -148,12 +148,36 @@ impl From<String> for EndReason {
 }
 
 type CallbackFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+type EventHook = Arc<dyn Fn(Event) -> CallbackFuture<Result<()>> + Send + Sync>;
 type IncomingHook = Arc<dyn Fn(IncomingCall) -> CallbackFuture<CallHandlerDecision> + Send + Sync>;
 type EstablishedHook = Arc<dyn Fn(SessionHandle) -> CallbackFuture<Result<()>> + Send + Sync>;
+type ProgressHook = Arc<
+    dyn Fn(SessionHandle, u16, String, Option<String>) -> CallbackFuture<Result<()>> + Send + Sync,
+>;
 type DtmfHook = Arc<dyn Fn(SessionHandle, char) -> CallbackFuture<Result<()>> + Send + Sync>;
 type EndedHook = Arc<dyn Fn(CallId, EndReason) -> CallbackFuture<Result<()>> + Send + Sync>;
+type FailedHook = Arc<dyn Fn(CallId, u16, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type CancelledHook = Arc<dyn Fn(CallId) -> CallbackFuture<Result<()>> + Send + Sync>;
+type MediaSecurityHook =
+    Arc<dyn Fn(SessionHandle, MediaSecurityState) -> CallbackFuture<Result<()>> + Send + Sync>;
+type HoldHook = Arc<dyn Fn(SessionHandle) -> CallbackFuture<Result<()>> + Send + Sync>;
 type TransferRequestHook =
     Arc<dyn Fn(SessionHandle, String) -> CallbackFuture<Result<bool>> + Send + Sync>;
+type TransferAcceptedHook =
+    Arc<dyn Fn(SessionHandle, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type ReferProgressHook =
+    Arc<dyn Fn(SessionHandle, u16, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type ReferCompletedHook =
+    Arc<dyn Fn(SessionHandle, String, u16, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type TransferFailedHook =
+    Arc<dyn Fn(SessionHandle, u16, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type RegistrationSuccessHook =
+    Arc<dyn Fn(String, u32, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type RegistrationFailedHook =
+    Arc<dyn Fn(String, u16, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type UnregistrationSuccessHook = Arc<dyn Fn(String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type UnregistrationFailedHook =
+    Arc<dyn Fn(String, String) -> CallbackFuture<Result<()>> + Send + Sync>;
 
 /// Builder for closure-based [`CallbackPeer`] applications.
 ///
@@ -161,11 +185,28 @@ type TransferRequestHook =
 /// application still wants typed hooks for common lifecycle events.
 pub struct CallbackPeerBuilder {
     config: Config,
+    event: Option<EventHook>,
     incoming: Option<IncomingHook>,
     established: Option<EstablishedHook>,
+    progress: Option<ProgressHook>,
     dtmf: Option<DtmfHook>,
     ended: Option<EndedHook>,
+    failed: Option<FailedHook>,
+    cancelled: Option<CancelledHook>,
+    media_security: Option<MediaSecurityHook>,
+    local_hold: Option<HoldHook>,
+    local_resume: Option<HoldHook>,
+    remote_hold: Option<HoldHook>,
+    remote_resume: Option<HoldHook>,
     transfer_request: Option<TransferRequestHook>,
+    transfer_accepted: Option<TransferAcceptedHook>,
+    refer_progress: Option<ReferProgressHook>,
+    refer_completed: Option<ReferCompletedHook>,
+    transfer_failed: Option<TransferFailedHook>,
+    registration_success: Option<RegistrationSuccessHook>,
+    registration_failed: Option<RegistrationFailedHook>,
+    unregistration_success: Option<UnregistrationSuccessHook>,
+    unregistration_failed: Option<UnregistrationFailedHook>,
 }
 
 impl CallbackPeerBuilder {
@@ -173,12 +214,39 @@ impl CallbackPeerBuilder {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            event: None,
             incoming: None,
             established: None,
+            progress: None,
             dtmf: None,
             ended: None,
+            failed: None,
+            cancelled: None,
+            media_security: None,
+            local_hold: None,
+            local_resume: None,
+            remote_hold: None,
+            remote_resume: None,
             transfer_request: None,
+            transfer_accepted: None,
+            refer_progress: None,
+            refer_completed: None,
+            transfer_failed: None,
+            registration_success: None,
+            registration_failed: None,
+            unregistration_success: None,
+            unregistration_failed: None,
         }
+    }
+
+    /// Handle every public event before more specific typed hooks run.
+    pub fn on_event<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(Event) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.event = Some(Arc::new(move |event| Box::pin(f(event))));
+        self
     }
 
     /// Handle incoming calls.
@@ -204,6 +272,18 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Handle provisional call progress such as 180 Ringing or 183 Session Progress.
+    pub fn on_progress<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, u16, String, Option<String>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.progress = Some(Arc::new(move |handle, status, reason, sdp| {
+            Box::pin(f(handle, status, reason, sdp))
+        }));
+        self
+    }
+
     /// Handle inbound DTMF digits on active calls.
     pub fn on_dtmf<F, Fut>(mut self, f: F) -> Self
     where
@@ -211,6 +291,78 @@ impl CallbackPeerBuilder {
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
         self.dtmf = Some(Arc::new(move |handle, digit| Box::pin(f(handle, digit))));
+        self
+    }
+
+    /// Handle failed calls.
+    pub fn on_failed<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(CallId, u16, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.failed = Some(Arc::new(move |call_id, status, reason| {
+            Box::pin(f(call_id, status, reason))
+        }));
+        self
+    }
+
+    /// Handle cancelled ringing calls.
+    pub fn on_cancelled<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(CallId) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.cancelled = Some(Arc::new(move |call_id| Box::pin(f(call_id))));
+        self
+    }
+
+    /// Handle negotiated media security state.
+    pub fn on_media_security<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, MediaSecurityState) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.media_security = Some(Arc::new(move |handle, state| Box::pin(f(handle, state))));
+        self
+    }
+
+    /// Handle local hold confirmation.
+    pub fn on_local_hold<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.local_hold = Some(Arc::new(move |handle| Box::pin(f(handle))));
+        self
+    }
+
+    /// Handle local resume confirmation.
+    pub fn on_local_resume<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.local_resume = Some(Arc::new(move |handle| Box::pin(f(handle))));
+        self
+    }
+
+    /// Handle remote hold.
+    pub fn on_remote_hold<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.remote_hold = Some(Arc::new(move |handle| Box::pin(f(handle))));
+        self
+    }
+
+    /// Handle remote resume.
+    pub fn on_remote_resume<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.remote_resume = Some(Arc::new(move |handle| Box::pin(f(handle))));
         self
     }
 
@@ -236,6 +388,100 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Handle an accepted outbound REFER.
+    pub fn on_transfer_accepted<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.transfer_accepted = Some(Arc::new(move |handle, refer_to| {
+            Box::pin(f(handle, refer_to))
+        }));
+        self
+    }
+
+    /// Handle provisional REFER progress.
+    pub fn on_refer_progress<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, u16, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.refer_progress = Some(Arc::new(move |handle, status, reason| {
+            Box::pin(f(handle, status, reason))
+        }));
+        self
+    }
+
+    /// Handle successful terminal REFER completion.
+    pub fn on_refer_completed<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, String, u16, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.refer_completed = Some(Arc::new(move |handle, target, status, reason| {
+            Box::pin(f(handle, target, status, reason))
+        }));
+        self
+    }
+
+    /// Handle REFER failure.
+    pub fn on_transfer_failed<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SessionHandle, u16, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.transfer_failed = Some(Arc::new(move |handle, status, reason| {
+            Box::pin(f(handle, status, reason))
+        }));
+        self
+    }
+
+    /// Handle successful registration.
+    pub fn on_registration_success<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(String, u32, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.registration_success = Some(Arc::new(move |registrar, expires, contact| {
+            Box::pin(f(registrar, expires, contact))
+        }));
+        self
+    }
+
+    /// Handle failed registration.
+    pub fn on_registration_failed<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(String, u16, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.registration_failed = Some(Arc::new(move |registrar, status, reason| {
+            Box::pin(f(registrar, status, reason))
+        }));
+        self
+    }
+
+    /// Handle successful unregistration.
+    pub fn on_unregistration_success<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.unregistration_success = Some(Arc::new(move |registrar| Box::pin(f(registrar))));
+        self
+    }
+
+    /// Handle failed unregistration.
+    pub fn on_unregistration_failed<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(String, String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.unregistration_failed = Some(Arc::new(move |registrar, reason| {
+            Box::pin(f(registrar, reason))
+        }));
+        self
+    }
+
     /// Build the [`CallbackPeer`].
     pub async fn build(self) -> Result<CallbackPeer<CallbackBuilderHandler>> {
         let incoming = self.incoming.ok_or_else(|| {
@@ -245,11 +491,28 @@ impl CallbackPeerBuilder {
         })?;
         CallbackPeer::new(
             CallbackBuilderHandler {
+                event: self.event,
                 incoming,
                 established: self.established,
+                progress: self.progress,
                 dtmf: self.dtmf,
                 ended: self.ended,
+                failed: self.failed,
+                cancelled: self.cancelled,
+                media_security: self.media_security,
+                local_hold: self.local_hold,
+                local_resume: self.local_resume,
+                remote_hold: self.remote_hold,
+                remote_resume: self.remote_resume,
                 transfer_request: self.transfer_request,
+                transfer_accepted: self.transfer_accepted,
+                refer_progress: self.refer_progress,
+                refer_completed: self.refer_completed,
+                transfer_failed: self.transfer_failed,
+                registration_success: self.registration_success,
+                registration_failed: self.registration_failed,
+                unregistration_success: self.unregistration_success,
+                unregistration_failed: self.unregistration_failed,
             },
             self.config,
         )
@@ -260,15 +523,40 @@ impl CallbackPeerBuilder {
 /// Internal [`CallHandler`] adapter used by [`CallbackPeerBuilder`].
 #[doc(hidden)]
 pub struct CallbackBuilderHandler {
+    event: Option<EventHook>,
     incoming: IncomingHook,
     established: Option<EstablishedHook>,
+    progress: Option<ProgressHook>,
     dtmf: Option<DtmfHook>,
     ended: Option<EndedHook>,
+    failed: Option<FailedHook>,
+    cancelled: Option<CancelledHook>,
+    media_security: Option<MediaSecurityHook>,
+    local_hold: Option<HoldHook>,
+    local_resume: Option<HoldHook>,
+    remote_hold: Option<HoldHook>,
+    remote_resume: Option<HoldHook>,
     transfer_request: Option<TransferRequestHook>,
+    transfer_accepted: Option<TransferAcceptedHook>,
+    refer_progress: Option<ReferProgressHook>,
+    refer_completed: Option<ReferCompletedHook>,
+    transfer_failed: Option<TransferFailedHook>,
+    registration_success: Option<RegistrationSuccessHook>,
+    registration_failed: Option<RegistrationFailedHook>,
+    unregistration_success: Option<UnregistrationSuccessHook>,
+    unregistration_failed: Option<UnregistrationFailedHook>,
 }
 
 #[async_trait]
 impl CallHandler for CallbackBuilderHandler {
+    async fn on_event(&self, event: Event) {
+        if let Some(hook) = &self.event {
+            if let Err(err) = hook(event).await {
+                tracing::warn!("[CallbackPeerBuilder] on_event failed: {}", err);
+            }
+        }
+    }
+
     async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
         (self.incoming)(call).await
     }
@@ -281,6 +569,20 @@ impl CallHandler for CallbackBuilderHandler {
         }
     }
 
+    async fn on_call_progress(
+        &self,
+        handle: SessionHandle,
+        status_code: u16,
+        reason: String,
+        sdp: Option<String>,
+    ) {
+        if let Some(hook) = &self.progress {
+            if let Err(err) = hook(handle, status_code, reason, sdp).await {
+                tracing::warn!("[CallbackPeerBuilder] on_progress failed: {}", err);
+            }
+        }
+    }
+
     async fn on_call_ended(&self, call_id: CallId, reason: EndReason) {
         if let Some(hook) = &self.ended {
             if let Err(err) = hook(call_id, reason).await {
@@ -289,10 +591,66 @@ impl CallHandler for CallbackBuilderHandler {
         }
     }
 
+    async fn on_call_failed(&self, call_id: CallId, status_code: u16, reason: String) {
+        if let Some(hook) = &self.failed {
+            if let Err(err) = hook(call_id, status_code, reason).await {
+                tracing::warn!("[CallbackPeerBuilder] on_failed failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_call_cancelled(&self, call_id: CallId) {
+        if let Some(hook) = &self.cancelled {
+            if let Err(err) = hook(call_id).await {
+                tracing::warn!("[CallbackPeerBuilder] on_cancelled failed: {}", err);
+            }
+        }
+    }
+
     async fn on_dtmf(&self, handle: SessionHandle, digit: char) {
         if let Some(hook) = &self.dtmf {
             if let Err(err) = hook(handle, digit).await {
                 tracing::warn!("[CallbackPeerBuilder] on_dtmf failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_media_security_negotiated(&self, handle: SessionHandle, state: MediaSecurityState) {
+        if let Some(hook) = &self.media_security {
+            if let Err(err) = hook(handle, state).await {
+                tracing::warn!("[CallbackPeerBuilder] on_media_security failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_call_on_hold(&self, handle: SessionHandle) {
+        if let Some(hook) = &self.local_hold {
+            if let Err(err) = hook(handle).await {
+                tracing::warn!("[CallbackPeerBuilder] on_local_hold failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_call_resumed(&self, handle: SessionHandle) {
+        if let Some(hook) = &self.local_resume {
+            if let Err(err) = hook(handle).await {
+                tracing::warn!("[CallbackPeerBuilder] on_local_resume failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_remote_call_on_hold(&self, handle: SessionHandle) {
+        if let Some(hook) = &self.remote_hold {
+            if let Err(err) = hook(handle).await {
+                tracing::warn!("[CallbackPeerBuilder] on_remote_hold failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_remote_call_resumed(&self, handle: SessionHandle) {
+        if let Some(hook) = &self.remote_resume {
+            if let Err(err) = hook(handle).await {
+                tracing::warn!("[CallbackPeerBuilder] on_remote_resume failed: {}", err);
             }
         }
     }
@@ -309,6 +667,88 @@ impl CallHandler for CallbackBuilderHandler {
                     err
                 );
                 false
+            }
+        }
+    }
+
+    async fn on_transfer_accepted(&self, handle: SessionHandle, refer_to: String) {
+        if let Some(hook) = &self.transfer_accepted {
+            if let Err(err) = hook(handle, refer_to).await {
+                tracing::warn!("[CallbackPeerBuilder] on_transfer_accepted failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_refer_progress(&self, handle: SessionHandle, status_code: u16, reason: String) {
+        if let Some(hook) = &self.refer_progress {
+            if let Err(err) = hook(handle, status_code, reason).await {
+                tracing::warn!("[CallbackPeerBuilder] on_refer_progress failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_refer_completed(
+        &self,
+        handle: SessionHandle,
+        target: String,
+        status_code: u16,
+        reason: String,
+    ) {
+        if let Some(hook) = &self.refer_completed {
+            if let Err(err) = hook(handle, target, status_code, reason).await {
+                tracing::warn!("[CallbackPeerBuilder] on_refer_completed failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_transfer_failed(&self, handle: SessionHandle, status_code: u16, reason: String) {
+        if let Some(hook) = &self.transfer_failed {
+            if let Err(err) = hook(handle, status_code, reason).await {
+                tracing::warn!("[CallbackPeerBuilder] on_transfer_failed failed: {}", err);
+            }
+        }
+    }
+
+    async fn on_registration_success(&self, registrar: String, expires: u32, contact: String) {
+        if let Some(hook) = &self.registration_success {
+            if let Err(err) = hook(registrar, expires, contact).await {
+                tracing::warn!(
+                    "[CallbackPeerBuilder] on_registration_success failed: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    async fn on_registration_failed(&self, registrar: String, status_code: u16, reason: String) {
+        if let Some(hook) = &self.registration_failed {
+            if let Err(err) = hook(registrar, status_code, reason).await {
+                tracing::warn!(
+                    "[CallbackPeerBuilder] on_registration_failed failed: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    async fn on_unregistration_success(&self, registrar: String) {
+        if let Some(hook) = &self.unregistration_success {
+            if let Err(err) = hook(registrar).await {
+                tracing::warn!(
+                    "[CallbackPeerBuilder] on_unregistration_success failed: {}",
+                    err
+                );
+            }
+        }
+    }
+
+    async fn on_unregistration_failed(&self, registrar: String, reason: String) {
+        if let Some(hook) = &self.unregistration_failed {
+            if let Err(err) = hook(registrar, reason).await {
+                tracing::warn!(
+                    "[CallbackPeerBuilder] on_unregistration_failed failed: {}",
+                    err
+                );
             }
         }
     }

@@ -176,6 +176,24 @@ path = "examples/advanced/concurrent_calls/client.rs"
 name = "advanced_registrar_server"
 path = "examples/advanced/registrar_server.rs"
 
+# Unified PBX interop examples
+[[example]]
+name = "pbx_endpoint"
+path = "examples/pbx/endpoint.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "pbx_streampeer"
+path = "examples/pbx/streampeer.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "pbx_callback_builder"
+path = "examples/pbx/callback_builder.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "pbx_analyze"
+path = "examples/pbx/analyze.rs"
+required-features = ["dev-insecure-tls"]
+
 # FreeSWITCH interop examples
 [[example]]
 name = "freeswitch_registration"
