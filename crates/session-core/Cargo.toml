@@ -16,6 +16,9 @@ path = "examples/endpoint/02_incoming_redirect/main.rs"
 [[example]]
 name = "endpoint_registered_account"
 path = "examples/endpoint/03_registered_account/main.rs"
+[[example]]
+name = "sip_client"
+path = "examples/sip_client/main.rs"
 
 # StreamPeer examples (sequential client/test API)
 [[example]]
@@ -251,6 +254,11 @@ serial_test = { workspace = true }
 tempfile = "3.14"
 # Self-signed cert generation for the TLS-call integration test.
 rcgen = "0.12"
+clap = { workspace = true }
+cpal = "0.15"
+crossterm = "0.27"
+ratatui = "0.26"
+toml = "0.8"
 
 [features]
 default = []
