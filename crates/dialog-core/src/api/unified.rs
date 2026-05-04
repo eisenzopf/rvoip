@@ -997,8 +997,10 @@ impl UnifiedDialogApi {
             transaction_id, dialog_id
         );
 
-        // Build the response
-        // For 200 OK responses to INVITE, we need special handling to ensure To tag is added
+        // Build the response. Only dialog-creating INVITEs need a freshly
+        // generated To tag. In-dialog re-INVITEs already carry the dialog's To
+        // tag; regenerating it forks the dialog identity and breaks the next
+        // mid-call request.
         let response = if status_code == 200 {
             // Get original request to check if it's an INVITE
             let original_request = self
@@ -1014,7 +1016,11 @@ impl UnifiedDialogApi {
                     message: "No original request found for transaction".to_string(),
                 })?;
 
-            if original_request.method() == rvoip_sip_core::Method::Invite {
+            let is_dialog_creating_invite = original_request.method()
+                == rvoip_sip_core::Method::Invite
+                && original_request.to().and_then(|to| to.tag()).is_none();
+
+            if is_dialog_creating_invite {
                 // Use special response builder for 200 OK to INVITE that adds To tag
                 use crate::transaction::utils::response_builders;
                 let local_addr = self
@@ -1061,7 +1067,8 @@ impl UnifiedDialogApi {
 
                 response
             } else {
-                // Not an INVITE, use regular response building
+                // Not a dialog-creating INVITE; preserve existing request
+                // headers, including the To tag on re-INVITEs.
                 self.build_response(
                     &transaction_id,
                     StatusCode::from_u16(status_code).unwrap_or(StatusCode::Ok),

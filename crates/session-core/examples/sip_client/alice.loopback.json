@@ -1,0 +1,13 @@
+{
+  "name": "alice",
+  "profile": "local",
+  "network": {
+    "bind": "127.0.0.1:5080",
+    "transport": "udp"
+  },
+  "media": {
+    "portStart": 17400,
+    "portEnd": 17500,
+    "srtp": "off"
+  }
+}

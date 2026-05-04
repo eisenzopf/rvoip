@@ -18,8 +18,8 @@ async fn main() -> rvoip_session_core::Result<()> {
             .await?;
 
         let incoming = bob.wait_for_incoming().await?;
-        println!("[bob] incoming from {}", incoming.from);
-        let call = incoming.accept().await?;
+        println!("[bob] incoming from {}", incoming.from());
+        let call = incoming.answer().await?;
         call.wait_for_end(None).await?;
         bob.shutdown().await
     });

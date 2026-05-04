@@ -217,7 +217,13 @@ pub use api::callback_peer::{
     CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl,
     ClosureHandler, EndReason, ShutdownHandle,
 };
-pub use api::endpoint::{Endpoint, EndpointAccount, EndpointBuilder, EndpointProfile};
+pub use api::endpoint::{
+    Endpoint, EndpointAccount, EndpointAccountConfig, EndpointAudio, EndpointAudioFrame,
+    EndpointAudioReceiver, EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId,
+    EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
+    EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
+    EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSrtpMode, EndpointTransport,
+};
 pub use api::stream_peer::{EventReceiver, PeerControl, StreamPeer, StreamPeerBuilder};
 
 // Built-in handlers
@@ -273,13 +279,18 @@ pub mod prelude {
         CallHandlerDecision, CallId, CallLifecycleSnapshot, CallProgressInfo, CallState,
         CallTerminalInfo, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl, Config,
         DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState,
-        DialogSubscriptionHandle, EndReason, Endpoint, EndpointAccount, EndpointBuilder,
-        EndpointProfile, Event, EventReceiver, IncomingCall, IncomingCallGuard,
-        MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, PeerControl, Registration,
-        RegistrationHandle, RegistrationInfo, RegistrationStatus, Result, SessionError,
-        SessionHandle, SipContactMode, SipReason, SipTlsMode, SrtpSuitePolicy, StreamPeer,
-        StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
-        TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
+        DialogSubscriptionHandle, EndReason, Endpoint, EndpointAccount, EndpointAccountConfig,
+        EndpointAudio, EndpointAudioFrame, EndpointAudioReceiver, EndpointAudioSender,
+        EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig, EndpointControl,
+        EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
+        EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
+        EndpointRegistrationStatus, EndpointSrtpMode, EndpointTransport, Event, EventReceiver,
+        IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
+        MediaSecurityState, PeerControl, Registration, RegistrationHandle, RegistrationInfo,
+        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipReason,
+        SipTlsMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
+        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
+        TransferTargetEvidence, TransferWaitMode,
     };
 }
 

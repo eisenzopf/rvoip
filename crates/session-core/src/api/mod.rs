@@ -323,9 +323,6 @@ pub use unified::{
 // Re-export the simple API (legacy)
 pub use simple::SimplePeer;
 
-// Re-export the simplified Endpoint API
-pub use endpoint::{Endpoint, EndpointAccount, EndpointBuilder, EndpointProfile};
-
 // Re-export event types
 pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState};
 pub use dialog_subscription::DialogSubscriptionHandle;
@@ -368,4 +365,11 @@ pub use stream_peer::{EventReceiver, PeerControl, StreamPeer};
 pub use callback_peer::{
     CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder, CallbackPeerControl,
     EndReason,
+};
+pub use endpoint::{
+    Endpoint, EndpointAccount, EndpointAccountConfig, EndpointAudio, EndpointAudioFrame,
+    EndpointAudioReceiver, EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId,
+    EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
+    EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
+    EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSrtpMode, EndpointTransport,
 };

@@ -1,0 +1,13 @@
+{
+  "name": "bob",
+  "profile": "local",
+  "network": {
+    "bind": "127.0.0.1:5081",
+    "transport": "udp"
+  },
+  "media": {
+    "portStart": 17600,
+    "portEnd": 17700,
+    "srtp": "off"
+  }
+}

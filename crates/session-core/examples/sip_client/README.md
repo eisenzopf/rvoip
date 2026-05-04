@@ -1,75 +1,94 @@
-# Session-Core SIP Client
+# Endpoint SIP Client
 
-Interactive terminal SIP client built directly on `session-core::Endpoint`.
+Interactive and noninteractive SIP client built only on the
+`session-core::Endpoint` facade. The example owns terminal UI and CPAL device
+I/O; SIP signalling, registration, calls, events, audio frames, DTMF,
+hold/resume, transfer, SRTP, and NAT/STUN settings all go through Endpoint
+types.
 
-This example is intentionally not based on the legacy `client-core` or
-`sip-client` crates. `session-core` owns registration, call control, SDP, RTP,
-codecs, DTMF, hold/resume, transfer, SRTP, and NAT/STUN knobs. The example owns
-only terminal UI state and CPAL microphone/speaker I/O.
+## JSON Config
 
-## List Audio Devices
-
-```sh
-cargo run -p rvoip-session-core --example sip_client -- --list-devices
+```json
+{
+  "name": "alice",
+  "profile": "asterisk-udp",
+  "registerOnStart": true,
+  "account": {
+    "username": "1001",
+    "password": "secret",
+    "registrar": "sip:192.168.1.50:5060"
+  },
+  "network": {
+    "bind": "0.0.0.0:5060",
+    "advertise": "192.168.1.10:5060",
+    "transport": "udp",
+    "stun": "stun.l.google.com:19302"
+  },
+  "media": {
+    "publicAddress": "192.168.1.10",
+    "srtp": "off"
+  }
+}
 ```
 
-Use the printed index or a device-name substring with `--input-device` and
-`--output-device`.
+Run:
 
-## Direct LAN Calling
+```sh
+cargo run -p rvoip-session-core --example sip_client -- --config alice.json
+```
 
-On computer B:
+CLI flags override the JSON file.
+
+## Sample Configs
+
+Runnable loopback configs:
+
+- `alice.loopback.json`: local caller on `127.0.0.1:5080`
+- `bob.loopback.json`: local callee on `127.0.0.1:5081`
+
+PBX templates:
+
+- `pbx-1001.asterisk.json`
+- `pbx-1002.asterisk.json`
+- `pbx-1001.freeswitch.json`
+- `pbx-1002.freeswitch.json`
+
+The PBX files assume a local registrar at `sip:127.0.0.1:5060` and sample
+extension passwords. Edit the password, registrar, `advertise`, and
+`publicAddress` fields for your Asterisk or FreeSWITCH setup.
+
+## Interactive Use
+
+Direct LAN receiver:
 
 ```sh
 cargo run -p rvoip-session-core --example sip_client -- \
-  listen --name bob --bind 0.0.0.0:5060 --advertise 192.168.1.20:5060
+  --name bob --bind 0.0.0.0:5071 --advertise 192.168.1.20:5071
 ```
 
-On computer A:
+Direct LAN caller:
 
 ```sh
 cargo run -p rvoip-session-core --example sip_client -- \
-  lan --name alice --bind 0.0.0.0:5060 --advertise 192.168.1.10:5060 \
-  --target sip:bob@192.168.1.20:5060
+  --name alice --bind 0.0.0.0:5060 --advertise 192.168.1.10:5060 \
+  --dial sip:bob@192.168.1.20:5071
 ```
 
-You can omit `--target` and press `d` inside the TUI.
-
-## PBX Registration
+PBX registration:
 
 ```sh
 cargo run -p rvoip-session-core --example sip_client -- \
-  register \
   --profile asterisk-udp \
   --name alice \
   --username 1001 \
   --password secret \
   --registrar sip:192.168.1.50:5060 \
   --bind 0.0.0.0:5060 \
-  --advertise 192.168.1.10:5060
+  --advertise 192.168.1.10:5060 \
+  --register
 ```
 
-After registration, press `d` and dial an extension such as `1002`.
-
-## NAT / STUN
-
-Static advertised media address:
-
-```sh
---media-public 203.0.113.10
-```
-
-Best-effort STUN probe:
-
-```sh
---stun stun.l.google.com:19302
-```
-
-This is not ICE. It uses session-core's existing static advertised-address and
-STUN support, which is appropriate for simple NAT labs and directly reachable
-PBX/SBC deployments.
-
-## Keys
+Keys:
 
 - `d`: dial
 - `a`: answer
@@ -81,44 +100,66 @@ PBX/SBC deployments.
 - `t`: blind transfer
 - `q`: graceful quit
 
-## Config File
+## Automated Smoke
 
-Default path:
-
-```text
-~/.config/rvoip/sip-client.toml
-```
-
-Example:
-
-```toml
-default_profile = "office"
-
-[profiles.office]
-mode = "register"
-profile = "asterisk-udp"
-name = "alice"
-username = "1001"
-password = "secret"
-registrar = "sip:192.168.1.50:5060"
-bind = "0.0.0.0:5060"
-advertise = "192.168.1.10:5060"
-input-device = "MacBook"
-output-device = "External"
-```
-
-Run it:
+Local two-process loopback:
 
 ```sh
-cargo run -p rvoip-session-core --example sip_client
+cargo run -p rvoip-session-core --example sip_client -- \
+  --test callee --config crates/session-core/examples/sip_client/bob.loopback.json
 ```
 
-CLI flags override config-file values.
+```sh
+cargo run -p rvoip-session-core --example sip_client -- \
+  --test caller --config crates/session-core/examples/sip_client/alice.loopback.json \
+  --dial sip:bob@127.0.0.1:5081
+```
+
+PBX two-process smoke, with Asterisk or FreeSWITCH already running locally:
+
+```sh
+cargo run -p rvoip-session-core --example sip_client -- \
+  --test pbx-callee --config crates/session-core/examples/sip_client/pbx-1002.asterisk.json --register
+```
+
+```sh
+cargo run -p rvoip-session-core --example sip_client -- \
+  --test pbx-caller --config crates/session-core/examples/sip_client/pbx-1001.asterisk.json \
+  --register --dial 1002
+```
+
+For FreeSWITCH, use the matching `pbx-1001.freeswitch.json` and
+`pbx-1002.freeswitch.json` configs.
+
+Smoke mode uses synthetic 8 kHz mono audio frames by default and exits nonzero
+on timeout, failed registration, failed call setup, missing DTMF, missing
+hangup, or missing inbound media frames. Use `--test-audio cpal` to exercise
+real microphone/speaker devices.
+
+Useful smoke flags:
+
+```sh
+--test-duration 5
+--test-timeout 30
+--test-dtmf 5
+--test-audio synthetic
+```
+
+## Audio Devices
+
+```sh
+cargo run -p rvoip-session-core --example sip_client -- --list-devices
+```
+
+Use the printed index or a device-name substring with `--input-device` and
+`--output-device`.
 
 ## Network Notes
 
 - Open SIP TCP/UDP port `5060` or your chosen bind port.
 - Open the RTP range used by session-core, default `16000-17000/udp`.
-- On macOS, allow terminal microphone access.
+- On macOS, allow terminal microphone access for CPAL audio.
 - When binding to `0.0.0.0`, pass `--advertise` with the LAN address peers can
   actually reach.
+- STUN here is session-core's best-effort advertised media address support, not
+  full ICE/WebRTC traversal.

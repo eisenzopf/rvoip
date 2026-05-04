@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
             .await?;
 
         let incoming = frontdesk.wait_for_incoming().await?;
-        println!("[frontdesk] redirecting {} to voicemail", incoming.from);
+        println!("[frontdesk] redirecting {} to voicemail", incoming.from());
         incoming.redirect_to("sip:voicemail@127.0.0.1:5099").await?;
         frontdesk.shutdown().await
     });
