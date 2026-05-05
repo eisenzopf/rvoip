@@ -49,6 +49,8 @@ pub enum TransportEvent {
         source: SocketAddr,
         /// The local address that received the message
         destination: SocketAddr,
+        /// Transport flavour that received the message.
+        transport_type: TransportType,
     },
 
     /// Error occurred in the transport

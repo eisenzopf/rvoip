@@ -292,6 +292,7 @@ mod tests {
                 message,
                 source,
                 destination,
+                ..
             } => {
                 assert_eq!(destination, server_bound_addr);
                 // Source may be different due to how UDP works

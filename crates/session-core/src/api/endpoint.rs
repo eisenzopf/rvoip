@@ -528,6 +528,20 @@ impl EndpointEvents {
                 call_id: call_id.map(EndpointCallId),
                 error,
             },
+            Event::SipTrace(trace) => EndpointEvent::SipTrace(EndpointSipTrace {
+                direction: trace.direction,
+                transport: trace.transport,
+                local_addr: trace.local_addr,
+                remote_addr: trace.remote_addr,
+                timestamp_unix_millis: trace.timestamp_unix_millis,
+                start_line: trace.start_line,
+                sip_call_id: trace.sip_call_id,
+                session_id: trace.session_id.map(EndpointCallId),
+                raw_message: trace.raw_message,
+                original_len: trace.original_len,
+                truncated: trace.truncated,
+                redacted: trace.redacted,
+            }),
             other => EndpointEvent::Info {
                 call_id: other.call_id().cloned().map(EndpointCallId),
                 message: format!("{other:?}"),
@@ -608,6 +622,8 @@ pub enum EndpointEvent {
     },
     /// Registration state changed.
     RegistrationChanged(EndpointRegistrationInfo),
+    /// SIP message observed at the transport boundary.
+    SipTrace(EndpointSipTrace),
     /// A network error occurred.
     NetworkError {
         /// Call identifier, when known.
@@ -622,6 +638,35 @@ pub enum EndpointEvent {
         /// Human-readable event summary.
         message: String,
     },
+}
+
+/// Endpoint-level SIP trace event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointSipTrace {
+    /// Inbound or outbound at the local transport boundary.
+    pub direction: crate::api::events::SipTraceDirection,
+    /// Transport flavour, for example `UDP`, `TCP`, or `TLS`.
+    pub transport: String,
+    /// Local socket address.
+    pub local_addr: String,
+    /// Remote socket address.
+    pub remote_addr: String,
+    /// Milliseconds since Unix epoch when the trace event was created.
+    pub timestamp_unix_millis: u64,
+    /// SIP start line.
+    pub start_line: String,
+    /// Wire-level SIP `Call-ID` header value when present.
+    pub sip_call_id: Option<String>,
+    /// Endpoint call/session id after mapping, when known.
+    pub session_id: Option<EndpointCallId>,
+    /// Redacted, optionally body-stripped SIP message text.
+    pub raw_message: String,
+    /// Original rendered message byte length before redaction/body stripping/truncation.
+    pub original_len: usize,
+    /// Whether `raw_message` was truncated for bounded diagnostics.
+    pub truncated: bool,
+    /// Whether sensitive headers were redacted.
+    pub redacted: bool,
 }
 
 /// Opaque call identifier for Endpoint applications.
@@ -1085,6 +1130,8 @@ pub struct EndpointConfig {
     pub network: Option<EndpointNetworkConfig>,
     /// Media settings.
     pub media: Option<EndpointMediaConfig>,
+    /// SIP trace diagnostics.
+    pub sip_trace: Option<crate::api::events::SipTraceConfig>,
     /// Whether an application should register immediately after startup.
     pub register_on_start: Option<bool>,
 }
@@ -1285,6 +1332,7 @@ pub struct EndpointBuilder {
     password: Option<String>,
     registrar: Option<String>,
     expires: u32,
+    sip_trace: Option<crate::api::events::SipTraceConfig>,
     from_uri: Option<String>,
     contact_uri: Option<String>,
     configurators: Vec<Box<dyn FnOnce(&mut Config) + Send>>,
@@ -1314,6 +1362,7 @@ impl EndpointBuilder {
             password: None,
             registrar: None,
             expires: 3600,
+            sip_trace: None,
             from_uri: None,
             contact_uri: None,
             configurators: Vec::new(),
@@ -1383,6 +1432,10 @@ impl EndpointBuilder {
             }
         }
 
+        if let Some(sip_trace) = config.sip_trace {
+            builder = builder.sip_trace(sip_trace);
+        }
+
         Ok(builder)
     }
 
@@ -1445,6 +1498,9 @@ impl EndpointBuilder {
         let mut configured = EndpointBuilder::from_config(config)?;
         if self.name.is_some() {
             configured.name = self.name;
+        }
+        if self.sip_trace.is_some() {
+            configured.sip_trace = self.sip_trace;
         }
         Ok(configured)
     }
@@ -1528,6 +1584,18 @@ impl EndpointBuilder {
         self
     }
 
+    /// Enable SIP transport-boundary tracing with default redaction.
+    pub fn enable_sip_trace(mut self) -> Self {
+        self.sip_trace = Some(crate::api::events::SipTraceConfig::enabled());
+        self
+    }
+
+    /// Set SIP transport-boundary trace policy.
+    pub fn sip_trace(mut self, config: crate::api::events::SipTraceConfig) -> Self {
+        self.sip_trace = Some(config);
+        self
+    }
+
     /// Override the From/AoR URI used for registration and outgoing calls.
     pub fn from_uri(mut self, uri: impl Into<String>) -> Self {
         self.from_uri = Some(uri.into());
@@ -1603,6 +1671,9 @@ impl EndpointBuilder {
                     config.srtp_required = true;
                 }
             }
+        }
+        if let Some(sip_trace) = self.sip_trace {
+            config.sip_trace = sip_trace;
         }
         if self.transport == EndpointTransport::Tls && config.sip_tls_mode == SipTlsMode::Disabled {
             config.sip_tls_mode = SipTlsMode::ClientOnly;
@@ -2074,6 +2145,28 @@ mod tests {
             parts.registrar.as_deref(),
             Some("sip:pbx.example.test;transport=tcp")
         );
+    }
+
+    #[test]
+    fn endpoint_json_config_accepts_partial_sip_trace_config() {
+        let config = serde_json::from_str::<EndpointConfig>(
+            r#"{
+                "sipTrace": {
+                    "enabled": true,
+                    "redactSensitiveHeaders": false
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let trace = config.sip_trace.unwrap();
+        assert!(trace.enabled);
+        assert_eq!(
+            trace.capacity,
+            crate::api::events::SipTraceConfig::DEFAULT_CAPACITY
+        );
+        assert!(!trace.redact_sensitive_headers);
+        assert!(trace.include_body);
     }
 
     #[test]

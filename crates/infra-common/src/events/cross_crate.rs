@@ -35,6 +35,9 @@ pub enum RvoipCrossCrateEvent {
     /// Sip-transport to dialog-core events
     TransportToDialog(TransportToDialogEvent),
 
+    /// Sip-transport/dialog transport boundary to session-core diagnostics
+    TransportToSession(SipTraceEvent),
+
     /// Media-core to rtp-core events
     MediaToRtp(MediaToRtpEvent),
 
@@ -62,6 +65,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToSession(_) => "media_to_session",
             RvoipCrossCrateEvent::DialogToTransport(_) => "dialog_to_transport",
             RvoipCrossCrateEvent::TransportToDialog(_) => "transport_to_dialog",
+            RvoipCrossCrateEvent::TransportToSession(_) => "transport_to_session",
             RvoipCrossCrateEvent::MediaToRtp(_) => "media_to_rtp",
             RvoipCrossCrateEvent::RtpToMedia(_) => "rtp_to_media",
         }
@@ -75,6 +79,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToSession(_) => PlaneType::Media,
             RvoipCrossCrateEvent::DialogToTransport(_) => PlaneType::Signaling,
             RvoipCrossCrateEvent::TransportToDialog(_) => PlaneType::Transport,
+            RvoipCrossCrateEvent::TransportToSession(_) => PlaneType::Transport,
             RvoipCrossCrateEvent::MediaToRtp(_) => PlaneType::Media,
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Transport,
         }
@@ -88,6 +93,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToSession(_) => PlaneType::Signaling,
             RvoipCrossCrateEvent::DialogToTransport(_) => PlaneType::Transport,
             RvoipCrossCrateEvent::TransportToDialog(_) => PlaneType::Signaling,
+            RvoipCrossCrateEvent::TransportToSession(_) => PlaneType::Signaling,
             RvoipCrossCrateEvent::MediaToRtp(_) => PlaneType::Transport,
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Media,
         }
@@ -101,6 +107,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToSession(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::DialogToTransport(_) => EventPriority::High,
             RvoipCrossCrateEvent::TransportToDialog(_) => EventPriority::High,
+            RvoipCrossCrateEvent::TransportToSession(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::MediaToRtp(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::RtpToMedia(_) => EventPriority::Normal,
         }
@@ -206,6 +213,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
             },
             RvoipCrossCrateEvent::DialogToTransport(_) => None, // Transport events don't have session context
             RvoipCrossCrateEvent::TransportToDialog(_) => None,
+            RvoipCrossCrateEvent::TransportToSession(event) => event.session_id.as_deref(),
             RvoipCrossCrateEvent::MediaToRtp(event) => match event {
                 MediaToRtpEvent::StartRtpStream { session_id, .. } => Some(session_id),
                 MediaToRtpEvent::StopRtpStream { session_id, .. } => Some(session_id),
@@ -221,6 +229,193 @@ impl RoutableEvent for RvoipCrossCrateEvent {
             },
         }
     }
+}
+
+// =============================================================================
+// SIP TRACE EVENTS
+// =============================================================================
+
+/// Direction of a traced SIP message at the transport boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SipTraceDirection {
+    /// Message received from a remote peer.
+    Inbound,
+    /// Message sent to a remote peer.
+    Outbound,
+}
+
+impl SipTraceDirection {
+    /// Compact arrow used by CLIs and logs.
+    pub fn arrow(&self) -> &'static str {
+        match self {
+            Self::Inbound => "<",
+            Self::Outbound => ">",
+        }
+    }
+}
+
+/// Runtime policy for SIP trace emission.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SipTraceConfig {
+    /// Whether SIP trace events should be emitted.
+    pub enabled: bool,
+    /// Suggested in-memory capacity for consumers that keep a trace ring.
+    pub capacity: usize,
+    /// Whether authentication-bearing SIP headers should be redacted.
+    pub redact_sensitive_headers: bool,
+    /// Whether message bodies, including SDP, should be included.
+    pub include_body: bool,
+}
+
+impl SipTraceConfig {
+    /// Default bounded trace capacity.
+    pub const DEFAULT_CAPACITY: usize = 256;
+
+    /// Create an enabled trace config with default redaction.
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for SipTraceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            capacity: Self::DEFAULT_CAPACITY,
+            redact_sensitive_headers: true,
+            include_body: true,
+        }
+    }
+}
+
+/// SIP message observed at the transport boundary.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SipTraceEvent {
+    /// Coordinator-specific owner id used to filter global trace events.
+    pub owner_id: String,
+    /// Inbound or outbound at the local transport boundary.
+    pub direction: SipTraceDirection,
+    /// Transport flavour, for example `UDP`, `TCP`, or `TLS`.
+    pub transport: String,
+    /// Local socket address.
+    pub local_addr: String,
+    /// Remote socket address.
+    pub remote_addr: String,
+    /// Milliseconds since Unix epoch when the trace event was created.
+    pub timestamp_unix_millis: u64,
+    /// SIP start line, for example `INVITE sip:bob@example.com SIP/2.0`.
+    pub start_line: String,
+    /// Wire-level SIP `Call-ID` header value when present.
+    pub sip_call_id: Option<String>,
+    /// Session-core session id after mapping, when known.
+    pub session_id: Option<String>,
+    /// Redacted, optionally body-stripped SIP message text.
+    pub raw_message: String,
+    /// Original rendered message byte length before redaction/body stripping/truncation.
+    pub original_len: usize,
+    /// Whether `raw_message` was truncated for bounded diagnostics.
+    pub truncated: bool,
+    /// Whether sensitive headers were redacted.
+    pub redacted: bool,
+}
+
+/// Maximum rendered SIP message bytes kept in one trace event.
+pub const SIP_TRACE_MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+/// Apply trace policy to a rendered SIP message.
+pub fn format_sip_trace_message(raw: &str, config: &SipTraceConfig) -> (String, bool) {
+    let original_len = raw.len();
+    let mut message = normalize_line_endings(raw);
+
+    if config.redact_sensitive_headers {
+        message = redact_sip_message(&message);
+    }
+
+    if !config.include_body {
+        message = strip_sip_body(&message);
+    }
+
+    let (message, truncated) = truncate_at_char_boundary(&message, SIP_TRACE_MAX_MESSAGE_BYTES);
+    (
+        format_truncation(message, original_len, truncated),
+        truncated,
+    )
+}
+
+/// Redact auth-bearing SIP headers while preserving all other lines.
+pub fn redact_sip_message(raw: &str) -> String {
+    let mut in_headers = true;
+    let mut redacted = Vec::new();
+
+    for line in raw.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if in_headers && trimmed.is_empty() {
+            in_headers = false;
+            redacted.push(String::new());
+            continue;
+        }
+
+        if in_headers {
+            if let Some((name, _value)) = trimmed.split_once(':') {
+                if is_sensitive_sip_header(name) {
+                    redacted.push(format!("{}: <redacted>", name.trim()));
+                    continue;
+                }
+            }
+        }
+
+        redacted.push(trimmed.to_string());
+    }
+
+    redacted.join("\n")
+}
+
+fn normalize_line_endings(raw: &str) -> String {
+    raw.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn strip_sip_body(raw: &str) -> String {
+    if let Some((headers, body)) = raw.split_once("\n\n") {
+        if body.is_empty() {
+            headers.to_string()
+        } else {
+            format!("{headers}\n\n<body omitted>")
+        }
+    } else {
+        raw.to_string()
+    }
+}
+
+fn is_sensitive_sip_header(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "authorization" | "proxy-authorization" | "www-authenticate" | "proxy-authenticate"
+    )
+}
+
+fn truncate_at_char_boundary(raw: &str, max_bytes: usize) -> (String, bool) {
+    if raw.len() <= max_bytes {
+        return (raw.to_string(), false);
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    (raw[..end].to_string(), true)
+}
+
+fn format_truncation(mut message: String, original_len: usize, truncated: bool) -> String {
+    if truncated {
+        message.push_str(&format!(
+            "\n\n<truncated: original message was {original_len} bytes>"
+        ));
+    }
+    message
 }
 
 // =============================================================================
@@ -1004,5 +1199,49 @@ mod tests {
             CrossCrateEvent::event_type(&deserialized),
             CrossCrateEvent::event_type(&event)
         );
+    }
+
+    #[test]
+    fn sip_trace_redacts_authorization_headers() {
+        let raw = concat!(
+            "INVITE sip:bob@example.com SIP/2.0\r\n",
+            "Via: SIP/2.0/UDP 127.0.0.1:5060\r\n",
+            "Authorization: Digest username=\"alice\", response=\"secret\"\r\n",
+            "Proxy-Authorization: Digest username=\"alice\", response=\"proxy-secret\"\r\n",
+            "Call-ID: call-1\r\n",
+            "\r\n",
+            "body"
+        );
+
+        let redacted = redact_sip_message(raw);
+
+        assert!(redacted.contains("Authorization: <redacted>"));
+        assert!(redacted.contains("Proxy-Authorization: <redacted>"));
+        assert!(redacted.contains("Via: SIP/2.0/UDP 127.0.0.1:5060"));
+        assert!(redacted.contains("body"));
+        assert!(!redacted.contains("secret"));
+        assert!(!redacted.contains("proxy-secret"));
+    }
+
+    #[test]
+    fn sip_trace_format_respects_no_redact_and_no_body() {
+        let raw = concat!(
+            "REGISTER sip:example.com SIP/2.0\r\n",
+            "Authorization: Digest response=\"secret\"\r\n",
+            "\r\n",
+            "private body"
+        );
+        let config = SipTraceConfig {
+            enabled: true,
+            capacity: 4,
+            redact_sensitive_headers: false,
+            include_body: false,
+        };
+
+        let (message, truncated) = format_sip_trace_message(raw, &config);
+
+        assert!(!truncated);
+        assert!(message.contains("Authorization: Digest response=\"secret\""));
+        assert!(!message.contains("private body"));
     }
 }

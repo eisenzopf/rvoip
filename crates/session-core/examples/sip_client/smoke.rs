@@ -8,13 +8,15 @@ use tokio::sync::mpsc;
 
 use rvoip_session_core::{
     Endpoint, EndpointAudioFrame, EndpointCall, EndpointCallId, EndpointControl, EndpointEvent,
-    EndpointEvents, EndpointIncomingCall, EndpointRegistrationStatus, SessionError,
+    EndpointEvents, EndpointIncomingCall, EndpointRegistrationStatus, EndpointSipTrace,
+    SessionError,
 };
 
 use crate::audio::{
     float_to_i16, resample_linear, AudioBridge, RunningAudio, FRAME_MS, FRAME_SAMPLES, SAMPLE_RATE,
 };
 use crate::config::{format_registration, RuntimeOptions, TestAudio, TestRole};
+use crate::runtime::TraceFile;
 
 const CALLER_TEST_TONE_HZ: f32 = 440.0;
 const CALLEE_TEST_TONE_HZ: f32 = 660.0;
@@ -40,9 +42,22 @@ pub(crate) async fn run_smoke(role: TestRole, options: RuntimeOptions) -> anyhow
         }
     }
     let (control, events) = endpoint.split();
+    let mut trace_file = match options.sip_trace.file.as_ref() {
+        Some(path) => {
+            println!("writing SIP trace to {}", path.display());
+            Some(TraceFile::open(path).map_err(|err| {
+                anyhow::anyhow!("failed to open SIP trace file {}: {err}", path.display())
+            })?)
+        }
+        None => None,
+    };
     let result = match role {
-        TestRole::Caller | TestRole::PbxCaller => smoke_caller(&options, control, events).await,
-        TestRole::Callee | TestRole::PbxCallee => smoke_callee(&options, control, events).await,
+        TestRole::Caller | TestRole::PbxCaller => {
+            smoke_caller(&options, control, events, &mut trace_file).await
+        }
+        TestRole::Callee | TestRole::PbxCallee => {
+            smoke_callee(&options, control, events, &mut trace_file).await
+        }
     };
     result
 }
@@ -51,6 +66,7 @@ async fn smoke_caller(
     options: &RuntimeOptions,
     control: EndpointControl,
     mut events: EndpointEvents,
+    trace_file: &mut Option<TraceFile>,
 ) -> anyhow::Result<()> {
     let target = options
         .dial
@@ -58,7 +74,7 @@ async fn smoke_caller(
         .ok_or_else(|| anyhow::anyhow!("caller smoke mode requires --dial"))?;
     let call = control.call(target).await?;
     println!("calling {target} ({})", call.id());
-    let call = wait_for_answered(&mut events, call.id(), options.test_timeout).await?;
+    let call = wait_for_answered(&mut events, call.id(), options.test_timeout, trace_file).await?;
     println!("answered {}", call.id());
 
     let audio = start_test_audio(
@@ -70,14 +86,22 @@ async fn smoke_caller(
     call.send_dtmf(options.test_dtmf).await?;
     println!("sent DTMF {}", options.test_dtmf);
     call.hold().await?;
-    wait_for_call_event(&mut events, call.id(), options.test_timeout, |event| {
-        matches!(event, EndpointEvent::LocalHold { .. })
-    })
+    wait_for_call_event(
+        &mut events,
+        call.id(),
+        options.test_timeout,
+        trace_file,
+        |event| matches!(event, EndpointEvent::LocalHold { .. }),
+    )
     .await?;
     call.resume().await?;
-    wait_for_call_event(&mut events, call.id(), options.test_timeout, |event| {
-        matches!(event, EndpointEvent::LocalResume { .. })
-    })
+    wait_for_call_event(
+        &mut events,
+        call.id(),
+        options.test_timeout,
+        trace_file,
+        |event| matches!(event, EndpointEvent::LocalResume { .. }),
+    )
     .await?;
     tokio::time::sleep(options.test_duration).await;
     call.hangup_and_wait(Some(options.test_timeout)).await?;
@@ -91,8 +115,9 @@ async fn smoke_callee(
     options: &RuntimeOptions,
     control: EndpointControl,
     mut events: EndpointEvents,
+    trace_file: &mut Option<TraceFile>,
 ) -> anyhow::Result<()> {
-    let incoming = wait_for_incoming(&mut events, options.test_timeout).await?;
+    let incoming = wait_for_incoming(&mut events, options.test_timeout, trace_file).await?;
     println!("answering incoming call from {}", incoming.from());
     let call = incoming.answer().await?;
     let audio = start_test_audio(
@@ -116,6 +141,9 @@ async fn smoke_callee(
             Ok(Ok(Some(EndpointEvent::CallEnded { .. }))) => {
                 saw_end = true;
                 break;
+            }
+            Ok(Ok(Some(EndpointEvent::SipTrace(trace)))) => {
+                write_trace_event(trace_file, &trace)?;
             }
             Ok(Ok(Some(_))) => {}
             Ok(Ok(None)) => break,
@@ -144,12 +172,16 @@ async fn wait_for_answered(
     events: &mut EndpointEvents,
     expected: EndpointCallId,
     timeout: Duration,
+    trace_file: &mut Option<TraceFile>,
 ) -> anyhow::Result<EndpointCall> {
     let fut = async {
         loop {
             match events.next().await? {
                 Some(EndpointEvent::CallAnswered { call, .. }) if call.id() == expected => {
                     return Ok(call)
+                }
+                Some(EndpointEvent::SipTrace(trace)) => {
+                    write_trace_event(trace_file, &trace)?;
                 }
                 Some(EndpointEvent::CallFailed {
                     status_code,
@@ -171,11 +203,15 @@ async fn wait_for_answered(
 async fn wait_for_incoming(
     events: &mut EndpointEvents,
     timeout: Duration,
+    trace_file: &mut Option<TraceFile>,
 ) -> anyhow::Result<EndpointIncomingCall> {
     let fut = async {
         loop {
             match events.next().await? {
                 Some(EndpointEvent::IncomingCall(incoming)) => return Ok(incoming),
+                Some(EndpointEvent::SipTrace(trace)) => {
+                    write_trace_event(trace_file, &trace)?;
+                }
                 Some(_) => {}
                 None => return Err(SessionError::Other("event stream closed".into())),
             }
@@ -188,6 +224,7 @@ async fn wait_for_call_event(
     events: &mut EndpointEvents,
     call_id: EndpointCallId,
     timeout: Duration,
+    trace_file: &mut Option<TraceFile>,
     mut matches_event: impl FnMut(&EndpointEvent) -> bool,
 ) -> anyhow::Result<()> {
     let fut = async {
@@ -196,12 +233,25 @@ async fn wait_for_call_event(
                 Some(event) if event_belongs_to(&event, &call_id) && matches_event(&event) => {
                     return Ok(())
                 }
+                Some(EndpointEvent::SipTrace(trace)) => {
+                    write_trace_event(trace_file, &trace)?;
+                }
                 Some(_) => {}
                 None => return Err(SessionError::Other("event stream closed".into())),
             }
         }
     };
     Ok(tokio::time::timeout(timeout, fut).await??)
+}
+
+fn write_trace_event(
+    trace_file: &mut Option<TraceFile>,
+    trace: &EndpointSipTrace,
+) -> Result<(), SessionError> {
+    if let Some(file) = trace_file.as_mut() {
+        file.write(trace)?;
+    }
+    Ok(())
 }
 
 fn event_belongs_to(event: &EndpointEvent, call_id: &EndpointCallId) -> bool {

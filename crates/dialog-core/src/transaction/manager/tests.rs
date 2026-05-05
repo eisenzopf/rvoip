@@ -466,6 +466,7 @@ mod tests {
                 message: Message::Response(response.clone()),
                 source: destination,
                 destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
             })
             .await
             .unwrap();
@@ -810,6 +811,7 @@ mod tests {
                 message: Message::Response(ringing_response.clone()),
                 source: destination,
                 destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
             })
             .await
             .unwrap();
@@ -834,6 +836,7 @@ mod tests {
                 message: Message::Response(ok_response.clone()),
                 source: destination,
                 destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
             })
             .await
             .unwrap();
@@ -960,6 +963,7 @@ mod tests {
                 message: Message::Response(ok_response.clone()),
                 source: destination,
                 destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
             })
             .await
             .unwrap();
@@ -1381,6 +1385,7 @@ mod tests {
                 message: Message::Response(ok_response.clone()),
                 source: destination,
                 destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
             })
             .await
             .unwrap();

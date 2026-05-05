@@ -28,8 +28,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
+use rvoip_infra_common::events::cross_crate::SipTraceDirection;
 use rvoip_sip_core::json::ext::SipMessageJson;
 use rvoip_sip_core::prelude::*;
+use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{Transport, TransportEvent};
 
 use crate::transaction::client::{
@@ -89,6 +91,7 @@ pub async fn handle_transport_message(
             message,
             source,
             destination,
+            ..
         } => {
             match message {
                 Message::Request(request) => {
@@ -756,6 +759,24 @@ mod via_header_tests {
 }
 
 impl TransactionManager {
+    pub(crate) async fn publish_inbound_sip_trace(
+        &self,
+        message: &Message,
+        source: SocketAddr,
+        destination: SocketAddr,
+        transport_type: TransportType,
+    ) {
+        if let Some(trace) = &self.sip_trace {
+            trace.publish(
+                SipTraceDirection::Inbound,
+                transport_type,
+                destination,
+                source,
+                message,
+            );
+        }
+    }
+
     /// Handle an incoming SIP message from the transport layer.
     ///
     /// This is the entry point for incoming messages from the transport layer to
@@ -773,8 +794,11 @@ impl TransactionManager {
                 message,
                 source,
                 destination,
+                transport_type,
             } => {
                 debug!("Received message from {}", source);
+                self.publish_inbound_sip_trace(&message, source, destination, transport_type)
+                    .await;
                 self.handle_message(message, source, destination).await
             }
             TransportEvent::KeepAlivePongReceived { source, .. } => {

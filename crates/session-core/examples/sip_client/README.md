@@ -25,7 +25,8 @@ cargo run -p rvoip-session-core --example sip_client -- \
   --dial sip:bob@127.0.0.1:5081
 ```
 
-In Bob's terminal, press `a` to answer. Press `h` to hang up and `q` to quit.
+In Bob's terminal, select `Answer` and press `Enter`. Use the contextual action
+menu to hang up or quit.
 
 The loopback presets are equivalent to:
 
@@ -111,8 +112,43 @@ When a prompt is open:
 - Dial and transfer prompts send on `Enter`
 - DTMF sends each `0-9`, `*`, or `#` digit immediately
 
-Legacy letter shortcuts such as `d`, `a`, `h`, `m`, `o`, `t`, and `q` still
+Legacy letter shortcuts such as `d`, `a`, `h`, `m`, `o`, `t`, `s`, and `q` still
 work as hidden accelerators, but the menu is the primary interface.
+
+## SIP Trace
+
+Enable SIP message inspection from the Endpoint event stream:
+
+```sh
+cargo run -p rvoip-session-core --example sip_client -- \
+  --preset alice-loopback \
+  --dial sip:bob@127.0.0.1:5081 \
+  --sip-trace
+```
+
+When trace is enabled, the contextual menu includes `SIP Trace`. It shows recent
+inbound and outbound SIP messages, filters to the current call when the session
+mapping is known, and opens the full raw message with `Enter`.
+
+Auth-bearing headers are redacted by default. To write the same trace stream to
+a file:
+
+```sh
+cargo run -p rvoip-session-core --example sip_client -- \
+  --preset alice-loopback \
+  --dial sip:bob@127.0.0.1:5081 \
+  --sip-trace \
+  --sip-trace-file /tmp/alice.siptrace
+```
+
+Useful trace flags:
+
+```sh
+--sip-trace
+--sip-trace-file /tmp/client.siptrace
+--sip-trace-no-redact
+--sip-trace-capacity 512
+```
 
 ## Audio Devices
 

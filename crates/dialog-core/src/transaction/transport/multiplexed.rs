@@ -29,6 +29,9 @@ use rvoip_sip_transport::{
 };
 use tracing::{debug, trace, warn};
 
+use super::SipTraceRuntime;
+use rvoip_infra_common::events::cross_crate::SipTraceDirection;
+
 /// Returns the URI that determines the next hop for an outbound request:
 /// the first Route URI when present, otherwise the Request-URI. Route
 /// address parameters are folded back into the URI so `;transport=tls`
@@ -116,6 +119,8 @@ pub struct MultiplexedTransport {
     /// Local address reported via the `Transport::local_addr()` method.
     /// Mirrors the default transport's bind address.
     local_addr: SocketAddr,
+    /// Optional SIP trace publisher for outbound transport-boundary events.
+    sip_trace: Option<Arc<SipTraceRuntime>>,
 }
 
 impl MultiplexedTransport {
@@ -129,6 +134,7 @@ impl MultiplexedTransport {
     pub fn new(
         default: Arc<dyn Transport>,
         transports: HashMap<TransportType, Arc<dyn Transport>>,
+        sip_trace: Option<Arc<SipTraceRuntime>>,
     ) -> TransportResult<Self> {
         let local_addr = default.local_addr().map_err(|e| {
             TransportError::Other(format!(
@@ -140,6 +146,7 @@ impl MultiplexedTransport {
             transports,
             default,
             local_addr,
+            sip_trace,
         })
     }
 
@@ -161,7 +168,7 @@ impl MultiplexedTransport {
         &self,
         message: &Message,
         destination: SocketAddr,
-    ) -> TransportResult<Arc<dyn Transport>> {
+    ) -> TransportResult<(TransportType, Arc<dyn Transport>)> {
         match message {
             Message::Request(request) => {
                 let want = select_transport_for_request(request);
@@ -171,7 +178,7 @@ impl MultiplexedTransport {
                         request.method(),
                         want
                     );
-                    Ok(transport.clone())
+                    Ok((want, transport.clone()))
                 } else if want == TransportType::Tls {
                     Err(TransportError::UnsupportedTransport(format!(
                         "{} requires TLS by next-hop URI {}, but no TLS transport is registered",
@@ -184,7 +191,7 @@ impl MultiplexedTransport {
                         want,
                         request.method()
                     );
-                    Ok(self.default.clone())
+                    Ok((self.default.default_transport_type(), self.default.clone()))
                 }
             }
             Message::Response(response) => {
@@ -206,7 +213,7 @@ impl MultiplexedTransport {
                                 destination,
                                 kind
                             );
-                            return Ok(transport.clone());
+                            return Ok((kind, transport.clone()));
                         }
                     }
                 }
@@ -214,7 +221,7 @@ impl MultiplexedTransport {
                     "MultiplexedTransport: no connection-oriented transport has {}; routing response via default",
                     destination
                 );
-                Ok(self.default.clone())
+                Ok((self.default.default_transport_type(), self.default.clone()))
             }
         }
     }
@@ -227,7 +234,17 @@ impl Transport for MultiplexedTransport {
     }
 
     async fn send_message(&self, message: Message, destination: SocketAddr) -> TransportResult<()> {
-        let transport = self.pick_transport(&message, destination)?;
+        let (transport_type, transport) = self.pick_transport(&message, destination)?;
+        if let Some(trace) = &self.sip_trace {
+            let local_addr = transport.local_addr().unwrap_or(self.local_addr);
+            trace.publish(
+                SipTraceDirection::Outbound,
+                transport_type,
+                local_addr,
+                destination,
+                &message,
+            );
+        }
         transport.send_message(message, destination).await
     }
 
@@ -490,7 +507,8 @@ mod tests {
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
         let msg = make_invite("sips:bob@example.com");
@@ -514,7 +532,8 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let route: Uri = "sips:proxy.example.com:5061;lr;transport=tls"
             .parse()
@@ -548,7 +567,8 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let route_uri: Uri = "sip:proxy.example.com:5061".parse().unwrap();
         let mut route_address = Address::new(route_uri);
@@ -583,7 +603,8 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let msg = make_invite("sip:bob@example.com;transport=tcp");
@@ -602,7 +623,8 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let msg = make_invite("sip:bob@example.com");
@@ -630,7 +652,8 @@ mod tests {
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
@@ -660,7 +683,8 @@ mod tests {
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let result = mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n")).await;
@@ -685,7 +709,8 @@ mod tests {
         by_flavour.insert(TransportType::Tcp, tcp.clone() as Arc<dyn Transport>);
         by_flavour.insert(TransportType::Tls, tls.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
         mux.send_raw(dest, Bytes::from_static(b"\r\n\r\n"))
@@ -708,7 +733,8 @@ mod tests {
         let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
         let msg = make_invite("sip:bob@example.com;transport=tcp");
@@ -727,7 +753,8 @@ mod tests {
         let mut by_flavour: HashMap<TransportType, Arc<dyn Transport>> = HashMap::new();
         by_flavour.insert(TransportType::Udp, udp.clone() as Arc<dyn Transport>);
 
-        let mux = MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour).unwrap();
+        let mux =
+            MultiplexedTransport::new(udp.clone() as Arc<dyn Transport>, by_flavour, None).unwrap();
 
         let dest: SocketAddr = "127.0.0.1:5061".parse().unwrap();
         let result = mux

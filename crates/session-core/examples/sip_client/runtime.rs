@@ -1,10 +1,13 @@
+use std::fs::{File, OpenOptions};
+use std::io::{self, BufWriter, Write};
+use std::path::Path;
 use std::time::Duration;
 
 use crossterm::event::{self, Event as TerminalEvent, KeyEventKind};
 use tokio::sync::mpsc;
 
 use rvoip_session_core::{
-    Endpoint, EndpointCall, EndpointEvent, EndpointIncomingCall, Result as SipResult,
+    Endpoint, EndpointCall, EndpointEvent, EndpointIncomingCall, EndpointSipTrace,
 };
 
 use crate::audio::{start_cpal_audio, AudioBridge, RunningAudio};
@@ -83,7 +86,20 @@ async fn run_runtime_inner(
     options: RuntimeOptions,
     command_rx: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
     event_tx: &mpsc::UnboundedSender<UiEvent>,
-) -> SipResult<()> {
+) -> anyhow::Result<()> {
+    let mut trace_file = match options.sip_trace.file.as_ref() {
+        Some(path) => {
+            let file = TraceFile::open(path).map_err(|err| {
+                anyhow::anyhow!("failed to open SIP trace file {}: {err}", path.display())
+            })?;
+            let _ = event_tx.send(UiEvent::Log(format!(
+                "writing SIP trace to {}",
+                path.display()
+            )));
+            Some(file)
+        }
+        None => None,
+    };
     let mut endpoint = Endpoint::from_config(options.endpoint.clone()).await?;
     if options.register_on_start {
         let _ = event_tx.send(UiEvent::State(AppState::Registering));
@@ -94,7 +110,7 @@ async fn run_runtime_inner(
             }
             Err(err) => {
                 let _ = event_tx.send(UiEvent::Registration(format!("registration failed: {err}")));
-                return Err(err);
+                return Err(err.into());
             }
         }
     }
@@ -379,6 +395,16 @@ async fn run_runtime_inner(
                             let _ = event_tx.send(UiEvent::Log(format!("{call_id}: {message}")));
                         }
                     }
+                    EndpointEvent::SipTrace(trace) => {
+                        if let Some(file) = trace_file.as_mut() {
+                            if let Err(err) = file.write(&trace) {
+                                let _ = event_tx.send(UiEvent::Error(format!(
+                                    "failed to write SIP trace: {err}"
+                                )));
+                            }
+                        }
+                        let _ = event_tx.send(UiEvent::SipTrace(trace));
+                    }
                 }
             }
         }
@@ -401,4 +427,50 @@ async fn run_runtime_inner(
     control.shutdown().await?;
     drop(running_audio);
     Ok(())
+}
+
+pub(crate) struct TraceFile {
+    writer: BufWriter<File>,
+}
+
+impl TraceFile {
+    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
+    }
+
+    pub(crate) fn write(&mut self, trace: &EndpointSipTrace) -> io::Result<()> {
+        writeln!(
+            self.writer,
+            "===== {} {} {} {} -> {} =====",
+            trace.timestamp_unix_millis,
+            trace.direction.arrow(),
+            trace.transport,
+            trace.local_addr,
+            trace.remote_addr
+        )?;
+        writeln!(self.writer, "Start-Line: {}", trace.start_line)?;
+        if let Some(call_id) = trace.sip_call_id.as_ref() {
+            writeln!(self.writer, "SIP Call-ID: {call_id}")?;
+        }
+        if let Some(session_id) = trace.session_id.as_ref() {
+            writeln!(self.writer, "Session ID: {session_id}")?;
+        }
+        if trace.redacted {
+            writeln!(self.writer, "Redacted: yes")?;
+        }
+        if trace.truncated {
+            writeln!(
+                self.writer,
+                "Truncated: yes, original bytes {}",
+                trace.original_len
+            )?;
+        }
+        writeln!(self.writer)?;
+        writeln!(self.writer, "{}", trace.raw_message)?;
+        writeln!(self.writer)?;
+        self.writer.flush()
+    }
 }

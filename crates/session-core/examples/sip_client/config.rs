@@ -7,7 +7,7 @@ use clap::{Parser, ValueEnum};
 use rvoip_session_core::{
     EndpointAccountConfig, EndpointConfig, EndpointMediaConfig, EndpointNetworkConfig,
     EndpointProfileName, EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSrtpMode,
-    EndpointTransport,
+    EndpointTransport, SipTraceConfig,
 };
 
 #[derive(Parser, Debug)]
@@ -93,6 +93,22 @@ pub(crate) struct Cli {
     /// Output device name substring or index from --list-devices.
     #[arg(long)]
     pub(crate) output_device: Option<String>,
+
+    /// Emit SIP message trace events into the TUI.
+    #[arg(long)]
+    pub(crate) sip_trace: bool,
+
+    /// Also append SIP trace messages to this file.
+    #[arg(long)]
+    pub(crate) sip_trace_file: Option<PathBuf>,
+
+    /// Do not redact auth-bearing SIP headers in trace output.
+    #[arg(long)]
+    pub(crate) sip_trace_no_redact: bool,
+
+    /// Number of SIP trace messages to retain in the TUI.
+    #[arg(long)]
+    pub(crate) sip_trace_capacity: Option<usize>,
 
     /// Run noninteractive smoke mode.
     #[arg(long, value_enum)]
@@ -225,15 +241,25 @@ pub(crate) struct RuntimeOptions {
     pub(crate) dial: Option<String>,
     pub(crate) input_device: Option<String>,
     pub(crate) output_device: Option<String>,
+    pub(crate) sip_trace: SipTraceOptions,
     pub(crate) test_duration: Duration,
     pub(crate) test_timeout: Duration,
     pub(crate) test_dtmf: char,
     pub(crate) test_audio: TestAudio,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SipTraceOptions {
+    pub(crate) enabled: bool,
+    pub(crate) redact_sensitive_headers: bool,
+    pub(crate) capacity: usize,
+    pub(crate) file: Option<PathBuf>,
+}
+
 pub(crate) fn build_runtime_options(cli: &Cli) -> anyhow::Result<RuntimeOptions> {
     let mut endpoint = load_endpoint_config(cli.config.clone(), cli.preset)?;
     apply_cli_overrides(&mut endpoint, cli);
+    let sip_trace = apply_sip_trace_overrides(&mut endpoint, cli)?;
     let register_on_start = cli.register
         || endpoint.register_on_start.unwrap_or(false)
         || matches!(cli.test, Some(TestRole::PbxCaller | TestRole::PbxCallee));
@@ -243,6 +269,7 @@ pub(crate) fn build_runtime_options(cli: &Cli) -> anyhow::Result<RuntimeOptions>
         dial: cli.dial.clone(),
         input_device: cli.input_device.clone(),
         output_device: cli.output_device.clone(),
+        sip_trace,
         test_duration: Duration::from_secs(cli.test_duration),
         test_timeout: Duration::from_secs(cli.test_timeout),
         test_dtmf: cli.test_dtmf,
@@ -263,6 +290,40 @@ fn load_endpoint_config(
         (None, Some(preset)) => preset.load(),
         (None, None) => Ok(EndpointConfig::default()),
     }
+}
+
+fn apply_sip_trace_overrides(
+    config: &mut EndpointConfig,
+    cli: &Cli,
+) -> anyhow::Result<SipTraceOptions> {
+    if matches!(cli.sip_trace_capacity, Some(0)) {
+        anyhow::bail!("--sip-trace-capacity must be greater than zero");
+    }
+
+    let mut trace = config
+        .sip_trace
+        .clone()
+        .unwrap_or_else(SipTraceConfig::default);
+    if cli.sip_trace || cli.sip_trace_file.is_some() {
+        trace.enabled = true;
+    }
+    if cli.sip_trace_no_redact {
+        trace.redact_sensitive_headers = false;
+    }
+    if let Some(capacity) = cli.sip_trace_capacity {
+        trace.capacity = capacity;
+    }
+
+    let enabled = trace.enabled;
+    let options = SipTraceOptions {
+        enabled,
+        redact_sensitive_headers: trace.redact_sensitive_headers,
+        capacity: trace.capacity.max(1),
+        file: cli.sip_trace_file.clone(),
+    };
+
+    config.sip_trace = if enabled { Some(trace) } else { None };
+    Ok(options)
 }
 
 fn apply_cli_overrides(config: &mut EndpointConfig, cli: &Cli) {

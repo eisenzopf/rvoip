@@ -28,7 +28,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 use crate::adapters::SessionApiCrossCrateEvent;
-use crate::api::events::{Event, MediaSecurityState};
+use crate::api::events::{Event, MediaSecurityState, SipTrace};
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::IncomingCall;
 use crate::api::unified::{Config, UnifiedCoordinator};
@@ -238,6 +238,16 @@ impl EventReceiver {
             let event = self.next().await?;
             if let Some(state) = media_security_state_from_event(event) {
                 return Some(state);
+            }
+        }
+    }
+
+    /// Wait for the next SIP trace event, skipping all others.
+    pub async fn next_sip_trace(&mut self) -> Option<SipTrace> {
+        loop {
+            match self.next().await? {
+                Event::SipTrace(trace) => return Some(trace),
+                _ => continue,
             }
         }
     }
@@ -1252,5 +1262,56 @@ impl StreamPeerBuilder {
 impl Default for StreamPeerBuilder {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventReceiver;
+    use crate::adapters::SessionApiCrossCrateEvent;
+    use crate::api::events::{Event, SipTrace, SipTraceDirection};
+    use crate::state_table::types::SessionId;
+    use rvoip_infra_common::events::cross_crate::CrossCrateEvent;
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn event_receiver_returns_sip_trace_events() {
+        let (tx, rx) = mpsc::channel::<Arc<dyn CrossCrateEvent>>(4);
+        tx.send(SessionApiCrossCrateEvent::new(Event::CallEnded {
+            call_id: SessionId("other".into()),
+            reason: "done".into(),
+        }))
+        .await
+        .unwrap();
+        tx.send(SessionApiCrossCrateEvent::new(Event::SipTrace(
+            trace_event(),
+        )))
+        .await
+        .unwrap();
+        drop(tx);
+
+        let mut receiver = EventReceiver::new(rx);
+        let trace = receiver.next_sip_trace().await.unwrap();
+
+        assert_eq!(trace.sip_call_id.as_deref(), Some("wire-call"));
+        assert_eq!(trace.session_id, Some(SessionId("session-1".into())));
+    }
+
+    fn trace_event() -> SipTrace {
+        SipTrace {
+            direction: SipTraceDirection::Outbound,
+            transport: "UDP".into(),
+            local_addr: "127.0.0.1:5060".into(),
+            remote_addr: "127.0.0.1:5080".into(),
+            timestamp_unix_millis: 1,
+            start_line: "INVITE sip:bob@example.com SIP/2.0".into(),
+            sip_call_id: Some("wire-call".into()),
+            session_id: Some(SessionId("session-1".into())),
+            raw_message: "INVITE sip:bob@example.com SIP/2.0\n\n".into(),
+            original_len: 40,
+            truncated: false,
+            redacted: true,
+        }
     }
 }

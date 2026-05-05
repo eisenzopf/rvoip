@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent};
+use crate::transport::{Transport, TransportEvent, TransportType};
 use rvoip_sip_core::Message;
 
 // SIP WebSocket subprotocol names as per RFC 7118
@@ -32,6 +32,7 @@ pub struct WebSocketTransport {
 
 struct WebSocketTransportInner {
     listener: Arc<WebSocketListener>,
+    secure: bool,
     connections: Mutex<HashMap<SocketAddr, Arc<WebSocketConnection>>>,
     closed: AtomicBool,
     events_tx: mpsc::Sender<TransportEvent>,
@@ -64,6 +65,7 @@ impl WebSocketTransport {
         let transport = WebSocketTransport {
             inner: Arc::new(WebSocketTransportInner {
                 listener: Arc::new(listener),
+                secure,
                 connections: Mutex::new(HashMap::new()),
                 closed: AtomicBool::new(false),
                 events_tx: events_tx.clone(),
@@ -192,6 +194,11 @@ impl WebSocketTransport {
                             message: sip_message,
                             source: peer_addr,
                             destination: local_addr,
+                            transport_type: if inner.secure {
+                                TransportType::Wss
+                            } else {
+                                TransportType::Ws
+                            },
                         };
 
                         if let Err(e) = inner.events_tx.send(event).await {

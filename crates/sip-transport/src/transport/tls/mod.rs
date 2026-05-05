@@ -392,6 +392,7 @@ impl TlsTransport {
                                         message,
                                         source: remote_addr,
                                         destination: local_addr,
+                                        transport_type: TransportType::Tls,
                                     })
                                     .await;
                             }

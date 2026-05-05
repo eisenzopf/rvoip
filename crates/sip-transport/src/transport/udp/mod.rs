@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent};
+use crate::transport::{Transport, TransportEvent, TransportType};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
@@ -136,6 +136,7 @@ impl UdpTransport {
                                             message,
                                             source: src,
                                             destination: local_addr,
+                                            transport_type: TransportType::Udp,
                                         };
 
                                         if let Err(e) = inner.events_tx.send(event).await {

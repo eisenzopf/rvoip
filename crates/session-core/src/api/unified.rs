@@ -228,6 +228,9 @@ pub struct Config {
     /// is available via [`UnifiedCoordinator::make_call_with_pai`].
     pub pai_uri: Option<String>,
 
+    /// Optional SIP transport-boundary tracing for diagnostics.
+    pub sip_trace: crate::api::events::SipTraceConfig,
+
     /// Outbound proxy URI (RFC 3261 §8.1.2). When set, a `Route:
     /// <outbound-proxy-uri;lr>` header is pre-loaded as the first Route on
     /// every outgoing INVITE this UA originates, forcing the dialog-
@@ -529,6 +532,7 @@ impl Config {
             session_timer_min_se: 90,
             credentials: None,
             pai_uri: None,
+            sip_trace: crate::api::events::SipTraceConfig::default(),
             outbound_proxy_uri: None,
             sip_outbound_enabled: false,
             sip_instance: None,
@@ -582,6 +586,7 @@ impl Config {
             session_timer_min_se: 90,
             credentials: None,
             pai_uri: None,
+            sip_trace: crate::api::events::SipTraceConfig::default(),
             outbound_proxy_uri: None,
             sip_outbound_enabled: false,
             sip_instance: None,
@@ -1091,8 +1096,18 @@ impl UnifiedCoordinator {
         let store = Arc::new(SessionStore::new());
         let registry = Arc::new(SessionRegistry::new());
 
+        let sip_trace_owner_id = config
+            .sip_trace
+            .enabled
+            .then(|| format!("sip-trace-{}", uuid::Uuid::new_v4()));
+
         // Create adapters
-        let dialog_api = Self::create_dialog_api(&config, global_coordinator.clone()).await?;
+        let dialog_api = Self::create_dialog_api(
+            &config,
+            global_coordinator.clone(),
+            sip_trace_owner_id.clone(),
+        )
+        .await?;
 
         // E4: parse the outbound proxy URI once up-front so a malformed
         // config fails loudly at coordinator boot, not per-call.
@@ -1299,6 +1314,7 @@ impl UnifiedCoordinator {
                 incoming_tx,
                 state_event_rx,
                 app_event_publisher.clone(),
+                sip_trace_owner_id,
             );
 
         // Start the event handler (sets up channels and subscriptions)
@@ -2847,6 +2863,7 @@ impl UnifiedCoordinator {
     async fn create_dialog_api(
         config: &Config,
         global_coordinator: Arc<GlobalEventCoordinator>,
+        sip_trace_owner_id: Option<String>,
     ) -> Result<Arc<rvoip_dialog_core::api::unified::UnifiedDialogApi>> {
         use rvoip_dialog_core::api::unified::UnifiedDialogApi;
         use rvoip_dialog_core::config::DialogManagerConfig;
@@ -2961,6 +2978,14 @@ impl UnifiedCoordinator {
             TransportManager::new(transport_config).await.map_err(|e| {
                 SessionError::InternalError(format!("Failed to create transport manager: {}", e))
             })?;
+
+        if let Some(owner_id) = sip_trace_owner_id {
+            transport_manager.enable_sip_trace(
+                owner_id,
+                config.sip_trace.clone(),
+                global_coordinator.clone(),
+            );
+        }
 
         // Initialize the transport manager
         transport_manager.initialize().await.map_err(|e| {

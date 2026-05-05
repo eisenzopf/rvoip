@@ -328,7 +328,8 @@ pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, Dia
 pub use dialog_subscription::DialogSubscriptionHandle;
 pub use events::{
     CallHandle, CallId, Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
-    SubscriptionState, TransferKind, TransferTargetEvidence,
+    SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
+    TransferTargetEvidence,
 };
 
 // Re-export builder
@@ -371,5 +372,6 @@ pub use endpoint::{
     EndpointAudioReceiver, EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId,
     EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
     EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
-    EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSrtpMode, EndpointTransport,
+    EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode,
+    EndpointTransport,
 };

@@ -16,8 +16,10 @@ use rvoip_sip_transport::{
 use crate::transaction::error::{Error, Result};
 
 pub mod multiplexed;
+mod trace;
 pub use multiplexed::MultiplexedTransport;
 pub use rvoip_sip_transport::transport::tls::TlsRole;
+pub(crate) use trace::SipTraceRuntime;
 
 /// Configuration options for the TransportManager
 #[derive(Debug, Clone)]
@@ -99,6 +101,8 @@ pub struct TransportManager {
     event_tx: mpsc::Sender<TransportEvent>,
     /// Flag indicating whether the manager is running
     running: Arc<Mutex<bool>>,
+    /// Optional SIP trace publisher shared with the transaction manager.
+    sip_trace: Option<Arc<SipTraceRuntime>>,
 }
 
 impl TransportManager {
@@ -119,6 +123,7 @@ impl TransportManager {
             transport_factory,
             event_tx,
             running: Arc::new(Mutex::new(false)),
+            sip_trace: None,
         };
 
         Ok((manager, event_rx))
@@ -289,6 +294,21 @@ impl TransportManager {
         self.start_event_processing();
 
         Ok(())
+    }
+
+    /// Enable transport-boundary SIP tracing for this manager.
+    pub fn enable_sip_trace(
+        &mut self,
+        owner_id: String,
+        config: rvoip_infra_common::events::cross_crate::SipTraceConfig,
+        coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
+    ) {
+        self.sip_trace = SipTraceRuntime::new(owner_id, config, coordinator);
+    }
+
+    /// Return the configured SIP trace runtime, if any.
+    pub(crate) fn sip_trace_runtime(&self) -> Option<Arc<SipTraceRuntime>> {
+        self.sip_trace.clone()
     }
 
     /// Adds a UDP transport to the manager
@@ -559,7 +579,7 @@ impl TransportManager {
             )
         })?;
         let by_flavour = self.transports_by_flavour().await;
-        let mux = MultiplexedTransport::new(default, by_flavour)
+        let mux = MultiplexedTransport::new(default, by_flavour, self.sip_trace_runtime())
             .map_err(|e| Error::Transport(format!("MultiplexedTransport: {}", e)))?;
         Ok(Arc::new(mux))
     }

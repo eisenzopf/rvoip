@@ -16,7 +16,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-use rvoip_session_core::{EndpointProfileName, EndpointTransport};
+use rvoip_session_core::{EndpointProfileName, EndpointSipTrace, EndpointTransport};
 
 use crate::audio::audio_device_summary;
 use crate::config::RuntimeOptions;
@@ -47,6 +47,7 @@ pub(crate) enum UiEvent {
     AudioStarted(String),
     AudioStopped,
     Muted(bool),
+    SipTrace(EndpointSipTrace),
     Log(String),
     Error(String),
     ShutdownComplete,
@@ -96,6 +97,7 @@ enum Action {
     Resume,
     SendDtmf,
     Transfer,
+    SipTrace,
     AudioDevices,
     Quit,
 }
@@ -114,6 +116,7 @@ impl Action {
             Self::Resume => "Resume",
             Self::SendDtmf => "Send DTMF",
             Self::Transfer => "Transfer",
+            Self::SipTrace => "SIP Trace",
             Self::AudioDevices => "Audio Devices",
             Self::Quit => "Quit",
         }
@@ -128,6 +131,7 @@ impl Action {
             Self::CancelCall => "Cancel Call",
             Self::HangUp => "Hang Up",
             Self::Quit => "Quit",
+            Self::SipTrace => "SIP Trace",
             Self::AudioDevices => "Audio Devices",
             _ => self.label(),
         }
@@ -139,7 +143,13 @@ enum ViewMode {
     Menu,
     Prompt(Action),
     Confirm(Action),
-    Detail,
+    Detail(DetailView),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DetailView {
+    AudioDevices,
+    SipTrace,
 }
 
 pub(crate) struct TuiApp {
@@ -157,6 +167,9 @@ pub(crate) struct TuiApp {
     input: String,
     dtmf_history: String,
     audio_detail: Vec<String>,
+    trace_events: VecDeque<EndpointSipTrace>,
+    selected_trace: usize,
+    trace_show_raw: bool,
     logs: VecDeque<String>,
     pub(crate) should_quit: bool,
 }
@@ -178,6 +191,9 @@ impl TuiApp {
             input: String::new(),
             dtmf_history: String::new(),
             audio_detail: Vec::new(),
+            trace_events: VecDeque::new(),
+            selected_trace: 0,
+            trace_show_raw: false,
             logs: VecDeque::new(),
             should_quit: false,
         }
@@ -235,6 +251,9 @@ impl TuiApp {
                     "microphone unmuted"
                 });
             }
+            UiEvent::SipTrace(trace) => {
+                self.push_trace(trace);
+            }
             UiEvent::Log(message) => self.push_log(message),
             UiEvent::Error(message) => {
                 self.set_state(AppState::Error);
@@ -266,6 +285,18 @@ impl TuiApp {
         self.clamp_selected_action();
     }
 
+    fn push_trace(&mut self, trace: EndpointSipTrace) {
+        let capacity = self.options.sip_trace.capacity.max(1);
+        if self.trace_events.len() >= capacity {
+            self.trace_events.pop_front();
+        }
+        self.trace_events.push_back(trace);
+        let visible = visible_trace_indices(self);
+        if !visible.is_empty() {
+            self.selected_trace = visible.len() - 1;
+        }
+    }
+
     fn selected_action(&self) -> Option<Action> {
         available_actions(self).get(self.selected_action).copied()
     }
@@ -289,7 +320,7 @@ pub(crate) fn handle_key(
         ViewMode::Menu => handle_menu_key(key, app, command_tx),
         ViewMode::Prompt(action) => handle_prompt_key(key, action, app, command_tx),
         ViewMode::Confirm(action) => handle_confirm_key(key, action, app, command_tx),
-        ViewMode::Detail => handle_detail_key(key, app),
+        ViewMode::Detail(detail) => handle_detail_key(key, detail, app),
     }
 }
 
@@ -386,10 +417,42 @@ fn handle_confirm_key(
     }
 }
 
-fn handle_detail_key(key: KeyEvent, app: &mut TuiApp) {
-    if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
-        return_to_menu(app);
+fn handle_detail_key(key: KeyEvent, detail: DetailView, app: &mut TuiApp) {
+    match detail {
+        DetailView::AudioDevices => {
+            if matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+                return_to_menu(app);
+            }
+        }
+        DetailView::SipTrace => handle_trace_key(key, app),
     }
+}
+
+fn handle_trace_key(key: KeyEvent, app: &mut TuiApp) {
+    match key.code {
+        KeyCode::Esc => return_to_menu(app),
+        KeyCode::Enter => {
+            if !visible_trace_indices(app).is_empty() {
+                app.trace_show_raw = !app.trace_show_raw;
+            }
+        }
+        KeyCode::Up => move_trace_selection(app, -1),
+        KeyCode::Down => move_trace_selection(app, 1),
+        _ => {}
+    }
+}
+
+fn move_trace_selection(app: &mut TuiApp, delta: isize) {
+    let len = visible_trace_indices(app).len();
+    if len == 0 {
+        app.selected_trace = 0;
+        return;
+    }
+    app.selected_trace = if delta.is_negative() {
+        (app.selected_trace + len - 1) % len
+    } else {
+        (app.selected_trace + 1) % len
+    };
 }
 
 fn move_selection(app: &mut TuiApp, delta: isize) {
@@ -428,13 +491,21 @@ fn open_action(
         Action::Reject | Action::CancelCall | Action::HangUp | Action::Quit => {
             app.view = ViewMode::Confirm(action);
         }
+        Action::SipTrace => {
+            let visible = visible_trace_indices(app);
+            if !visible.is_empty() {
+                app.selected_trace = visible.len() - 1;
+            }
+            app.trace_show_raw = false;
+            app.view = ViewMode::Detail(DetailView::SipTrace);
+        }
         Action::AudioDevices => {
             app.audio_detail = audio_device_summary(
                 app.options.input_device.as_deref(),
                 app.options.output_device.as_deref(),
                 &app.audio,
             );
-            app.view = ViewMode::Detail;
+            app.view = ViewMode::Detail(DetailView::AudioDevices);
         }
     }
 }
@@ -466,6 +537,7 @@ fn shortcut_action(ch: char, app: &TuiApp) -> Option<Action> {
             }
         }
         't' => Action::Transfer,
+        's' => Action::SipTrace,
         'q' => Action::Quit,
         _ => return None,
     };
@@ -483,7 +555,7 @@ fn return_to_menu(app: &mut TuiApp) {
 }
 
 fn available_actions(app: &TuiApp) -> Vec<Action> {
-    match app.state {
+    let actions = match app.state {
         AppState::Idle | AppState::Registered => {
             vec![Action::Dial, Action::AudioDevices, Action::Quit]
         }
@@ -533,7 +605,23 @@ fn available_actions(app: &TuiApp) -> Vec<Action> {
             Action::Quit,
         ],
         AppState::Error | AppState::ShuttingDown => vec![Action::Quit],
+    };
+    with_sip_trace_action(actions, app)
+}
+
+fn with_sip_trace_action(mut actions: Vec<Action>, app: &TuiApp) -> Vec<Action> {
+    if !app.options.sip_trace.enabled
+        || matches!(app.state, AppState::Error | AppState::ShuttingDown)
+    {
+        return actions;
     }
+
+    let insert_at = actions
+        .iter()
+        .position(|action| *action == Action::AudioDevices)
+        .unwrap_or_else(|| actions.len().saturating_sub(1));
+    actions.insert(insert_at, Action::SipTrace);
+    actions
 }
 
 pub(crate) fn draw_ui(frame: &mut Frame<'_>, app: &TuiApp) {
@@ -626,7 +714,8 @@ fn draw_detail(frame: &mut Frame<'_>, app: &TuiApp, area: ratatui::layout::Rect)
         ViewMode::Menu => draw_state_detail(frame, app, area),
         ViewMode::Prompt(action) => draw_prompt(frame, app, action, area),
         ViewMode::Confirm(action) => draw_confirm(frame, app, action, area),
-        ViewMode::Detail => draw_audio_detail(frame, app, area),
+        ViewMode::Detail(DetailView::AudioDevices) => draw_audio_detail(frame, app, area),
+        ViewMode::Detail(DetailView::SipTrace) => draw_sip_trace(frame, app, area),
     }
 }
 
@@ -855,6 +944,185 @@ fn draw_audio_detail(frame: &mut Frame<'_>, app: &TuiApp, area: ratatui::layout:
     );
 }
 
+fn draw_sip_trace(frame: &mut Frame<'_>, app: &TuiApp, area: ratatui::layout::Rect) {
+    let visible = visible_trace_indices(app);
+    let title = if let Some(call_id) = current_session_id(app) {
+        format!("SIP Trace - current call {call_id}")
+    } else {
+        "SIP Trace".into()
+    };
+
+    let lines = if visible.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "No SIP messages captured yet.",
+                Style::default().fg(Color::Gray),
+            )),
+            Line::from(format!(
+                "Redaction: {}",
+                if app.options.sip_trace.redact_sensitive_headers {
+                    "on"
+                } else {
+                    "off"
+                }
+            )),
+            Line::from("Start or receive a call while --sip-trace is enabled."),
+        ]
+    } else if app.trace_show_raw {
+        let selected = selected_trace(app, &visible);
+        raw_trace_lines(selected)
+    } else {
+        trace_list_lines(app, &visible)
+    };
+
+    clear_area(frame, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn trace_list_lines(app: &TuiApp, visible: &[usize]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "Enter opens the selected raw message. Esc returns to actions.",
+        Style::default().fg(Color::Gray),
+    )));
+    lines.push(Line::from(String::new()));
+
+    for (visible_idx, trace_idx) in visible.iter().copied().enumerate().rev().take(12).rev() {
+        let Some(trace) = app.trace_events.get(trace_idx) else {
+            continue;
+        };
+        let selected = visible_idx == app.selected_trace.min(visible.len().saturating_sub(1));
+        let marker = if selected { "> " } else { "  " };
+        let style = if selected {
+            trace_style(trace).add_modifier(Modifier::BOLD)
+        } else {
+            trace_style(trace)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(trace.direction.arrow(), style),
+            Span::raw(" "),
+            Span::styled(trace.transport.clone(), Style::default().fg(Color::Cyan)),
+            Span::raw("  "),
+            Span::styled(trace.start_line.clone(), style),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!(
+                "    call-id: {}  session: {}",
+                trace.sip_call_id.as_deref().unwrap_or("-"),
+                trace
+                    .session_id
+                    .as_ref()
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "-".into())
+            ),
+            Style::default().fg(Color::Gray),
+        )));
+    }
+
+    lines
+}
+
+fn raw_trace_lines(trace: Option<&EndpointSipTrace>) -> Vec<Line<'static>> {
+    let Some(trace) = trace else {
+        return vec![Line::from("No trace selected.")];
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Enter returns to the trace list. Esc returns to actions.",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(String::new()),
+        Line::from(format!(
+            "{} {} {} -> {}",
+            trace.direction.arrow(),
+            trace.transport,
+            trace.local_addr,
+            trace.remote_addr
+        )),
+        Line::from(format!("Start: {}", trace.start_line)),
+        Line::from(format!(
+            "SIP Call-ID: {}",
+            trace.sip_call_id.as_deref().unwrap_or("-")
+        )),
+        Line::from(format!(
+            "Session: {}",
+            trace
+                .session_id
+                .as_ref()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "-".into())
+        )),
+    ];
+    if trace.redacted {
+        lines.push(Line::from(Span::styled(
+            "Sensitive headers redacted.",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if trace.truncated {
+        lines.push(Line::from(Span::styled(
+            format!("Message truncated from {} bytes.", trace.original_len),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    lines.push(Line::from(String::new()));
+    lines.extend(
+        trace
+            .raw_message
+            .lines()
+            .map(|line| Line::from(line.to_string())),
+    );
+    lines
+}
+
+fn visible_trace_indices(app: &TuiApp) -> Vec<usize> {
+    let all = app.trace_events.iter().enumerate().map(|(idx, _)| idx);
+    let Some(call_id) = current_session_id(app) else {
+        return all.collect();
+    };
+
+    let filtered = app
+        .trace_events
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, trace)| {
+            let matches_call = trace
+                .session_id
+                .as_ref()
+                .is_some_and(|session_id| session_id.to_string() == call_id);
+            matches_call.then_some(idx)
+        })
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        all.collect()
+    } else {
+        filtered
+    }
+}
+
+fn selected_trace<'a>(app: &'a TuiApp, visible: &[usize]) -> Option<&'a EndpointSipTrace> {
+    let selected = app.selected_trace.min(visible.len().saturating_sub(1));
+    visible
+        .get(selected)
+        .and_then(|trace_idx| app.trace_events.get(*trace_idx))
+}
+
+fn current_session_id(app: &TuiApp) -> Option<&str> {
+    app.active_call
+        .as_ref()
+        .map(|(id, _)| id.as_str())
+        .or_else(|| app.calling.as_ref().map(|(id, _)| id.as_str()))
+        .or_else(|| app.incoming.as_ref().map(|(id, _, _)| id.as_str()))
+}
+
 fn draw_events(frame: &mut Frame<'_>, app: &TuiApp, area: ratatui::layout::Rect) {
     let mut lines = app
         .logs
@@ -865,7 +1133,11 @@ fn draw_events(frame: &mut Frame<'_>, app: &TuiApp, area: ratatui::layout::Rect)
         .map(|line| Line::from(Span::styled(line.clone(), log_style(line))))
         .collect::<Vec<_>>();
     lines.push(Line::from(Span::styled(
-        "Up/Down select  Enter choose  Esc back",
+        if matches!(app.view, ViewMode::Detail(DetailView::SipTrace)) {
+            "Up/Down trace  Enter raw/list  Esc back"
+        } else {
+            "Up/Down select  Enter choose  Esc back"
+        },
         Style::default().fg(Color::Gray),
     )));
 
@@ -944,6 +1216,19 @@ fn log_style(line: &str) -> Style {
         Style::default().fg(Color::Green)
     } else {
         Style::default().fg(Color::Gray)
+    }
+}
+
+fn trace_style(trace: &EndpointSipTrace) -> Style {
+    if trace.start_line.starts_with("SIP/2.0 4")
+        || trace.start_line.starts_with("SIP/2.0 5")
+        || trace.start_line.starts_with("SIP/2.0 6")
+    {
+        Style::default().fg(Color::Red)
+    } else if trace.direction.arrow() == "<" {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Green)
     }
 }
 

@@ -172,6 +172,7 @@ impl TcpTransport {
                             message,
                             source: peer_addr,
                             destination: local_addr,
+                            transport_type: TransportType::Tcp,
                         };
 
                         if let Err(e) = events_tx.send(event).await {
@@ -412,6 +413,7 @@ mod tests {
                 message,
                 source,
                 destination,
+                ..
             } => {
                 assert_eq!(destination, server_addr);
                 assert!(message.is_request());

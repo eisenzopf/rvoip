@@ -13,11 +13,41 @@
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
 use crate::errors::Result;
 use crate::state_table::types::SessionId;
+pub use rvoip_infra_common::events::cross_crate::{SipTraceConfig, SipTraceDirection};
 use rvoip_sip_core::types::sdp::CryptoSuite;
 use tokio::sync::mpsc;
 
 /// Type alias for call ID (same as SessionId)
 pub type CallId = SessionId;
+
+/// Public SIP trace event emitted when [`SipTraceConfig::enabled`] is true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SipTrace {
+    /// Inbound or outbound at the local transport boundary.
+    pub direction: SipTraceDirection,
+    /// Transport flavour, for example `UDP`, `TCP`, or `TLS`.
+    pub transport: String,
+    /// Local socket address.
+    pub local_addr: String,
+    /// Remote socket address.
+    pub remote_addr: String,
+    /// Milliseconds since Unix epoch when the trace event was created.
+    pub timestamp_unix_millis: u64,
+    /// SIP start line, for example `INVITE sip:bob@example.com SIP/2.0`.
+    pub start_line: String,
+    /// Wire-level SIP `Call-ID` header value when present.
+    pub sip_call_id: Option<String>,
+    /// Session-core session id after mapping, when known.
+    pub session_id: Option<CallId>,
+    /// Redacted, optionally body-stripped SIP message text.
+    pub raw_message: String,
+    /// Original rendered message byte length before redaction/body stripping/truncation.
+    pub original_len: usize,
+    /// Whether `raw_message` was truncated for bounded diagnostics.
+    pub truncated: bool,
+    /// Whether sensitive headers were redacted.
+    pub redacted: bool,
+}
 
 /// Typed classification for REFER transfer requests.
 ///
@@ -602,6 +632,10 @@ pub enum Event {
         reason: String,
     },
 
+    // ===== Diagnostics Events =====
+    /// SIP message observed at the transport boundary.
+    SipTrace(SipTrace),
+
     // ===== Error Events =====
     /// Network error occurred
     NetworkError {
@@ -665,6 +699,7 @@ impl Event {
             | Event::DialogStateChanged {
                 subscription_id, ..
             } => Some(subscription_id),
+            Event::SipTrace(trace) => trace.session_id.as_ref(),
             Event::NetworkError { call_id, .. } => call_id.as_ref(),
             // Registration events don't have call_id
             Event::RegistrationSuccess { .. }

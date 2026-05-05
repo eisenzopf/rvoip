@@ -14,7 +14,7 @@ use rvoip_sip_core::types::Message;
 use rvoip_sip_core::{parse_message};
 
 use crate::error::{Error, Result};
-use crate::transport::{Transport, TransportEvent};
+use crate::transport::{Transport, TransportEvent, TransportType};
 
 // Maximum UDP packet size
 const MAX_UDP_PACKET_SIZE: usize = 65_507;
@@ -169,6 +169,7 @@ impl UdpTransport {
                             message,
                             source: src,
                             destination: local_addr,
+                            transport_type: TransportType::Udp,
                         };
 
                         if let Err(e) = inner.events_tx.send(event).await {

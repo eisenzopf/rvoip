@@ -203,8 +203,8 @@ use crate::transaction::transport::multiplexed::{
     next_hop_uri_for_request, select_transport_for_request, top_route_uri,
 };
 use crate::transaction::transport::{
-    NetworkInfoForSdp, TransportCapabilities, TransportCapabilitiesExt, TransportInfo,
-    WebSocketStatus,
+    NetworkInfoForSdp, SipTraceRuntime, TransportCapabilities, TransportCapabilitiesExt,
+    TransportInfo, WebSocketStatus,
 };
 use crate::transaction::utils::{
     create_ack_from_invite, generate_branch, transaction_key_from_message,
@@ -327,6 +327,8 @@ pub struct TransactionManager {
             Option<mpsc::Sender<crate::manager::outbound_flow::FlowTransportEvent>>,
         >,
     >,
+    /// Optional SIP trace publisher for inbound transport-boundary events.
+    sip_trace: Option<Arc<SipTraceRuntime>>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -457,6 +459,7 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            sip_trace: None,
         };
 
         // Start the message processing loop
@@ -563,6 +566,7 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            sip_trace: None,
         };
 
         // Start the message processing loop
@@ -655,6 +659,7 @@ impl TransactionManager {
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
         // manager only has a single flavour registered (typical
         // UDP-only setup) the multiplexer transparently delegates to it.
+        let sip_trace = transport_manager.sip_trace_runtime();
         let default_transport = transport_manager
             .build_multiplexed_transport()
             .await
@@ -703,6 +708,7 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            sip_trace,
         };
 
         // Start the message processing loop
@@ -788,6 +794,7 @@ impl TransactionManager {
             timer_manager,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
+            sip_trace: None,
         }
     }
 
@@ -847,6 +854,7 @@ impl TransactionManager {
             transaction_to_subscribers,
             next_subscriber_id,
             transport_rx: Arc::new(Mutex::new(transport_rx)),
+            sip_trace: None,
         }
     }
 

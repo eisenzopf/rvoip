@@ -18,7 +18,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
 use rvoip_infra_common::events::cross_crate::{
-    CrossCrateEvent, DialogToSessionEvent, MediaToSessionEvent, RvoipCrossCrateEvent,
+    CrossCrateEvent, DialogToSessionEvent, MediaToSessionEvent, RvoipCrossCrateEvent, SipTraceEvent,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -29,6 +29,27 @@ use tracing::{debug, error, info, warn};
 /// same AoR collapse to a single re-REGISTER. Matches the guidance in
 /// RFC 5626 §4.4.1 (flow recovery should not storm the registrar).
 const OUTBOUND_FLOW_REFRESH_DEBOUNCE: Duration = Duration::from_secs(1);
+
+fn sip_trace_owner_matches(configured_owner_id: Option<&str>, event_owner_id: &str) -> bool {
+    configured_owner_id.is_some_and(|owner_id| owner_id == event_owner_id)
+}
+
+fn map_sip_trace_session_id(
+    event: &SipTraceEvent,
+    callid_to_session: &DashMap<String, SessionId>,
+) -> Option<SessionId> {
+    event
+        .session_id
+        .as_ref()
+        .map(|id| SessionId(id.clone()))
+        .or_else(|| {
+            event.sip_call_id.as_ref().and_then(|sip_call_id| {
+                callid_to_session
+                    .get(sip_call_id)
+                    .map(|entry| entry.value().clone())
+            })
+        })
+}
 
 /// Handler for processing cross-crate events in session-core
 #[derive(Clone)]
@@ -66,6 +87,9 @@ pub struct SessionCrossCrateEventHandler {
 
     /// App-level event publisher. Updates lifecycle before global bus delivery.
     app_event_publisher: SessionEventPublisher,
+
+    /// Optional owner id for SIP trace events emitted by this coordinator's transport stack.
+    sip_trace_owner_id: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -423,6 +447,35 @@ impl SessionCrossCrateEventHandler {
         }
     }
 
+    async fn handle_transport_to_session_event(&self, event: &SipTraceEvent) -> Result<()> {
+        if !sip_trace_owner_matches(self.sip_trace_owner_id.as_deref(), &event.owner_id) {
+            return Ok(());
+        }
+
+        let session_id = map_sip_trace_session_id(event, &self.dialog_adapter.callid_to_session);
+
+        let trace = crate::api::events::SipTrace {
+            direction: event.direction.clone(),
+            transport: event.transport.clone(),
+            local_addr: event.local_addr.clone(),
+            remote_addr: event.remote_addr.clone(),
+            timestamp_unix_millis: event.timestamp_unix_millis,
+            start_line: event.start_line.clone(),
+            sip_call_id: event.sip_call_id.clone(),
+            session_id,
+            raw_message: event.raw_message.clone(),
+            original_len: event.original_len,
+            truncated: event.truncated,
+            redacted: event.redacted,
+        };
+
+        publish_api_event(
+            &self.app_event_publisher,
+            crate::api::events::Event::SipTrace(trace),
+        );
+        Ok(())
+    }
+
     pub fn new(
         state_machine: Arc<StateMachineExecutor>,
         global_coordinator: Arc<GlobalEventCoordinator>,
@@ -443,6 +496,7 @@ impl SessionCrossCrateEventHandler {
                 global_coordinator.clone(),
                 LifecycleIndex::new(),
             ),
+            sip_trace_owner_id: None,
         }
     }
 
@@ -465,6 +519,7 @@ impl SessionCrossCrateEventHandler {
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher,
+            sip_trace_owner_id: None,
         }
     }
 
@@ -502,6 +557,7 @@ impl SessionCrossCrateEventHandler {
         incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
         state_machine_event_rx: mpsc::Receiver<crate::state_machine::executor::SessionEvent>,
         app_event_publisher: SessionEventPublisher,
+        sip_trace_owner_id: Option<String>,
     ) -> Self {
         let mut handler = Self::with_incoming_call_channel(
             state_machine,
@@ -513,6 +569,7 @@ impl SessionCrossCrateEventHandler {
             app_event_publisher,
         );
         handler.state_machine_event_rx = Some(Arc::new(Mutex::new(state_machine_event_rx)));
+        handler.sip_trace_owner_id = sip_trace_owner_id;
         handler
     }
 
@@ -626,6 +683,36 @@ impl SessionCrossCrateEventHandler {
             info!("🔔 [session_event_handler] Dialog-to-session event loop ended");
         });
 
+        // Subscribe to transport-to-session diagnostics such as SIP trace.
+        let mut transport_sub = self
+            .global_coordinator
+            .subscribe("transport_to_session")
+            .await
+            .map_err(|e| {
+                SessionError::InternalError(format!(
+                    "Failed to subscribe to transport diagnostics: {}",
+                    e
+                ))
+            })?;
+
+        let handler = self.clone();
+        let mut shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() { break; }
+                    }
+                    event = transport_sub.recv() => {
+                        let Some(event) = event else { break };
+                        if let Err(e) = handler.handle(event).await {
+                            error!("Error handling transport-to-session event: {}", e);
+                        }
+                    }
+                }
+            }
+        });
+
         // Subscribe to media-to-session events
         let mut media_sub = self
             .global_coordinator
@@ -720,6 +807,9 @@ impl CrossCrateEventHandler for SessionCrossCrateEventHandler {
             }
             Some(RvoipCrossCrateEvent::MediaToSession(typed)) => {
                 self.handle_media_to_session_event(typed).await?;
+            }
+            Some(RvoipCrossCrateEvent::TransportToSession(typed)) => {
+                self.handle_transport_to_session_event(typed).await?;
             }
             Some(other) => {
                 debug!(
@@ -973,6 +1063,9 @@ impl SessionCrossCrateEventHandler {
         self.dialog_adapter
             .dialog_to_session
             .insert(rvoip_dialog_id, session_id.clone());
+        self.dialog_adapter
+            .callid_to_session
+            .insert(call_id.clone(), session_id.clone());
 
         let event =
             rvoip_infra_common::events::cross_crate::SessionToDialogEvent::StoreDialogMapping {
@@ -3729,7 +3822,10 @@ fn parse_sipfrag_status_line(body: &str) -> Option<(u16, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_sipfrag_status_line;
+    use super::{map_sip_trace_session_id, parse_sipfrag_status_line, sip_trace_owner_matches};
+    use crate::state_table::types::SessionId;
+    use dashmap::DashMap;
+    use rvoip_infra_common::events::cross_crate::{SipTraceDirection, SipTraceEvent};
 
     #[test]
     fn sipfrag_parses_progress_and_final() {
@@ -3752,5 +3848,54 @@ mod tests {
         assert!(parse_sipfrag_status_line("HTTP/1.1 200 OK").is_none());
         assert!(parse_sipfrag_status_line("SIP/2.0 notanumber Ringing").is_none());
         assert!(parse_sipfrag_status_line("").is_none());
+    }
+
+    #[test]
+    fn sip_trace_owner_filter_accepts_only_matching_owner() {
+        assert!(sip_trace_owner_matches(Some("owner-a"), "owner-a"));
+        assert!(!sip_trace_owner_matches(Some("owner-a"), "owner-b"));
+        assert!(!sip_trace_owner_matches(None, "owner-a"));
+    }
+
+    #[test]
+    fn sip_trace_maps_sip_call_id_to_session_id() {
+        let callid_to_session = DashMap::new();
+        callid_to_session.insert("wire-call".into(), SessionId("session-1".into()));
+        let event = trace_event(None, Some("wire-call"));
+
+        assert_eq!(
+            map_sip_trace_session_id(&event, &callid_to_session),
+            Some(SessionId("session-1".into()))
+        );
+    }
+
+    #[test]
+    fn sip_trace_direct_session_id_wins_over_call_id_mapping() {
+        let callid_to_session = DashMap::new();
+        callid_to_session.insert("wire-call".into(), SessionId("mapped-session".into()));
+        let event = trace_event(Some("direct-session"), Some("wire-call"));
+
+        assert_eq!(
+            map_sip_trace_session_id(&event, &callid_to_session),
+            Some(SessionId("direct-session".into()))
+        );
+    }
+
+    fn trace_event(session_id: Option<&str>, sip_call_id: Option<&str>) -> SipTraceEvent {
+        SipTraceEvent {
+            owner_id: "owner-a".into(),
+            direction: SipTraceDirection::Inbound,
+            transport: "UDP".into(),
+            local_addr: "127.0.0.1:5060".into(),
+            remote_addr: "127.0.0.1:5080".into(),
+            timestamp_unix_millis: 1,
+            start_line: "INVITE sip:bob@example.com SIP/2.0".into(),
+            sip_call_id: sip_call_id.map(str::to_string),
+            session_id: session_id.map(str::to_string),
+            raw_message: "INVITE sip:bob@example.com SIP/2.0\n\n".into(),
+            original_len: 40,
+            truncated: false,
+            redacted: true,
+        }
     }
 }

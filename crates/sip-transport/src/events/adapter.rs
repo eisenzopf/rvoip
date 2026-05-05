@@ -170,6 +170,7 @@ impl TransportEventAdapter {
                 message,
                 source,
                 destination,
+                ..
             } => {
                 // Extract basic SIP information
                 let method = if message.is_request() {

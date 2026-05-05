@@ -55,7 +55,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
-use crate::api::events::{Event, MediaSecurityState, SubscriptionState, TransferTargetEvidence};
+use crate::api::events::{
+    Event, MediaSecurityState, SipTrace, SubscriptionState, TransferTargetEvidence,
+};
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::unified::{Config, Registration, RegistrationHandle, UnifiedCoordinator};
@@ -178,6 +180,7 @@ type RegistrationFailedHook =
 type UnregistrationSuccessHook = Arc<dyn Fn(String) -> CallbackFuture<Result<()>> + Send + Sync>;
 type UnregistrationFailedHook =
     Arc<dyn Fn(String, String) -> CallbackFuture<Result<()>> + Send + Sync>;
+type SipTraceHook = Arc<dyn Fn(SipTrace) -> CallbackFuture<Result<()>> + Send + Sync>;
 
 /// Builder for closure-based [`CallbackPeer`] applications.
 ///
@@ -207,6 +210,7 @@ pub struct CallbackPeerBuilder {
     registration_failed: Option<RegistrationFailedHook>,
     unregistration_success: Option<UnregistrationSuccessHook>,
     unregistration_failed: Option<UnregistrationFailedHook>,
+    sip_trace: Option<SipTraceHook>,
 }
 
 impl CallbackPeerBuilder {
@@ -236,6 +240,7 @@ impl CallbackPeerBuilder {
             registration_failed: None,
             unregistration_success: None,
             unregistration_failed: None,
+            sip_trace: None,
         }
     }
 
@@ -482,6 +487,16 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Handle SIP transport-boundary trace events when tracing is enabled.
+    pub fn on_sip_trace<F, Fut>(mut self, f: F) -> Self
+    where
+        F: Fn(SipTrace) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.sip_trace = Some(Arc::new(move |trace| Box::pin(f(trace))));
+        self
+    }
+
     /// Build the [`CallbackPeer`].
     pub async fn build(self) -> Result<CallbackPeer<CallbackBuilderHandler>> {
         let incoming = self.incoming.ok_or_else(|| {
@@ -513,6 +528,7 @@ impl CallbackPeerBuilder {
                 registration_failed: self.registration_failed,
                 unregistration_success: self.unregistration_success,
                 unregistration_failed: self.unregistration_failed,
+                sip_trace: self.sip_trace,
             },
             self.config,
         )
@@ -545,6 +561,7 @@ pub struct CallbackBuilderHandler {
     registration_failed: Option<RegistrationFailedHook>,
     unregistration_success: Option<UnregistrationSuccessHook>,
     unregistration_failed: Option<UnregistrationFailedHook>,
+    sip_trace: Option<SipTraceHook>,
 }
 
 #[async_trait]
@@ -749,6 +766,14 @@ impl CallHandler for CallbackBuilderHandler {
                     "[CallbackPeerBuilder] on_unregistration_failed failed: {}",
                     err
                 );
+            }
+        }
+    }
+
+    async fn on_sip_trace(&self, trace: SipTrace) {
+        if let Some(hook) = &self.sip_trace {
+            if let Err(err) = hook(trace).await {
+                tracing::warn!("[CallbackPeerBuilder] on_sip_trace failed: {}", err);
             }
         }
     }
@@ -975,6 +1000,10 @@ pub trait CallHandler: Send + Sync + 'static {
     /// Called when unregistration fails.
     #[allow(unused_variables)]
     async fn on_unregistration_failed(&self, registrar: String, reason: String) {}
+
+    /// Called for each SIP trace event when tracing is enabled.
+    #[allow(unused_variables)]
+    async fn on_sip_trace(&self, trace: SipTrace) {}
 
     /// Called when an outgoing call receives a 401/407 and the coordinator is
     /// about to retry with `Authorization` / `Proxy-Authorization` (RFC 3261
@@ -1895,6 +1924,10 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                 Event::UnregistrationFailed { registrar, reason } => {
                     handler.on_unregistration_failed(registrar, reason).await;
+                }
+
+                Event::SipTrace(trace) => {
+                    handler.on_sip_trace(trace).await;
                 }
 
                 Event::CallAuthRetrying {

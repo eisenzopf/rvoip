@@ -222,7 +222,8 @@ pub use api::endpoint::{
     EndpointAudioReceiver, EndpointAudioSender, EndpointBuilder, EndpointCall, EndpointCallId,
     EndpointConfig, EndpointControl, EndpointEvent, EndpointEvents, EndpointIncomingCall,
     EndpointMediaConfig, EndpointNetworkConfig, EndpointProfile, EndpointProfileName,
-    EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSrtpMode, EndpointTransport,
+    EndpointRegistrationInfo, EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode,
+    EndpointTransport,
 };
 pub use api::stream_peer::{EventReceiver, PeerControl, StreamPeer, StreamPeerBuilder};
 
@@ -255,8 +256,8 @@ pub use api::dialog_package::{
 };
 pub use api::dialog_subscription::DialogSubscriptionHandle;
 pub use api::events::{
-    Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, SubscriptionState,
-    TransferKind, TransferTargetEvidence,
+    Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, SipTrace, SipTraceConfig,
+    SipTraceDirection, SubscriptionState, TransferKind, TransferTargetEvidence,
 };
 
 // Errors
@@ -284,13 +285,13 @@ pub mod prelude {
         EndpointBuilder, EndpointCall, EndpointCallId, EndpointConfig, EndpointControl,
         EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
-        EndpointRegistrationStatus, EndpointSrtpMode, EndpointTransport, Event, EventReceiver,
-        IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
+        EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
+        EventReceiver, IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
         MediaSecurityState, PeerControl, Registration, RegistrationHandle, RegistrationInfo,
         RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipReason,
-        SipTlsMode, SrtpSuitePolicy, StreamPeer, StreamPeerBuilder, SubscriptionState,
-        TransferDialogMatcher, TransferKind, TransferLifecycleOptions, TransferOutcome,
-        TransferTargetEvidence, TransferWaitMode,
+        SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy, StreamPeer,
+        StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
+        TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
     };
 }
 
