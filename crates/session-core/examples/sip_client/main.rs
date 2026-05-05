@@ -433,7 +433,6 @@ async fn run_tui(options: RuntimeOptions) -> anyhow::Result<()> {
     let runtime_options = options.clone();
     let runtime = std::thread::Builder::new()
         .name("sip-client-runtime".into())
-        .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
