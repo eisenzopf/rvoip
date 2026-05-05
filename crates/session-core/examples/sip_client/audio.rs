@@ -369,6 +369,33 @@ pub(crate) fn list_audio_devices() -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn audio_device_summary(
+    input_selector: Option<&str>,
+    output_selector: Option<&str>,
+    active_route: &str,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!(
+            "Active route: {}",
+            if active_route.is_empty() {
+                "stopped"
+            } else {
+                active_route
+            }
+        ),
+        format!("Input selector: {}", input_selector.unwrap_or("default")),
+        format!("Output selector: {}", output_selector.unwrap_or("default")),
+        String::new(),
+        "Input devices:".into(),
+    ];
+
+    append_device_lines(&mut lines, true);
+    lines.push(String::new());
+    lines.push("Output devices:".into());
+    append_device_lines(&mut lines, false);
+    lines
+}
+
 fn print_device_list(input: bool) {
     match collect_device_names(input, Duration::from_secs(3)) {
         Ok(names) if names.is_empty() => println!("  <none>"),
@@ -378,6 +405,18 @@ fn print_device_list(input: bool) {
             }
         }
         Err(message) => println!("  <{message}>"),
+    }
+}
+
+fn append_device_lines(lines: &mut Vec<String>, input: bool) {
+    match collect_device_names(input, Duration::from_secs(1)) {
+        Ok(names) if names.is_empty() => lines.push("  <none>".into()),
+        Ok(names) => {
+            for (idx, name) in names.iter().enumerate() {
+                lines.push(format!("  {idx}: {name}"));
+            }
+        }
+        Err(message) => lines.push(format!("  <{message}>")),
     }
 }
 

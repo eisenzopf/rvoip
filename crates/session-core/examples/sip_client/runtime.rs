@@ -41,7 +41,7 @@ pub(crate) async fn run_tui(options: RuntimeOptions) -> anyhow::Result<()> {
 
     let mut terminal = TerminalSession::enter()?;
     let mut app = TuiApp::new(options);
-    app.push_log("press d to dial, q to quit");
+    app.push_log("select an action with Up/Down, then Enter");
 
     loop {
         while let Ok(event) = event_rx.try_recv() {
@@ -115,7 +115,10 @@ async fn run_runtime_inner(
     if let Some(target) = options.dial.as_ref() {
         match control.call(target).await {
             Ok(call) => {
-                let _ = event_tx.send(UiEvent::State(AppState::Calling));
+                let _ = event_tx.send(UiEvent::Calling {
+                    id: call.id().to_string(),
+                    target: target.clone(),
+                });
                 let _ = event_tx.send(UiEvent::Log(format!("calling {target} ({})", call.id())));
                 active_call = Some(call);
             }
@@ -140,7 +143,10 @@ async fn run_runtime_inner(
                         }
                         match control.call(&target).await {
                             Ok(call) => {
-                                let _ = event_tx.send(UiEvent::State(AppState::Calling));
+                                let _ = event_tx.send(UiEvent::Calling {
+                                    id: call.id().to_string(),
+                                    target: target.clone(),
+                                });
                                 let _ = event_tx.send(UiEvent::Log(format!("calling {target} ({})", call.id())));
                                 active_call = Some(call);
                                 on_hold = false;

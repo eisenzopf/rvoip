@@ -100,15 +100,19 @@ cargo run -p rvoip-session-core --example sip_client -- --config alice.json
 
 ## Keyboard
 
-- `d`: dial
-- `a`: answer
-- `r`: reject
-- `h`: hang up
-- `m`: mute/unmute microphone
-- `o`: hold/resume
-- `0-9 * #`: send DTMF
-- `t`: blind transfer
-- `q`: graceful quit
+The softphone shows only actions that make sense for the current call state.
+
+- `Up` / `Down`: select an action
+- `Enter`: choose the selected action
+- `Esc`: cancel a prompt, confirmation, or detail view
+
+When a prompt is open:
+
+- Dial and transfer prompts send on `Enter`
+- DTMF sends each `0-9`, `*`, or `#` digit immediately
+
+Legacy letter shortcuts such as `d`, `a`, `h`, `m`, `o`, `t`, and `q` still
+work as hidden accelerators, but the menu is the primary interface.
 
 ## Audio Devices
 
