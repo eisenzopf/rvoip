@@ -198,6 +198,20 @@ pub struct ManagerStats {
     pub auto_responses: u64,
 }
 
+fn set_response_to_tag(response: &mut Response, tag: &str) {
+    use rvoip_sip_core::types::{HeaderName, TypedHeader};
+
+    if let Some(to_index) = response
+        .headers
+        .iter()
+        .position(|header| header.name() == HeaderName::To)
+    {
+        if let TypedHeader::To(to_header) = response.headers[to_index].clone() {
+            response.headers[to_index] = TypedHeader::To(to_header.with_tag(tag));
+        }
+    }
+}
+
 impl UnifiedDialogManager {
     /// Get inner dialog manager for event hub setup
     pub fn inner_manager(&self) -> &DialogManager {
@@ -1114,6 +1128,9 @@ impl UnifiedDialogManager {
                 message: "No original request found for transaction".to_string(),
             })?;
 
+        let response_to_tag =
+            self.ensure_uas_invite_response_tag(transaction_id, &original_request, status_code)?;
+
         // Use the proper response builder to create response with all required headers
         let mut response = rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
             &original_request,
@@ -1131,10 +1148,59 @@ impl UnifiedDialogManager {
             }
         }
 
-        let built_response = response.build();
+        let mut built_response = response.build();
+        if let Some(to_tag) = response_to_tag {
+            set_response_to_tag(&mut built_response, &to_tag);
+        }
 
         debug!("Successfully built response for transaction {} using proper RFC 3261 compliant headers", transaction_id);
         Ok(built_response)
+    }
+
+    fn ensure_uas_invite_response_tag(
+        &self,
+        transaction_id: &TransactionKey,
+        original_request: &Request,
+        status_code: StatusCode,
+    ) -> ApiResult<Option<String>> {
+        let status = status_code.as_u16();
+        if original_request.method() != Method::Invite
+            || original_request.to().and_then(|to| to.tag()).is_some()
+            || !(101..300).contains(&status)
+        {
+            return Ok(None);
+        }
+
+        let Some(dialog_id_ref) = self.core.transaction_to_dialog.get(transaction_id) else {
+            return Ok(None);
+        };
+        let dialog_id = dialog_id_ref.clone();
+        drop(dialog_id_ref);
+
+        let (to_tag, tuple) = {
+            let mut dialog = self.core.get_dialog_mut(&dialog_id)?;
+            let to_tag = match dialog.local_tag.clone() {
+                Some(tag) if !tag.is_empty() => tag,
+                _ => {
+                    let tag = dialog.generate_local_tag();
+                    dialog.local_tag = Some(tag.clone());
+                    tag
+                }
+            };
+
+            (to_tag, dialog.dialog_id_tuple())
+        };
+
+        if let Some((call_id, local_tag, remote_tag)) = tuple {
+            let key = crate::manager::utils::DialogUtils::create_lookup_key(
+                &call_id,
+                &local_tag,
+                &remote_tag,
+            );
+            self.core.dialog_lookup.insert(key, dialog_id);
+        }
+
+        Ok(Some(to_tag))
     }
 
     /// Send a status response (convenience method)

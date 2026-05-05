@@ -202,6 +202,28 @@ pub struct UnifiedDialogApi {
     config: DialogManagerConfig,
 }
 
+fn add_contact_header(response: &mut Response, contact_uri: &str) -> ApiResult<()> {
+    use rvoip_sip_core::types::{
+        address::Address,
+        contact::{Contact, ContactParamInfo},
+        uri::Uri,
+        TypedHeader,
+    };
+    use std::str::FromStr;
+
+    let uri = Uri::from_str(contact_uri).map_err(|e| ApiError::Internal {
+        message: format!("Invalid Contact URI {}: {}", contact_uri, e),
+    })?;
+    response
+        .headers
+        .push(TypedHeader::Contact(Contact::new_params(vec![
+            ContactParamInfo {
+                address: Address::new(uri),
+            },
+        ])));
+    Ok(())
+}
+
 /// Options for constructing a non-dialog REGISTER request.
 #[derive(Debug, Clone)]
 pub struct RegisterRequestOptions {
@@ -1021,49 +1043,19 @@ impl UnifiedDialogApi {
                 && original_request.to().and_then(|to| to.tag()).is_none();
 
             if is_dialog_creating_invite {
-                // Use special response builder for 200 OK to INVITE that adds To tag
-                use crate::transaction::utils::response_builders;
+                let mut response = self
+                    .build_response(&transaction_id, StatusCode::Ok, body)
+                    .await?;
                 let local_addr = self
                     .manager
                     .core()
                     .local_address_for_uri(original_request.uri());
-                let mut response =
-                    if let Some(contact_uri) = self.manager.core().local_contact_uri() {
-                        response_builders::create_ok_response_with_contact_uri(
-                            &original_request,
-                            &contact_uri,
-                        )
-                        .map_err(|e| ApiError::Internal {
-                            message: format!(
-                                "Invalid configured local Contact URI {}: {}",
-                                contact_uri, e
-                            ),
-                        })?
-                    } else {
-                        response_builders::create_ok_response_with_dialog_info(
-                            &original_request,
-                            "server",
-                            &local_addr.ip().to_string(),
-                            Some(local_addr.port()),
-                        )
-                    };
-
-                // Add SDP if provided
-                if let Some(sdp_body) = body {
-                    response = response.with_body(sdp_body.as_bytes().to_vec());
-                    // Add Content-Type header for SDP
-                    use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-                    use rvoip_sip_core::{types::content_type::ContentType, TypedHeader};
-                    response
-                        .headers
-                        .push(TypedHeader::ContentType(ContentType::new(
-                            ContentTypeValue {
-                                m_type: "application".to_string(),
-                                m_subtype: "sdp".to_string(),
-                                parameters: std::collections::HashMap::new(),
-                            },
-                        )));
-                }
+                let contact_uri = self
+                    .manager
+                    .core()
+                    .local_contact_uri()
+                    .unwrap_or_else(|| format!("sip:server@{}", local_addr));
+                add_contact_header(&mut response, &contact_uri)?;
 
                 response
             } else {

@@ -18,13 +18,16 @@ use tokio::sync::mpsc;
 
 use rvoip_dialog_core::transaction::transport::{TransportManager, TransportManagerConfig};
 use rvoip_dialog_core::transaction::TransactionManager;
-use rvoip_sip_core::{Method, Request};
+use rvoip_sip_core::{Method, Request, StatusCode};
 
 use rvoip_dialog_core::{
     api::{unified::UnifiedDialogApi, ApiError, DialogConfig},
     // Core unified types
     config::{ClientBehavior, DialogManagerConfig},
-    manager::unified::UnifiedDialogManager,
+    manager::{
+        dialog_operations::DialogLookup, transaction_integration::TransactionHelpers,
+        unified::UnifiedDialogManager,
+    },
 };
 
 /// Test environment for unified API testing
@@ -251,6 +254,58 @@ async fn test_unified_manager_server_mode() -> Result<(), Box<dyn std::error::Er
     // Test lifecycle
     manager.start().await?;
     manager.stop().await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_invite_provisional_response_gets_reusable_to_tag(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = UnifiedTestEnvironment::new().await?;
+
+    let config = DialogManagerConfig::server(env.local_address)
+        .with_domain("sip.company.com")
+        .build();
+    let manager = UnifiedDialogManager::new(env.transaction_manager.clone(), config).await?;
+
+    let invite = create_fake_invite();
+    let server_tx = env
+        .transaction_manager
+        .create_server_transaction(invite.clone(), env.remote_address)
+        .await?;
+    let transaction_id = server_tx.id().clone();
+    let dialog_id = manager
+        .core()
+        .create_early_dialog_from_invite(&invite)
+        .await?;
+    manager
+        .core()
+        .link_transaction_to_dialog(&transaction_id, &dialog_id);
+
+    let provisional = manager
+        .build_response(
+            &transaction_id,
+            StatusCode::SessionProgress,
+            Some("v=0\r\n".to_string()),
+        )
+        .await?;
+    let provisional_tag = provisional
+        .to()
+        .and_then(|to| to.tag().map(str::to_string))
+        .expect("183 response should carry a To tag");
+
+    let dialog = manager.core().get_dialog(&dialog_id)?;
+    assert_eq!(dialog.local_tag.as_deref(), Some(provisional_tag.as_str()));
+
+    let ok = manager
+        .build_response(&transaction_id, StatusCode::Ok, Some("v=0\r\n".to_string()))
+        .await?;
+    let ok_tag = ok
+        .to()
+        .and_then(|to| to.tag().map(str::to_string))
+        .expect("200 response should carry a To tag");
+
+    assert_eq!(ok_tag, provisional_tag);
 
     Ok(())
 }
@@ -641,6 +696,7 @@ fn create_fake_invite() -> Request {
 
     SimpleRequestBuilder::new(Method::Invite, "sip:user@example.com")
         .expect("Failed to create request builder")
+        .via("127.0.0.1:5061", "UDP", Some("z9hG4bK-unified-test"))
         .from("Caller", "sip:caller@example.com", Some("caller-tag"))
         .to("User", "sip:user@example.com", None)
         .call_id("test-call-id")
