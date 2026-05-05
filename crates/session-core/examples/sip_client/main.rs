@@ -39,6 +39,15 @@ use rvoip_session_core::{
 const SAMPLE_RATE: u32 = 8_000;
 const FRAME_MS: u32 = 20;
 const FRAME_SAMPLES: usize = (SAMPLE_RATE as usize * FRAME_MS as usize) / 1_000;
+const CALLER_TEST_TONE_HZ: f32 = 440.0;
+const CALLEE_TEST_TONE_HZ: f32 = 660.0;
+const TEST_TONE_AMPLITUDE: f32 = 0.30;
+const TEST_TONE_MAX_SAMPLES: usize = SAMPLE_RATE as usize * 10;
+const TEST_TONE_MIN_SAMPLES: usize = SAMPLE_RATE as usize / 2;
+const TEST_TONE_MIN_RMS: f32 = 0.02;
+const TEST_TONE_MIN_POWER: f32 = 0.001;
+const TEST_TONE_MIN_DOMINANCE: f32 = 3.0;
+const TEST_TONE_MAX_FREQ_ERROR_HZ: f32 = 40.0;
 const MAX_LOGS: usize = 200;
 
 #[derive(Parser, Debug)]
@@ -422,15 +431,18 @@ async fn run_tui(options: RuntimeOptions) -> anyhow::Result<()> {
     let (command_tx, command_rx) = mpsc::unbounded_channel();
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     let runtime_options = options.clone();
-    let runtime = std::thread::spawn(move || {
-        match tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt.block_on(run_runtime(runtime_options, command_rx, event_tx)),
-            Err(err) => eprintln!("failed to start SIP runtime: {err}"),
-        }
-    });
+    let runtime = std::thread::Builder::new()
+        .name("sip-client-runtime".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt.block_on(run_runtime(runtime_options, command_rx, event_tx)),
+                Err(err) => eprintln!("failed to start SIP runtime: {err}"),
+            }
+        })?;
 
     let mut terminal = TerminalSession::enter()?;
     let mut app = TuiApp::new(options);
@@ -889,7 +901,12 @@ async fn smoke_caller(
     let call = wait_for_answered(&mut events, call.id(), options.test_timeout).await?;
     println!("answered {}", call.id());
 
-    let audio = start_test_audio(call.clone(), options).await?;
+    let audio = start_test_audio(
+        call.clone(),
+        options,
+        TestTonePlan::for_role(TestRole::Caller),
+    )
+    .await?;
     call.send_dtmf(options.test_dtmf).await?;
     println!("sent DTMF {}", options.test_dtmf);
     call.hold().await?;
@@ -918,7 +935,12 @@ async fn smoke_callee(
     let incoming = wait_for_incoming(&mut events, options.test_timeout).await?;
     println!("answering incoming call from {}", incoming.from());
     let call = incoming.answer().await?;
-    let audio = start_test_audio(call.clone(), options).await?;
+    let audio = start_test_audio(
+        call.clone(),
+        options,
+        TestTonePlan::for_role(TestRole::Callee),
+    )
+    .await?;
     let deadline = Instant::now() + options.test_timeout + options.test_duration;
     let mut saw_dtmf = false;
     let mut saw_end = false;
@@ -1047,9 +1069,10 @@ fn event_belongs_to(event: &EndpointEvent, call_id: &EndpointCallId) -> bool {
 async fn start_test_audio(
     call: EndpointCall,
     options: &RuntimeOptions,
+    tone: TestTonePlan,
 ) -> anyhow::Result<TestAudioRun> {
     match options.test_audio {
-        TestAudio::Synthetic => start_synthetic_audio(call).await,
+        TestAudio::Synthetic => start_synthetic_audio(call, tone).await,
         TestAudio::Cpal => {
             let bridge = AudioBridge::new(
                 options.input_device.clone(),
@@ -1062,15 +1085,44 @@ async fn start_test_audio(
     }
 }
 
-async fn start_synthetic_audio(call: EndpointCall) -> anyhow::Result<TestAudioRun> {
+#[derive(Debug, Clone, Copy)]
+struct TestTonePlan {
+    send_hz: f32,
+    expect_hz: f32,
+    reject_hz: f32,
+}
+
+impl TestTonePlan {
+    fn for_role(role: TestRole) -> Self {
+        match role {
+            TestRole::Caller | TestRole::PbxCaller => Self {
+                send_hz: CALLER_TEST_TONE_HZ,
+                expect_hz: CALLEE_TEST_TONE_HZ,
+                reject_hz: CALLER_TEST_TONE_HZ,
+            },
+            TestRole::Callee | TestRole::PbxCallee => Self {
+                send_hz: CALLEE_TEST_TONE_HZ,
+                expect_hz: CALLER_TEST_TONE_HZ,
+                reject_hz: CALLEE_TEST_TONE_HZ,
+            },
+        }
+    }
+}
+
+async fn start_synthetic_audio(
+    call: EndpointCall,
+    tone: TestTonePlan,
+) -> anyhow::Result<TestAudioRun> {
     let audio = call.audio().await?;
     let (sender, mut receiver) = audio.split();
-    let received = Arc::new(AtomicUsize::new(0));
-    let received_for_task = received.clone();
+    let capture = Arc::new(ToneCapture::default());
+    let capture_for_task = capture.clone();
     let send_task = tokio::spawn(async move {
         let mut timestamp = 0u32;
+        let mut phase = 0.0f32;
         loop {
-            let frame = EndpointAudioFrame::pcmu_sized_mono_8khz(vec![0; FRAME_SAMPLES], timestamp);
+            let pcm = tone_frame(tone.send_hz, &mut phase);
+            let frame = EndpointAudioFrame::pcmu_sized_mono_8khz(pcm, timestamp);
             timestamp = timestamp.wrapping_add(FRAME_SAMPLES as u32);
             if sender.send(frame).await.is_err() {
                 break;
@@ -1080,13 +1132,12 @@ async fn start_synthetic_audio(call: EndpointCall) -> anyhow::Result<TestAudioRu
     });
     let recv_task = tokio::spawn(async move {
         while let Some(frame) = receiver.recv().await {
-            if !frame.samples.is_empty() {
-                received_for_task.fetch_add(1, Ordering::SeqCst);
-            }
+            capture_for_task.record(&frame);
         }
     });
     Ok(TestAudioRun::Synthetic {
-        received,
+        capture,
+        tone,
         send_task,
         recv_task,
     })
@@ -1094,7 +1145,8 @@ async fn start_synthetic_audio(call: EndpointCall) -> anyhow::Result<TestAudioRu
 
 enum TestAudioRun {
     Synthetic {
-        received: Arc<AtomicUsize>,
+        capture: Arc<ToneCapture>,
+        tone: TestTonePlan,
         send_task: tokio::task::JoinHandle<()>,
         recv_task: tokio::task::JoinHandle<()>,
     },
@@ -1104,10 +1156,12 @@ enum TestAudioRun {
 impl TestAudioRun {
     fn require_media(&self) -> anyhow::Result<()> {
         match self {
-            Self::Synthetic { received, .. } => {
-                if received.load(Ordering::SeqCst) == 0 {
-                    anyhow::bail!("no inbound synthetic media frames received");
-                }
+            Self::Synthetic { capture, tone, .. } => {
+                let analysis = capture.analyze(*tone)?;
+                println!(
+                    "detected {:.0} Hz audio tone (dominant {:.0} Hz, rms {:.3}, frames {})",
+                    tone.expect_hz, analysis.dominant_hz, analysis.rms, analysis.frames
+                );
             }
             Self::Cpal(running) => {
                 let _ = running;
@@ -1115,6 +1169,157 @@ impl TestAudioRun {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Default)]
+struct ToneCapture {
+    received: AtomicUsize,
+    samples: Mutex<Vec<f32>>,
+}
+
+impl ToneCapture {
+    fn record(&self, frame: &EndpointAudioFrame) {
+        if frame.samples.is_empty() {
+            return;
+        }
+        self.received.fetch_add(1, Ordering::SeqCst);
+
+        let mut samples = frame
+            .samples
+            .iter()
+            .map(|sample| *sample as f32 / i16::MAX as f32)
+            .collect::<Vec<_>>();
+        if frame.sample_rate != SAMPLE_RATE {
+            samples = resample_linear(&samples, frame.sample_rate, SAMPLE_RATE);
+        }
+
+        if let Ok(mut captured) = self.samples.lock() {
+            let remaining = TEST_TONE_MAX_SAMPLES.saturating_sub(captured.len());
+            captured.extend(samples.into_iter().take(remaining));
+        }
+    }
+
+    fn analyze(&self, tone: TestTonePlan) -> anyhow::Result<ToneAnalysis> {
+        let frames = self.received.load(Ordering::SeqCst);
+        if frames == 0 {
+            anyhow::bail!("no inbound synthetic media frames received");
+        }
+
+        let samples = self
+            .samples
+            .lock()
+            .map_err(|_| anyhow::anyhow!("tone capture buffer poisoned"))?;
+        if samples.len() < TEST_TONE_MIN_SAMPLES {
+            anyhow::bail!(
+                "not enough inbound audio for tone analysis: {} samples, need at least {}",
+                samples.len(),
+                TEST_TONE_MIN_SAMPLES
+            );
+        }
+
+        let rms = rms(&samples);
+        let expected_power = goertzel_power(&samples, SAMPLE_RATE, tone.expect_hz);
+        let rejected_power = goertzel_power(&samples, SAMPLE_RATE, tone.reject_hz);
+        let (dominant_hz, dominant_power) = dominant_tone(&samples);
+        let dominance = expected_power / rejected_power.max(1.0e-9);
+
+        if rms < TEST_TONE_MIN_RMS {
+            anyhow::bail!(
+                "remote audio tone too quiet: rms {:.4}, expected {:.0} Hz",
+                rms,
+                tone.expect_hz
+            );
+        }
+        if expected_power < TEST_TONE_MIN_POWER {
+            anyhow::bail!(
+                "expected {:.0} Hz audio tone too weak: power {:.6}, rms {:.4}, frames {}",
+                tone.expect_hz,
+                expected_power,
+                rms,
+                frames
+            );
+        }
+        if dominance < TEST_TONE_MIN_DOMINANCE {
+            anyhow::bail!(
+                "wrong remote audio tone: expected {:.0} Hz power {:.6}, local {:.0} Hz power {:.6}, dominance {:.2}",
+                tone.expect_hz,
+                expected_power,
+                tone.reject_hz,
+                rejected_power,
+                dominance
+            );
+        }
+        if (dominant_hz - tone.expect_hz).abs() > TEST_TONE_MAX_FREQ_ERROR_HZ {
+            anyhow::bail!(
+                "dominant remote audio tone was {:.0} Hz, expected {:.0} Hz (power {:.6})",
+                dominant_hz,
+                tone.expect_hz,
+                dominant_power
+            );
+        }
+
+        Ok(ToneAnalysis {
+            frames,
+            rms,
+            dominant_hz,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ToneAnalysis {
+    frames: usize,
+    rms: f32,
+    dominant_hz: f32,
+}
+
+fn tone_frame(freq_hz: f32, phase: &mut f32) -> Vec<i16> {
+    let phase_step = std::f32::consts::TAU * freq_hz / SAMPLE_RATE as f32;
+    let mut pcm = Vec::with_capacity(FRAME_SAMPLES);
+    for _ in 0..FRAME_SAMPLES {
+        pcm.push(float_to_i16(TEST_TONE_AMPLITUDE * phase.sin()));
+        *phase += phase_step;
+        if *phase >= std::f32::consts::TAU {
+            *phase -= std::f32::consts::TAU;
+        }
+    }
+    pcm
+}
+
+fn rms(samples: &[f32]) -> f32 {
+    let power = samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
+    power.sqrt()
+}
+
+fn dominant_tone(samples: &[f32]) -> (f32, f32) {
+    let mut best_hz = 0.0;
+    let mut best_power = 0.0;
+    for hz in (300..=900).step_by(20) {
+        let hz = hz as f32;
+        let power = goertzel_power(samples, SAMPLE_RATE, hz);
+        if power > best_power {
+            best_power = power;
+            best_hz = hz;
+        }
+    }
+    (best_hz, best_power)
+}
+
+fn goertzel_power(samples: &[f32], sample_rate: u32, freq_hz: f32) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    let omega = std::f32::consts::TAU * freq_hz / sample_rate as f32;
+    let coeff = 2.0 * omega.cos();
+    let mut q1 = 0.0;
+    let mut q2 = 0.0;
+    for sample in samples {
+        let q0 = coeff * q1 - q2 + *sample;
+        q2 = q1;
+        q1 = q0;
+    }
+    let power = q1 * q1 + q2 * q2 - coeff * q1 * q2;
+    power / (samples.len() * samples.len()) as f32
 }
 
 impl Drop for TestAudioRun {
@@ -1525,9 +1730,7 @@ fn draw_ui(frame: &mut Frame<'_>, app: &TuiApp) {
         )),
     ];
     frame.render_widget(
-        Paragraph::new(account)
-            .block(Block::default().title("Endpoint").borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(account).block(Block::default().title("Endpoint").borders(Borders::ALL)),
         top[0],
     );
 
@@ -1551,9 +1754,7 @@ fn draw_ui(frame: &mut Frame<'_>, app: &TuiApp) {
         Line::from(input_status(app)),
     ];
     frame.render_widget(
-        Paragraph::new(call)
-            .block(Block::default().title("Call").borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(call).block(Block::default().title("Call").borders(Borders::ALL)),
         top[1],
     );
 

@@ -48,14 +48,17 @@ Runnable loopback configs:
 
 PBX templates:
 
-- `pbx-1001.asterisk.json`
-- `pbx-1002.asterisk.json`
+- `pbx-2001.asterisk-udp.json`
+- `pbx-2002.asterisk-udp.json`
 - `pbx-1001.freeswitch.json`
 - `pbx-1002.freeswitch.json`
 
-The PBX files assume a local registrar at `sip:127.0.0.1:5060` and sample
-extension passwords. Edit the password, registrar, `advertise`, and
-`publicAddress` fields for your Asterisk or FreeSWITCH setup.
+The Asterisk UDP files match the local Docker PBX in
+`/Users/jonathan/Developer/asterisk`: extensions `2001` and `2002`, password
+`password123`, SIP UDP, and plain RTP. Edit the registrar, account
+`contactUri`, `advertise`, and `publicAddress` fields if your generated
+`rvoip-local.env` uses different addresses. The FreeSWITCH files are templates
+for its local Docker profile.
 
 ## Interactive Use
 
@@ -80,11 +83,11 @@ PBX registration:
 cargo run -p rvoip-session-core --example sip_client -- \
   --profile asterisk-udp \
   --name alice \
-  --username 1001 \
-  --password secret \
-  --registrar sip:192.168.1.50:5060 \
-  --bind 0.0.0.0:5060 \
-  --advertise 192.168.1.10:5060 \
+  --username 2001 \
+  --password password123 \
+  --registrar sip:192.168.64.2:5060 \
+  --bind 0.0.0.0:5080 \
+  --advertise 192.168.5.2:5080 \
   --register
 ```
 
@@ -119,22 +122,24 @@ PBX two-process smoke, with Asterisk or FreeSWITCH already running locally:
 
 ```sh
 cargo run -p rvoip-session-core --example sip_client -- \
-  --test pbx-callee --config crates/session-core/examples/sip_client/pbx-1002.asterisk.json --register
+  --test pbx-callee --config crates/session-core/examples/sip_client/pbx-2002.asterisk-udp.json
 ```
 
 ```sh
 cargo run -p rvoip-session-core --example sip_client -- \
-  --test pbx-caller --config crates/session-core/examples/sip_client/pbx-1001.asterisk.json \
-  --register --dial 1002
+  --test pbx-caller --config crates/session-core/examples/sip_client/pbx-2001.asterisk-udp.json \
+  --dial 2002
 ```
 
 For FreeSWITCH, use the matching `pbx-1001.freeswitch.json` and
 `pbx-1002.freeswitch.json` configs.
 
-Smoke mode uses synthetic 8 kHz mono audio frames by default and exits nonzero
-on timeout, failed registration, failed call setup, missing DTMF, missing
-hangup, or missing inbound media frames. Use `--test-audio cpal` to exercise
-real microphone/speaker devices.
+Smoke mode uses synthetic 8 kHz mono audio by default. The caller sends a
+440 Hz audio tone, the callee sends a 660 Hz audio tone, and each side analyzes
+inbound PCM to verify the expected remote tone. Smoke exits nonzero on timeout,
+failed registration, failed call setup, missing DTMF, missing hangup, missing
+inbound media, or an incorrect/missing audio tone. Use `--test-audio cpal` to
+exercise real microphone/speaker devices instead of deterministic tone checks.
 
 Useful smoke flags:
 
