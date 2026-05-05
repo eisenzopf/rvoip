@@ -2078,7 +2078,15 @@ mod tests {
 
     #[test]
     fn sip_client_example_stays_on_endpoint_surface() {
-        let source = include_str!("../../examples/sip_client/main.rs");
+        let source = [
+            include_str!("../../examples/sip_client/main.rs"),
+            include_str!("../../examples/sip_client/audio.rs"),
+            include_str!("../../examples/sip_client/config.rs"),
+            include_str!("../../examples/sip_client/runtime.rs"),
+            include_str!("../../examples/sip_client/smoke.rs"),
+            include_str!("../../examples/sip_client/ui.rs"),
+        ]
+        .join("\n");
         for banned in [
             "StreamPeer",
             "PeerControl",
