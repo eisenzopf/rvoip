@@ -37,6 +37,39 @@ use rvoip_sip_core::{Response, StatusCode};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// Registrar metadata returned on a successful REGISTER 2xx response.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RegistrationResponseMetadata {
+    pub(crate) service_route: Option<Vec<String>>,
+    pub(crate) pub_gruu: Option<String>,
+    pub(crate) temp_gruu: Option<String>,
+}
+
+/// Outcome for a single REGISTER wire attempt.
+///
+/// This deliberately does not encode state-machine lifecycle decisions. The
+/// dialog adapter sends one request, parses one response, and returns the SIP
+/// result; the state-machine action decides which internal event to enqueue.
+#[derive(Debug, Clone)]
+pub(crate) enum RegisterAttemptOutcome {
+    Registered {
+        accepted_expires: u32,
+        metadata: RegistrationResponseMetadata,
+    },
+    Unregistered,
+    AuthChallenge {
+        status_code: u16,
+        challenge: String,
+    },
+    IntervalTooBrief {
+        min_expires: u32,
+    },
+    Failure {
+        status_code: u16,
+        reason: String,
+    },
+}
+
 /// Minimal dialog adapter - just translates between dialog-core and state machine
 pub struct DialogAdapter {
     /// Dialog-core unified API
@@ -275,13 +308,72 @@ impl DialogAdapter {
         let credentials = session.credentials.clone();
         drop(session);
 
-        self.send_register(
+        let mut attempt_expires = expires;
+        for _ in 0..=2 {
+            match self
+                .send_register(
+                    session_id,
+                    &registrar_uri,
+                    &from_uri,
+                    &contact_uri,
+                    attempt_expires,
+                    credentials.as_ref(),
+                )
+                .await?
+            {
+                RegisterAttemptOutcome::Registered {
+                    accepted_expires,
+                    metadata,
+                } => {
+                    return self
+                        .apply_registration_success(
+                            session_id,
+                            &registrar_uri,
+                            &from_uri,
+                            &contact_uri,
+                            accepted_expires,
+                            metadata,
+                        )
+                        .await;
+                }
+                RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
+                    let mut session = self.store.get_session(session_id).await?;
+                    session.registration_expires = Some(min_expires);
+                    session.registration_retry_count += 1;
+                    self.store.update_session(session).await?;
+                    attempt_expires = min_expires;
+                }
+                RegisterAttemptOutcome::Failure {
+                    status_code,
+                    reason,
+                } => {
+                    return self
+                        .apply_registration_failure(session_id, &registrar_uri, status_code, reason)
+                        .await;
+                }
+                RegisterAttemptOutcome::AuthChallenge { status_code, .. } => {
+                    return self
+                        .apply_registration_failure(
+                            session_id,
+                            &registrar_uri,
+                            status_code,
+                            "automatic registration refresh received a new auth challenge",
+                        )
+                        .await;
+                }
+                RegisterAttemptOutcome::Unregistered => {
+                    return self
+                        .apply_unregistration_success(session_id, &registrar_uri)
+                        .await;
+                }
+            }
+        }
+
+        self.apply_registration_failure(
             session_id,
             &registrar_uri,
-            &from_uri,
-            &contact_uri,
-            expires,
-            credentials.as_ref(),
+            423,
+            "registration refresh failed with repeated 423 Interval Too Brief responses",
         )
         .await
     }
@@ -326,9 +418,7 @@ impl DialogAdapter {
             .unwrap_or(fallback_expires)
     }
 
-    fn response_registration_metadata(
-        response: &Response,
-    ) -> (Option<Vec<String>>, Option<String>, Option<String>) {
+    fn response_registration_metadata(response: &Response) -> RegistrationResponseMetadata {
         use rvoip_sip_core::types::outbound::read_gruu_contact_params;
         use rvoip_sip_core::types::TypedHeader;
 
@@ -367,10 +457,86 @@ impl DialogAdapter {
             }
         }
 
-        (service_route, pub_gruu, temp_gruu)
+        RegistrationResponseMetadata {
+            service_route,
+            pub_gruu,
+            temp_gruu,
+        }
     }
 
-    async fn mark_registration_failed(
+    pub(crate) async fn apply_registration_success(
+        &self,
+        session_id: &SessionId,
+        registrar_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        accepted_expires: u32,
+        metadata: RegistrationResponseMetadata,
+    ) -> Result<()> {
+        let now = Instant::now();
+        let next_refresh_at = if self.registration_auto_refresh && accepted_expires > 0 {
+            Some(self.compute_registration_refresh_at(now, accepted_expires))
+        } else {
+            None
+        };
+
+        let mut session = self.store.get_session(session_id).await?;
+        session.is_registered = true;
+        session.registration_expires = Some(accepted_expires);
+        session.registration_accepted_expires = Some(accepted_expires);
+        session.registration_registered_at = Some(now);
+        session.registration_next_refresh_at = next_refresh_at;
+        session.registration_last_failure = None;
+        session.registration_retry_count = 0;
+        session.registration_service_route = metadata.service_route;
+        session.registration_pub_gruu = metadata.pub_gruu;
+        session.registration_temp_gruu = metadata.temp_gruu;
+        self.store.update_session(session).await?;
+
+        tracing::info!(
+            "✅ Registration successful - session {} marked as registered",
+            session_id.0
+        );
+        self.publish_api_event(crate::api::events::Event::RegistrationSuccess {
+            registrar: registrar_uri.to_string(),
+            expires: accepted_expires,
+            contact: contact_uri.to_string(),
+        });
+        self.schedule_registration_refresh(session_id.clone(), next_refresh_at);
+        self.start_symmetric_registration_keepalive(from_uri, registrar_uri)
+            .await;
+        Ok(())
+    }
+
+    pub(crate) async fn apply_unregistration_success(
+        &self,
+        session_id: &SessionId,
+        registrar_uri: &str,
+    ) -> Result<()> {
+        self.abort_registration_refresh(session_id);
+        let mut session = self.store.get_session(session_id).await?;
+        session.is_registered = false;
+        session.registration_accepted_expires = None;
+        session.registration_registered_at = None;
+        session.registration_next_refresh_at = None;
+        session.registration_last_failure = None;
+        session.registration_retry_count = 0;
+        session.registration_service_route = None;
+        session.registration_pub_gruu = None;
+        session.registration_temp_gruu = None;
+        self.store.update_session(session).await?;
+
+        tracing::info!(
+            "✅ Unregistration successful - session {} marked as unregistered",
+            session_id.0
+        );
+        self.publish_api_event(crate::api::events::Event::UnregistrationSuccess {
+            registrar: registrar_uri.to_string(),
+        });
+        Ok(())
+    }
+
+    pub(crate) async fn apply_registration_failure(
         &self,
         session_id: &SessionId,
         registrar_uri: &str,
@@ -403,19 +569,33 @@ impl DialogAdapter {
             status_code,
             reason: failure_summary,
         });
-        if let Some(state_machine) = self.state_machine.get() {
-            Box::pin(state_machine.process_event(
-                session_id,
-                crate::state_table::types::EventType::RegistrationFailed(status_code),
-            ))
-            .await
-            .map_err(|e| {
-                SessionError::InternalError(format!(
-                    "REGISTER failure event dispatch failed: {}",
-                    e
-                ))
-            })?;
-        }
+        Ok(())
+    }
+
+    pub(crate) async fn apply_unregistration_failure(
+        &self,
+        session_id: &SessionId,
+        registrar_uri: &str,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        self.abort_registration_refresh(session_id);
+        let reason = reason.into();
+        let mut session = self.store.get_session(session_id).await?;
+        session.is_registered = false;
+        session.registration_accepted_expires = None;
+        session.registration_registered_at = None;
+        session.registration_next_refresh_at = None;
+        session.registration_last_failure = Some(reason.clone());
+        session.registration_retry_count = 0;
+        session.registration_service_route = None;
+        session.registration_pub_gruu = None;
+        session.registration_temp_gruu = None;
+        self.store.update_session(session).await?;
+
+        self.publish_api_event(crate::api::events::Event::UnregistrationFailed {
+            registrar: registrar_uri.to_string(),
+            reason,
+        });
         Ok(())
     }
 
@@ -1218,7 +1398,7 @@ impl DialogAdapter {
     }
 
     /// Send REGISTER request and process response
-    pub async fn send_register(
+    pub(crate) async fn send_register(
         &self,
         session_id: &SessionId,
         registrar_uri: &str,
@@ -1226,7 +1406,7 @@ impl DialogAdapter {
         contact_uri: &str,
         expires: u32,
         credentials: Option<&crate::types::Credentials>,
-    ) -> Result<()> {
+    ) -> Result<RegisterAttemptOutcome> {
         tracing::info!(
             "Sending REGISTER for session {} to {} (expires={})",
             session_id.0,
@@ -1360,274 +1540,86 @@ impl DialogAdapter {
             session_id.0
         );
 
-        // Just update session state based on response - don't trigger events (avoids recursion)
-        // The state machine will query the session state to determine next transition
         match response.status_code() {
             200..=299 => {
-                // Registration or unregistration successful.
                 let is_unregister = expires == 0;
-                let accepted_expires = if is_unregister {
-                    0
-                } else {
-                    Self::accepted_registration_expires(&response, contact_uri, expires)
-                };
-                let (service_route, pub_gruu, temp_gruu) = if is_unregister {
-                    (None, None, None)
-                } else {
-                    Self::response_registration_metadata(&response)
-                };
-                let now = Instant::now();
-                let next_refresh_at =
-                    if !is_unregister && self.registration_auto_refresh && accepted_expires > 0 {
-                        Some(self.compute_registration_refresh_at(now, accepted_expires))
-                    } else {
-                        None
-                    };
-                let mut session = self.store.get_session(session_id).await?;
-                session.is_registered = !is_unregister;
                 if is_unregister {
-                    session.registration_accepted_expires = None;
-                    session.registration_registered_at = None;
-                    session.registration_next_refresh_at = None;
-                    session.registration_last_failure = None;
-                    session.registration_service_route = None;
-                    session.registration_pub_gruu = None;
-                    session.registration_temp_gruu = None;
+                    Ok(RegisterAttemptOutcome::Unregistered)
                 } else {
-                    session.registration_expires = Some(accepted_expires);
-                    session.registration_accepted_expires = Some(accepted_expires);
-                    session.registration_registered_at = Some(now);
-                    session.registration_next_refresh_at = next_refresh_at;
-                    session.registration_last_failure = None;
-                    session.registration_service_route = service_route;
-                    session.registration_pub_gruu = pub_gruu;
-                    session.registration_temp_gruu = temp_gruu;
-                }
-                self.store.update_session(session).await?;
-
-                if is_unregister {
-                    self.abort_registration_refresh(session_id);
-                    tracing::info!(
-                        "✅ Unregistration successful - session {} marked as unregistered",
-                        session_id.0
-                    );
-                    self.publish_api_event(crate::api::events::Event::UnregistrationSuccess {
-                        registrar: registrar_uri.to_string(),
-                    });
-                } else {
-                    tracing::info!(
-                        "✅ Registration successful - session {} marked as registered",
-                        session_id.0
-                    );
-                    self.publish_api_event(crate::api::events::Event::RegistrationSuccess {
-                        registrar: registrar_uri.to_string(),
-                        expires: accepted_expires,
-                        contact: contact_uri.to_string(),
-                    });
-                    self.schedule_registration_refresh(session_id.clone(), next_refresh_at);
-                    self.start_symmetric_registration_keepalive(from_uri, registrar_uri)
-                        .await;
-                }
-
-                if let Some(state_machine) = self.state_machine.get() {
-                    let event = if is_unregister {
-                        crate::state_table::types::EventType::Unregistration200OK
-                    } else {
-                        crate::state_table::types::EventType::Registration200OK
-                    };
-                    Box::pin(state_machine.process_event(session_id, event))
-                        .await
-                        .map_err(|e| {
-                            SessionError::InternalError(format!(
-                                "REGISTER success event dispatch failed: {}",
-                                e
-                            ))
-                        })?;
-                } else {
-                    tracing::debug!(
-                        "No state_machine wired into DialogAdapter; REGISTER success stored without state event"
-                    );
+                    let accepted_expires =
+                        Self::accepted_registration_expires(&response, contact_uri, expires);
+                    let metadata = Self::response_registration_metadata(&response);
+                    Ok(RegisterAttemptOutcome::Registered {
+                        accepted_expires,
+                        metadata,
+                    })
                 }
             }
             401 | 407 => {
-                // RFC 3261 §22.2 — auth challenge on REGISTER. Unified with the
-                // INVITE auth path: dispatch `EventType::AuthRequired` into the
-                // state machine and let the `Registering + AuthRequired →
-                // Registering` transition drive the retry via
-                // `StoreAuthChallenge` + `SendREGISTERWithAuth`. No inline
-                // loop here — keeps the retry policy in one place and gives
-                // session-scoped observability through the state-table.
-                //
-                // The cap lives on `registration_retry_count`: on a second
-                // 401 we mark the session unregistered and surface failure
-                // instead of re-firing the event (prevents infinite loops
-                // when the credentials are wrong).
+                // RFC 3261 §22.2 — auth challenge on REGISTER. The adapter
+                // only extracts the challenge; the state-machine action owns
+                // retry limits and the follow-up `AuthRequired` event.
                 use rvoip_sip_core::types::headers::HeaderAccess;
                 let header_name = if response.status_code() == 407 {
                     rvoip_sip_core::types::header::HeaderName::ProxyAuthenticate
                 } else {
                     rvoip_sip_core::types::header::HeaderName::WwwAuthenticate
                 };
-                let challenge_opt = response.raw_header_value(&header_name);
-
-                let session_snapshot = self.store.get_session(session_id).await?;
-                let retry_count = session_snapshot.registration_retry_count;
-
-                if let Some(challenge) = challenge_opt {
-                    if retry_count >= 1 {
-                        tracing::error!(
-                            "❌ REGISTER auth failed (retry count {}); invalid credentials",
-                            retry_count
-                        );
-                        self.mark_registration_failed(
-                            session_id,
-                            registrar_uri,
-                            response.status_code(),
-                            response.reason_phrase().to_string(),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                    {
-                        let mut session = self.store.get_session(session_id).await?;
-                        session.registration_retry_count += 1;
-                        self.store.update_session(session).await?;
-                    }
-                    tracing::info!(
-                        "🔄 REGISTER {} challenge for session {} — dispatching AuthRequired",
-                        response.status_code(),
-                        session_id.0,
-                    );
-                    if let Some(state_machine) = self.state_machine.get() {
-                        // Box::pin: AuthRequired → SendREGISTERWithAuth →
-                        // send_register forms an async recursion the compiler
-                        // can't size inline.
-                        Box::pin(state_machine.process_event(
-                            session_id,
-                            crate::state_table::types::EventType::AuthRequired {
-                                status_code: response.status_code(),
-                                challenge,
-                            },
-                        ))
-                        .await
-                        .map_err(|e| {
-                            SessionError::InternalError(format!(
-                                "REGISTER AuthRequired dispatch failed: {}",
-                                e
-                            ))
-                        })?;
-                    } else {
-                        tracing::warn!(
-                            "No state_machine wired into DialogAdapter; REGISTER auth cannot retry"
-                        );
-                    }
+                if let Some(challenge) = response.raw_header_value(&header_name) {
+                    Ok(RegisterAttemptOutcome::AuthChallenge {
+                        status_code: response.status_code(),
+                        challenge,
+                    })
                 } else {
                     tracing::warn!(
-                        "REGISTER {} without challenge header — marking unregistered",
+                        "REGISTER {} without challenge header",
                         response.status_code()
                     );
-                    self.mark_registration_failed(
-                        session_id,
-                        registrar_uri,
-                        response.status_code(),
-                        "REGISTER challenge response did not include challenge header",
-                    )
-                    .await?;
+                    Ok(RegisterAttemptOutcome::Failure {
+                        status_code: response.status_code(),
+                        reason: "REGISTER challenge response did not include challenge header"
+                            .to_string(),
+                    })
                 }
             }
             423 => {
                 // RFC 3261 §10.2.8 — Interval Too Brief. The registrar requires
                 // a minimum expiry; it MUST include a Min-Expires header with
-                // its minimum acceptable value. Retry once using that value.
+                // its minimum acceptable value. The action owns the bounded
+                // retry and re-enters this method iteratively.
                 use rvoip_sip_core::types::headers::HeaderAccess;
                 let min_expires = response
                     .raw_header_value(&rvoip_sip_core::types::header::HeaderName::MinExpires)
                     .and_then(|s| s.trim().parse::<u32>().ok());
 
-                let session = self.store.get_session(session_id).await?;
-                // Cap retries at 2 attempts to avoid loops if a broken registrar
-                // keeps sending 423 regardless of the expiry we send.
-                if session.registration_retry_count >= 2 {
-                    tracing::error!(
-                        "❌ Registration failed with repeated 423 — giving up (retry count {})",
-                        session.registration_retry_count
-                    );
-                    self.mark_registration_failed(
-                        session_id,
-                        registrar_uri,
-                        response.status_code(),
-                        "Registration failed with repeated 423 Interval Too Brief responses",
-                    )
-                    .await?;
-                    return Ok(());
+                match min_expires {
+                    Some(min_expires) if min_expires > 0 && min_expires <= 7200 => {
+                        Ok(RegisterAttemptOutcome::IntervalTooBrief { min_expires })
+                    }
+                    Some(min_expires) => Ok(RegisterAttemptOutcome::Failure {
+                        status_code: response.status_code(),
+                        reason: format!(
+                            "423 Interval Too Brief included invalid Min-Expires={}",
+                            min_expires
+                        ),
+                    }),
+                    None => Ok(RegisterAttemptOutcome::Failure {
+                        status_code: response.status_code(),
+                        reason: "423 Interval Too Brief without Min-Expires header".to_string(),
+                    }),
                 }
-
-                let new_expires = match min_expires {
-                    Some(min) if min > 0 && min <= 7200 => min,
-                    Some(min) => {
-                        tracing::warn!(
-                            "423 Min-Expires={} out of sane range; clamping to 3600",
-                            min
-                        );
-                        min.min(3600)
-                    }
-                    None => {
-                        tracing::error!(
-                            "423 Interval Too Brief without Min-Expires header — cannot retry"
-                        );
-                        self.mark_registration_failed(
-                            session_id,
-                            registrar_uri,
-                            response.status_code(),
-                            "423 Interval Too Brief without Min-Expires header",
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                };
-
-                tracing::info!(
-                    "🔄 423 Interval Too Brief — retrying REGISTER with Expires={} (server required min)",
-                    new_expires
-                );
-
-                // Persist new expiry and bump the retry counter.
-                let mut session = self.store.get_session(session_id).await?;
-                session.registration_expires = Some(new_expires);
-                session.registration_retry_count += 1;
-                self.store.update_session(session).await?;
-
-                // Re-issue with the required expiry. Credentials, if any, get
-                // reused (we have the challenge stored). `Box::pin` to prevent
-                // the recursive async future from blowing up its size on the
-                // stack, matching the 401/407 path above.
-                Box::pin(self.send_register(
-                    session_id,
-                    registrar_uri,
-                    from_uri,
-                    contact_uri,
-                    new_expires,
-                    credentials,
-                ))
-                .await?;
             }
             _ => {
-                // Registration failed
                 tracing::warn!(
                     "❌ Registration failed with status {}",
                     response.status_code()
                 );
-                self.mark_registration_failed(
-                    session_id,
-                    registrar_uri,
-                    response.status_code(),
-                    response.reason_phrase().to_string(),
-                )
-                .await?;
+                Ok(RegisterAttemptOutcome::Failure {
+                    status_code: response.status_code(),
+                    reason: response.reason_phrase().to_string(),
+                })
             }
         }
-
-        Ok(())
     }
 
     pub async fn send_subscribe(

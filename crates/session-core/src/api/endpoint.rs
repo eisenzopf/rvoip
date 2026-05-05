@@ -23,7 +23,7 @@ use rvoip_sip_core::types::uri::{Scheme, Uri};
 use crate::api::audio::{AudioReceiver, AudioSender, AudioStream};
 use crate::api::events::Event;
 use crate::api::handle::{CallId, SessionHandle};
-use crate::api::incoming::IncomingCall;
+use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::stream_peer::{EventReceiver, PeerControl, StreamPeer};
 use crate::api::unified::{
     Config, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipTlsMode,
@@ -656,6 +656,12 @@ impl EndpointCall {
         EndpointCallId(self.handle.id().clone())
     }
 
+    /// Return the underlying session handle for advanced operations that are
+    /// not yet modeled directly on the endpoint facade.
+    pub fn as_session_handle(&self) -> &SessionHandle {
+        &self.handle
+    }
+
     /// Wait for this outgoing call to be answered.
     pub async fn wait_for_answered(&self, timeout: Option<Duration>) -> Result<Self> {
         let handle = self.handle.wait_for_answered(timeout).await?;
@@ -761,6 +767,16 @@ impl EndpointIncomingCall {
     pub async fn answer(self) -> Result<EndpointCall> {
         let handle = self.incoming.accept().await?;
         Ok(EndpointCall::new(handle, self.registrar, self.transport))
+    }
+
+    /// Alias for [`answer`](Self::answer).
+    pub async fn accept(self) -> Result<EndpointCall> {
+        self.answer().await
+    }
+
+    /// Defer the incoming call decision and return a guard.
+    pub fn defer(self, watchdog: Duration) -> IncomingCallGuard {
+        self.incoming.defer(watchdog)
     }
 
     /// Reject the call with 603 Decline.

@@ -1,4 +1,5 @@
-use crate::state_table::types::SessionId;
+use crate::adapters::dialog_adapter::RegisterAttemptOutcome;
+use crate::state_table::types::{EventType, SessionId};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
@@ -9,15 +10,264 @@ use crate::{
     state_table::{Action, Condition},
 };
 
+/// Result of a state-table action.
+///
+/// Actions may enqueue internal follow-up events, but they must not call
+/// `StateMachine::process_event` directly. The executor drains these events
+/// after the current transition has fully unwound and saved its state.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ActionOutcome {
+    pub(crate) follow_up_events: Vec<EventType>,
+}
+
+impl ActionOutcome {
+    fn with_event(event: EventType) -> Self {
+        Self {
+            follow_up_events: vec![event],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegisterActionMode {
+    Register,
+    RegisterWithAuth,
+    Unregister,
+}
+
+async fn execute_register_action(
+    session: &mut SessionState,
+    dialog_adapter: &Arc<DialogAdapter>,
+    session_store: &Arc<SessionStore>,
+    mode: RegisterActionMode,
+) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    let session_id = session.session_id.clone();
+    let from_uri = session
+        .local_uri
+        .clone()
+        .ok_or_else(|| "local_uri not set for registration".to_string())?;
+    let registrar_uri = match mode {
+        RegisterActionMode::Unregister => session
+            .registrar_uri
+            .clone()
+            .ok_or_else(|| "registrar_uri not set for unregistration".to_string())?,
+        RegisterActionMode::Register | RegisterActionMode::RegisterWithAuth => session
+            .registrar_uri
+            .clone()
+            .or_else(|| session.remote_uri.clone())
+            .ok_or_else(|| "registrar_uri not set for registration".to_string())?,
+    };
+    let contact_uri = match mode {
+        RegisterActionMode::Unregister => session
+            .registration_contact
+            .clone()
+            .ok_or_else(|| "contact_uri not set for unregistration".to_string())?,
+        RegisterActionMode::Register | RegisterActionMode::RegisterWithAuth => session
+            .registration_contact
+            .clone()
+            .or_else(|| session.local_uri.clone())
+            .ok_or_else(|| "contact_uri not set for registration".to_string())?,
+    };
+    let credentials = match mode {
+        RegisterActionMode::Register => None,
+        RegisterActionMode::RegisterWithAuth | RegisterActionMode::Unregister => {
+            session.credentials.clone()
+        }
+    };
+    let mut expires = match mode {
+        RegisterActionMode::Unregister => 0,
+        RegisterActionMode::Register | RegisterActionMode::RegisterWithAuth => {
+            session.registration_expires.unwrap_or(3600)
+        }
+    };
+
+    loop {
+        let outcome = dialog_adapter
+            .send_register(
+                &session_id,
+                &registrar_uri,
+                &from_uri,
+                &contact_uri,
+                expires,
+                credentials.as_ref(),
+            )
+            .await?;
+
+        match outcome {
+            RegisterAttemptOutcome::Registered {
+                accepted_expires,
+                metadata,
+            } => {
+                dialog_adapter
+                    .apply_registration_success(
+                        &session_id,
+                        &registrar_uri,
+                        &from_uri,
+                        &contact_uri,
+                        accepted_expires,
+                        metadata,
+                    )
+                    .await?;
+                *session = session_store.get_session(&session_id).await?;
+                return Ok(ActionOutcome::with_event(EventType::Registration200OK));
+            }
+            RegisterAttemptOutcome::Unregistered => {
+                if mode == RegisterActionMode::Unregister {
+                    dialog_adapter
+                        .apply_unregistration_success(&session_id, &registrar_uri)
+                        .await?;
+                    *session = session_store.get_session(&session_id).await?;
+                    return Ok(ActionOutcome::with_event(EventType::Unregistration200OK));
+                }
+
+                dialog_adapter
+                    .apply_registration_failure(
+                        &session_id,
+                        &registrar_uri,
+                        200,
+                        "REGISTER returned an unregistration success while registering",
+                    )
+                    .await?;
+                *session = session_store.get_session(&session_id).await?;
+                return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                    200,
+                )));
+            }
+            RegisterAttemptOutcome::AuthChallenge {
+                status_code,
+                challenge,
+            } => {
+                if mode == RegisterActionMode::Unregister {
+                    dialog_adapter
+                        .apply_unregistration_failure(
+                            &session_id,
+                            &registrar_uri,
+                            format!(
+                                "unregistration received {} authentication challenge",
+                                status_code
+                            ),
+                        )
+                        .await?;
+                    *session = session_store.get_session(&session_id).await?;
+                    return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
+                }
+
+                let retry_count = session_store
+                    .get_session(&session_id)
+                    .await?
+                    .registration_retry_count;
+                if retry_count >= 1 {
+                    tracing::error!(
+                        "❌ REGISTER auth failed (retry count {}); invalid credentials",
+                        retry_count
+                    );
+                    dialog_adapter
+                        .apply_registration_failure(
+                            &session_id,
+                            &registrar_uri,
+                            status_code,
+                            "REGISTER authentication failed",
+                        )
+                        .await?;
+                    *session = session_store.get_session(&session_id).await?;
+                    return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                        status_code,
+                    )));
+                }
+
+                let mut latest = session_store.get_session(&session_id).await?;
+                latest.registration_retry_count += 1;
+                session_store.update_session(latest.clone()).await?;
+                *session = latest;
+                return Ok(ActionOutcome::with_event(EventType::AuthRequired {
+                    status_code,
+                    challenge,
+                }));
+            }
+            RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
+                if mode == RegisterActionMode::Unregister {
+                    dialog_adapter
+                        .apply_unregistration_failure(
+                            &session_id,
+                            &registrar_uri,
+                            format!(
+                                "unregistration received 423 Interval Too Brief Min-Expires={}",
+                                min_expires
+                            ),
+                        )
+                        .await?;
+                    *session = session_store.get_session(&session_id).await?;
+                    return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
+                }
+
+                let latest = session_store.get_session(&session_id).await?;
+                if latest.registration_retry_count >= 2 {
+                    tracing::error!(
+                        "❌ Registration failed with repeated 423 — giving up (retry count {})",
+                        latest.registration_retry_count
+                    );
+                    dialog_adapter
+                        .apply_registration_failure(
+                            &session_id,
+                            &registrar_uri,
+                            423,
+                            "Registration failed with repeated 423 Interval Too Brief responses",
+                        )
+                        .await?;
+                    *session = session_store.get_session(&session_id).await?;
+                    return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                        423,
+                    )));
+                }
+
+                tracing::info!(
+                    "🔄 423 Interval Too Brief — retrying REGISTER with Expires={} (server required min)",
+                    min_expires
+                );
+                let mut latest = latest;
+                latest.registration_expires = Some(min_expires);
+                latest.registration_retry_count += 1;
+                session_store.update_session(latest.clone()).await?;
+                *session = latest;
+                expires = min_expires;
+            }
+            RegisterAttemptOutcome::Failure {
+                status_code,
+                reason,
+            } => {
+                if mode == RegisterActionMode::Unregister {
+                    dialog_adapter
+                        .apply_unregistration_failure(
+                            &session_id,
+                            &registrar_uri,
+                            format!("{} (status {})", reason, status_code),
+                        )
+                        .await?;
+                    *session = session_store.get_session(&session_id).await?;
+                    return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
+                }
+
+                dialog_adapter
+                    .apply_registration_failure(&session_id, &registrar_uri, status_code, reason)
+                    .await?;
+                *session = session_store.get_session(&session_id).await?;
+                return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                    status_code,
+                )));
+            }
+        }
+    }
+}
+
 /// Execute an action from the state table
-pub async fn execute_action(
+pub(crate) async fn execute_action(
     action: &Action,
     session: &mut SessionState,
     dialog_adapter: &Arc<DialogAdapter>,
     media_adapter: &Arc<MediaAdapter>,
     session_store: &Arc<SessionStore>,
     _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
 
     match action {
@@ -235,7 +485,7 @@ pub async fn execute_action(
                         "ScheduleReinviteRetry with no pending_reinvite for session {}; noop",
                         session.session_id
                     );
-                    return Ok(());
+                    return Ok(ActionOutcome::default());
                 }
             };
             session.reinvite_retry_attempts += 1;
@@ -951,38 +1201,13 @@ pub async fn execute_action(
         // Registration actions
         Action::SendREGISTER => {
             info!("Action::SendREGISTER for session {}", session.session_id);
-            let from_uri = session
-                .local_uri
-                .as_deref()
-                .ok_or_else(|| "local_uri not set for registration".to_string())?;
-            let registrar_uri = session
-                .registrar_uri
-                .as_deref()
-                .or_else(|| session.remote_uri.as_deref())
-                .ok_or_else(|| "registrar_uri not set for registration".to_string())?;
-            let contact_uri = session
-                .registration_contact
-                .as_deref()
-                .or_else(|| session.local_uri.as_deref())
-                .ok_or_else(|| "contact_uri not set for registration".to_string())?;
-            let expires = session.registration_expires.unwrap_or(3600);
-
-            // Send REGISTER without authentication (first attempt)
-            dialog_adapter
-                .send_register(
-                    &session.session_id,
-                    registrar_uri,
-                    from_uri,
-                    contact_uri,
-                    expires,
-                    None, // No credentials on first attempt
-                )
-                .await?;
-            // `send_register` awaits the response and may mutate the store
-            // directly (set `is_registered`, bump retry counters, dispatch a
-            // recursive AuthRequired). Reload so the executor's final save
-            // doesn't overwrite those changes with a stale copy.
-            *session = session_store.get_session(&session.session_id).await?;
+            return execute_register_action(
+                session,
+                dialog_adapter,
+                session_store,
+                RegisterActionMode::Register,
+            )
+            .await;
         }
 
         Action::SendREGISTERWithAuth => {
@@ -990,65 +1215,24 @@ pub async fn execute_action(
                 "Action::SendREGISTERWithAuth for session {}",
                 session.session_id
             );
-            let from_uri = session
-                .local_uri
-                .as_deref()
-                .ok_or_else(|| "local_uri not set for registration".to_string())?;
-            let registrar_uri = session
-                .registrar_uri
-                .as_deref()
-                .or_else(|| session.remote_uri.as_deref())
-                .ok_or_else(|| "registrar_uri not set for registration".to_string())?;
-            let contact_uri = session
-                .registration_contact
-                .as_deref()
-                .or_else(|| session.local_uri.as_deref())
-                .ok_or_else(|| "contact_uri not set for registration".to_string())?;
-            let expires = session.registration_expires.unwrap_or(3600);
-
-            // Send REGISTER with authentication
-            dialog_adapter
-                .send_register(
-                    &session.session_id,
-                    registrar_uri,
-                    from_uri,
-                    contact_uri,
-                    expires,
-                    session.credentials.as_ref(),
-                )
-                .await?;
-            // Reload — see SendREGISTER above.
-            *session = session_store.get_session(&session.session_id).await?;
+            return execute_register_action(
+                session,
+                dialog_adapter,
+                session_store,
+                RegisterActionMode::RegisterWithAuth,
+            )
+            .await;
         }
 
         Action::SendUnREGISTER => {
             info!("Action::SendUnREGISTER for session {}", session.session_id);
-            let from_uri = session
-                .local_uri
-                .as_deref()
-                .ok_or_else(|| "local_uri not set for unregistration".to_string())?;
-            let registrar_uri = session
-                .registrar_uri
-                .as_deref()
-                .ok_or_else(|| "registrar_uri not set for unregistration".to_string())?;
-            let contact_uri = session
-                .registration_contact
-                .as_deref()
-                .ok_or_else(|| "contact_uri not set for unregistration".to_string())?;
-
-            // Send REGISTER with expires=0 to unregister
-            dialog_adapter
-                .send_register(
-                    &session.session_id,
-                    registrar_uri,
-                    from_uri,
-                    contact_uri,
-                    0, // expires=0 means unregister
-                    session.credentials.as_ref(),
-                )
-                .await?;
-            // Reload — see SendREGISTER above.
-            *session = session_store.get_session(&session.session_id).await?;
+            return execute_register_action(
+                session,
+                dialog_adapter,
+                session_store,
+                RegisterActionMode::Unregister,
+            )
+            .await;
         }
 
         Action::StoreAuthChallenge => {
@@ -1517,7 +1701,7 @@ pub async fn execute_action(
         }
     }
 
-    Ok(())
+    Ok(ActionOutcome::default())
 }
 
 /// Publish an app-level `Event` to the global coordinator's session-to-app

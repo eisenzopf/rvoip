@@ -1332,7 +1332,7 @@ async fn run_endpoint_two_party(
             let handle = handle
                 .wait_for_answered(Some(remote_test_timeout(provider)?))
                 .await?;
-            run_hold_on_handle(provider, cfg, &handle, transport).await?;
+            run_hold_on_handle(provider, cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::HoldResume, Role::Callee) => {
             let incoming =
@@ -1340,7 +1340,7 @@ async fn run_endpoint_two_party(
             let handle = incoming.accept().await?;
             run_answering_tone_role(
                 cfg,
-                &handle,
+                handle.as_session_handle(),
                 tone_for_callee(transport),
                 hold_resume_callee_wav(transport),
                 transport,
@@ -1351,6 +1351,7 @@ async fn run_endpoint_two_party(
             settle_after_register(provider).await;
             let handle = endpoint.call(&cfg.remote_call_uri()).await?;
             handle
+                .as_session_handle()
                 .wait_for_progress(
                     |event| {
                         matches!(
@@ -1364,7 +1365,7 @@ async fn run_endpoint_two_party(
                     Some(remote_test_timeout(provider)?),
                 )
                 .await?;
-            let mut events = handle.events().await?;
+            let mut events = handle.as_session_handle().events().await?;
             handle
                 .hangup_and_wait(Some(Duration::from_secs(12)))
                 .await?;
@@ -1391,18 +1392,18 @@ async fn run_endpoint_two_party(
                     Some(remote_test_timeout(provider)?),
                 )
                 .await?;
-            run_dtmf_caller(cfg, &handle, transport).await?;
+            run_dtmf_caller(cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::Dtmf, Role::Callee) => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_dtmf_callee(provider, cfg, &handle, transport).await?;
+            run_dtmf_callee(provider, cfg, handle.as_session_handle(), transport).await?;
         }
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
             let handle = endpoint.call(target_user_for(transport)).await?;
-            let mut events = handle.events().await?;
+            let mut events = handle.as_session_handle().events().await?;
             let (status, _) =
                 wait_for_call_failed_on_events(&mut events, remote_test_timeout(provider)?).await?;
             if status != 486 {
@@ -1412,7 +1413,7 @@ async fn run_endpoint_two_party(
         (Scenario::Reject, Role::Callee) => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
-            incoming.reject(486, "Busy Here");
+            incoming.reject(486, "Busy Here").await?;
             sleep(Duration::from_secs(1)).await;
         }
         _ => return Err(format!("unsupported Endpoint role {:?} for {:?}", role, scenario).into()),
@@ -1607,18 +1608,18 @@ async fn run_endpoint_transfer(
                     Some(remote_test_timeout(provider)?),
                 )
                 .await?;
-            run_transferor(provider, cfg, &handle, transport).await?;
+            run_transferor(provider, cfg, handle.as_session_handle(), transport).await?;
         }
         Role::Transferee => {
             let incoming =
                 timeout(remote_test_timeout(provider)?, endpoint.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_transfer_answering_role(cfg, &handle, transport, true).await?;
+            run_transfer_answering_role(cfg, handle.as_session_handle(), transport, true).await?;
         }
         Role::Target => {
             let incoming = timeout(Duration::from_secs(90), endpoint.wait_for_incoming()).await??;
             let handle = incoming.accept().await?;
-            run_transfer_answering_role(cfg, &handle, transport, false).await?;
+            run_transfer_answering_role(cfg, handle.as_session_handle(), transport, false).await?;
         }
         _ => return Err(format!("unsupported transfer role {:?}", role).into()),
     }

@@ -146,6 +146,48 @@ impl StateMachine {
         session_id: &SessionId,
         event: EventType,
     ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        use std::collections::VecDeque;
+
+        const MAX_INTERNAL_EVENTS: usize = 32;
+
+        let mut queue = VecDeque::new();
+        queue.push_back(event);
+        let mut first_result = None;
+        let mut processed = 0usize;
+
+        while let Some(event) = queue.pop_front() {
+            processed += 1;
+            if processed > MAX_INTERNAL_EVENTS {
+                return Err(crate::errors::SessionError::InternalError(format!(
+                    "state-machine internal event limit ({}) exceeded for session {}",
+                    MAX_INTERNAL_EVENTS, session_id
+                ))
+                .into());
+            }
+
+            let result = self
+                .process_one_event(session_id, event, &mut queue)
+                .await?;
+            if first_result.is_none() {
+                first_result = Some(result);
+            }
+        }
+
+        first_result.ok_or_else(|| {
+            crate::errors::SessionError::InternalError(format!(
+                "state-machine queue was empty for session {}",
+                session_id
+            ))
+            .into()
+        })
+    }
+
+    async fn process_one_event(
+        &self,
+        session_id: &SessionId,
+        event: EventType,
+        queued_follow_up_events: &mut std::collections::VecDeque<EventType>,
+    ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
         use crate::session_store::{ActionRecord, GuardResult, TransitionRecord};
         use std::time::Instant;
 
@@ -355,15 +397,11 @@ impl StateMachine {
         info!("Executing transition for {:?} + {:?}", old_state, event);
 
         // Apply next_state and persist BEFORE executing actions so that any
-        // re-entrant event dispatch triggered from inside an action observes
-        // the post-transition state. Without this, actions that perform
-        // async I/O and then call back into the state machine (e.g.
-        // `DialogAdapter::send_register` dispatching `AuthRequired` inline
-        // on a 401) would see stale `call_state` and their event would miss
-        // the matching transition. If an action fails after this point the
-        // state change stays committed — mirrors how most state machines
-        // handle partial side-effect failures (caller sees the error and
-        // decides how to recover).
+        // follow-up event queued by an action observes the post-transition
+        // state. If an action fails after this point the state change stays
+        // committed — mirrors how most state machines handle partial
+        // side-effect failures (caller sees the error and decides how to
+        // recover).
         if let Some(new_state) = transition.next_state {
             info!("State transition: {:?} -> {:?}", old_state, new_state);
             session.call_state = new_state;
@@ -387,8 +425,9 @@ impl StateMachine {
             let action_duration = action_start.elapsed().as_millis() as u64;
 
             let (success, error_opt, exec_error) = match result {
-                Ok(_) => {
+                Ok(outcome) => {
                     actions_executed.push(action.clone());
+                    queued_follow_up_events.extend(outcome.follow_up_events);
                     (true, None, None)
                 }
                 Err(e) => {
@@ -521,7 +560,7 @@ impl StateMachine {
         // 12. Trigger internal events after saving
         if all_conditions_met && !call_established_triggered {
             debug!("All conditions met, triggering InternalCheckReady");
-            Box::pin(self.process_event(session_id, EventType::InternalCheckReady)).await?;
+            queued_follow_up_events.push_back(EventType::InternalCheckReady);
         }
 
         Ok(ProcessEventResult {
