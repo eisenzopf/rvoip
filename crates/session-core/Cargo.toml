@@ -17,6 +17,9 @@ path = "examples/endpoint/02_incoming_redirect/main.rs"
 name = "endpoint_registered_account"
 path = "examples/endpoint/03_registered_account/main.rs"
 [[example]]
+name = "endpoint_audio_roundtrip"
+path = "examples/endpoint/04_audio_roundtrip/main.rs"
+[[example]]
 name = "sip_client"
 path = "examples/sip_client/main.rs"
 

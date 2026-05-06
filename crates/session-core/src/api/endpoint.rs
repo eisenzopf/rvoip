@@ -2195,4 +2195,23 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn endpoint_audio_roundtrip_stays_on_endpoint_surface() {
+        let source = include_str!("../../examples/endpoint/04_audio_roundtrip/main.rs");
+        for banned in [
+            "StreamPeer",
+            "PeerControl",
+            "UnifiedCoordinator",
+            "RegistrationHandle",
+            "SessionHandle",
+            "as_session_handle",
+            "rvoip_media_core",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "endpoint audio roundtrip example must not reference lower-level API {banned}"
+            );
+        }
+    }
 }

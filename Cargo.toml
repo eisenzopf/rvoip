@@ -15,6 +15,7 @@ members = [
     # call-engine, client-core, sip-client, rvoip) are temporarily
     # out-of-workspace until they're migrated onto this surface.
     "crates/session-core",
+    "crates/b2bua",
     "crates/codec-core",
     "crates/infra-common",
     "crates/registrar-core", "crates/users-core",
@@ -30,6 +31,7 @@ default-members = [
     "crates/rtp-core",
     "crates/media-core",
     "crates/session-core",
+    "crates/b2bua",
     "crates/codec-core",
     "crates/infra-common",
     "crates/registrar-core",
@@ -125,6 +127,7 @@ rvoip-dialog-core = { path = "crates/dialog-core", version = "0.1.26" }
 rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
 rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }
 rvoip-session-core = { path = "crates/session-core", version = "0.1.26" }
+rvoip-b2bua = { path = "crates/b2bua", version = "0.1.26" }
 rvoip-call-engine = { path = "crates/call-engine", version = "0.1.26" }
 rvoip-client-core = { path = "crates/client-core", version = "0.1.26" }
 rvoip-codec-core = { path = "crates/codec-core", version = "0.1.26" }

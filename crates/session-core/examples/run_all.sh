@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 
 SCRIPTS=(
   "cargo run -p rvoip-session-core --example endpoint_local_call --quiet"
+  "cargo run -p rvoip-session-core --example endpoint_audio_roundtrip --quiet"
   "cargo run -p rvoip-session-core --example endpoint_incoming_redirect --quiet"
   "cargo run -p rvoip-session-core --example stream_peer_basic_call --quiet"
   "./stream_peer/02_call_control/run.sh"

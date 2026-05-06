@@ -1,0 +1,20 @@
+[package]
+name = "rvoip-b2bua"
+version = "0.1.26"
+edition = "2021"
+authors = ["RVoIP Contributors"]
+description = "Back-to-back user agent orchestration layer for RVoIP"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+rvoip-session-core = { path = "../session-core" }
+async-trait = "0.1"
+dashmap = "5.5"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0"
+tokio = { version = "1.40", features = ["sync", "time", "rt", "macros"] }
+tracing = "0.1"
+uuid = { version = "1.4", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

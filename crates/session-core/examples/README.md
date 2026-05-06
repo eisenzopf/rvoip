@@ -30,6 +30,7 @@ Run the protocol regression fixtures:
 | Command | Description |
 | --- | --- |
 | `cargo run -p rvoip-session-core --example endpoint_local_call` | Two local endpoints make and receive a call |
+| `cargo run -p rvoip-session-core --example endpoint_audio_roundtrip` | Two local endpoints exchange audio tones and verify received media |
 | `cargo run -p rvoip-session-core --example endpoint_incoming_redirect` | Receive an INVITE and send SIP 302 redirect |
 | `cargo run -p rvoip-session-core --example endpoint_registered_account` | Register to a PBX and call `SIP_TARGET` |
 
