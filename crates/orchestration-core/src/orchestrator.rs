@@ -147,14 +147,20 @@ impl Orchestrator {
         self.voice_ai.clone()
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(self: Arc<Self>) -> Result<()> {
         let coordinator = self
             .coordinator
             .as_ref()
-            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?;
+            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?
+            .clone();
 
         while let Some(incoming) = coordinator.get_incoming_call().await {
-            self.handle_incoming_call(incoming).await?;
+            let me = self.clone();
+            tokio::spawn(async move {
+                if let Err(error) = me.handle_incoming_call(incoming).await {
+                    eprintln!("orchestration-core: inbound call handling failed: {error}");
+                }
+            });
         }
 
         Ok(())

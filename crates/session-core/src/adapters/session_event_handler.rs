@@ -20,6 +20,7 @@ use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEven
 use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, DialogToSessionEvent, MediaToSessionEvent, RvoipCrossCrateEvent, SipTraceEvent,
 };
+use rvoip_infra_common::planes::routing::RoutableEvent;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -663,6 +664,15 @@ impl SessionCrossCrateEventHandler {
         let mut shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             info!("🔔 [session_event_handler] Started dialog-to-session event loop");
+            // Per-session dispatch: each session gets its own task that drains a
+            // dedicated mpsc, preserving in-order processing for that session
+            // while letting independent sessions run concurrently. This was
+            // previously a single `handler.handle(event).await` per loop turn,
+            // which capped per-coordinator INVITE throughput at ~2/sec.
+            let mut session_senders: std::collections::HashMap<
+                String,
+                mpsc::UnboundedSender<Arc<dyn CrossCrateEvent>>,
+            > = std::collections::HashMap::new();
             loop {
                 tokio::select! {
                     _ = shutdown.changed() => {
@@ -673,9 +683,43 @@ impl SessionCrossCrateEventHandler {
                     }
                     event = dialog_sub.recv() => {
                         let Some(event) = event else { break };
-                        info!("🔔 [session_event_handler] Received event from channel: {:?}", event);
-                        if let Err(e) = handler.handle(event).await {
-                            error!("Error handling dialog-to-session event: {}", e);
+                        let session_key = event
+                            .as_any()
+                            .downcast_ref::<RvoipCrossCrateEvent>()
+                            .and_then(RoutableEvent::session_id)
+                            .map(|s| s.to_string());
+                        match session_key {
+                            Some(sid) => {
+                                let sender = session_senders.entry(sid.clone()).or_insert_with(|| {
+                                    let (tx, mut rx) = mpsc::unbounded_channel::<Arc<dyn CrossCrateEvent>>();
+                                    let handler_for_session = handler.clone();
+                                    let sid_for_log = sid.clone();
+                                    tokio::spawn(async move {
+                                        while let Some(ev) = rx.recv().await {
+                                            if let Err(e) = handler_for_session.handle(ev).await {
+                                                error!(
+                                                    session = %sid_for_log,
+                                                    "Error handling dialog-to-session event: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    });
+                                    tx
+                                });
+                                if sender.send(event).is_err() {
+                                    session_senders.remove(&sid);
+                                }
+                            }
+                            None => {
+                                // Events without session context — process on a one-shot task.
+                                let handler = handler.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = handler.handle(event).await {
+                                        error!("Error handling dialog-to-session event: {}", e);
+                                    }
+                                });
+                            }
                         }
                     }
                 }

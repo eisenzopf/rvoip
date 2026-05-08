@@ -1,6 +1,8 @@
 use rvoip_orchestration_core::prelude::*;
 use rvoip_session_core::types::{DialogId, IncomingCallInfo, SessionId};
 
+pub mod perf;
+
 pub fn support_call() -> Call {
     Call::inbound(
         CallerIdentity::new("sip:caller@example.com"),

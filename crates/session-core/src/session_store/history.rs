@@ -26,10 +26,13 @@ impl Default for HistoryConfig {
     fn default() -> Self {
         Self {
             max_transitions: 50,
-            #[cfg(debug_assertions)]
+            // Opt-in lives at SessionState::with_history(); once a caller has
+            // built a SessionHistory they expect it to record. The previous
+            // cfg(debug_assertions) gate silently disabled tracking in release
+            // builds, which lost data without the caller's knowledge. Set
+            // `enabled: false` explicitly if you want a configured-but-paused
+            // history.
             enabled: true,
-            #[cfg(not(debug_assertions))]
-            enabled: false,
             track_actions: true,
             track_guards: false,
         }

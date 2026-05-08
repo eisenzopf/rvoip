@@ -24,5 +24,13 @@ thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 
+[dev-dependencies]
+criterion.workspace = true
+libc = "0.2"
+
+[[bench]]
+name = "active_calls"
+harness = false
+
 [lints]
 workspace = true
