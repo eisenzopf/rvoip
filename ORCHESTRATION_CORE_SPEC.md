@@ -1598,6 +1598,11 @@ is descriptive, not a replacement for the normative design above.
 - `Orchestrator` builder with optional injected `UnifiedCoordinator`
 - cloneable `OrchestrationHandle` with basic call, queue, transfer, hold/resume,
   agent-state, and assignment entry points
+- long-running `Orchestrator::run()` intake loop backed by
+  `UnifiedCoordinator::get_incoming_call`
+- factored inbound-call handling that creates a `Call` and caller `CallLeg`
+  and applies `Reject`, `Queue`, `OfferAgent`, and explicit unsupported
+  `DialSipUri` route decisions
 - `AssignmentManager` for queue-to-agent assignment:
   - lists queued calls
   - finds eligible agents
@@ -1606,34 +1611,75 @@ is descriptive, not a replacement for the normative design above.
   - creates `AgentOffer`
   - updates call and agent state
   - accepts or fails offers and releases capacity
-- unit tests for assignment, offer accept/failure, reservation release, queue
-  priority claiming, and event sequencing
+- AI-first and human-first routing policies fall back to the other agent kind
+- outbound SIP agent offer connection scaffolding:
+  - resolves SIP agent contacts
+  - resolves `RegisteredSipUser` agents through a `registrar-core` backed
+    contact resolver
+  - chooses the highest-priority live registered contact for an agent AOR
+  - dials agents through `session-core::make_call`
+  - records agent `CallLeg`s
+  - moves offers to `Pending`
+  - waits for agent answer/failure events
+  - starts caller-to-agent bridge through `session-core::bridge` when both legs
+    are active
+  - retains live `BridgeHandle`s in `BridgeManager`
+  - requeues failed queue assignments while excluding the failed agent
+  - optionally retries the next eligible queued agent immediately on
+    no-answer/busy/failure
+  - fails and releases retry offers whose outbound SIP leg cannot be created
+- bridge teardown watcher for connected human calls:
+  - caller hangup tears down the agent leg and bridge
+  - agent hangup tears down the caller leg and bridge
+  - active capacity is released
+  - human agent moves to `WrapUp` and can be returned to `Available`
+- local voice-AI action handling for `Say`, queue/agent/SIP transfer, and hangup
+- crate-local examples under `crates/orchestration-core/examples/`
+- unit and integration tests for assignment, offer accept/failure, reservation
+  release, queue priority claiming, event sequencing, inbound route handling,
+  voice-AI actions, AI/human handoff, outbound agent leg creation, failed
+  connection requeue, immediate retry to the next eligible agent, bridge
+  precondition validation, real three-party `session-core` bridge flows for
+  caller-side and agent-side teardown, and live busy/reject and no-answer retry
+  coverage that bridges to the second agent
+- registrar-core registration writes populate lookup locations, and tests cover
+  registered contact lookup, unregister cleanup, resolver failure for
+  unregistered agents, and a live registered SIP agent bridge
+- registrar-core now uses a full-AOR authoritative binding store:
+  - preserves `sip:user@domain` / `sips:user@domain`
+  - supports explicit domain aliases
+  - stores q-values, expiry, transport, received address, Path route set,
+    methods, `+sip.instance`, `reg-id`, flow id, and reachability
+  - supports single-binding refresh/unregister, all-binding unregister, max
+    contact policy, `remove_existing`, and `remove_unavailable`
+  - exposes `lookup_live_contacts(aor, method)` ordered by reachability,
+    q-value, expiry, and URI tie-breaker
+  - includes interface-first identity and credential provider seams with an
+    in-memory fake provider for tests
+- orchestration-core resolves registered SIP agents by full AOR through
+  `lookup_live_contacts(aor, "INVITE")` and carries registrar contact metadata
+  into `ResolvedContact`
+- session-core REGISTER handling now writes full AOR registrations instead of
+  collapsing to username-only registration keys
 
 ### Next
 
-- inbound SIP intake from `UnifiedCoordinator::get_incoming_call`
-- per-inbound-call creation of `Call` and caller `CallLeg`
-- route decision application:
-  - `Reject` via `session-core::reject_call`
-  - `Queue` via `OrchestrationHandle::enqueue_call`
-  - `OfferAgent` via assignment primitives
-  - `DialSipUri` as a stub or explicit unsupported path until outbound dialing
-    is implemented
-- focused tests around the factored inbound-call handler
+- local voice AI runtime loop using ASR/TTS/dialog traits
+- live SIP REGISTER parser extraction for Contact params (`expires`, `q`,
+  `+sip.instance`, `reg-id`), Path headers, received address, and supported
+  methods
+- active SIP OPTIONS qualify driver from session/dialog-core into registrar
+  reachability state
+- outbound alternate-flow retry using RFC 5626 flow metadata
 
 ### Not Yet Implemented
 
-- long-running `Orchestrator::run()` intake loop
-- outbound SIP agent dialing through `session-core::make_call`
-- waiting for agent answer/failure and updating `AgentOffer`
-- accepting the caller leg and bridging caller/agent legs
-- retaining live `BridgeHandle`s for production call bridges
-- registered SIP user contact resolution backed by `registrar-core`
 - local voice AI runtime loop using ASR/TTS/dialog traits
+- live SIP OPTIONS qualification transport
+- concrete Okta/Auth0/Azure/Google identity adapters
 - transfer workflows beyond state/event scaffolding
 - recording and transcript persistence beyond provider/store traits
-- examples under `examples/`
-- real `session-core` and interop tests
+- interop tests
 
 ## 19. Open Design Questions
 

@@ -3,14 +3,105 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
 
 // ============ Registration Types ============
+
+/// Canonical SIP address-of-record for registered users.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct AddressOfRecord(String);
+
+impl AddressOfRecord {
+    pub fn parse(input: &str) -> std::result::Result<Self, String> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err("AOR cannot be empty".to_string());
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        let (scheme, rest) = if lower.starts_with("sips:") {
+            ("sips", &trimmed[5..])
+        } else if lower.starts_with("sip:") {
+            ("sip", &trimmed[4..])
+        } else if trimmed.contains('@') {
+            ("sip", trimmed)
+        } else {
+            return Err(format!(
+                "AOR {trimmed} must include a SIP scheme or user@domain"
+            ));
+        };
+
+        let without_headers = rest.split('?').next().unwrap_or(rest);
+        let without_params = without_headers.split(';').next().unwrap_or(without_headers);
+        let (user, domain) = without_params
+            .split_once('@')
+            .ok_or_else(|| format!("AOR {trimmed} must include user@domain"))?;
+        if user.is_empty() || domain.is_empty() {
+            return Err(format!(
+                "AOR {trimmed} must include non-empty user and domain"
+            ));
+        }
+
+        Ok(Self(format!(
+            "{}:{}@{}",
+            scheme.to_ascii_lowercase(),
+            user,
+            domain.to_ascii_lowercase()
+        )))
+    }
+
+    pub fn from_user_domain(user: &str, domain: &str) -> std::result::Result<Self, String> {
+        Self::parse(&format!("sip:{user}@{domain}"))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn user(&self) -> &str {
+        let without_scheme = self
+            .0
+            .split_once(':')
+            .map_or(self.0.as_str(), |(_, rest)| rest);
+        without_scheme.split('@').next().unwrap_or(without_scheme)
+    }
+
+    pub fn domain(&self) -> &str {
+        self.0.split('@').nth(1).unwrap_or("")
+    }
+
+    pub fn scheme(&self) -> &str {
+        self.0.split_once(':').map_or("sip", |(scheme, _)| scheme)
+    }
+
+    pub fn with_domain(&self, domain: &str) -> std::result::Result<Self, String> {
+        Self::parse(&format!("{}:{}@{}", self.scheme(), self.user(), domain))
+    }
+}
+
+impl fmt::Display for AddressOfRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl FromStr for AddressOfRecord {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
 
 /// Represents a user's registration information
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserRegistration {
     /// Unique user identifier (e.g., "alice")
     pub user_id: String,
+
+    /// Canonical SIP address-of-record for this registration, when available.
+    pub aor: Option<AddressOfRecord>,
 
     /// List of contact addresses where user can be reached
     pub contacts: Vec<ContactInfo>,
@@ -60,6 +151,44 @@ pub struct ContactInfo {
 
     /// Methods this contact supports
     pub methods: Vec<String>,
+
+    /// RFC 5626 reg-id for a specific outbound flow.
+    pub reg_id: Option<u32>,
+
+    /// Stable flow identifier for transport-level routing.
+    pub flow_id: Option<String>,
+
+    /// Current reachability/qualify state for this binding.
+    pub reachability: ContactReachability,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContactReachability {
+    Unknown,
+    Reachable,
+    Unreachable,
+}
+
+impl Default for ContactReachability {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+impl ContactInfo {
+    pub fn supports_method(&self, method: &str) -> bool {
+        self.methods.is_empty()
+            || self
+                .methods
+                .iter()
+                .any(|registered| registered.eq_ignore_ascii_case(method))
+    }
+
+    pub fn is_live_for(&self, method: &str, now: DateTime<Utc>) -> bool {
+        self.expires > now
+            && self.reachability != ContactReachability::Unreachable
+            && self.supports_method(method)
+    }
 }
 
 /// SIP transport protocols
@@ -310,6 +439,24 @@ pub struct RegistrarConfig {
     /// Maximum contacts per user
     pub max_contacts_per_user: usize,
 
+    /// Maximum contacts per address-of-record.
+    pub max_contacts_per_aor: usize,
+
+    /// Replace the lowest-priority existing contact when max contacts is reached.
+    pub remove_existing: bool,
+
+    /// Remove unreachable contacts before rejecting or replacing live contacts.
+    pub remove_unavailable: bool,
+
+    /// Interval in seconds for SIP OPTIONS qualification. None disables active qualify.
+    pub qualify_frequency: Option<u64>,
+
+    /// Timeout in seconds for SIP OPTIONS qualification.
+    pub qualify_timeout: u64,
+
+    /// Persist and return RFC 3327 Path vectors.
+    pub support_path: bool,
+
     /// Maximum subscriptions per user
     pub max_subscriptions_per_user: usize,
 
@@ -326,6 +473,12 @@ impl Default for RegistrarConfig {
             auto_buddy_lists: true,
             default_presence_enabled: true,
             max_contacts_per_user: 10,
+            max_contacts_per_aor: 10,
+            remove_existing: false,
+            remove_unavailable: true,
+            qualify_frequency: None,
+            qualify_timeout: 3,
+            support_path: true,
             max_subscriptions_per_user: 100,
             expiry_check_interval: 30, // Check every 30 seconds
         }

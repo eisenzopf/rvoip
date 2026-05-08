@@ -15,7 +15,9 @@ use rvoip_infra_common::events::{
     coordinator::GlobalEventCoordinator,
     cross_crate::{DialogToSessionEvent, RvoipCrossCrateEvent, SessionToDialogEvent},
 };
-use rvoip_registrar_core::{ContactInfo, RegistrarService, Transport};
+use rvoip_registrar_core::{
+    AddressOfRecord, ContactInfo, ContactReachability, RegistrarService, Transport,
+};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -48,8 +50,8 @@ impl RegistrationAdapter {
     ) -> Result<()> {
         info!("🔐 Handling incoming REGISTER from {}", from_uri);
 
-        // Extract username from URI (e.g., "sip:alice@127.0.0.1" → "alice")
-        let username = Self::extract_username(&from_uri)?;
+        let aor = Self::extract_aor(&from_uri)?;
+        let username = aor.user().to_string();
         debug!("Extracted username: {}", username);
 
         // Call registrar-core to authenticate
@@ -76,11 +78,14 @@ impl RegistrationAdapter {
                 received: None,
                 path: Vec::new(),
                 methods: vec!["INVITE".to_string(), "ACK".to_string(), "BYE".to_string()],
+                reg_id: None,
+                flow_id: None,
+                reachability: ContactReachability::Unknown,
             };
 
-            // Register user in registrar-core
+            // Register the full AOR in registrar-core so domains do not collide.
             self.registrar
-                .register_user(&username, contact, Some(expires))
+                .register_aor(&aor, contact, Some(expires))
                 .await
                 .map_err(|e| SessionError::RegistrationFailed(e.to_string()))?;
 
@@ -197,15 +202,8 @@ impl RegistrationAdapter {
         Ok(())
     }
 
-    /// Extract username from SIP URI
-    fn extract_username(uri: &str) -> Result<String> {
-        // Parse URI: "sip:alice@127.0.0.1" → "alice"
-        let parsed = uri
-            .parse::<rvoip_sip_core::Uri>()
-            .map_err(|e| SessionError::InvalidInput(format!("Invalid URI: {}", e)))?;
-
-        parsed
-            .user
-            .ok_or_else(|| SessionError::InvalidInput("No username in URI".into()))
+    fn extract_aor(uri: &str) -> Result<AddressOfRecord> {
+        AddressOfRecord::parse(uri)
+            .map_err(|error| SessionError::InvalidInput(format!("Invalid AOR: {error}")))
     }
 }

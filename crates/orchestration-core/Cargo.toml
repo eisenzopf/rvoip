@@ -17,6 +17,7 @@ async-trait.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
 rvoip-media-core.workspace = true
+rvoip-registrar-core = { path = "../registrar-core" }
 rvoip-session-core = { path = "../session-core" }
 serde.workspace = true
 thiserror.workspace = true

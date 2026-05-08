@@ -2,8 +2,10 @@ use crate::error::{OrchestrationError, Result};
 use crate::ids::*;
 use crate::types::*;
 use async_trait::async_trait;
+use rvoip_registrar_core::{AddressOfRecord, RegistrarService};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[async_trait]
 pub trait Router: Send + Sync {
@@ -91,12 +93,97 @@ impl ContactResolver for StaticContactResolver {
                 uri: uri.clone(),
                 expires_at: None,
                 source: ContactSource::Static,
+                transport: None,
+                received: None,
+                path: Vec::new(),
+                instance_id: None,
+                reg_id: None,
+                flow_id: None,
             }),
             AgentConnector::RegisteredSipUser { aor } => {
                 Err(OrchestrationError::ContactResolutionFailed(
                     agent.id.clone(),
                     format!("no registrar-backed resolver configured for {aor}"),
                 ))
+            }
+            AgentConnector::LocalVoiceAi(_) => Err(OrchestrationError::ContactResolutionFailed(
+                agent.id.clone(),
+                "local voice AI agents do not have SIP contacts".to_string(),
+            )),
+            _ => Err(OrchestrationError::ContactResolutionFailed(
+                agent.id.clone(),
+                "unsupported agent connector".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct RegistrarContactResolver {
+    registrar: Arc<RegistrarService>,
+}
+
+impl RegistrarContactResolver {
+    pub fn new(registrar: Arc<RegistrarService>) -> Self {
+        Self { registrar }
+    }
+}
+
+#[async_trait]
+impl ContactResolver for RegistrarContactResolver {
+    async fn resolve_contact(&self, agent: &Agent) -> Result<ResolvedContact> {
+        match &agent.connector {
+            AgentConnector::SipUri(uri) => Ok(ResolvedContact {
+                uri: uri.clone(),
+                expires_at: None,
+                source: ContactSource::Static,
+                transport: None,
+                received: None,
+                path: Vec::new(),
+                instance_id: None,
+                reg_id: None,
+                flow_id: None,
+            }),
+            AgentConnector::RegisteredSipUser { aor } => {
+                let aor = AddressOfRecord::parse(aor).map_err(|error| {
+                    OrchestrationError::ContactResolutionFailed(
+                        agent.id.clone(),
+                        format!("invalid registered SIP AOR {aor}: {error}"),
+                    )
+                })?;
+                let contacts = self
+                    .registrar
+                    .lookup_live_contacts(&aor, "INVITE")
+                    .await
+                    .map_err(|error| {
+                        OrchestrationError::ContactResolutionFailed(
+                            agent.id.clone(),
+                            format!("failed to resolve registered SIP user {aor}: {error}"),
+                        )
+                    })?;
+
+                let Some(contact) = contacts.into_iter().next() else {
+                    return Err(OrchestrationError::ContactResolutionFailed(
+                        agent.id.clone(),
+                        format!("registered SIP user {aor} has no live contacts"),
+                    ));
+                };
+
+                Ok(ResolvedContact {
+                    uri: contact.uri,
+                    expires_at: Some(contact.expires),
+                    source: ContactSource::Registrar,
+                    transport: Some(contact.transport),
+                    received: contact.received,
+                    path: contact.path,
+                    instance_id: if contact.instance_id.is_empty() {
+                        None
+                    } else {
+                        Some(contact.instance_id)
+                    },
+                    reg_id: contact.reg_id,
+                    flow_id: contact.flow_id,
+                })
             }
             AgentConnector::LocalVoiceAi(_) => Err(OrchestrationError::ContactResolutionFailed(
                 agent.id.clone(),

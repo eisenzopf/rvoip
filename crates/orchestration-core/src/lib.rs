@@ -29,16 +29,18 @@ pub use voice_ai::*;
 
 pub mod prelude {
     pub use crate::{
-        Agent, AgentCapacity, AgentConnector, AgentKind, AgentOffer, AgentOfferStatus, AgentState,
-        AsrConfig, AsrProvider, AsrSession, Assignment, AssignmentManager, Call, CallContext,
-        CallDirection, CallDisposition, CallId, CallLeg, CallLegId, CallLegRole, CallLegStatus,
-        CallMetrics, CallPriority, CallStatus, ContactResolver, DialogManager, DialogTurn,
-        MemoryAgentOfferStore, MemoryAgentStore, MemoryCallStore, MemoryQueueStore,
-        OrchestrationConfig, OrchestrationError, OrchestrationEvent, OrchestrationEventBus,
-        OrchestrationEventEnvelope, OrchestrationHandle, Orchestrator, OrchestratorBuilder, Queue,
-        QueuePolicy, QueueSelector, QueueStats, QueueTarget, QueuedCall, RecordingSink,
-        ResolvedContact, Result, RouteDecision, RouteRequest, Router, Skill, TransferTarget,
-        TtsProvider, TtsRequest, TtsStream, VoiceAiAction, VoiceAiRuntime, VoiceAiRuntimeConfig,
-        VoiceAiSession,
+        Agent, AgentCapacity, AgentConnector, AgentId, AgentKind, AgentOffer, AgentOfferStatus,
+        AgentState, AsrConfig, AsrProvider, AsrSession, Assignment, AssignmentManager,
+        AudioEncoding, AudioFormat, Call, CallContext, CallDirection, CallDisposition, CallId,
+        CallLeg, CallLegId, CallLegRole, CallLegStatus, CallMetrics, CallPriority, CallStatus,
+        CallerIdentity, ContactResolver, ContactSource, DialogCallContext, DialogManager,
+        DialogSessionId, DialogTurn, MemoryAgentOfferStore, MemoryAgentStore, MemoryCallStore,
+        MemoryQueueStore, OrchestrationConfig, OrchestrationError, OrchestrationEvent,
+        OrchestrationEventBus, OrchestrationEventEnvelope, OrchestrationHandle, Orchestrator,
+        OrchestratorBuilder, Queue, QueueId, QueuePolicy, QueueSelector, QueueStats, QueueTarget,
+        QueuedCall, RecordingSink, RegistrarContactResolver, ResolvedContact, Result,
+        RouteDecision, RouteRequest, Router, Skill, StaticRouter, TranscriptEvent, TransferTarget,
+        TtsProvider, TtsRequest, TtsStream, VoiceAiAction, VoiceAiId, VoiceAiRuntime,
+        VoiceAiRuntimeConfig, VoiceAiSession, VoiceAiSessionId, VoiceAiSessionStatus,
     };
 }

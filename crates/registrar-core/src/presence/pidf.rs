@@ -266,7 +266,7 @@ mod tests {
     async fn test_pidf_roundtrip() {
         let generator = PidfGenerator::new();
 
-        let mut presence = PresenceState {
+        let presence = PresenceState {
             user_id: "alice@example.com".to_string(),
             basic_status: BasicStatus::Open,
             extended_status: Some(ExtendedStatus::Available),

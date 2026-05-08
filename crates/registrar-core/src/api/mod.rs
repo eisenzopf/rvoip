@@ -7,9 +7,13 @@ use tracing::{debug, info, warn};
 
 use crate::error::Result;
 use crate::events::{PresenceEvent, RegistrarEvent};
+use crate::identity::{CredentialProvider, IdentityProvider};
 use crate::presence::Presence;
 use crate::registrar::Registrar;
-use crate::types::{BuddyInfo, ContactInfo, PresenceState, PresenceStatus, RegistrarConfig};
+use crate::types::{
+    AddressOfRecord, BuddyInfo, ContactInfo, ContactReachability, PresenceState, PresenceStatus,
+    RegistrarConfig,
+};
 
 /// High-level registrar service for session-core integration
 pub struct RegistrarService {
@@ -33,6 +37,12 @@ pub struct RegistrarService {
 
     /// Digest authenticator
     auth: Option<Arc<rvoip_auth_core::DigestAuthenticator>>,
+
+    /// Optional external identity source.
+    identity_provider: Option<Arc<dyn IdentityProvider>>,
+
+    /// Optional external credential source.
+    credential_provider: Option<Arc<dyn CredentialProvider>>,
 }
 
 /// Service operation mode
@@ -45,6 +55,11 @@ pub enum ServiceMode {
 }
 
 impl RegistrarService {
+    /// Create a new registrar service with the default P2P mode.
+    pub async fn new() -> Result<Self> {
+        Self::new_p2p().await
+    }
+
     /// Create a new registrar service for P2P mode
     pub async fn new_p2p() -> Result<Self> {
         Self::new_with_mode(ServiceMode::P2P, RegistrarConfig::default()).await
@@ -61,7 +76,7 @@ impl RegistrarService {
 
     /// Create with specific mode and configuration
     pub async fn new_with_mode(mode: ServiceMode, config: RegistrarConfig) -> Result<Self> {
-        let registrar = Arc::new(Registrar::new());
+        let registrar = Arc::new(Registrar::with_config(config.clone()));
         let presence = Arc::new(Presence::new());
 
         // Start background tasks
@@ -77,6 +92,8 @@ impl RegistrarService {
             mode,
             user_store: None,
             auth: None,
+            identity_provider: None,
+            credential_provider: None,
         })
     }
 
@@ -96,6 +113,19 @@ impl RegistrarService {
         service.user_store = Some(user_store);
 
         Ok(service)
+    }
+
+    pub fn with_identity_provider(mut self, provider: Arc<dyn IdentityProvider>) -> Self {
+        self.identity_provider = Some(provider);
+        self
+    }
+
+    pub fn set_identity_provider(&mut self, provider: Arc<dyn IdentityProvider>) {
+        self.identity_provider = Some(provider);
+    }
+
+    pub fn set_credential_provider(&mut self, provider: Arc<dyn CredentialProvider>) {
+        self.credential_provider = Some(provider);
     }
 
     /// Get user store for adding users
@@ -132,24 +162,36 @@ impl RegistrarService {
         username: &str,
         authorization: Option<&str>,
         method: &str,
-        _uri: &str,
+        uri: &str,
     ) -> Result<(bool, Option<String>)> {
         // If no auth configured, allow all
-        if self.auth.is_none() || self.user_store.is_none() {
+        if self.auth.is_none() {
             return Ok((true, None));
         }
 
         let auth = self.auth.as_ref().unwrap();
-        let user_store = self.user_store.as_ref().unwrap();
-
-        // Check if user exists
-        if !user_store.user_exists(username) {
+        let external_password = if let Some(provider) = &self.credential_provider {
+            match AddressOfRecord::parse(uri) {
+                Ok(aor) => provider.sip_digest_secret(&aor).await?,
+                Err(error) => {
+                    warn!("Unable to parse AOR for credential lookup: {}", error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let local_password = self
+            .user_store
+            .as_ref()
+            .and_then(|user_store| user_store.get_password(username));
+        let Some(password) = external_password.or(local_password) else {
             warn!("Registration attempt for unknown user: {}", username);
             // Still send challenge (don't reveal user doesn't exist)
             let challenge = auth.generate_challenge();
             let www_auth = auth.format_www_authenticate(&challenge);
             return Ok((false, Some(www_auth)));
-        }
+        };
 
         // Check for Authorization header
         if let Some(auth_header) = authorization {
@@ -160,13 +202,6 @@ impl RegistrarService {
             .map_err(|e| {
                 crate::error::RegistrarError::Internal(format!("Failed to parse auth: {}", e))
             })?;
-
-            // Get password for user
-            let password = user_store
-                .get_password(&digest_response.username)
-                .ok_or_else(|| {
-                    crate::error::RegistrarError::UserNotFound(digest_response.username.clone())
-                })?;
 
             // Validate digest response
             info!(
@@ -241,6 +276,38 @@ impl RegistrarService {
         Ok(())
     }
 
+    pub async fn register_aor(
+        &self,
+        aor: &AddressOfRecord,
+        contact: ContactInfo,
+        expires: Option<u32>,
+    ) -> Result<()> {
+        self.validate_identity_for_registration(aor).await?;
+        let expires = expires.unwrap_or(self.config.default_expires);
+        self.registrar
+            .register_aor(aor, contact.clone(), expires)
+            .await?;
+        self.publish_event(RegistrarEvent::UserRegistered {
+            user: aor.to_string(),
+            contact,
+        })
+        .await;
+        Ok(())
+    }
+
+    pub async fn register_contacts(
+        &self,
+        aor: &AddressOfRecord,
+        contacts: Vec<ContactInfo>,
+        expires: Option<u32>,
+    ) -> Result<()> {
+        self.validate_identity_for_registration(aor).await?;
+        let expires = expires.unwrap_or(self.config.default_expires);
+        self.registrar
+            .register_contacts(aor, contacts, expires)
+            .await
+    }
+
     /// Unregister a user
     ///
     /// Called when session-core receives REGISTER with Expires: 0
@@ -261,11 +328,76 @@ impl RegistrarService {
         Ok(())
     }
 
+    pub async fn unregister_aor(&self, aor: &AddressOfRecord) -> Result<()> {
+        self.registrar.unregister_aor(aor).await
+    }
+
+    pub async fn unregister_contact_aor(
+        &self,
+        aor: &AddressOfRecord,
+        contact_uri: &str,
+    ) -> Result<()> {
+        self.registrar
+            .unregister_contact_aor(aor, contact_uri)
+            .await
+    }
+
+    pub async fn unregister_all_bindings(&self, aor: &AddressOfRecord) -> Result<()> {
+        self.registrar.unregister_all_bindings(aor).await
+    }
+
     /// Lookup where a user can be reached
     ///
     /// Called when session-core needs to route an INVITE
     pub async fn lookup_user(&self, user_id: &str) -> Result<Vec<ContactInfo>> {
         self.registrar.lookup_user(user_id).await
+    }
+
+    pub async fn lookup_aor(&self, aor: &AddressOfRecord) -> Result<Vec<ContactInfo>> {
+        self.registrar.lookup_aor(aor).await
+    }
+
+    pub async fn lookup_live_contacts(
+        &self,
+        aor: &AddressOfRecord,
+        method: &str,
+    ) -> Result<Vec<ContactInfo>> {
+        if let Some(provider) = &self.identity_provider {
+            match provider.resolve_identity(aor).await? {
+                Some(identity) if identity.enabled => {}
+                Some(_) => return Ok(Vec::new()),
+                None => {
+                    return Err(crate::error::RegistrarError::UserNotFound(aor.to_string()));
+                }
+            }
+        }
+        self.registrar.lookup_live_contacts(aor, method).await
+    }
+
+    pub async fn refresh_registration_aor(
+        &self,
+        aor: &AddressOfRecord,
+        contact_uri: &str,
+        expires: u32,
+    ) -> Result<()> {
+        self.registrar
+            .refresh_registration_aor(aor, contact_uri, expires)
+            .await
+    }
+
+    pub async fn set_contact_reachability(
+        &self,
+        aor: &AddressOfRecord,
+        contact_uri: &str,
+        reachability: ContactReachability,
+    ) -> Result<()> {
+        self.registrar
+            .set_contact_reachability(aor, contact_uri, reachability)
+            .await
+    }
+
+    pub fn add_domain_alias(&self, alias: impl Into<String>, target: impl Into<String>) {
+        self.registrar.add_domain_alias(alias, target);
     }
 
     /// Get all registered users
@@ -276,6 +408,22 @@ impl RegistrarService {
     /// Check if a user is registered
     pub async fn is_registered(&self, user_id: &str) -> bool {
         self.registrar.is_registered(user_id).await
+    }
+
+    async fn validate_identity_for_registration(&self, aor: &AddressOfRecord) -> Result<()> {
+        let Some(provider) = &self.identity_provider else {
+            return Ok(());
+        };
+        match provider.resolve_identity(aor).await? {
+            Some(identity) if identity.enabled => Ok(()),
+            Some(_) => {
+                let _ = self.registrar.unregister_aor(aor).await;
+                Err(crate::error::RegistrarError::InvalidRegistration(format!(
+                    "identity {aor} is disabled"
+                )))
+            }
+            None => Err(crate::error::RegistrarError::UserNotFound(aor.to_string())),
+        }
     }
 
     // ========== Presence Methods ==========

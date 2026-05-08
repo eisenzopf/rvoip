@@ -12,18 +12,23 @@
 pub mod api;
 pub mod error;
 pub mod events;
+pub mod identity;
 pub mod presence;
 pub mod registrar;
 pub mod types;
 
 // Re-exports for convenience
-pub use api::RegistrarService;
+pub use api::{RegistrarService, ServiceMode};
 pub use error::{RegistrarError, Result};
 pub use events::{PresenceEvent, RegistrarEvent};
-pub use registrar::{UserCredentials, UserStore};
+pub use identity::{
+    CredentialProvider, ExternalIdentity, IdentityProvider, IdentitySyncService,
+    InMemoryIdentityProvider,
+};
+pub use registrar::{Registrar, UserCredentials, UserStore};
 pub use types::{
-    BasicStatus, ContactInfo, ExtendedStatus, PresenceState, PresenceStatus, Subscription,
-    SubscriptionState, Transport, UserRegistration,
+    AddressOfRecord, BasicStatus, ContactInfo, ContactReachability, ExtendedStatus, PresenceState,
+    PresenceStatus, RegistrarConfig, Subscription, SubscriptionState, Transport, UserRegistration,
 };
 
 // Version information

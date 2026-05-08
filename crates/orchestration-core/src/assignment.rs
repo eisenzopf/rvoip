@@ -63,33 +63,36 @@ impl AssignmentManager {
         for queued_call in queued_calls {
             let required_skills =
                 merged_skills(&queue.required_skills, &queued_call.required_skills);
-            let candidates = self
-                .agents
-                .list_eligible_agents(AgentEligibilityRequest {
-                    queue_id: Some(queue_id.clone()),
-                    required_skills,
-                    excluded_agent_ids: queued_call.previous_agent_ids.clone(),
-                    preferred_kind: preferred_kind(queue.policy),
-                })
-                .await?;
-            let Some(agent_id) = self.selector.select_agent(&queued_call, candidates).await? else {
-                continue;
-            };
+            for preferred_kind in preferred_kind_order(queue.policy) {
+                let candidates = self
+                    .agents
+                    .list_eligible_agents(AgentEligibilityRequest {
+                        queue_id: Some(queue_id.clone()),
+                        required_skills: required_skills.clone(),
+                        excluded_agent_ids: queued_call.previous_agent_ids.clone(),
+                        preferred_kind,
+                    })
+                    .await?;
+                let Some(agent_id) = self.selector.select_agent(&queued_call, candidates).await?
+                else {
+                    continue;
+                };
 
-            let Some(reservation_id) = self
-                .agents
-                .reserve_capacity(&agent_id, &queued_call.call_id)
-                .await?
-            else {
-                continue;
-            };
+                let Some(reservation_id) = self
+                    .agents
+                    .reserve_capacity(&agent_id, &queued_call.call_id)
+                    .await?
+                else {
+                    continue;
+                };
 
-            match self
-                .try_claim_for_reserved_agent(&queue, &queued_call, agent_id, reservation_id)
-                .await?
-            {
-                Some(assignment) => return Ok(Some(assignment)),
-                None => continue,
+                match self
+                    .try_claim_for_reserved_agent(&queue, &queued_call, agent_id, reservation_id)
+                    .await?
+                {
+                    Some(assignment) => return Ok(Some(assignment)),
+                    None => continue,
+                }
             }
         }
 
@@ -305,11 +308,11 @@ fn merged_skills(queue_skills: &[Skill], call_skills: &[Skill]) -> Vec<Skill> {
     skills
 }
 
-fn preferred_kind(policy: QueuePolicy) -> Option<AgentKind> {
+fn preferred_kind_order(policy: QueuePolicy) -> Vec<Option<AgentKind>> {
     match policy {
-        QueuePolicy::AiFirstThenHuman => Some(AgentKind::VoiceAi),
-        QueuePolicy::HumanFirstThenAi => Some(AgentKind::Human),
-        _ => None,
+        QueuePolicy::AiFirstThenHuman => vec![Some(AgentKind::VoiceAi), Some(AgentKind::Human)],
+        QueuePolicy::HumanFirstThenAi => vec![Some(AgentKind::Human), Some(AgentKind::VoiceAi)],
+        _ => vec![None],
     }
 }
 
@@ -555,5 +558,30 @@ mod tests {
             .unwrap()
             .is_empty());
         assert_eq!(queues.stats(&queue_id).await.unwrap().queued_calls, 1);
+    }
+
+    #[tokio::test]
+    async fn ai_first_policy_falls_back_to_human_when_ai_unavailable() {
+        let (calls, agents, queues, offers, events, _call, human, queue_id) = fixture().await;
+        let mut queue = queues.get_queue(&queue_id).await.unwrap().unwrap();
+        queue.policy = QueuePolicy::AiFirstThenHuman;
+        queues.upsert_queue(queue).await.unwrap();
+
+        let mut ai = Agent::voice_ai("support-ai", "support-ai-runtime");
+        ai.state = AgentState::Offline;
+        ai.skills.push(Skill::from("support"));
+        agents.upsert_agent(ai).await.unwrap();
+
+        let manager = AssignmentManager::new(
+            calls,
+            agents,
+            queues,
+            offers,
+            events,
+            AssignmentConfig::default(),
+        );
+
+        let assignment = manager.assign_next(&queue_id).await.unwrap().unwrap();
+        assert_eq!(assignment.agent_id, human.id);
     }
 }

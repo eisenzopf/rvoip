@@ -4,14 +4,21 @@ use crate::error::{OrchestrationError, Result};
 use crate::events::{OrchestrationEvent, OrchestrationEventBus};
 use crate::ids::*;
 use crate::store::*;
-use crate::traits::{ContactResolver, RouteDecision, Router, StaticContactResolver, StaticRouter};
+use crate::traits::{
+    ContactResolver, RouteDecision, RouteRequest, Router, StaticContactResolver, StaticRouter,
+};
 use crate::types::*;
-use crate::voice_ai::VoiceAiRuntime;
+use crate::voice_ai::{TranscriptEvent, VoiceAiAction, VoiceAiRuntime};
 use chrono::{Duration as ChronoDuration, Utc};
-use rvoip_session_core::{BridgeHandle, Config, UnifiedCoordinator};
+use rvoip_session_core::types::IncomingCallInfo;
+use rvoip_session_core::{
+    BridgeHandle, CallState, Config, Event, EventReceiver, SessionId, UnifiedCoordinator,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
+use tokio::time::{sleep, timeout, Instant};
 
 #[derive(Clone, Default)]
 pub struct BridgeManager {
@@ -34,6 +41,50 @@ impl BridgeManager {
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
     }
+}
+
+enum AgentOfferOutcome {
+    Answered,
+    Failed { status_code: u16, reason: String },
+}
+
+fn agent_leg_role(agent: &Agent) -> CallLegRole {
+    match agent.kind {
+        AgentKind::Human => CallLegRole::HumanAgent,
+        AgentKind::VoiceAi => CallLegRole::VoiceAiAgent,
+    }
+}
+
+async fn wait_for_session_active(
+    coordinator: &UnifiedCoordinator,
+    session_id: &SessionId,
+    deadline: Duration,
+) -> Result<()> {
+    let end = Instant::now() + deadline;
+    loop {
+        let state = coordinator.get_state(session_id).await?;
+        if matches!(state, CallState::Active | CallState::Bridged) {
+            return Ok(());
+        }
+        if Instant::now() >= end {
+            return Err(OrchestrationError::BridgeFailed(format!(
+                "session {session_id} did not become active before bridge (state: {state:?})"
+            )));
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn next_terminal_event(events: &mut EventReceiver) -> Option<String> {
+    while let Some(event) = events.next().await {
+        match event {
+            Event::CallEnded { reason, .. } => return Some(reason),
+            Event::CallFailed { reason, .. } => return Some(reason),
+            Event::CallCancelled { .. } => return Some("call cancelled".to_string()),
+            _ => {}
+        }
+    }
+    None
 }
 
 #[derive(Clone, Default)]
@@ -78,6 +129,7 @@ impl Orchestrator {
             queues: self.queues.clone(),
             offers: self.offers.clone(),
             events: self.events.clone(),
+            contact_resolver: self.contact_resolver.clone(),
             bridge_manager: self.bridge_manager.clone(),
             config: self.config.clone(),
         }
@@ -96,6 +148,226 @@ impl Orchestrator {
     }
 
     pub async fn run(&self) -> Result<()> {
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?;
+
+        while let Some(incoming) = coordinator.get_incoming_call().await {
+            self.handle_incoming_call(incoming).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn handle_incoming_call(&self, incoming: IncomingCallInfo) -> Result<CallId> {
+        let call = self.create_inbound_call(&incoming);
+        let call_id = call.id.clone();
+        let from_status = call.status;
+
+        self.calls.insert_call(call.clone()).await?;
+        self.events.emit(OrchestrationEvent::InboundCallReceived {
+            call_id: call_id.clone(),
+            caller: call.caller.clone(),
+            to: call.dialed_uri.clone(),
+        });
+        self.events.emit(OrchestrationEvent::CallCreated { call });
+
+        self.set_call_status(&call_id, from_status, CallStatus::Routing)
+            .await?;
+
+        let request = RouteRequest {
+            call_id: call_id.clone(),
+            from: incoming.from.clone(),
+            to: incoming.to.clone(),
+            sip_call_id: Some(incoming.call_id.clone()),
+            caller_identity: CallerIdentity {
+                uri: incoming.from,
+                display_name: None,
+                asserted_identity: incoming.p_asserted_identity,
+                metadata: HashMap::new(),
+            },
+            priority: CallPriority::default(),
+            metadata: HashMap::new(),
+        };
+
+        let decision = match timeout(
+            self.config.inbound.route_timeout,
+            self.router.route(request),
+        )
+        .await
+        {
+            Ok(Ok(decision)) => decision,
+            Ok(Err(error)) => {
+                self.fail_inbound_call(&call_id, &incoming.session_id, error.to_string())
+                    .await?;
+                return Err(error);
+            }
+            Err(_) => {
+                let reason = "inbound route timeout".to_string();
+                self.fail_inbound_call(&call_id, &incoming.session_id, reason.clone())
+                    .await?;
+                return Err(OrchestrationError::RoutingFailed(reason));
+            }
+        };
+
+        self.apply_inbound_route_decision(&call_id, &incoming.session_id, decision)
+            .await?;
+        Ok(call_id)
+    }
+
+    fn create_inbound_call(&self, incoming: &IncomingCallInfo) -> Call {
+        let mut call = Call::inbound(
+            CallerIdentity {
+                uri: incoming.from.clone(),
+                display_name: None,
+                asserted_identity: incoming.p_asserted_identity.clone(),
+                metadata: HashMap::new(),
+            },
+            incoming.to.clone(),
+        );
+        call.sip_call_id = Some(incoming.call_id.clone());
+
+        let mut caller_leg = CallLeg::new(
+            CallLegRole::Caller,
+            incoming.session_id.clone(),
+            incoming.from.clone(),
+        );
+        caller_leg.sip_call_id = Some(incoming.call_id.clone());
+        caller_leg.status = CallLegStatus::Ringing;
+        call.legs.push(caller_leg);
+
+        call
+    }
+
+    async fn apply_inbound_route_decision(
+        &self,
+        call_id: &CallId,
+        session_id: &rvoip_session_core::SessionId,
+        decision: RouteDecision,
+    ) -> Result<()> {
+        let handle = self.handle();
+        match decision {
+            RouteDecision::Reject { status, reason } => {
+                if let Some(coordinator) = &self.coordinator {
+                    coordinator.reject_call(session_id, status, &reason).await?;
+                }
+                self.finish_rejected_call(call_id, status, reason).await?;
+            }
+            RouteDecision::Queue { queue_id } => {
+                handle
+                    .enqueue_call(
+                        call_id.clone(),
+                        QueueTarget {
+                            queue_id,
+                            ..QueueTarget::default()
+                        },
+                    )
+                    .await?;
+            }
+            RouteDecision::OfferAgent { agent_id } => {
+                handle.offer_agent(call_id.clone(), agent_id).await?;
+            }
+            RouteDecision::DialSipUri { uri } => {
+                let reason = format!(
+                    "DialSipUri route to {uri} is unsupported until outbound dialing is implemented"
+                );
+                self.mark_call_failed(call_id, reason).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_call_status(
+        &self,
+        call_id: &CallId,
+        from: CallStatus,
+        to: CallStatus,
+    ) -> Result<()> {
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        call.status = to;
+        self.calls.update_call(call).await?;
+        self.events.emit(OrchestrationEvent::CallStatusChanged {
+            call_id: call_id.clone(),
+            from,
+            to,
+        });
+        Ok(())
+    }
+
+    async fn finish_rejected_call(
+        &self,
+        call_id: &CallId,
+        status: u16,
+        reason: String,
+    ) -> Result<()> {
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        let from = call.status;
+        call.status = CallStatus::Ended;
+        call.ended_at = Some(Utc::now());
+        call.disposition = Some(CallDisposition::Rejected {
+            status,
+            reason: reason.clone(),
+        });
+        self.calls.update_call(call).await?;
+        self.events.emit(OrchestrationEvent::CallEnded {
+            call_id: call_id.clone(),
+            reason,
+        });
+        self.events.emit(OrchestrationEvent::CallStatusChanged {
+            call_id: call_id.clone(),
+            from,
+            to: CallStatus::Ended,
+        });
+        Ok(())
+    }
+
+    async fn fail_inbound_call(
+        &self,
+        call_id: &CallId,
+        session_id: &rvoip_session_core::SessionId,
+        reason: String,
+    ) -> Result<()> {
+        if self.config.routing.fail_closed {
+            if let Some(coordinator) = &self.coordinator {
+                let _ = coordinator
+                    .reject_call(session_id, 500, "Routing Failed")
+                    .await;
+            }
+        }
+        self.mark_call_failed(call_id, reason).await
+    }
+
+    async fn mark_call_failed(&self, call_id: &CallId, reason: String) -> Result<()> {
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        let from = call.status;
+        call.status = CallStatus::Failed;
+        call.ended_at = Some(Utc::now());
+        call.disposition = Some(CallDisposition::Failed {
+            reason: reason.clone(),
+        });
+        self.calls.update_call(call).await?;
+        self.events.emit(OrchestrationEvent::CallFailed {
+            call_id: call_id.clone(),
+            reason,
+        });
+        self.events.emit(OrchestrationEvent::CallStatusChanged {
+            call_id: call_id.clone(),
+            from,
+            to: CallStatus::Failed,
+        });
         Ok(())
     }
 }
@@ -274,6 +546,7 @@ pub struct OrchestrationHandle {
     queues: SharedQueueStore,
     offers: SharedAgentOfferStore,
     events: OrchestrationEventBus,
+    contact_resolver: Arc<dyn ContactResolver>,
     bridge_manager: BridgeManager,
     config: OrchestrationConfig,
 }
@@ -287,10 +560,18 @@ impl OrchestrationHandle {
         self.coordinator.as_ref()
     }
 
-    pub async fn insert_call(&self, call: Call) -> Result<()> {
+    pub async fn create_call(&self, call: Call) -> Result<()> {
         self.calls.insert_call(call.clone()).await?;
         self.events.emit(OrchestrationEvent::CallCreated { call });
         Ok(())
+    }
+
+    pub async fn upsert_agent(&self, agent: Agent) -> Result<()> {
+        self.agents.upsert_agent(agent).await
+    }
+
+    pub async fn upsert_queue(&self, queue: Queue) -> Result<()> {
+        self.queues.upsert_queue(queue).await
     }
 
     pub async fn enqueue_call(&self, call_id: CallId, target: QueueTarget) -> Result<()> {
@@ -308,7 +589,7 @@ impl OrchestrationHandle {
             required_skills: target.required_skills,
             enqueued_at: Utc::now(),
             expires_at: None,
-            previous_agent_ids: Vec::new(),
+            previous_agent_ids: target.previous_agent_ids,
             attempt_count: 0,
             escalation_reason: None,
             metadata: target.metadata,
@@ -331,7 +612,7 @@ impl OrchestrationHandle {
     }
 
     pub async fn offer_agent(&self, call_id: CallId, agent_id: AgentId) -> Result<AgentOfferId> {
-        let _call = self
+        let mut call = self
             .calls
             .get_call(&call_id)
             .await?
@@ -358,10 +639,27 @@ impl OrchestrationHandle {
             failure_reason: None,
         };
         self.offers.insert_offer(offer).await?;
+        self.agents
+            .update_state(&agent_id, AgentState::Offering)
+            .await?;
+        let from = call.status;
+        call.status = CallStatus::OfferingAgent;
+        call.assigned_agent_id = Some(agent_id.clone());
+        self.calls.update_call(call).await?;
         self.events.emit(OrchestrationEvent::AgentReserved {
-            call_id,
-            agent_id,
+            call_id: call_id.clone(),
+            agent_id: agent_id.clone(),
             offer_id: offer_id.clone(),
+        });
+        self.events.emit(OrchestrationEvent::AgentStateChanged {
+            agent_id: agent_id.clone(),
+            from: AgentState::Reserved,
+            to: AgentState::Offering,
+        });
+        self.events.emit(OrchestrationEvent::CallStatusChanged {
+            call_id,
+            from,
+            to: CallStatus::OfferingAgent,
         });
         Ok(offer_id)
     }
@@ -377,6 +675,532 @@ impl OrchestrationHandle {
         )
         .assign_next(queue_id)
         .await
+    }
+
+    pub async fn assign_and_connect_next_call(
+        &self,
+        queue_id: &QueueId,
+    ) -> Result<Option<Assignment>> {
+        let Some(assignment) = self.assign_next_call(queue_id).await? else {
+            return Ok(None);
+        };
+        self.connect_agent_offer(&assignment.offer_id).await?;
+        Ok(Some(assignment))
+    }
+
+    pub async fn accept_offer(&self, offer_id: &AgentOfferId) -> Result<()> {
+        AssignmentManager::new(
+            self.calls.clone(),
+            self.agents.clone(),
+            self.queues.clone(),
+            self.offers.clone(),
+            self.events.clone(),
+            self.config.assignment.clone(),
+        )
+        .accept_offer(offer_id)
+        .await
+    }
+
+    pub async fn fail_offer(
+        &self,
+        offer_id: &AgentOfferId,
+        status: AgentOfferStatus,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        AssignmentManager::new(
+            self.calls.clone(),
+            self.agents.clone(),
+            self.queues.clone(),
+            self.offers.clone(),
+            self.events.clone(),
+            self.config.assignment.clone(),
+        )
+        .fail_offer(offer_id, status, reason)
+        .await
+    }
+
+    pub async fn connect_agent_offer(&self, offer_id: &AgentOfferId) -> Result<CallLegId> {
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?;
+        let mut offer = self
+            .offers
+            .get_offer(offer_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::Store(format!("offer not found: {offer_id}")))?;
+        let agent = self
+            .agents
+            .get_agent(&offer.agent_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::AgentNotFound(offer.agent_id.clone()))?;
+
+        if matches!(agent.connector, AgentConnector::LocalVoiceAi(_)) {
+            return Err(OrchestrationError::VoiceAiFailed(format!(
+                "local voice AI agent {} does not create an outbound SIP leg",
+                agent.id
+            )));
+        }
+
+        let contact = self.contact_resolver.resolve_contact(&agent).await?;
+        let mut call = self
+            .calls
+            .get_call(&offer.call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(offer.call_id.clone()))?;
+        let from_status = call.status;
+        let from_agent_state = agent.state;
+        let from_uri = self.config.session.local_uri.clone();
+
+        let session_id = coordinator.make_call(&from_uri, &contact.uri).await?;
+        let mut agent_leg = CallLeg::new(agent_leg_role(&agent), session_id, contact.uri.clone());
+        agent_leg.status = CallLegStatus::Dialing;
+        agent_leg.agent_id = Some(agent.id.clone());
+        let agent_leg_id = agent_leg.id.clone();
+
+        call.status = CallStatus::ConnectingAgent;
+        call.assigned_agent_id = Some(agent.id.clone());
+        call.legs.push(agent_leg);
+        self.calls.update_call(call).await?;
+
+        offer.status = AgentOfferStatus::Pending;
+        offer.agent_leg_id = Some(agent_leg_id.clone());
+        self.offers.update_offer(offer.clone()).await?;
+        self.agents
+            .update_state(&offer.agent_id, AgentState::Ringing)
+            .await?;
+
+        self.events.emit(OrchestrationEvent::CallStatusChanged {
+            call_id: offer.call_id.clone(),
+            from: from_status,
+            to: CallStatus::ConnectingAgent,
+        });
+        self.events.emit(OrchestrationEvent::AgentStateChanged {
+            agent_id: offer.agent_id.clone(),
+            from: from_agent_state,
+            to: AgentState::Ringing,
+        });
+
+        Ok(agent_leg_id)
+    }
+
+    pub async fn wait_for_agent_offer_outcome(
+        &self,
+        offer_id: &AgentOfferId,
+    ) -> Result<Option<BridgeId>> {
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?;
+        let mut current_offer_id = offer_id.clone();
+        loop {
+            let offer = self
+                .offers
+                .get_offer(&current_offer_id)
+                .await?
+                .ok_or_else(|| {
+                    OrchestrationError::Store(format!("offer not found: {current_offer_id}"))
+                })?;
+            let agent_session_id =
+                self.agent_session_id_for_offer(&offer)
+                    .await?
+                    .ok_or_else(|| {
+                        OrchestrationError::InvalidState(format!(
+                            "offer {current_offer_id} has no agent leg"
+                        ))
+                    })?;
+            let mut events = coordinator.events_for_session(&agent_session_id).await?;
+
+            match timeout(self.config.assignment.outbound_answer_timeout, async {
+                while let Some(event) = events.next().await {
+                    match event {
+                        Event::CallAnswered { .. } => return AgentOfferOutcome::Answered,
+                        Event::CallFailed {
+                            status_code,
+                            reason,
+                            ..
+                        } => {
+                            return AgentOfferOutcome::Failed {
+                                status_code,
+                                reason,
+                            };
+                        }
+                        Event::CallEnded { reason, .. } => {
+                            return AgentOfferOutcome::Failed {
+                                status_code: 487,
+                                reason,
+                            };
+                        }
+                        Event::CallCancelled { .. } => {
+                            return AgentOfferOutcome::Failed {
+                                status_code: 487,
+                                reason: "call cancelled".to_string(),
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+                AgentOfferOutcome::Failed {
+                    status_code: 500,
+                    reason: "agent event stream closed".to_string(),
+                }
+            })
+            .await
+            {
+                Ok(AgentOfferOutcome::Answered) => {
+                    return self.bridge_agent_offer(&current_offer_id).await.map(Some);
+                }
+                Ok(AgentOfferOutcome::Failed { reason, .. }) => {
+                    let Some(next_assignment) = self
+                        .fail_agent_connection_and_retry_next(
+                            &current_offer_id,
+                            AgentOfferStatus::Failed,
+                            reason,
+                        )
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(next_offer_id) =
+                        self.connect_retry_assignment(next_assignment).await?
+                    else {
+                        return Ok(None);
+                    };
+                    current_offer_id = next_offer_id;
+                }
+                Err(_) => {
+                    let Some(next_assignment) = self
+                        .fail_agent_connection_and_retry_next(
+                            &current_offer_id,
+                            AgentOfferStatus::TimedOut,
+                            "agent no answer",
+                        )
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(next_offer_id) =
+                        self.connect_retry_assignment(next_assignment).await?
+                    else {
+                        return Ok(None);
+                    };
+                    current_offer_id = next_offer_id;
+                }
+            }
+        }
+    }
+
+    pub async fn wait_for_single_agent_offer_outcome(
+        &self,
+        offer_id: &AgentOfferId,
+    ) -> Result<Option<BridgeId>> {
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?;
+        let offer = self
+            .offers
+            .get_offer(offer_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::Store(format!("offer not found: {offer_id}")))?;
+        let agent_session_id = self
+            .agent_session_id_for_offer(&offer)
+            .await?
+            .ok_or_else(|| {
+                OrchestrationError::InvalidState(format!("offer {offer_id} has no agent leg"))
+            })?;
+        let mut events = coordinator.events_for_session(&agent_session_id).await?;
+
+        match timeout(self.config.assignment.outbound_answer_timeout, async {
+            while let Some(event) = events.next().await {
+                match event {
+                    Event::CallAnswered { .. } => return AgentOfferOutcome::Answered,
+                    Event::CallFailed {
+                        status_code,
+                        reason,
+                        ..
+                    } => {
+                        return AgentOfferOutcome::Failed {
+                            status_code,
+                            reason,
+                        }
+                    }
+                    Event::CallEnded { reason, .. } => {
+                        return AgentOfferOutcome::Failed {
+                            status_code: 487,
+                            reason,
+                        }
+                    }
+                    Event::CallCancelled { .. } => {
+                        return AgentOfferOutcome::Failed {
+                            status_code: 487,
+                            reason: "call cancelled".to_string(),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            AgentOfferOutcome::Failed {
+                status_code: 500,
+                reason: "agent event stream closed".to_string(),
+            }
+        })
+        .await
+        {
+            Ok(AgentOfferOutcome::Answered) => self.bridge_agent_offer(offer_id).await.map(Some),
+            Ok(AgentOfferOutcome::Failed { reason, .. }) => {
+                self.fail_agent_connection(offer_id, AgentOfferStatus::Failed, reason)
+                    .await?;
+                Ok(None)
+            }
+            Err(_) => {
+                self.fail_agent_connection(offer_id, AgentOfferStatus::TimedOut, "agent no answer")
+                    .await?;
+                Ok(None)
+            }
+        }
+    }
+
+    pub async fn bridge_agent_offer(&self, offer_id: &AgentOfferId) -> Result<BridgeId> {
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?;
+        let offer = self
+            .offers
+            .get_offer(offer_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::Store(format!("offer not found: {offer_id}")))?;
+        let call = self
+            .calls
+            .get_call(&offer.call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(offer.call_id.clone()))?;
+        let caller_leg = call
+            .legs
+            .iter()
+            .find(|leg| leg.role == CallLegRole::Caller)
+            .cloned()
+            .ok_or_else(|| {
+                OrchestrationError::InvalidState(format!(
+                    "call {} has no caller leg to bridge",
+                    offer.call_id
+                ))
+            })?;
+        let agent_leg = offer
+            .agent_leg_id
+            .as_ref()
+            .and_then(|agent_leg_id| call.legs.iter().find(|leg| &leg.id == agent_leg_id))
+            .cloned()
+            .ok_or_else(|| {
+                OrchestrationError::InvalidState(format!(
+                    "offer {offer_id} has no recorded agent leg"
+                ))
+            })?;
+
+        if self.config.inbound.auto_accept_before_bridge {
+            coordinator.accept_call(&caller_leg.session_id).await?;
+        }
+        wait_for_session_active(coordinator, &caller_leg.session_id, Duration::from_secs(5))
+            .await?;
+        wait_for_session_active(coordinator, &agent_leg.session_id, Duration::from_secs(5)).await?;
+
+        let bridge_handle = coordinator
+            .bridge(&caller_leg.session_id, &agent_leg.session_id)
+            .await
+            .map_err(|error| OrchestrationError::BridgeFailed(error.to_string()))?;
+        let bridge_id = BridgeId::new();
+        self.bridge_manager
+            .insert(bridge_id.clone(), bridge_handle)
+            .await;
+        self.accept_offer(offer_id).await?;
+        self.mark_bridge_started(&offer.call_id, &caller_leg.id, &agent_leg.id, &bridge_id)
+            .await?;
+        self.spawn_bridge_teardown_watch(
+            offer.call_id.clone(),
+            offer.agent_id.clone(),
+            bridge_id.clone(),
+            caller_leg.id.clone(),
+            caller_leg.session_id.clone(),
+            agent_leg.id.clone(),
+            agent_leg.session_id.clone(),
+        );
+
+        Ok(bridge_id)
+    }
+
+    pub async fn fail_agent_connection(
+        &self,
+        offer_id: &AgentOfferId,
+        status: AgentOfferStatus,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        let reason = reason.into();
+        let offer = self
+            .offers
+            .get_offer(offer_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::Store(format!("offer not found: {offer_id}")))?;
+
+        self.hangup_agent_session_for_offer(&offer).await?;
+        self.mark_agent_leg_terminal(&offer, CallLegStatus::Failed)
+            .await?;
+        self.fail_offer(offer_id, status, reason.clone()).await?;
+
+        if let Some(queue_id) = offer.queue_id.clone() {
+            self.clear_assignment_for_retry(&offer.call_id).await?;
+            let previous_agent_ids = self.failed_agent_ids_for_call(&offer.call_id).await?;
+            self.enqueue_call(
+                offer.call_id,
+                QueueTarget {
+                    queue_id,
+                    previous_agent_ids,
+                    ..QueueTarget::default()
+                },
+            )
+            .await?;
+        } else {
+            self.mark_call_failed(&offer.call_id, reason).await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn fail_agent_connection_and_retry_next(
+        &self,
+        offer_id: &AgentOfferId,
+        status: AgentOfferStatus,
+        reason: impl Into<String>,
+    ) -> Result<Option<Assignment>> {
+        let reason = reason.into();
+        let offer = self
+            .offers
+            .get_offer(offer_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::Store(format!("offer not found: {offer_id}")))?;
+
+        self.hangup_agent_session_for_offer(&offer).await?;
+        self.mark_agent_leg_terminal(&offer, CallLegStatus::Failed)
+            .await?;
+        self.fail_offer(offer_id, status, reason.clone()).await?;
+
+        let Some(queue_id) = offer.queue_id.clone() else {
+            self.mark_call_failed(&offer.call_id, reason).await?;
+            return Ok(None);
+        };
+
+        self.clear_assignment_for_retry(&offer.call_id).await?;
+        let previous_agent_ids = self.failed_agent_ids_for_call(&offer.call_id).await?;
+        self.enqueue_call(
+            offer.call_id,
+            QueueTarget {
+                queue_id: queue_id.clone(),
+                previous_agent_ids,
+                ..QueueTarget::default()
+            },
+        )
+        .await?;
+
+        self.assign_next_call(&queue_id).await
+    }
+
+    async fn connect_retry_assignment(
+        &self,
+        mut assignment: Assignment,
+    ) -> Result<Option<AgentOfferId>> {
+        loop {
+            match self.connect_agent_offer(&assignment.offer_id).await {
+                Ok(_) => return Ok(Some(assignment.offer_id)),
+                Err(error) => {
+                    let Some(next_assignment) = self
+                        .fail_agent_connection_and_retry_next(
+                            &assignment.offer_id,
+                            AgentOfferStatus::Failed,
+                            format!("agent connection failed: {error}"),
+                        )
+                        .await?
+                    else {
+                        return Ok(None);
+                    };
+                    assignment = next_assignment;
+                }
+            }
+        }
+    }
+
+    pub async fn apply_voice_ai_action(
+        &self,
+        call_id: CallId,
+        agent_id: AgentId,
+        action: VoiceAiAction,
+    ) -> Result<()> {
+        match action {
+            VoiceAiAction::Continue => Ok(()),
+            VoiceAiAction::Say { text } => {
+                let mut call = self
+                    .calls
+                    .get_call(&call_id)
+                    .await?
+                    .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+                let from = call.status;
+                call.status = CallStatus::InVoiceAi;
+                call.assigned_agent_id = Some(agent_id.clone());
+                call.context
+                    .metadata
+                    .insert("last_voice_ai_say".to_string(), text.clone());
+                self.calls.update_call(call).await?;
+                self.events.emit(OrchestrationEvent::VoiceAiTranscript {
+                    call_id: call_id.clone(),
+                    agent_id,
+                    transcript: TranscriptEvent::Final {
+                        text,
+                        confidence: None,
+                    },
+                });
+                if from != CallStatus::InVoiceAi {
+                    self.events.emit(OrchestrationEvent::CallStatusChanged {
+                        call_id,
+                        from,
+                        to: CallStatus::InVoiceAi,
+                    });
+                }
+                Ok(())
+            }
+            VoiceAiAction::TransferToQueue { queue_id } => {
+                self.end_voice_ai_session(&call_id, &agent_id, "transfer to queue")
+                    .await?;
+                self.prepare_call_for_handoff(&call_id, &agent_id).await?;
+                self.enqueue_call(
+                    call_id,
+                    QueueTarget {
+                        queue_id,
+                        previous_agent_ids: vec![agent_id],
+                        ..QueueTarget::default()
+                    },
+                )
+                .await
+            }
+            VoiceAiAction::TransferToAgent {
+                agent_id: target_agent_id,
+            } => {
+                self.end_voice_ai_session(&call_id, &agent_id, "transfer to agent")
+                    .await?;
+                self.prepare_call_for_handoff(&call_id, &agent_id).await?;
+                self.offer_agent(call_id, target_agent_id).await.map(|_| ())
+            }
+            VoiceAiAction::TransferToSipUri { uri } => {
+                self.end_voice_ai_session(&call_id, &agent_id, "transfer to SIP URI")
+                    .await?;
+                self.prepare_call_for_handoff(&call_id, &agent_id).await?;
+                self.transfer_call(call_id, TransferTarget::SipUri(uri))
+                    .await
+            }
+            VoiceAiAction::Hangup { reason } => {
+                self.end_voice_ai_session(&call_id, &agent_id, &reason)
+                    .await?;
+                self.end_call(call_id, reason).await
+            }
+        }
     }
 
     pub async fn transfer_call(&self, call_id: CallId, target: TransferTarget) -> Result<()> {
@@ -463,6 +1287,14 @@ impl OrchestrationHandle {
         self.calls.get_call(call_id).await
     }
 
+    pub async fn get_agent(&self, agent_id: &AgentId) -> Result<Option<Agent>> {
+        self.agents.get_agent(agent_id).await
+    }
+
+    pub async fn list_offers_for_call(&self, call_id: &CallId) -> Result<Vec<AgentOffer>> {
+        self.offers.list_offers_for_call(call_id).await
+    }
+
     pub async fn get_queue_stats(&self, queue_id: &QueueId) -> Result<QueueStats> {
         let mut stats = self.queues.stats(queue_id).await?;
         if let Some(queue) = self.queues.get_queue(queue_id).await? {
@@ -495,6 +1327,322 @@ impl OrchestrationHandle {
         self.calls.update_call(call).await?;
         self.events
             .emit(OrchestrationEvent::CallStatusChanged { call_id, from, to });
+        Ok(())
+    }
+
+    async fn mark_bridge_started(
+        &self,
+        call_id: &CallId,
+        caller_leg_id: &CallLegId,
+        agent_leg_id: &CallLegId,
+        bridge_id: &BridgeId,
+    ) -> Result<()> {
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        let from = call.status;
+        call.status = CallStatus::Connected;
+        call.active_bridge_id = Some(bridge_id.clone());
+        call.answered_at.get_or_insert_with(Utc::now);
+        for leg in &mut call.legs {
+            if &leg.id == caller_leg_id || &leg.id == agent_leg_id {
+                leg.status = CallLegStatus::Bridged;
+                leg.answered_at.get_or_insert_with(Utc::now);
+            }
+        }
+        self.calls.update_call(call).await?;
+        self.events.emit(OrchestrationEvent::BridgeStarted {
+            call_id: call_id.clone(),
+            bridge_id: bridge_id.clone(),
+            caller_leg_id: caller_leg_id.clone(),
+            agent_leg_id: agent_leg_id.clone(),
+        });
+        if from != CallStatus::Connected {
+            self.events.emit(OrchestrationEvent::CallStatusChanged {
+                call_id: call_id.clone(),
+                from,
+                to: CallStatus::Connected,
+            });
+        }
+        Ok(())
+    }
+
+    fn spawn_bridge_teardown_watch(
+        &self,
+        call_id: CallId,
+        agent_id: AgentId,
+        bridge_id: BridgeId,
+        caller_leg_id: CallLegId,
+        caller_session_id: SessionId,
+        agent_leg_id: CallLegId,
+        agent_session_id: SessionId,
+    ) {
+        let handle = self.clone();
+        tokio::spawn(async move {
+            let _ = handle
+                .watch_bridge_teardown(
+                    call_id,
+                    agent_id,
+                    bridge_id,
+                    caller_leg_id,
+                    caller_session_id,
+                    agent_leg_id,
+                    agent_session_id,
+                )
+                .await;
+        });
+    }
+
+    async fn watch_bridge_teardown(
+        &self,
+        call_id: CallId,
+        agent_id: AgentId,
+        bridge_id: BridgeId,
+        caller_leg_id: CallLegId,
+        caller_session_id: SessionId,
+        agent_leg_id: CallLegId,
+        agent_session_id: SessionId,
+    ) -> Result<()> {
+        let coordinator = self
+            .coordinator
+            .as_ref()
+            .ok_or_else(|| OrchestrationError::InvalidState("no session coordinator".into()))?;
+        let mut caller_events = coordinator.events_for_session(&caller_session_id).await?;
+        let mut agent_events = coordinator.events_for_session(&agent_session_id).await?;
+
+        let reason = tokio::select! {
+            reason = next_terminal_event(&mut caller_events) => {
+                let reason = reason.unwrap_or_else(|| "caller leg event stream closed".to_string());
+                let _ = coordinator.hangup(&agent_session_id).await;
+                format!("caller leg ended: {reason}")
+            }
+            reason = next_terminal_event(&mut agent_events) => {
+                let reason = reason.unwrap_or_else(|| "agent leg event stream closed".to_string());
+                let _ = coordinator.hangup(&caller_session_id).await;
+                format!("agent leg ended: {reason}")
+            }
+        };
+
+        self.finish_bridged_call(
+            &call_id,
+            &agent_id,
+            &bridge_id,
+            &caller_leg_id,
+            &agent_leg_id,
+            reason,
+        )
+        .await
+    }
+
+    async fn finish_bridged_call(
+        &self,
+        call_id: &CallId,
+        agent_id: &AgentId,
+        bridge_id: &BridgeId,
+        caller_leg_id: &CallLegId,
+        agent_leg_id: &CallLegId,
+        reason: String,
+    ) -> Result<()> {
+        let _ = self.bridge_manager.remove(bridge_id).await;
+
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        if matches!(call.status, CallStatus::Ended | CallStatus::Failed) {
+            return Ok(());
+        }
+        let from = call.status;
+        call.status = CallStatus::Ended;
+        call.ended_at = Some(Utc::now());
+        call.active_bridge_id = None;
+        if call.disposition.is_none() {
+            call.disposition = Some(CallDisposition::Completed);
+        }
+        for leg in &mut call.legs {
+            if &leg.id == caller_leg_id || &leg.id == agent_leg_id {
+                leg.status = CallLegStatus::Ended;
+                leg.ended_at.get_or_insert_with(Utc::now);
+            }
+        }
+        self.calls.update_call(call).await?;
+
+        for offer in self.offers.list_offers_for_call(call_id).await? {
+            if &offer.agent_id == agent_id && offer.status == AgentOfferStatus::Accepted {
+                if let Some(reservation_id) = offer.reservation_id {
+                    self.agents.release_capacity(&reservation_id).await?;
+                }
+            }
+        }
+
+        if let Some(agent) = self.agents.get_agent(agent_id).await? {
+            let previous = agent.state;
+            self.agents
+                .update_state(agent_id, AgentState::WrapUp)
+                .await?;
+            self.events.emit(OrchestrationEvent::AgentStateChanged {
+                agent_id: agent_id.clone(),
+                from: previous,
+                to: AgentState::WrapUp,
+            });
+        }
+
+        self.events.emit(OrchestrationEvent::BridgeEnded {
+            call_id: call_id.clone(),
+            bridge_id: bridge_id.clone(),
+            reason: reason.clone(),
+        });
+        self.events.emit(OrchestrationEvent::CallEnded {
+            call_id: call_id.clone(),
+            reason,
+        });
+        self.events.emit(OrchestrationEvent::CallStatusChanged {
+            call_id: call_id.clone(),
+            from,
+            to: CallStatus::Ended,
+        });
+        Ok(())
+    }
+
+    async fn mark_agent_leg_terminal(
+        &self,
+        offer: &AgentOffer,
+        status: CallLegStatus,
+    ) -> Result<()> {
+        let Some(agent_leg_id) = &offer.agent_leg_id else {
+            return Ok(());
+        };
+        let mut call = self
+            .calls
+            .get_call(&offer.call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(offer.call_id.clone()))?;
+        if let Some(leg) = call.legs.iter_mut().find(|leg| &leg.id == agent_leg_id) {
+            leg.status = status;
+            leg.ended_at = Some(Utc::now());
+        }
+        self.calls.update_call(call).await?;
+        Ok(())
+    }
+
+    async fn clear_assignment_for_retry(&self, call_id: &CallId) -> Result<()> {
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        call.assigned_agent_id = None;
+        self.calls.update_call(call).await?;
+        Ok(())
+    }
+
+    async fn mark_call_failed(&self, call_id: &CallId, reason: String) -> Result<()> {
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        let from = call.status;
+        call.status = CallStatus::Failed;
+        call.ended_at = Some(Utc::now());
+        call.disposition = Some(CallDisposition::Failed {
+            reason: reason.clone(),
+        });
+        self.calls.update_call(call).await?;
+        self.events.emit(OrchestrationEvent::CallFailed {
+            call_id: call_id.clone(),
+            reason,
+        });
+        self.events.emit(OrchestrationEvent::CallStatusChanged {
+            call_id: call_id.clone(),
+            from,
+            to: CallStatus::Failed,
+        });
+        Ok(())
+    }
+
+    async fn agent_session_id_for_offer(&self, offer: &AgentOffer) -> Result<Option<SessionId>> {
+        let Some(agent_leg_id) = &offer.agent_leg_id else {
+            return Ok(None);
+        };
+        Ok(self.calls.get_call(&offer.call_id).await?.and_then(|call| {
+            call.legs
+                .into_iter()
+                .find(|leg| &leg.id == agent_leg_id)
+                .map(|leg| leg.session_id)
+        }))
+    }
+
+    async fn hangup_agent_session_for_offer(&self, offer: &AgentOffer) -> Result<()> {
+        let Some(coordinator) = &self.coordinator else {
+            return Ok(());
+        };
+        let Some(session_id) = self.agent_session_id_for_offer(offer).await? else {
+            return Ok(());
+        };
+
+        let _ = coordinator.hangup(&session_id).await;
+        Ok(())
+    }
+
+    async fn failed_agent_ids_for_call(&self, call_id: &CallId) -> Result<Vec<AgentId>> {
+        let mut agent_ids = Vec::new();
+        for offer in self.offers.list_offers_for_call(call_id).await? {
+            if matches!(
+                offer.status,
+                AgentOfferStatus::Rejected
+                    | AgentOfferStatus::TimedOut
+                    | AgentOfferStatus::Cancelled
+                    | AgentOfferStatus::Failed
+            ) && !agent_ids.contains(&offer.agent_id)
+            {
+                agent_ids.push(offer.agent_id);
+            }
+        }
+        Ok(agent_ids)
+    }
+
+    async fn prepare_call_for_handoff(&self, call_id: &CallId, agent_id: &AgentId) -> Result<()> {
+        let mut call = self
+            .calls
+            .get_call(call_id)
+            .await?
+            .ok_or_else(|| OrchestrationError::CallNotFound(call_id.clone()))?;
+        call.assigned_agent_id = None;
+        call.context
+            .metadata
+            .insert("handoff_from_agent_id".to_string(), agent_id.to_string());
+        self.calls.update_call(call).await?;
+        Ok(())
+    }
+
+    async fn end_voice_ai_session(
+        &self,
+        call_id: &CallId,
+        agent_id: &AgentId,
+        reason: &str,
+    ) -> Result<()> {
+        let offers = self.offers.list_offers_for_call(call_id).await?;
+        for offer in offers {
+            if &offer.agent_id == agent_id {
+                if let Some(reservation_id) = offer.reservation_id {
+                    self.agents.release_capacity(&reservation_id).await?;
+                }
+            }
+        }
+        if self.agents.get_agent(agent_id).await?.is_some() {
+            self.agents
+                .update_state(agent_id, AgentState::Available)
+                .await?;
+        }
+        self.events.emit(OrchestrationEvent::VoiceAiEnded {
+            call_id: call_id.clone(),
+            agent_id: agent_id.clone(),
+            reason: reason.to_string(),
+        });
         Ok(())
     }
 }

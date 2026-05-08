@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn test_event_types() {
         // Event trait requires an instance, not a type
-        let reg_event = RegistrarEvent::UserRegistered {
+        let _reg_event = RegistrarEvent::UserRegistered {
             user: "test".to_string(),
             contact: ContactInfo {
                 uri: "sip:test@example.com".to_string(),
@@ -175,6 +175,9 @@ mod tests {
                 received: None,
                 path: Vec::new(),
                 methods: Vec::new(),
+                reg_id: None,
+                flow_id: None,
+                reachability: crate::types::ContactReachability::Unknown,
             },
         };
 

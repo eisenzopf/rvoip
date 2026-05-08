@@ -1,5 +1,6 @@
 use crate::ids::*;
 use chrono::{DateTime, Utc};
+use rvoip_registrar_core::Transport;
 use rvoip_session_core::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -32,7 +33,7 @@ impl CallerIdentity {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallContext {
-    pub customer_id: Option<String>,
+    pub external_ref: Option<String>,
     pub intent: Option<String>,
     pub language: Option<String>,
     pub metadata: HashMap<String, String>,
@@ -344,6 +345,7 @@ pub struct QueueTarget {
     pub queue_id: QueueId,
     pub priority: Option<CallPriority>,
     pub required_skills: Vec<Skill>,
+    pub previous_agent_ids: Vec<AgentId>,
     pub metadata: HashMap<String, String>,
 }
 
@@ -442,6 +444,12 @@ pub struct ResolvedContact {
     pub uri: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub source: ContactSource,
+    pub transport: Option<Transport>,
+    pub received: Option<String>,
+    pub path: Vec<String>,
+    pub instance_id: Option<String>,
+    pub reg_id: Option<u32>,
+    pub flow_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
