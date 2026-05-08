@@ -448,21 +448,17 @@ impl PortAllocator {
                     // Get the local address for logging before we drop the socket
                     let local_addr = socket.local_addr().ok();
 
-                    // Explicitly close the socket, which should release it
+                    // Explicitly close the probe socket — UDP has no TIME_WAIT so the
+                    // port is immediately reusable on macOS, Linux, and Windows. The
+                    // legacy `rebind_wait_time_ms` sleep here was a TCP-style
+                    // TIME_WAIT intuition wrongly applied to UDP.
                     drop(socket);
 
-                    // On some platforms we need a small delay before the port is truly released
                     if let Some(local_addr) = local_addr {
                         debug!(
                             "Successfully validated port {} (bound to {})",
                             port, local_addr
                         );
-                    }
-
-                    // Delay based on platform
-                    let delay_ms = self.socket_strategy.rebind_wait_time_ms;
-                    if delay_ms > 0 {
-                        sleep(Duration::from_millis(delay_ms)).await;
                     }
 
                     true

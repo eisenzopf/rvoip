@@ -69,13 +69,24 @@ pub use crate::api::unified::Config as PeerConfig;
 pub struct EventReceiver {
     rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
     filter: Option<CallId>,
+    /// Events synthesized at receiver-construction time to compensate for the
+    /// subscribe-after-event race: the session-to-app channel is broadcast,
+    /// so a subscriber added by `events_for_session` after the relevant
+    /// transition already fired would otherwise hang. `events_for_session`
+    /// inspects the session's current state and pushes the event the
+    /// caller would have observed had they been subscribed earlier.
+    primed: std::collections::VecDeque<Event>,
 }
 
 impl EventReceiver {
     pub(crate) fn new(
         rx: mpsc::Receiver<Arc<dyn rvoip_infra_common::events::cross_crate::CrossCrateEvent>>,
     ) -> Self {
-        Self { rx, filter: None }
+        Self {
+            rx,
+            filter: None,
+            primed: std::collections::VecDeque::new(),
+        }
     }
 
     /// Create a receiver pre-filtered to a specific session.
@@ -86,7 +97,16 @@ impl EventReceiver {
         Self {
             rx,
             filter: Some(call_id),
+            primed: std::collections::VecDeque::new(),
         }
+    }
+
+    /// Push a synthesized event to the front of this receiver's queue.
+    /// Used by `events_for_session` to repair the subscribe-after-event
+    /// race for callers that registered a per-session subscriber after a
+    /// state transition had already fired.
+    pub(crate) fn prime(&mut self, event: Event) {
+        self.primed.push_back(event);
     }
 
     /// Wait for the next event (optionally filtered to one session).
@@ -103,6 +123,12 @@ impl EventReceiver {
     /// # }
     /// ```
     pub async fn next(&mut self) -> Option<Event> {
+        // Drain primed events first — these were synthesized by
+        // `events_for_session` so the caller observes a state transition
+        // that fired before this receiver was subscribed.
+        if let Some(event) = self.primed.pop_front() {
+            return Some(event);
+        }
         loop {
             let raw = self.rx.recv().await?;
             // Downcast from Arc<dyn CrossCrateEvent> to our concrete wrapper
@@ -130,6 +156,9 @@ impl EventReceiver {
     /// # }
     /// ```
     pub fn try_next(&mut self) -> Option<Event> {
+        if let Some(event) = self.primed.pop_front() {
+            return Some(event);
+        }
         loop {
             let raw = self.rx.try_recv().ok()?;
             let session_event = raw.as_any().downcast_ref::<SessionApiCrossCrateEvent>()?;

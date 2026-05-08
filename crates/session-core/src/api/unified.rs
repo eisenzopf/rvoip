@@ -1605,10 +1605,49 @@ impl UnifiedCoordinator {
         id: &SessionId,
     ) -> Result<crate::api::stream_peer::EventReceiver> {
         let rx = self.subscribe_events().await?;
-        Ok(crate::api::stream_peer::EventReceiver::filtered(
-            rx,
-            id.clone(),
-        ))
+        let mut receiver = crate::api::stream_peer::EventReceiver::filtered(rx, id.clone());
+
+        // Race repair: SESSION_TO_APP_CHANNEL is broadcast — a subscriber
+        // added here cannot observe events that fired before this call
+        // returned. On a fast loopback, `make_call → 200 OK → CallAnswered`
+        // can complete in well under a millisecond, so callers that follow
+        // the documented `make_call → events_for_session → wait for
+        // CallAnswered` pattern would otherwise deadlock. Inspect the
+        // session's *current* state and synthesize the events the caller
+        // would have observed had they been subscribed earlier.
+        if let Ok(state) = self.helpers.get_state(id).await {
+            use crate::types::CallState;
+            match state {
+                CallState::Active
+                | CallState::Bridged
+                | CallState::OnHold
+                | CallState::HoldPending
+                | CallState::EarlyMedia
+                | CallState::Resuming
+                | CallState::Muted => {
+                    receiver.prime(crate::api::events::Event::CallAnswered {
+                        call_id: id.clone(),
+                        sdp: None,
+                    });
+                }
+                CallState::Failed(reason) => {
+                    receiver.prime(crate::api::events::Event::CallFailed {
+                        call_id: id.clone(),
+                        reason: reason.to_string(),
+                        status_code: 500,
+                    });
+                }
+                CallState::Terminated | CallState::Cancelled => {
+                    receiver.prime(crate::api::events::Event::CallEnded {
+                        call_id: id.clone(),
+                        reason: format!("session in state {state:?}"),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(receiver)
     }
 
     pub(crate) async fn lifecycle_snapshot(&self, id: &SessionId) -> CallLifecycleSnapshot {

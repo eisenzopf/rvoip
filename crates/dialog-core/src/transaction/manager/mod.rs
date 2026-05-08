@@ -921,6 +921,7 @@ impl TransactionManager {
 
         // Remember initial state to detect quick state transitions
         let initial_state = tx.state();
+        let tx_kind = tx.kind();
 
         // First subscribe to events BEFORE initiating the transaction
         // so we don't miss any events that happen during initiation
@@ -977,17 +978,30 @@ impl TransactionManager {
                             if tx_id == *transaction_id => {
                             debug!(%transaction_id, previous=?previous_state, new=?new_state, "Transaction state changed");
 
-                            // If transaction moved directly to Terminated state
-                            if new_state == TransactionState::Terminated &&
-                               (previous_state == TransactionState::Initial ||
-                                previous_state == TransactionState::Calling ||
-                                previous_state == TransactionState::Trying) {
-
-                                debug!(%transaction_id, "Transaction moved to Terminated state - likely transport error");
-                                return Err(Error::transport_error(
-                                    rvoip_sip_transport::Error::ProtocolError("Transaction terminated unexpectedly".into()),
-                                    "Failed to send request - transaction terminated"
-                                ));
+                            // If transaction moved directly to Terminated state.
+                            // For an INVITE client, Calling → Terminated is the
+                            // RFC 3261 §17.1.1.2 path for a 2xx final response —
+                            // that's success, not a transport error. For
+                            // non-INVITE, Trying/Calling → Terminated within
+                            // the 100 ms window is unusual; the normal path is
+                            // Trying → Completed → Terminated (after Timer K).
+                            if new_state == TransactionState::Terminated {
+                                let is_invite_2xx_path = tx_kind == TransactionKind::InviteClient
+                                    && previous_state == TransactionState::Calling;
+                                if is_invite_2xx_path {
+                                    debug!(%transaction_id, "INVITE client Calling → Terminated (RFC 3261 §17.1.1.2 2xx) - treating as success");
+                                    return Ok(());
+                                }
+                                if previous_state == TransactionState::Initial
+                                    || previous_state == TransactionState::Calling
+                                    || previous_state == TransactionState::Trying
+                                {
+                                    debug!(%transaction_id, kind=?tx_kind, ?previous_state, "Transaction moved to Terminated state - likely transport error");
+                                    return Err(Error::transport_error(
+                                        rvoip_sip_transport::Error::ProtocolError("Transaction terminated unexpectedly".into()),
+                                        "Failed to send request - transaction terminated"
+                                    ));
+                                }
                             }
                         },
                         _ => {} // Ignore other events
@@ -1016,30 +1030,44 @@ impl TransactionManager {
 
                 Ok(())
             }).await {
-                // Timeout occurred
+                // Timeout occurred — recv loop drained or 100 ms elapsed.
                 Err(_) => {
-                    // Check one more time if the transaction still exists or has terminated
                     let locked_txs = self.client_transactions.lock().await;
                     if let Some(tx) = locked_txs.get(transaction_id) {
                         let final_state = tx.state();
                         if final_state == TransactionState::Terminated {
-                            debug!(%transaction_id, "Transaction terminated after timeout");
+                            // For INVITE, Calling → Terminated is the 2xx path
+                            // (RFC 3261 §17.1.1.2). For non-INVITE, normal flow
+                            // is Trying → Completed → Terminated only after
+                            // Timer K (5 s for UDP), so Terminated this fast
+                            // is suspicious.
+                            if tx_kind == TransactionKind::InviteClient {
+                                debug!(%transaction_id, "INVITE client terminated within 100 ms safety wait - treating as success (fast 2xx)");
+                                return Ok(());
+                            }
+                            debug!(%transaction_id, "Non-INVITE terminated within 100 ms safety wait - likely transport error");
                             return Err(Error::transport_error(
                                 rvoip_sip_transport::Error::ProtocolError("Transaction terminated after timeout".into()),
                                 "Failed to send request - transaction terminated"
                             ));
                         }
 
-                        // If we still have a transaction and it's not terminated, assume it's okay
                         debug!(%transaction_id, state=?final_state, "Transaction still exists and is not terminated after timeout");
                         Ok(())
                     } else {
-                        // Transaction was removed
-                        debug!(%transaction_id, "Transaction was removed after timeout");
-                        Err(Error::transport_error(
-                            rvoip_sip_transport::Error::ProtocolError("Transaction was removed after timeout".into()),
-                            "Failed to send request - transaction removed"
-                        ))
+                        // Transaction was removed. For INVITE, a fast 2xx
+                        // legitimately removes the transaction quickly. For
+                        // non-INVITE, this would be abnormal in 100 ms.
+                        if tx_kind == TransactionKind::InviteClient {
+                            debug!(%transaction_id, "INVITE client transaction removed within 100 ms safety wait - treating as success (fast 2xx)");
+                            Ok(())
+                        } else {
+                            debug!(%transaction_id, "Non-INVITE transaction was removed after timeout");
+                            Err(Error::transport_error(
+                                rvoip_sip_transport::Error::ProtocolError("Transaction was removed after timeout".into()),
+                                "Failed to send request - transaction removed"
+                            ))
+                        }
                     }
                 },
                 // Got a result from the event processing

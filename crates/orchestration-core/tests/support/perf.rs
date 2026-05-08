@@ -396,6 +396,19 @@ pub async fn profile_live_sip_rtp(
     };
     let mut phase = phase_start;
 
+    // Phase A instrumentation: at N=1, log per-call timeline so we can localize
+    // the 2 s setup floor. Set `RVOIP_LIVE_SIP_RTP_TRACE=1` to enable.
+    let trace_enabled = std::env::var("RVOIP_LIVE_SIP_RTP_TRACE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let trace_t0 = phase_start;
+    let trace = move |label: String| {
+        if trace_enabled {
+            let elapsed_ms = trace_t0.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("[trace {elapsed_ms:>8.2} ms] {label}");
+        }
+    };
+
     let mut make_call_tasks = Vec::with_capacity(active_calls);
     for index in 0..active_calls {
         let caller = caller_coords[index].clone();
@@ -405,11 +418,12 @@ pub async fn profile_live_sip_rtp(
             orchestrator_config.sip_port
         );
         let to_for_task = to.clone();
+        let trace = trace.clone();
         make_call_tasks.push(tokio::spawn(async move {
-            caller
-                .make_call(&from, &to_for_task)
-                .await
-                .map(|session_id| (to_for_task, caller, session_id))
+            trace(format!("make_call started to={to_for_task}"));
+            let result = caller.make_call(&from, &to_for_task).await;
+            trace(format!("make_call returned to={to_for_task}"));
+            result.map(|session_id| (to_for_task, caller, session_id))
         }));
     }
 
@@ -425,6 +439,7 @@ pub async fn profile_live_sip_rtp(
     //   - caller side: collect each caller session_id keyed by To URI for media routing.
     // Without this pipelining, the three phases serialize and total wall time is
     // roughly N * (orchestrator_ingest_per_call + agent_ingest_per_call).
+    let orchestrator_trace = trace.clone();
     let orchestrator_pipeline = async {
         let mut outcome_tasks: Vec<tokio::task::JoinHandle<Result<(CallId, BridgeId)>>> =
             Vec::with_capacity(active_calls);
@@ -439,9 +454,16 @@ pub async fn profile_live_sip_rtp(
                 call_id, offer_id, ..
             } = envelope.event
             {
+                orchestrator_trace(format!("AgentReserved received call={call_id}"));
                 let handle = handle.clone();
+                let outcome_trace = orchestrator_trace.clone();
+                let offer_id_for_trace = offer_id.clone();
                 outcome_tasks.push(tokio::spawn(async move {
+                    outcome_trace(format!("connect_agent_offer started offer={offer_id_for_trace}"));
                     handle.connect_agent_offer(&offer_id).await?;
+                    outcome_trace(format!(
+                        "connect_agent_offer returned offer={offer_id_for_trace}"
+                    ));
                     let bridge_id = handle
                         .wait_for_agent_offer_outcome(&offer_id)
                         .await?
@@ -450,6 +472,9 @@ pub async fn profile_live_sip_rtp(
                                 "agent offer completed without bridge".to_string(),
                             )
                         })?;
+                    outcome_trace(format!(
+                        "wait_for_agent_offer_outcome returned offer={offer_id_for_trace}"
+                    ));
                     Ok::<(CallId, BridgeId), OrchestrationError>((call_id, bridge_id))
                 }));
                 received += 1;
@@ -460,12 +485,14 @@ pub async fn profile_live_sip_rtp(
 
     // Each agent_coord receives exactly one INVITE. Spawning per-coord tasks
     // means every agent get_incoming_call runs concurrently — no shared mpsc.
+    let agent_trace = trace.clone();
     let agent_pipeline = async {
         let mut pull_tasks: Vec<
             tokio::task::JoinHandle<Result<(String, Arc<UnifiedCoordinator>, SessionId)>>,
         > = Vec::with_capacity(active_calls);
         for agent_coord in &agent_coords {
             let agent_coord = agent_coord.clone();
+            let agent_trace = agent_trace.clone();
             pull_tasks.push(tokio::spawn(async move {
                 let incoming = timeout(setup_timeout, agent_coord.get_incoming_call())
                     .await
@@ -477,7 +504,10 @@ pub async fn profile_live_sip_rtp(
                     .ok_or_else(|| {
                         OrchestrationError::InvalidState("agent incoming-call stream closed".into())
                     })?;
+                agent_trace(format!("agent get_incoming returned to={}", incoming.to));
+                let session_id_for_trace = incoming.session_id.clone();
                 agent_coord.accept_call(&incoming.session_id).await?;
+                agent_trace(format!("agent accept_call returned session={session_id_for_trace}"));
                 Ok::<_, OrchestrationError>((
                     canonical_sip_uri(&incoming.to),
                     agent_coord,
