@@ -1,3 +1,30 @@
+//! Unified PBX interop harness shared by the `pbx_endpoint`, `pbx_stream_peer`,
+//! `pbx_callback_builder`, and `pbx_analyze` Cargo examples in this directory.
+//!
+//! The same scenario suite — registration/unregistration, basic call,
+//! hold/resume, ring/cancel, DTMF, reject/busy, and blind transfer — is
+//! exercised against both Asterisk and FreeSWITCH and through all three
+//! public API surfaces ([`Endpoint`](rvoip_sip::Endpoint),
+//! [`StreamPeer`](rvoip_sip::StreamPeer), and
+//! [`CallbackPeer::builder`](rvoip_sip::CallbackPeerBuilder)) so provider
+//! behaviour and surface ergonomics are validated in the same matrix.
+//!
+//! The runner (`examples/pbx/run.sh`) controls behaviour via these env vars:
+//!
+//! - `PBX_PROVIDER` (`asterisk`|`freeswitch`) — selects PBX defaults and SRTP
+//!   policy
+//! - `PBX_SCENARIO` (e.g. `registration`, `basic_call`, `hold_resume`,
+//!   `ring_cancel`, `dtmf`, `reject`, `blind_transfer`) — chooses the scenario
+//! - `PBX_TRANSPORT` (`udp`|`tls`) — selects the transport leg
+//! - `PBX_ROLE` — selects the participant (caller/callee/transfer-target/etc.)
+//!
+//! Per-provider tunables (`SIP_PORT`, `SIP_TLS_PORT`, `SIP_PASSWORD`,
+//! `ASTERISK_TLS_CONTACT_MODE`, `FREESWITCH_UDP_ADDR`, etc.) come from the
+//! `env/asterisk.env` and `env/freeswitch.env` files loaded by `run.sh`.
+//!
+//! See `examples/pbx/README.md` for the full scenario matrix, evidence layout,
+//! and provider differences.
+
 #![allow(dead_code)]
 
 use std::net::{IpAddr, SocketAddr};

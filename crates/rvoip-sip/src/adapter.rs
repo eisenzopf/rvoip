@@ -1,12 +1,12 @@
 //! `SipAdapter` — the [`rvoip_core::ConnectionAdapter`] implementation that
-//! plugs the proven `api::UnifiedCoordinator` surface into `rvoip-core`'s
-//! cross-transport `Orchestrator`.
+//! plugs the proven [`crate::api::UnifiedCoordinator`] surface into
+//! [`rvoip_core::Orchestrator`].
 //!
 //! Per CARVE_PLAN §2 layering rule: every method here ultimately calls into
-//! `api::UnifiedCoordinator` (the sole sanctioned path to `dialog-core` /
-//! `media-core` from this crate). No new state machine, no parallel SIP
-//! plumbing — just translation between the rvoip-core vocabulary and the
-//! UnifiedCoordinator API.
+//! [`crate::api::UnifiedCoordinator`] (the sole sanctioned path to
+//! [`rvoip_sip_dialog`] / [`rvoip_media_core`] from this crate). No new
+//! state machine, no parallel SIP plumbing — just translation between the
+//! [`rvoip_core`] vocabulary and the [`UnifiedCoordinator`] API.
 
 use crate::api::events::Event as ApiEvent;
 use crate::api::unified::{Config as ApiConfig, UnifiedCoordinator};
@@ -47,7 +47,7 @@ pub struct SipAdapter {
 impl SipAdapter {
     /// Construct from a fully-configured [`UnifiedCoordinator`]. Spawns the
     /// background event-translation task; the returned `Arc<SipAdapter>` is
-    /// what gets registered with `rvoip_core::Orchestrator::register`.
+    /// what gets registered with [`rvoip_core::Orchestrator::register`].
     pub async fn new(coordinator: Arc<UnifiedCoordinator>) -> crate::errors::Result<Arc<Self>> {
         let (out_tx, out_rx) = mpsc::channel(256);
         let adapter = Arc::new(Self {

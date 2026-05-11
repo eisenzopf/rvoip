@@ -1,3 +1,17 @@
+//! Architectural guard: the REGISTER send path stays flat.
+//!
+//! `DialogAdapter::send_register` once dispatched its own follow-up events
+//! back into the state machine, which made registration retries recurse
+//! through `StateMachine::process_event` and obscured failure attribution.
+//! The send path is now expected to return a typed outcome to its caller; the
+//! state machine drains queued internal events in a loop instead of boxing
+//! itself recursively.
+//!
+//! This test reads the two source files and rejects any change that
+//! re-introduces either pattern. It is a textual guard (no runtime SIP
+//! traffic) so it is cheap to run on every CI build and triggers on the
+//! review that introduces the regression.
+
 #[test]
 fn register_send_path_does_not_reenter_state_machine() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");

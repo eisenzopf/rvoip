@@ -7,6 +7,34 @@
 //! the public control surfaces that applications use to build softphones,
 //! test clients, IVRs, B2BUA legs, routing servers, and PBX/SBC interop tools.
 //!
+//! ## Where it fits in the workspace
+//!
+//! - [`rvoip_sip_dialog`] — RFC 3261 dialog/transaction layer
+//!   ([`Dialog`](rvoip_sip_dialog::Dialog),
+//!   [`DialogId`](rvoip_sip_dialog::DialogId),
+//!   [`DialogManager`](rvoip_sip_dialog::DialogManager))
+//! - [`rvoip_sip_core`] — SIP message parser and builder
+//!   ([`Message`](rvoip_sip_core::Message),
+//!   [`Request`](rvoip_sip_core::Request),
+//!   [`Response`](rvoip_sip_core::Response),
+//!   [`Uri`](rvoip_sip_core::Uri))
+//! - [`rvoip_sip_registrar`] — registrar/location service
+//!   ([`Registrar`](rvoip_sip_registrar::Registrar),
+//!   [`RegistrarService`](rvoip_sip_registrar::RegistrarService))
+//! - [`rvoip_media_core`] — codecs, media sessions, audio processing
+//!   ([`MediaSession`](rvoip_media_core::MediaSession),
+//!   [`MediaEngine`](rvoip_media_core::MediaEngine))
+//! - [`rvoip_rtp_core`] — RTP/SRTP transport
+//!   ([`RtpSession`](rvoip_rtp_core::RtpSession),
+//!   [`RtpPacket`](rvoip_rtp_core::RtpPacket))
+//! - [`rvoip_core`] — transport-agnostic orchestrator
+//!   ([`Orchestrator`](rvoip_core::Orchestrator),
+//!   [`ConnectionAdapter`](rvoip_core::ConnectionAdapter))
+//!
+//! This crate is the application seam; the layers above resolve into one of
+//! [`Endpoint`], [`StreamPeer`], [`CallbackPeer`], or [`UnifiedCoordinator`]
+//! depending on how much orchestration the caller wants to own.
+//!
 //! ## Choosing an API Surface
 //!
 //! | Surface | Best for | Programming model |
@@ -52,6 +80,9 @@
 //! # }
 //! ```
 //!
+//! Runnable example: `cargo run -p rvoip-sip --example endpoint_local_call`
+//! (`examples/endpoint/01_local_call/main.rs`).
+//!
 //! ## StreamPeer: Sequential Client or Test Code
 //!
 //! [`StreamPeer`] owns a coordinator plus a typed event receiver. Its helpers
@@ -75,6 +106,8 @@
 //! ```
 //!
 //! For concurrent code, split it into [`PeerControl`] and [`EventReceiver`].
+//! Runnable example: `cargo run -p rvoip-sip --example stream_peer_basic_call`
+//! (`examples/stream_peer/01_basic_call/main.rs`).
 //!
 //! ## CallbackPeer: Reactive Server Code
 //!
@@ -111,6 +144,12 @@
 //! # }
 //! ```
 //!
+//! Runnable example:
+//! `cargo run -p rvoip-sip --example callback_peer_auto_answer_server`
+//! (`examples/callback_peer/01_auto_answer/server.rs`). Built-in handlers
+//! ([`AutoAnswerHandler`], [`RoutingHandler`], [`QueueHandler`]) each have
+//! their own numbered scenario under `examples/callback_peer/`.
+//!
 //! ## UnifiedCoordinator: Custom Orchestration
 //!
 //! [`UnifiedCoordinator`] exposes the same session machinery without imposing
@@ -142,6 +181,11 @@
 //! When you build directly on the coordinator, call-control methods generally
 //! take a [`SessionId`]. The peer surfaces wrap those IDs in [`SessionHandle`]
 //! for ergonomic per-call control.
+//!
+//! Runnable example: `cargo run -p rvoip-sip --example unified_basic_call`
+//! (`examples/unified/01_basic_call/main.rs`). The
+//! `examples/unified/04_b2bua_bridge/` scenario demonstrates a three-party
+//! bridge built directly on the coordinator.
 //!
 //! ## Features Exposed Through SessionHandle
 //!
@@ -199,10 +243,10 @@
 //!
 //! See `examples/sip_b2bua.rs` for a complete CLI-driven runner.
 //!
-//! ## Cross-transport via `rvoip-core::Orchestrator` + `SipAdapter`
+//! ## Cross-transport via [`rvoip_core::Orchestrator`] + [`SipAdapter`]
 //!
-//! [`SipAdapter`] implements `rvoip_core::ConnectionAdapter`, so SIP plugs
-//! into the cross-transport `Orchestrator` alongside future
+//! [`SipAdapter`] implements [`rvoip_core::ConnectionAdapter`], so SIP plugs
+//! into the cross-transport [`rvoip_core::Orchestrator`] alongside future
 //! `rvoip-webrtc` / `rvoip-quic` adapters. Consumers that plan to add other
 //! transports later use this surface today; the single SIP adapter
 //! demonstrates the seam.
@@ -228,6 +272,23 @@
 //! See `crates/rvoip-core/examples/sip_only_orchestrator.rs` for a complete
 //! runner. When `rvoip-webrtc` and `rvoip-quic` ship, they register against
 //! the same `Orchestrator` handle without reshaping consumer code.
+//!
+//! ## Custom INVITE headers
+//!
+//! Each API surface exposes a `_with_headers` variant that accepts a
+//! `Vec<`[`TypedHeader`]`>` and attaches the extras to the very first
+//! outgoing INVITE: [`UnifiedCoordinator::make_call_with_headers`],
+//! [`PeerControl::call_with_headers`], [`StreamPeer::call_with_headers`],
+//! [`CallbackPeerControl::call_with_headers`],
+//! [`EndpointControl::call_with_headers`], and
+//! [`Endpoint::call_with_headers`]. Use this for headers RFC 3261 leaves
+//! outside the request line — `Diversion`, `History-Info`, `Call-Info`,
+//! `User-to-User`, or vendor `X-*` headers required by a specific PBX or
+//! SBC. The extras append after any synthesized `P-Asserted-Identity` and
+//! before the outbound-proxy Route, so the on-wire ordering is
+//! deterministic. [`HeaderName`] and [`TypedHeader`] are re-exported at the
+//! crate root for ergonomic authoring without pulling in `rvoip-sip-core`
+//! directly.
 //!
 //! ## Configuration and Interop
 //!
@@ -333,6 +394,11 @@ pub use errors::{Result, SessionError};
 pub use state_table::types::SessionId;
 pub use types::CallState;
 
+// SIP header authoring (re-exported from rvoip-sip-core so callers using
+// the `_with_headers` outbound-INVITE variants can construct typed headers
+// without importing the lower-level crate directly).
+pub use rvoip_sip_core::types::{HeaderName, TypedHeader};
+
 // ── Prelude ─────────────────────────────────────────────────────────────────
 
 /// Common imports for most use cases.
@@ -352,12 +418,13 @@ pub mod prelude {
         EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
-        EventReceiver, IncomingCall, IncomingCallGuard, MediaSecurityKeying, MediaSecurityProfile,
-        MediaSecurityState, PeerControl, Registration, RegistrationHandle, RegistrationInfo,
-        RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode, SipReason,
-        SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy, StreamPeer,
-        StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
+        EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaSecurityKeying,
+        MediaSecurityProfile, MediaSecurityState, PeerControl, Registration, RegistrationHandle,
+        RegistrationInfo, RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode,
+        SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy,
+        StreamPeer, StreamPeerBuilder, SubscriptionState, TransferDialogMatcher, TransferKind,
         TransferLifecycleOptions, TransferOutcome, TransferTargetEvidence, TransferWaitMode,
+        TypedHeader,
     };
 }
 

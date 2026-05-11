@@ -64,8 +64,6 @@ See:
 - [`examples/README.md`](examples/README.md)
 - [`examples/pbx/README.md`](examples/pbx/README.md) — Asterisk and FreeSWITCH interop matrix (run through `Endpoint`, `StreamPeer`, and `CallbackPeer::builder`)
 - [`examples/sip_client/README.md`](examples/sip_client/README.md) — terminal softphone built on the `Endpoint` facade
-- [`docs/COMPATIBILITY_MATRIX.md`](docs/COMPATIBILITY_MATRIX.md)
-- [`docs/TOPOLOGY_PROFILES.md`](docs/TOPOLOGY_PROFILES.md)
 
 ## Known limits
 

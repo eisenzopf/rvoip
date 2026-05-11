@@ -1,19 +1,35 @@
 //! RFC 4235 dialog event package parsing and typed state.
+//!
+//! Decodes `application/dialog-info+xml` NOTIFY bodies into typed
+//! [`DialogInfoDocument`] / [`DialogInfo`] values so subscribers built on
+//! [`DialogSubscriptionHandle`](crate::DialogSubscriptionHandle) can react to
+//! dialog lifecycle changes (early/confirmed/terminated, with cause) without
+//! re-parsing XML.
 
 use crate::errors::{Result, SessionError};
 
 /// RFC 4235 dialog state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogPackageState {
+    /// `trying` — INVITE sent, no provisional response yet.
     Trying,
+    /// `proceeding` — provisional response received without early media.
     Proceeding,
+    /// `early` — early dialog established (e.g. 180 with To-tag).
     Early,
+    /// `confirmed` — final 2xx received and the dialog is established.
     Confirmed,
+    /// `terminated` — dialog has ended.
     Terminated,
+    /// Vendor-specific state outside the RFC 4235 enum; the raw value is
+    /// preserved verbatim.
     Unknown(String),
 }
 
 impl DialogPackageState {
+    /// Parse a `<state>` element body into a [`DialogPackageState`]. Unknown
+    /// values are surfaced via [`Self::Unknown`] rather than failing so
+    /// vendor extensions still reach the caller.
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "trying" => Self::Trying,
@@ -25,25 +41,40 @@ impl DialogPackageState {
         }
     }
 
+    /// True iff the dialog has reached its terminal state.
     pub fn is_terminated(&self) -> bool {
         matches!(self, Self::Terminated)
     }
 }
 
-/// RFC 4235 dialog-state event/cause.
+/// RFC 4235 dialog-state event/cause carried on the `event` attribute of a
+/// `<state>` element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DialogPackageEvent {
+    /// `cancelled` — UAC sent CANCEL before answer.
     Cancelled,
+    /// `rejected` — UAS returned a non-2xx final.
     Rejected,
+    /// `replaced` — dialog was replaced by a `Replaces` INVITE.
     Replaced,
+    /// `local-bye` — local UA sent BYE.
     LocalBye,
+    /// `remote-bye` — remote UA sent BYE.
     RemoteBye,
+    /// `error` — transport or protocol error tore the dialog down.
     Error,
+    /// `timeout` — dialog ended due to timer expiry (e.g. session timer,
+    /// no ACK).
     Timeout,
+    /// Vendor-specific cause outside the RFC 4235 enum; the raw value is
+    /// preserved verbatim.
     Unknown(String),
 }
 
 impl DialogPackageEvent {
+    /// Parse a `state` element's `event` attribute into a typed
+    /// [`DialogPackageEvent`]. Unknown values are surfaced via
+    /// [`Self::Unknown`] rather than failing.
     pub fn parse(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
             "cancelled" | "canceled" => Self::Cancelled,
@@ -61,20 +92,35 @@ impl DialogPackageEvent {
 /// One `<dialog>` entry from an RFC 4235 `dialog-info` document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogInfo {
+    /// Value of the `id` attribute on `<dialog>`.
     pub id: String,
+    /// `call-id` attribute, when present.
     pub call_id: Option<String>,
+    /// `local-tag` attribute, when present.
     pub local_tag: Option<String>,
+    /// `remote-tag` attribute, when present.
     pub remote_tag: Option<String>,
+    /// `direction` attribute (typically `initiator` or `recipient`).
     pub direction: Option<String>,
+    /// Typed dialog state parsed from `<state>`.
     pub state: DialogPackageState,
+    /// Typed dialog-state event parsed from `<state event=…>`, when present.
     pub event: Option<DialogPackageEvent>,
+    /// Local-side URI (from `<local><identity>` or `<local><target uri=…>`).
     pub local_uri: Option<String>,
+    /// Remote-side URI (from `<remote><identity>` or
+    /// `<remote><target uri=…>`).
     pub remote_uri: Option<String>,
+    /// Verbatim `<state>` text, preserved so callers can recover from
+    /// [`DialogPackageState::Unknown`] without re-fetching the XML.
     pub raw_state: String,
+    /// Verbatim `event` attribute, preserved so callers can recover from
+    /// [`DialogPackageEvent::Unknown`].
     pub raw_event: Option<String>,
 }
 
 impl DialogInfo {
+    /// True iff the underlying dialog state is `terminated`.
     pub fn is_terminated(&self) -> bool {
         self.state.is_terminated()
     }
@@ -83,9 +129,14 @@ impl DialogInfo {
 /// Parsed RFC 4235 `dialog-info` document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogInfoDocument {
+    /// `entity` attribute on the root `<dialog-info>` element — usually the
+    /// monitored AOR.
     pub entity: Option<String>,
+    /// `version` attribute on the root, when present.
     pub version: Option<u32>,
+    /// Root document state (typically `full` or `partial`).
     pub state: Option<String>,
+    /// One entry per `<dialog>` child.
     pub dialogs: Vec<DialogInfo>,
 }
 

@@ -21,6 +21,12 @@ use tokio::sync::mpsc;
 pub type CallId = SessionId;
 
 /// Public SIP trace event emitted when [`SipTraceConfig::enabled`] is true.
+///
+/// `raw_message` is the rendered on-wire bytes (after optional header
+/// redaction and body stripping). Pass it through
+/// [`rvoip_sip_core::parse_message`] to get a typed
+/// [`rvoip_sip_core::Message`] back if the consumer wants to inspect headers
+/// programmatically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SipTrace {
     /// Inbound or outbound at the local transport boundary.

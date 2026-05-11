@@ -111,7 +111,7 @@ impl StateMachineHelpers {
         to: &str,
         credentials: Option<crate::types::Credentials>,
     ) -> Result<SessionId> {
-        self.make_call_inner(from, to, credentials, None, None)
+        self.make_call_inner(from, to, credentials, None, None, Vec::new())
             .await
     }
 
@@ -129,7 +129,7 @@ impl StateMachineHelpers {
         to: &str,
         pai: Option<String>,
     ) -> Result<SessionId> {
-        self.make_call_inner(from, to, None, None, pai).await
+        self.make_call_inner(from, to, None, None, pai, Vec::new()).await
     }
 
     /// Combined entry point used by
@@ -144,7 +144,25 @@ impl StateMachineHelpers {
         credentials: Option<crate::types::Credentials>,
         pai: Option<String>,
     ) -> Result<SessionId> {
-        self.make_call_inner(from, to, credentials, None, pai).await
+        self.make_call_inner(from, to, credentials, None, pai, Vec::new())
+            .await
+    }
+
+    /// Combined entry point used by
+    /// [`UnifiedCoordinator::make_call_with_headers`](crate::api::unified::UnifiedCoordinator::make_call_with_headers)
+    /// and the `_with_headers` variants on the peer surfaces. Attaches a
+    /// caller-supplied `Vec<TypedHeader>` to the very first INVITE alongside
+    /// any credentials and `P-Asserted-Identity` already configured.
+    pub async fn make_call_with_headers_and_credentials_and_pai(
+        &self,
+        from: &str,
+        to: &str,
+        credentials: Option<crate::types::Credentials>,
+        pai: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<SessionId> {
+        self.make_call_inner(from, to, credentials, None, pai, extra_headers)
+            .await
     }
 
     /// Spawn an outbound leg that will carry RFC 3515 §2.4.5 progress
@@ -166,8 +184,15 @@ impl StateMachineHelpers {
         to: &str,
         transferor_session_id: &SessionId,
     ) -> Result<SessionId> {
-        self.make_call_inner(from, to, None, Some(transferor_session_id.clone()), None)
-            .await
+        self.make_call_inner(
+            from,
+            to,
+            None,
+            Some(transferor_session_id.clone()),
+            None,
+            Vec::new(),
+        )
+        .await
     }
 
     /// Lower-level primitive: retroactively link an existing leg to a
@@ -194,6 +219,7 @@ impl StateMachineHelpers {
         credentials: Option<crate::types::Credentials>,
         transferor_session_id: Option<SessionId>,
         pai_uri: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<SessionId> {
         let session_id = SessionId::new();
 
@@ -205,12 +231,16 @@ impl StateMachineHelpers {
         )
         .await?;
 
-        // Fold any caller-supplied state (credentials, transfer linkage, PAI)
-        // into `SessionState` *before* the `MakeCall` event enters the
-        // state machine — otherwise a fast loopback `Dialog180Ringing`
-        // arriving mid-dispatch can beat the update and the state
-        // machine sees stale state.
-        if credentials.is_some() || transferor_session_id.is_some() || pai_uri.is_some() {
+        // Fold any caller-supplied state (credentials, transfer linkage, PAI,
+        // extra headers) into `SessionState` *before* the `MakeCall` event
+        // enters the state machine — otherwise a fast loopback
+        // `Dialog180Ringing` arriving mid-dispatch can beat the update and
+        // the state machine sees stale state.
+        if credentials.is_some()
+            || transferor_session_id.is_some()
+            || pai_uri.is_some()
+            || !extra_headers.is_empty()
+        {
             let mut session = self.state_machine.store.get_session(&session_id).await?;
             if let Some(creds) = credentials {
                 session.credentials = Some(creds);
@@ -221,6 +251,9 @@ impl StateMachineHelpers {
             }
             if let Some(pai) = pai_uri {
                 session.pai_uri = Some(pai);
+            }
+            if !extra_headers.is_empty() {
+                session.extra_headers = extra_headers;
             }
             self.state_machine.store.update_session(session).await?;
         }

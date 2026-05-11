@@ -1,3 +1,10 @@
+//! Terminal rendering for the `sip_client` softphone TUI: builds the
+//! ratatui frames (registration status, active calls, SIP trace pane, key
+//! help) and dispatches `crossterm` key events into [`UiEvent`]s the runtime
+//! loop consumes.
+//!
+//! Implementation detail of the `sip_client` example; see [`super::main`].
+
 use std::collections::VecDeque;
 use std::io::{self, Stdout};
 

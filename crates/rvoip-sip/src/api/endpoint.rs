@@ -4,6 +4,11 @@
 //! [`StreamPeer`], keeps the existing [`SessionHandle`] and [`IncomingCall`]
 //! types, and adds only the account/profile conveniences that SIP applications
 //! usually need first.
+//!
+//! For PBX or SBC integrations that require non-standard or vendor INVITE
+//! headers, [`Endpoint::call_with_headers`] and
+//! [`EndpointControl::call_with_headers`] attach a caller-supplied
+//! `Vec<TypedHeader>` to the very first INVITE.
 
 #![deny(missing_docs)]
 
@@ -166,6 +171,51 @@ impl Endpoint {
         ))
     }
 
+    /// Initiate an outgoing call attaching caller-supplied extra typed
+    /// headers to the very first INVITE.
+    ///
+    /// Use for headers RFC 3261 leaves outside the standard request line —
+    /// e.g. `Diversion`, `History-Info`, `Call-Info`, `User-to-User`, or
+    /// vendor `X-*` headers required by a PBX or SBC. Target resolution is
+    /// identical to [`call`](Self::call); the extras pass through to
+    /// [`crate::UnifiedCoordinator::make_call_with_headers`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(endpoint: rvoip_sip::Endpoint) -> rvoip_sip::Result<()> {
+    /// use rvoip_sip::{HeaderName, TypedHeader};
+    /// use rvoip_sip_core::types::header::HeaderValue;
+    ///
+    /// let tenant = TypedHeader::Other(
+    ///     HeaderName::Other("X-Tenant-ID".into()),
+    ///     HeaderValue::text("acme-prod"),
+    /// );
+    /// let call = endpoint
+    ///     .call_with_headers("1002", vec![tenant])
+    ///     .await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn call_with_headers(
+        &self,
+        target: &str,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<EndpointCall> {
+        let target = self.resolve_target(target)?;
+        let handle = self
+            .peer
+            .control()
+            .call_with_headers(&target, extra_headers)
+            .await?;
+        Ok(EndpointCall::new(
+            handle,
+            self.registrar.clone(),
+            self.transport,
+        ))
+    }
+
     /// Initiate an outgoing call and wait for it to answer.
     pub async fn call_and_wait(
         &self,
@@ -272,6 +322,30 @@ impl EndpointControl {
     pub async fn call(&self, target: &str) -> Result<EndpointCall> {
         let target = self.resolve_target(target)?;
         let handle = self.control.call(&target).await?;
+        Ok(EndpointCall::new(
+            handle,
+            self.registrar.clone(),
+            self.transport,
+        ))
+    }
+
+    /// Initiate an outgoing call attaching caller-supplied extra typed
+    /// headers to the very first INVITE.
+    ///
+    /// Sibling of [`call`](Self::call) that forwards through
+    /// [`PeerControl::call_with_headers`]. See
+    /// [`Endpoint::call_with_headers`](super::endpoint::Endpoint::call_with_headers)
+    /// for the canonical example.
+    pub async fn call_with_headers(
+        &self,
+        target: &str,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<EndpointCall> {
+        let target = self.resolve_target(target)?;
+        let handle = self
+            .control
+            .call_with_headers(&target, extra_headers)
+            .await?;
         Ok(EndpointCall::new(
             handle,
             self.registrar.clone(),

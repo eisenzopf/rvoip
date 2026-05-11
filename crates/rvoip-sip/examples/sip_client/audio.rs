@@ -1,3 +1,10 @@
+//! CPAL audio I/O bridge: pumps decoded PCM frames from
+//! [`EndpointCall`](rvoip_sip::EndpointCall) into the default output device
+//! and captures from the default input device into an
+//! [`EndpointAudioSender`](rvoip_sip::EndpointAudioSender).
+//!
+//! Implementation detail of the `sip_client` example; see [`super::main`].
+
 use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, Ordering},

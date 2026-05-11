@@ -1,7 +1,12 @@
-//! Audio streaming types for rvoip-sip
+//! Audio streaming types for rvoip-sip.
 //!
-//! Provides a split duplex audio stream per session. The caller owns the
-//! send/receive loop, enabling flexible bridging in higher layers.
+//! Provides a split duplex audio stream per session, carrying
+//! [`rvoip_media_core::types::AudioFrame`] values produced by the
+//! [`rvoip_media_core::MediaSession`] underneath an active call. The caller
+//! owns the send/receive loop, enabling flexible bridging (mix-minus,
+//! recording, AEC) in higher layers. RTP packetisation, jitter buffering,
+//! and SRTP handling stay inside [`rvoip_rtp_core`] — this module surfaces
+//! only decoded/encoded frames.
 
 #![deny(missing_docs)]
 

@@ -4,7 +4,9 @@
 //! with two ergonomic pieces:
 //!
 //! - [`PeerControl`] for commands such as `call`, `accept`, registration, and
-//!   early media.
+//!   early media. [`PeerControl::call_with_headers`] attaches caller-supplied
+//!   extra typed headers to the very first INVITE for PBX/SBC integrations
+//!   that require non-standard or vendor headers.
 //! - [`EventReceiver`] for typed application events.
 //!
 //! The unsplit [`StreamPeer`] exposes common `wait_for_*` helpers that consume
@@ -423,6 +425,45 @@ impl PeerControl {
         Ok(SessionHandle::new(id, self.coordinator.clone()))
     }
 
+    /// Initiate an outgoing call attaching caller-supplied extra typed
+    /// headers to the very first INVITE.
+    ///
+    /// Use for headers RFC 3261 leaves outside the standard request line —
+    /// e.g. `Diversion`, `History-Info`, `Call-Info`, `User-to-User`, or
+    /// vendor `X-*` headers required by a specific PBX or SBC. Wraps
+    /// [`crate::UnifiedCoordinator::make_call_with_headers`]; see it for header
+    /// ordering guarantees and composition limits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_sip::PeerControl) -> rvoip_sip::Result<()> {
+    /// use rvoip_sip::{HeaderName, TypedHeader};
+    /// use rvoip_sip_core::types::header::HeaderValue;
+    ///
+    /// let tenant = TypedHeader::Other(
+    ///     HeaderName::Other("X-Tenant-ID".into()),
+    ///     HeaderValue::text("acme-prod"),
+    /// );
+    /// let call = control
+    ///     .call_with_headers("sip:bob@example.com", vec![tenant])
+    ///     .await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn call_with_headers(
+        &self,
+        target: &str,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<SessionHandle> {
+        let id = self
+            .coordinator
+            .make_call_with_headers(&self.local_uri, target, extra_headers)
+            .await?;
+        Ok(SessionHandle::new(id, self.coordinator.clone()))
+    }
+
     /// Accept an incoming call that was presented as an event.
     ///
     /// # Examples
@@ -687,6 +728,19 @@ impl StreamPeer {
     /// ```
     pub async fn call(&mut self, target: &str) -> Result<SessionHandle> {
         self.control.call(target).await
+    }
+
+    /// Initiate an outgoing call attaching caller-supplied extra typed
+    /// headers to the very first INVITE.
+    ///
+    /// Sequential wrapper over [`PeerControl::call_with_headers`]; see it
+    /// for the canonical example and header ordering details.
+    pub async fn call_with_headers(
+        &mut self,
+        target: &str,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<SessionHandle> {
+        self.control.call_with_headers(target, extra_headers).await
     }
 
     /// Wait for the next incoming call.

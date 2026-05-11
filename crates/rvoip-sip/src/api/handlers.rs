@@ -26,6 +26,9 @@ use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 
 /// Accepts all incoming calls and allows all transfers.
 ///
+/// See `examples/callback_peer/01_auto_answer/` (run with
+/// `cargo run -p rvoip-sip --example callback_peer_auto_answer_server`).
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -138,6 +141,9 @@ pub struct RoutingRule {
 /// Rules are evaluated in order; the first match wins. If no rule matches,
 /// `default_action` is applied (defaults to `Reject 404 Not Found`).
 ///
+/// See `examples/callback_peer/04_routing_handler/` (run with
+/// `cargo run -p rvoip-sip --example callback_peer_routing_handler_server`).
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -228,6 +234,9 @@ impl CallHandler for RoutingHandler {
 /// Pair with a consumer task that calls [`IncomingCallGuard::accept()`] or
 /// [`IncomingCallGuard::reject()`] when ready. If the channel is full, the
 /// call is rejected with `503 Service Unavailable`.
+///
+/// See `examples/callback_peer/05_queue_handler/` (run with
+/// `cargo run -p rvoip-sip --example callback_peer_queue_handler_server`).
 ///
 /// # Example
 ///

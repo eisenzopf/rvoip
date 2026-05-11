@@ -1,3 +1,10 @@
+//! Non-interactive smoke-test driver: registers, places or answers a single
+//! call, optionally exchanges audio for a fixed window, and exits with a
+//! deterministic status code so CI scripts and the unified PBX runner can
+//! assert end-to-end behaviour without a TUI.
+//!
+//! Selected via the `--test` CLI flag; see [`super::main`].
+
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,

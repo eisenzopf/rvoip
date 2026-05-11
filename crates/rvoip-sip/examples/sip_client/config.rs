@@ -1,3 +1,10 @@
+//! Clap-based CLI argument parsing plus preset and JSON config loading for
+//! the `sip_client` example. Translates `--preset` / `--config` choices into
+//! an [`EndpointConfig`](rvoip_sip::EndpointConfig) the runtime can hand to
+//! [`Endpoint::builder`](rvoip_sip::Endpoint::builder).
+//!
+//! Implementation detail of the `sip_client` example; see [`super::main`].
+
 use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;

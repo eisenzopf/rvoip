@@ -802,8 +802,12 @@ impl SessionHandle {
     /// remote tag. Returns `None` if the dialog isn't yet established or
     /// has already been cleaned up.
     ///
-    /// Intended for orchestrators building a `Replaces` header for
-    /// attended transfer — see [`transfer_attended`](Self::transfer_attended).
+    /// The identity corresponds to the underlying
+    /// [`rvoip_sip_dialog::Dialog`] tracked by [`rvoip_sip_dialog`] — the
+    /// returned tuple is what RFC 3891 §3 requires when constructing a
+    /// `Replaces` header. Intended for orchestrators building that header
+    /// for attended transfer — see
+    /// [`transfer_attended`](Self::transfer_attended).
     ///
     /// # Examples
     ///

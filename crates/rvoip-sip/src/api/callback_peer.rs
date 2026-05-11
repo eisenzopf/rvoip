@@ -10,7 +10,9 @@
 //! auth retry notifications. The peer also exposes [`CallbackPeerControl`] so
 //! supervisors and handler-owned tasks can place outbound calls, register,
 //! inspect registration metadata through the coordinator, and shut down the
-//! running peer.
+//! running peer. [`CallbackPeerControl::call_with_headers`] attaches
+//! caller-supplied extra typed headers to the very first INVITE for
+//! PBX/SBC integrations that require non-standard or vendor headers.
 //!
 //! # Use cases
 //!
@@ -1065,6 +1067,45 @@ impl CallbackPeerControl {
         let id = self
             .coordinator
             .make_call_with_auth(&self.local_uri, target, credentials)
+            .await?;
+        Ok(SessionHandle::new(id, self.coordinator.clone()))
+    }
+
+    /// Initiate an outgoing call attaching caller-supplied extra typed
+    /// headers to the very first INVITE.
+    ///
+    /// Use for headers RFC 3261 leaves outside the standard request line —
+    /// e.g. `Diversion`, `History-Info`, `Call-Info`, `User-to-User`, or
+    /// vendor `X-*` headers. Wraps
+    /// [`crate::UnifiedCoordinator::make_call_with_headers`]; see it for header
+    /// ordering guarantees and composition limits.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(control: rvoip_sip::CallbackPeerControl) -> rvoip_sip::Result<()> {
+    /// use rvoip_sip::{HeaderName, TypedHeader};
+    /// use rvoip_sip_core::types::header::HeaderValue;
+    ///
+    /// let tenant = TypedHeader::Other(
+    ///     HeaderName::Other("X-Tenant-ID".into()),
+    ///     HeaderValue::text("acme-prod"),
+    /// );
+    /// let call = control
+    ///     .call_with_headers("sip:bob@example.com", vec![tenant])
+    ///     .await?;
+    /// # let _ = call;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn call_with_headers(
+        &self,
+        target: &str,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<SessionHandle> {
+        let id = self
+            .coordinator
+            .make_call_with_headers(&self.local_uri, target, extra_headers)
             .await?;
         Ok(SessionHandle::new(id, self.coordinator.clone()))
     }

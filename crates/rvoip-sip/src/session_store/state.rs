@@ -179,6 +179,15 @@ pub struct SessionState {
     /// header lands on the very first wire transmission. Carrier trunks
     /// commonly require this for caller-ID assertion.
     pub pai_uri: Option<String>,
+    /// Caller-supplied extra typed headers to attach to the very first
+    /// outgoing INVITE for this session. Populated by the
+    /// `_with_headers` variants on the public API surfaces; consumed by
+    /// `Action::SendINVITE`, which appends them to the `extras` vector after
+    /// any synthesized `P-Asserted-Identity`. Empty by default — the
+    /// outbound-proxy Route prepended inside
+    /// `DialogAdapter::send_invite_with_extra_headers` still runs after this,
+    /// so a configured outbound proxy stays first on the wire.
+    pub extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     pub is_registered: bool, // Whether registration is complete
     pub auth_challenge: Option<crate::auth::DigestChallenge>, // Cached authentication challenge from 401
     pub registration_retry_count: u32, // Number of retries attempted (prevent infinite loops)
@@ -268,6 +277,7 @@ impl SessionState {
             registration_temp_gruu: None,
             credentials: None,
             pai_uri: None,
+            extra_headers: Vec::new(),
             is_registered: false,
             auth_challenge: None,
             registration_retry_count: 0,

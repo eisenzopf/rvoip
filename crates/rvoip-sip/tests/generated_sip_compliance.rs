@@ -1,3 +1,22 @@
+//! Generator-side SIP compliance assertions.
+//!
+//! These tests build representative SIP requests and responses through the
+//! public [`UnifiedCoordinator`](rvoip_sip::UnifiedCoordinator) and
+//! [`StreamPeer`](rvoip_sip::StreamPeer) entry points, then hand the on-wire
+//! bytes back to
+//! [`rvoip_sip_core::validation::validate_generated_request`] and
+//! [`rvoip_sip_core::validation::validate_generated_response`] to confirm
+//! `rvoip-sip` always emits messages that the parser independently accepts as
+//! RFC 3261-compliant.
+//!
+//! Gated behind the `generated-validation` Cargo feature so the validation
+//! tables are only compiled when this regression file runs:
+//!
+//! ```sh
+//! cargo test -p rvoip-sip --features generated-validation \
+//!     --test generated_sip_compliance
+//! ```
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

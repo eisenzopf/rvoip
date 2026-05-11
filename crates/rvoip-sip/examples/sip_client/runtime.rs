@@ -1,3 +1,10 @@
+//! Interactive TUI event loop: wires terminal key events, periodic redraws,
+//! audio bridge ticks, and [`EndpointEvent`](rvoip_sip::EndpointEvent) streams
+//! together so an operator can place, answer, hold, resume, transfer, and tear
+//! down calls from the keyboard.
+//!
+//! Implementation detail of the `sip_client` example; see [`super::main`].
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;

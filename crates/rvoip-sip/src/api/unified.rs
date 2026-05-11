@@ -15,6 +15,13 @@
 //! reactive server endpoints, [`CallbackPeer`] is usually the better starting
 //! point.
 //!
+//! Outbound-call variants: [`UnifiedCoordinator::make_call`],
+//! [`UnifiedCoordinator::make_call_with_auth`] (per-call digest credentials),
+//! [`UnifiedCoordinator::make_call_with_pai`] (per-call
+//! `P-Asserted-Identity`), and
+//! [`UnifiedCoordinator::make_call_with_headers`] (caller-supplied extra
+//! typed headers on the first INVITE).
+//!
 //! # Example
 //!
 //! ```rust,no_run
@@ -1756,6 +1763,62 @@ impl UnifiedCoordinator {
     ) -> Result<SessionId> {
         self.helpers
             .make_call_with_credentials_and_pai(from, to, self.config.credentials.clone(), pai)
+            .await
+    }
+
+    /// Make an outgoing call attaching caller-supplied extra typed headers to
+    /// the very first INVITE. Use this for headers RFC 3261 leaves outside
+    /// the standard request line — e.g. `Diversion` (RFC 5806),
+    /// `History-Info` (RFC 7044), `Call-Info` (RFC 3261 §20.9),
+    /// `User-to-User` (RFC 7433), or vendor `X-*` headers required by a
+    /// specific PBX or SBC.
+    ///
+    /// Header ordering on the wire is: synthesized `P-Asserted-Identity`
+    /// (from [`Config::pai_uri`]) first, then `extra_headers` in the order
+    /// supplied, then a Route header pre-pended by
+    /// [`Config::outbound_proxy_uri`] when configured. Credentials and PAI
+    /// continue to come from [`Config`] — for a per-call override of
+    /// credentials use [`make_call_with_auth`](Self::make_call_with_auth);
+    /// for a per-call override of PAI use
+    /// [`make_call_with_pai`](Self::make_call_with_pai). Combining either of
+    /// those with custom headers is intentionally out of scope for this
+    /// release; configure the default through [`Config`] instead.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>) -> rvoip_sip::Result<()> {
+    /// use rvoip_sip::{HeaderName, TypedHeader};
+    /// use rvoip_sip_core::types::header::HeaderValue;
+    ///
+    /// let tenant = TypedHeader::Other(
+    ///     HeaderName::Other("X-Tenant-ID".into()),
+    ///     HeaderValue::text("acme-prod"),
+    /// );
+    ///
+    /// let call_id = coordinator.make_call_with_headers(
+    ///     "sip:alice@127.0.0.1:5060",
+    ///     "sip:bob@example.com",
+    ///     vec![tenant],
+    /// ).await?;
+    /// # let _ = call_id;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn make_call_with_headers(
+        &self,
+        from: &str,
+        to: &str,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<SessionId> {
+        self.helpers
+            .make_call_with_headers_and_credentials_and_pai(
+                from,
+                to,
+                self.config.credentials.clone(),
+                self.config.pai_uri.clone(),
+                extra_headers,
+            )
             .await
     }
 

@@ -385,10 +385,13 @@ pub(crate) async fn execute_action(
             );
 
             // Build any extra typed headers that travel with the very first
-            // INVITE. Today only `P-Asserted-Identity` (RFC 3325 §9.1) lands
-            // here — when `SessionState.pai_uri` is set the typed header is
-            // constructed and routed through dialog-core's
-            // `make_call_with_extra_headers_for_session` entry point.
+            // INVITE. The synthesized `P-Asserted-Identity` (RFC 3325 §9.1)
+            // is appended first when `SessionState.pai_uri` is set;
+            // caller-supplied headers from the `_with_headers` API variants
+            // follow. The outbound-proxy Route prepended inside
+            // `DialogAdapter::send_invite_with_extra_headers` runs after
+            // this, so a configured outbound proxy still ends up first on
+            // the wire.
             let mut extras: Vec<rvoip_sip_core::types::TypedHeader> = Vec::new();
             if let Some(pai) = session.pai_uri.as_ref() {
                 use rvoip_sip_core::types::{
@@ -412,6 +415,9 @@ pub(crate) async fn execute_action(
                         .into());
                     }
                 }
+            }
+            if !session.extra_headers.is_empty() {
+                extras.extend(session.extra_headers.iter().cloned());
             }
 
             // This will create the real dialog in dialog-core.

@@ -4,7 +4,10 @@
 //! `orchestration-core/src/traits.rs:81-198` with a SIP-flavored
 //! [`ContactRequest`] input (the workforce-flavored `Agent` parameter stays
 //! in orchestration-core). The two impls — [`StaticContactResolver`] and
-//! [`RegistrarContactResolver`] — preserve the proven behavior.
+//! [`RegistrarContactResolver`] — preserve the proven behavior. The latter
+//! delegates AOR lookups to a [`rvoip_sip_registrar::RegistrarService`] so
+//! B2BUA originate-legs can locate live contacts registered elsewhere in the
+//! system.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -20,7 +23,8 @@ pub enum ContactRequest {
     /// Use a literal SIP URI as-is (no registrar lookup).
     Static { uri: String },
     /// Look up a registered SIP user by AOR; the resolver consults the
-    /// configured `RegistrarService` to find the live Contact binding.
+    /// configured [`rvoip_sip_registrar::RegistrarService`] to find the live
+    /// Contact binding.
     Registered { aor: String },
 }
 
