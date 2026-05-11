@@ -955,8 +955,12 @@ Migrating their call sites is a follow-up.
   before handing the `Response` to `UnifiedDialogApi::send_response`
 - `rvoip_sip_core::validation::{validate_notify_request,
   validate_publish_request, validate_subscribe_request,
-  validate_wire_request, validate_wire_response}` — invoked by
-  `HeaderPolicy::validate_outbound` where the method matches
+  validate_wire_request, validate_wire_response, validate_content_length}`
+  — invoked by `HeaderPolicy::validate_outbound` where the method matches.
+  **Audit note:** `validate_register_request` and `validate_refer_request`
+  do **not** exist in sip-core today; for those methods the policy layer
+  on the rvoip-sip side does the application-slice check and the wire
+  validator catches any structural issue at the transaction layer.
 - `rvoip_sip_core::parse_message` — for inbound `IncomingCall.request`
   attachment if the state machine didn't already retain the parsed form
 - `prepend_outbound_proxy_route` (`adapters/dialog_adapter.rs:2086`) —
@@ -1189,28 +1193,21 @@ mutating Config before the endpoint starts — this is unaffected.
 
 ### Typed-header coverage gaps in `rvoip-sip-core`
 
-Four headers the design treats as application-controlled have **no
+Five headers the design treats as application-controlled have **no
 typed `TypedHeader` variant** in sip-core today:
 
 - `Diversion` (RFC 5806)
 - `History-Info` (RFC 7044)
 - `Privacy` (RFC 3323)
 - `Replaces` (RFC 3891) — mentioned in docstrings only
+- `Target-Dialog` (RFC 4538) — caught in the 2026-05-11 audit
 
-`TypedHeader::Other(HeaderName::Other(name), value)` works for all four
+`TypedHeader::Other(HeaderName::Other(name), value)` works for all five
 and is the canonical builder path; `with_raw_header("Diversion", "...")`
 goes the same way. To preserve B2BUA ergonomics, `rvoip-sip` ships
 typed helper constructors that produce the correctly-cased `Other`
-variant:
-
-```rust
-pub mod api::headers::convenience {
-    pub fn diversion(value: impl Into<String>) -> TypedHeader;
-    pub fn history_info(value: impl Into<String>) -> TypedHeader;
-    pub fn privacy(value: impl Into<String>) -> TypedHeader;
-    pub fn replaces(value: impl Into<String>) -> TypedHeader;
-}
-```
+variant — see the expanded list in the **Typed-header convenience
+expanded** subsection of "Layer-audit refinements" below.
 
 `classify()` normalizes `HeaderName::Other("Diversion")` identically to
 `HeaderName::Diversion` if/when sip-core later promotes them — no
