@@ -706,23 +706,37 @@ Shared infrastructure:
 `with_raw_header`, `strip_header`, and `with_headers_from` that operate
 on `BuilderHeaderState`, so each builder only declares it owns one.
 
-Promote `StateMachineHelpers::make_call_inner` and the analogous
-register/refer/notify/etc. internal helpers to `pub(crate)` so the
-builders call them directly. Refactor to options-shape:
+Author / refactor internal helpers in `state_machine/helpers.rs`. Per
+the 2026-05-11 audit, only the INVITE family has helpers today (5
+sibling methods at lines 99-156). Phase C collapses those into a single
+`make_call_inner(opts)` and **authors brand-new** siblings for the
+other methods:
 
 ```rust
-pub(crate) async fn make_call_inner(...);                // exists
-pub(crate) async fn send_refer_inner(opts);              // refactor of send_refer
-pub(crate) async fn send_notify_inner(opts);             // refactor of send_notify
-pub(crate) async fn send_info_inner(opts);               // refactor of send_info
-pub(crate) async fn send_bye_inner(opts);                // refactor of hangup_with_reason
-pub(crate) async fn send_register_inner(opts);           // refactor of register_with
-// + send_cancel_inner, send_update_inner, send_subscribe_inner,
-//   send_message_inner, send_options_inner
+// Collapse of 5 existing methods (lines 99-156):
+pub(crate) async fn make_call_inner(opts);
+
+// NEW (no current analog in helpers.rs):
+pub(crate) async fn send_refer_inner(opts);
+pub(crate) async fn send_notify_inner(opts);
+pub(crate) async fn send_info_inner(opts);
+pub(crate) async fn send_bye_inner(opts);                // replaces hangup_with_reason
+pub(crate) async fn send_cancel_inner(opts);
+pub(crate) async fn send_update_inner(opts);
+pub(crate) async fn send_subscribe_inner(opts);
+pub(crate) async fn send_message_inner(opts);
+pub(crate) async fn send_options_inner(opts);
+pub(crate) async fn send_register_inner(opts);
+pub(crate) async fn send_reinvite_inner(opts);
 ```
 
-No new state-machine plumbing — these just package the existing
-event-and-state side effects behind a one-call options entrypoint.
+INVITE / re-INVITE / REGISTER / SUBSCRIBE / MESSAGE / NOTIFY route
+through their existing state-machine Action variants (widened payload
+to carry `Arc<XxxRequestOptions>`). REFER / INFO / UPDATE / BYE /
+CANCEL / OPTIONS go through direct `DialogAdapter::send_*_with_options`
+calls — no new Action variants required for them (they bypass the
+state machine today and continue to). The state machine is unchanged
+structurally; only INVITE-family payloads widen.
 
 `UnifiedCoordinator` gains the 12 `.invite() / .reinvite() / .register()
 / .refer() / .bye() / .cancel() / .notify() / .subscribe() / .info() /
@@ -896,16 +910,27 @@ Migrating their call sites is a follow-up.
 - `crates/rvoip-sip/tests/b2bua_carry_through_integration.rs`
 - `crates/rvoip-sip/tests/forbidden_header_guard_integration.rs`
 
+**Modified — `infra-common` (Phase E only, additive)**
+
+- `src/events/cross_crate.rs` — enrich `DialogToSessionEvent::{TransferRequested,
+  NotifyReceived, IncomingRegister}` with `raw_request: Arc<bytes::Bytes>`;
+  add new variants `InfoReceived`, `MessageReceived`, `OptionsReceived`,
+  and either enrich `ReinviteReceived` with `raw_request` (preferred) or
+  add a dedicated `UpdateReceived`. `bytes` is already a workspace dep
+  on `infra-common`; **no new `rvoip-sip-core` dependency is introduced**.
+
 **Modified — `rvoip-sip-dialog` (additive only)**
 
 - `src/api/unified.rs` — add `ReferRequestOptions`,
   `NotifyRequestOptions`, `InfoRequestOptions`, `ByeRequestOptions`,
-  `UpdateRequestOptions`, `SubscribeRequestOptions`; add `extra_headers`
-  field to `RegisterRequestOptions`; add 6 `*_with_options` methods
+  `CancelRequestOptions`, `UpdateRequestOptions`, `ReInviteRequestOptions`,
+  `SubscribeRequestOptions`, `MessageRequestOptions`,
+  `OptionsRequestOptions` (NEW — no existing send_options path);
+  add `extra_headers` field AND `#[derive(Default)]` to the existing
+  `RegisterRequestOptions` (lines 228-239); add 11 `*_with_options`
+  methods (the OPTIONS one is brand-new authorship on top of
+  `transaction/utils/request_builders.rs`)
 - `src/manager/dialog_operations.rs` (or sibling) — internal
-  implementation appending `extra_headers` to the in-dialog `Request`
-  constructed by `transaction/utils/request_builders.rs` before
-  transaction dispatch
 
 **Modified — `rvoip-sip`**
 
@@ -928,8 +953,12 @@ Migrating their call sites is a follow-up.
 - `src/api/events.rs` — add `IncomingResponse`, `IncomingRequest`,
   `IncomingRegister`; enrich `Event::{ReferReceived, NotifyReceived,
   InfoReceived}` with `request: IncomingRequest` (additive)
-- `src/adapters/dialog_adapter.rs` — 6 new `send_*_with_options` mirror
-  methods
+- `src/adapter.rs` — thin re-export shim; update its `pub use` list to
+  cover the new builders / traits / convenience constructors. This file
+  is 14 KB; the heavy lifting is in `src/adapters/dialog_adapter.rs`.
+- `src/adapters/dialog_adapter.rs` — 11 new `send_*_with_options` mirror
+  methods (one per new dialog-core entry point; OPTIONS is the new
+  authored path)
 - `src/state_machine/helpers.rs` — promote internal helpers to
   `pub(crate)`, refactor to options-shape; populate
   `IncomingCall.request`
