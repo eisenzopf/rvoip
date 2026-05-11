@@ -35,6 +35,12 @@ impl Default for OrchestrationConfig {
 pub struct InboundCallConfig {
     pub route_timeout: Duration,
     pub auto_accept_before_bridge: bool,
+    /// Maximum concurrent inbound call setups admitted before further
+    /// requests are rejected at the door with SIP 503. Bounds runtime
+    /// pressure under burst load — once admitted, calls do not collapse
+    /// the orchestrator. Defaults to 256 × CPU cores (clamped to 1024 if
+    /// available_parallelism cannot be detected).
+    pub max_concurrent_setups: usize,
 }
 
 impl Default for InboundCallConfig {
@@ -42,8 +48,15 @@ impl Default for InboundCallConfig {
         Self {
             route_timeout: Duration::from_secs(5),
             auto_accept_before_bridge: true,
+            max_concurrent_setups: default_max_concurrent_setups(),
         }
     }
+}
+
+fn default_max_concurrent_setups() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get() * 256)
+        .unwrap_or(1024)
 }
 
 #[derive(Debug, Clone)]

@@ -43,6 +43,11 @@ pub enum RvoipCrossCrateEvent {
 
     /// Rtp-core to media-core events
     RtpToMedia(RtpToMediaEvent),
+
+    /// Orchestration-plane events (orchestration-core / future rvoip-core).
+    /// Per-fine-grained-variant `event_type` so subscribers get separate
+    /// per-type broadcast channels in `GlobalEventCoordinator`.
+    Orchestration(OrchestrationCrossCrateEvent),
 }
 
 /// Trait for cross-crate events
@@ -68,6 +73,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::TransportToSession(_) => "transport_to_session",
             RvoipCrossCrateEvent::MediaToRtp(_) => "media_to_rtp",
             RvoipCrossCrateEvent::RtpToMedia(_) => "rtp_to_media",
+            RvoipCrossCrateEvent::Orchestration(inner) => inner.event_type(),
         }
     }
 
@@ -82,6 +88,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::TransportToSession(_) => PlaneType::Transport,
             RvoipCrossCrateEvent::MediaToRtp(_) => PlaneType::Media,
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Transport,
+            RvoipCrossCrateEvent::Orchestration(_) => PlaneType::Signaling,
         }
     }
 
@@ -96,6 +103,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::TransportToSession(_) => PlaneType::Signaling,
             RvoipCrossCrateEvent::MediaToRtp(_) => PlaneType::Transport,
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Media,
+            RvoipCrossCrateEvent::Orchestration(_) => PlaneType::Signaling,
         }
     }
 
@@ -110,6 +118,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::TransportToSession(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::MediaToRtp(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::RtpToMedia(_) => EventPriority::Normal,
+            RvoipCrossCrateEvent::Orchestration(_) => EventPriority::Normal,
         }
     }
 
@@ -227,6 +236,9 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 RtpToMediaEvent::RtpStatisticsUpdate { session_id, .. } => Some(session_id),
                 RtpToMediaEvent::RtpError { session_id, .. } => Some(session_id),
             },
+            // Orchestration events use call_id, not SIP session_id, so no
+            // session-bound routing is offered. Subscribers route by event_type.
+            RvoipCrossCrateEvent::Orchestration(_) => None,
         }
     }
 }
@@ -1162,6 +1174,202 @@ impl RvoipCrossCrateEvent {
             media_config: config,
         })
     }
+}
+
+// =============================================================================
+// ORCHESTRATION-PLANE EVENTS
+// =============================================================================
+
+/// Wire-format orchestration events for cross-crate observability.
+///
+/// Mirrors `orchestration-core::OrchestrationEvent` with primitive payloads
+/// (string IDs, no rich struct payloads) so the wire format does not pull
+/// orchestration-core types into infra-common. Each variant maps to a
+/// distinct `event_type()` string so `GlobalEventCoordinator` allocates a
+/// separate broadcast channel per variant — a slow consumer of one variant
+/// does not lag consumers of another.
+///
+/// In-process subscribers within orchestration-core continue to use the
+/// rich, typed `OrchestrationEvent` API; this wire form exists for
+/// cross-crate observers (logging sinks, future rvoip-harness, telemetry).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum OrchestrationCrossCrateEvent {
+    InboundCallReceived {
+        call_id: String,
+        caller_uri: String,
+        to: String,
+    },
+    CallCreated {
+        call_id: String,
+    },
+    CallQueued {
+        call_id: String,
+        queue_id: String,
+    },
+    CallDequeued {
+        call_id: String,
+        queue_id: String,
+    },
+    QueueOverflowed {
+        call_id: String,
+        from_queue_id: String,
+        target: String,
+        reason: String,
+    },
+    CallStatusChanged {
+        call_id: String,
+        from: String,
+        to: String,
+    },
+    AgentStateChanged {
+        agent_id: String,
+        from: String,
+        to: String,
+    },
+    AgentReserved {
+        call_id: String,
+        agent_id: String,
+        offer_id: String,
+    },
+    AgentOfferAccepted {
+        call_id: String,
+        agent_id: String,
+        offer_id: String,
+    },
+    AgentOfferRejected {
+        call_id: String,
+        agent_id: String,
+        offer_id: String,
+        reason: String,
+    },
+    AgentOfferTimedOut {
+        call_id: String,
+        agent_id: String,
+        offer_id: String,
+    },
+    AgentOfferFailed {
+        call_id: String,
+        agent_id: String,
+        offer_id: String,
+        reason: String,
+    },
+    VoiceAiStarted {
+        call_id: String,
+        agent_id: String,
+    },
+    VoiceAiTranscript {
+        call_id: String,
+        agent_id: String,
+        text: String,
+        is_final: bool,
+    },
+    VoiceAiBargeIn {
+        call_id: String,
+        agent_id: String,
+    },
+    VoiceAiEnded {
+        call_id: String,
+        agent_id: String,
+        reason: String,
+    },
+    BridgeStarted {
+        call_id: String,
+        bridge_id: String,
+        caller_leg_id: String,
+        agent_leg_id: String,
+    },
+    BridgeEnded {
+        call_id: String,
+        bridge_id: String,
+        reason: String,
+    },
+    RecordingStarted {
+        call_id: String,
+        recording_id: String,
+    },
+    RecordingStopped {
+        call_id: String,
+        recording_id: String,
+    },
+    TransferRequested {
+        call_id: String,
+        from_agent_id: String,
+        target: String,
+    },
+    TransferCompleted {
+        call_id: String,
+        target: String,
+    },
+    CallEnded {
+        call_id: String,
+        reason: String,
+    },
+    CallFailed {
+        call_id: String,
+        reason: String,
+    },
+}
+
+impl OrchestrationCrossCrateEvent {
+    /// Per-variant event type string, used by `GlobalEventCoordinator` to
+    /// allocate a separate broadcast channel per variant.
+    pub fn event_type(&self) -> EventTypeId {
+        match self {
+            Self::InboundCallReceived { .. } => "orchestration.inbound_call_received",
+            Self::CallCreated { .. } => "orchestration.call_created",
+            Self::CallQueued { .. } => "orchestration.call_queued",
+            Self::CallDequeued { .. } => "orchestration.call_dequeued",
+            Self::QueueOverflowed { .. } => "orchestration.queue_overflowed",
+            Self::CallStatusChanged { .. } => "orchestration.call_status_changed",
+            Self::AgentStateChanged { .. } => "orchestration.agent_state_changed",
+            Self::AgentReserved { .. } => "orchestration.agent_reserved",
+            Self::AgentOfferAccepted { .. } => "orchestration.agent_offer_accepted",
+            Self::AgentOfferRejected { .. } => "orchestration.agent_offer_rejected",
+            Self::AgentOfferTimedOut { .. } => "orchestration.agent_offer_timed_out",
+            Self::AgentOfferFailed { .. } => "orchestration.agent_offer_failed",
+            Self::VoiceAiStarted { .. } => "orchestration.voice_ai_started",
+            Self::VoiceAiTranscript { .. } => "orchestration.voice_ai_transcript",
+            Self::VoiceAiBargeIn { .. } => "orchestration.voice_ai_barge_in",
+            Self::VoiceAiEnded { .. } => "orchestration.voice_ai_ended",
+            Self::BridgeStarted { .. } => "orchestration.bridge_started",
+            Self::BridgeEnded { .. } => "orchestration.bridge_ended",
+            Self::RecordingStarted { .. } => "orchestration.recording_started",
+            Self::RecordingStopped { .. } => "orchestration.recording_stopped",
+            Self::TransferRequested { .. } => "orchestration.transfer_requested",
+            Self::TransferCompleted { .. } => "orchestration.transfer_completed",
+            Self::CallEnded { .. } => "orchestration.call_ended",
+            Self::CallFailed { .. } => "orchestration.call_failed",
+        }
+    }
+
+    /// All orchestration event-type strings, in declaration order. Used by
+    /// `EventTypeRegistry::register_builtin_types` to register every variant.
+    pub const ALL_EVENT_TYPES: &'static [EventTypeId] = &[
+        "orchestration.inbound_call_received",
+        "orchestration.call_created",
+        "orchestration.call_queued",
+        "orchestration.call_dequeued",
+        "orchestration.queue_overflowed",
+        "orchestration.call_status_changed",
+        "orchestration.agent_state_changed",
+        "orchestration.agent_reserved",
+        "orchestration.agent_offer_accepted",
+        "orchestration.agent_offer_rejected",
+        "orchestration.agent_offer_timed_out",
+        "orchestration.agent_offer_failed",
+        "orchestration.voice_ai_started",
+        "orchestration.voice_ai_transcript",
+        "orchestration.voice_ai_barge_in",
+        "orchestration.voice_ai_ended",
+        "orchestration.bridge_started",
+        "orchestration.bridge_ended",
+        "orchestration.recording_started",
+        "orchestration.recording_stopped",
+        "orchestration.transfer_requested",
+        "orchestration.transfer_completed",
+        "orchestration.call_ended",
+        "orchestration.call_failed",
+    ];
 }
 
 #[cfg(test)]

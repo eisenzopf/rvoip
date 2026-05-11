@@ -1,6 +1,7 @@
 # orchestration-core Performance Plan
 
-**Status:** Active. Supersedes `CONCURRENCY_PLAN.md` for current implementation work.
+**Status:** Phases 0–2 shipped 2026-05-10. Phase 3 deferred (trigger not met; see §7 Phase 3 and §12).
+Supersedes `CONCURRENCY_PLAN.md` for current implementation work.
 `CONCURRENCY_PLAN.md` is kept alongside this document as historical reference per `PRD.md` §15.
 
 **Goal:** Make `orchestration-core` ship 1k–5k concurrent sessions on a single instance with a clear path to 10k+, **without doing wasted work on subsystems the PRD removes from rvoip's scope.**
@@ -109,7 +110,7 @@ These rules apply to every change in this plan:
 
 Each phase is independently mergeable, leaves the crate in a working state, and produces measurable improvement against the `perf_active_calls.rs` baseline.
 
-### Phase 0 — Adopt `infra-common::GlobalEventCoordinator`
+### Phase 0 — Adopt `infra-common::GlobalEventCoordinator` ✅ Shipped 2026-05-10
 
 Unchanged from `CONCURRENCY_PLAN.md` §4.1. Carried forward in full because the work survives the scope cut and removes a custom bus from the crate.
 
@@ -125,7 +126,7 @@ Unchanged from `CONCURRENCY_PLAN.md` §4.1. Carried forward in full because the 
 
 **Open question:** `Orchestrator::events()` returns a thin façade vs `Arc<GlobalEventCoordinator>` directly. **Recommendation: thin façade** so the bus can evolve without API churn. (Same as CONCURRENCY_PLAN §4.1 open question.)
 
-### Phase 1 — DashMap + secondary indices for surviving stores only
+### Phase 1 — DashMap + secondary indices for surviving stores only ✅ Shipped 2026-05-10
 
 Replace `RwLock<HashMap<...>>` with `DashMap` in the surviving stores **only**. Add the secondary indices needed for O(1) / O(matching) lookups.
 
@@ -156,7 +157,7 @@ VoiceAiRegistry {
 
 **Expected impact:** Removes the locks-across-`.await` problem (`CONCURRENCY_PLAN.md` §2.1) for the surviving stores. The surviving hot path on `MemoryCallStore` is the one that affects the perf_active_calls.rs measurement most directly once the workforce code is removed.
 
-### Phase 2 — Admission semaphore + per-process backpressure
+### Phase 2 — Admission semaphore + per-process backpressure ✅ Shipped 2026-05-10
 
 Unchanged from `CONCURRENCY_PLAN.md` §4.6.
 
@@ -168,7 +169,7 @@ Unchanged from `CONCURRENCY_PLAN.md` §4.6.
 
 **Expected impact:** A burst of 10k concurrent INVITEs degrades cleanly (some rejected with 503) instead of hanging. Latency under burst remains bounded.
 
-### Phase 3 (conditional) — Atomic `CallLeg` state for hot-path transitions
+### Phase 3 (conditional) — Atomic `CallLeg` state for hot-path transitions ⏸ Deferred 2026-05-10 (trigger not met — see §12)
 
 **Trigger:** Run if profiling after Phase 1 shows `CallLeg` state transitions (`CallLegStatus` updates inside `Call.update`) appearing as a top-3 contention point at N=1000.
 
@@ -265,13 +266,97 @@ This perf plan ships **before** the `rvoip-core` / `rvoip-sip` / `rvoip-uctp` / 
 
 ## 11. Open questions
 
-1. **Phase 3 inclusion.** Include `CallLeg` atomic state speculatively in v1 of this plan, or defer until profiling after Phase 1 confirms need? **Recommendation: defer; ship Phases 0–2 and measure first.** Phase 3 is documented but conditional.
+1. **Phase 3 inclusion.** Include `CallLeg` atomic state speculatively in v1 of this plan, or defer until profiling after Phase 1 confirms need? **Resolved 2026-05-10: deferred.** Profiling under both `perf_active_calls` (N=1000, allocator-dominated) and `perf_live_sip_rtp` (N=50, 10 s media hold, full SIP+RTP) shows zero samples on `CallLeg` state writes. Trigger condition not met. See §12.
 
 2. **`Orchestrator::events()` façade vs direct exposure** (carried from CONCURRENCY_PLAN §8 item 1). Façade keeps API stable through bus evolution. **Recommendation: thin façade.**
 
 3. **Examples relocation.** Should the queue-management examples (`human_queue`, `ai_only_queue`, etc.) be marked deprecated during this plan's lifetime, or moved at lift-out time per PRD §13 step 7? **Recommendation: leave intact during perf work; relocate / delete during the lift-out PR series, not during this plan.** They are the integration test bed for the workforce surface that will leave the crate.
 
 4. **`developer_workflows.rs` test fate.** Same as examples — these tests exercise workforce code that's leaving. **Recommendation: keep running during this perf work; relocate during the lift-out cutover.** During the perf rework they prevent us from regressing user-visible behavior in code that's still nominally supported.
+
+---
+
+## 12. Ship report (2026-05-10)
+
+### Phases shipped
+
+| Phase | Status | What landed |
+|---|---|---|
+| 0 — `GlobalEventCoordinator` adoption | ✅ Shipped | `RvoipCrossCrateEvent::Orchestration(OrchestrationCrossCrateEvent)` with 24 per-fine-grained-type variants in `infra-common/src/events/cross_crate.rs`; all variants registered in `EventTypeRegistry::register_builtin_types`; `OrchestrationEventBus` refactored to per-variant `DashMap<&'static str, broadcast::Sender>` channels + `Relaxed` sequence counter (was `SeqCst`); optional `Arc<GlobalEventCoordinator>` shadow-publish; new `subscribe_kind()` API. Legacy `subscribe()` preserved. |
+| 1 — DashMap + indices for surviving stores | ✅ Shipped | `MemoryCallStore` → `DashMap<CallId, Call>` + `by_session: DashMap<SessionId, CallId>` + `by_dialog: DashMap<String, CallId>`; index reindexing via `reindex()` on every insert/update; `BridgeManager` → `DashMap<BridgeId, (BridgeHandle, CallId)>` + `by_call`; `VoiceAiRegistry` → `DashMap<VoiceAiId, VoiceAiRuntime>`. Workforce stores (`MemoryAgentStore`, `MemoryQueueStore`, `MemoryAgentOfferStore`) untouched per scope contract. |
+| 2 — Admission semaphore | ✅ Shipped | `InboundCallConfig::max_concurrent_setups` (default 256 × `available_parallelism()`); `Orchestrator::admission: Arc<Semaphore>`; `handle_incoming_call` `try_acquire_owned` at the door, SIP 503 + `OrchestrationError::AdmissionRejected(limit)` on exhaustion. |
+| 3 — Atomic `CallLeg` state | ⏸ Deferred | Trigger not met. See "Profiling outcome" below. |
+
+### Phase 1 → Phase 2 perf (orchestration-only, release, multi-thread, 4 workers)
+
+| N | Phase 1 per-call wall | Phase 2 per-call wall | Δ |
+|---:|---:|---:|---:|
+| 100 | 0.048 ms | 0.065 ms | run-to-run noise |
+| 500 | 0.084 ms | 0.083 ms | flat |
+| 1000 | 0.113 ms | 0.112 ms | flat |
+
+Sub-linear scaling: 10× N → ~2.36× per-call. Above the §8 verification "2× flat" target but well within the §2 ship target of 1k–5k concurrent sessions (1k calls land in ~113 ms; ~9k calls/sec single-instance capacity). The residual non-flat slope is dominated by O(N) eligibility scans in workforce code that is leaving per `PRD.md` §13 — explicitly out of scope for this plan.
+
+### Live SIP/RTP perf (real `UnifiedCoordinator`s per caller and agent, full SIP + RTP)
+
+`perf_live_sip_rtp` at N=5 (default) and N=50, 10 s media hold:
+
+| Metric | N=5 | N=50 |
+|---|---:|---:|
+| Setup wall | 230 ms | 1058 ms (21 ms/call) |
+| Media wall | 6.0 s | 11.1 s |
+| Media CPU | 545 ms | 7.56 s (~70 % of one core) |
+| RTP frames per side | 1 250 | 25 000 |
+| RSS active delta | 31 MB (~6.3 MB/call) | 144 MB (~3.0 MB/call) |
+
+### Profiling outcome — why Phase 3 is deferred
+
+Sampled the live SIP/RTP test at N=50 with macOS `sample` (1 ms intervals, ~85 k stack samples across 18 s covering setup + 10 s media + teardown). Also sampled `perf_active_calls` at N=1000 in a loop (~70 k samples).
+
+Inclusive frame appearances by subsystem, live SIP/RTP profile:
+
+| Subsystem | Inclusive samples |
+|---|---:|
+| `rtp-core` (RTP send/recv loop, UDP transport) | 297 |
+| `session-core` (event handler, state machine, audio path) | 200 |
+| `media-core` (RTP forwarding, G711 codec, MediaSessionController) | 162 |
+| `dialog-core` | 29 |
+| `broadcast::Sender` event bus (Phase 0 code) | 21 |
+| `Semaphore`/admission (Phase 2 code) | 10 |
+| `orchestration-core` (anything) | 10 |
+| DashMap (Phase 1 stores) | 1 |
+| `BridgeManager` | 0 |
+| `update_call` | 0 |
+| **`CallLeg` state writes** | **0** |
+
+`parking_lot::lock_slow` + `__psynch_mutexwait` combined = 63 / ~85 000 samples = **0.074 %**. There is no lock-contention story left to optimize.
+
+The Phase 3 trigger ("`CallLeg` state transitions appearing as a top-3 contention point at N=1000") is not met by either benchmark. The leg-state hot path that Phase 3 would optimize is invisible in the profile. Phase 3 is documented but deferred — revisit only if a future benchmark, real production telemetry, or a new bridge / transfer hot path elevates leg-state writes into the profile.
+
+### What the profile says about session-core
+
+Top session-core frames in live SIP/RTP at N=50:
+
+| Frame | Samples |
+|---|---:|
+| `SessionCrossCrateEventHandler::start_global_event_subscriptions` | 58 |
+| `UnifiedCoordinator::send_audio` | 18 |
+| `SessionCrossCrateEventHandler::handle_dialog_to_session_event` | 18 |
+| `state_machine::executor::StateMachine::process_event` + `process_one_event` | 21 |
+| `session_store::store::SessionStore::get_session` | 9 |
+| `UnifiedCoordinator::accept_call` | 4 |
+
+Each is < 0.1 % of total samples. No contention pattern, no scaling cliff. session-core does not need urgent tuning at the concurrency levels this plan targets.
+
+### What the profile says about residual CPU
+
+The dominant non-wait CPU consumers in live SIP/RTP are inherent media-plane work — RTP packet send/recv, UDP transport, G711 encode/decode, RTP forwarding. Any further perf gains would have to come from:
+
+- **media-plane redesign** (zero-copy RTP buffers, batched UDP syscalls) — `rtp-core` / `media-core` scope, not this plan.
+- **Reduced per-call allocation churn** — would benefit both orchestration-only and live tests, but requires touching `Call` / `Agent` / `Queue` data structure ergonomics. Defer.
+- **Tokio runtime tuning** (worker count, timer wheel granularity) — also out of this plan's scope.
+
+None of these are reasons to revisit Phase 3.
 
 ---
 

@@ -3,8 +3,9 @@ use crate::ids::*;
 use crate::types::*;
 use async_trait::async_trait;
 use chrono::Utc;
+use dashmap::DashMap;
 use rvoip_session_core::SessionId;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -64,56 +65,104 @@ pub type SharedAgentStore = Arc<dyn AgentStore>;
 pub type SharedQueueStore = Arc<dyn QueueStore>;
 pub type SharedAgentOfferStore = Arc<dyn AgentOfferStore>;
 
+/// In-memory call store backed by `DashMap` plus secondary indices.
+///
+/// - `calls`: primary CallId → Call store.
+/// - `by_session`: SIP `SessionId` → `CallId` for O(1) `get_call_by_session`.
+///   One Call has many legs and therefore many SessionIds; each leg's
+///   session_id maps back to the same CallId.
+/// - `by_dialog`: SIP Call-ID string → `CallId` — populated when
+///   `Call::sip_call_id` is set. Pays its cost on writes; readers will be
+///   added during the rvoip-sip migration when correlating wire-level
+///   dialog identifiers becomes a hot path.
+///
+/// Indices are maintained on every `insert_call` / `update_call` by
+/// diffing the previous stored state against the new one. There is no
+/// per-key serialization beyond the entry-level lock — callers that
+/// read-modify-write a Call must coordinate sequentially per CallId, the
+/// same invariant the prior `RwLock<HashMap>` implementation imposed.
 #[derive(Default)]
 pub struct MemoryCallStore {
-    calls: RwLock<HashMap<CallId, Call>>,
+    calls: DashMap<CallId, Call>,
+    by_session: DashMap<SessionId, CallId>,
+    by_dialog: DashMap<String, CallId>,
 }
 
 impl MemoryCallStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Reindex secondary maps after a primary `insert`. Called with the
+    /// just-stored Call and the previously-stored Call (if any). Adds new
+    /// session/dialog entries and removes ones that are no longer present.
+    fn reindex(&self, new_call: &Call, old: Option<Call>) {
+        for leg in &new_call.legs {
+            self.by_session
+                .insert(leg.session_id.clone(), new_call.id.clone());
+        }
+        if let Some(sip_id) = &new_call.sip_call_id {
+            self.by_dialog.insert(sip_id.clone(), new_call.id.clone());
+        }
+
+        if let Some(old) = old {
+            let new_sessions: HashSet<&SessionId> =
+                new_call.legs.iter().map(|leg| &leg.session_id).collect();
+            for old_leg in &old.legs {
+                if !new_sessions.contains(&old_leg.session_id) {
+                    // Only remove if the index still points to this CallId.
+                    // Guards against the (unlikely) case where another call
+                    // re-claimed the SessionId before this update landed.
+                    self.by_session
+                        .remove_if(&old_leg.session_id, |_, owner| owner == &new_call.id);
+                }
+            }
+            if old.sip_call_id != new_call.sip_call_id {
+                if let Some(old_sip_id) = &old.sip_call_id {
+                    self.by_dialog
+                        .remove_if(old_sip_id, |_, owner| owner == &new_call.id);
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]
 impl CallStore for MemoryCallStore {
     async fn insert_call(&self, call: Call) -> Result<()> {
-        self.calls.write().await.insert(call.id.clone(), call);
+        let old = self.calls.insert(call.id.clone(), call.clone());
+        self.reindex(&call, old);
         Ok(())
     }
 
     async fn update_call(&self, call: Call) -> Result<()> {
-        self.calls.write().await.insert(call.id.clone(), call);
+        let old = self.calls.insert(call.id.clone(), call.clone());
+        self.reindex(&call, old);
         Ok(())
     }
 
     async fn get_call(&self, id: &CallId) -> Result<Option<Call>> {
-        Ok(self.calls.read().await.get(id).cloned())
+        Ok(self.calls.get(id).map(|entry| entry.clone()))
     }
 
     async fn get_call_by_session(&self, session_id: &SessionId) -> Result<Option<Call>> {
-        Ok(self
-            .calls
-            .read()
-            .await
-            .values()
-            .find(|call| call.legs.iter().any(|leg| &leg.session_id == session_id))
-            .cloned())
+        let Some(call_id) = self.by_session.get(session_id).map(|entry| entry.clone()) else {
+            return Ok(None);
+        };
+        Ok(self.calls.get(&call_id).map(|entry| entry.clone()))
     }
 
     async fn list_active_calls(&self) -> Result<Vec<Call>> {
         Ok(self
             .calls
-            .read()
-            .await
-            .values()
-            .filter(|call| {
+            .iter()
+            .filter(|entry| {
                 !matches!(
-                    call.status,
+                    entry.value().status,
                     CallStatus::Ended | CallStatus::Failed | CallStatus::Abandoned
                 )
             })
-            .cloned()
+            .map(|entry| entry.value().clone())
             .collect())
     }
 }

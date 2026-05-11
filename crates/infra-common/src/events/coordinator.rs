@@ -16,7 +16,7 @@ use crate::events::system::EventSystem;
 use crate::events::types::{Event, EventHandler, EventPriority};
 use crate::planes::{LayerTaskManager, PlaneConfig, PlaneRouter, PlaneType};
 
-use crate::events::cross_crate::{CrossCrateEvent, EventTypeId};
+use crate::events::cross_crate::{CrossCrateEvent, EventTypeId, OrchestrationCrossCrateEvent};
 
 use super::config::{DeploymentConfig, EventCoordinatorConfig};
 use super::transport::NetworkTransport;
@@ -550,7 +550,20 @@ impl EventTypeRegistry {
             },
         );
 
-        // Add more cross-crate event types as needed
+        // Orchestration-plane events: one entry per fine-grained variant so
+        // the coordinator allocates a separate broadcast channel per variant.
+        for &event_type in OrchestrationCrossCrateEvent::ALL_EVENT_TYPES {
+            self.register_event_type(
+                event_type,
+                EventTypeInfo {
+                    event_type,
+                    source_plane: PlaneType::Signaling,
+                    target_plane: PlaneType::Signaling,
+                    priority: EventPriority::Normal,
+                    description: format!("Orchestration-plane event: {event_type}"),
+                },
+            );
+        }
     }
 }
 

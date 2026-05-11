@@ -49,4 +49,7 @@ pub enum OrchestrationError {
 
     #[error("invalid state: {0}")]
     InvalidState(String),
+
+    #[error("admission rejected: orchestrator at concurrency limit ({0} setups in flight)")]
+    AdmissionRejected(usize),
 }

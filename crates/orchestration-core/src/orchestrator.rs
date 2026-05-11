@@ -2,6 +2,8 @@ use crate::assignment::{Assignment, AssignmentManager};
 use crate::config::OrchestrationConfig;
 use crate::error::{OrchestrationError, Result};
 use crate::events::{OrchestrationEvent, OrchestrationEventBus};
+use dashmap::DashMap;
+use rvoip_infra_common::events::coordinator::global_coordinator;
 use crate::ids::*;
 use crate::store::*;
 use crate::traits::{
@@ -17,29 +19,46 @@ use rvoip_session_core::{
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tokio::time::{sleep, timeout, Instant};
 
+/// Per-process registry of active media bridges.
+///
+/// Backed by `DashMap` for lock-free concurrent reads/writes plus a
+/// secondary `by_call` index for O(1) "which bridge is this call in?"
+/// lookups (used by future hangup / teardown paths). The primary map
+/// stores the handle alongside the owning `CallId` so `remove` can keep
+/// both indices coherent without an extra parameter.
 #[derive(Clone, Default)]
 pub struct BridgeManager {
-    bridges: Arc<RwLock<HashMap<BridgeId, BridgeHandle>>>,
+    bridges: Arc<DashMap<BridgeId, (BridgeHandle, CallId)>>,
+    by_call: Arc<DashMap<CallId, BridgeId>>,
 }
 
 impl BridgeManager {
-    pub async fn insert(&self, bridge_id: BridgeId, handle: BridgeHandle) {
-        self.bridges.write().await.insert(bridge_id, handle);
+    pub fn insert(&self, bridge_id: BridgeId, call_id: CallId, handle: BridgeHandle) {
+        self.by_call.insert(call_id.clone(), bridge_id.clone());
+        self.bridges.insert(bridge_id, (handle, call_id));
     }
 
-    pub async fn remove(&self, bridge_id: &BridgeId) -> Option<BridgeHandle> {
-        self.bridges.write().await.remove(bridge_id)
+    pub fn remove(&self, bridge_id: &BridgeId) -> Option<BridgeHandle> {
+        let (_, (handle, call_id)) = self.bridges.remove(bridge_id)?;
+        self.by_call
+            .remove_if(&call_id, |_, owner| owner == bridge_id);
+        Some(handle)
     }
 
-    pub async fn len(&self) -> usize {
-        self.bridges.read().await.len()
+    /// O(1) lookup: which active bridge (if any) is this call in?
+    pub fn bridge_for_call(&self, call_id: &CallId) -> Option<BridgeId> {
+        self.by_call.get(call_id).map(|entry| entry.clone())
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.len().await == 0
+    pub fn len(&self) -> usize {
+        self.bridges.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bridges.is_empty()
     }
 }
 
@@ -87,18 +106,23 @@ async fn next_terminal_event(events: &mut EventReceiver) -> Option<String> {
     None
 }
 
+/// Per-process registry of voice-AI runtimes keyed by `VoiceAiId`.
+///
+/// Backed by `DashMap` — reads and writes are lock-free at the entry level.
+/// Will move to `rvoip-harness` post-migration; the access pattern is
+/// preserved so the move is mechanical.
 #[derive(Clone, Default)]
 pub struct VoiceAiRegistry {
-    runtimes: Arc<RwLock<HashMap<VoiceAiId, VoiceAiRuntime>>>,
+    runtimes: Arc<DashMap<VoiceAiId, VoiceAiRuntime>>,
 }
 
 impl VoiceAiRegistry {
-    pub async fn insert(&self, id: VoiceAiId, runtime: VoiceAiRuntime) {
-        self.runtimes.write().await.insert(id, runtime);
+    pub fn insert(&self, id: VoiceAiId, runtime: VoiceAiRuntime) {
+        self.runtimes.insert(id, runtime);
     }
 
-    pub async fn get(&self, id: &VoiceAiId) -> Option<VoiceAiRuntime> {
-        self.runtimes.read().await.get(id).cloned()
+    pub fn get(&self, id: &VoiceAiId) -> Option<VoiceAiRuntime> {
+        self.runtimes.get(id).map(|entry| entry.clone())
     }
 }
 
@@ -113,6 +137,12 @@ pub struct Orchestrator {
     bridge_manager: BridgeManager,
     voice_ai: VoiceAiRegistry,
     events: OrchestrationEventBus,
+    /// Bounds inbound call setups in flight. A new INVITE acquires a permit
+    /// at the door of `handle_incoming_call`; if the semaphore is exhausted
+    /// the call is rejected with SIP 503 instead of joining a death spiral.
+    /// Permit is released when `handle_incoming_call` returns (success or
+    /// failure).
+    admission: Arc<Semaphore>,
     config: OrchestrationConfig,
 }
 
@@ -167,6 +197,23 @@ impl Orchestrator {
     }
 
     pub async fn handle_incoming_call(&self, incoming: IncomingCallInfo) -> Result<CallId> {
+        // Admission gate — try to acquire a permit at the door. If the
+        // orchestrator is at its setup-concurrency limit, reject SIP 503
+        // before any work is done. The permit is held for the duration of
+        // this function and released on return.
+        let _permit = match self.admission.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(_) => {
+                let limit = self.config.inbound.max_concurrent_setups;
+                if let Some(coordinator) = &self.coordinator {
+                    let _ = coordinator
+                        .reject_call(&incoming.session_id, 503, "Service Unavailable")
+                        .await;
+                }
+                return Err(OrchestrationError::AdmissionRejected(limit));
+            }
+        };
+
         let call = self.create_inbound_call(&incoming);
         let call_id = call.id.clone();
         let from_status = call.status;
@@ -518,7 +565,7 @@ impl OrchestratorBuilder {
 
         let voice_ai = VoiceAiRegistry::default();
         for (id, runtime) in self.voice_ai_runtimes {
-            voice_ai.insert(id, runtime).await;
+            voice_ai.insert(id, runtime);
         }
 
         Ok(Orchestrator {
@@ -538,7 +585,11 @@ impl OrchestratorBuilder {
                 .unwrap_or_else(|| Arc::new(StaticContactResolver)),
             bridge_manager: BridgeManager::default(),
             voice_ai,
-            events: OrchestrationEventBus::new(self.config.events.channel_capacity),
+            events: OrchestrationEventBus::with_coordinator(
+                self.config.events.channel_capacity,
+                global_coordinator().await.clone(),
+            ),
+            admission: Arc::new(Semaphore::new(self.config.inbound.max_concurrent_setups)),
             config: self.config,
         })
     }
@@ -1017,8 +1068,7 @@ impl OrchestrationHandle {
             .map_err(|error| OrchestrationError::BridgeFailed(error.to_string()))?;
         let bridge_id = BridgeId::new();
         self.bridge_manager
-            .insert(bridge_id.clone(), bridge_handle)
-            .await;
+            .insert(bridge_id.clone(), offer.call_id.clone(), bridge_handle);
         self.accept_offer(offer_id).await?;
         self.mark_bridge_started(&offer.call_id, &caller_leg.id, &agent_leg.id, &bridge_id)
             .await?;
@@ -1319,7 +1369,7 @@ impl OrchestrationHandle {
     }
 
     pub async fn active_bridge_count(&self) -> usize {
-        self.bridge_manager.len().await
+        self.bridge_manager.len()
     }
 
     async fn transition_call(&self, call_id: CallId, to: CallStatus) -> Result<()> {
@@ -1451,7 +1501,7 @@ impl OrchestrationHandle {
         agent_leg_id: &CallLegId,
         reason: String,
     ) -> Result<()> {
-        let _ = self.bridge_manager.remove(bridge_id).await;
+        let _ = self.bridge_manager.remove(bridge_id);
 
         let mut call = self
             .calls
