@@ -262,6 +262,11 @@ pub trait SipRequestOptions: Sized {
     /// Inspect headers staged so far — useful when carry-through and
     /// custom-author logic interleave.
     fn staged_headers(&self) -> &[TypedHeader];
+
+    /// Strict-vs-flexible policy. Defaults to `Config.default_builder_strictness`
+    /// (which defaults to Strict). See "Strict vs flexible outbound mode"
+    /// under "Layer-audit refinements" for semantics.
+    fn with_strictness(self, mode: BuilderStrictness) -> Self;
 }
 
 pub struct HeaderPolicyViolation {
@@ -909,6 +914,8 @@ Migrating their call sites is a follow-up.
 - `crates/rvoip-sip/tests/response_builders_integration.rs`
 - `crates/rvoip-sip/tests/b2bua_carry_through_integration.rs`
 - `crates/rvoip-sip/tests/forbidden_header_guard_integration.rs`
+- `crates/rvoip-sip/tests/builder_strictness_integration.rs`
+- `crates/rvoip-sip/tests/config_builder_coexistence.rs`
 
 **Modified — `infra-common` (Phase E only, additive)**
 
@@ -1046,12 +1053,25 @@ End-to-end test plan, run in order; each must pass before the next:
     carry-through correctly drops `Via`, `CSeq`, `Call-ID`,
     `Max-Forwards`, `Content-Length` and reports them in
     `HeaderCarryThroughReport.skipped`
-12. `cargo test -p rvoip-sip` — full suite, including the legacy
+12. `cargo test -p rvoip-sip --test builder_strictness_integration` —
+    `BuilderStrictness::Strict` rejects a `with_header(Authorization(...))`
+    on `RegisterBuilder` with `Err(UseDedicatedSetter("with_credentials"))`;
+    `BuilderStrictness::Lenient` silently drops it with a warn log and
+    proceeds; both modes reject `with_header(CallId(...))` as hard
+    `Err(StackManaged)`. Adds a guard test that the wire-level
+    `validate_wire_request` still runs regardless of `BuilderStrictness`
+    (force an internally malformed body and assert it fails at the
+    transaction layer).
+13. `cargo test -p rvoip-sip --test config_builder_coexistence` —
+    the three worked examples from "Config + builder coexistence"
+    (pure Config, pure builder, mixed) all produce wire output that
+    matches an expected fixture under `tests/fixtures/`.
+14. `cargo test -p rvoip-sip` — full suite, including the legacy
     `pai_integration.rs` and `extra_headers_integration.rs` (proves
     `#[deprecated]` wrappers still work)
-13. `cargo build --examples -p rvoip-sip` — examples still compile
+15. `cargo build --examples -p rvoip-sip` — examples still compile
     despite emitting deprecation warnings
-14. Manual: open `target/doc/rvoip_sip/index.html`. The crate-level
+16. Manual: open `target/doc/rvoip_sip/index.html`. The crate-level
     `//!` now has a "Gateway / B2BUA / SBC Authoring" section with the
     §8 example and a header-classification reference table (StackManaged
     / MethodShaped / ApplicationControlled). Each new builder type page
