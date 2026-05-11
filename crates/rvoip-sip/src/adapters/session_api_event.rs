@@ -1,4 +1,4 @@
-//! Cross-crate event wrapper for session-core user-facing (API) events.
+//! Cross-crate event wrapper for rvoip-sip user-facing (API) events.
 //!
 //! Session API events are published to the `"session_to_app"` channel on the
 //! [`GlobalEventCoordinator`](rvoip_infra_common::events::coordinator::GlobalEventCoordinator).
@@ -23,7 +23,7 @@ use std::sync::Arc;
 /// ```
 pub const SESSION_TO_APP_CHANNEL: &str = "session_to_app";
 
-/// Wraps a session-core [`Event`] for publishing through the
+/// Wraps an rvoip-sip [`Event`] for publishing through the
 /// [`GlobalEventCoordinator`](rvoip_infra_common::events::coordinator::GlobalEventCoordinator).
 ///
 /// [`Event`]: crate::api::events::Event

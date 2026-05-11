@@ -3,6 +3,9 @@ mod common;
 use common::{available_ai, fake_runtime, say, support_call};
 use rvoip_orchestration_core::prelude::*;
 
+#[deprecated(
+    note = "Workforce/queue orchestration moves out of rvoip in PRD §13.3 step 7 — to Thelve or your own consumer. Voice-AI runtime moves to rvoip-harness in PRD §13.3 step 6. The SIP-only primitives this example exercises (UnifiedCoordinator, BridgeManager) live on at rvoip_sip::api / rvoip_core::bridge."
+)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let queue_id = QueueId::from("ai-support");

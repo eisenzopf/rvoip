@@ -1,4 +1,4 @@
-//! Callback types and infrastructure for session-core
+//! Callback types and infrastructure for rvoip-sip
 //!
 //! This module defines the callback system that allows developers to handle
 //! SIP events (like REFER) manually instead of relying on automatic processing.

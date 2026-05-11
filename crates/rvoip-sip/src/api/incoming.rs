@@ -255,7 +255,7 @@ impl IncomingCall {
     /// Redirect the caller to another URI with **302 Moved Temporarily**.
     ///
     /// This sends a SIP 3xx response with a `Contact` header. It is a
-    /// session-core primitive; higher-level B2BUA/routing layers decide
+    /// rvoip-sip primitive; higher-level B2BUA/routing layers decide
     /// whether redirect is the right policy for a particular call.
     ///
     /// # Examples
@@ -432,7 +432,7 @@ impl IncomingCallGuard {
         &self.call_id
     }
 
-    /// Mark this deferred call as resolved because session-core already
+    /// Mark this deferred call as resolved because rvoip-sip already
     /// observed a terminal event for it. This prevents the drop safety net
     /// from sending a late rejection for a call that no longer exists.
     pub(crate) fn resolve_without_response(&self) {
@@ -510,7 +510,7 @@ impl IncomingCallGuard {
     /// Reject the call and wait for the matching terminal event.
     ///
     /// This is the deterministic variant for queues and tests that need to
-    /// know when the rejection has been observed by session-core's event
+    /// know when the rejection has been observed by rvoip-sip's event
     /// stream. The event subscription is opened before the reject is sent.
     ///
     /// # Examples

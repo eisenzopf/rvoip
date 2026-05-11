@@ -3,6 +3,9 @@ mod common;
 use common::{available_human, support_call};
 use rvoip_orchestration_core::prelude::*;
 
+#[deprecated(
+    note = "Workforce/queue orchestration moves out of rvoip in PRD §13.3 step 7 — to Thelve or your own consumer. The SIP-only primitives this example exercises (UnifiedCoordinator, BridgeManager) live on at rvoip_sip::api / rvoip_core::bridge."
+)]
 #[tokio::main]
 async fn main() -> Result<()> {
     let queue_id = QueueId::from("support");

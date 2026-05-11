@@ -113,9 +113,8 @@ pub use device::{AudioDeviceManager, AudioDevice};
 pub use pipeline::AudioPipeline;
 
 
-// Re-export integration types from session-core and rtp-core
-pub use rvoip_session_core::api::types::SessionId;
-pub use rvoip_session_core::api::MediaControl;
+// Re-export integration types from rvoip-sip and rtp-core
+pub use rvoip_sip::api::types::SessionId;
 pub use rvoip_rtp_core::packet::RtpPacket;
 
 /// Audio-core library version

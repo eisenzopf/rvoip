@@ -1,6 +1,6 @@
 # RVoIP Softphone Example
 
-Terminal SIP softphone built only on the `session-core::Endpoint` facade. It
+Terminal SIP softphone built only on the `rvoip_sip::Endpoint` facade. It
 uses `Endpoint` for SIP signalling, registration, call control, audio frames,
 DTMF, hold/resume, transfer, SRTP, and NAT/STUN settings. The example owns only
 the CLI, terminal UI, and CPAL device I/O.
@@ -10,7 +10,7 @@ the CLI, terminal UI, and CPAL device I/O.
 Print the two commands for a loopback call:
 
 ```sh
-./crates/session-core/examples/sip_client/run_loopback.sh
+./crates/rvoip-sip/examples/sip_client/run_loopback.sh
 ```
 
 Or run them directly in two terminals:
@@ -216,9 +216,9 @@ deterministic tone checks.
 ## Network Notes
 
 - Open the SIP TCP/UDP bind port, commonly `5060` or the selected preset port.
-- Open the RTP range used by the config, defaulting to session-core's media
+- Open the RTP range used by the config, defaulting to rvoip-sip's media
   range when not specified.
 - When binding to `0.0.0.0`, pass `--advertise` with the LAN address peers can
   actually reach.
-- STUN here is session-core's best-effort advertised media address support, not
+- STUN here is rvoip-sip's best-effort advertised media address support, not
   full ICE/WebRTC traversal.

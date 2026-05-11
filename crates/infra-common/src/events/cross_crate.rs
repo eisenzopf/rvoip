@@ -48,6 +48,14 @@ pub enum RvoipCrossCrateEvent {
     /// Per-fine-grained-variant `event_type` so subscribers get separate
     /// per-type broadcast channels in `GlobalEventCoordinator`.
     Orchestration(OrchestrationCrossCrateEvent),
+
+    /// rvoip-core spine events (cross-transport `Connection*` / `Bridge*` /
+    /// `Conversation*` / `Session*` vocabulary). Lives on its own variant so
+    /// the rvoip-core spine doesn't piggy-back on the legacy `Orchestration`
+    /// variant (which is workforce-flavored and disappears with
+    /// orchestration-core in PRD §13.3 step 7). Per-fine-grained-variant
+    /// `event_type` per the same pattern as `Orchestration`.
+    Core(RvoipCoreCrossCrateEvent),
 }
 
 /// Trait for cross-crate events
@@ -74,6 +82,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToRtp(_) => "media_to_rtp",
             RvoipCrossCrateEvent::RtpToMedia(_) => "rtp_to_media",
             RvoipCrossCrateEvent::Orchestration(inner) => inner.event_type(),
+            RvoipCrossCrateEvent::Core(inner) => inner.event_type(),
         }
     }
 
@@ -89,6 +98,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToRtp(_) => PlaneType::Media,
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Transport,
             RvoipCrossCrateEvent::Orchestration(_) => PlaneType::Signaling,
+            RvoipCrossCrateEvent::Core(_) => PlaneType::Signaling,
         }
     }
 
@@ -104,6 +114,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToRtp(_) => PlaneType::Transport,
             RvoipCrossCrateEvent::RtpToMedia(_) => PlaneType::Media,
             RvoipCrossCrateEvent::Orchestration(_) => PlaneType::Signaling,
+            RvoipCrossCrateEvent::Core(_) => PlaneType::Signaling,
         }
     }
 
@@ -119,6 +130,7 @@ impl CrossCrateEvent for RvoipCrossCrateEvent {
             RvoipCrossCrateEvent::MediaToRtp(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::RtpToMedia(_) => EventPriority::Normal,
             RvoipCrossCrateEvent::Orchestration(_) => EventPriority::Normal,
+            RvoipCrossCrateEvent::Core(_) => EventPriority::Normal,
         }
     }
 
@@ -239,6 +251,10 @@ impl RoutableEvent for RvoipCrossCrateEvent {
             // Orchestration events use call_id, not SIP session_id, so no
             // session-bound routing is offered. Subscribers route by event_type.
             RvoipCrossCrateEvent::Orchestration(_) => None,
+            // rvoip-core spine events use cross-transport ConnectionId /
+            // SessionId / ConversationId vocabulary, not the SIP session_id
+            // dispatched by RoutableEvent. Subscribers route by event_type.
+            RvoipCrossCrateEvent::Core(_) => None,
         }
     }
 }
@@ -1369,6 +1385,212 @@ impl OrchestrationCrossCrateEvent {
         "orchestration.transfer_completed",
         "orchestration.call_ended",
         "orchestration.call_failed",
+    ];
+}
+
+// =============================================================================
+// RVOIP-CORE SPINE EVENTS
+// =============================================================================
+
+/// Wire-format rvoip-core spine events for cross-crate observability.
+///
+/// Mirrors `rvoip_core::events::Event` with primitive payloads (string IDs,
+/// no rich struct payloads) so the wire format does not pull rvoip-core types
+/// into infra-common. Each variant maps to a distinct `event_type()` string
+/// so `GlobalEventCoordinator` allocates a separate broadcast channel per
+/// variant (a slow consumer of one variant does not lag others).
+///
+/// In-process subscribers within rvoip-core continue to use the rich, typed
+/// `Event` API; this wire form exists for cross-crate observers (logging
+/// sinks, harness, telemetry, the rvoip facade).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum RvoipCoreCrossCrateEvent {
+    // --- Conversation lifecycle ---
+    ConversationOpened { conversation_id: String },
+    ConversationClosed { conversation_id: String },
+
+    // --- Session lifecycle ---
+    SessionStarted { session_id: String, conversation_id: String },
+    SessionEnded { session_id: String },
+    SessionFailed { session_id: String, detail: String },
+
+    // --- Connection lifecycle ---
+    ConnectionInbound { connection_id: String },
+    ConnectionOutbound { connection_id: String },
+    ConnectionConnected { connection_id: String },
+    ConnectionProgress { connection_id: String, kind: String },
+    ConnectionEnded { connection_id: String, reason: String },
+    ConnectionFailed { connection_id: String, detail: String },
+
+    // --- Bridge lifecycle ---
+    ConnectionsBridged { bridge_id: String, a: String, b: String },
+    ConnectionsUnbridged { bridge_id: String },
+
+    // --- Transfer ---
+    ConnectionTransferred { connection_id: String, target: String },
+
+    // --- Participant lifecycle ---
+    ParticipantJoined { session_id: String, participant_id: String },
+    ParticipantLeft { session_id: String, participant_id: String },
+
+    // --- AI / listener attach ---
+    AiAttached {
+        connection_id: String,
+        attachment_id: String,
+        provider_ref: String,
+    },
+    AiDetached { attachment_id: String },
+    ListenerAttached { listener_id: String },
+    ListenerDetached { listener_id: String },
+
+    // --- Messaging ---
+    MessageReceived { message_id: String, conversation_id: String },
+    MessageSent { message_id: String, conversation_id: String },
+    MessageDelivered { message_id: String },
+    MessageRead { message_id: String },
+
+    // --- DTMF ---
+    DtmfReceived { connection_id: String, digits: String },
+
+    // --- Transcription / recording ---
+    TranscriptTurn {
+        stream_id: String,
+        speaker: Option<String>,
+        text: String,
+        confidence: f32,
+        is_final: bool,
+        assigned_provider: Option<String>,
+    },
+    RecordingStarted { recording_id: String },
+    RecordingStopped { recording_id: String },
+    RecordingComplete { recording_id: String, sink: String },
+
+    // --- vCon ---
+    VconReady { session_id: String, handle_url: String, content_hash: String },
+    VconRedacted {
+        session_id: String,
+        old_url: String,
+        new_url: String,
+    },
+
+    // --- Identity ---
+    IdentityAssuranceChanged {
+        connection_id: String,
+        identity_id: Option<String>,
+    },
+
+    // --- Registration ---
+    RegistrationChanged { aor: String },
+    RegistrationHeartbeat { aor: String },
+
+    // --- Observability ---
+    CapacityReport {
+        tenant_id: Option<String>,
+        active_connections: u64,
+        active_bridges: u64,
+        admission_in_use: u64,
+    },
+    UsageRecord { tenant_id: String, kind: String, units: u64 },
+    Anomaly {
+        kind: String,
+        connection_id: Option<String>,
+        detail: String,
+    },
+    MediaQuality {
+        connection_id: String,
+        jitter_ms: f32,
+        packet_loss_pct: f32,
+        mos: Option<f32>,
+    },
+}
+
+impl RvoipCoreCrossCrateEvent {
+    /// Per-variant event type string, used by `GlobalEventCoordinator` to
+    /// allocate a separate broadcast channel per variant.
+    pub fn event_type(&self) -> EventTypeId {
+        match self {
+            Self::ConversationOpened { .. } => "rvoip_core.conversation_opened",
+            Self::ConversationClosed { .. } => "rvoip_core.conversation_closed",
+            Self::SessionStarted { .. } => "rvoip_core.session_started",
+            Self::SessionEnded { .. } => "rvoip_core.session_ended",
+            Self::SessionFailed { .. } => "rvoip_core.session_failed",
+            Self::ConnectionInbound { .. } => "rvoip_core.connection_inbound",
+            Self::ConnectionOutbound { .. } => "rvoip_core.connection_outbound",
+            Self::ConnectionConnected { .. } => "rvoip_core.connection_connected",
+            Self::ConnectionProgress { .. } => "rvoip_core.connection_progress",
+            Self::ConnectionEnded { .. } => "rvoip_core.connection_ended",
+            Self::ConnectionFailed { .. } => "rvoip_core.connection_failed",
+            Self::ConnectionsBridged { .. } => "rvoip_core.connections_bridged",
+            Self::ConnectionsUnbridged { .. } => "rvoip_core.connections_unbridged",
+            Self::ConnectionTransferred { .. } => "rvoip_core.connection_transferred",
+            Self::ParticipantJoined { .. } => "rvoip_core.participant_joined",
+            Self::ParticipantLeft { .. } => "rvoip_core.participant_left",
+            Self::AiAttached { .. } => "rvoip_core.ai_attached",
+            Self::AiDetached { .. } => "rvoip_core.ai_detached",
+            Self::ListenerAttached { .. } => "rvoip_core.listener_attached",
+            Self::ListenerDetached { .. } => "rvoip_core.listener_detached",
+            Self::MessageReceived { .. } => "rvoip_core.message_received",
+            Self::MessageSent { .. } => "rvoip_core.message_sent",
+            Self::MessageDelivered { .. } => "rvoip_core.message_delivered",
+            Self::MessageRead { .. } => "rvoip_core.message_read",
+            Self::DtmfReceived { .. } => "rvoip_core.dtmf_received",
+            Self::TranscriptTurn { .. } => "rvoip_core.transcript_turn",
+            Self::RecordingStarted { .. } => "rvoip_core.recording_started",
+            Self::RecordingStopped { .. } => "rvoip_core.recording_stopped",
+            Self::RecordingComplete { .. } => "rvoip_core.recording_complete",
+            Self::VconReady { .. } => "rvoip_core.vcon_ready",
+            Self::VconRedacted { .. } => "rvoip_core.vcon_redacted",
+            Self::IdentityAssuranceChanged { .. } => "rvoip_core.identity_assurance_changed",
+            Self::RegistrationChanged { .. } => "rvoip_core.registration_changed",
+            Self::RegistrationHeartbeat { .. } => "rvoip_core.registration_heartbeat",
+            Self::CapacityReport { .. } => "rvoip_core.capacity_report",
+            Self::UsageRecord { .. } => "rvoip_core.usage_record",
+            Self::Anomaly { .. } => "rvoip_core.anomaly",
+            Self::MediaQuality { .. } => "rvoip_core.media_quality",
+        }
+    }
+
+    /// All rvoip-core event-type strings, in declaration order. Used by
+    /// `EventTypeRegistry::register_builtin_types` to register every variant.
+    pub const ALL_EVENT_TYPES: &'static [EventTypeId] = &[
+        "rvoip_core.conversation_opened",
+        "rvoip_core.conversation_closed",
+        "rvoip_core.session_started",
+        "rvoip_core.session_ended",
+        "rvoip_core.session_failed",
+        "rvoip_core.connection_inbound",
+        "rvoip_core.connection_outbound",
+        "rvoip_core.connection_connected",
+        "rvoip_core.connection_progress",
+        "rvoip_core.connection_ended",
+        "rvoip_core.connection_failed",
+        "rvoip_core.connections_bridged",
+        "rvoip_core.connections_unbridged",
+        "rvoip_core.connection_transferred",
+        "rvoip_core.participant_joined",
+        "rvoip_core.participant_left",
+        "rvoip_core.ai_attached",
+        "rvoip_core.ai_detached",
+        "rvoip_core.listener_attached",
+        "rvoip_core.listener_detached",
+        "rvoip_core.message_received",
+        "rvoip_core.message_sent",
+        "rvoip_core.message_delivered",
+        "rvoip_core.message_read",
+        "rvoip_core.dtmf_received",
+        "rvoip_core.transcript_turn",
+        "rvoip_core.recording_started",
+        "rvoip_core.recording_stopped",
+        "rvoip_core.recording_complete",
+        "rvoip_core.vcon_ready",
+        "rvoip_core.vcon_redacted",
+        "rvoip_core.identity_assurance_changed",
+        "rvoip_core.registration_changed",
+        "rvoip_core.registration_heartbeat",
+        "rvoip_core.capacity_report",
+        "rvoip_core.usage_record",
+        "rvoip_core.anomaly",
+        "rvoip_core.media_quality",
     ];
 }
 

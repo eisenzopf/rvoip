@@ -1,7 +1,7 @@
 use crate::ids::*;
 use chrono::{DateTime, Utc};
-use rvoip_registrar_core::Transport;
-use rvoip_session_core::SessionId;
+use rvoip_sip_registrar::Transport;
+use rvoip_sip::SessionId;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -439,22 +439,7 @@ pub struct AgentEligibilityRequest {
     pub preferred_kind: Option<AgentKind>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ResolvedContact {
-    pub uri: String,
-    pub expires_at: Option<DateTime<Utc>>,
-    pub source: ContactSource,
-    pub transport: Option<Transport>,
-    pub received: Option<String>,
-    pub path: Vec<String>,
-    pub instance_id: Option<String>,
-    pub reg_id: Option<u32>,
-    pub flow_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ContactSource {
-    Static,
-    Registrar,
-    Custom,
-}
+// CARVE_PLAN step 8: ResolvedContact and ContactSource moved to
+// `rvoip_sip::server::contact_resolver` (lifted alongside the
+// ContactResolver trait + impls). Re-exported through `crate` for back-compat
+// in lib.rs.

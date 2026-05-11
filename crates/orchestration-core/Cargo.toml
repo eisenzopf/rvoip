@@ -16,10 +16,11 @@ description = "SIP-focused voice orchestration primitives for RVoIP"
 async-trait.workspace = true
 chrono.workspace = true
 dashmap.workspace = true
+rvoip-core.workspace = true
 rvoip-infra-common = { path = "../infra-common" }
 rvoip-media-core.workspace = true
-rvoip-registrar-core = { path = "../registrar-core" }
-rvoip-session-core = { path = "../session-core" }
+rvoip-sip-registrar = { path = "../rvoip-sip-registrar" }
+rvoip-sip = { path = "../rvoip-sip" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -52,7 +52,7 @@ fn map_sip_trace_session_id(
         })
 }
 
-/// Handler for processing cross-crate events in session-core
+/// Handler for processing cross-crate events in rvoip-sip
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct SessionCrossCrateEventHandler {
@@ -74,7 +74,7 @@ pub struct SessionCrossCrateEventHandler {
     /// Channel to send incoming call notifications
     incoming_call_tx: Option<mpsc::Sender<crate::types::IncomingCallInfo>>,
 
-    /// Internal state-machine event stream owned by session-core.
+    /// Internal state-machine event stream owned by rvoip-sip.
     state_machine_event_rx:
         Option<Arc<Mutex<mpsc::Receiver<crate::state_machine::executor::SessionEvent>>>>,
 

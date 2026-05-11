@@ -1012,7 +1012,7 @@ transitions:
     /// asserted by `default_yaml_loads_with_no_unknown_actions` together
     /// with the CI expectation that new YAML names accompany every new
     /// variant.
-    /// Compile-time invariant: session-core's `MediaSessionId` is the
+    /// Compile-time invariant: rvoip-sip's `MediaSessionId` is the
     /// same type as `rvoip_media_core::DialogId`. If this test stops
     /// compiling the alias has been broken — see Sprint 2.5 P5
     /// (`MEDIA_PLANE_LAYERING_FOLLOWUPS.md`).

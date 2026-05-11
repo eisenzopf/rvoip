@@ -240,9 +240,9 @@ impl AudioFrame {
         (sum_of_squares / self.samples.len() as f64).sqrt() as f32
     }
 
-    /// Convert to session-core AudioFrame format
-    pub fn to_session_core(&self) -> rvoip_session_core::api::types::AudioFrame {
-        rvoip_session_core::api::types::AudioFrame::new(
+    /// Convert to rvoip-sip AudioFrame format
+    pub fn to_session_core(&self) -> rvoip_sip::api::types::AudioFrame {
+        rvoip_sip::api::types::AudioFrame::new(
             self.samples.clone(),
             self.format.sample_rate,
             self.format.channels as u8, // Convert u16 to u8
@@ -250,9 +250,9 @@ impl AudioFrame {
         )
     }
 
-    /// Create from session-core AudioFrame
+    /// Create from rvoip-sip AudioFrame
     pub fn from_session_core(
-        frame: &rvoip_session_core::api::types::AudioFrame,
+        frame: &rvoip_sip::api::types::AudioFrame,
         frame_size_ms: u32,
     ) -> Self {
         let format = AudioFormat::new(

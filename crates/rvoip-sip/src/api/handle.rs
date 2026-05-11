@@ -53,7 +53,7 @@ pub enum TransferOutcome {
     ReferCompleted {
         /// Transfer call/session id.
         call_id: CallId,
-        /// Transfer target URI reported by session-core.
+        /// Transfer target URI reported by rvoip-sip.
         target: String,
         /// Final sipfrag status code.
         status_code: u16,
@@ -274,11 +274,11 @@ impl SessionHandle {
 
     /// Hang up the call.
     ///
-    /// Fire-and-forget: hands the teardown request to session-core and returns
+    /// Fire-and-forget: hands the teardown request to rvoip-sip and returns
     /// after the command is accepted. Established calls send BYE. Ringing or
     /// early-media calls send CANCEL and wait internally for the final INVITE
     /// outcome. If the outbound INVITE has not received a provisional response
-    /// yet, session-core records cancel intent and sends CANCEL only if/when
+    /// yet, rvoip-sip records cancel intent and sends CANCEL only if/when
     /// RFC 3261 makes it legal; a fast 200 OK on that path is ACKed and then
     /// immediately BYE-cleaned.
     ///
@@ -774,7 +774,7 @@ impl SessionHandle {
     /// *consultation* session's identity to produce it. The adapter
     /// URI-escapes the value when embedding it in the Refer-To target.
     ///
-    /// session-core only exposes the wire-level primitive. Linking an
+    /// rvoip-sip only exposes the wire-level primitive. Linking an
     /// original call to its consultation call, waiting on REFER NOTIFY
     /// progress, and tearing down the consultation after success are all
     /// orchestration concerns for a higher layer (application code or a

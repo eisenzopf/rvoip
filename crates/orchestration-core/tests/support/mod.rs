@@ -1,5 +1,5 @@
 use rvoip_orchestration_core::prelude::*;
-use rvoip_session_core::types::{DialogId, IncomingCallInfo, SessionId};
+use rvoip_sip::types::{DialogId, IncomingCallInfo, SessionId};
 
 pub mod perf;
 

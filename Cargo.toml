@@ -2,39 +2,38 @@
 resolver = "2"
 
 members = [
-    "crates/sip-core",
-    "crates/sip-transport",
-    # transaction-core has been merged into dialog-core
-    "crates/dialog-core",
+    # CARVE_PLAN step 12: SIP-family crates renamed for alphabetical
+    # clustering. `sip-core` / `sip-transport` keep their package names;
+    # `dialog-core` → `rvoip-sip-dialog` and `registrar-core` →
+    # `rvoip-sip-registrar` rename both directory and package.
+    "crates/rvoip-sip-core",
+    "crates/rvoip-sip-transport",
+    "crates/rvoip-sip-dialog",
+    "crates/rvoip-sip-registrar",
     "crates/rtp-core",
     "crates/media-core",
-    # Legacy session-core (v1) and session-core-v2 have been archived to
-    # session-core_old / session-core-v2_dead. The `session-core` below is
-    # the current session layer (previously versioned as v3). Downstream
-    # crates still written against the archived v1 API (audio-core,
-    # call-engine, client-core, sip-client, rvoip) are temporarily
-    # out-of-workspace until they're migrated onto this surface.
-    "crates/session-core",
+    "crates/rvoip-sip",
+    "crates/rvoip-core",
     "crates/orchestration-core",
     "crates/codec-core",
     "crates/infra-common",
-    "crates/registrar-core", "crates/users-core",
+    "crates/users-core",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
 # these are the packages that will be affected
 default-members = [
-    "crates/sip-core",
-    "crates/sip-transport",
-    # transaction-core has been merged into dialog-core
-    "crates/dialog-core",
+    "crates/rvoip-sip-core",
+    "crates/rvoip-sip-transport",
+    "crates/rvoip-sip-dialog",
+    "crates/rvoip-sip-registrar",
     "crates/rtp-core",
     "crates/media-core",
-    "crates/session-core",
+    "crates/rvoip-sip",
+    "crates/rvoip-core",
     "crates/orchestration-core",
     "crates/codec-core",
     "crates/infra-common",
-    "crates/registrar-core",
 ]
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
@@ -120,13 +119,17 @@ collapsible_else_if = "allow"
 
 [workspace.dependencies]
 # 🎯 INTERNAL CRATES - Include version for publishing to crates.io!
-rvoip-sip-core = { path = "crates/sip-core", version = "0.1.26" }
-rvoip-sip-transport = { path = "crates/sip-transport", version = "0.1.26" }
-# transaction-core has been merged into dialog-core
-rvoip-dialog-core = { path = "crates/dialog-core", version = "0.1.26" }
+rvoip-sip-core = { path = "crates/rvoip-sip-core", version = "0.1.26" }
+rvoip-sip-transport = { path = "crates/rvoip-sip-transport", version = "0.1.26" }
+rvoip-sip-dialog = { path = "crates/rvoip-sip-dialog", version = "0.1.26" }
+rvoip-sip-registrar = { path = "crates/rvoip-sip-registrar", version = "0.1.0" }
+# CARVE_PLAN step 12: rvoip-dialog-core / rvoip-registrar-core entries
+# removed — packages renamed to rvoip-sip-dialog / rvoip-sip-registrar above.
+# Update consumer Cargo.toml entries to the new names.
 rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
 rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }
-rvoip-session-core = { path = "crates/session-core", version = "0.1.26" }
+rvoip-sip = { path = "crates/rvoip-sip", version = "0.2.0" }
+rvoip-core = { path = "crates/rvoip-core", version = "0.1.26" }
 rvoip-orchestration-core = { path = "crates/orchestration-core", version = "0.1.26" }
 rvoip-call-engine = { path = "crates/call-engine", version = "0.1.26" }
 rvoip-client-core = { path = "crates/client-core", version = "0.1.26" }

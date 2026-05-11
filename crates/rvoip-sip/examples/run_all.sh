@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the local developer-facing session-core examples.
+# Run the local developer-facing rvoip-sip examples.
 set -euo pipefail
 cd "$(dirname "$0")"
 

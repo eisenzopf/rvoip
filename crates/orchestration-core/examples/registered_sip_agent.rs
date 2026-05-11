@@ -3,7 +3,7 @@ mod common;
 use chrono::{Duration as ChronoDuration, Utc};
 use common::support_call;
 use rvoip_orchestration_core::prelude::*;
-use rvoip_registrar_core::{
+use rvoip_sip_registrar::{
     AddressOfRecord, ContactInfo, ContactReachability, RegistrarService, Transport,
 };
 

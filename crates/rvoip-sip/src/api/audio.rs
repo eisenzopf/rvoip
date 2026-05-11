@@ -1,4 +1,4 @@
-//! Audio streaming types for session-core
+//! Audio streaming types for rvoip-sip
 //!
 //! Provides a split duplex audio stream per session. The caller owns the
 //! send/receive loop, enabling flexible bridging in higher layers.

@@ -2,7 +2,7 @@
 //!
 //! Application-facing SIP session orchestration for Rust VoIP applications.
 //!
-//! `session-core` sits above the lower-level SIP dialog and media crates. It
+//! `rvoip-sip` sits above the lower-level SIP dialog and media crates. It
 //! owns call/session state, registration state, SIP feature orchestration, and
 //! the public control surfaces that applications use to build softphones,
 //! test clients, IVRs, B2BUA legs, routing servers, and PBX/SBC interop tools.
@@ -166,6 +166,68 @@
 //!   [`SessionHandle::wait_for_media_security`]
 //! - typed per-call events with [`SessionHandle::events`]
 //! - decoded/encoded audio frames with [`SessionHandle::audio`]
+//!
+//! ## B2BUA via `server::*`
+//!
+//! [`server`] adds B2BUA / gateway helpers on top of [`UnifiedCoordinator`] —
+//! coordination glue, not a parallel access path to dialog/media. Three entry
+//! points: [`server::SipBridgeStrategy`] for SIP↔SIP same-codec fast-path
+//! bridges, [`server::ContactResolver`] for AOR → live Contact lookups
+//! against `rvoip-sip-registrar`, and [`server::transfer`] for blind/
+//! attended/external REFER orchestration. The optional [`server::b2bua`]
+//! convenience wires the canonical inbound→originate→bridge pattern in one
+//! call.
+//!
+//! ```rust,no_run
+//! use rvoip_sip::api::events::Event;
+//! use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+//! use rvoip_sip::server::b2bua::SipB2bua;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//! let coordinator = UnifiedCoordinator::new(Config::local("b2bua", 5070)).await?;
+//! let b2bua = SipB2bua::new(coordinator.clone());
+//! let mut events = coordinator.events().await?;
+//! while let Some(Event::IncomingCall { call_id, .. }) = events.next().await {
+//!     let _bridge = b2bua
+//!         .handle_inbound("sip:b2bua@127.0.0.1", &call_id, "sip:upstream@example.com")
+//!         .await?;
+//!     // Drop the BridgeHandle to tear the bridge down.
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See `examples/sip_b2bua.rs` for a complete CLI-driven runner.
+//!
+//! ## Cross-transport via `rvoip-core::Orchestrator` + `SipAdapter`
+//!
+//! [`SipAdapter`] implements `rvoip_core::ConnectionAdapter`, so SIP plugs
+//! into the cross-transport `Orchestrator` alongside future
+//! `rvoip-webrtc` / `rvoip-quic` adapters. Consumers that plan to add other
+//! transports later use this surface today; the single SIP adapter
+//! demonstrates the seam.
+//!
+//! ```rust,no_run
+//! use rvoip_core::{Config as CoreConfig, Orchestrator};
+//! use rvoip_sip::api::unified::{Config as SipConfig, UnifiedCoordinator};
+//! use rvoip_sip::SipAdapter;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+//! let coordinator = UnifiedCoordinator::new(SipConfig::local("sip-leg", 5072)).await?;
+//! let adapter = SipAdapter::new(coordinator).await?;
+//! let orchestrator = Orchestrator::new(CoreConfig::default());
+//! orchestrator.register(adapter)?;
+//!
+//! let mut events = orchestrator.subscribe_events();
+//! // events.recv() yields normalized rvoip-core Events (translated from api::Event).
+//! # let _ = events;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See `crates/rvoip-core/examples/sip_only_orchestrator.rs` for a complete
+//! runner. When `rvoip-webrtc` and `rvoip-quic` ship, they register against
+//! the same `Orchestrator` handle without reshaping consumer code.
 //!
 //! ## Configuration and Interop
 //!

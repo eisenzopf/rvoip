@@ -83,12 +83,12 @@ impl From<&DialogId> for rvoip_sip_dialog::DialogId {
     }
 }
 
-/// Session-core's identifier for a media session is exactly media-core's
+/// rvoip-sip's identifier for a media session is exactly media-core's
 /// `DialogId`. Aliased so call sites can keep saying `MediaSessionId`
 /// where it reads better, while the underlying type is unified across
 /// the media boundary (eliminates `MediaSessionId::from_dialog(&...)`
 /// reconstruction and the "fresh UUID" bug class — see
-/// `crates/session-core/docs/MEDIA_PLANE_LAYERING_FOLLOWUPS.md` P5).
+/// `crates/rvoip-sip/docs/MEDIA_PLANE_LAYERING_FOLLOWUPS.md` P5).
 ///
 /// Note: this is **not** the same type as `state_table::DialogId`
 /// above — that one is a `Copy` Uuid newtype with bidirectional

@@ -7,7 +7,7 @@ use super::state::SessionState;
 use crate::state_table::Role;
 use crate::types::CallState;
 
-/// Flexible session storage for session-core
+/// Flexible session storage for rvoip-sip
 ///
 /// This store supports multiple sessions for legitimate use cases like transfers,
 /// while keeping the API simple for single session usage.

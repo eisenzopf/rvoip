@@ -1,4 +1,4 @@
-//! Simplified Dialog Adapter for session-core
+//! Simplified Dialog Adapter for rvoip-sip
 //!
 //! Thin translation layer between dialog-core and state machine.
 //! Focuses only on essential dialog operations and events.
@@ -717,7 +717,7 @@ impl DialogAdapter {
 
     /// RFC 3261 §22.2 — resend an INVITE with digest `Authorization` (or
     /// `Proxy-Authorization`) header on the same dialog after the server
-    /// challenged with 401/407. Session-core-v3's `SendINVITEWithAuth` action
+    /// challenged with 401/407. The `SendINVITEWithAuth` state-machine action
     /// owns the digest computation; this is a thin passthrough to dialog-core.
     ///
     /// Both REGISTER and INVITE 401/407 challenges flow through the state
@@ -1677,7 +1677,7 @@ impl DialogAdapter {
     }
 
     /// Send an RFC 4235 dialog-package SUBSCRIBE and pre-register the
-    /// session↔dialog mapping so NOTIFY events route back to session-core.
+    /// session↔dialog mapping so NOTIFY events route back to rvoip-sip.
     pub async fn send_dialog_subscribe(
         &self,
         session_id: &SessionId,

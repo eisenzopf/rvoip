@@ -2,10 +2,10 @@ mod support;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use rvoip_orchestration_core::prelude::*;
-use rvoip_registrar_core::{
+use rvoip_sip_registrar::{
     AddressOfRecord, ContactInfo, ContactReachability, RegistrarService, Transport,
 };
-use rvoip_session_core::{CallState, UnifiedCoordinator};
+use rvoip_sip::{CallState, UnifiedCoordinator};
 use support::{available_ai, available_human, incoming_call, support_call};
 use tokio::time::{timeout, Duration};
 
@@ -17,10 +17,10 @@ fn unused_udp_port() -> u16 {
         .port()
 }
 
-fn local_session_config(name: &str) -> rvoip_session_core::Config {
+fn local_session_config(name: &str) -> rvoip_sip::Config {
     let sip_port = unused_udp_port();
     let media_start = unused_udp_port();
-    let mut config = rvoip_session_core::Config::local(name, sip_port);
+    let mut config = rvoip_sip::Config::local(name, sip_port);
     config.media_port_start = media_start;
     config.media_port_end = media_start.saturating_add(20);
     config.unregister_on_shutdown_timeout_secs = 0;

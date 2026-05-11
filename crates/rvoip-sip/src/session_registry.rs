@@ -1,4 +1,4 @@
-//! Session Registry for single session mapping in session-core
+//! Session Registry for single session mapping in rvoip-sip
 //!
 //! This module provides simple mappings for the single session constraint.
 //! Since only one session can exist at a time, the mappings are much simpler.

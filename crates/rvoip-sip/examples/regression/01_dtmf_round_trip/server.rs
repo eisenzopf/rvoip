@@ -1,6 +1,6 @@
 //! Auto-answer SIP server that logs each RFC 4733 DTMF digit it
 //! receives. Proves the Sprint 2 B4 receive path is wired end-to-end:
-//! rtp-core PT 101 decode → media-core callback → session-core
+//! rtp-core PT 101 decode → media-core callback → rvoip-sip
 //! `on_dtmf(handle, digit)`.
 //!
 //! Run standalone:  cargo run -p rvoip-sip --example regression_dtmf_round_trip_server

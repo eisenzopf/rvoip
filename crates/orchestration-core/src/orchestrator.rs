@@ -6,15 +6,14 @@ use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::global_coordinator;
 use crate::ids::*;
 use crate::store::*;
-use crate::traits::{
-    ContactResolver, RouteDecision, RouteRequest, Router, StaticContactResolver, StaticRouter,
-};
+use crate::traits::{agent_contact_request, RouteDecision, RouteRequest, Router, StaticRouter};
+use rvoip_sip::server::{ContactResolver, StaticContactResolver};
 use crate::types::*;
 use crate::voice_ai::{TranscriptEvent, VoiceAiAction, VoiceAiRuntime};
 use chrono::{Duration as ChronoDuration, Utc};
-use rvoip_session_core::types::IncomingCallInfo;
-use rvoip_session_core::{
-    BridgeHandle, CallState, Config, Event, EventReceiver, SessionId, UnifiedCoordinator,
+use rvoip_sip::types::IncomingCallInfo;
+use rvoip_sip::{
+    CallState, Config, Event, EventReceiver, SessionId, UnifiedCoordinator,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,45 +21,13 @@ use std::time::Duration;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::time::{sleep, timeout, Instant};
 
-/// Per-process registry of active media bridges.
-///
-/// Backed by `DashMap` for lock-free concurrent reads/writes plus a
-/// secondary `by_call` index for O(1) "which bridge is this call in?"
-/// lookups (used by future hangup / teardown paths). The primary map
-/// stores the handle alongside the owning `CallId` so `remove` can keep
-/// both indices coherent without an extra parameter.
-#[derive(Clone, Default)]
-pub struct BridgeManager {
-    bridges: Arc<DashMap<BridgeId, (BridgeHandle, CallId)>>,
-    by_call: Arc<DashMap<CallId, BridgeId>>,
-}
-
-impl BridgeManager {
-    pub fn insert(&self, bridge_id: BridgeId, call_id: CallId, handle: BridgeHandle) {
-        self.by_call.insert(call_id.clone(), bridge_id.clone());
-        self.bridges.insert(bridge_id, (handle, call_id));
-    }
-
-    pub fn remove(&self, bridge_id: &BridgeId) -> Option<BridgeHandle> {
-        let (_, (handle, call_id)) = self.bridges.remove(bridge_id)?;
-        self.by_call
-            .remove_if(&call_id, |_, owner| owner == bridge_id);
-        Some(handle)
-    }
-
-    /// O(1) lookup: which active bridge (if any) is this call in?
-    pub fn bridge_for_call(&self, call_id: &CallId) -> Option<BridgeId> {
-        self.by_call.get(call_id).map(|entry| entry.clone())
-    }
-
-    pub fn len(&self) -> usize {
-        self.bridges.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bridges.is_empty()
-    }
-}
+// `BridgeHandle` is media-core's owned bridge resource (drop tears down).
+// Lifted in CARVE_PLAN step 3: orchestration-core no longer defines its own
+// `BridgeManager`; both come from `rvoip-core::bridge`. The `BridgeManager`
+// type alias preserves the orchestration-core call signature
+// (`BridgeManager<CallId, BridgeId>`) so existing call sites keep working.
+pub use rvoip_core::bridge::BridgeHandle;
+pub type BridgeManager = rvoip_core::bridge::BridgeManager<CallId, BridgeId>;
 
 enum AgentOfferOutcome {
     Answered,
@@ -128,6 +95,14 @@ impl VoiceAiRegistry {
 
 pub struct Orchestrator {
     coordinator: Option<Arc<UnifiedCoordinator>>,
+    /// CARVE_PLAN step 9: cross-transport `Orchestrator` from rvoip-core,
+    /// auto-constructed when a `UnifiedCoordinator` is provided. A
+    /// `SipAdapter` wrapping the same coordinator is registered so the
+    /// `Orchestrator → SipAdapter → UnifiedCoordinator → dialog/media`
+    /// dispatch path is live alongside the workforce-flavored direct
+    /// coordinator path. Future cross-transport adapters
+    /// (rvoip-webrtc, rvoip-quic) register against this same handle.
+    rvoip_orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
     calls: SharedCallStore,
     agents: SharedAgentStore,
     queues: SharedQueueStore,
@@ -167,6 +142,17 @@ impl Orchestrator {
 
     pub fn coordinator(&self) -> Option<&Arc<UnifiedCoordinator>> {
         self.coordinator.as_ref()
+    }
+
+    /// Cross-transport orchestrator handle (CARVE_PLAN step 9). `Some` when a
+    /// `UnifiedCoordinator` was provided to the builder, in which case a
+    /// `SipAdapter` wrapping that coordinator was auto-registered. Consumers
+    /// that want to dispatch through the cross-transport seam (e.g. before
+    /// adding a future WebRTC or QUIC adapter) hold this handle and use its
+    /// methods (`originate_connection`, `route_inbound_connection`, `end_connection`,
+    /// `transfer_connection`, `hold`, `resume`, etc.).
+    pub fn rvoip_orchestrator(&self) -> Option<&Arc<rvoip_core::Orchestrator>> {
+        self.rvoip_orchestrator.as_ref()
     }
 
     pub fn events(&self) -> OrchestrationEventBus {
@@ -296,7 +282,7 @@ impl Orchestrator {
     async fn apply_inbound_route_decision(
         &self,
         call_id: &CallId,
-        session_id: &rvoip_session_core::SessionId,
+        session_id: &rvoip_sip::SessionId,
         decision: RouteDecision,
     ) -> Result<()> {
         let handle = self.handle();
@@ -386,7 +372,7 @@ impl Orchestrator {
     async fn fail_inbound_call(
         &self,
         call_id: &CallId,
-        session_id: &rvoip_session_core::SessionId,
+        session_id: &rvoip_sip::SessionId,
         reason: String,
     ) -> Result<()> {
         if self.config.routing.fail_closed {
@@ -563,6 +549,24 @@ impl OrchestratorBuilder {
             (None, None) => None,
         };
 
+        // CARVE_PLAN step 9: when a UnifiedCoordinator is provided, wrap it
+        // in a SipAdapter and register against a fresh rvoip_core::Orchestrator.
+        // This is the proof-of-life for the cross-transport seam — the SIP
+        // path can dispatch through Orchestrator → SipAdapter → UnifiedCoordinator
+        // alongside the existing workforce-flavored direct-coordinator path.
+        let rvoip_orchestrator = if let Some(coord) = coordinator.as_ref() {
+            let adapter = rvoip_sip::SipAdapter::new(coord.clone()).await?;
+            let rvoip_orch = rvoip_core::Orchestrator::new(rvoip_core::Config::default());
+            rvoip_orch.register(adapter).map_err(|err| {
+                OrchestrationError::InvalidState(format!(
+                    "failed to register SipAdapter with rvoip_core::Orchestrator: {err}"
+                ))
+            })?;
+            Some(rvoip_orch)
+        } else {
+            None
+        };
+
         let voice_ai = VoiceAiRegistry::default();
         for (id, runtime) in self.voice_ai_runtimes {
             voice_ai.insert(id, runtime);
@@ -570,6 +574,7 @@ impl OrchestratorBuilder {
 
         Ok(Orchestrator {
             coordinator,
+            rvoip_orchestrator,
             calls,
             agents,
             queues,
@@ -799,7 +804,14 @@ impl OrchestrationHandle {
             )));
         }
 
-        let contact = self.contact_resolver.resolve_contact(&agent).await?;
+        let request = agent_contact_request(&agent)?;
+        let contact = self
+            .contact_resolver
+            .resolve_contact(&request)
+            .await
+            .map_err(|err| {
+                OrchestrationError::ContactResolutionFailed(agent.id.clone(), err.to_string())
+            })?;
         let mut call = self
             .calls
             .get_call(&offer.call_id)

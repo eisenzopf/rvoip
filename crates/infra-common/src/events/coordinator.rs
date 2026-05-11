@@ -16,7 +16,9 @@ use crate::events::system::EventSystem;
 use crate::events::types::{Event, EventHandler, EventPriority};
 use crate::planes::{LayerTaskManager, PlaneConfig, PlaneRouter, PlaneType};
 
-use crate::events::cross_crate::{CrossCrateEvent, EventTypeId, OrchestrationCrossCrateEvent};
+use crate::events::cross_crate::{
+    CrossCrateEvent, EventTypeId, OrchestrationCrossCrateEvent, RvoipCoreCrossCrateEvent,
+};
 
 use super::config::{DeploymentConfig, EventCoordinatorConfig};
 use super::transport::NetworkTransport;
@@ -561,6 +563,20 @@ impl EventTypeRegistry {
                     target_plane: PlaneType::Signaling,
                     priority: EventPriority::Normal,
                     description: format!("Orchestration-plane event: {event_type}"),
+                },
+            );
+        }
+
+        // rvoip-core spine events: same per-variant pattern as orchestration.
+        for &event_type in RvoipCoreCrossCrateEvent::ALL_EVENT_TYPES {
+            self.register_event_type(
+                event_type,
+                EventTypeInfo {
+                    event_type,
+                    source_plane: PlaneType::Signaling,
+                    target_plane: PlaneType::Signaling,
+                    priority: EventPriority::Normal,
+                    description: format!("rvoip-core spine event: {event_type}"),
                 },
             );
         }

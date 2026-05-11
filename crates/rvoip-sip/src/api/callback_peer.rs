@@ -928,7 +928,7 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_transfer_failed(&self, handle: SessionHandle, status_code: u16, reason: String) {}
 
-    /// Called when session-core has target-answer evidence for a transfer.
+    /// Called when rvoip-sip has target-answer evidence for a transfer.
     #[allow(unused_variables)]
     async fn on_transfer_target_answered(
         &self,
@@ -1129,7 +1129,7 @@ impl CallbackPeerControl {
         self.coordinator.unregister(handle).await
     }
 
-    /// Hang up or cancel a call and wait until session-core has accepted the
+    /// Hang up or cancel a call and wait until rvoip-sip has accepted the
     /// request.
     ///
     /// This uses the same SIP teardown semantics as [`SessionHandle::hangup`]:

@@ -1,6 +1,6 @@
-//! Core types for session-core
+//! Core types for rvoip-sip
 //!
-//! This module defines the fundamental types used throughout the session-core crate.
+//! This module defines the fundamental types used throughout the rvoip-sip crate.
 //! It includes identifiers, events, and common data structures.
 
 use serde::{Deserialize, Serialize};

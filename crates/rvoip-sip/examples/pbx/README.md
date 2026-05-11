@@ -1,6 +1,6 @@
 # Unified PBX Interop Examples
 
-This directory is the source of truth for `session-core` PBX interop examples.
+This directory is the source of truth for `rvoip-sip` PBX interop examples.
 The same scenario code can run against Asterisk or FreeSWITCH and through three
 public API surfaces:
 

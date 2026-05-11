@@ -1,7 +1,7 @@
 //! TLS SIP server — accepts `sips:` calls over a TLS listener.
 //!
 //! Demonstrates the Sprint 1 A1 TLS client/server path: set
-//! `Config::tls_cert_path` + `tls_key_path` and session-core auto-binds
+//! `Config::tls_cert_path` + `tls_key_path` and rvoip-sip auto-binds
 //! a TLS listener at `sip_port + 1` (RFC 3261 5060→5061 convention).
 //!
 //! The cert + key come from `TLS_CERT_PATH` / `TLS_KEY_PATH`; the

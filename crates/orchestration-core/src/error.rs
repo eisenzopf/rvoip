@@ -6,7 +6,7 @@ pub type Result<T> = std::result::Result<T, OrchestrationError>;
 #[derive(Debug, Error)]
 pub enum OrchestrationError {
     #[error("session-core error: {0}")]
-    SessionCore(#[from] rvoip_session_core::SessionError),
+    SessionCore(#[from] rvoip_sip::SessionError),
 
     #[error("call not found: {0}")]
     CallNotFound(CallId),

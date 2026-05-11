@@ -1,7 +1,7 @@
-//! # Session Core API
+//! # rvoip-sip API
 //!
 //! Public developer interfaces for building SIP applications on top of
-//! `session-core`.
+//! `rvoip-sip`.
 //!
 //! This module is organized around four API surfaces:
 //!
@@ -272,7 +272,7 @@
 //!
 //! ## Rustdoc Policy
 //!
-//! Rustdoc is the canonical developer documentation for `session-core`.
+//! Rustdoc is the canonical developer documentation for `rvoip-sip`.
 //! Public developer-facing APIs in [`unified`], [`stream_peer`],
 //! [`callback_peer`], [`handle`], [`incoming`], and [`audio`] are compiled with
 //! `missing_docs` denied. Each public method should explain what it does, call

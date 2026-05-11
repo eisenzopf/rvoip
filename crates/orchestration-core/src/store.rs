@@ -4,7 +4,7 @@ use crate::types::*;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
-use rvoip_session_core::SessionId;
+use rvoip_sip::SessionId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;

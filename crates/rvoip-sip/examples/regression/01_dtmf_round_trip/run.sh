@@ -5,7 +5,7 @@
 # pkill teardown doesn't truncate its output. We then assert the
 # server actually observed all 5 digits — this locks in the full
 # RFC 4733 receive path (PT 101 decode → media-core callback →
-# session-core `on_dtmf`).
+# rvoip-sip `on_dtmf`).
 set -euo pipefail
 cd "$(dirname "$0")/../../.."   # crate root
 

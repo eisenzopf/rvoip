@@ -1,4 +1,4 @@
-//! Typed application events emitted by `session-core`.
+//! Typed application events emitted by `rvoip-sip`.
 //!
 //! [`Event`] is the common event contract used by [`StreamPeer`], per-call
 //! [`SessionHandle`](crate::SessionHandle) receivers, and direct
@@ -37,7 +37,7 @@ pub struct SipTrace {
     pub start_line: String,
     /// Wire-level SIP `Call-ID` header value when present.
     pub sip_call_id: Option<String>,
-    /// Session-core session id after mapping, when known.
+    /// rvoip-sip session id after mapping, when known.
     pub session_id: Option<CallId>,
     /// Redacted, optionally body-stripped SIP message text.
     pub raw_message: String,
@@ -376,7 +376,7 @@ pub enum Event {
     ///
     /// Callback handlers may accept or reject the REFER through their return
     /// value. Stream/unified users can call `accept_refer` or `reject_refer`;
-    /// if they do nothing, session-core preserves the legacy behavior and
+    /// if they do nothing, rvoip-sip preserves the legacy behavior and
     /// accepts the REFER after a short grace period.
     ReferReceived {
         /// Session identifier for the dialog that received REFER.

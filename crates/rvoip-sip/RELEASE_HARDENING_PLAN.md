@@ -1,20 +1,23 @@
-# session-core Release Hardening Plan
+# rvoip-sip Release Hardening Plan
 
-This tracks the work needed before the next `rvoip-sip` release that
-highlights the unified, stream, and callback API surfaces.
+This tracks the work needed before the next `rvoip-sip` release that highlights
+the unified, stream, and callback API surfaces. The crate was carved out of the
+legacy `session-core` crate and now lives at `crates/rvoip-sip/` with package
+name `rvoip-sip` (see [`docs/RELEASE_NOTES_NEXT.md`](docs/RELEASE_NOTES_NEXT.md)
+for migration guidance).
 
 ## Goals
 
-- Position `session-core` as the application-facing SIP session layer above
-  `dialog-core`, `media-core`, and `rtp-core`.
+- Position `rvoip-sip` as the application-facing SIP session layer above
+  `rvoip-sip-dialog`, `rvoip-media-core`, and `rvoip-rtp-core`.
 - Make the public API story explicit:
+  - `Endpoint` for simple softphones, PBX accounts, demos, and IVR legs.
   - `StreamPeer` for sequential clients, scripts, softphones, and tests.
   - `CallbackPeer` for reactive servers, IVR, routing, and endpoint apps.
   - `UnifiedCoordinator` for lower-level orchestration, bridges, gateways, and
     B2BUA-style code.
   - `SessionHandle` for per-call control: audio, transfer, DTMF, hold/resume,
     and teardown.
-- Remove fragile debug-string event routing from the cross-crate event path.
 - Document what is validated today, what is alpha, and what belongs to the next
   interop hardening cycle.
 
@@ -22,65 +25,42 @@ highlights the unified, stream, and callback API surfaces.
 
 | Area | Status | Notes |
 |------|--------|-------|
-| Typed cross-crate event handling | Done | Normal dialog/media event routing now uses typed `RvoipCrossCrateEvent` dispatch. |
+| Crate rename `session-core` → `rvoip-sip` | Done | Code, examples, doctests, and rustdoc prose migrated. Legacy shim crate deleted. |
+| Typed cross-crate event handling | Done | Normal dialog/media event routing uses typed `RvoipCrossCrateEvent` dispatch. |
 | REFER metadata propagation | Done | `Referred-By` and `Replaces` flow from dialog-core to public `Event::ReferReceived`. |
-| session-core README | Done | Added API selection, layering, examples, and alpha status. |
-| Compatibility matrix | Done | Added validated/planned profile table. |
-| Topology profiles | Done | Documented LAN, Asterisk, proxy, carrier, and WebRTC edge profiles. |
-| Release notes draft | Done | Drafted next release notes around API surfaces and Asterisk evidence. |
-| Interop CI plan | Done | Defined SIPp/Asterisk/FreeSWITCH/proxy lab phases. |
-| Tests | Done | `cargo check -p rvoip-sip` and `cargo test -p rvoip-sip` pass. `rvoip-infra-common` tests compile but still have unrelated task-management assertion failures. |
+| README & module rustdoc | Done | `crates/rvoip-sip/README.md` plus all `//!`/`///` module headers use the new name. |
+| Compatibility matrix | Done | `docs/COMPATIBILITY_MATRIX.md` covers validated/planned profiles. |
+| Topology profiles | Done | `docs/TOPOLOGY_PROFILES.md` covers LAN, Asterisk, proxy, carrier, and WebRTC edge profiles. |
+| Release notes draft | Done | `docs/RELEASE_NOTES_NEXT.md` framed around API surfaces and Asterisk evidence. |
+| Interop CI plan | Done | `docs/INTEROP_CI_PLAN.md` defines SIPp/Asterisk/FreeSWITCH/proxy lab phases. |
+| Tests | Done | `cargo check -p rvoip-sip` and `cargo test -p rvoip-sip --doc` pass (217 doctests). |
 
-## Implementation Checklist
+## Verification before release
 
-1. Finish typed event migration.
-   - Match on `RvoipCrossCrateEvent::DialogToSession` and
-     `RvoipCrossCrateEvent::MediaToSession`.
-   - Remove normal-path `format!("{:?}", event)` dispatch.
-   - Keep only a narrow unknown-event fallback that logs and drops.
-   - Preserve existing public event semantics.
+```sh
+cargo fmt --check
+cargo test -p rvoip-infra-common
+cargo test -p rvoip-sip-dialog
+cargo test -p rvoip-media-core
+cargo test -p rvoip-sip
+cargo test -p rvoip-sip --doc
+cargo doc -p rvoip-sip --no-deps
+```
 
-2. Propagate transfer metadata.
-   - Extend `DialogToSessionEvent::TransferRequested` with
-     `referred_by: Option<String>` and `replaces: Option<String>`.
-   - Populate those fields from dialog-core's `SessionCoordinationEvent`.
-   - Publish them through `Event::ReferReceived`.
+Manual release gates remain the Asterisk `StreamPeer` and `CallbackPeer`
+example suites under `examples/pbx/`.
 
-3. Add release documentation.
-   - `crates/session-core/README.md`
-   - `crates/session-core/docs/COMPATIBILITY_MATRIX.md`
-   - `crates/session-core/docs/TOPOLOGY_PROFILES.md`
-   - `crates/session-core/docs/RELEASE_NOTES_NEXT.md`
-   - `crates/session-core/docs/INTEROP_CI_PLAN.md`
-
-4. Update existing docs.
-   - Top-level `README.md`
-   - `crates/session-core/examples/README.md`
-   - `crates/session-core/examples/asterisk/README.md`
-   - `crates/session-core/examples/asterisk_callback/README.md`
-   - `crates/session-core/docs/RFC_COMPLIANCE_STATUS.md`
-   - `crates/session-core/docs/ATTENDED_TRANSFER_IMPLEMENTATION_PLAN.md`
-
-5. Verify.
-   - `cargo fmt --check`
-   - `cargo test -p rvoip-infra-common`
-   - `cargo test -p rvoip-dialog-core`
-   - `cargo test -p rvoip-media-core`
-   - `cargo test -p rvoip-sip`
-   - Manual release gates remain the Asterisk StreamPeer and CallbackPeer
-     example suites.
-
-## Release Framing
+## Release framing
 
 Lead with:
 
-> `session-core` now provides Rust-native programmable SIP session
-> orchestration through three API surfaces: `StreamPeer`, `CallbackPeer`, and
-> `UnifiedCoordinator`.
+> `rvoip-sip` (formerly `session-core`) now provides Rust-native programmable
+> SIP session orchestration through four API surfaces: `Endpoint`,
+> `StreamPeer`, `CallbackPeer`, and `UnifiedCoordinator`.
 
 Validated claims:
 
-- Local and multi-process examples.
+- Local and multi-process examples under `examples/`.
 - Asterisk UDP/RTP and TLS/SDES-SRTP scenarios.
 - Registration/unregistration, hold/resume, CANCEL, DTMF, blind transfer,
   REFER/NOTIFY progress, registered-flow reuse, and audio verification.
@@ -91,4 +71,4 @@ Do not overclaim:
   DTLS-SRTP, and WebRTC edge support remain future validation or future
   feature work.
 - Blind transfer is validated; attended transfer should be described as
-  primitives unless a full orchestration layer is added.
+  REFER-with-Replaces primitives unless a full orchestration layer is added.

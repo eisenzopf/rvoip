@@ -9,9 +9,9 @@ endpoints without owning low-level SIP transaction and RTP details directly.
 
 | Crate | Responsibility |
 |-------|----------------|
-| `dialog-core` | SIP dialog, transaction, request/response, routing, and subscription machinery |
-| `media-core` / `rtp-core` | RTP, SRTP, codecs, audio sources, streams, and media transport |
-| `session-core` | Application-facing call/session behavior and public call-control APIs |
+| `rvoip-sip-dialog` | SIP dialog, transaction, request/response, routing, and subscription machinery |
+| `rvoip-media-core` / `rvoip-rtp-core` | RTP, SRTP, codecs, audio sources, streams, and media transport |
+| `rvoip-sip` (this crate) | Application-facing call/session behavior and public call-control APIs |
 
 ## API surfaces
 
@@ -62,9 +62,8 @@ progress, and audio verification for both `StreamPeer` and `CallbackPeer`.
 See:
 
 - [`examples/README.md`](examples/README.md)
-- [`examples/asterisk/README.md`](examples/asterisk/README.md)
-- [`examples/asterisk_callback/README.md`](examples/asterisk_callback/README.md)
-- [`examples/freeswitch/README.md`](examples/freeswitch/README.md)
+- [`examples/pbx/README.md`](examples/pbx/README.md) — Asterisk and FreeSWITCH interop matrix (run through `Endpoint`, `StreamPeer`, and `CallbackPeer::builder`)
+- [`examples/sip_client/README.md`](examples/sip_client/README.md) — terminal softphone built on the `Endpoint` facade
 - [`docs/COMPATIBILITY_MATRIX.md`](docs/COMPATIBILITY_MATRIX.md)
 - [`docs/TOPOLOGY_PROFILES.md`](docs/TOPOLOGY_PROFILES.md)
 

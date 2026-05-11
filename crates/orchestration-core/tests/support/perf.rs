@@ -1,6 +1,6 @@
 use rvoip_orchestration_core::prelude::*;
 use rvoip_orchestration_core::{AgentOfferId, BridgeId};
-use rvoip_session_core::{Config, SessionId, UnifiedCoordinator};
+use rvoip_sip::{Config, SessionId, UnifiedCoordinator};
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -316,7 +316,7 @@ pub async fn profile_live_sip_rtp(
     // mpsc on the simulator side, so concurrent setup is bounded only by the
     // orchestrator's processing capacity.
     let mut coord_tasks: Vec<
-        tokio::task::JoinHandle<rvoip_session_core::Result<(Arc<UnifiedCoordinator>, Arc<UnifiedCoordinator>, Config, Config)>>,
+        tokio::task::JoinHandle<rvoip_sip::Result<(Arc<UnifiedCoordinator>, Arc<UnifiedCoordinator>, Config, Config)>>,
     > = Vec::with_capacity(active_calls);
     for index in 0..active_calls {
         let caller_cfg = live_session_config(&format!("perf-caller-{index:04}"), 1, 2);
@@ -859,7 +859,7 @@ async fn send_bidirectional_tone(
 }
 
 async fn count_received_audio_frames(
-    mut subscriber: rvoip_session_core::types::AudioFrameSubscriber,
+    mut subscriber: rvoip_sip::types::AudioFrameSubscriber,
     duration: Duration,
 ) -> usize {
     let deadline = tokio::time::Instant::now() + duration;

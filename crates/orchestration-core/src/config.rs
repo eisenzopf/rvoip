@@ -2,7 +2,7 @@ use std::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct OrchestrationConfig {
-    pub session: rvoip_session_core::Config,
+    pub session: rvoip_sip::Config,
     pub inbound: InboundCallConfig,
     pub routing: RoutingConfig,
     pub queues: QueueConfig,
@@ -17,7 +17,7 @@ pub struct OrchestrationConfig {
 impl Default for OrchestrationConfig {
     fn default() -> Self {
         Self {
-            session: rvoip_session_core::Config::default(),
+            session: rvoip_sip::Config::default(),
             inbound: InboundCallConfig::default(),
             routing: RoutingConfig::default(),
             queues: QueueConfig::default(),

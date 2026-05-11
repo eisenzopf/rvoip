@@ -1,0 +1,40 @@
+[package]
+name = "rvoip-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "Transport-agnostic spine for RVoIP — types, ConnectionAdapter trait, BridgeManager, Orchestrator entry point"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+rvoip-infra-common.workspace = true
+rvoip-media-core.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+# Examples — sip_only_orchestrator demonstrates the cross-transport seam by
+# registering rvoip-sip's SipAdapter against a rvoip-core Orchestrator.
+rvoip-sip = { path = "../rvoip-sip" }
+tracing-subscriber.workspace = true
+
+[[example]]
+name = "sip_only_orchestrator"
+path = "examples/sip_only_orchestrator.rs"
+
+[lints]
+workspace = true

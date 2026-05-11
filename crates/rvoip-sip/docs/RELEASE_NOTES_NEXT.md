@@ -1,12 +1,21 @@
-# Draft Release Notes: session-core
+# Draft Release Notes: rvoip-sip (renamed from session-core)
 
 ## Headline
 
-`session-core` now presents a clear programmable SIP session API with three
-surfaces: `StreamPeer`, `CallbackPeer`, and `UnifiedCoordinator`.
+`rvoip-sip` (formerly `session-core`) now presents a clear programmable SIP
+session API with four surfaces: `Endpoint`, `StreamPeer`, `CallbackPeer`, and
+`UnifiedCoordinator`. The crate moved from `crates/session-core/` to
+`crates/rvoip-sip/`; the legacy `rvoip-session-core` shim has been removed.
 
 ## What changed
 
+- Crate renamed to `rvoip-sip` (package, directory, and all rustdoc). Existing
+  callers should switch their `Cargo.toml` from `rvoip-session-core` to
+  `rvoip-sip` and update imports from `rvoip_session_core::*` to
+  `rvoip_sip::*`. No behavior changes accompany the rename.
+- `Endpoint` is a new ergonomic surface that wraps `StreamPeer` with
+  account/profile setup and bare extension dialing — start here for softphones,
+  PBX accounts, demos, and simple IVR legs.
 - `StreamPeer` is the sequential API for clients, scripts, softphones, and
   integration tests.
 - `CallbackPeer` is the reactive API for servers, IVR, routing, and endpoint

@@ -7,7 +7,7 @@
 //! bridging, and media control.
 //!
 //! Use this module directly when you are building an application framework on
-//! top of `session-core`: B2BUA logic, gateways, carrier-facing services,
+//! top of `rvoip-sip`: B2BUA logic, gateways, carrier-facing services,
 //! custom peer abstractions, or multi-leg call orchestration. It is also the
 //! surface that exposes deterministic registration shutdown and metadata such
 //! as registrar-accepted expiry, refresh timing, Service-Route, and GRUU. For
@@ -214,7 +214,7 @@ pub struct Config {
 
     /// Default credentials to apply to every outgoing call for RFC 3261 §22.2
     /// INVITE digest auth retry. When the server responds 401/407 to our
-    /// INVITE, session-core looks here (or at per-call credentials passed
+    /// INVITE, rvoip-sip looks here (or at per-call credentials passed
     /// via `PeerControl::call_with_auth`) to compute the digest response. When
     /// `None`, a 401/407 on INVITE surfaces as `CallFailed` instead of
     /// retrying. Default: `None`.
@@ -238,7 +238,7 @@ pub struct Config {
     /// `sip:sbc.example.com;lr`, `sips:sbc.example.com:5061;lr`.
     ///
     /// The URI should carry the `;lr` parameter to signal a loose-routing
-    /// proxy (RFC 3261 §16.12.1.1). Session-core does **not** auto-add `;lr`
+    /// proxy (RFC 3261 §16.12.1.1). rvoip-sip does **not** auto-add `;lr`
     /// — set it explicitly in the URI string.
     ///
     /// Applied to outgoing INVITEs and REGISTERs. For REGISTER, the registrar
@@ -267,7 +267,7 @@ pub struct Config {
     ///
     /// When the registrar echoes the outbound Contact in a 2xx REGISTER,
     /// dialog-core starts CRLFCRLF keep-alive pings on the registration
-    /// flow. Flow failure is surfaced back into session-core so the
+    /// flow. Flow failure is surfaced back into rvoip-sip so the
     /// registration can be refreshed.
     pub sip_outbound_enabled: bool,
 
@@ -295,7 +295,7 @@ pub struct Config {
 
     /// Automatically refresh successful registrations before they expire.
     ///
-    /// When enabled, session-core schedules a re-REGISTER after a successful
+    /// When enabled, rvoip-sip schedules a re-REGISTER after a successful
     /// REGISTER 2xx using the registrar-accepted expiry. Default: `true`.
     pub registration_auto_refresh: bool,
 
@@ -445,7 +445,7 @@ pub struct Config {
     /// Override the RTP-side public address advertised in SDP `c=` /
     /// `o=` and `m=audio <port>` lines. Use when:
     ///
-    /// - The session-core process runs behind a 1:1 NAT or IP alias
+    /// - The rvoip-sip process runs behind a 1:1 NAT or IP alias
     ///   and the operator already knows the external IP/port.
     /// - The deployment uses an SBC that performs media latching, and
     ///   we want to advertise the SBC's public IP rather than rely on
@@ -779,7 +779,7 @@ impl Config {
     ///
     /// The signaling side preloads the outbound proxy route; media relay
     /// integration remains explicit because RTPengine control belongs above
-    /// session-core.
+    /// rvoip-sip.
     ///
     /// # Examples
     ///
@@ -3136,7 +3136,7 @@ impl UnifiedCoordinator {
     /// [`register_with`](Self::register_with) for new code so the peer config
     /// can provide defaults.
     ///
-    /// On a 2xx response, session-core stores the registrar-accepted expiry.
+    /// On a 2xx response, rvoip-sip stores the registrar-accepted expiry.
     /// It prefers the echoed matching Contact `expires` parameter, then the
     /// response `Expires` header, then the requested `expires` value. When
     /// [`Config::registration_auto_refresh`] is enabled, a refresh REGISTER is
@@ -3569,7 +3569,7 @@ pub enum RegistrationStatus {
 /// Query result for a registration handle.
 ///
 /// This is a snapshot of the current client-side registration lifecycle. It
-/// combines session-core state with metadata learned from dialog-core REGISTER
+/// combines rvoip-sip state with metadata learned from dialog-core REGISTER
 /// responses.
 #[derive(Debug, Clone)]
 pub struct RegistrationInfo {
@@ -3581,7 +3581,7 @@ pub struct RegistrationInfo {
     pub registrar: Option<String>,
     /// Contact URI currently associated with the registration.
     pub contact: Option<String>,
-    /// Last expiry value session-core will request on refresh.
+    /// Last expiry value rvoip-sip will request on refresh.
     pub expires_secs: Option<u32>,
     /// Duration until the currently scheduled automatic refresh.
     pub next_refresh_in: Option<Duration>,

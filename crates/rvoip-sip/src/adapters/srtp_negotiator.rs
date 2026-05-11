@@ -1,6 +1,6 @@
 //! RFC 4568 SDES key-exchange wrapper used by the media adapter.
 //!
-//! session-core owns SDP negotiation (decision D16 in the
+//! rvoip-sip owns SDP negotiation (decision D16 in the
 //! `STEP_2B_SRTP_INTEGRATION_PLAN.md`); rtp-core owns crypto
 //! primitives. This module is the bridge — it consumes typed
 //! `CryptoAttribute` values from sip-core, generates fresh master keys

@@ -8,7 +8,7 @@
 //! Alice should observe `Event::CallCancelled`.
 //!
 //! RFC 3261 §9 — CANCEL cancels a pending INVITE. The responding UAS
-//! replies 487 Request Terminated to the INVITE, and session-core
+//! replies 487 Request Terminated to the INVITE, and rvoip-sip
 //! surfaces that as a distinct `CallCancelled` event (not `CallFailed`)
 //! so UIs can render "missed call" differently.
 

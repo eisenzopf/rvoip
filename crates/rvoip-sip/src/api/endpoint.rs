@@ -1,6 +1,6 @@
 //! Simplified endpoint API for softphones, PBX accounts, demos, and IVR legs.
 //!
-//! [`Endpoint`] is the easiest session-core surface to start with. It wraps
+//! [`Endpoint`] is the easiest rvoip-sip surface to start with. It wraps
 //! [`StreamPeer`], keeps the existing [`SessionHandle`] and [`IncomingCall`]
 //! types, and adds only the account/profile conveniences that SIP applications
 //! usually need first.

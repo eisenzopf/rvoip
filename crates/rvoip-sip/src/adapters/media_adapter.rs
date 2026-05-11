@@ -1,4 +1,4 @@
-//! Simplified Media Adapter for session-core
+//! Simplified Media Adapter for rvoip-sip
 //!
 //! Thin translation layer between media-core and state machine.
 //! Focuses only on essential media operations and events.
@@ -252,7 +252,7 @@ pub struct MediaAdapter {
     pub(crate) negotiated_srtp: Arc<DashMap<SessionId, SrtpPair>>,
 
     /// Global event coordinator for publishing RFC 4733 DTMF events
-    /// onto the session-core API event bus. Populated at boot via
+    /// onto the rvoip-sip API event bus. Populated at boot via
     /// [`Self::set_global_coordinator`]; `None` in tests that bypass
     /// the full wiring.
     pub(crate) global_coordinator: Arc<
@@ -370,7 +370,7 @@ impl MediaAdapter {
     }
 
     /// Install the global event coordinator so the adapter can publish
-    /// RFC 4733 DTMF events onto the session-core API event stream.
+    /// RFC 4733 DTMF events onto the rvoip-sip API event stream.
     /// Idempotent — a later call replaces any prior coordinator.
     pub async fn set_global_coordinator(
         &self,
@@ -1123,7 +1123,7 @@ impl MediaAdapter {
     // ===== AUDIO FRAME API - The Missing Core Functionality =====
 
     /// Send an audio frame for encoding and transmission
-    /// This is the equivalent of the old session-core's MediaControl::send_audio_frame()
+    /// This is the equivalent of the legacy MediaControl::send_audio_frame() API.
     pub async fn send_audio_frame(
         &self,
         session_id: &SessionId,
@@ -1390,7 +1390,7 @@ impl MediaAdapter {
     /// Install the RFC 4733 DTMF bridge: registers a callback with
     /// media-core so PT 101 packets (already deduped to one-per-digit
     /// on the first end-of-event frame) are published as
-    /// `Event::DtmfReceived { call_id, digit }` on the session-core
+    /// `Event::DtmfReceived { call_id, digit }` on the rvoip-sip
     /// public API event stream. No-op if the app event publisher/global
     /// coordinator has not been installed yet (e.g. isolated unit tests).
     async fn install_dtmf_callback(&self, session_id: SessionId, dialog_id: DialogId) {
@@ -1457,7 +1457,7 @@ impl MediaAdapter {
     }
 
     /// Subscribe to receive decoded audio frames from RTP
-    /// This is the equivalent of the old session-core's MediaControl::subscribe_to_audio_frames()
+    /// This is the equivalent of the legacy MediaControl::subscribe_to_audio_frames() API.
     pub async fn subscribe_to_audio_frames(
         &self,
         session_id: &SessionId,

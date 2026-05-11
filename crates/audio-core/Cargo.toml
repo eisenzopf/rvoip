@@ -21,7 +21,7 @@ workspace = true
 
 [dependencies]
 # 🎯 INTERNAL CRATES - Use workspace dependencies (no version needed!)
-rvoip-session-core.workspace = true
+rvoip-sip.workspace = true
 rvoip-rtp-core.workspace = true
 rvoip-client-core = { workspace = true, optional = true }
 

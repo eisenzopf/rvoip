@@ -1,4 +1,4 @@
-//! Authentication module for session-core
+//! Authentication module for rvoip-sip
 //!
 //! Re-exports SIP Digest authentication from auth-core.
 //! This follows SIP industry best practices where authentication is a shared module.

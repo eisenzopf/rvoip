@@ -1,4 +1,4 @@
-//! SIP-focused voice orchestration primitives built on top of `rvoip-session-core`.
+//! SIP-focused voice orchestration primitives built on top of `rvoip-sip`.
 //!
 //! This crate intentionally provides SIP voice orchestration building blocks
 //! rather than a full omnichannel contact-center product. The main business
@@ -26,6 +26,15 @@ pub use store::*;
 pub use traits::*;
 pub use types::*;
 pub use voice_ai::*;
+
+// CARVE_PLAN step 8: ContactResolver / impls / ResolvedContact / ContactSource
+// lifted to `rvoip_sip::server`. Re-exported here so existing
+// `rvoip_orchestration_core::ContactResolver` consumers keep compiling
+// without changing their import paths.
+pub use rvoip_sip::server::{
+    ContactRequest, ContactResolver, ContactResolverError, ContactSource, RegistrarContactResolver,
+    ResolvedContact, StaticContactResolver,
+};
 
 pub mod prelude {
     pub use crate::{
