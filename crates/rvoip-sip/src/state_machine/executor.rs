@@ -1,0 +1,626 @@
+use crate::state_table::SessionId;
+use std::sync::Arc;
+use tracing::{debug, error, info};
+
+use crate::{
+    adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
+    session_store::{SessionState, SessionStore},
+    state_table::{Action, EventTemplate, EventType, StateKey, Transition, MASTER_TABLE},
+    types::CallState,
+    // Event import removed - events handled by SessionCrossCrateEventHandler
+};
+
+use super::{actions, guards};
+
+/// Result of processing an event through the state machine
+#[derive(Debug, Clone)]
+pub struct ProcessEventResult {
+    /// The old state before processing
+    pub old_state: CallState,
+    /// The new state after processing
+    pub next_state: Option<CallState>,
+    /// The transition that was executed (if any)
+    pub transition: Option<Transition>,
+    /// Actions that were executed
+    pub actions_executed: Vec<Action>,
+    /// Events that were published
+    pub events_published: Vec<EventTemplate>,
+}
+
+/// The state machine executor that processes events through the state table
+pub struct StateMachine {
+    /// The master state table (static rules)
+    table: Arc<crate::state_table::MasterStateTable>,
+
+    /// Session state storage
+    pub(crate) store: Arc<SessionStore>,
+
+    /// Adapter to dialog-core
+    dialog_adapter: Arc<DialogAdapter>,
+
+    /// Adapter to media-core
+    media_adapter: Arc<MediaAdapter>,
+
+    /// Event publisher (optional - for legacy compatibility)
+    event_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
+    // SimplePeer events now handled by SessionCrossCrateEventHandler
+}
+
+/// Events that flow through the system
+#[derive(Debug, Clone)]
+pub enum SessionEvent {
+    StateChanged {
+        session_id: SessionId,
+        old_state: CallState,
+        new_state: CallState,
+    },
+    MediaFlowEstablished {
+        session_id: SessionId,
+        local_addr: String,
+        remote_addr: String,
+        direction: crate::state_table::MediaFlowDirection,
+    },
+    CallEstablished {
+        session_id: SessionId,
+    },
+    CallTerminated {
+        session_id: SessionId,
+    },
+    CallCancelled {
+        session_id: SessionId,
+    },
+    CallOnHold {
+        session_id: SessionId,
+    },
+    CallResumed {
+        session_id: SessionId,
+    },
+    Custom {
+        session_id: SessionId,
+        event: String,
+    },
+}
+
+impl StateMachine {
+    pub fn new(
+        table: Arc<crate::state_table::MasterStateTable>,
+        store: Arc<SessionStore>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+    ) -> Self {
+        Self {
+            table,
+            store,
+            dialog_adapter,
+            media_adapter,
+            event_tx: None, // No event channel by default
+                            // SimplePeer events handled by SessionCrossCrateEventHandler
+        }
+    }
+
+    // new_with_simple_peer_events removed - using SessionCrossCrateEventHandler for event forwarding
+
+    pub fn new_with_adapters(
+        store: Arc<SessionStore>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Self {
+        Self {
+            table: MASTER_TABLE.clone(),
+            store,
+            dialog_adapter,
+            media_adapter,
+            event_tx: Some(event_tx),
+            // SimplePeer events handled by SessionCrossCrateEventHandler
+        }
+    }
+
+    pub fn new_with_custom_table(
+        table: Arc<crate::state_table::MasterStateTable>,
+        store: Arc<SessionStore>,
+        dialog_adapter: Arc<DialogAdapter>,
+        media_adapter: Arc<MediaAdapter>,
+        event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+    ) -> Self {
+        Self {
+            table,
+            store,
+            dialog_adapter,
+            media_adapter,
+            event_tx: Some(event_tx),
+            // SimplePeer events handled by SessionCrossCrateEventHandler
+        }
+    }
+
+    // Callback registry removed - using event-driven approach
+
+    /// Check if a transition exists for the given state key
+    pub fn has_transition(&self, key: &StateKey) -> bool {
+        self.table.has_transition(key)
+    }
+
+    /// Process an event for a session
+    pub async fn process_event(
+        &self,
+        session_id: &SessionId,
+        event: EventType,
+    ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        use std::collections::VecDeque;
+
+        const MAX_INTERNAL_EVENTS: usize = 32;
+
+        let mut queue = VecDeque::new();
+        queue.push_back(event);
+        let mut first_result = None;
+        let mut processed = 0usize;
+
+        while let Some(event) = queue.pop_front() {
+            processed += 1;
+            if processed > MAX_INTERNAL_EVENTS {
+                return Err(crate::errors::SessionError::InternalError(format!(
+                    "state-machine internal event limit ({}) exceeded for session {}",
+                    MAX_INTERNAL_EVENTS, session_id
+                ))
+                .into());
+            }
+
+            let result = self
+                .process_one_event(session_id, event, &mut queue)
+                .await?;
+            if first_result.is_none() {
+                first_result = Some(result);
+            }
+        }
+
+        first_result.ok_or_else(|| {
+            crate::errors::SessionError::InternalError(format!(
+                "state-machine queue was empty for session {}",
+                session_id
+            ))
+            .into()
+        })
+    }
+
+    async fn process_one_event(
+        &self,
+        session_id: &SessionId,
+        event: EventType,
+        queued_follow_up_events: &mut std::collections::VecDeque<EventType>,
+    ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::session_store::{ActionRecord, GuardResult, TransitionRecord};
+        use std::time::Instant;
+
+        debug!("Processing event {:?} for session {}", event, session_id);
+        let transition_start = Instant::now();
+
+        // 1. Get current session state
+        let mut session = match self.store.get_session(session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Failed to get session {}: {}", session_id, e);
+                return Err(
+                    crate::errors::SessionError::SessionNotFound(session_id.to_string()).into(),
+                );
+            }
+        };
+        let old_state = session.call_state;
+
+        // Initialize tracking for history
+        let mut guards_evaluated = Vec::new();
+        let mut actions_executed_history = Vec::new();
+        let mut errors = Vec::new();
+
+        // 1a. Store event-specific data in session state
+        match &event {
+            EventType::MakeCall { target } => {
+                session.remote_uri = Some(target.clone());
+                // local_uri should be set when session is created
+            }
+            EventType::IncomingCall { from, sdp } => {
+                session.remote_uri = Some(from.clone());
+                if let Some(sdp_data) = sdp {
+                    session.remote_sdp = Some(sdp_data.clone());
+                }
+            }
+            EventType::RejectCall { status, reason } => {
+                session.reject_status = Some(*status);
+                session.reject_reason = Some(reason.clone());
+            }
+            EventType::RedirectCall { status, contacts } => {
+                session.redirect_response_status = Some(*status);
+                session.redirect_response_contacts = contacts.clone();
+            }
+            EventType::SendEarlyMedia { sdp } => {
+                if let Some(sdp_data) = sdp {
+                    session.early_media_sdp = Some(sdp_data.clone());
+                }
+            }
+            EventType::AuthRequired {
+                status_code,
+                challenge,
+            } => {
+                session.pending_auth = Some((*status_code, challenge.clone()));
+            }
+            EventType::SessionIntervalTooSmall { min_se_secs } => {
+                // RFC 4028 §6 — stash the peer's required floor for the
+                // retry action to consume. Normalize 0 / missing to None so
+                // the action's "no Min-SE cached" guard fires cleanly.
+                session.session_timer_min_se = if *min_se_secs > 0 {
+                    Some(*min_se_secs)
+                } else {
+                    None
+                };
+            }
+            EventType::Dialog3xxRedirect { targets, .. } => {
+                // Append to any existing targets (keeps earlier hops' fallbacks
+                // reachable in case the newly-suggested target also redirects).
+                // Dedupe trivially to avoid fast loops.
+                for t in targets {
+                    if !session.redirect_targets.contains(t) {
+                        session.redirect_targets.push(t.clone());
+                    }
+                }
+            }
+            // BlindTransfer event removed
+            EventType::TransferRequested {
+                refer_to,
+                transfer_type,
+                transaction_id,
+            } => {
+                session.transfer_target = Some(refer_to.clone());
+                session.transfer_notify_dialog = session.dialog_id.clone();
+                session.refer_transaction_id = Some(transaction_id.clone());
+                debug!(
+                    "Set transfer target from REFER: {}, type: {:?}, transaction: {}",
+                    refer_to, transfer_type, transaction_id
+                );
+            }
+            // StartAttendedTransfer event removed
+            EventType::ReinviteReceived { sdp } => {
+                // Stash the peer's new SDP offer so NegotiateSDPAsUAS
+                // picks it up when it fires later in this transition.
+                // Force renegotiation — the peer's offer supersedes any
+                // previously negotiated remote SDP.
+                if let Some(sdp_data) = sdp {
+                    session.remote_sdp = Some(sdp_data.clone());
+                    session.sdp_negotiated = false;
+                }
+            }
+            EventType::UpdateReceived { sdp } => {
+                // RFC 4028 UPDATE for session-timer refresh carries no SDP,
+                // but if a peer sends an UPDATE body (RFC 3311 session
+                // modification), record it so a future transition with
+                // NegotiateSDPAsUAS can act on it.
+                if let Some(sdp_data) = sdp {
+                    session.remote_sdp = Some(sdp_data.clone());
+                    session.sdp_negotiated = false;
+                }
+            }
+            _ => {}
+        }
+
+        // 2. Build state key for lookup
+        let key = StateKey {
+            role: session.role,
+            state: session.call_state,
+            event: event.clone(),
+        };
+
+        // 3. Look up transition in table
+        let transition = match self.table.get(&key) {
+            Some(t) => t,
+            None => {
+                debug!("No transition defined for {:?}", key);
+
+                // Record failed transition attempt in history
+                if session.history.is_some() {
+                    let now = Instant::now();
+                    let record = TransitionRecord {
+                        sequence: 0, // Will be set by history
+                        timestamp: now,
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        from_state: old_state,
+                        event: event.clone(),
+                        to_state: Some(old_state),
+                        guards_evaluated: vec![],
+                        actions_executed: vec![],
+                        duration_ms: transition_start.elapsed().as_millis() as u64,
+                        errors: vec![format!("No transition defined for {:?}", key)],
+                        events_published: vec![],
+                    };
+                    session.record_transition(record);
+                    self.store.update_session(session).await?;
+                }
+
+                return Ok(ProcessEventResult {
+                    old_state,
+                    next_state: None,
+                    transition: None,
+                    actions_executed: vec![],
+                    events_published: vec![],
+                });
+            }
+        };
+
+        // 4. Check guards
+        for guard in &transition.guards {
+            let guard_start = Instant::now();
+            let satisfied = guards::check_guard(guard, &session).await;
+            let guard_duration = guard_start.elapsed().as_millis() as u64;
+
+            guards_evaluated.push(GuardResult {
+                guard: guard.clone(),
+                passed: satisfied,
+                evaluation_time_us: guard_duration * 1000,
+            });
+
+            if !satisfied {
+                debug!("Guard {:?} not satisfied, skipping transition", guard);
+
+                // Record guard failure in history
+                if session.history.is_some() {
+                    let now = Instant::now();
+                    let record = TransitionRecord {
+                        sequence: 0,
+                        timestamp: now,
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        from_state: old_state,
+                        event: event.clone(),
+                        to_state: Some(old_state),
+                        guards_evaluated,
+                        actions_executed: vec![],
+                        duration_ms: transition_start.elapsed().as_millis() as u64,
+                        errors: vec![format!("Guard {:?} not satisfied", guard)],
+                        events_published: vec![],
+                    };
+                    session.record_transition(record);
+                    self.store.update_session(session).await?;
+                }
+
+                return Ok(ProcessEventResult {
+                    old_state,
+                    next_state: None,
+                    transition: None,
+                    actions_executed: vec![],
+                    events_published: vec![],
+                });
+            }
+        }
+
+        info!("Executing transition for {:?} + {:?}", old_state, event);
+
+        // Apply next_state and persist BEFORE executing actions so that any
+        // follow-up event queued by an action observes the post-transition
+        // state. If an action fails after this point the state change stays
+        // committed — mirrors how most state machines handle partial
+        // side-effect failures (caller sees the error and decides how to
+        // recover).
+        if let Some(new_state) = transition.next_state {
+            info!("State transition: {:?} -> {:?}", old_state, new_state);
+            session.call_state = new_state;
+            session.entered_state_at = Instant::now();
+            self.store.update_session(session.clone()).await?;
+        }
+
+        // 5. Execute actions
+        let mut actions_executed = Vec::new();
+        for action in &transition.actions {
+            let action_start = Instant::now();
+            let result = actions::execute_action(
+                action,
+                &mut session,
+                &self.dialog_adapter,
+                &self.media_adapter,
+                &self.store,
+                &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
+            )
+            .await;
+            let action_duration = action_start.elapsed().as_millis() as u64;
+
+            let (success, error_opt, exec_error) = match result {
+                Ok(outcome) => {
+                    actions_executed.push(action.clone());
+                    queued_follow_up_events.extend(outcome.follow_up_events);
+                    (true, None, None)
+                }
+                Err(e) => {
+                    let error_msg = format!("Failed to execute action {:?}: {}", action, e);
+                    error!("{}", error_msg);
+                    errors.push(error_msg.clone());
+                    (false, Some(error_msg), Some(e))
+                }
+            };
+
+            actions_executed_history.push(ActionRecord {
+                action: action.clone(),
+                success,
+                execution_time_us: action_duration * 1000,
+                error: error_opt,
+            });
+
+            if !success {
+                // Record failed action in history
+                if session.history.is_some() {
+                    let now = Instant::now();
+                    let record = TransitionRecord {
+                        sequence: 0,
+                        timestamp: now,
+                        timestamp_ms: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64,
+                        from_state: old_state,
+                        event: event.clone(),
+                        to_state: Some(old_state),
+                        guards_evaluated,
+                        actions_executed: actions_executed_history,
+                        duration_ms: transition_start.elapsed().as_millis() as u64,
+                        errors,
+                        events_published: vec![],
+                    };
+                    session.record_transition(record);
+                    self.store.update_session(session).await?;
+                }
+
+                return Err(exec_error.unwrap());
+            }
+        }
+
+        // 6. Record successful transition in history (state already applied
+        // above, before the action loop)
+        let next_state = transition.next_state;
+        if session.history.is_some() {
+            let now = Instant::now();
+            let record = TransitionRecord {
+                sequence: 0,
+                timestamp: now,
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+                from_state: old_state,
+                event: event.clone(),
+                to_state: next_state,
+                guards_evaluated,
+                actions_executed: actions_executed_history,
+                duration_ms: transition_start.elapsed().as_millis() as u64,
+                errors,
+                events_published: transition.publish_events.clone(),
+            };
+            session.record_transition(record);
+        }
+
+        // 7. Apply condition updates
+        session.apply_condition_updates(&transition.condition_updates);
+
+        // Before saving, check whether a *concurrent* process_event (e.g.
+        // the Dialog200OK handler that fired during our own SendReINVITE
+        // await) has since committed a different `call_state`. If so,
+        // preserve its commit — overwriting would race-clobber the
+        // response-driven transition (e.g. HoldPending → OnHold).
+        if let Ok(current) = self.store.get_session(session_id).await {
+            if current.call_state != session.call_state {
+                debug!(
+                    "session {} call_state changed during action phase ({:?} -> {:?}); preserving store value",
+                    session_id, session.call_state, current.call_state
+                );
+                session.call_state = current.call_state;
+                session.entered_state_at = current.entered_state_at;
+            }
+            if current.sdp_origin_version > session.sdp_origin_version {
+                session.sdp_origin_session_id = current.sdp_origin_session_id;
+                session.sdp_origin_version = current.sdp_origin_version;
+            }
+            if session.media_security.is_none() {
+                session.media_security = current.media_security;
+            }
+        }
+
+        // 8. Save updated session state
+        self.store.update_session(session.clone()).await?;
+
+        // 9. Publish events (if channel is available)
+        if let Some(ref event_tx) = self.event_tx {
+            for event_template in &transition.publish_events {
+                let event = self
+                    .instantiate_event(event_template, &session, old_state)
+                    .await;
+                if let Err(e) = event_tx.send(event).await {
+                    error!("Failed to publish event: {}", e);
+                }
+            }
+        }
+
+        // 10. Reload session to pick up any changes made by actions
+        // Actions like send_register may have updated the session (e.g., is_registered flag)
+        let session = self
+            .store
+            .get_session(session_id)
+            .await
+            .map_err(|e| format!("Failed to reload session after actions: {}", e))?;
+
+        // 11. Check if conditions trigger internal events
+        let all_conditions_met = session.all_conditions_met();
+        let call_established_triggered = session.call_established_triggered;
+
+        // 12. Save the updated session state back to the store
+        // CRITICAL: Session changes during process_event must be persisted!
+        self.store
+            .update_session(session)
+            .await
+            .map_err(|e| format!("Failed to save session state: {}", e))?;
+
+        // 12. Trigger internal events after saving
+        if all_conditions_met && !call_established_triggered {
+            debug!("All conditions met, triggering InternalCheckReady");
+            queued_follow_up_events.push_back(EventType::InternalCheckReady);
+        }
+
+        Ok(ProcessEventResult {
+            old_state,
+            next_state: transition.next_state,
+            transition: Some(transition.clone()),
+            actions_executed,
+            events_published: transition.publish_events.clone(),
+        })
+    }
+
+    /// Convert event template to concrete event
+    async fn instantiate_event(
+        &self,
+        template: &EventTemplate,
+        session: &SessionState,
+        old_state: CallState,
+    ) -> SessionEvent {
+        match template {
+            EventTemplate::StateChanged => SessionEvent::StateChanged {
+                session_id: session.session_id.clone(),
+                old_state,
+                new_state: session.call_state,
+            },
+            EventTemplate::MediaFlowEstablished => {
+                let negotiated = session.negotiated_config.as_ref();
+                SessionEvent::MediaFlowEstablished {
+                    session_id: session.session_id.clone(),
+                    local_addr: negotiated
+                        .map(|n| n.local_addr.to_string())
+                        .unwrap_or_default(),
+                    remote_addr: negotiated
+                        .map(|n| n.remote_addr.to_string())
+                        .unwrap_or_default(),
+                    direction: crate::state_table::MediaFlowDirection::Both,
+                }
+            }
+            EventTemplate::CallEstablished => SessionEvent::CallEstablished {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::CallTerminated => SessionEvent::CallTerminated {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::CallCancelled => SessionEvent::CallCancelled {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::CallOnHold => SessionEvent::CallOnHold {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::CallResumed => SessionEvent::CallResumed {
+                session_id: session.session_id.clone(),
+            },
+            EventTemplate::Custom(event) => SessionEvent::Custom {
+                session_id: session.session_id.clone(),
+                event: event.clone(),
+            },
+            _ => SessionEvent::Custom {
+                session_id: session.session_id.clone(),
+                event: format!("{:?}", template),
+            },
+        }
+    }
+}

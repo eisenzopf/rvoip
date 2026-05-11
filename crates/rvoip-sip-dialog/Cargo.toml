@@ -1,0 +1,85 @@
+[package]
+name = "rvoip-sip-dialog"
+# 🎯 INHERIT VERSION AND METADATA FROM WORKSPACE!
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+
+# Crate-specific description
+description = "RFC 3261 SIP Dialog Management Layer for RVOIP"
+
+# ✨ INHERIT LINTS FROM WORKSPACE
+[lints]
+workspace = true
+
+[dependencies]
+# 🎯 INTERNAL CRATES - Use workspace dependencies
+rvoip-sip-core.workspace = true
+rvoip-sip-transport.workspace = true
+rvoip-infra-common.workspace = true
+# transaction-core has been merged into this crate
+
+# External dependencies from workspace
+tokio.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+dashmap.workspace = true
+uuid.workspace = true
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+log.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+rand.workspace = true
+hickory-resolver.workspace = true
+fastrand.workspace = true
+
+# Crate-specific dependencies not in workspace
+http = "0.2"
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+
+# Logging for examples
+tracing-subscriber = "0.3"
+
+[features]
+default = ["recovery", "events"]
+generated-validation = ["rvoip-sip-core/generated-validation"]
+
+# Dialog recovery features
+recovery = []
+
+# Event system features
+events = []
+
+# Testing features
+testing = []
+
+# Development features (additional debugging)
+dev = ["recovery", "events", "testing"]
+
+# Dev-only: forwards to sip-transport's `dev-insecure-tls` and exposes
+# `TlsClientConfig::insecure_skip_verify` through the `TransportManager`.
+# See `crates/sip-transport/Cargo.toml` for the production warning.
+dev-insecure-tls = ["rvoip-sip-transport/dev-insecure-tls"]
+
+[[test]]
+name = "generated_sip_compliance"
+path = "tests/generated_sip_compliance.rs"
+required-features = ["generated-validation"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

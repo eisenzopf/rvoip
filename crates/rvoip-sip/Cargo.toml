@@ -1,0 +1,297 @@
+[package]
+name = "rvoip-sip"
+version = "0.2.0"
+edition = "2021"
+authors = ["RVoIP Contributors"]
+description = "SIP umbrella for RVoIP: api/* (UnifiedCoordinator, StreamPeer, CallbackPeer, Endpoint), server/* (B2BUA helpers), adapter/* (rvoip-core::ConnectionAdapter impl)"
+license = "MIT OR Apache-2.0"
+
+# Endpoint examples (simplest account/profile API)
+[[example]]
+name = "endpoint_local_call"
+path = "examples/endpoint/01_local_call/main.rs"
+[[example]]
+name = "endpoint_incoming_redirect"
+path = "examples/endpoint/02_incoming_redirect/main.rs"
+[[example]]
+name = "endpoint_registered_account"
+path = "examples/endpoint/03_registered_account/main.rs"
+[[example]]
+name = "endpoint_audio_roundtrip"
+path = "examples/endpoint/04_audio_roundtrip/main.rs"
+[[example]]
+name = "sip_client"
+path = "examples/sip_client/main.rs"
+
+# StreamPeer examples (sequential client/test API)
+[[example]]
+name = "stream_peer_basic_call"
+path = "examples/stream_peer/01_basic_call/main.rs"
+[[example]]
+name = "stream_peer_call_control_server"
+path = "examples/stream_peer/02_call_control/server.rs"
+[[example]]
+name = "stream_peer_call_control_client"
+path = "examples/stream_peer/02_call_control/client.rs"
+[[example]]
+name = "stream_peer_audio_alice"
+path = "examples/stream_peer/03_audio/alice.rs"
+[[example]]
+name = "stream_peer_audio_bob"
+path = "examples/stream_peer/03_audio/bob.rs"
+[[example]]
+name = "stream_peer_registration_server"
+path = "examples/stream_peer/04_registration/server.rs"
+[[example]]
+name = "stream_peer_registration_client"
+path = "examples/stream_peer/04_registration/client.rs"
+[[example]]
+name = "stream_peer_blind_transfer_alice"
+path = "examples/stream_peer/05_blind_transfer/alice.rs"
+[[example]]
+name = "stream_peer_blind_transfer_bob"
+path = "examples/stream_peer/05_blind_transfer/bob.rs"
+[[example]]
+name = "stream_peer_blind_transfer_charlie"
+path = "examples/stream_peer/05_blind_transfer/charlie.rs"
+[[example]]
+name = "stream_peer_concurrent_calls_server"
+path = "examples/stream_peer/06_concurrent_calls/server.rs"
+[[example]]
+name = "stream_peer_concurrent_calls_client"
+path = "examples/stream_peer/06_concurrent_calls/client.rs"
+
+# CallbackPeer examples (reactive server API)
+[[example]]
+name = "callback_peer_auto_answer_server"
+path = "examples/callback_peer/01_auto_answer/server.rs"
+[[example]]
+name = "callback_peer_auto_answer_client"
+path = "examples/callback_peer/01_auto_answer/client.rs"
+[[example]]
+name = "callback_peer_closure_gatekeeper_server"
+path = "examples/callback_peer/02_closure_gatekeeper/server.rs"
+[[example]]
+name = "callback_peer_closure_gatekeeper_client"
+path = "examples/callback_peer/02_closure_gatekeeper/client.rs"
+[[example]]
+name = "callback_peer_builder_ivr_server"
+path = "examples/callback_peer/03_builder_ivr/server.rs"
+[[example]]
+name = "callback_peer_builder_ivr_client"
+path = "examples/callback_peer/03_builder_ivr/client.rs"
+[[example]]
+name = "callback_peer_routing_handler_server"
+path = "examples/callback_peer/04_routing_handler/server.rs"
+[[example]]
+name = "callback_peer_routing_handler_client"
+path = "examples/callback_peer/04_routing_handler/client.rs"
+[[example]]
+name = "callback_peer_queue_handler_server"
+path = "examples/callback_peer/05_queue_handler/server.rs"
+[[example]]
+name = "callback_peer_queue_handler_client"
+path = "examples/callback_peer/05_queue_handler/client.rs"
+[[example]]
+name = "callback_peer_trait_handler_server"
+path = "examples/callback_peer/06_trait_handler/server.rs"
+[[example]]
+name = "callback_peer_trait_handler_client"
+path = "examples/callback_peer/06_trait_handler/client.rs"
+
+# Server-side B2BUA example (CARVE_PLAN step 10) — uses rvoip_sip::server::*
+# exclusively; no rvoip-core involvement.
+[[example]]
+name = "sip_b2bua"
+path = "examples/sip_b2bua.rs"
+
+# UnifiedCoordinator examples (explicit session orchestration API)
+[[example]]
+name = "unified_basic_call"
+path = "examples/unified/01_basic_call/main.rs"
+[[example]]
+name = "unified_event_filters"
+path = "examples/unified/02_event_filters/main.rs"
+[[example]]
+name = "unified_registration_server"
+path = "examples/unified/03_registration_server/main.rs"
+[[example]]
+name = "unified_b2bua_bridge_alice"
+path = "examples/unified/04_b2bua_bridge/alice.rs"
+[[example]]
+name = "unified_b2bua_bridge_carol"
+path = "examples/unified/04_b2bua_bridge/carol.rs"
+[[example]]
+name = "unified_b2bua_bridge_peer"
+path = "examples/unified/04_b2bua_bridge/bridge_peer.rs"
+
+# Regression fixtures (protocol/behavior evidence, not the first learning path)
+[[example]]
+name = "regression_dtmf_round_trip_server"
+path = "examples/regression/01_dtmf_round_trip/server.rs"
+[[example]]
+name = "regression_dtmf_round_trip_client"
+path = "examples/regression/01_dtmf_round_trip/client.rs"
+[[example]]
+name = "regression_tls_server"
+path = "examples/regression/02_tls/server.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "regression_tls_client"
+path = "examples/regression/02_tls/client.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "regression_srtp_server"
+path = "examples/regression/03_srtp/server.rs"
+[[example]]
+name = "regression_srtp_client"
+path = "examples/regression/03_srtp/client.rs"
+[[example]]
+name = "regression_cancel_alice"
+path = "examples/regression/04_cancel/alice.rs"
+[[example]]
+name = "regression_cancel_bob"
+path = "examples/regression/04_cancel/bob.rs"
+[[example]]
+name = "regression_prack_alice"
+path = "examples/regression/05_prack/alice.rs"
+[[example]]
+name = "regression_prack_bob"
+path = "examples/regression/05_prack/bob.rs"
+[[example]]
+name = "regression_session_timer_alice"
+path = "examples/regression/06_session_timer/alice.rs"
+[[example]]
+name = "regression_session_timer_bob"
+path = "examples/regression/06_session_timer/bob.rs"
+[[example]]
+name = "regression_session_timer_failure_alice"
+path = "examples/regression/07_session_timer_failure/alice.rs"
+[[example]]
+name = "regression_session_timer_failure_bob"
+path = "examples/regression/07_session_timer_failure/bob.rs"
+[[example]]
+name = "regression_glare_retry_alice"
+path = "examples/regression/08_glare_retry/alice.rs"
+[[example]]
+name = "regression_glare_retry_bob"
+path = "examples/regression/08_glare_retry/bob.rs"
+[[example]]
+name = "regression_notify_send_alice"
+path = "examples/regression/09_notify_send/alice.rs"
+[[example]]
+name = "regression_notify_send_bob"
+path = "examples/regression/09_notify_send/bob.rs"
+
+# Unified PBX interop examples
+[[example]]
+name = "pbx_endpoint"
+path = "examples/pbx/endpoint.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "pbx_stream_peer"
+path = "examples/pbx/stream_peer.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "pbx_callback_builder"
+path = "examples/pbx/callback_builder.rs"
+required-features = ["dev-insecure-tls"]
+[[example]]
+name = "pbx_analyze"
+path = "examples/pbx/analyze.rs"
+required-features = ["dev-insecure-tls"]
+
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
+tracing = "0.1"
+thiserror = "1.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+bincode = "1.3"
+futures = "0.3"
+roxmltree = "0.20"
+
+# RVoIP crates - using actual package names
+rvoip-core = { path = "../rvoip-core" }
+rvoip-infra-common = { path = "../infra-common" }
+rvoip-sip-dialog = { path = "../rvoip-sip-dialog" }
+rvoip-media-core = { path = "../media-core" }
+rvoip-sip-core = { path = "../rvoip-sip-core" }
+rvoip-rtp-core = { path = "../rtp-core" }
+# RFC 4568 SDES — base64 encoding of `a=crypto: inline:` master keys.
+base64 = "0.21"
+rvoip-auth-core = { path = "../auth-core" }
+rvoip-sip-registrar = { path = "../rvoip-sip-registrar" }
+
+# State management
+lazy_static = "1.4"
+once_cell = "1.19"
+arc-swap = "1.7"
+
+# Collections
+indexmap = "2.2"
+dashmap = "5.5"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Audio handling (for API compatibility)
+hound = "3.5"
+bytes = "1.5"
+
+# Utility
+uuid = { version = "1.4", features = ["v4"] }
+rand = "0.8"
+# RFC 3261 §8.1 — state-machine `Action` variant reflection for the YAML
+# loader's drift-detection validation pass (see `state_table/yaml_loader.rs`
+# `parse_action_by_name`).
+strum = { version = "0.26", features = ["derive"] }
+
+[dev-dependencies]
+pretty_assertions = "1.4"
+test-log = "0.2"
+env_logger = "0.11"
+tracing-subscriber = "0.3"
+dotenvy = "0.15"
+rvoip-sip-transport = { path = "../rvoip-sip-transport" }
+rvoip-sip-registrar = { path = "../rvoip-sip-registrar" }
+serial_test = { workspace = true }
+tempfile = "3.14"
+# Self-signed cert generation for the TLS-call integration test.
+rcgen = "0.12"
+clap = { workspace = true }
+cpal = "0.15"
+crossterm = "0.27"
+ratatui = "0.26"
+toml = "0.8"
+
+[features]
+default = []
+event-history = []
+persistence = ["sqlx"]
+generated-validation = [
+    "rvoip-sip-dialog/generated-validation",
+    "rvoip-sip-core/generated-validation",
+]
+# Dev-only: exposes `Config::tls_insecure_skip_verify` and forwards to
+# dialog-core's matching feature (which in turn forwards to
+# sip-transport's). Production builds must omit this feature so `rustls`
+# always validates server certs. Forwarded here on dialog-core only —
+# session-core only depends on sip-transport as a dev-dependency, and
+# feature chains via dev-deps don't participate in regular builds.
+dev-insecure-tls = ["rvoip-sip-dialog/dev-insecure-tls"]
+
+[[test]]
+name = "generated_sip_compliance"
+path = "tests/generated_sip_compliance.rs"
+required-features = ["generated-validation"]
+
+[dependencies.sqlx]
+version = "0.7"
+optional = true
+features = ["sqlite", "runtime-tokio"]
