@@ -225,7 +225,12 @@ other RFC 3261 header is reachable through `header()`.
 ### 2. Outbound: `SipRequestOptions` — shared builder trait
 
 ```rust
-pub trait SipRequestOptions: Sized {
+pub trait SipRequestOptions: Sized + Send + Sync {
+    // Send + Sync is mandatory: every builder must cross `.await` points
+    // and be safe to spawn via `tokio::spawn` for B2BUA / call-center
+    // per-leg concurrency. See second-round audit §"Builder Send+Sync
+    // requirement" for the rationale.
+
     /// The SIP method this builder will emit. Used by HeaderPolicy.
     fn method(&self) -> Method;
 
@@ -376,9 +381,9 @@ type that matches the existing flat method's return.
 
 | Builder | Coordinator entry | `.send()` returns | Method-specific setters |
 |---|---|---|---|
-| `OutboundCallBuilder` | `coord.invite(from, to)` | `Result<SessionId>` | `with_credentials`, `with_pai` / `without_pai`, `as_transfer_leg(&SessionId)`, `with_subject`, `with_from_display`, `with_precomputed_authorization`, `with_sdp` |
+| `OutboundCallBuilder` | `coord.invite(from, to)` | `Result<SessionId>` | `with_credentials`, `with_pai` / `without_pai`, `as_transfer_leg(&SessionId)`, `with_subject`, `with_from_display`, `with_contact_uri` (B2BUA-critical, see second-round audit), `with_outbound_proxy(uri)` / `without_outbound_proxy`, `with_precomputed_authorization`, `with_sdp` |
 | `OutboundCallBuilder` (re-INVITE) | `coord.reinvite(&session)` | `Result<()>` | `with_sdp`, `as_session_timer_refresh`, `with_precomputed_authorization` |
-| `RegisterBuilder` | `coord.register(registrar, user, pw)` | `Result<RegistrationHandle>` | `with_expires`, `with_from_uri`, `with_contact_uri`, `with_path(uri)` (RFC 3327), `with_q_value(f32)`, `with_sip_instance(urn)`, `with_reg_id(u32)`, `with_precomputed_authorization` |
+| `RegisterBuilder` | `coord.register(registrar, user, pw)` | `Result<RegistrationHandle>` | `with_expires`, `with_from_uri`, `with_contact_uri`, `with_outbound_proxy(uri)` / `without_outbound_proxy`, `with_path(uri)` (RFC 3327), `with_q_value(f32)`, `with_sip_instance(urn)`, `with_reg_id(u32)`, `with_precomputed_authorization` |
 | `ReferBuilder` | `coord.refer(&session, refer_to)` | `Result<()>` | `with_replaces(value)`, `with_referred_by(uri)` (RFC 3892), `with_target_dialog(&IncomingRequest)` |
 | `ByeBuilder` | `coord.bye(&session)` | `Result<()>` | `with_reason(SipReason)` |
 | `CancelBuilder` | `coord.cancel(&session)` | `Result<()>` | `with_reason(SipReason)` |
@@ -404,9 +409,17 @@ and the `Endpoint` adapter still runs `resolve_target` on bare extensions.
 ### 6. Send-side response builders (B2BUA-critical)
 
 Servers and B2BUAs need authorship on the **response** side too. All
-implement `SipRequestOptions`. Dialog-core's `send_response` already
-accepts a fully-authored `Response`, so response builders compose the
-`Response` in `rvoip-sip` via `SimpleResponseBuilder` and hand it over.
+implement `SipRequestOptions`. Dialog-core's
+`UnifiedDialogApi::send_response(transaction_id, Response)` at
+`crates/rvoip-sip-dialog/src/api/unified.rs:784-790` already accepts a
+fully-authored `Response`, so response builders compose the `Response`
+in `rvoip-sip` via `SimpleResponseBuilder` from sip-core and hand it
+over. **Today's `DialogAdapter::send_response` at
+`dialog_adapter.rs:1064-1089` is a thin pass-through** that builds a
+basic Response from `(status_code, sdp)` and forwards; Phase D adds
+`send_response_with_options(session_id, Response)` as a sibling that
+takes a pre-built Response and resolves the session's pending
+transaction key.
 
 | Builder | Entry | `.send()` returns | Method-specific setters |
 |---|---|---|---|
@@ -658,15 +671,25 @@ in dialog-core; only application-controlled headers ride alongside.
 
 Five phases, each shippable as a separate PR in this order.
 
-### Phase A — Inbound inspection (rvoip-sip only)
+### Phase A — Inbound inspection (rvoip-sip + minimal infra-common)
 
 `src/api/headers/view.rs` (new) defines `SipHeaderView`. `IncomingCall`
 gains a `request: Arc<rvoip_sip_core::Request>` field populated by the
 state machine at session creation. `header()`, `headers_named()`,
-`headers()`, `header_wire_value()`, `header_names()`, `raw_request()`
+`headers()`, `header_str()`, `header_names()`, `raw_request()`
 implementations. The empty-`HashMap` bug at `src/api/incoming.rs:80` is
 fixed (populated for back-compat, deprecation note pointing readers at
 the trait).
+
+**Cross-crate event enrichment (Phase A scope, not deferred to E):**
+the existing `DialogToSessionEvent::IncomingCall` variant
+(`crates/infra-common/src/events/cross_crate.rs:516`) carries
+pre-decoded fields today and does not retain the parsed Request.
+Phase A adds `raw_request: Arc<Bytes>` to that variant (additive;
+existing consumers unaffected) and dialog-core's publish site
+re-serializes the parsed INVITE via `Request::to_bytes()` into the
+event. rvoip-sip's state-machine handler re-parses on receipt to
+populate `IncomingCall.request`. Same plumbing pattern as Phase E.
 
 `IncomingResponse`, `IncomingRequest`, `IncomingRegister` new types,
 each implementing `SipHeaderView`. `Event::CallProgressDetailed
@@ -735,13 +758,51 @@ pub(crate) async fn send_register_inner(opts);
 pub(crate) async fn send_reinvite_inner(opts);
 ```
 
-INVITE / re-INVITE / REGISTER / SUBSCRIBE / MESSAGE / NOTIFY route
-through their existing state-machine Action variants (widened payload
-to carry `Arc<XxxRequestOptions>`). REFER / INFO / UPDATE / BYE /
-CANCEL / OPTIONS go through direct `DialogAdapter::send_*_with_options`
-calls — no new Action variants required for them (they bypass the
-state machine today and continue to). The state machine is unchanged
-structurally; only INVITE-family payloads widen.
+**Routing matrix (verified 2026-05-11, supersedes earlier wording).**
+Today's `UnifiedCoordinator` public-API entry points split as follows:
+
+| Method | UAC public-API path today | Phase C plan |
+|---|---|---|
+| INVITE | `EventType::MakeCall` → state machine → `Action::SendINVITE` (carries headers via `SessionState.extra_headers` stash) → `DialogAdapter::send_invite_with_extra_headers` | Same path. Stash widens from `Vec<TypedHeader>` to `Arc<OutboundCallOptions>` (or stash both side-by-side for back-compat). |
+| re-INVITE | `EventType::ReInvite*` → state machine → `Action::SendReINVITE` (parameterless today, `state_table/types.rs:489`) → `DialogAdapter::send_reinvite_session` | Same path. `Action::SendReINVITE` widens to carry `Arc<ReInviteRequestOptions>` — clean refactor since it has no existing payload. |
+| REGISTER | `EventType::Register*` → state machine → `Action::SendREGISTER` / `SendREGISTERWithAuth` → `DialogAdapter::send_register*` | Same path. Action payload (or stash) widens to options. |
+| SUBSCRIBE | `EventType::Subscribe*` → state machine → `Action::SendSUBSCRIBE` → `DialogAdapter::send_subscribe` | Same path. |
+| NOTIFY | **Two paths today.** UAC public-API (`UnifiedCoordinator::send_notify` at unified.rs:2472) bypasses the state machine and calls `dialog_adapter.send_notify` directly. The `Action::SendNOTIFY` variant (actions.rs:1446) is used only for state-machine-driven emissions (e.g., REFER-implicit NOTIFY, subscription-state changes). | Builder's `.send()` keeps the direct path (no state-machine round-trip). Action payload widens too so state-machine-emitted NOTIFYs also carry options. |
+| MESSAGE | `EventType::Message*` → state machine → `Action::SendMESSAGE` → `DialogAdapter::send_message` | Same path. |
+| BYE | `EventType::HangupCall` → state machine → `Action::SendBYE` (reads `SessionState.pending_bye_reason` stash) → `DialogAdapter::send_bye_session_with_reason` | Same path. Stash widens (`pending_bye_options: Arc<ByeRequestOptions>`). Required because BYE drives session lifecycle — bypassing the state machine would skip CallEnded events / cleanup. |
+| CANCEL | State-machine-driven (`Action::SendCANCEL`); no public-API path | Builder routes through state machine to preserve CANCEL semantics (RFC 3261 §9). Stash + Action payload widen together. |
+| REFER | Direct: `UnifiedCoordinator::send_refer` at unified.rs:2260 stashes `transfer_target`/`replaces_header`/`transfer_state` and calls `dialog_adapter.send_refer_session` directly. **No `Action::SendREFER` variant exists.** | Builder's `.send()` keeps the direct path. No new Action variant required; the existing transfer-state stash plus the new options struct ride together as function arguments to `DialogAdapter::send_refer_with_options`. |
+| INFO | Direct: `UnifiedCoordinator::send_info` at unified.rs:2437 calls `dialog_adapter.send_info` directly. No state-machine path. | Builder's `.send()` keeps the direct path. |
+| UPDATE | No public-API path today. | Builder's `.send()` calls `DialogAdapter::send_update_with_options` directly; no Action variant. |
+| OPTIONS | Does not exist anywhere today (no UnifiedCoordinator method, no Action variant, no dialog-core method). | Builder's `.send()` calls `DialogAdapter::send_options_with_options` which calls the new `UnifiedDialogApi::send_options_out_of_dialog_with_options`. New authorship through and through. |
+
+Phase C therefore touches three categories of code:
+
+1. **Action-variant widening** (INVITE, re-INVITE, REGISTER, SUBSCRIBE, MESSAGE, NOTIFY, BYE, CANCEL): the `Action::Send*` variant payload widens to carry `Arc<XxxRequestOptions>`, or the corresponding `SessionState` stash field widens. No new variants. The state machine's transition table (`src/state_table/yaml_loader.rs` + `src/state_table/types.rs`) is unchanged.
+
+2. **Direct-dispatch builders** (REFER, INFO, UPDATE, OPTIONS): builder's `.send()` calls `DialogAdapter::send_*_with_options` directly without touching the state machine. No SessionState stash widening required for these.
+
+3. **Inner helper authorship** (`state_machine/helpers.rs`):
+
+```rust
+// Collapse of 5 existing methods (lines 99-156):
+pub(crate) async fn make_call_inner(opts);
+
+// NEW (no current analog in helpers.rs):
+pub(crate) async fn send_register_inner(opts);
+pub(crate) async fn send_subscribe_inner(opts);
+pub(crate) async fn send_message_inner(opts);
+pub(crate) async fn send_notify_inner(opts);     // for the state-machine-emit path
+pub(crate) async fn send_bye_inner(opts);        // replaces hangup_with_reason internals
+pub(crate) async fn send_cancel_inner(opts);
+pub(crate) async fn send_reinvite_inner(opts);
+
+// Direct-dispatch (no state machine — these never enter helpers.rs):
+//   send_refer_inner, send_info_inner, send_update_inner, send_options_inner
+//   live as inherent methods on the builder, calling DialogAdapter directly.
+```
+
+The state machine is unchanged structurally — payload widening is the entire change. The `SessionState` stash fields gain `pending_<method>_options: Option<Arc<XxxRequestOptions>>` siblings to the existing `pending_bye_reason` / `transfer_target` fields (`session_store/state.rs:43-209`).
 
 `UnifiedCoordinator` gains the 12 `.invite() / .reinvite() / .register()
 / .refer() / .bye() / .cancel() / .notify() / .subscribe() / .info() /
@@ -846,16 +907,27 @@ Each has a default no-op implementation so existing `CallHandler`
 implementors compile unchanged.
 
 ```rust
-async fn on_refer_received_full(&self, h: SessionHandle, r: IncomingRequest) -> bool {
-    // default impl rebuilds today's pre-decoded args from the request
-    let refer_to = r.header_str(&HeaderName::ReferTo).unwrap_or_default();
-    self.on_refer_received(h, refer_to /* + replaces, referred_by */ ).await
+// Naming corrected from earlier drafts: the existing trait methods are
+// `on_transfer_request` (callback_peer.rs:894), `on_refer_notify` (904),
+// and `on_notify` (980) — NOT `on_refer_received` / `on_notify_received`.
+// The `_full` companions take `IncomingRequest` and default-decode to
+// the legacy positional arguments so existing implementers compile
+// unchanged.
+
+async fn on_transfer_request_full(&self, h: SessionHandle, r: IncomingRequest) -> bool {
+    let target = r.header_str(&HeaderName::ReferTo).unwrap_or_default();
+    self.on_transfer_request(h, target).await
 }
-async fn on_notify_received_full(&self, h: SessionHandle, r: IncomingRequest) { ... }
-async fn on_info_received_full(&self, h: SessionHandle, r: IncomingRequest) { ... }
-async fn on_message_received_full(&self, h: SessionHandle, r: IncomingRequest) { ... }
-async fn on_options_received_full(&self, h: SessionHandle, r: IncomingRequest) { ... }
-async fn on_update_received_full(&self, h: SessionHandle, r: IncomingRequest) { ... }
+async fn on_refer_notify_full(&self, h: SessionHandle, r: IncomingRequest) {
+    // default impl forwards pre-decoded fields to on_refer_notify(...)
+}
+async fn on_notify_full(&self, h: SessionHandle, r: IncomingRequest) {
+    // default impl forwards pre-decoded fields to on_notify(...)
+}
+async fn on_info_full(&self, h: SessionHandle, r: IncomingRequest) {}
+async fn on_message_full(&self, h: SessionHandle, r: IncomingRequest) {}
+async fn on_options_full(&self, h: SessionHandle, r: IncomingRequest) {}
+async fn on_update_full(&self, h: SessionHandle, r: IncomingRequest) {}
 ```
 
 Existing implementations keep compiling; B2BUA implementations override
@@ -1174,12 +1246,32 @@ Three layer-respect rules the new builders must honor, made explicit:
 
    **Resolution:** carry the raw wire bytes as `Arc<bytes::Bytes>` (the
    `bytes` crate is already a workspace dep on both sides and is what
-   `rvoip-sip-core` uses for `Request.body`). Dialog-core, which
-   already holds the parsed message, also has the original bytes —
-   it stashes them into the event. The rvoip-sip side re-parses with
-   `rvoip_sip_core::parse_message` (cheap: the message was already
-   validated upstream; parse is purely structural) and wraps the
-   result in `IncomingRequest`/`IncomingResponse`/`IncomingRegister`.
+   `rvoip-sip-core` uses for `Request.body`). The rvoip-sip side
+   re-parses with `rvoip_sip_core::parse_message` (cheap: the message
+   was already validated upstream; parse is purely structural) and
+   wraps the result in `IncomingRequest`/`IncomingResponse`/`IncomingRegister`.
+
+   **Plumbing note (verified):** dialog-core today holds the parsed
+   `Request` at publish time but **strips it to pre-decoded scalar
+   fields** before constructing the bus variant. Verified publish
+   sites:
+   - REGISTER → `crates/rvoip-sip-dialog/src/protocol/register_handler.rs:92-108`
+   - NOTIFY → `crates/rvoip-sip-dialog/src/manager/protocol_handlers.rs:656-728`
+   - REFER → `crates/rvoip-sip-dialog/src/events/event_hub.rs:588-596`
+
+   Phase E gives each publish site one extra line:
+   ```rust
+   raw_request: Arc::new(request.to_bytes()),   // re-serialize from typed
+   ```
+   `Request::to_bytes` (sip-core) is canonical and round-trips. If
+   preserving the *exact* inbound byte sequence is required for some
+   B2BUA use case (e.g., signature verification across the bus), an
+   optional follow-up holds the original `Bytes` from the parse step
+   in the dialog handler and threads it to the publish site — but
+   re-serialization is the default because it keeps the parse layer
+   stateless and meets every other B2BUA need (the parsed semantics
+   match exactly; only insignificant whitespace and header-case may
+   differ).
 
    ```rust
    // infra-common::events::cross_crate.rs — additive fields
@@ -1601,6 +1693,86 @@ on `rvoip-sip` is **additive**: registrar continues to compile and run
 unchanged. Migrating `rvoip-sip-registrar` onto `IncomingRegister` is
 a follow-up PR outside this design's scope.
 
+### Response-side authorship plumbing (Phase D detail)
+
+Audit-confirmed flow for response authoring:
+
+- `UnifiedDialogApi::send_response(transaction_id: &TransactionKey, response: Response)`
+  (`crates/rvoip-sip-dialog/src/api/unified.rs:784-790`) exists today and
+  takes a **fully-built `Response`**. This is the layer-correct hand-off
+  point.
+- `DialogAdapter::send_response(session_id, code, sdp)` at
+  `dialog_adapter.rs:1064-1089` is the current thin pass-through that
+  builds a basic `Response` from `(status_code, sdp)` and forwards.
+- For provisional 183 with SDP, `send_early_media` exists at
+  `state_machine/helpers.rs:298-310`. No 100 Trying / 180 Ringing
+  authoring path exists today; Phase D adds them through
+  `ProvisionalBuilder`.
+
+Phase D builders (`AcceptBuilder`, `RejectBuilder`, `RedirectBuilder`,
+`ProvisionalBuilder`, `AuthChallengeBuilder`) compose `Response`
+objects inside `rvoip-sip` using `SimpleResponseBuilder` from sip-core,
+then call `UnifiedDialogApi::send_response` directly. The new
+`DialogAdapter::send_response_with_options` is a thin proxy that
+forwards the pre-built `Response` and resolves the session's pending
+transaction key — it does not re-build the message.
+
+### AuthChallengeBuilder is NEW authorship (not a wrap)
+
+Audit-confirmed: the only 401 sender in `rvoip-sip` today is
+`RegistrationAdapter` at `src/adapters/registration_adapter.rs:112-132`,
+and it challenges only inbound REGISTER. **No code path exists today
+to send 401/407 in response to inbound INVITE or in-dialog requests.**
+
+Phase D's `AuthChallengeBuilder` adds this surface from scratch:
+
+```rust
+incoming.challenge_builder(AuthScheme::Digest)
+    .with_realm("pbx.example")
+    .with_nonce(generate_nonce())
+    .with_algorithm("MD5")
+    .with_qop("auth")
+    .send().await?;   // sends 401 Unauthorized + WWW-Authenticate
+```
+
+Builder uses `SimpleResponseBuilder::www_authenticate_digest`
+(`crates/rvoip-sip-core/src/builder/response.rs:1480-1487`) for the
+typed challenge, composes the 401/407 Response, and hands it to
+`UnifiedDialogApi::send_response`. No new dialog-core method required —
+the existing `send_response` accepts any pre-built `Response`.
+
+### Surface types are inherent impls, not traits (corrected)
+
+`PeerControl` and `CallbackPeerControl` (`stream_peer.rs:364-465`,
+`callback_peer.rs:1025-1069`) are concrete structs with **inherent
+impls**, not trait definitions. The design's earlier wording about
+"trait methods" to deprecate is corrected: `#[deprecated]` annotations
+go on the inherent methods directly. No trait changes are needed; the
+new builder entry points are added as additional inherent methods on
+the same structs.
+
+### Phase A: incoming-Request attachment to `IncomingCall`
+
+Audit confirmed `IncomingCall.headers: HashMap<String,String>` exists
+at `api/incoming.rs:58` and is **never populated** (initialized empty
+at line 80, no code fills it). Phase A:
+
+1. Adds `request: Arc<rvoip_sip_core::Request>` to `IncomingCall`.
+2. Implements `SipHeaderView` on `IncomingCall`, delegating to the new
+   field.
+3. Populates the field in `state_machine/actions.rs` at the point
+   where `IncomingCall` is constructed for the `Action::AcceptCall`
+   handler path. The parsed INVITE Request is already available from
+   the inbound `DialogToSessionEvent::IncomingCall` variant — the
+   audit confirmed `cross_crate.rs:516` carries pre-decoded fields
+   today; Phase A also enriches the IncomingCall variant with
+   `raw_request: Arc<Bytes>` and re-parses on the rvoip-sip side
+   (same pattern as Phase E).
+4. Fixes the empty-HashMap bug by populating from the parsed Request
+   for back-compat with code that reads `IncomingCall.headers` today.
+   Deprecate the field with a doc-note pointing readers at
+   `SipHeaderView::header_str`.
+
 ### Open questions for the implementer
 
 These are deliberately left open because the answer depends on
@@ -1627,6 +1799,1077 @@ implementation decisions outside the scope of the design:
    builder trait shape makes adding `PublishBuilder` trivial when
    needed — the bus and dialog-core do not need PUBLISH-specific
    plumbing because PUBLISH is non-dialog-bound.
+
+---
+
+## Second-round layer-audit refinements (2026-05-11, post-review)
+
+A code-level re-audit across all four crates (rvoip-sip, rvoip-sip-core,
+rvoip-sip-dialog, rvoip-sip-transport) plus `infra-common` confirmed
+that **the plan honors layer separation** and **does not disturb the
+state machine, dialog/transaction state, the cross-crate event bus, or
+the transport pipe**. This section records gaps the re-audit surfaced
+and the targeted refinements that close them. Where this section
+conflicts with earlier wording in the document, this section wins.
+
+### Layer-separation verdict (re-confirmed)
+
+| Layer concern | Audit finding | Plan honors? |
+|---|---|---|
+| `rvoip-sip-transport` zero authorship | All `SimpleRequestBuilder` / `Message::new` use is `#[cfg(test)]`-gated. Production paths only `parse_message` inbound and `Message::to_bytes` outbound. Emits `TransportEvent` only. | ✅ Yes — design proposes no transport changes. |
+| `rvoip-sip-core` foundation isolation | No `rvoip-*` deps in `Cargo.toml`. `Request.headers: Vec<TypedHeader>`, `body: Bytes`, `TypedHeader::Other` round-trips losslessly via `Display`. `ParseMode::{Strict, Lenient}` exists at `parser/message.rs:45-50`. | ✅ Yes — design proposes no sip-core changes. |
+| Dialog/transaction state in `rvoip-sip-dialog` | `DialogImpl.local_cseq` (line 47), `route_set: Vec<Uri>` (line 56), `increment_local_cseq()` (line 706). In-dialog template at `transaction/dialog/mod.rs:102-196` appends `extra_headers` only **after** From/To/Call-ID/CSeq/Via/Max-Forwards/Contact/Route/Content-Type/Content-Length are stamped. | ✅ Yes — `*_with_options` additions append at the existing tail slot. State machine, route-set, CSeq, transaction core untouched. |
+| `infra-common` bus SIP-agnostic | `infra-common/Cargo.toml` has **no `rvoip-sip-core` dep**. Cross-crate event payloads cannot carry `Arc<rvoip_sip_core::Request>` without breaking foundation isolation. Bus is in-process `broadcast::Sender<Arc<dyn CrossCrateEvent>>` (`events/coordinator.rs:111-125`); no wire serialization in current monolithic mode. | ✅ Yes — Phase A/E use `Arc<bytes::Bytes>` and re-parse on the rvoip-sip side. |
+| `rvoip-sip` state-machine non-disturbance | `Action::Send*` variants in `state_table/types.rs:469-631` — payload-widening (existing variants gain `Arc<XxxRequestOptions>` payloads) is purely additive. The transition table (`state_table/yaml_loader.rs`) is **not** modified. REFER/INFO/UPDATE/OPTIONS continue to use direct `DialogAdapter` dispatch (no new Action variants). | ✅ Yes — state-machine semantics unchanged. |
+| Config-vs-builder coexistence | `Config` at `api/unified.rs:185` with `local_uri` (204), `pai_uri` (236), `credentials` (228), `outbound_proxy_uri` (256), `sip_contact_mode` (331). All builder overrides flow through `DialogAdapter` merge precedence and never mutate `Config`. | ✅ Yes — Path 1/2/3 examples in "Config + builder coexistence" cover the three modes. |
+
+**The plan, as written, does not push any layer into doing work it
+shouldn't do.** The refinements below close gaps in specificity, not
+violations.
+
+### Audit-surfaced corrections to the body of the document
+
+| Doc claim (earlier wording) | Audited reality | Effect on plan |
+|---|---|---|
+| `CallHandler::on_refer_received`, `on_notify_received` | The trait at `callback_peer.rs:814+` actually defines **`on_transfer_request(handle, target: String)` (line 894)**, **`on_refer_notify(handle, status, reason, subscription_state, body)` (line 904)**, and **`on_notify(handle, event_package, subscription_state, content_type, body)` (line 980)**. There is no `on_refer_received` / `on_notify_received`. | The `_full` companion methods in Phase E must be named `on_transfer_request_full`, `on_refer_notify_full`, `on_notify_full` (each taking `IncomingRequest`). Default impl pulls the same pre-decoded fields from the typed Request to forward to the legacy method. The "verified callback names" callout earlier in this document is the source of truth; treat any occurrence of `on_refer_received` / `on_notify_received` elsewhere as a doc-bug to be fixed during implementation. |
+| Deprecation list for `StreamPeer` is `{call, call_with_headers}` | `StreamPeer::call_with_auth` exists at `stream_peer.rs:416`. | Phase C deprecation list must include `StreamPeer::call_with_auth`. The new `peer.invite(to).with_credentials(creds).send()` shape replaces it. |
+| `Endpoint` has `{call, call_with_headers}` only | Confirmed — no `call_with_auth` on Endpoint today. | The new builder unifies these surfaces: Endpoint also gains a chainable `with_credentials` via its `endpoint.invite(to)` entry, closing a real gap (today Endpoint callers cannot authenticate outbound calls without the builder). |
+| dialog-core `send_response` at `unified.rs:784-790` accepts a fully-built `Response` | Verified. | Phase D's `DialogAdapter::send_response_with_options(session_id, Response)` is a thin proxy that locates the pending transaction key and forwards. No new dialog-core entry point required for responses. |
+| dialog-core `send_subscribe_with_options` / `send_subscribe_refresh_with_options` exist | Neither exists today. `send_register_with_options` is the **only** existing `*_with_options` method (`unified.rs:1250`). | Phase B authors both new methods on top of the existing `send_subscribe_out_of_dialog` and `send_subscribe_refresh` paths. |
+| Inbound INFO / MESSAGE / OPTIONS / UPDATE flow on the cross-crate bus | **They do not.** Today these inbound requests publish to the **internal-to-dialog-core** `SessionCoordinationEvent` enum (`events/session_coordination.rs:17`): OPTIONS → `CapabilityQuery` (`protocol_handlers.rs:277, 526`), MESSAGE → internal handler, INFO routes through a co-located path, UPDATE shares the re-INVITE channel. The `event_hub.rs::convert_session_coordination_to_cross_crate` bridge at `event_hub.rs:182+` translates only a subset (IncomingCall, CallTerminating, TransferRequest, AckReceived, etc.) to `DialogToSessionEvent`. **CapabilityQuery is not bridged at all** — OPTIONS inbound never reaches rvoip-sip today. | **Phase E is doing more work than the earlier draft implied.** It must: (a) add the new variants to `DialogToSessionEvent` (`infra-common::events::cross_crate.rs`); AND (b) add new `SessionCoordinationEvent` variants in dialog-core where today's pre-decoded scalar fields are not enough to round-trip the original Request; AND (c) extend the conversion bridge in `event_hub.rs:182+` to map the new internal variants to the new cross-crate variants. See §"Phase E plumbing — three-stage" below for the explicit step list. |
+| Phase A enriches `DialogToSessionEvent::IncomingCall` with `raw_request: Arc<Bytes>` | Variant verified at `cross_crate.rs:516`. Plan also needs the dialog-core publish site to re-serialize the parsed INVITE via `Request::to_bytes()` and attach. | Phase A scope is unchanged; the implementation note here is that the publish site for `IncomingCall` lives in dialog-core's call-handling path (paired with where it stamps `from`, `to`, `sdp_offer` today). Same pattern as Phase E for REGISTER/NOTIFY/REFER. |
+| `bytes` is a workspace dep on infra-common | `bytes` is in the workspace root but **not** explicitly declared in `infra-common/Cargo.toml`. | Phase A (the first phase to touch `cross_crate.rs` with a `Bytes` field) must add `bytes = { workspace = true }` to `infra-common/Cargo.toml`. No new transitive deps; `bytes` is already pulled by `rvoip-sip-core` and `rvoip-sip-transport`. |
+| `Default` on every options struct | `RegisterRequestOptions` (`unified.rs:228-239`) today derives `Debug, Clone` only. | Phase B adds `#[derive(Default)]` to `RegisterRequestOptions` AND every new `*RequestOptions` struct. The plan already calls this out; flagging here for completeness. |
+
+### B2BUA / SBC / call-center gaps — explicit closure
+
+The user requirement is that B2BUA / SBC / call-center applications can
+**read and rewrite SIP headers freely** without breaking the dialog,
+transaction, or transport layers. The audit confirmed the design's
+carry-through model handles the common case; the gaps below close
+specific real-world authoring needs.
+
+#### Outbound `Contact` rewrite (B2BUA-critical)
+
+**Gap.** B2BUAs must publish their own `Contact` URI on the outbound
+INVITE — otherwise mid-dialog requests bypass the B2BUA and flow
+endpoint-to-endpoint, breaking bridging and media anchoring. Today
+`OutboundCallBuilder` derives `Contact` from `Config.sip_contact_mode`
+with no per-call override.
+
+**Resolution.** Add `with_contact_uri(uri)` to `OutboundCallBuilder`
+and `RegisterBuilder`. For INVITE this controls only the **initial**
+`Contact` on the outbound INVITE; dialog-core then takes over Contact
+authority for the established dialog (per RFC 3261 §12, in-dialog
+`Contact` is the locally-registered local target). Classification:
+`MethodShaped { setter: "with_contact_uri" }` on INVITE and REGISTER;
+remains `StackManaged` for every other in-dialog method. Merge
+precedence in the "Configuration merge semantics" table updated:
+
+| `Contact` URI (initial INVITE / REGISTER) | builder.with_contact_uri → surface.contact_uri → Config.sip_contact_mode |
+
+#### Per-leg outbound-proxy override
+
+**Gap.** A B2BUA may need to route different legs through different
+outbound proxies (e.g., one carrier per termination region).
+`.without_outbound_proxy()` exists in the plan but only **suppresses**
+Config's default; there is no way to **redirect** to a different
+proxy for one builder.
+
+**Resolution.** Add `with_outbound_proxy(uri)` to every outbound
+builder. Forwarded to `DialogAdapter` which already owns the
+`prepend_outbound_proxy_route` helper at `dialog_adapter.rs:2086` —
+the adapter consults the per-call override before falling back to
+`Config.outbound_proxy_uri`. No new dialog-core or transport changes.
+
+#### Inbound provisional-response surface (early-media B2BUA bridging)
+
+**Gap.** B2BUAs bridging early media (183 Session Progress with SDP)
+must inspect the upstream 183's `Contact`, `Record-Route`, `Allow`,
+`Supported`, and `Server` headers and selectively forward them to the
+downstream caller before the 200 OK lands. The plan introduces
+`IncomingResponse` for non-2xx finals but is silent on provisional
+inbound.
+
+**Resolution.** `IncomingResponse` covers **every** inbound non-2xx
+status, including 1xx provisional. The `Event::CallProgressDetailed
+(IncomingResponse)` variant (added in Phase A) fires on **each** 1xx
+upstream-side, not only finals. The pre-existing
+`Event::CallProgress` (pre-decoded) stays in parallel for non-B2BUA
+callers. Add a doc-example to Phase A showing 183 inspection.
+
+#### Response-side per-leg authoring (UAS path completeness)
+
+**Gap audit.** Response-side builders (Accept/Reject/Redirect/
+Provisional/AuthChallenge) implement `SipRequestOptions` so
+`with_header` / `with_headers_from` / `strip_header` work. But the
+list of *method-shaped* responses needs explicit clarification:
+
+- `100 Trying` is stack-emitted by the transaction layer per RFC 3261 §17.2.1; **not** authoring-exposed. The `ProvisionalBuilder` is for 18x only.
+- `180 Ringing` / `183 Session Progress` go through `ProvisionalBuilder`; `with_sdp` valid only on 183.
+- `200 OK` for INVITE goes through `AcceptBuilder`. For non-INVITE in-dialog (BYE/UPDATE/INFO/MESSAGE/OPTIONS), the **transaction layer** synthesizes 200 OK automatically with no application override — *unless* the app rejects the request first.
+
+**Resolution.** Add a `GenericResponseBuilder` that accepts arbitrary
+`status: u16` (3xx-6xx range gated for safety) for cases not covered
+by the named builders (e.g., 491 Request Pending, 480 Temporarily
+Unavailable with a custom `Retry-After`). Reachable from
+`IncomingCall::respond_builder(status)` and
+`IncomingRequest::respond_builder(status)`. Implements
+`SipRequestOptions` exactly like the others. Wraps
+`SimpleResponseBuilder` from sip-core; dispatches via
+`UnifiedDialogApi::send_response`. **Does not** support 1xx (use
+`ProvisionalBuilder`) or 2xx for INVITE (use `AcceptBuilder`).
+
+#### REGISTER 3rd-party / on-behalf-of authoring (PBX/SBC pattern)
+
+**Gap.** A PBX or SBC may need to register **on behalf of** an AOR it
+doesn't own — `From`, `To`, and `Contact` URIs differ; the
+`P-Asserted-Identity` may name the registering proxy not the AOR.
+The plan's `RegisterBuilder.with_from_uri` covers `From`, but the
+explicit pattern is missing from the doc.
+
+**Resolution.** Add a "3rd-party REGISTER" worked example to the
+"B2BUA composition example" section, demonstrating
+`coord.register(registrar, user, pw).with_from_uri(behalf_uri)
+.with_contact_uri(my_proxy_contact).with_raw_header("P-Asserted-Identity",
+proxy_pai)?.send()`. No new API; documentation only.
+
+### Phase E plumbing — three-stage (corrected)
+
+Phase E is the most layer-sensitive phase. The audit confirmed the
+publish-site plumbing requires **three** discrete additions in
+dialog-core + infra-common, not one. Earlier wording implied a single
+variant-enrichment pass; this section makes the full plumbing explicit.
+
+For each new inbound method surfaced to applications
+(INFO, MESSAGE, OPTIONS, UPDATE):
+
+1. **Internal dialog-core event** — `events/session_coordination.rs`
+   either gains a new `SessionCoordinationEvent` variant carrying the
+   parsed `Request` (rvoip-sip-dialog already depends on rvoip-sip-core,
+   so `Arc<Request>` is valid here), OR an existing variant's payload
+   widens to include the parsed Request. This step is **internal to
+   dialog-core** — no layer boundary crossed.
+2. **Cross-crate event bridge** — `events/event_hub.rs:182+`
+   (`convert_session_coordination_to_cross_crate`) maps the internal
+   variant to a `DialogToSessionEvent` variant carrying
+   `raw_request: Arc<bytes::Bytes>` (re-serialized via
+   `request.to_bytes()`). This is the layer-boundary hop; the bus
+   stays SIP-agnostic.
+3. **Cross-crate variant authorship** — `infra-common::events::cross_crate.rs`
+   gains the new variants (`InfoReceived`, `MessageReceived`,
+   `OptionsReceived`; `UpdateReceived` may enrich the existing
+   `ReinviteReceived` per the recommended consolidation).
+
+The rvoip-sip side (state-machine handlers + `IncomingRequest`
+construction) reads `raw_request` and re-parses via
+`rvoip_sip_core::parse_message` to populate `IncomingRequest`,
+exactly as Phase A does for `IncomingCall`.
+
+**OPTIONS today is dropped at the dialog-core layer entirely** (the
+internal `SessionCoordinationEvent::CapabilityQuery` is not bridged
+to the cross-crate bus). Phase E therefore performs *new* authorship
+for OPTIONS — not "promote an existing pipe."
+
+### Builder Send+Sync requirement (call-center / B2BUA concurrency)
+
+Every builder type (`OutboundCallBuilder`, `RegisterBuilder`,
+`ReferBuilder`, `AcceptBuilder`, etc.) must be `Send + Sync` so
+applications can `tokio::spawn` per-leg authoring tasks and pass
+builders across `.await` points. The trait definition pins it:
+
+```rust
+pub trait SipRequestOptions: Sized + Send + Sync {
+    // ...
+}
+```
+
+`BuilderHeaderState` carries `Vec<TypedHeader>` which is `Send + Sync`
+because `TypedHeader` already is. `Arc<XxxRequestOptions>` (stashed on
+`SessionState`) is `Send + Sync`. No additional changes needed; this
+constraint is documented to prevent accidental regression.
+
+### Header-name canonicalization & case-insensitive lookup
+
+Per RFC 3261 §7.3.1, SIP header names are case-insensitive. The audit
+confirmed `HeaderName` in sip-core already canonicalizes via `as_str()`
+(`types/headers/header_name.rs:162-215+`), but the design must specify
+that the new API surfaces lower-case at the lookup boundary:
+
+- `SipHeaderView::header(&name)`, `headers_named(&name)`, `header_str(&name)`,
+  and `HeaderPolicy::classify(method, &name)` all canonicalize via
+  `HeaderName::canonical_form()` before comparing. Mixed-case raw
+  strings (`"X-Customer-ID"`, `"x-customer-id"`, `"X-CUSTOMER-ID"`)
+  resolve to the same `Other(HeaderName::Other("X-Customer-ID"))`.
+- `with_raw_header(name, value)` normalizes `name` to the canonical
+  cased form at staging time so wire output is RFC-tidy.
+
+### Auth retry preserves staged application headers
+
+UAC requests that draw a 401 / 407 today are retried by the state
+machine with credentials applied. Application-staged headers
+(`with_header`, `with_raw_header`, `with_headers_from`) must survive
+the retry — losing them would silently corrupt B2BUA carry-through.
+
+**Resolution.** `Arc<XxxRequestOptions>` stashed on `SessionState`
+is the source-of-truth for retry. The state machine's auth-retry
+handler reads the same options struct on the retry pass and only
+swaps in the computed `Authorization` / `Proxy-Authorization` header.
+No application-staged header is dropped. Phase C test
+`builder_auth_retry_preserves_headers` (added to the verification
+matrix) asserts this on the wire.
+
+### Trace / observability integration
+
+`SipTraceEvent` (already published by both `rvoip-sip-transport` and
+`rvoip-sip-dialog`) captures every outbound and inbound SIP message.
+The new builders' `.send()` does **not** introduce a parallel trace
+path — outbound traces continue to fire at the existing transport-layer
+emission point, which means all `with_header` / `with_headers_from` /
+carry-through results are visible on the trace identically to legacy
+`make_call_with_headers` output today. Add an explicit assertion in
+`b2bua_carry_through_integration.rs` that `SipTraceEvent` for the
+outbound INVITE contains both the carried-through and rewritten
+headers.
+
+### CANCEL header-policy decision (resolved open question)
+
+The earlier "Open questions" §1 left CANCEL semantics undecided. The
+audit-confirmed RFC 3261 §9.1 requirement is that CANCEL **must**
+copy `Call-ID`, `From`, `To` (without tag), `CSeq` (method changed),
+and `Route` headers from the INVITE.
+
+**Decision.** `CancelBuilder` allows application headers
+(`with_header`, `with_raw_header`, `with_headers_from`). The RFC-required
+fields (`Call-ID`, `From`, `To`, `CSeq`, `Route`) are `StackManaged` —
+the builder layer rejects any attempt to override them and the dialog
+layer (`transaction/utils/request_builders.rs::create_cancel_from_invite`)
+clones them from the INVITE deterministically. Application headers
+land in the same tail slot as for every other method.
+
+### Stateless-proxy use case — out of scope (explicit)
+
+The `rvoip-sip` crate is built around dialog-bound sessions. Pure
+stateless SIP proxying (forwarding requests with `Via` push/pop only,
+no dialog or session creation) is **not in scope** for this design.
+B2BUA-style stateful proxying (each leg is a session, both legs
+bridged) is in scope and is the primary B2BUA use case the design
+serves.
+
+A future stateless-proxy surface, if needed, would live as a new
+crate or a new top-level module that talks directly to
+`rvoip-sip-transport` and `rvoip-sip-core` (no dialog-core dependency).
+The builder shapes introduced in this document would be reusable
+verbatim, but the dispatch path would differ.
+
+### Summary of additive changes vs. previous draft
+
+| Section in this audit | New API surface added | Files newly touched | Layer crossed? |
+|---|---|---|---|
+| `with_contact_uri` on `OutboundCallBuilder` / `RegisterBuilder` | 2 setters | `src/api/send/outbound_call.rs`, `register.rs` | No (just adds an authoring option already supported at the wire). |
+| `with_outbound_proxy(uri)` on every outbound builder | 1 setter on shared trait helper | `src/api/headers/options.rs`, `adapters/dialog_adapter.rs` (consults new override before `prepend_outbound_proxy_route`) | No. |
+| `IncomingResponse` for 1xx provisional | New `Event::CallProgressDetailed` variant | `src/api/events.rs` | No (rides existing inbound pipe). |
+| `GenericResponseBuilder` | New builder | `src/api/respond/generic.rs` | No (wraps `SimpleResponseBuilder` like the others). |
+| `bytes = { workspace = true }` in `infra-common/Cargo.toml` | none | `infra-common/Cargo.toml` | No (build-system only). |
+| `Send + Sync` bound on `SipRequestOptions` | none (assertion) | `src/api/headers/options.rs` | No. |
+| Header-name case-insensitive lookup | none (assertion) | `src/api/headers/policy.rs`, `view.rs` | No. |
+| Auth-retry preserves staged headers | none (test) | `tests/builder_auth_retry_preserves_headers.rs` | No. |
+| Trace assertion in carry-through test | none (test) | `tests/b2bua_carry_through_integration.rs` | No. |
+| CANCEL header-policy decision | classification only | `src/api/headers/policy.rs` | No. |
+| Phase E three-stage plumbing | clarification | dialog-core `events/session_coordination.rs`, `events/event_hub.rs`, infra-common `events/cross_crate.rs` | Bridge stays at the dialog-core publish site; the bus payload stays `Arc<Bytes>`. |
+| Trait-name corrections (`on_transfer_request_full`, `on_refer_notify_full`, `on_notify_full`) | rename in plan only | `src/api/callback_peer.rs` | No. |
+| `StreamPeer::call_with_auth` to deprecation list | rename in plan only | `src/api/stream_peer.rs` | No. |
+
+**None of these additions cross a layer boundary that was not already
+crossed by the original plan.** Every new setter, builder, or assertion
+either rides the existing in-process state-machine action loop, the
+existing `DialogAdapter` direct-dispatch path, or the existing
+cross-crate event bus with `Arc<Bytes>` payloads.
+
+### Test additions
+
+The following tests are added to the Phase C / D / E verification
+matrix (numbered to extend the existing list):
+
+17. `cargo test -p rvoip-sip --test b2bua_contact_rewrite_integration` —
+    `OutboundCallBuilder::with_contact_uri` rewrites Contact on the
+    outbound INVITE; wire trace asserts the override; dialog-core
+    accepts it as the local target for the established dialog.
+18. `cargo test -p rvoip-sip --test per_leg_outbound_proxy_integration` —
+    `with_outbound_proxy(uri)` on one leg uses a different proxy than
+    `Config.outbound_proxy_uri`; second leg uses the Config default.
+19. `cargo test -p rvoip-sip --test provisional_carry_through_integration` —
+    inbound 183 with SDP triggers `Event::CallProgressDetailed
+    (IncomingResponse)`; B2BUA carries `Contact`/`Allow`/`Server` to
+    downstream 183 via `ProvisionalBuilder::with_headers_from`.
+20. `cargo test -p rvoip-sip --test generic_response_integration` —
+    `IncomingCall::respond_builder(491).with_raw_header("Retry-After",
+    "5")?.send()` produces a valid 491 Request Pending with the
+    custom header.
+21. `cargo test -p rvoip-sip --test builder_auth_retry_preserves_headers` —
+    `coord.invite(...).with_credentials(creds).with_raw_header("X-Trace",
+    id)?.send()` sees the X-Trace header on both the initial 401-drawing
+    INVITE and the credentialed retry INVITE.
+22. `cargo test -p rvoip-sip --test header_case_insensitive_lookup` —
+    `with_raw_header("x-customer-id", ...)` and
+    `headers_named(&HeaderName::Other("X-CUSTOMER-ID".into()))`
+    resolve to the same staged header.
+23. `cargo test -p rvoip-sip --test third_party_register_integration` —
+    `coord.register(...).with_from_uri(behalf).with_contact_uri(proxy)
+    .with_raw_header("P-Asserted-Identity", proxy_pai)?.send()`
+    yields a wire REGISTER with the rewritten From/Contact/PAI.
+
+---
+
+## Third-round refinements — operational and interop corners (2026-05-11)
+
+A third pass over the same four crates focused on the operational
+corners B2BUA / SBC / call-center / registrar / softphone authors hit
+once the builders are in use: stash lifecycle, multipart bodies,
+reliable provisional, registrar response authorship, topology hiding,
+trust boundaries, and timeouts. Where this section conflicts with
+earlier wording it wins.
+
+### Stash lifecycle (memory safety, retry correctness)
+
+**Verified plumbing.** `SessionState` (`session_store/state.rs`) carries
+the existing stash fields:
+
+- `extra_headers: Vec<TypedHeader>` (line 190) — set at
+  `state_machine/helpers.rs:256`, consumed by
+  `DialogAdapter::send_invite_with_extra_headers` (`dialog_adapter.rs:926`).
+- `pending_bye_reason: Option<(String, u16, Option<String>)>` (line 160) —
+  set at `api/unified.rs:2001` when `hangup_with_reason` is called,
+  consumed by the `Action::SendBYE` handler.
+- `pending_reinvite: Option<PendingReinvite>` (line 134) — 491 retry state.
+
+The doc earlier introduced `pending_<method>_options:
+Option<Arc<XxxRequestOptions>>` fields alongside these. Three lifecycle
+guarantees the implementer must preserve so the builders don't leak
+state or replay stale options on a future call:
+
+1. **Set-once, consumed-once.** Each `Action::Send*` handler reads the
+   stash, clones the `Arc` into the dialog-adapter call, and then
+   sets the field back to `None`. The existing `pending_bye_reason`
+   pattern (`Option<...>` cleared by the action handler) is the template.
+2. **Auth retry path re-reads, does not re-set.** The 401/407 retry
+   loop reads the same `Arc<XxxRequestOptions>` for the retry
+   transaction. The options struct stays in the stash until the
+   transaction reaches a final response (success, terminal failure,
+   or hard timeout). The state machine's existing
+   `invite_auth_retry_count` (state.rs:122) drives the retry; the
+   options stash piggybacks on the same lifecycle so application
+   headers (`X-Trace-ID`, etc.) ride identically across both
+   transactions.
+3. **Session teardown clears all stashes.** When a session enters
+   the `Terminated` state the stash fields are set to `None` /
+   `Vec::new()` as part of normal cleanup. The existing
+   `extra_headers: Vec::new()` reset (`state.rs:280`, init path) is
+   the pattern; `pending_<method>_options` siblings follow the same
+   discipline.
+
+**Test addition (verification matrix #24):**
+`cargo test -p rvoip-sip --test stash_lifecycle_integration` — assert
+that after a successful `coord.invite(...).with_raw_header("X-Trace",
+id)?.send().await` the session's `pending_invite_options` is `None`,
+and that a subsequent re-INVITE on the same session does not see the
+stale `X-Trace` header.
+
+### Multipart bodies (SS7 ↔ SIP gateways, ISUP-tunneling B2BUAs)
+
+**Gap.** SS7-SIP gateways emit INVITE bodies with `multipart/mixed`
+containing `application/sdp` and `application/isup` parts. Telephony
+B2BUAs need to pass these through (or strip ISUP) without
+disturbing the SDP offer-answer.
+
+**Verification.** `rvoip-sip-core`'s builders do **not** synthesize
+multipart structure — `Request.body: bytes::Bytes` holds whatever
+bytes the application provides, and the application sets
+`Content-Type: multipart/mixed; boundary=…` explicitly. The wire is
+already faithful.
+
+**API resolution.**
+
+- Every builder's `with_body(impl Into<Bytes>)` accepts pre-formed
+  multipart bytes verbatim — no special-casing in the builder layer.
+- A small helper module `api::headers::convenience::multipart`
+  ships:
+
+  ```rust
+  pub fn multipart_mixed(parts: &[(&str, Bytes)]) -> (String, Bytes) {
+      // returns (content_type with boundary, body bytes)
+  }
+  ```
+
+  Returned tuple plugs directly into `with_content_type(s)` and
+  `with_body(b)`. RFC 5621 boundary generation handled inside.
+- `SipHeaderView` consumers parse inbound multipart via the same
+  helper (`api::headers::convenience::multipart::parse(content_type,
+  body) -> Vec<(String, Bytes)>`).
+- B2BUA carry-through doctest: SS7 inbound INVITE → outbound INVITE
+  preserving both SDP and ISUP parts.
+
+**No new dialog-core or sip-core code.** The helper sits in `rvoip-sip`
+and produces plain bytes + Content-Type that sip-core already serializes
+correctly.
+
+### Reliable provisional (RFC 3262) — `100rel` interaction
+
+**Verified state.** Dialog-core has `UnifiedDialogApi::send_prack(&DialogId,
+rseq: u32)` at `unified.rs:1502` — PRACK authorship plumbing exists.
+The plan deliberately excludes a `PrackBuilder` from public API
+because the state machine emits PRACK automatically on receipt of a
+reliable 1xx.
+
+**B2BUA / SBC concern.** When the upstream leg requires `100rel` and
+the downstream leg does not (or vice versa), the B2BUA must either
+(a) bridge 100rel end-to-end, or (b) terminate it. The builder API
+needs to let the application drive this.
+
+**Resolution.**
+
+- `ProvisionalBuilder::with_require_100rel(bool)` (already listed in
+  the design): when `true`, stamps `Require: 100rel` and `RSeq` on
+  the outbound 1xx, and the state machine arms its PRACK-await
+  timer per RFC 3262.
+- `OutboundCallBuilder::with_supported_100rel(bool)` (new):
+  controls whether the outbound INVITE advertises `Supported: 100rel`.
+  Defaults to `false` (matches today's no-100rel default); SBCs
+  bridging 100rel set it to `true` per-leg.
+- `IncomingResponse::is_reliable_provisional() -> bool` convenience
+  on the inbound response view: returns `true` when the upstream 1xx
+  carries `Require: 100rel`. Lets B2BUA bridges decide whether to
+  forward the 1xx with reliability semantics intact or to consume
+  the reliability locally and forward an unreliable 1xx.
+
+PRACK itself stays under state-machine control. The application
+authors only the **1xx** (via `ProvisionalBuilder`) and the
+**INVITE** (via `OutboundCallBuilder`); PRACK reuse the same `Arc`-shared
+options for the dialog target. No new dialog-core method.
+
+### Topology hiding — explicit guarantee for B2BUA
+
+**Verified property.** Because `Via`, `Record-Route`, `Contact`
+(in-dialog), `Call-ID`, `CSeq`, and `Max-Forwards` are `StackManaged`,
+and because each B2BUA leg is an independent session with its own
+dialog, **topology hiding is automatic**: the upstream leg's
+`Via`/`Record-Route`/`Call-ID` never leak onto the downstream wire,
+because dialog-core generates fresh values for the downstream leg.
+
+**Explicit doc statement** (now in design): a B2BUA achieves
+topology hiding by **not carrying through** the stack-managed
+headers. The `with_headers_from(&inbound, names)` API rejects
+stack-managed names automatically (per
+`HeaderPolicy::forbidden_for_carry_through`), so a naïvely-written
+B2BUA cannot accidentally leak topology. The `HeaderCarryThroughReport
+.skipped` list logs every filtered header for audit.
+
+**Threat-model addition.** The `Via` header on a 200 OK is the
+SIP equivalent of an X-Forwarded-For chain. Carrying it across legs
+defeats topology hiding. The policy table makes this impossible by
+construction; no application-level discipline is required.
+
+### Trust-boundary patterns — P-Asserted-Identity, History-Info, Privacy
+
+**Gap.** B2BUAs/SBCs sit on trust boundaries. RFC 3325 says PAI must
+be stripped when crossing from a trusted to an untrusted SIP network.
+RFC 7044 says History-Info should not cross trust boundaries unless
+the application explicitly permits. The plan provides the *mechanism*
+(`.strip_header(name)`, `.without_pai()`) but doesn't document the
+**discipline**.
+
+**Resolution (documentation-only).** Add a "Trust boundaries" subsection
+to the crate-level `//!` block with three template B2BUA patterns:
+
+```rust
+// 1. Trusted → untrusted egress: strip PAI, strip History-Info,
+//    keep Diversion only if regulator-required.
+let (out, _) = coord.invite(from, untrusted_target)
+    .with_headers_from(&inbound, &[HeaderName::Diversion])?;
+let out = out
+    .strip_header(&HeaderName::Other("History-Info".into()))
+    .without_pai();    // disregards Config.pai_uri
+
+// 2. Untrusted → trusted ingress: ASSERT identity from local AAA,
+//    do NOT carry through inbound PAI.
+let (out, _) = coord.invite(asserted_from, trusted_target)
+    .with_pai(local_aaa_resolved_identity)
+    .with_headers_from(&inbound, &[/* nothing identity-related */])?;
+
+// 3. Trusted-to-trusted (intra-domain): carry through verbatim.
+let (out, _) = coord.invite(from, peer_pbx)
+    .with_headers_from(&inbound, &[
+        HeaderName::Other("P-Asserted-Identity".into()),
+        HeaderName::Other("History-Info".into()),
+        HeaderName::Other("Diversion".into()),
+    ])?;
+```
+
+No new API — these are doctests in the crate root that travel with
+`cargo doc` and that turn into compile-tested examples via the
+existing doc-test infrastructure.
+
+### Registrar UAS path — Service-Route, Path, Contact response authoring
+
+**Verified state.** `RegistrationAdapter::send_register_response`
+(`registration_adapter.rs:112-132`) is the only registrar-response
+path today. It publishes a `SessionToDialogEvent::SendRegisterResponse`
+with `status_code, reason, www_authenticate, contact, expires`.
+
+**Gap.** Registrars built on top of `rvoip-sip-registrar` need to
+attach **`Service-Route`** (RFC 3608), **`Path`** echo-back (RFC 3327),
+**`P-Associated-URI`** (RFC 3455), and **`Min-Expires`** (RFC 3261
+§10.2.8) headers on the 200 OK / 423 / 401 response. None of this
+is reachable today.
+
+**Resolution.** `IncomingRegister::accept_builder()` returns a
+`RegisterResponseBuilder` implementing `SipRequestOptions`. Setters:
+
+| Setter | Effect |
+|---|---|
+| `with_expires(u32)` | Sets per-contact Expires on the 200 OK |
+| `with_min_expires(u32)` | Sets Min-Expires on a 423 response (only valid via `IncomingRegister::reject_builder().with_status(423)`) |
+| `with_service_route(Vec<Uri>)` | Stamps Service-Route on 200 OK |
+| `with_path_echo()` | Echoes inbound Path header on 200 OK |
+| `with_associated_uri(Vec<Uri>)` | Stamps P-Associated-URI |
+| `with_contact_from_binding(binding)` | Adds a Contact line per registered binding (multiple calls accumulate) |
+| `with_raw_header(name, value)` | Same general policy check as outbound builders |
+
+This sits next to `IncomingCall::accept_builder()` /
+`IncomingRegister::challenge_builder()` already in the design. The
+implementation uses `SimpleResponseBuilder::register_response` from
+sip-core and dispatches via `UnifiedDialogApi::send_response`. **No
+new dialog-core method required.**
+
+The existing `SessionToDialogEvent::SendRegisterResponse` variant
+in `infra-common::events::cross_crate.rs:502` widens additively to
+carry an optional pre-built `Response` bytes payload — see Phase D
+plumbing pattern.
+
+### OPTIONS request timeout & response capture
+
+**Verified state.** No `OPTIONS` plumbing exists at all today (no
+`UnifiedDialogApi::send_options`, no `Action::SendOPTIONS`, no
+inbound handler). Phase B / Phase C / Phase E all author from
+scratch.
+
+**Spec for the new `OptionsBuilder::send().await -> Result<IncomingResponse>`:**
+
+- Default timeout: 32 seconds (Timer F default per RFC 3261 §7.1.1
+  for non-INVITE transactions, derived from `T1 * 64`).
+- `OptionsBuilder::with_timeout(Duration)` setter for application
+  override. Reachable via `SipRequestOptions`-extension setter (does
+  not belong on the trait itself because only OPTIONS expects a
+  response back to the caller).
+- On timeout: returns `Err(SendError::Timeout)`. The underlying
+  non-INVITE transaction is destroyed by the transaction layer per
+  RFC 3261 §17.1.2.4. No retransmission state leaks.
+- On success: returns the full `IncomingResponse` so the caller can
+  read `Allow`, `Supported`, `Accept`, `User-Agent`, `Server` —
+  the entire reason OPTIONS is useful for B2BUA capability discovery.
+
+`MessageBuilder::send().await -> Result<()>` does **not** return the
+200 OK because MESSAGE is fire-and-forget per RFC 3428; the 200 OK is
+absorbed by the transaction layer.
+
+### Auto-emitted message header injection (state-machine-originated outbound)
+
+**Gap.** The state machine emits some outbound requests **without**
+application initiation: automatic BYE on session-timer expiry,
+automatic CANCEL on `dialog_terminated_during_INVITE`, automatic
+NOTIFY on subscription state change driven by upstream REFER. The
+plan focuses on application-initiated paths; auto-emitted paths
+inherit the stash but offer no fresh authoring hook.
+
+**Resolution.** Three patterns, ordered by ergonomics:
+
+1. **Stash before auto-emission.** Applications that need headers on
+   the auto-emitted CANCEL/BYE/NOTIFY stash options proactively:
+
+   ```rust
+   coord.prepare_auto_emitted_options::<ByeBuilder>(&session, |b| {
+       b.with_reason("SIP;cause=503;text=\"Upstream gone\"")
+        .with_raw_header("X-Trace-ID", id).unwrap()
+   });
+   // Later, on session-timer expiry, the state machine emits BYE with
+   // the prepared options.
+   ```
+
+2. **Event hook to author last-minute.** New
+   `CallHandler::on_auto_emit_outbound(method, builder) -> builder`
+   default-impl identity. Application overrides to mutate
+   `BuilderHeaderState` immediately before dispatch. Synchronous
+   (no `.await`) so it must be cheap. Optional; default no-op preserves
+   today's behavior exactly.
+
+3. **Per-Config defaults.** `Config` gains
+   `auto_emit_extra_headers: Vec<TypedHeader>` for tenant-wide
+   defaults (`User-Agent: MyApp/1.0`, `X-Operator: tenant-42`). Cheap
+   default; applies to every outbound the state machine generates
+   without per-call options. Stack-managed names still rejected;
+   classify runs at Config-construction time so misconfigurations
+   fail fast.
+
+Pattern 3 is the recommended default for most B2BUA/SBC tenants —
+no per-call code, no event hook, just a Config field. Patterns 1 and
+2 cover the per-call-but-not-application-initiated case.
+
+### Re-INVITE glare and 491 retry — staged header preservation
+
+**Verified state.** `pending_reinvite: Option<PendingReinvite>`
+(state.rs:134) carries 491 retry state per RFC 3261 §14.1. Today
+the retry has no application headers.
+
+**Resolution.** `Arc<ReInviteRequestOptions>` is stashed alongside
+`pending_reinvite`; on 491 the retry transaction reads the same
+`Arc` and includes application-staged headers identically to the
+initial re-INVITE. Same lifecycle discipline as auth-retry:
+set-once, consumed-on-final-response, cleared at termination.
+
+### Subscription multiplex on a single dialog
+
+**Concern.** Multiple subscriptions can ride one dialog (event
+package multiplex per RFC 6665 §4.5.2). The `NotifyBuilder` needs to
+target the right subscription. Plan's `coord.notify(&session,
+event_package)` takes the package name, but the audit confirms today's
+`UnifiedDialogApi::send_notify` (unified.rs:1449) and `send_refer_notify`
+(unified.rs:1462) take the **dialog id**, not a subscription id.
+
+**Resolution.** Add `NotifyBuilder::for_subscription(SubscriptionId)`
+setter — when set, the dialog-core call carries the subscription id
+through to the existing subscription manager; when omitted, the
+single-subscription-on-dialog default applies (today's behavior).
+No dialog-core API change required if the subscription manager
+already accepts the id; otherwise add an optional field to
+`NotifyRequestOptions`.
+
+### Body type coverage — application/dtmf-relay, application/pidf+xml
+
+**No change required.** `Bytes` plus `with_content_type(String)`
+covers every body type. The convenience module ships factories for
+the common SIP body types:
+
+```rust
+pub mod api::bodies {
+    pub fn sdp(s: impl Into<String>) -> (String, Bytes);                // "application/sdp"
+    pub fn dtmf_relay(signal: char, duration_ms: u32) -> (String, Bytes); // "application/dtmf-relay"
+    pub fn pidf_xml(presence: &Presence) -> (String, Bytes);            // "application/pidf+xml" — RFC 3863
+    pub fn simple_message_summary(...) -> (String, Bytes);              // "application/simple-message-summary" — RFC 3842
+    pub fn isup_l3(bytes: impl Into<Bytes>) -> (String, Bytes);         // "application/isup" — RFC 3204
+}
+```
+
+Returned `(content_type, body)` tuple plugs into `with_content_type(s)`
++ `with_body(b)`.
+
+### Sensitive header masking on `SipTraceEvent`
+
+**Concern.** SIP traces routinely carry `Authorization`, custom
+`X-Auth-Token`, and PII-bearing fields like `P-Asserted-Identity`.
+For compliance (GDPR, HIPAA) operators need a redaction hook before
+traces hit logs.
+
+**Resolution.** New `Config.trace_redaction: Option<Arc<dyn
+TraceRedactor + Send + Sync>>`. The redactor receives the parsed
+`Request` / `Response` before `SipTraceEvent` is published and
+returns either `Allow`, `Redact(headers: Vec<HeaderName>)`, or
+`Drop`. Default `None` preserves today's behavior. **Wire output is
+unaffected** — redaction applies only to the trace event payload.
+
+This is a `rvoip-sip` change; no dialog-core or transport change.
+The trace emission site
+(`adapters/dialog_adapter.rs` `on_sip_trace` publish or the equivalent
+hook) consults the redactor before publishing the event.
+
+### Verification matrix — third-round additions
+
+24. `cargo test -p rvoip-sip --test stash_lifecycle_integration` —
+    stash fields cleared after successful send; not replayed on
+    subsequent send; preserved across 401/407 retry.
+25. `cargo test -p rvoip-sip --test multipart_body_integration` —
+    `OutboundCallBuilder::with_body(multipart_mixed(...))` produces
+    a wire INVITE with correctly-formatted multipart structure and
+    SDP + ISUP parts; inbound `IncomingCall::body()` parses both
+    parts back out.
+26. `cargo test -p rvoip-sip --test reliable_provisional_bridge` —
+    upstream 18x with `Require: 100rel` bridged to downstream;
+    `with_supported_100rel(true)` advertises on outbound INVITE.
+27. `cargo test -p rvoip-sip --test topology_hiding_guarantee` —
+    every `Via`, `Record-Route`, `Call-ID`, `CSeq` on the inbound
+    leg is reported as skipped in
+    `HeaderCarryThroughReport.skipped` when `with_headers_from`
+    requests `&[]` (carry nothing); none appears on the outbound
+    wire trace.
+28. `cargo test -p rvoip-sip --test registrar_response_builder` —
+    `IncomingRegister::accept_builder()
+    .with_expires(3600)
+    .with_service_route(routes)
+    .with_path_echo()
+    .send()` produces a wire 200 OK with all three headers in the
+    right slots.
+29. `cargo test -p rvoip-sip --test options_timeout` — OPTIONS
+    request times out after 32s default; `with_timeout(Duration::from_secs(5))`
+    overrides; returned `IncomingResponse` carries inbound
+    `Allow`/`Supported`/`Server`.
+30. `cargo test -p rvoip-sip --test auto_emit_headers` — Config-level
+    `auto_emit_extra_headers` rides session-timer auto-BYE without
+    application code; per-call `prepare_auto_emitted_options`
+    overrides for one session.
+31. `cargo test -p rvoip-sip --test trace_redaction` — redactor
+    strips `Authorization` from `SipTraceEvent` payload; wire output
+    unaffected; non-redacted traces include the header.
+
+---
+
+## Fourth-round refinements — implementation readiness (2026-05-11)
+
+The earlier rounds locked in API shape, layer respect, and operational
+corners. This section closes the **implementation-readiness** gaps: the
+error model an implementer reaches for, cancel-safety on `.send().await`,
+two concrete builder struct sketches the implementer can copy-shape,
+and a developer-facing decision chart so a reader of this document
+knows immediately whether to keep using `Config`, adopt builders for
+one call site, or migrate end-to-end.
+
+### Error model — integration with the existing `SessionError`
+
+**Verified state.** `rvoip-sip` exposes one error enum:
+`SessionError` (`errors.rs:8-85`). Notable variants already present:
+`InvalidInput`, `ProtocolError`, `Timeout(String)`,
+`MissingCredentialsForInviteAuth`, `InviteAuthRetryExhausted`,
+`UnreliableProvisionalsNotSupported`, `DialogError`. `From<Box<dyn
+Error>>` flatteners exist; `From<rvoip_auth_core::AuthError>` exists.
+
+**Resolution.** Add three variants to `SessionError` (additive,
+non-breaking):
+
+```rust
+#[error("header policy violation on {method}: {header} — {reason}")]
+HeaderPolicy {
+    method: rvoip_sip_core::Method,
+    header: rvoip_sip_core::types::headers::HeaderName,
+    reason: ViolationReason,
+},
+
+#[error("required application header missing for {method}: {names:?}")]
+MissingRequiredHeader {
+    method: rvoip_sip_core::Method,
+    names: Vec<rvoip_sip_core::types::headers::HeaderName>,
+},
+
+#[error("send cancelled mid-flight")]
+SendCancelled,
+```
+
+`HeaderPolicyViolation` already defined in §2 maps cleanly:
+`From<HeaderPolicyViolation> for SessionError` produces the
+`HeaderPolicy` variant. The `?` operator on every builder setter
+(`.with_header(...)?`, `.with_headers_from(...)?`) flows the policy
+violation into the surrounding `Result<_, SessionError>` without
+custom adapter code.
+
+**`OPTIONS` timeout** (third-round) maps to the existing
+`SessionError::Timeout(String)` variant with a structured message
+`"OPTIONS to {target} timed out after {duration:?}"`. No new variant
+required.
+
+**Auth retry exhaustion** continues to surface as
+`InviteAuthRetryExhausted` — builders do not introduce a new error
+for this; the existing variant covers the case.
+
+### Cancel-safety on `.send().await`
+
+**Requirement.** B2BUA / call-center applications drop futures
+routinely — they race `tokio::select!` between an inbound CANCEL on
+leg A and the outbound INVITE `.send().await` on leg B. The builders
+must be cancel-safe: if `.send().await` is dropped before completion,
+no SIP message has gone on the wire **OR** the state machine is left
+in a clean state.
+
+**Resolution.** Two-phase semantics:
+
+1. **Pre-await preparation** is synchronous (no `.await` points). The
+   builder validates the policy, runs `HeaderPolicy::validate_outbound`,
+   stamps the `Arc<XxxRequestOptions>` onto `SessionState`, and
+   queues the `Action::Send*` event. None of these can be cancelled.
+2. **Post-await response wait** is the cancel-safe slice. If the
+   future is dropped here, the wire message has already gone out and
+   the state machine handles the response (or timeout) as usual; the
+   caller simply doesn't observe the result. `SessionError::SendCancelled`
+   is **not** returned in this case — the future just resolves
+   nothing on the dropped side, while the dialog still settles.
+
+**Exception.** For `MessageBuilder` (fire-and-forget per RFC 3428),
+`.send().await` completes immediately after queuing — no response
+wait, fully cancel-safe regardless of caller behavior.
+
+**Test addition (verification matrix #32):**
+`cargo test -p rvoip-sip --test cancel_safety_integration` —
+drop the future at various stages and assert no leaked
+`SessionState` stash, no leaked transaction, no panic in the state
+machine.
+
+### Concrete builder struct sketches (representative two)
+
+The plan lists 12 outbound + 5 response builders in tables; this
+subsection materializes two representative implementations so the
+shape is unambiguous for the implementer. The remaining builders
+follow the same pattern.
+
+#### `OutboundCallBuilder` (UAC INVITE — the most-touched UAC path)
+
+```rust
+// src/api/send/outbound_call.rs
+
+pub struct OutboundCallBuilder {
+    coordinator: Arc<UnifiedCoordinator>,    // for state-machine dispatch
+    from: Option<String>,                    // None → use surface/Config local_uri
+    to: String,
+    sdp: Option<String>,
+    credentials: Option<Credentials>,
+    pai_override: PaiOverride,               // Suppress | Use(String) | Default
+    contact_uri: Option<String>,             // second-round audit addition
+    outbound_proxy_override: ProxyOverride,  // Suppress | Use(String) | Default
+    subject: Option<String>,
+    from_display: Option<String>,
+    precomputed_auth: Option<String>,
+    transfer_leg: Option<SessionId>,
+    supported_100rel: bool,                  // third-round audit addition
+    strictness: BuilderStrictness,
+    staged: BuilderHeaderState,              // application-staged TypedHeaders
+}
+
+impl OutboundCallBuilder {
+    pub(crate) fn new(coord: Arc<UnifiedCoordinator>, from: Option<String>, to: String) -> Self {
+        Self {
+            coordinator: coord,
+            from, to,
+            sdp: None,
+            credentials: None,
+            pai_override: PaiOverride::Default,
+            contact_uri: None,
+            outbound_proxy_override: ProxyOverride::Default,
+            subject: None,
+            from_display: None,
+            precomputed_auth: None,
+            transfer_leg: None,
+            supported_100rel: false,
+            strictness: BuilderStrictness::Strict,
+            staged: BuilderHeaderState::default(),
+        }
+    }
+
+    // Method-shaped setters
+    pub fn with_sdp(mut self, s: impl Into<String>) -> Self { self.sdp = Some(s.into()); self }
+    pub fn with_credentials(mut self, c: Credentials) -> Self { self.credentials = Some(c); self }
+    pub fn with_pai(mut self, uri: impl Into<String>) -> Self { self.pai_override = PaiOverride::Use(uri.into()); self }
+    pub fn without_pai(mut self) -> Self { self.pai_override = PaiOverride::Suppress; self }
+    pub fn with_contact_uri(mut self, uri: impl Into<String>) -> Self { self.contact_uri = Some(uri.into()); self }
+    pub fn with_outbound_proxy(mut self, uri: impl Into<String>) -> Self {
+        self.outbound_proxy_override = ProxyOverride::Use(uri.into()); self
+    }
+    pub fn without_outbound_proxy(mut self) -> Self {
+        self.outbound_proxy_override = ProxyOverride::Suppress; self
+    }
+    pub fn with_subject(mut self, s: impl Into<String>) -> Self { self.subject = Some(s.into()); self }
+    pub fn with_from_display(mut self, s: impl Into<String>) -> Self { self.from_display = Some(s.into()); self }
+    pub fn with_precomputed_authorization(mut self, h: impl Into<String>) -> Self {
+        self.precomputed_auth = Some(h.into()); self
+    }
+    pub fn as_transfer_leg(mut self, transferor: &SessionId) -> Self {
+        self.transfer_leg = Some(transferor.clone()); self
+    }
+    pub fn with_supported_100rel(mut self, on: bool) -> Self { self.supported_100rel = on; self }
+
+    // Terminal — runs HeaderPolicy::validate_outbound, builds
+    // OutboundCallOptions, stashes on SessionState, emits
+    // EventType::MakeCall, returns Result<SessionId>.
+    pub async fn send(self) -> Result<SessionId, SessionError> {
+        let options = self.build_options()?;
+        self.coordinator.dispatch_invite(options).await
+    }
+
+    fn build_options(self) -> Result<OutboundCallOptions, SessionError> {
+        HeaderPolicy::validate_outbound(Method::Invite, &self.staged.headers)
+            .map_err(|missing| SessionError::MissingRequiredHeader {
+                method: Method::Invite,
+                names: missing.into_iter().map(|m| m.name).collect(),
+            })?;
+        Ok(OutboundCallOptions { /* … fields → struct fields */ })
+    }
+}
+
+// SipRequestOptions impl uses the default impls operating on
+// `self.staged: BuilderHeaderState`. with_header / with_headers /
+// with_raw_header / strip_header / with_headers_from / staged_headers
+// / with_strictness all flow through the shared trait default impls.
+impl SipRequestOptions for OutboundCallBuilder {
+    fn method(&self) -> Method { Method::Invite }
+    // (default impls cover the rest, parameterised by &mut self.staged)
+}
+```
+
+#### `RejectBuilder` (UAS — 4xx/5xx/6xx response authoring)
+
+```rust
+// src/api/respond/reject.rs
+
+pub struct RejectBuilder {
+    // Either path: respond to an inbound INVITE (IncomingCall) OR
+    // to an established session (UnifiedCoordinator::reject).
+    target: RejectTarget,
+    status: u16,                             // default 486 Busy Here
+    reason: Option<String>,
+    retry_after: Option<u32>,
+    warning: Option<Warning>,
+    strictness: BuilderStrictness,
+    staged: BuilderHeaderState,
+}
+
+enum RejectTarget {
+    Incoming(Arc<IncomingCall>),
+    Session { coord: Arc<UnifiedCoordinator>, session: SessionId },
+}
+
+impl RejectBuilder {
+    pub fn with_status(mut self, code: u16) -> Self {
+        debug_assert!(code >= 400 && code < 700, "reject code must be 4xx/5xx/6xx");
+        self.status = code; self
+    }
+    pub fn with_reason(mut self, r: impl Into<String>) -> Self { self.reason = Some(r.into()); self }
+    pub fn with_retry_after(mut self, secs: u32) -> Self { self.retry_after = Some(secs); self }
+    pub fn with_warning(mut self, code: u16, agent: impl Into<String>, text: impl Into<String>) -> Self {
+        self.warning = Some(Warning { code, agent: agent.into(), text: text.into() });
+        self
+    }
+
+    pub async fn send(self) -> Result<(), SessionError> {
+        let response = self.build_response()?;
+        match self.target {
+            RejectTarget::Incoming(call) => call.send_response_with_options(response).await,
+            RejectTarget::Session { coord, session } => coord.send_response_with_options(&session, response).await,
+        }
+    }
+
+    fn build_response(&self) -> Result<rvoip_sip_core::Response, SessionError> {
+        // composes Response via SimpleResponseBuilder, applies retry_after / warning,
+        // appends self.staged.headers, runs HeaderPolicy::validate_outbound for
+        // the response-side check.
+        unimplemented!("see implementation in src/api/respond/reject.rs")
+    }
+}
+
+impl SipRequestOptions for RejectBuilder {
+    fn method(&self) -> Method { Method::Invite }  // method is the INVITE being rejected
+    // default trait impls cover with_header / with_headers / with_raw_header /
+    // strip_header / with_headers_from / staged_headers / with_strictness
+}
+```
+
+The remaining 10 outbound + 4 response builders follow the same
+template — only the method-shaped setters and the terminal `.send()`
+return type vary.
+
+### Developer decision chart — which path to use?
+
+A reader scanning this doc should be able to pick their path in 30
+seconds. The chart below sits in the crate-level `//!` block in
+condensed form.
+
+| If the developer says… | Recommended path | What it looks like |
+|---|---|---|
+| "I just want to make a call, library handles SIP" | **Pure Config (Path 1)** — unchanged from today | `Config::default().with_local_uri(...)` → `coord.make_call(target)` |
+| "I need credentials on outbound calls" | **Pure Config + one builder** — minimal builder use | `coord.invite(from, to).with_credentials(c).send()` |
+| "I need to attach one custom X-* header" | **Pure Config + one builder** | `coord.invite(from, to).with_raw_header("X-Foo", "bar")?.send()` |
+| "I'm building a B2BUA — must carry headers across legs" | **Mixed (Path 3)** — Config for identity, builder per request, `with_headers_from` for carry-through | `coord.invite(...).with_headers_from(&inbound, &[...])?.send()` |
+| "I need to validate before sending; reject bad headers" | **Default** — `BuilderStrictness::Strict` rejects via `Result` | every `.with_header(...)?` already enforces |
+| "I need lenient parsing for messy upstream" | **Builder with `with_strictness(Lenient)`** | `coord.invite(...).with_strictness(BuilderStrictness::Lenient).send()` |
+| "I need to inspect every inbound header" | **`SipHeaderView` on IncomingCall** | `incoming.header(&HeaderName::Diversion)` |
+| "I'm authoring custom 4xx responses with Retry-After" | **`RejectBuilder`** | `incoming.reject_builder().with_status(503).with_retry_after(120).send()` |
+| "I'm a registrar and need Service-Route on 200 OK" | **`RegisterResponseBuilder`** (third-round addition) | `incoming.accept_builder().with_service_route(...).send()` |
+| "I have an existing app on `make_call_with_pai` — will it still work?" | **Yes, unchanged** — deprecated but functional | call sites compile, emit deprecation warning, behave identically |
+
+This chart drives the crate-level documentation. Implementers writing
+the `//!` block can lift it verbatim.
+
+### Phase ownership for second/third/fourth-round additions
+
+To prevent the additive scope from drifting between phases, this
+subsection assigns each post-original addition to a specific phase.
+Implementers map their PR boundaries to this table.
+
+| Addition | Origin | Phase |
+|---|---|---|
+| `with_contact_uri` on `OutboundCallBuilder` / `RegisterBuilder` | Second-round | C (Phase C — outbound builders) |
+| `with_outbound_proxy(uri)` on all outbound builders | Second-round | C (shared trait helper); `DialogAdapter` consult: Phase C |
+| `IncomingResponse` for 1xx provisional | Second-round | A (rides Phase A `IncomingResponse` introduction) |
+| `GenericResponseBuilder` | Second-round | D (Phase D — response builders) |
+| `bytes = workspace = true` in `infra-common/Cargo.toml` | Second-round | A (first phase touching cross_crate.rs) |
+| `Send + Sync` bound on `SipRequestOptions` | Second-round | C (trait definition) |
+| Case-insensitive header name canonicalization | Second-round | C (policy module) |
+| Auth-retry preserves staged headers | Second-round | C (state machine integration) |
+| Trace assertion in carry-through test | Second-round | C (test) |
+| CANCEL header-policy decision | Second-round | C (policy table) |
+| Phase E three-stage plumbing clarification | Second-round | E (Phase E — already named) |
+| Trait-name corrections | Second-round | E (renames `_full` companion methods) |
+| `StreamPeer::call_with_auth` to deprecation list | Second-round | C (deprecation pass) |
+| Stash lifecycle (set-once / consumed-once / cleared-at-termination) | Third-round | C (state machine integration) |
+| Multipart body convenience module | Third-round | C (convenience module under `api::headers`) |
+| `with_supported_100rel(bool)` + `IncomingResponse::is_reliable_provisional()` | Third-round | C (outbound builder) + A (inbound view) |
+| Topology-hiding guarantee | Third-round | C (assertion + test) |
+| Trust-boundary doc patterns | Third-round | C (crate-level `//!` block) |
+| `RegisterResponseBuilder` (Service-Route, Path echo, P-Associated-URI) | Third-round | D (Phase D — response builders) |
+| `OptionsBuilder::with_timeout` + Timer F default | Third-round | C (outbound builder) |
+| Auto-emit message header injection (3 patterns) | Third-round | C (proactive stash) + E (CallHandler hook) + B (Config field) |
+| Re-INVITE glare options preservation | Third-round | C (state machine integration) |
+| `NotifyBuilder::for_subscription(SubscriptionId)` | Third-round | C (outbound builder; possible Phase B if dialog-core extension required) |
+| Body convenience helpers (`sdp`, `dtmf_relay`, `pidf_xml`, `simple_message_summary`, `isup`) | Third-round | C (convenience module) |
+| `Config.trace_redaction` | Third-round | A (Config field; activates with traces) |
+| `SessionError::{HeaderPolicy, MissingRequiredHeader, SendCancelled}` | Fourth-round | C (error model) |
+| Cancel-safety semantics | Fourth-round | C (builder `.send().await` contract) |
+| Concrete builder struct sketches | Fourth-round | C (implementation reference) |
+| Developer decision chart | Fourth-round | A (crate-level `//!` block, first phase to ship) |
+
+### Acceptance criteria — what "done" looks like
+
+The implementer signs off on each phase by the following objective
+checks (in addition to the verification matrix #1-#32):
+
+**Phase A (Inbound inspection)**
+- [ ] `IncomingCall.headers: HashMap` populated from the parsed INVITE.
+- [ ] `IncomingCall::header(&HeaderName::Diversion)` returns typed access for inbound INVITE carrying Diversion.
+- [ ] `Event::CallProgressDetailed(IncomingResponse)` fires on every 1xx, not just finals.
+- [ ] `Config.trace_redaction` is a no-op when `None` (default).
+- [ ] `infra-common/Cargo.toml` includes `bytes = { workspace = true }`.
+- [ ] Crate-level `//!` block includes the developer decision chart.
+
+**Phase B (Dialog-core options extension)**
+- [ ] Every `*RequestOptions` struct derives `Default`.
+- [ ] `RegisterRequestOptions` derives `Default` and has `extra_headers`.
+- [ ] `send_options_out_of_dialog_with_options` exists and is layer-parallel to `send_message_out_of_dialog`.
+- [ ] `cargo test -p rvoip-sip-dialog` is green (no regressions).
+
+**Phase C (Send-side builders)**
+- [ ] Every builder is `Send + Sync + Sized`.
+- [ ] `BuilderStrictness::Strict` is default.
+- [ ] `SessionError::HeaderPolicy` and `MissingRequiredHeader` exist.
+- [ ] Stash fields are consumed-once and cleared at session termination.
+- [ ] Cancel-safety integration test (#32) passes.
+- [ ] Every concrete builder has a struct + doc-test per the §"Concrete builder struct sketches" template.
+
+**Phase D (Response builders)**
+- [ ] `AcceptBuilder`, `RejectBuilder`, `RedirectBuilder`, `ProvisionalBuilder`, `AuthChallengeBuilder`, `GenericResponseBuilder`, `RegisterResponseBuilder` all implement `SipRequestOptions`.
+- [ ] `DialogAdapter::send_response_with_options(session_id, Response)` exists.
+
+**Phase E (In-dialog request surface)**
+- [ ] `CallHandler::on_transfer_request_full`, `on_refer_notify_full`, `on_notify_full`, `on_info_full`, `on_message_full`, `on_options_full`, `on_update_full` all exist with default impls.
+- [ ] Cross-crate variants `InfoReceived`, `MessageReceived`, `OptionsReceived` (and `UpdateReceived` xor enriched `ReinviteReceived`) all carry `raw_request: Arc<Bytes>`.
+- [ ] `event_hub.rs::convert_session_coordination_to_cross_crate` bridges all five inbound mid-dialog methods (REFER + NOTIFY + INFO + MESSAGE + OPTIONS + UPDATE).
+- [ ] Inbound OPTIONS reaches `CallHandler::on_options_full` end-to-end (today it is dropped at dialog-core).
+
+When all five checklists pass, the design is shipped end-to-end and
+the developer-facing surface promised at the top of this document is
+real.
 
 ---
 
