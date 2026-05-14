@@ -273,6 +273,16 @@ impl DialogEventAdapter {
                 let to = "unknown@unknown".to_string(); // TODO: Extract from SIP headers properly
                 let sdp_offer = None; // TODO: Extract SDP from request body
 
+                // Round-trip the parsed Request into wire bytes via
+                // `Message::to_bytes()`. `Request::Display` skips the
+                // RFC 3261 header/body separator CRLF when the body is
+                // empty, which leaves the bytes unparseable; the
+                // explicit `Message::to_bytes()` path always emits the
+                // separator and round-trips cleanly through
+                // `parse_message`.
+                let raw_bytes = std::sync::Arc::new(bytes::Bytes::from(
+                    rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
+                ));
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
                         session_id: dialog_id.to_string(),
@@ -283,6 +293,7 @@ impl DialogEventAdapter {
                         headers: std::collections::HashMap::new(),
                         transaction_id: "unknown".to_string(), // TODO: Extract from request
                         source_addr: "unknown".to_string(),    // TODO: Extract from source
+                        raw_request: Some(raw_bytes),
                     },
                 ))
             }
@@ -292,6 +303,7 @@ impl DialogEventAdapter {
                     DialogToSessionEvent::CallEstablished {
                         session_id: dialog_id.to_string(),
                         sdp_answer: None, // SDP answer would need to be extracted from response
+                        raw_response: None,
                     },
                 ))
             }

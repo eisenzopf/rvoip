@@ -243,6 +243,17 @@ impl DialogEventHub {
                     }
                 }
 
+                // SIP_API_DESIGN_2 Phase A: serialize the parsed INVITE
+                // back to bytes so the receiving side can reconstruct an
+                // `Arc<Request>` via `parse_message` without breaking
+                // foundation-crate isolation. Use `Message::to_bytes()`
+                // — `Request::Display` skips the RFC 3261 header/body
+                // separator CRLF on empty-body messages, which makes
+                // the bytes unparseable.
+                let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
+                    rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
+                )));
+
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
                         session_id,
@@ -253,6 +264,7 @@ impl DialogEventHub {
                         headers,
                         transaction_id: transaction_id.to_string(),
                         source_addr: source.to_string(),
+                        raw_request,
                     },
                 ))
             }
@@ -275,6 +287,7 @@ impl DialogEventHub {
                             DialogToSessionEvent::CallEstablished {
                                 session_id,
                                 sdp_answer: Some(session_answer),
+                                raw_response: None,
                             },
                         ))
                     }
@@ -356,6 +369,12 @@ impl DialogEventHub {
             } => {
                 // Try to get session ID from stored mapping first
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    // SIP_API_DESIGN_2 Phase A: preserve the inbound
+                    // response bytes once so every publish branch below
+                    // can attach them without serializing twice.
+                    let raw_response = Some(std::sync::Arc::new(bytes::Bytes::from(
+                        response.to_string().into_bytes(),
+                    )));
                     // Handle specific response codes
                     match response.status_code() {
                         200 => {
@@ -370,6 +389,7 @@ impl DialogEventHub {
                                 DialogToSessionEvent::CallEstablished {
                                     session_id,
                                     sdp_answer,
+                                    raw_response: raw_response.clone(),
                                 },
                             ))
                         }
@@ -388,6 +408,7 @@ impl DialogEventHub {
                                     status_code: response.status_code(),
                                     reason_phrase: response.reason_phrase().to_string(),
                                     sdp,
+                                    raw_response: raw_response.clone(),
                                 },
                             ))
                         }
@@ -469,6 +490,7 @@ impl DialogEventHub {
                                         session_id,
                                         status_code: 422,
                                         reason_phrase: response.reason_phrase().to_string(),
+                                        raw_response: raw_response.clone(),
                                     },
                                 ))
                             }
@@ -541,6 +563,7 @@ impl DialogEventHub {
                                         session_id,
                                         status_code: response.status_code(),
                                         reason_phrase: response.reason_phrase().to_string(),
+                                        raw_response: raw_response.clone(),
                                     },
                                 ))
                             }
@@ -555,6 +578,7 @@ impl DialogEventHub {
                                     session_id,
                                     status_code: code,
                                     reason_phrase: response.reason_phrase().to_string(),
+                                    raw_response: raw_response.clone(),
                                 },
                             ))
                         }
@@ -572,6 +596,7 @@ impl DialogEventHub {
                 refer_to,
                 referred_by,
                 replaces,
+                raw_request,
             } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     // Convert ReferTo to string
@@ -584,6 +609,20 @@ impl DialogEventHub {
                         rvoip_infra_common::events::cross_crate::TransferType::Blind
                     };
 
+                    // SIP_API_DESIGN_2 §7.5 — thread the inbound REFER
+                    // bytes through to the cross-crate variant so
+                    // session-core can build a typed `IncomingRequest`
+                    // view. A `None` here at this point means the
+                    // publish site upstream (`protocol_handlers.rs`)
+                    // did not preserve the bytes; warn loudly so the
+                    // regression is observable.
+                    if raw_request.is_none() {
+                        tracing::warn!(
+                            "TransferRequest cross-crate bridge: raw_request was None — \
+                             upstream publish site did not preserve REFER bytes"
+                        );
+                    }
+
                     Some(RvoipCrossCrateEvent::DialogToSession(
                         DialogToSessionEvent::TransferRequested {
                             session_id,
@@ -592,6 +631,7 @@ impl DialogEventHub {
                             transaction_id: transaction_id.to_string(),
                             referred_by,
                             replaces,
+                            raw_request,
                         },
                     ))
                 } else {
@@ -674,6 +714,7 @@ impl DialogEventHub {
                         status_code: 180,
                         reason_phrase: "Ringing".to_string(),
                         sdp: None,
+                        raw_response: None,
                     })
                 }),
 
@@ -686,6 +727,7 @@ impl DialogEventHub {
                         status_code: 183,
                         reason_phrase: "Session Progress".to_string(),
                         sdp: Some(sdp),
+                        raw_response: None,
                     })
                 }),
 
@@ -702,6 +744,7 @@ impl DialogEventHub {
                         status_code,
                         reason_phrase,
                         sdp: None,
+                        raw_response: None,
                     })
                 }),
 
@@ -713,38 +756,92 @@ impl DialogEventHub {
             // on glare) through its state machine. INFO and NOTIFY are also
             // emitted via this variant today — we deliberately skip them
             // here so they do not get misrouted to the re-INVITE handler.
+            //
+            // SIP_API_DESIGN_2 Phase E: today's protocol handlers route
+            // inbound in-dialog INFO and MESSAGE through this same
+            // `ReInvite` variant (it's the only mid-dialog request
+            // variant). We dispatch by method so each gets its own
+            // cross-crate variant.
             SessionCoordinationEvent::ReInvite {
                 dialog_id, request, ..
             } => {
                 let method = request.method();
-                if !matches!(method, Method::Invite | Method::Update) {
-                    debug!(
-                        "Skipping ReInvite cross-crate conversion for method {:?} (dialog {})",
-                        method, dialog_id
-                    );
-                    return None;
-                }
-                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    let sdp = if !request.body().is_empty() {
-                        String::from_utf8(request.body().to_vec()).ok()
-                    } else {
-                        None
-                    };
-                    info!(
-                        "Converting ReInvite ({}) to cross-crate event for session {}",
-                        method, session_id
-                    );
-                    Some(RvoipCrossCrateEvent::DialogToSession(
-                        DialogToSessionEvent::ReinviteReceived {
+                let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
+                    request.to_string().into_bytes(),
+                )));
+                let session_id = match self.dialog_manager.get_session_id(&dialog_id) {
+                    Some(s) => s,
+                    None => {
+                        warn!(
+                            "No session ID found for dialog {:?} in mid-dialog {} request",
+                            dialog_id, method
+                        );
+                        return None;
+                    }
+                };
+                match method {
+                    Method::Invite | Method::Update => {
+                        let sdp = if !request.body().is_empty() {
+                            String::from_utf8(request.body().to_vec()).ok()
+                        } else {
+                            None
+                        };
+                        info!(
+                            "Converting ReInvite ({}) to cross-crate event for session {}",
+                            method, session_id
+                        );
+                        Some(RvoipCrossCrateEvent::DialogToSession(
+                            DialogToSessionEvent::ReinviteReceived {
+                                session_id,
+                                sdp,
+                                method: method.to_string(),
+                                raw_request,
+                            },
+                        ))
+                    }
+                    Method::Info => Some(RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::InfoReceived {
                             session_id,
-                            sdp,
-                            method: method.to_string(),
+                            raw_request,
                         },
-                    ))
-                } else {
-                    warn!("No session ID found for dialog {:?} in ReInvite", dialog_id);
-                    None
+                    )),
+                    Method::Message => Some(RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::MessageReceived {
+                            session_id,
+                            raw_request,
+                        },
+                    )),
+                    _ => {
+                        debug!(
+                            "Skipping ReInvite cross-crate conversion for method {:?} (dialog {})",
+                            method, dialog_id
+                        );
+                        None
+                    }
                 }
+            }
+
+            // SIP_API_DESIGN_2 Phase E — bridge inbound OPTIONS to
+            // session-core. In-dialog OPTIONS rides the existing
+            // dialog mapping; out-of-dialog OPTIONS has an empty
+            // session_id (the cross-crate `session_id()` accessor
+            // normalizes the empty string to `None`).
+            SessionCoordinationEvent::CapabilityQuery {
+                request, ..
+            } => {
+                let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
+                    request.to_string().into_bytes(),
+                )));
+                // CapabilityQuery in today's dialog-core does not carry
+                // a dialog id; OPTIONS therefore surfaces as
+                // out-of-dialog (empty session_id, which the cross-
+                // crate session_id() accessor returns as `None`).
+                Some(RvoipCrossCrateEvent::DialogToSession(
+                    DialogToSessionEvent::OptionsReceived {
+                        session_id: String::new(),
+                        raw_request,
+                    },
+                ))
             }
 
             _ => None, // Other events not yet mapped
@@ -769,18 +866,28 @@ impl CrossCrateEventHandler for DialogEventHub {
                             www_authenticate,
                             contact,
                             expires,
+                            min_expires,
+                            service_route,
+                            path_echo,
+                            associated_uri,
+                            extra_headers,
                         } => {
                             info!(
                                 "📩 Handling SendRegisterResponse via trait: {} {}",
                                 status_code, reason
                             );
-                            self.handle_register_response(
+                            self.handle_register_response_with_extras(
                                 transaction_id,
                                 *status_code,
                                 reason,
                                 www_authenticate.as_deref(),
                                 contact.as_deref(),
                                 *expires,
+                                *min_expires,
+                                service_route,
+                                *path_echo,
+                                associated_uri,
+                                extra_headers,
                             )
                             .await?;
                             return Ok(()); // Early return after handling
@@ -922,6 +1029,89 @@ impl DialogEventHub {
         Ok(())
     }
 
+    /// SIP_API_DESIGN_2 Phase D — registrar response with the full
+    /// set of additive fields (Min-Expires, Service-Route, Path echo,
+    /// P-Associated-URI, generic extras). Falls back to the legacy
+    /// path when no new fields are populated so existing callers see
+    /// no behaviour change.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_register_response_with_extras(
+        &self,
+        transaction_id: &str,
+        status_code: u16,
+        reason: &str,
+        www_authenticate: Option<&str>,
+        contact: Option<&str>,
+        expires: Option<u32>,
+        min_expires: Option<u32>,
+        service_route: &[String],
+        path_echo: bool,
+        associated_uri: &[String],
+        extra_headers: &[(String, String)],
+    ) -> Result<()> {
+        let has_extras = min_expires.is_some()
+            || !service_route.is_empty()
+            || path_echo
+            || !associated_uri.is_empty()
+            || !extra_headers.is_empty();
+
+        if !has_extras {
+            return self
+                .handle_register_response(
+                    transaction_id,
+                    status_code,
+                    reason,
+                    www_authenticate,
+                    contact,
+                    expires,
+                )
+                .await;
+        }
+
+        let tx_key = transaction_id
+            .parse::<TransactionKey>()
+            .map_err(|e| anyhow::anyhow!("Failed to parse transaction_id: {}", e))?;
+
+        if self
+            .dialog_manager
+            .transaction_manager()
+            .original_request(&tx_key)
+            .await
+            .is_err()
+        {
+            debug!(
+                "Transaction {} not found in this DialogManager - skipping",
+                transaction_id
+            );
+            return Ok(());
+        }
+
+        self.dialog_manager
+            .send_register_response_with_extras(
+                &tx_key,
+                status_code,
+                reason,
+                www_authenticate,
+                contact,
+                expires,
+                min_expires,
+                service_route,
+                path_echo,
+                associated_uri,
+                extra_headers,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to send REGISTER response: {}", e))?;
+
+        info!(
+            "✅ Sent REGISTER response (with {} extras): {} {}",
+            extra_headers.len(),
+            status_code,
+            reason
+        );
+        Ok(())
+    }
+
     /// Handle ReferResponse event from session-core
     async fn handle_refer_response(&self, event_str: &str) -> Result<()> {
         // Extract transaction_id, accept flag, status_code, and reason
@@ -980,13 +1170,18 @@ impl DialogEventHub {
                     }
                 }
                 Ok(None) => {
-                    error!(
+                    // Demoted to debug — common during test teardown when
+                    // the REFER transaction completes before the
+                    // ReferResponse event is processed.
+                    debug!(
                         "No original request found for transaction: {}",
                         transaction_id
                     );
                 }
                 Err(e) => {
-                    error!(
+                    // Same teardown race as above; surface as debug
+                    // rather than error so test logs stay readable.
+                    debug!(
                         "Failed to get original request for transaction {}: {}",
                         transaction_id, e
                     );

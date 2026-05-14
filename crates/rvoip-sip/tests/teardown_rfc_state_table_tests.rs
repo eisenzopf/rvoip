@@ -40,7 +40,7 @@ fn uac_initiating_user_teardown_records_cancel_intent_without_cancel() {
         let t = transition(&table, Role::UAC, CallState::Initiating, event);
         assert_eq!(t.next_state, Some(CallState::CancelPending));
         assert!(
-            !t.actions.contains(&Action::SendCANCEL),
+            !t.actions.contains(&Action::SendCANCELWithOptions),
             "CANCEL is not legal before a provisional response"
         );
         assert_no_terminal_publish(t);
@@ -57,7 +57,7 @@ fn uac_cancel_pending_provisional_sends_cancel_without_terminal_event() {
     ] {
         let t = transition(&table, Role::UAC, CallState::CancelPending, event);
         assert_eq!(t.next_state, Some(CallState::Cancelling));
-        assert!(t.actions.contains(&Action::SendCANCEL));
+        assert!(t.actions.contains(&Action::SendCANCELWithOptions));
         assert_no_terminal_publish(t);
     }
 }
@@ -70,7 +70,7 @@ fn uac_ringing_and_early_teardown_send_cancel_without_immediate_cancelled_event(
         for event in [EventType::HangupCall, EventType::CancelCall] {
             let t = transition(&table, Role::UAC, state, event);
             assert_eq!(t.next_state, Some(CallState::Cancelling));
-            assert!(t.actions.contains(&Action::SendCANCEL));
+            assert!(t.actions.contains(&Action::SendCANCELWithOptions));
             assert_no_terminal_publish(t);
         }
     }
@@ -155,7 +155,7 @@ fn initiating_timeout_does_not_send_cancel() {
         ))
     );
     assert!(
-        !t.actions.contains(&Action::SendCANCEL),
+        !t.actions.contains(&Action::SendCANCELWithOptions),
         "Timer B before a provisional response must not send CANCEL"
     );
 }

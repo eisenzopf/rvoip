@@ -281,6 +281,42 @@ pub fn refer_for_dialog_with_contact(
     route_set: Option<Vec<Uri>>,
     contact_uri: Option<String>,
 ) -> Result<Request> {
+    refer_for_dialog_with_extras(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        target_uri,
+        cseq,
+        local_address,
+        route_set,
+        contact_uri,
+        None,
+    )
+}
+
+/// REFER builder with caller-supplied `Refer-To` value, optional Contact
+/// override, and application `extra_headers` appended after the
+/// stack-managed slice (Call-ID / CSeq / Via / Max-Forwards / From-tag).
+///
+/// SIP_API_DESIGN_2 §7.2 — this is the entry point the
+/// rvoip-sip / dialog-core options surface threads `Replaces`,
+/// `Referred-By`, `Target-Dialog`, and any application-staged headers
+/// through to the wire.
+pub fn refer_for_dialog_with_extras(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    target_uri: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact_uri: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let from_uri_string = from_uri.into();
     let target_uri_str = target_uri.into();
@@ -334,6 +370,15 @@ pub fn refer_for_dialog_with_contact(
             "Invalid Refer-To URI: {}",
             target_uri_str
         )));
+    }
+
+    // Append application-staged headers (SIP_API_DESIGN_2 §5.2): stack
+    // owns Call-ID/CSeq/Via/Max-Forwards/From-tag (already stamped); the
+    // application slice rides after Refer-To.
+    if let Some(headers) = extra_headers {
+        for hdr in headers {
+            request.headers.push(hdr);
+        }
     }
 
     Ok(request)
@@ -416,6 +461,36 @@ pub fn update_for_dialog_with_contact(
     route_set: Option<Vec<Uri>>,
     contact_uri: Option<String>,
 ) -> Result<Request> {
+    update_for_dialog_with_extras(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        sdp_content,
+        cseq,
+        local_address,
+        route_set,
+        contact_uri,
+        None,
+    )
+}
+
+/// UPDATE builder with application-staged `extra_headers` appended
+/// after the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+pub fn update_for_dialog_with_extras(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    sdp_content: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact_uri: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let from_uri_string = from_uri.into();
     let route_set = route_set.unwrap_or_default();
@@ -447,7 +522,13 @@ pub fn update_for_dialog_with_contact(
         None
     };
 
-    request_builder_from_dialog_template(&template, Method::Update, sdp_content, content_type, None)
+    request_builder_from_dialog_template(
+        &template,
+        Method::Update,
+        sdp_content,
+        content_type,
+        extra_headers,
+    )
 }
 
 /// Quick INFO request creation for mid-dialog information
@@ -503,6 +584,36 @@ pub fn info_for_dialog(
     local_address: SocketAddr,
     route_set: Option<Vec<Uri>>,
 ) -> Result<Request> {
+    info_for_dialog_with_extras(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        content,
+        content_type,
+        cseq,
+        local_address,
+        route_set,
+        None,
+    )
+}
+
+/// INFO builder with application-staged `extra_headers` appended after
+/// the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+pub fn info_for_dialog_with_extras(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    content: impl Into<String>,
+    content_type: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
@@ -523,7 +634,7 @@ pub fn info_for_dialog(
         Method::Info,
         Some(content.into()),
         Some(ct),
-        None,
+        extra_headers,
     )
 }
 
@@ -582,6 +693,38 @@ pub fn notify_for_dialog(
     local_address: SocketAddr,
     route_set: Option<Vec<Uri>>,
 ) -> Result<Request> {
+    notify_for_dialog_with_extras(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        event_type,
+        notification_body,
+        subscription_state,
+        cseq,
+        local_address,
+        route_set,
+        None,
+    )
+}
+
+/// NOTIFY builder with application-staged `extra_headers` appended after
+/// the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+pub fn notify_for_dialog_with_extras(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    event_type: impl Into<String>,
+    notification_body: Option<String>,
+    subscription_state: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     use crate::transaction::client::builders::InDialogRequestBuilder;
 
     let to_uri_string = to_uri.into();
@@ -620,7 +763,15 @@ pub fn notify_for_dialog(
         template.route_set,
     );
 
-    builder.build()
+    let mut request = builder.build()?;
+
+    if let Some(headers) = extra_headers {
+        for hdr in headers {
+            request.headers.push(hdr);
+        }
+    }
+
+    Ok(request)
 }
 
 /// Quick MESSAGE request creation for instant messaging
@@ -676,6 +827,36 @@ pub fn message_for_dialog(
     local_address: SocketAddr,
     route_set: Option<Vec<Uri>>,
 ) -> Result<Request> {
+    message_for_dialog_with_extras(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        message_content,
+        content_type,
+        cseq,
+        local_address,
+        route_set,
+        None,
+    )
+}
+
+/// In-dialog MESSAGE builder with application-staged `extra_headers`
+/// appended after the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+pub fn message_for_dialog_with_extras(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    message_content: impl Into<String>,
+    content_type: Option<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
@@ -696,7 +877,7 @@ pub fn message_for_dialog(
         Method::Message,
         Some(message_content.into()),
         Some(ct),
-        None,
+        extra_headers,
     )
 }
 
@@ -753,6 +934,36 @@ pub fn reinvite_for_dialog(
     route_set: Option<Vec<Uri>>,
     contact: Option<String>,
 ) -> Result<Request> {
+    reinvite_for_dialog_with_extras(
+        call_id,
+        from_uri,
+        from_tag,
+        to_uri,
+        to_tag,
+        sdp_offer,
+        cseq,
+        local_address,
+        route_set,
+        contact,
+        None,
+    )
+}
+
+/// re-INVITE builder with application-staged `extra_headers` appended
+/// after the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+pub fn reinvite_for_dialog_with_extras(
+    call_id: impl Into<String>,
+    from_uri: impl Into<String>,
+    from_tag: impl Into<String>,
+    to_uri: impl Into<String>,
+    to_tag: impl Into<String>,
+    sdp_offer: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    route_set: Option<Vec<Uri>>,
+    contact: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let to_uri_string = to_uri.into();
     let template = DialogRequestTemplate {
         call_id: call_id.into(),
@@ -772,7 +983,7 @@ pub fn reinvite_for_dialog(
         Method::Invite,
         Some(sdp_offer.into()),
         Some("application/sdp".to_string()),
-        None,
+        extra_headers,
     )
 }
 
@@ -839,6 +1050,30 @@ pub fn subscribe_out_of_dialog(
     cseq: u32,
     local_address: SocketAddr,
 ) -> Result<Request> {
+    subscribe_out_of_dialog_with_extras(
+        target_uri,
+        from_uri,
+        contact_uri,
+        event_package,
+        expires,
+        cseq,
+        local_address,
+        None,
+    )
+}
+
+/// Out-of-dialog SUBSCRIBE with application-staged `extra_headers`
+/// appended after the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+pub fn subscribe_out_of_dialog_with_extras(
+    target_uri: impl Into<String>,
+    from_uri: impl Into<String>,
+    contact_uri: impl Into<String>,
+    event_package: impl Into<String>,
+    expires: u32,
+    cseq: u32,
+    local_address: SocketAddr,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let target_uri = target_uri.into();
     let from_uri = from_uri.into();
     let contact_uri = contact_uri.into();
@@ -846,7 +1081,7 @@ pub fn subscribe_out_of_dialog(
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
-    let request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(
+    let mut request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(
         &target_uri,
         &event_package,
         expires,
@@ -865,6 +1100,12 @@ pub fn subscribe_out_of_dialog(
     .contact(&contact_uri, None)
     .build();
 
+    if let Some(headers) = extra_headers {
+        for hdr in headers {
+            request.headers.push(hdr);
+        }
+    }
+
     Ok(request)
 }
 
@@ -880,6 +1121,34 @@ pub fn subscribe_out_of_dialog_with_identity(
     call_id: impl Into<String>,
     from_tag: impl Into<String>,
 ) -> Result<Request> {
+    subscribe_out_of_dialog_with_identity_and_extras(
+        target_uri,
+        from_uri,
+        contact_uri,
+        event_package,
+        expires,
+        cseq,
+        local_address,
+        call_id,
+        from_tag,
+        None,
+    )
+}
+
+/// Out-of-dialog SUBSCRIBE with caller-provided identity AND
+/// application-staged `extra_headers`. See SIP_API_DESIGN_2 §5.2.
+pub fn subscribe_out_of_dialog_with_identity_and_extras(
+    target_uri: impl Into<String>,
+    from_uri: impl Into<String>,
+    contact_uri: impl Into<String>,
+    event_package: impl Into<String>,
+    expires: u32,
+    cseq: u32,
+    local_address: SocketAddr,
+    call_id: impl Into<String>,
+    from_tag: impl Into<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let target_uri = target_uri.into();
     let from_uri = from_uri.into();
     let contact_uri = contact_uri.into();
@@ -889,7 +1158,7 @@ pub fn subscribe_out_of_dialog_with_identity(
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
-    let request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(
+    let mut request = rvoip_sip_core::builder::SimpleRequestBuilder::subscribe(
         &target_uri,
         &event_package,
         expires,
@@ -904,6 +1173,12 @@ pub fn subscribe_out_of_dialog_with_identity(
     .contact(&contact_uri, None)
     .build();
 
+    if let Some(headers) = extra_headers {
+        for hdr in headers {
+            request.headers.push(hdr);
+        }
+    }
+
     Ok(request)
 }
 
@@ -915,13 +1190,37 @@ pub fn message_out_of_dialog(
     cseq: u32,
     local_address: SocketAddr,
 ) -> Result<Request> {
+    message_out_of_dialog_with_extras(
+        target_uri,
+        from_uri,
+        body,
+        cseq,
+        local_address,
+        None,
+        None,
+    )
+}
+
+/// Out-of-dialog MESSAGE with caller-chosen Content-Type and
+/// application-staged `extra_headers` appended after the stack-managed
+/// slice. See SIP_API_DESIGN_2 §5.2.
+pub fn message_out_of_dialog_with_extras(
+    target_uri: impl Into<String>,
+    from_uri: impl Into<String>,
+    body: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    content_type: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
     let target_uri = target_uri.into();
     let from_uri = from_uri.into();
     let body = body.into();
+    let ct = content_type.unwrap_or_else(|| "text/plain".to_string());
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
-    let request = rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Message, &target_uri)
+    let mut request = rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Message, &target_uri)
         .map_err(|e| Error::Other(format!("Failed to build MESSAGE request: {}", e)))?
         .from(
             "",
@@ -933,9 +1232,67 @@ pub fn message_out_of_dialog(
         .cseq(cseq)
         .via(&local_address.to_string(), via_transport, Some(&branch))
         .max_forwards(70)
-        .content_type("text/plain")
+        .content_type(&ct)
         .body(bytes::Bytes::from(body))
         .build();
+
+    if let Some(headers) = extra_headers {
+        for hdr in headers {
+            request.headers.push(hdr);
+        }
+    }
+
+    Ok(request)
+}
+
+/// Out-of-dialog OPTIONS request. SIP_API_DESIGN_2 Phase B authorship
+/// — new helper introduced to support the unified builder dispatch.
+/// RFC 3261 §11.
+pub fn options_out_of_dialog_with_extras(
+    target_uri: impl Into<String>,
+    from_uri: impl Into<String>,
+    cseq: u32,
+    local_address: SocketAddr,
+    accept: Option<String>,
+    extra_headers: Option<Vec<TypedHeader>>,
+) -> Result<Request> {
+    use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+
+    let target_uri = target_uri.into();
+    let from_uri = from_uri.into();
+    let branch = crate::transaction::utils::dialog_utils::generate_branch();
+    let via_transport = via_transport_for_uris(&target_uri, &from_uri);
+
+    let mut builder = rvoip_sip_core::builder::SimpleRequestBuilder::new(
+        Method::Options,
+        &target_uri,
+    )
+    .map_err(|e| Error::Other(format!("Failed to build OPTIONS request: {}", e)))?
+    .from(
+        "",
+        &from_uri,
+        Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
+    )
+    .to("", &target_uri, None)
+    .call_id(&format!("opt-{}", uuid::Uuid::new_v4()))
+    .cseq(cseq)
+    .via(&local_address.to_string(), via_transport, Some(&branch))
+    .max_forwards(70);
+
+    if let Some(accept_value) = accept {
+        builder = builder.header(TypedHeader::Other(
+            HeaderName::Accept,
+            HeaderValue::Raw(accept_value.into_bytes()),
+        ));
+    }
+
+    let mut request = builder.build();
+
+    if let Some(headers) = extra_headers {
+        for hdr in headers {
+            request.headers.push(hdr);
+        }
+    }
 
     Ok(request)
 }

@@ -298,12 +298,17 @@ pub mod unified; // Unified API // Simple peer API (legacy — use StreamPeer in
 
 // New v3 API modules
 pub mod audio; // AudioStream, AudioSender, AudioReceiver
+pub mod bodies; // SIP_API_DESIGN_2 §3.6 — Convenience body constructors
 pub mod callback_peer; // CallbackPeer, CallHandler, CallHandlerDecision, EndReason
 pub mod handle; // SessionHandle, CallId
 pub mod handlers;
-pub mod incoming; // IncomingCall, IncomingCallGuard
+pub mod headers; // SipHeaderView, SipRequestOptions, HeaderPolicy (SIP_API_DESIGN_2)
+pub mod incoming; // IncomingCall, IncomingCallGuard, IncomingRequest, IncomingResponse, IncomingRegister
+pub mod send; // Outbound builders (SIP_API_DESIGN_2 Phase C)
+pub mod respond; // Response builders (SIP_API_DESIGN_2 Phase D)
 pub mod lifecycle;
 pub mod stream_peer; // StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
+pub mod trace_redactor; // SIP_API_DESIGN_2 §12.4 — pluggable trace-output redaction
 
 // Re-export the main types
 pub use types::{
@@ -355,8 +360,29 @@ pub use handle::{
 // DialogIdentity (used when orchestrating attended transfer from a higher layer)
 pub use types::DialogIdentity;
 
-// IncomingCall / IncomingCallGuard
-pub use incoming::{IncomingCall, IncomingCallGuard};
+// IncomingCall / IncomingCallGuard / IncomingRequest / IncomingResponse / IncomingRegister
+pub use incoming::{
+    IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
+};
+
+// Header view + builder trait surface (SIP_API_DESIGN_2)
+pub use headers::{
+    BuilderHeaderState, BuilderStrictness, HeaderCarryThroughReport, HeaderPolicyViolation,
+    HeaderRole, MissingRequiredHeader, SipHeaderView, SipRequestOptions, ViolationReason,
+};
+
+// Outbound builders (SIP_API_DESIGN_2 Phase C)
+pub use send::{
+    ByeBuilder, CancelBuilder, InfoBuilder, MessageBuilder, NotifyBuilder, OptionsBuilder,
+    OutboundCallBuilder, ReInviteBuilder, ReferBuilder, RegisterBuilder, RegisterRefreshBuilder,
+    Surface, SurfaceBuilder, SubscribeBuilder, SubscribeRefreshBuilder, UpdateBuilder,
+};
+
+// Response builders (SIP_API_DESIGN_2 Phase D)
+pub use respond::{
+    AcceptBuilder, AuthChallengeBuilder, AuthScheme, GenericResponseBuilder, ProvisionalBuilder,
+    RedirectBuilder, RegisterResponseBuilder, RejectBuilder,
+};
 pub use lifecycle::{CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo};
 
 // StreamPeer (replaces SimplePeer for new code)

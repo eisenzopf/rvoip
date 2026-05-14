@@ -36,6 +36,10 @@ once_cell = "1.18.0"
 mimalloc = { version = "0.1", default-features = false }
 anyhow = "1.0"
 tokio-util = "0.7.16"
+# SIP_API_DESIGN_2 Phase A: bus payloads carry original inbound bytes
+# (Arc<bytes::Bytes>) — *not* Arc<rvoip_sip_core::Request> — so foundation
+# crates remain SIP-agnostic.
+bytes = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true

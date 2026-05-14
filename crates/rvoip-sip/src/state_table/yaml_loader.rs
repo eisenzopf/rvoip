@@ -681,6 +681,22 @@ impl YamlTableLoader {
             "MessageDelivered" => Ok(EventType::MessageDelivered),
             "MessageFailed" => Ok(EventType::MessageFailed(0)),
 
+            // SIP_API_DESIGN_2 §7.1 — builder-staged outbound events.
+            // Each `coord.<verb>(..).send()` dispatches one of these so
+            // the YAML row drives `Action::Send<METHOD>WithOptions`.
+            "SendOutboundInvite" => Ok(EventType::SendOutboundInvite),
+            "SendOutboundReInvite" => Ok(EventType::SendOutboundReInvite),
+            "SendOutboundBye" => Ok(EventType::SendOutboundBye),
+            "SendOutboundCancel" => Ok(EventType::SendOutboundCancel),
+            "SendOutboundRefer" => Ok(EventType::SendOutboundRefer),
+            "SendOutboundNotify" => Ok(EventType::SendOutboundNotify),
+            "SendOutboundInfo" => Ok(EventType::SendOutboundInfo),
+            "SendOutboundUpdate" => Ok(EventType::SendOutboundUpdate),
+            "SendOutboundMessage" => Ok(EventType::SendOutboundMessage),
+            "SendOutboundOptions" => Ok(EventType::SendOutboundOptions),
+            "SendOutboundSubscribe" => Ok(EventType::SendOutboundSubscribe),
+            "SendOutboundRegister" => Ok(EventType::SendOutboundRegister),
+
             // Default: treat as media event
             _ => Ok(EventType::MediaEvent(name.to_string())),
         }
@@ -783,7 +799,11 @@ impl YamlTableLoader {
             "RetryWithContact" => Ok(Action::RetryWithContact),
             "ScheduleReinviteRetry" => Ok(Action::ScheduleReinviteRetry),
             "ClearPendingReinvite" => Ok(Action::ClearPendingReinvite),
-            "SendCANCEL" => Ok(Action::SendCANCEL),
+            // SendCANCEL legacy variant deleted per Phase 5 — YAML now
+            // emits SendCANCELWithOptions exclusively. Keep an alias so
+            // historical YAML still parses for the duration of the
+            // deprecation cycle.
+            "SendCANCEL" | "SendCANCELWithOptions" => Ok(Action::SendCANCELWithOptions),
             "SendReINVITE" => Ok(Action::SendReINVITE),
 
             // Media actions
@@ -827,7 +847,9 @@ impl YamlTableLoader {
             // Subscription actions
             "SendSUBSCRIBE" => Ok(Action::SendSUBSCRIBE),
             "ProcessNOTIFY" => Ok(Action::ProcessNOTIFY),
-            "SendNOTIFY" => Ok(Action::SendNOTIFY),
+            // SendNOTIFY legacy variant deleted per Phase 5; alias kept
+            // for the deprecation cycle so historical YAML parses.
+            "SendNOTIFY" | "SendNOTIFYWithOptions" => Ok(Action::SendNOTIFYWithOptions),
 
             // Message actions
             "SendMESSAGE" => Ok(Action::SendMESSAGE),
@@ -861,6 +883,39 @@ impl YamlTableLoader {
 
             // Internal
             "CheckReadiness" => Ok(Action::Custom("CheckReadiness".to_string())),
+
+            // SIP_API_DESIGN_2 §7.1 — unified outbound dispatch through
+            // the option stash. Builder `.send()` stages
+            // `pending_<method>_options` and queues
+            // `EventType::SendOutbound<METHOD>`; the YAML transition row
+            // emits `Send<METHOD>WithOptions` which reads the stash.
+            "SendINVITEWithOptions" => Ok(Action::SendINVITEWithOptions),
+            "SendReINVITEWithOptions" => Ok(Action::SendReINVITEWithOptions),
+            "SendREGISTERWithOptions" => Ok(Action::SendREGISTERWithOptions),
+            "SendSUBSCRIBEWithOptions" => Ok(Action::SendSUBSCRIBEWithOptions),
+            "SendMESSAGEWithOptions" => Ok(Action::SendMESSAGEWithOptions),
+            // SendNOTIFYWithOptions/SendCANCELWithOptions handled by
+            // their legacy-alias arms above (Phase 5 consolidation).
+            "SendBYEWithOptions" => Ok(Action::SendBYEWithOptions),
+            "SendREFERWithOptions" => Ok(Action::SendREFERWithOptions),
+            "SendINFOWithOptions" => Ok(Action::SendINFOWithOptions),
+            "SendUPDATEWithOptions" => Ok(Action::SendUPDATEWithOptions),
+            "SendOPTIONSWithOptions" => Ok(Action::SendOPTIONSWithOptions),
+
+            // §7.3 invariant #2 — clear the stash on final-response
+            // transitions (200 / 4xx / 5xx / 6xx / timeout).
+            "ClearPendingINVITEOptions" => Ok(Action::ClearPendingINVITEOptions),
+            "ClearPendingReINVITEOptions" => Ok(Action::ClearPendingReINVITEOptions),
+            "ClearPendingREGISTEROptions" => Ok(Action::ClearPendingREGISTEROptions),
+            "ClearPendingSUBSCRIBEOptions" => Ok(Action::ClearPendingSUBSCRIBEOptions),
+            "ClearPendingMESSAGEOptions" => Ok(Action::ClearPendingMESSAGEOptions),
+            "ClearPendingNOTIFYOptions" => Ok(Action::ClearPendingNOTIFYOptions),
+            "ClearPendingBYEOptions" => Ok(Action::ClearPendingBYEOptions),
+            "ClearPendingCANCELOptions" => Ok(Action::ClearPendingCANCELOptions),
+            "ClearPendingREFEROptions" => Ok(Action::ClearPendingREFEROptions),
+            "ClearPendingINFOOptions" => Ok(Action::ClearPendingINFOOptions),
+            "ClearPendingUPDATEOptions" => Ok(Action::ClearPendingUPDATEOptions),
+            "ClearPendingOPTIONSOptions" => Ok(Action::ClearPendingOPTIONSOptions),
 
             // Unknown action — drift detection. Previously silently fell through
             // to `Action::Custom(name)`, which masked dead YAML entries pointing

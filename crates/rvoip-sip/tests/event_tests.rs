@@ -90,6 +90,7 @@ fn test_refer_received_event() {
         replaces: None,
         transaction_id: "tx-123".into(),
         transfer_type: "blind".into(),
+        request: None,
     };
     assert_eq!(e.call_id(), Some(&id));
     assert!(e.is_transfer_event());

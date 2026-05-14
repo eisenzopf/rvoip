@@ -320,6 +320,31 @@ pub enum EventType {
     InternalProceedWithTransfer,
     InternalMakeTransferCall,
     InternalTransferCallEstablished,
+
+    // ──────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 §7.1 — Builder-driven outbound dispatch.
+    //
+    // Each rvoip-sip outbound builder stages its options struct into
+    // the matching `pending_<method>_options` slot via
+    // `StateMachine::stage_outbound_options` (which performs the §7.3
+    // invariant #5 conflict guard) and then queues one of these
+    // events. The YAML state-table routes `SendOutbound<METHOD>` to
+    // `Action::Send<METHOD>WithOptions`, which reads the stash. The
+    // payload-free shape keeps the data lifecycle observable in the
+    // stash rather than threading it through event payloads.
+    // ──────────────────────────────────────────────────────────────────
+    SendOutboundInvite,
+    SendOutboundReInvite,
+    SendOutboundBye,
+    SendOutboundCancel,
+    SendOutboundRefer,
+    SendOutboundNotify,
+    SendOutboundInfo,
+    SendOutboundUpdate,
+    SendOutboundMessage,
+    SendOutboundOptions,
+    SendOutboundSubscribe,
+    SendOutboundRegister,
 }
 
 impl EventType {
@@ -485,7 +510,6 @@ pub enum Action {
     SendINVITE,
     SendACK,
     SendBYE,
-    SendCANCEL,
     SendReINVITE,
     /// Follow a 3xx redirect (RFC 3261 §8.1.3.4): pop the next URI from
     /// `session.redirect_targets` and re-send INVITE to it. Gives up after
@@ -600,11 +624,63 @@ pub enum Action {
     // Subscription actions
     SendSUBSCRIBE,
     ProcessNOTIFY,
-    SendNOTIFY,
 
     // Message actions
     SendMESSAGE,
     ProcessMESSAGE,
+
+    // ──────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 §7.1 — Unified outbound dispatch.
+    //
+    // Twelve trigger actions that route every outbound SIP method
+    // through `Action::Send*WithOptions`. Per §7.3 invariant #1, the
+    // builder's `.send()` writes the matching `Arc<XxxRequestOptions>`
+    // to `session.pending_<method>_options` *before* queuing the
+    // event; the action handler reads from that stash, dispatches via
+    // `DialogAdapter::send_*_with_options`, and clears the slot when
+    // the transaction reaches a final response.
+    //
+    // The unit-variant shape keeps `Action` `PartialEq + Serialize`
+    // (state-table YAML compatibility); the payload travels in the
+    // stash where lifecycle is observable.
+    // ──────────────────────────────────────────────────────────────────
+    SendINVITEWithOptions,
+    SendReINVITEWithOptions,
+    SendREGISTERWithOptions,
+    SendSUBSCRIBEWithOptions,
+    SendMESSAGEWithOptions,
+    SendNOTIFYWithOptions,
+    SendBYEWithOptions,
+    SendCANCELWithOptions,
+    SendREFERWithOptions,
+    SendINFOWithOptions,
+    SendUPDATEWithOptions,
+    SendOPTIONSWithOptions,
+
+    // ──────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 §7.3 invariant #2 — stash clear actions.
+    //
+    // The matching `Send*WithOptions` handler now reads the stash via
+    // `.clone()` rather than `.take()`, so the `Arc<XxxRequestOptions>`
+    // persists across auth-retry / refresh dispatches. The state-table
+    // emits `ClearPending<METHOD>Options` on the transition that
+    // reaches a final response (`Dialog200OK`, `Dialog{4,5,6}xxFailure`,
+    // `DialogTimeout`) for that method. The `Terminated` backstop in
+    // the executor wipes every slot unconditionally so a YAML gap can
+    // never leave a stash permanently occupied.
+    // ──────────────────────────────────────────────────────────────────
+    ClearPendingINVITEOptions,
+    ClearPendingReINVITEOptions,
+    ClearPendingREGISTEROptions,
+    ClearPendingSUBSCRIBEOptions,
+    ClearPendingMESSAGEOptions,
+    ClearPendingNOTIFYOptions,
+    ClearPendingBYEOptions,
+    ClearPendingCANCELOptions,
+    ClearPendingREFEROptions,
+    ClearPendingINFOOptions,
+    ClearPendingUPDATEOptions,
+    ClearPendingOPTIONSOptions,
 
     // Generic cleanup actions
     CleanupDialog,

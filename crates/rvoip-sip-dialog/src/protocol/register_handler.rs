@@ -93,6 +93,12 @@ impl RegisterHandler for DialogManager {
             use rvoip_infra_common::events::cross_crate::{
                 DialogToSessionEvent, RvoipCrossCrateEvent,
             };
+            // SIP_API_DESIGN_2 Phase A: preserve inbound REGISTER bytes
+            // so the registrar surface can build an `IncomingRegister`
+            // view with `raw_request()`.
+            let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
+                request.to_string().into_bytes(),
+            )));
             let event =
                 RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingRegister {
                     transaction_id: transaction_id.to_string(),
@@ -105,6 +111,7 @@ impl RegisterHandler for DialogManager {
                         .call_id()
                         .map(|cid| cid.value().to_string())
                         .unwrap_or_else(|| "unknown".to_string()),
+                    raw_request,
                 });
 
             // Publish via event hub (global event bus)
@@ -278,6 +285,159 @@ impl DialogManager {
             })?;
 
         debug!("Sent REGISTER response: {} {}", status_code, reason);
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase D — registrar response with full
+    /// RFC 3327 / 3608 / 3455 field set plus generic
+    /// application-staged extras.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_register_response_with_extras(
+        &self,
+        transaction_id: &crate::transaction::TransactionKey,
+        status_code: u16,
+        reason: &str,
+        www_authenticate: Option<&str>,
+        contact: Option<&str>,
+        expires: Option<u32>,
+        min_expires: Option<u32>,
+        service_route: &[String],
+        path_echo: bool,
+        associated_uri: &[String],
+        extra_headers: &[(String, String)],
+    ) -> DialogResult<()> {
+        use rvoip_sip_core::types::header::HeaderName;
+        use rvoip_sip_core::types::headers::header_value::HeaderValue;
+        use rvoip_sip_core::{StatusCode, TypedHeader};
+
+        debug!(
+            "Sending REGISTER response (extras): {} {} (service_route={}, path_echo={}, associated_uri={}, extras={})",
+            status_code,
+            reason,
+            service_route.len(),
+            path_echo,
+            associated_uri.len(),
+            extra_headers.len()
+        );
+
+        // Resolve the inbound request to template the response.
+        let request = self
+            .transaction_manager
+            .original_request(transaction_id)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to get request for transaction: {}", e),
+            })?
+            .ok_or_else(|| DialogError::TransactionError {
+                message: "No request found for transaction".into(),
+            })?;
+
+        let status = StatusCode::from_u16(status_code).map_err(|e| {
+            DialogError::protocol_error(&format!("Invalid status code {}: {}", status_code, e))
+        })?;
+
+        let mut response =
+            crate::transaction::utils::response_builders::create_response(&request, status);
+
+        // RFC 3261 §20.23 — Min-Expires lives on 423 Interval Too Brief.
+        if let Some(min) = min_expires {
+            response.headers.push(TypedHeader::MinExpires(
+                rvoip_sip_core::types::min_expires::MinExpires::new(min),
+            ));
+        }
+
+        // Echo the inbound Contact when requested (matches the legacy
+        // send_register_response 200 OK path), then stamp Expires.
+        if let Some(_contact_uri) = contact {
+            if let Some(contact_header) = request.header(&HeaderName::Contact) {
+                response.headers.push(contact_header.clone());
+            }
+        }
+        if let Some(exp) = expires {
+            response.headers.push(TypedHeader::Expires(
+                rvoip_sip_core::types::expires::Expires::new(exp),
+            ));
+        }
+
+        // 401 WWW-Authenticate (raw header, mirrors legacy path).
+        if status_code == 401 {
+            if let Some(www_auth) = www_authenticate {
+                response.headers.push(TypedHeader::Other(
+                    HeaderName::WwwAuthenticate,
+                    HeaderValue::Raw(www_auth.as_bytes().to_vec()),
+                ));
+            }
+        }
+
+        // RFC 3608 Service-Route — each entry rendered as `<uri>` and
+        // concatenated comma-separated. Stored as a `Other` raw header
+        // until sip-core grows a typed `ServiceRoute`.
+        if !service_route.is_empty() {
+            let rendered = service_route
+                .iter()
+                .map(|u| format!("<{}>", u))
+                .collect::<Vec<_>>()
+                .join(", ");
+            response.headers.push(TypedHeader::Other(
+                HeaderName::Other("Service-Route".to_string()),
+                HeaderValue::Raw(rendered.into_bytes()),
+            ));
+        }
+
+        // RFC 3327 Path echo — copy every inbound `Path:` header onto
+        // the 2xx so subsequent re-targeted requests reach the UA via
+        // the same waypoints.
+        if path_echo {
+            for hdr in request.headers.iter() {
+                if matches!(
+                    hdr,
+                    TypedHeader::Other(HeaderName::Other(name), _)
+                        if name.eq_ignore_ascii_case("Path")
+                ) {
+                    response.headers.push(hdr.clone());
+                }
+            }
+        }
+
+        // RFC 3455 P-Associated-URI — each AOR rendered as `<uri>` and
+        // concatenated.
+        if !associated_uri.is_empty() {
+            let rendered = associated_uri
+                .iter()
+                .map(|u| format!("<{}>", u))
+                .collect::<Vec<_>>()
+                .join(", ");
+            response.headers.push(TypedHeader::Other(
+                HeaderName::Other("P-Associated-URI".to_string()),
+                HeaderValue::Raw(rendered.into_bytes()),
+            ));
+        }
+
+        // Generic application-staged extras — `(name, value)` wire
+        // tuples. The receiving side reconstructs the typed header
+        // here; infra-common stays SIP-agnostic.
+        for (name, value) in extra_headers {
+            let header_name = match name.parse::<HeaderName>() {
+                Ok(n) => n,
+                Err(_) => HeaderName::Other(name.clone()),
+            };
+            response.headers.push(TypedHeader::Other(
+                header_name,
+                HeaderValue::Raw(value.as_bytes().to_vec()),
+            ));
+        }
+
+        self.transaction_manager
+            .send_response(transaction_id, response)
+            .await
+            .map_err(|e| DialogError::TransactionError {
+                message: format!("Failed to send REGISTER response: {}", e),
+            })?;
+
+        debug!(
+            "Sent REGISTER response (extras): {} {}",
+            status_code, reason
+        );
         Ok(())
     }
 }

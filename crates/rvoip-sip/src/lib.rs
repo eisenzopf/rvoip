@@ -306,6 +306,117 @@
 //!
 //! See the [`api`] module docs for the complete module map and additional
 //! quick-start examples.
+//!
+//! ## Gateway / B2BUA / SBC Authoring
+//!
+//! For applications that need to inspect every inbound SIP field, author
+//! arbitrary outbound headers, and compose inbound/outbound legs across
+//! trust boundaries (B2BUAs, SBCs, gateways, call-center frontends),
+//! `rvoip-sip` provides a uniform builder-shaped request/response API
+//! introduced by `SIP_API_DESIGN_2.md`. The four cornerstones:
+//!
+//! - [`api::headers::SipHeaderView`] — inbound-header inspection,
+//!   implemented by every `IncomingCall` / `IncomingRequest` /
+//!   [`api::incoming::IncomingResponse`] / `IncomingRegister`. Generic
+//!   over the wrapper so carry-through code can write
+//!   `with_headers_from(&inbound, &[...])` once.
+//! - [`api::headers::SipRequestOptions`] — outbound and response
+//!   builder shape. Every builder (`coord.invite(..).send()`,
+//!   `coord.refer(..).send()`, `coord.accept(..).send()`, …)
+//!   implements it.
+//! - [`api::headers::policy`] — layer-boundary enforcement that
+//!   classifies every header for every method into
+//!   `StackManaged` / `MethodShaped` / `ApplicationControlled` so the
+//!   dialog state machine remains authoritative.
+//! - [`api::headers::convenience`] — typed constructors for headers
+//!   without a first-class `TypedHeader` variant in sip-core
+//!   (`Diversion`, `History-Info`, `Replaces`, `Target-Dialog`,
+//!   `Session-Expires`, `Min-SE`, `P-Charging-Vector`,
+//!   `P-Called-Party-ID`) plus body factories (`sdp`, `dtmf_relay`,
+//!   `pidf_xml`, multipart construction/parsing).
+//!
+//! ### Decision chart
+//!
+//! | If you say… | Use | Example |
+//! |---|---|---|
+//! | "I just want to make a call, library handles SIP" | Pure Config | `coord.make_call(target)` (deprecated wrapper) |
+//! | "I need credentials on outbound calls" | One builder | `coord.invite(from, to).with_credentials(c).send()` |
+//! | "I need to attach one custom X-* header" | One builder | `coord.invite(from, to).with_raw_header("X-Foo", "bar")?.send()` |
+//! | "I'm building a B2BUA — carry headers across legs" | Builder + carry-through | `coord.invite(...).with_headers_from(&inbound, &[...])?.send()` |
+//! | "I need lenient validation for messy upstream" | `with_strictness(Lenient)` | `coord.invite(...).with_strictness(BuilderStrictness::Lenient).send()` |
+//! | "I need to inspect every inbound header" | [`api::headers::SipHeaderView`] | `incoming.header(&HeaderName::Diversion)` |
+//! | "I'm authoring custom 4xx with Retry-After" | `RejectBuilder` | `incoming.reject_builder().with_status(503).with_retry_after(120).send()` |
+//! | "I'm a registrar with Service-Route on 200 OK" | `RegisterResponseBuilder` | `incoming.accept_builder().with_service_route(routes).with_path_echo().send()` |
+//!
+//! ### B2BUA composition (the litmus test)
+//!
+//! ```rust,no_run
+//! # use std::sync::Arc;
+//! # use rvoip_sip::{UnifiedCoordinator, IncomingCall};
+//! # use rvoip_sip_core::types::headers::HeaderName;
+//! # async fn example(coord: Arc<UnifiedCoordinator>, incoming: IncomingCall) -> rvoip_sip::Result<()> {
+//! use rvoip_sip::api::headers::{SipHeaderView, SipRequestOptions};
+//!
+//! // Inspect inbound
+//! let _original_pai = incoming.header(&HeaderName::Other("P-Asserted-Identity".into()));
+//! let _history = incoming.headers_named(&HeaderName::Other("History-Info".into()));
+//!
+//! // Build outbound leg — every with_* returns Result; `?` chains cleanly
+//! let upstream_target = "sip:bob@upstream.example";
+//! let (outbound, _report) = coord
+//!     .invite(None, upstream_target)
+//!     .with_headers_from(&incoming, &[
+//!         HeaderName::Other("History-Info".into()),
+//!         HeaderName::Other("Diversion".into()),
+//!     ])?;
+//! let outbound = outbound
+//!     .strip_header(&HeaderName::Other("Privacy".into()))
+//!     .with_raw_header(
+//!         HeaderName::Other("P-Asserted-Identity".into()),
+//!         "sip:+15551234@gw.local",
+//!     )?;
+//!
+//! let _session = outbound.send().await?;
+//! # Ok(()) }
+//! ```
+//!
+//! ### Trust-boundary patterns
+//!
+//! Three canonical postures cover most B2BUA / SBC use cases:
+//!
+//! 1. **Trusted → untrusted egress.** Strip identity headers, keep
+//!    routing breadcrumbs only when regulator-mandated.
+//! 2. **Untrusted → trusted ingress.** Assert identity from local
+//!    AAA, ignore inbound PAI entirely.
+//! 3. **Trusted-to-trusted (intra-domain).** Carry through verbatim
+//!    so the downstream peer sees the upstream's headers.
+//!
+//! All three are illustrated in `SIP_API_DESIGN_2.md` §11.3; the
+//! [`api::headers::policy::forbidden_for_carry_through`] guard
+//! ensures none of them can accidentally leak `Via` / `Call-ID` /
+//! `CSeq` / `Max-Forwards` to the downstream wire — topology hiding
+//! is automatic.
+//!
+//! ### Header classification reference
+//!
+//! - **StackManaged**: `Call-ID`, `CSeq`, `Via`, `Max-Forwards`,
+//!   `Content-Length`, `Record-Route`, `Route`. Hard-rejected at
+//!   `with_header()` time regardless of `BuilderStrictness`.
+//! - **MethodShaped**: `Contact` (initial INVITE/REGISTER/SUBSCRIBE),
+//!   `Authorization` (UAC requests with `with_credentials`),
+//!   `Expires` (REGISTER/SUBSCRIBE), `Refer-To` (REFER), `Event` /
+//!   `Subscription-State` (SUBSCRIBE/NOTIFY). Rejected under
+//!   `BuilderStrictness::Strict`; downgraded to a `tracing::warn!`
+//!   under `Lenient`.
+//! - **ApplicationControlled**: `Diversion`, `History-Info`,
+//!   `Referred-By`, `Replaces`, `P-Asserted-Identity`,
+//!   `P-Preferred-Identity`, `Privacy`, `Reason`, `Retry-After`,
+//!   `Warning`, `Subject`, `Date`, `User-Agent`, `Server`, `Accept`,
+//!   `Allow`, `Supported`, `Require`, `Path`, `Service-Route`,
+//!   `Reply-To`, `Target-Dialog`, `Session-Expires`, `Min-SE`, all
+//!   `X-*`, and every `Other(_)` not listed above. Free to stage.
+//!
+//! See [`api::headers::policy::classify`] for the per-method matrix.
 
 #![deny(rustdoc::bare_urls)]
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -365,7 +476,28 @@ pub use api::handle::{
     CallId, SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions,
     TransferOutcome, TransferWaitMode,
 };
-pub use api::incoming::{IncomingCall, IncomingCallGuard};
+pub use api::incoming::{
+    IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
+};
+pub use api::headers::view::SipHeaderView;
+pub use api::headers::options::{
+    BuilderHeaderState, BuilderStrictness, HeaderCarryThroughReport, HeaderPolicyViolation,
+    SipRequestOptions, ViolationReason,
+};
+pub use api::trace_redactor::{PassthroughRedactor, RedactionDecision, TraceRedactor};
+
+/// SIP_API_DESIGN_2 §3.6 — convenience body constructors. Each
+/// helper returns `(content_type, Bytes)` for attachment to a SIP
+/// body via the new outbound builders. The §10 #24 `multipart_mixed`
+/// / `multipart_parse` helpers live in
+/// [`api::headers::convenience`](crate::api::headers::convenience) and
+/// are re-exported here for surface symmetry.
+pub mod bodies {
+    pub use crate::api::bodies::*;
+    pub use crate::api::headers::convenience::{
+        multipart_mixed, multipart_parse, MultipartParseError, MultipartPart,
+    };
+}
 pub use api::lifecycle::{
     CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo,
 };

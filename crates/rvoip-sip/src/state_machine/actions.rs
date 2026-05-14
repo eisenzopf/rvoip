@@ -81,6 +81,16 @@ async fn execute_register_action(
         }
     };
 
+    // SIP_API_DESIGN_2 §7.3 — preserve builder-staged extras across the
+    // 401/407 retry hop. We `clone()` (not `take()`) so the stash persists
+    // for the auth-retry pass; `Action::ClearPendingREGISTEROptions` (or
+    // the Terminated backstop) clears it on final response.
+    let staged_extras: Vec<rvoip_sip_core::types::TypedHeader> = session
+        .pending_register_options
+        .as_ref()
+        .map(|opts| opts.extra_headers.clone())
+        .unwrap_or_default();
+
     loop {
         let outcome = dialog_adapter
             .send_register(
@@ -90,6 +100,7 @@ async fn execute_register_action(
                 &contact_uri,
                 expires,
                 credentials.as_ref(),
+                staged_extras.clone(),
             )
             .await?;
 
@@ -329,9 +340,25 @@ pub(crate) async fn execute_action(
                 "Action::SendRejectResponse for session {} with status {}",
                 session.session_id, status
             );
-            dialog_adapter
-                .send_response(&session.session_id, status, None)
-                .await?;
+            // SIP_API_DESIGN_2 §3.4 — when the application built the
+            // 4xx/6xx via `RejectBuilder` / `AuthChallengeBuilder`, the
+            // staged extras (`Retry-After`, `Warning`,
+            // `WWW-Authenticate`, custom `X-*`, …) ride here. The
+            // builder writes to `reject_response_extras` BEFORE
+            // dispatching the state-machine `RejectCall` event, so we
+            // consume the stash on the first SendRejectResponse and
+            // clear it so a follow-up reject_call (e.g. cleanup) does
+            // not pick up stale headers.
+            let extras = session.reject_response_extras.take();
+            if let Some(extras) = extras {
+                dialog_adapter
+                    .send_response_with_options(&session.session_id, status, None, extras)
+                    .await?;
+            } else {
+                dialog_adapter
+                    .send_response(&session.session_id, status, None)
+                    .await?;
+            }
         }
         Action::SendRedirectResponse => {
             let status = session.redirect_response_status.unwrap_or(302);
@@ -589,18 +616,51 @@ pub(crate) async fn execute_action(
             info!("SendACK action: dialog-core handles ACK sending, dialog marked as established for UAC session {}", session.session_id);
         }
         Action::SendBYE => {
-            if let Some((protocol, cause, text)) = session.pending_bye_reason.take() {
-                let reason = rvoip_sip_core::types::reason::Reason::new(protocol, cause, text);
+            // SIP_API_DESIGN_2 §7.4 — application-staged
+            // `pending_bye_options` (from `coord.bye(..).send()`) wins
+            // over the auto-emit headers; when the stash is empty we
+            // fall back to `Config.auto_emit_extra_headers` (operators
+            // use it to stamp tenant identifiers / trace headers onto
+            // every teardown the stack initiates).
+            let reason = session.pending_bye_reason.take();
+
+            if let Some(opts_arc) = session.pending_bye_options.take() {
+                // Stash wins — extras already validated at the
+                // DialogAdapter mirror boundary when the builder
+                // dispatched.
+                let opts = (*opts_arc).clone();
                 dialog_adapter
-                    .send_bye_session_with_reason(&session.session_id, reason)
+                    .send_bye_with_options(&session.session_id, opts)
                     .await?;
             } else {
-                dialog_adapter.send_bye_session(&session.session_id).await?;
+                let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
+                if auto_extras.is_empty() {
+                    // Preserve the legacy fast path so the existing flat
+                    // helpers stay observable as the canonical entries.
+                    if let Some((protocol, cause, text)) = reason {
+                        let reason =
+                            rvoip_sip_core::types::reason::Reason::new(protocol, cause, text);
+                        dialog_adapter
+                            .send_bye_session_with_reason(&session.session_id, reason)
+                            .await?;
+                    } else {
+                        dialog_adapter.send_bye_session(&session.session_id).await?;
+                    }
+                } else {
+                    let opts = rvoip_sip_dialog::api::unified::ByeRequestOptions {
+                        reason: reason.and_then(|(_p, _c, text)| text),
+                        extra_headers: auto_extras,
+                    };
+                    dialog_adapter
+                        .send_bye_with_options(&session.session_id, opts)
+                        .await?;
+                }
             }
         }
-        Action::SendCANCEL => {
-            dialog_adapter.send_cancel(&session.session_id).await?;
-        }
+        // Action::SendCANCEL deleted per SIP_API_DESIGN_2.md Phase 5 —
+        // consolidated into Action::SendCANCELWithOptions which honors
+        // stash-precedence and auto-emit fallback identically. YAML
+        // emit rows updated to reference SendCANCELWithOptions.
 
         // Call control actions
         Action::HoldCall => {
@@ -1350,12 +1410,27 @@ pub(crate) async fn execute_action(
                 "Authorization"
             };
 
+            // SIP_API_DESIGN_2 §7.3 — pull application extras from the
+            // INVITE stash so they ride the 401/407 retry. The snapshot
+            // persists across the auth-retry hop because the stash is
+            // not consumed by `Action::SendINVITEWithOptions` until the
+            // final response (200 / 4xx-after-retry / 5xx / 6xx).
+            // Today only the OutboundCallBuilder path fills this; the
+            // legacy `make_call_*` paths leave it empty, in which case
+            // we send an empty extras vector (matching prior behaviour).
+            let auth_extras: Vec<rvoip_sip_core::types::TypedHeader> = session
+                .pending_invite_options
+                .as_ref()
+                .map(|snapshot| snapshot.extra_headers.clone())
+                .unwrap_or_default();
+
             dialog_adapter
                 .resend_invite_with_auth(
                     &session.session_id,
                     session.local_sdp.clone(),
                     header_name,
                     header_value,
+                    auth_extras,
                 )
                 .await?;
             info!(
@@ -1443,15 +1518,9 @@ pub(crate) async fn execute_action(
             // NOTIFY processing is handled by events from dialog adapter
             // This action is a placeholder for any additional processing needed
         }
-        Action::SendNOTIFY => {
-            info!("Action::SendNOTIFY for session {}", session.session_id);
-            // Get event package from session context (default to presence)
-            let event_package = "presence";
-            let body = session.local_sdp.clone(); // Use SDP field to store notify body temporarily
-            dialog_adapter
-                .send_notify(&session.session_id, event_package, body, None)
-                .await?;
-        }
+        // Action::SendNOTIFY deleted per SIP_API_DESIGN_2.md Phase 5 —
+        // consolidated into Action::SendNOTIFYWithOptions. YAML emit
+        // rows updated to reference SendNOTIFYWithOptions.
 
         // Message actions
         Action::SendMESSAGE => {
@@ -1704,6 +1773,337 @@ pub(crate) async fn execute_action(
                     session.session_id
                 );
             }
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        // SIP_API_DESIGN_2 §7.1 / §7.3 — Unified outbound dispatch
+        // through the option stash.
+        //
+        // Each handler reads `session.pending_<method>_options` with
+        // `.take()`, so the stash is consumed-on-dispatch. This
+        // matches the Phase 2 lifecycle: builder `.send()` stages the
+        // slot (with the §7.3 invariant #5 conflict guard), the
+        // matching `EventType::SendOutbound<METHOD>` queues, the
+        // handler below dispatches via the dialog-adapter mirror and
+        // the slot returns to `None`. A second `.send()` for the same
+        // method is then immediately allowed — concurrent overlaps
+        // are still rejected by the conflict guard at stage time.
+        //
+        // Phase 4 (auth-retry) will reintroduce `.clone()` semantics
+        // alongside per-method response correlation so the same
+        // snapshot can drive a 401 retransmit. Until that lands, the
+        // `Send<METHOD>WithAuth` actions read their own session state
+        // (auth_challenge / credentials) rather than the stash.
+        //
+        // §7.4 precedence (stash wins over auto-emit) on BYE / NOTIFY /
+        // CANCEL lives in the auto-emit handlers above
+        // (`Action::SendBYE`, `Action::SendCANCEL`, `Action::SendNOTIFY`).
+        // ──────────────────────────────────────────────────────────────
+        Action::SendBYEWithOptions => {
+            if let Some(opts) = session.pending_bye_options.take() {
+                dialog_adapter
+                    .send_bye_with_options(&session.session_id, (*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendCANCELWithOptions => {
+            // Phase 5 — single CANCEL action: stash wins; otherwise fall
+            // back to `Config.auto_emit_extra_headers` (operators stamp
+            // tenant/trace headers on every CANCEL); else legacy fast
+            // path. Consolidated from the deleted `Action::SendCANCEL`.
+            if let Some(opts_arc) = session.pending_cancel_options.take() {
+                let opts = (*opts_arc).clone();
+                dialog_adapter
+                    .send_cancel_with_options(&session.session_id, opts)
+                    .await?;
+            } else {
+                let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
+                if auto_extras.is_empty() {
+                    dialog_adapter.send_cancel(&session.session_id).await?;
+                } else {
+                    let opts = rvoip_sip_dialog::api::unified::CancelRequestOptions {
+                        reason: None,
+                        extra_headers: auto_extras,
+                    };
+                    dialog_adapter
+                        .send_cancel_with_options(&session.session_id, opts)
+                        .await?;
+                }
+            }
+        }
+        Action::SendREFERWithOptions => {
+            if let Some(opts) = session.pending_refer_options.take() {
+                dialog_adapter
+                    .send_refer_with_options(&session.session_id, (*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendNOTIFYWithOptions => {
+            // Phase 5 — single NOTIFY action: stash wins; otherwise
+            // consult `Config.auto_emit_extra_headers` so operator
+            // headers ride every stack-emitted NOTIFY. Consolidated from
+            // the deleted `Action::SendNOTIFY`.
+            if let Some(opts_arc) = session.pending_notify_options.take() {
+                let opts = (*opts_arc).clone();
+                dialog_adapter
+                    .send_notify_with_options(&session.session_id, opts)
+                    .await?;
+            } else {
+                let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
+                let event_package = "presence";
+                let body = session.local_sdp.clone();
+                if auto_extras.is_empty() {
+                    dialog_adapter
+                        .send_notify(&session.session_id, event_package, body, None)
+                        .await?;
+                } else {
+                    let opts = rvoip_sip_dialog::api::unified::NotifyRequestOptions {
+                        event: event_package.to_string(),
+                        subscription_state: String::new(),
+                        content_type: None,
+                        body: body.map(bytes::Bytes::from),
+                        subscription_id: None,
+                        extra_headers: auto_extras,
+                    };
+                    dialog_adapter
+                        .send_notify_with_options(&session.session_id, opts)
+                        .await?;
+                }
+            }
+        }
+        Action::SendINFOWithOptions => {
+            if let Some(opts) = session.pending_info_options.take() {
+                dialog_adapter
+                    .send_info_with_options(&session.session_id, (*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendUPDATEWithOptions => {
+            if let Some(opts) = session.pending_update_options.take() {
+                dialog_adapter
+                    .send_update_with_options(&session.session_id, (*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendReINVITEWithOptions => {
+            if let Some(opts) = session.pending_reinvite_options.take() {
+                dialog_adapter
+                    .send_reinvite_with_options(&session.session_id, (*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendMESSAGEWithOptions => {
+            if let Some(opts) = session.pending_message_options.take() {
+                dialog_adapter
+                    .send_message_oob_with_options((*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendOPTIONSWithOptions => {
+            if let Some(opts) = session.pending_options_options.take() {
+                dialog_adapter
+                    .send_options_oob_with_options((*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendSUBSCRIBEWithOptions => {
+            if let Some(opts) = session.pending_subscribe_options.take() {
+                // Out-of-dialog SUBSCRIBE uses the target as the
+                // request URI; falls back to the session's remote
+                // URI for in-dialog refresh.
+                let target = session.remote_uri.clone().unwrap_or_default();
+                dialog_adapter
+                    .send_subscribe_oob_with_options(&target, (*opts).clone())
+                    .await?;
+            }
+        }
+        Action::SendREGISTERWithOptions => {
+            if let Some(opts) = session.pending_register_options.take() {
+                // SIP_API_DESIGN_2 §7.1 — REGISTER dispatch through the
+                // unified options surface, routed through the
+                // DialogAdapter mirror so HeaderPolicy::validate_outbound
+                // and prepend_outbound_proxy_route run on the application
+                // extras. The legacy automatic refresh path (driven by
+                // Config.registration_auto_refresh) remains; this Action
+                // covers builder dispatch (initial + manual refresh) and
+                // consults `opts.refresh` for Call-ID / CSeq reuse
+                // semantics in dialog-core.
+                let opts = (*opts).clone();
+                let refresh_flag = opts.refresh;
+                let response = dialog_adapter
+                    .send_register_with_options(opts)
+                    .await
+                    .map_err(|e| {
+                        Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                            "SendREGISTERWithOptions: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    "SendREGISTERWithOptions (refresh={}) on session {}: status={}",
+                    refresh_flag,
+                    session.session_id,
+                    response.status_code()
+                );
+            }
+        }
+        Action::SendINVITEWithOptions => {
+            // INVITE uses `.clone()` (not `.take()`) so the snapshot
+            // persists through the 401/407 auth-retry hop —
+            // `Action::SendINVITEWithAuth` reads from the same stash to
+            // preserve application extras on the retry. The slot is
+            // cleared on final response by
+            // `Action::ClearPendingINVITEOptions` emitted from the
+            // Initiating → Active (Dialog200OK) and Initiating → Failed
+            // (Dialog4xx/5xx/6xx/Timeout) transitions in YAML, and
+            // backstopped by the executor's `Terminated` sweep.
+            if let Some(opts) = session.pending_invite_options.clone() {
+                let snapshot = (*opts).clone();
+                let from = snapshot.from.clone().unwrap_or_else(String::new);
+
+                // Mirror the legacy `CreateDialog` action's PAI plumbing
+                // (actions.rs:407) so the builder dispatch path stamps
+                // `P-Asserted-Identity` on the wire INVITE when
+                // `session.pai_uri` is set (either from the builder's
+                // `with_pai(uri)` or via `Config.pai_uri` fall-through
+                // resolved at builder-staging time). Without this, the
+                // builder path silently drops PAI even though the legacy
+                // path honors it.
+                let mut extras = snapshot.extra_headers.clone();
+                if let Some(pai) = session.pai_uri.as_ref() {
+                    use rvoip_sip_core::types::{
+                        p_asserted_identity::PAssertedIdentity, uri::Uri, TypedHeader,
+                    };
+                    use std::str::FromStr;
+                    match Uri::from_str(pai) {
+                        Ok(uri) => {
+                            extras.insert(
+                                0,
+                                TypedHeader::PAssertedIdentity(
+                                    PAssertedIdentity::with_uri(uri),
+                                ),
+                            );
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "SendINVITEWithOptions: SessionState.pai_uri \
+                                 ({}) is not a valid URI: {}",
+                                pai, e
+                            )
+                            .into());
+                        }
+                    }
+                }
+
+                // SIP_API_DESIGN_2 §6.1 — per-call outbound proxy
+                // override. `dialog_adapter.send_invite_with_extra_headers`
+                // applies the global `Config.outbound_proxy_uri` via
+                // `prepend_outbound_proxy_route`. To honor the builder's
+                // `with_outbound_proxy(uri)` override we prepend a
+                // `Route:` ahead of any global one; `Suppress` just
+                // omits both. The global path will still try to
+                // prepend its own Route at the adapter, so on Use we
+                // route through the override below and skip the adapter's
+                // global default by passing `None` for the adapter call
+                // when applicable.
+                use crate::api::send::ProxyOverride;
+                let route_override = match &snapshot.outbound_proxy_override {
+                    ProxyOverride::Use(uri) => Some(uri.clone()),
+                    ProxyOverride::Default | ProxyOverride::Suppress => None,
+                };
+                if let Some(uri_str) = route_override {
+                    use rvoip_sip_core::types::{route::Route, uri::Uri, TypedHeader};
+                    use std::str::FromStr;
+                    match Uri::from_str(&uri_str) {
+                        Ok(uri) => {
+                            extras
+                                .insert(0, TypedHeader::Route(Route::with_uri(uri)));
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "SendINVITEWithOptions: outbound_proxy override \
+                                 ({}) is not a valid URI: {}",
+                                uri_str, e
+                            )
+                            .into());
+                        }
+                    }
+                }
+                let suppress_global_proxy = matches!(
+                    &snapshot.outbound_proxy_override,
+                    ProxyOverride::Suppress | ProxyOverride::Use(_)
+                );
+
+                if suppress_global_proxy {
+                    dialog_adapter
+                        .send_invite_with_extra_headers_no_global_proxy(
+                            &session.session_id,
+                            &from,
+                            &snapshot.to,
+                            snapshot.sdp.clone(),
+                            extras,
+                        )
+                        .await?;
+                } else {
+                    dialog_adapter
+                        .send_invite_with_extra_headers(
+                            &session.session_id,
+                            &from,
+                            &snapshot.to,
+                            snapshot.sdp.clone(),
+                            extras,
+                        )
+                        .await?;
+                }
+                debug!(
+                    "SendINVITEWithOptions dispatched for session {}: to={}",
+                    session.session_id, snapshot.to
+                );
+            }
+        }
+
+        // ──────────────────────────────────────────────────────────────
+        // SIP_API_DESIGN_2 §7.3 invariant #2 — stash clear actions.
+        // YAML emits the matching variant on the final-response
+        // transition (200 / 4xx / 5xx / 6xx / timeout) so the slot is
+        // ready for the next builder dispatch. Idempotent: clearing an
+        // already-`None` slot is a no-op.
+        // ──────────────────────────────────────────────────────────────
+        Action::ClearPendingINVITEOptions => {
+            session.pending_invite_options = None;
+        }
+        Action::ClearPendingReINVITEOptions => {
+            session.pending_reinvite_options = None;
+        }
+        Action::ClearPendingREGISTEROptions => {
+            session.pending_register_options = None;
+        }
+        Action::ClearPendingSUBSCRIBEOptions => {
+            session.pending_subscribe_options = None;
+        }
+        Action::ClearPendingMESSAGEOptions => {
+            session.pending_message_options = None;
+        }
+        Action::ClearPendingNOTIFYOptions => {
+            session.pending_notify_options = None;
+        }
+        Action::ClearPendingBYEOptions => {
+            session.pending_bye_options = None;
+        }
+        Action::ClearPendingCANCELOptions => {
+            session.pending_cancel_options = None;
+        }
+        Action::ClearPendingREFEROptions => {
+            session.pending_refer_options = None;
+        }
+        Action::ClearPendingINFOOptions => {
+            session.pending_info_options = None;
+        }
+        Action::ClearPendingUPDATEOptions => {
+            session.pending_update_options = None;
+        }
+        Action::ClearPendingOPTIONSOptions => {
+            session.pending_options_options = None;
         }
     }
 

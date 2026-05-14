@@ -388,7 +388,7 @@ async fn test_event_subscription() {
     // Subscribe to events
     let (tx, mut rx) = tokio::sync::mpsc::channel(10);
     coordinator
-        .subscribe(session_id.clone(), move |event| {
+        .on_session_events(session_id.clone(), move |event| {
             let _ = tx.try_send(event);
         })
         .await;

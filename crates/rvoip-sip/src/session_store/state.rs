@@ -97,6 +97,13 @@ pub struct SessionState {
     // Rejection details captured from RejectCall event for use by SendRejectResponse
     pub reject_status: Option<u16>,
     pub reject_reason: Option<String>,
+    /// SIP_API_DESIGN_2 §3.4 — application headers staged by
+    /// [`RejectBuilder`](crate::api::respond::RejectBuilder) /
+    /// [`AuthChallengeBuilder`](crate::api::respond::AuthChallengeBuilder)
+    /// to ride on the wire 4xx-6xx response. Set by the builder
+    /// before calling `reject_call`; consumed (and cleared) by
+    /// `Action::SendRejectResponse`.
+    pub reject_response_extras: Option<Vec<rvoip_sip_core::types::TypedHeader>>,
 
     // RFC 3261 §8.1.3.4 / §21.3 — redirect details captured from a local
     // UAS-side RedirectCall event, used by `SendRedirectResponse`. The status
@@ -158,6 +165,51 @@ pub struct SessionState {
     pub transfer_target_progress_seen: bool, // Whether REFER NOTIFY reported target provisional progress
     pub transfer_target_last_progress: Option<(u16, String)>, // Last provisional target evidence
     pub pending_bye_reason: Option<(String, u16, Option<String>)>, // RFC 3326 Reason for next local BYE
+
+    // ──────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 §7.3 — Pending-options stash lifecycle.
+    //
+    // Each `pending_<method>_options` slot is set by the matching
+    // rvoip-sip builder's `.send()` immediately before the
+    // `Action::Send<METHOD>WithOptions` is queued. The state-machine
+    // handler reads, dispatches, and clears the slot back to `None`
+    // when the transaction reaches a final response (success,
+    // terminal failure, or hard timeout). Auth-retry re-reads the
+    // same `Arc<XxxRequestOptions>` for the retry transaction; the
+    // slot persists across retries until the final response.
+    //
+    // Set-once / consumed-once: a second `.send()` of the same
+    // method on the same session while the slot is occupied returns
+    // `Err(SessionError::Conflict { method })`. Different methods on
+    // the same session are independent (different slots).
+    //
+    // On entry to `Terminated`, every `pending_*_options` is set to
+    // `None`.
+    // ──────────────────────────────────────────────────────────────────
+    pub pending_invite_options:
+        Option<std::sync::Arc<crate::api::send::outbound_call::OutboundCallOptionsSnapshot>>,
+    pub pending_reinvite_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::ReInviteRequestOptions>>,
+    pub pending_register_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::RegisterRequestOptions>>,
+    pub pending_refer_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::ReferRequestOptions>>,
+    pub pending_bye_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::ByeRequestOptions>>,
+    pub pending_cancel_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::CancelRequestOptions>>,
+    pub pending_notify_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::NotifyRequestOptions>>,
+    pub pending_subscribe_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::SubscribeRequestOptions>>,
+    pub pending_info_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::InfoRequestOptions>>,
+    pub pending_update_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::UpdateRequestOptions>>,
+    pub pending_message_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::MessageRequestOptions>>,
+    pub pending_options_options:
+        Option<std::sync::Arc<rvoip_sip_dialog::api::unified::OptionsRequestOptions>>,
 
     // Registration fields
     pub registrar_uri: Option<String>, // URI of the registrar server
@@ -242,6 +294,7 @@ impl SessionState {
             dtmf_digits: None,
             reject_status: None,
             reject_reason: None,
+            reject_response_extras: None,
             redirect_response_status: None,
             redirect_response_contacts: Vec::new(),
             early_media_sdp: None,
@@ -263,6 +316,20 @@ impl SessionState {
             transfer_target_progress_seen: false,
             transfer_target_last_progress: None,
             pending_bye_reason: None,
+            // SIP_API_DESIGN_2 §7.3 stash slots — none populated at
+            // session creation.
+            pending_invite_options: None,
+            pending_reinvite_options: None,
+            pending_register_options: None,
+            pending_refer_options: None,
+            pending_bye_options: None,
+            pending_cancel_options: None,
+            pending_notify_options: None,
+            pending_subscribe_options: None,
+            pending_info_options: None,
+            pending_update_options: None,
+            pending_message_options: None,
+            pending_options_options: None,
             registrar_uri: None,
             registration_expires: None,
             registration_contact: None,

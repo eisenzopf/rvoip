@@ -422,13 +422,20 @@ impl MethodHandler for DialogManager {
 
             // Forward to session layer FIRST - let session-core decide Accept/Reject
             // Session-core will send the appropriate response (202 Accepted or 4xx/5xx rejection)
-            // via the transaction_id that we include in the event
+            // via the transaction_id that we include in the event.
+            // SIP_API_DESIGN_2 §7.5 — preserve the inbound REFER bytes
+            // so the cross-crate `TransferRequested` variant carries them
+            // through to session-core's `IncomingRequest` view.
+            let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
+                request.to_string().into_bytes(),
+            )));
             let event = crate::events::SessionCoordinationEvent::TransferRequest {
                 dialog_id: dialog_id.clone(),
                 transaction_id: transaction_id.clone(),
                 refer_to,
                 referred_by,
                 replaces,
+                raw_request,
             };
 
             self.notify_session_layer(event).await?;
@@ -651,6 +658,10 @@ struct NotifyFields {
     subscription_state: Option<String>,
     content_type: Option<String>,
     body: Option<String>,
+    /// SIP_API_DESIGN_2 §7.5 — original inbound NOTIFY bytes preserved
+    /// so session-core can build an `IncomingRequest` view with
+    /// header-level access.
+    raw_request: Option<std::sync::Arc<bytes::Bytes>>,
 }
 
 fn extract_notify_fields(request: &Request) -> NotifyFields {
@@ -683,11 +694,16 @@ fn extract_notify_fields(request: &Request) -> NotifyFields {
         Some(String::from_utf8_lossy(body_bytes).into_owned())
     };
 
+    let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
+        request.to_string().into_bytes(),
+    )));
+
     NotifyFields {
         event_package,
         subscription_state,
         content_type,
         body,
+        raw_request,
     }
 }
 
@@ -719,6 +735,7 @@ impl DialogManager {
                 subscription_state: fields.subscription_state,
                 content_type: fields.content_type,
                 body: fields.body,
+                raw_request: fields.raw_request,
             },
         );
 

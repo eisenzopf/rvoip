@@ -240,6 +240,14 @@ pub enum SessionCoordinationEvent {
 
         /// Optional Replaces header (for attended transfer)
         replaces: Option<String>,
+
+        /// SIP_API_DESIGN_2 §7.5 — original inbound REFER bytes,
+        /// preserved so the cross-crate `TransferRequested` variant
+        /// can carry them through to session-core's
+        /// `IncomingRequest` view (header-level access for
+        /// `Target-Dialog`, custom X-* headers, etc.). `None` for
+        /// synthesized/test publish paths.
+        raw_request: Option<std::sync::Arc<bytes::Bytes>>,
     },
 
     /// RFC 5626 outbound flow has failed — the keep-alive ping either

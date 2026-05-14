@@ -98,6 +98,11 @@ impl RegistrationAdapter {
                     www_authenticate: None,
                     contact: Some(contact_uri),
                     expires: Some(expires),
+                    min_expires: None,
+                    service_route: Vec::new(),
+                    path_echo: false,
+                    associated_uri: Vec::new(),
+                    extra_headers: Vec::new(),
                 });
 
             self.global_coordinator
@@ -120,6 +125,11 @@ impl RegistrationAdapter {
                     www_authenticate: www_auth_challenge,
                     contact: None,
                     expires: None,
+                    min_expires: None,
+                    service_route: Vec::new(),
+                    path_echo: false,
+                    associated_uri: Vec::new(),
+                    extra_headers: Vec::new(),
                 });
 
             self.global_coordinator

@@ -1,4 +1,15 @@
 //! Incoming call handling — accept, reject, redirect, or defer.
+//!
+//! Inbound SIP messages reach the application through one of four typed
+//! wrappers that all implement
+//! [`SipHeaderView`](crate::api::headers::SipHeaderView):
+//!
+//! | Wrapper | What it wraps |
+//! |---|---|
+//! | [`IncomingCall`] | Inbound INVITE |
+//! | [`IncomingRequest`] | In-dialog REFER / NOTIFY / INFO / OPTIONS / UPDATE / MESSAGE |
+//! | [`IncomingResponse`] | Every inbound response (1xx / 2xx / 3xx / 4xx-6xx) |
+//! | [`IncomingRegister`] | Inbound REGISTER on registrar surfaces |
 
 #![deny(missing_docs)]
 
@@ -9,8 +20,14 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+use rvoip_sip_core::types::headers::{HeaderName, TypedHeader};
+use rvoip_sip_core::{Request, Response};
+
 use crate::api::events::Event;
 use crate::api::handle::{CallId, SessionHandle};
+use crate::api::headers::view::{
+    header_names_slice, header_slice, headers_named_slice, SipHeaderView,
+};
 use crate::api::lifecycle::{CallLifecycleSnapshot, CallTerminalInfo};
 use crate::api::unified::UnifiedCoordinator;
 use crate::errors::{Result, SessionError};
@@ -55,9 +72,19 @@ pub struct IncomingCall {
     /// Remote SDP offer, if present.
     pub sdp: Option<String>,
     /// Additional SIP headers (lower-cased names).
+    ///
+    /// **Deprecated:** prefer
+    /// [`SipHeaderView`](crate::api::headers::SipHeaderView) inspection
+    /// via [`Self::header`], [`Self::header_str`], or
+    /// [`Self::raw_request`]. This field is populated from the parsed
+    /// INVITE for back-compat and may carry only a curated subset of
+    /// the wire headers. Will be removed in a future breaking release.
     pub headers: HashMap<String, String>,
     /// When the INVITE arrived.
     pub received_at: Instant,
+    /// The parsed inbound INVITE request, when available. `None` only
+    /// when the call was synthesized (tests, lean-mode feature flag).
+    pub(crate) request: Option<Arc<Request>>,
     /// Internal — coordinator for performing accept/reject.
     pub(crate) coordinator: Arc<UnifiedCoordinator>,
     /// Whether this call has already been resolved (to catch double-resolve).
@@ -79,9 +106,63 @@ impl IncomingCall {
             sdp,
             headers: HashMap::new(),
             received_at: Instant::now(),
+            request: None,
             coordinator,
             resolved: false,
         }
+    }
+
+    /// Construct an `IncomingCall` with a parsed inbound INVITE
+    /// retained. Populates [`Self::headers`] from the request for
+    /// back-compat with the legacy field.
+    pub(crate) fn with_request(
+        call_id: CallId,
+        from: String,
+        to: String,
+        sdp: Option<String>,
+        coordinator: Arc<UnifiedCoordinator>,
+        request: Arc<Request>,
+    ) -> Self {
+        let mut headers: HashMap<String, String> = HashMap::new();
+        for hdr in &request.headers {
+            let name = hdr.name();
+            let key = match &name {
+                HeaderName::Other(s) => s.to_ascii_lowercase(),
+                other => format!("{:?}", other).to_ascii_lowercase(),
+            };
+            // Keep first-seen wire value for the legacy HashMap.
+            headers.entry(key).or_insert_with(|| hdr.to_string());
+        }
+        Self {
+            call_id,
+            from,
+            to,
+            sdp,
+            headers,
+            received_at: Instant::now(),
+            request: Some(request),
+            coordinator,
+            resolved: false,
+        }
+    }
+
+    /// Underlying parsed [`Request`]. `None` when the call was
+    /// synthesized (tests) or under a future lean-mode feature flag.
+    pub fn raw_request(&self) -> Option<&Arc<Request>> {
+        self.request.as_ref()
+    }
+
+    /// Zero-alloc header iteration — preferred over the boxed trait
+    /// method on hot paths.
+    pub fn headers_named_iter<'a>(
+        &'a self,
+        name: &'a HeaderName,
+    ) -> impl Iterator<Item = &'a TypedHeader> + 'a {
+        let slice: &[TypedHeader] = match &self.request {
+            Some(r) => &r.headers[..],
+            None => &[],
+        };
+        headers_named_slice(slice, name)
     }
 
     // ===== Resolution methods =====
@@ -337,6 +418,110 @@ impl IncomingCall {
     pub fn defer(mut self, timeout: Duration) -> IncomingCallGuard {
         self.resolved = true; // prevent Drop from also rejecting
         IncomingCallGuard::new(self.call_id.clone(), self.coordinator.clone(), timeout)
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 Phase D — builder entry points on inbound INVITE.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Begin an `AcceptBuilder` so additional response headers can be
+    /// staged before sending 200 OK.
+    pub fn accept_builder(mut self) -> crate::api::respond::AcceptBuilder {
+        self.resolved = true;
+        crate::api::respond::AcceptBuilder::new(self.coordinator.clone(), self.call_id.clone())
+    }
+
+    /// Begin a `RejectBuilder` for a custom 4xx/5xx/6xx response.
+    pub fn reject_builder(mut self) -> crate::api::respond::RejectBuilder {
+        self.resolved = true;
+        crate::api::respond::RejectBuilder::new(self.coordinator.clone(), self.call_id.clone())
+    }
+
+    /// Begin a `RedirectBuilder` for a custom 3xx response.
+    pub fn redirect_builder(mut self) -> crate::api::respond::RedirectBuilder {
+        self.resolved = true;
+        crate::api::respond::RedirectBuilder::new(self.coordinator.clone(), self.call_id.clone())
+    }
+
+    /// Begin a `ProvisionalBuilder` for a 1xx reliable provisional.
+    pub fn send_provisional_builder(
+        &self,
+        code: u16,
+    ) -> crate::api::respond::ProvisionalBuilder {
+        crate::api::respond::ProvisionalBuilder::new(
+            self.coordinator.clone(),
+            self.call_id.clone(),
+            code,
+        )
+    }
+
+    /// Begin an `AuthChallengeBuilder` for a 401/407 response.
+    pub fn challenge_builder(
+        &self,
+        scheme: crate::api::respond::AuthScheme,
+    ) -> crate::api::respond::AuthChallengeBuilder {
+        crate::api::respond::AuthChallengeBuilder::new(
+            self.coordinator.clone(),
+            self.call_id.clone(),
+            rvoip_sip_core::types::Method::Invite,
+            scheme,
+        )
+    }
+
+    /// Begin a `GenericResponseBuilder` for an arbitrary 3xx-6xx
+    /// status (e.g. 491 Request Pending with `Retry-After`).
+    pub fn respond_builder(
+        mut self,
+        status: u16,
+    ) -> Result<crate::api::respond::GenericResponseBuilder> {
+        self.resolved = true;
+        crate::api::respond::GenericResponseBuilder::new(
+            self.coordinator.clone(),
+            self.call_id.clone(),
+            rvoip_sip_core::types::Method::Invite,
+            status,
+        )
+    }
+}
+
+impl SipHeaderView for IncomingCall {
+    fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
+        self.request
+            .as_ref()
+            .and_then(|r| header_slice(&r.headers[..], name))
+    }
+
+    fn headers_named<'a>(
+        &'a self,
+        name: &HeaderName,
+    ) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.request {
+            Some(r) => {
+                let name = name.clone();
+                Box::new(
+                    r.headers
+                        .iter()
+                        .filter(move |h| {
+                            crate::api::headers::view::header_name_eq(&h.name(), &name)
+                        }),
+                )
+            }
+            None => Box::new(std::iter::empty()),
+        }
+    }
+
+    fn headers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.request {
+            Some(r) => Box::new(r.headers.iter()),
+            None => Box::new(std::iter::empty()),
+        }
+    }
+
+    fn header_names(&self) -> Vec<HeaderName> {
+        match &self.request {
+            Some(r) => header_names_slice(&r.headers[..]),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -733,6 +918,569 @@ impl Drop for IncomingCallGuard {
                     .reject_call(&call_id, 503, "Service Unavailable")
                     .await;
             });
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// IncomingRequest / IncomingResponse / IncomingRegister
+//
+// These three wrappers complete the inbound surface. They are populated
+// when dialog-core publishes an in-dialog request, an inbound response,
+// or an inbound REGISTER. Today only `IncomingCall` carries a fully
+// parsed `Arc<Request>`; the other three retain the same field shape so
+// later phases can fill in their typed payloads without breaking the
+// public API.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// An in-dialog received SIP request (REFER / NOTIFY / INFO /
+/// OPTIONS / UPDATE / MESSAGE).
+///
+/// Implements [`SipHeaderView`] for uniform header inspection.
+#[derive(Clone)]
+pub struct IncomingRequest {
+    /// The session this request belongs to, when known.
+    pub call_id: CallId,
+    /// SIP From URI on the request.
+    pub from: String,
+    /// SIP To URI on the request.
+    pub to: String,
+    /// The SIP method (REFER, NOTIFY, …).
+    pub method: rvoip_sip_core::types::Method,
+    /// When the request arrived.
+    pub received_at: Instant,
+    /// The parsed inbound request, when available.
+    pub(crate) request: Option<Arc<Request>>,
+    /// Coordinator for sending responses. `None` for bus-constructed
+    /// instances; the surface consumer (CallbackPeer / StreamPeer)
+    /// repopulates this on dispatch so response builders can resolve
+    /// the dialog/transaction.
+    pub(crate) coordinator: Option<Arc<UnifiedCoordinator>>,
+}
+
+impl std::fmt::Debug for IncomingRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncomingRequest")
+            .field("call_id", &self.call_id)
+            .field("from", &self.from)
+            .field("to", &self.to)
+            .field("method", &self.method)
+            .field("has_request", &self.request.is_some())
+            .field("has_coordinator", &self.coordinator.is_some())
+            .finish()
+    }
+}
+
+impl IncomingRequest {
+    // ─────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 Phase D — response builder entry points.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Begin a `GenericResponseBuilder` for the inbound request.
+    /// Returns `Err(SessionError::InvalidInput)` when this
+    /// `IncomingRequest` was constructed without a coordinator hook
+    /// (bus path before the surface consumer rehydrates it).
+    pub fn respond_builder(
+        &self,
+        status: u16,
+    ) -> Result<crate::api::respond::GenericResponseBuilder> {
+        let coord = self.coordinator.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.respond_builder() requires a coordinator hook; the bus \
+                 path has not yet rehydrated it"
+                    .to_string(),
+            )
+        })?;
+        crate::api::respond::GenericResponseBuilder::new(
+            coord,
+            self.call_id.clone(),
+            self.method.clone(),
+            status,
+        )
+    }
+
+    /// Begin an `AuthChallengeBuilder` for 401/407 on the inbound request.
+    pub fn challenge_builder(
+        &self,
+        scheme: crate::api::respond::AuthScheme,
+    ) -> Result<crate::api::respond::AuthChallengeBuilder> {
+        let coord = self.coordinator.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.challenge_builder() requires a coordinator hook"
+                    .to_string(),
+            )
+        })?;
+        Ok(crate::api::respond::AuthChallengeBuilder::new(
+            coord,
+            self.call_id.clone(),
+            self.method.clone(),
+            scheme,
+        ))
+    }
+
+    /// Rehydrate the coordinator hook so response builders can
+    /// dispatch. Called by the surface consumer (CallbackPeer /
+    /// StreamPeer) on every inbound event before exposing the
+    /// `IncomingRequest` to application code.
+    pub(crate) fn set_coordinator(&mut self, coord: Arc<UnifiedCoordinator>) {
+        self.coordinator = Some(coord);
+    }
+
+    /// SIP_API_DESIGN_2 Phase E — construct an `IncomingRequest` from
+    /// re-parsed bus bytes. Coordinator is `None` until the surface
+    /// consumer (CallbackPeer / StreamPeer) rehydrates it via
+    /// `set_coordinator` on dispatch.
+    pub(crate) fn from_bus_request(
+        call_id: CallId,
+        from: String,
+        to: String,
+        method: rvoip_sip_core::types::Method,
+        request: Arc<Request>,
+    ) -> Self {
+        Self {
+            call_id,
+            from,
+            to,
+            method,
+            received_at: Instant::now(),
+            request: Some(request),
+            coordinator: None,
+        }
+    }
+
+    /// Underlying parsed [`Request`]. `None` when synthesized.
+    pub fn raw_request(&self) -> Option<&Arc<Request>> {
+        self.request.as_ref()
+    }
+
+    /// Zero-alloc header iteration — preferred over the boxed trait
+    /// method on hot paths.
+    pub fn headers_named_iter<'a>(
+        &'a self,
+        name: &'a HeaderName,
+    ) -> impl Iterator<Item = &'a TypedHeader> + 'a {
+        let slice: &[TypedHeader] = match &self.request {
+            Some(r) => &r.headers[..],
+            None => &[],
+        };
+        headers_named_slice(slice, name)
+    }
+}
+
+impl SipHeaderView for IncomingRequest {
+    fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
+        self.request
+            .as_ref()
+            .and_then(|r| header_slice(&r.headers[..], name))
+    }
+    fn headers_named<'a>(
+        &'a self,
+        name: &HeaderName,
+    ) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.request {
+            Some(r) => {
+                let name = name.clone();
+                Box::new(r.headers.iter().filter(move |h| {
+                    crate::api::headers::view::header_name_eq(&h.name(), &name)
+                }))
+            }
+            None => Box::new(std::iter::empty()),
+        }
+    }
+    fn headers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.request {
+            Some(r) => Box::new(r.headers.iter()),
+            None => Box::new(std::iter::empty()),
+        }
+    }
+    fn header_names(&self) -> Vec<HeaderName> {
+        match &self.request {
+            Some(r) => header_names_slice(&r.headers[..]),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// An inbound SIP response — 1xx provisional, 2xx success, 3xx
+/// redirect, 4xx-6xx final. Carries the parsed [`Response`] when
+/// available; used by B2BUA flows for downstream carry-through of
+/// `Allow` / `Supported` / `Server` / `Session-Expires`, redirect
+/// handling, and final-failure inspection (`Retry-After`, `Warning`,
+/// `Reason`).
+#[derive(Clone, Debug)]
+pub struct IncomingResponse {
+    /// The session the response belongs to.
+    pub call_id: CallId,
+    /// SIP status code (100, 180, 200, 302, 404, …).
+    pub status_code: u16,
+    /// Reason phrase from the status line.
+    pub reason_phrase: String,
+    /// SDP body on the response, if any.
+    pub sdp: Option<String>,
+    /// When the response arrived.
+    pub received_at: Instant,
+    /// The parsed inbound response, when available.
+    pub(crate) response: Option<Arc<Response>>,
+}
+
+impl IncomingResponse {
+    /// Synthesize an `IncomingResponse` without a parsed body. Used by
+    /// the legacy bus path until Phase A's bus enrichment fully lands.
+    pub(crate) fn synthetic(
+        call_id: CallId,
+        status_code: u16,
+        reason_phrase: String,
+        sdp: Option<String>,
+    ) -> Self {
+        Self {
+            call_id,
+            status_code,
+            reason_phrase,
+            sdp,
+            received_at: Instant::now(),
+            response: None,
+        }
+    }
+
+    /// Construct an `IncomingResponse` carrying a parsed response.
+    pub(crate) fn with_response(
+        call_id: CallId,
+        status_code: u16,
+        reason_phrase: String,
+        sdp: Option<String>,
+        response: Arc<Response>,
+    ) -> Self {
+        Self {
+            call_id,
+            status_code,
+            reason_phrase,
+            sdp,
+            received_at: Instant::now(),
+            response: Some(response),
+        }
+    }
+
+    /// Underlying parsed [`Response`]. `None` until Phase A's bus
+    /// enrichment is wired up for this code path.
+    pub fn raw_response(&self) -> Option<&Arc<Response>> {
+        self.response.as_ref()
+    }
+
+    /// Zero-alloc header iteration.
+    pub fn headers_named_iter<'a>(
+        &'a self,
+        name: &'a HeaderName,
+    ) -> impl Iterator<Item = &'a TypedHeader> + 'a {
+        let slice: &[TypedHeader] = match &self.response {
+            Some(r) => &r.headers[..],
+            None => &[],
+        };
+        headers_named_slice(slice, name)
+    }
+
+    /// True when this is a 1xx response.
+    pub fn is_provisional(&self) -> bool {
+        (100..200).contains(&self.status_code)
+    }
+
+    /// True when this carries an RFC 3262 reliable provisional marker
+    /// (Require: 100rel + RSeq). Inspects the parsed response when
+    /// available; falls back to `false` when synthesized.
+    pub fn is_reliable_provisional(&self) -> bool {
+        if !self.is_provisional() {
+            return false;
+        }
+        let Some(resp) = &self.response else {
+            return false;
+        };
+        let mut has_require_100rel = false;
+        let mut has_rseq = false;
+        for h in &resp.headers {
+            match h {
+                TypedHeader::Require(req) => {
+                    if req
+                        .option_tags
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case("100rel"))
+                    {
+                        has_require_100rel = true;
+                    }
+                }
+                TypedHeader::RSeq(_) => has_rseq = true,
+                _ => {}
+            }
+        }
+        has_require_100rel && has_rseq
+    }
+}
+
+impl SipHeaderView for IncomingResponse {
+    fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
+        self.response
+            .as_ref()
+            .and_then(|r| header_slice(&r.headers[..], name))
+    }
+    fn headers_named<'a>(
+        &'a self,
+        name: &HeaderName,
+    ) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.response {
+            Some(r) => {
+                let name = name.clone();
+                Box::new(r.headers.iter().filter(move |h| {
+                    crate::api::headers::view::header_name_eq(&h.name(), &name)
+                }))
+            }
+            None => Box::new(std::iter::empty()),
+        }
+    }
+    fn headers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.response {
+            Some(r) => Box::new(r.headers.iter()),
+            None => Box::new(std::iter::empty()),
+        }
+    }
+    fn header_names(&self) -> Vec<HeaderName> {
+        match &self.response {
+            Some(r) => header_names_slice(&r.headers[..]),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// Inbound SIP REGISTER on registrar surfaces.
+///
+/// Wraps the parsed REGISTER request and exposes it through
+/// [`SipHeaderView`] plus dedicated convenience accessors for AOR /
+/// Contact / Expires that registrar code reaches for first.
+#[derive(Clone)]
+pub struct IncomingRegister {
+    // Manual `Debug` impl below skips the `coordinator` field since
+    // `UnifiedCoordinator` does not derive `Debug`.
+    /// Transaction key for the inbound REGISTER (used for response
+    /// authoring).
+    pub transaction_id: String,
+    /// `From` URI (the registering AOR).
+    pub from_uri: String,
+    /// `To` URI (the registrar / target AOR).
+    pub to_uri: String,
+    /// First `Contact` URI on the wire. Multi-Contact lookups go
+    /// through [`SipHeaderView`].
+    pub contact_uri: String,
+    /// Requested `Expires` (header or Contact-param). 0 means unregister.
+    pub expires: u32,
+    /// Raw `Authorization:` header value if present.
+    pub authorization: Option<String>,
+    /// `Call-ID` from the request.
+    pub call_id_header: String,
+    /// When the REGISTER arrived.
+    pub received_at: Instant,
+    /// The parsed inbound REGISTER request, when available.
+    pub(crate) request: Option<Arc<Request>>,
+    /// SIP_API_DESIGN_2 Phase D — optional hook back into the
+    /// coordinator so `RegisterResponseBuilder.send()` can publish a
+    /// `SessionToDialogEvent::SendRegisterResponse` to dialog-core.
+    /// `None` when the wrapper was synthesized for tests or by the
+    /// legacy registrar crate that authors responses directly.
+    pub(crate) coordinator: Option<Arc<UnifiedCoordinator>>,
+}
+
+impl std::fmt::Debug for IncomingRegister {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncomingRegister")
+            .field("transaction_id", &self.transaction_id)
+            .field("from_uri", &self.from_uri)
+            .field("to_uri", &self.to_uri)
+            .field("contact_uri", &self.contact_uri)
+            .field("expires", &self.expires)
+            .field("authorization_present", &self.authorization.is_some())
+            .field("call_id_header", &self.call_id_header)
+            .field("coordinator_present", &self.coordinator.is_some())
+            .finish()
+    }
+}
+
+impl IncomingRegister {
+    // ─────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 Phase D — registrar response builder entries.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Begin a `RegisterResponseBuilder` for the inbound REGISTER.
+    pub fn accept_builder(&self) -> crate::api::respond::RegisterResponseBuilder {
+        crate::api::respond::RegisterResponseBuilder::new(
+            self.transaction_id.clone(),
+            self.coordinator.clone(),
+        )
+    }
+
+    /// Begin a 401 / 407 auth challenge for the inbound REGISTER.
+    /// The matching dispatch happens via the same
+    /// `SessionToDialogEvent::SendRegisterResponse` channel that
+    /// `accept_builder` uses, so a registrar can author both 200 OK
+    /// and 401 through one consistent surface.
+    pub fn challenge_builder(
+        &self,
+        scheme: crate::api::respond::AuthScheme,
+    ) -> crate::api::respond::RegisterResponseBuilder {
+        crate::api::respond::RegisterResponseBuilder::new_challenge(
+            self.transaction_id.clone(),
+            self.coordinator.clone(),
+            scheme,
+        )
+    }
+
+    /// Begin a generic non-2xx REGISTER response (404, 423 Interval
+    /// Too Brief with `Min-Expires`, 503 Service Unavailable, …).
+    pub fn reject_builder(
+        &self,
+        status: u16,
+    ) -> crate::api::respond::RegisterResponseBuilder {
+        crate::api::respond::RegisterResponseBuilder::new_reject(
+            self.transaction_id.clone(),
+            self.coordinator.clone(),
+            status,
+        )
+    }
+
+    /// Synthesize without a parsed request. Used by the legacy bus
+    /// path until enrichment fully lands.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn synthetic(
+        transaction_id: String,
+        from_uri: String,
+        to_uri: String,
+        contact_uri: String,
+        expires: u32,
+        authorization: Option<String>,
+        call_id_header: String,
+    ) -> Self {
+        Self {
+            transaction_id,
+            from_uri,
+            to_uri,
+            contact_uri,
+            expires,
+            authorization,
+            call_id_header,
+            received_at: Instant::now(),
+            request: None,
+            coordinator: None,
+        }
+    }
+
+    /// Construct from a parsed inbound REGISTER request.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_request(
+        transaction_id: String,
+        from_uri: String,
+        to_uri: String,
+        contact_uri: String,
+        expires: u32,
+        authorization: Option<String>,
+        call_id_header: String,
+        request: Arc<Request>,
+    ) -> Self {
+        Self {
+            transaction_id,
+            from_uri,
+            to_uri,
+            contact_uri,
+            expires,
+            authorization,
+            call_id_header,
+            received_at: Instant::now(),
+            request: Some(request),
+            coordinator: None,
+        }
+    }
+
+    /// Same as [`with_request`] but threads the coordinator handle so
+    /// the response builder can publish a
+    /// `SessionToDialogEvent::SendRegisterResponse` back to
+    /// dialog-core.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_request_and_coordinator(
+        transaction_id: String,
+        from_uri: String,
+        to_uri: String,
+        contact_uri: String,
+        expires: u32,
+        authorization: Option<String>,
+        call_id_header: String,
+        request: Arc<Request>,
+        coordinator: Arc<UnifiedCoordinator>,
+    ) -> Self {
+        Self {
+            transaction_id,
+            from_uri,
+            to_uri,
+            contact_uri,
+            expires,
+            authorization,
+            call_id_header,
+            received_at: Instant::now(),
+            request: Some(request),
+            coordinator: Some(coordinator),
+        }
+    }
+
+    /// Underlying parsed [`Request`].
+    pub fn raw_request(&self) -> Option<&Arc<Request>> {
+        self.request.as_ref()
+    }
+
+    /// Zero-alloc header iteration.
+    pub fn headers_named_iter<'a>(
+        &'a self,
+        name: &'a HeaderName,
+    ) -> impl Iterator<Item = &'a TypedHeader> + 'a {
+        let slice: &[TypedHeader] = match &self.request {
+            Some(r) => &r.headers[..],
+            None => &[],
+        };
+        headers_named_slice(slice, name)
+    }
+
+    /// SIP_API_DESIGN_2 Phase D — set the coordinator hook so
+    /// `accept_builder()` / `challenge_builder()` / `reject_builder()`
+    /// can dispatch a `SessionToDialogEvent::SendRegisterResponse`.
+    /// Called by the dispatch path right before handing the
+    /// `IncomingRegister` to the application handler.
+    pub fn set_coordinator(&mut self, coordinator: Arc<UnifiedCoordinator>) {
+        self.coordinator = Some(coordinator);
+    }
+}
+
+impl SipHeaderView for IncomingRegister {
+    fn header(&self, name: &HeaderName) -> Option<&TypedHeader> {
+        self.request
+            .as_ref()
+            .and_then(|r| header_slice(&r.headers[..], name))
+    }
+    fn headers_named<'a>(
+        &'a self,
+        name: &HeaderName,
+    ) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.request {
+            Some(r) => {
+                let name = name.clone();
+                Box::new(r.headers.iter().filter(move |h| {
+                    crate::api::headers::view::header_name_eq(&h.name(), &name)
+                }))
+            }
+            None => Box::new(std::iter::empty()),
+        }
+    }
+    fn headers<'a>(&'a self) -> Box<dyn Iterator<Item = &'a TypedHeader> + 'a> {
+        match &self.request {
+            Some(r) => Box::new(r.headers.iter()),
+            None => Box::new(std::iter::empty()),
+        }
+    }
+    fn header_names(&self) -> Vec<HeaderName> {
+        match &self.request {
+            Some(r) => header_names_slice(&r.headers[..]),
+            None => Vec::new(),
         }
     }
 }

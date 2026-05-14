@@ -392,7 +392,12 @@ impl PeerControl {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call(&self, target: &str) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         let id = self.coordinator.make_call(&self.local_uri, target).await?;
         Ok(SessionHandle::new(id, self.coordinator.clone()))
     }
@@ -413,11 +418,16 @@ impl PeerControl {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).with_credentials(c).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call_with_auth(
         &self,
         target: &str,
         credentials: crate::types::Credentials,
     ) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         let id = self
             .coordinator
             .make_call_with_auth(&self.local_uri, target, credentials)
@@ -452,11 +462,16 @@ impl PeerControl {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call_with_headers(
         &self,
         target: &str,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         let id = self
             .coordinator
             .make_call_with_headers(&self.local_uri, target, extra_headers)
@@ -726,7 +741,12 @@ impl StreamPeer {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call(&mut self, target: &str) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         self.control.call(target).await
     }
 
@@ -735,11 +755,16 @@ impl StreamPeer {
     ///
     /// Sequential wrapper over [`PeerControl::call_with_headers`]; see it
     /// for the canonical example and header ordering details.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call_with_headers(
         &mut self,
         target: &str,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         self.control.call_with_headers(target, extra_headers).await
     }
 
@@ -767,13 +792,19 @@ impl StreamPeer {
                     to,
                     sdp,
                 }) => {
-                    return Ok(IncomingCall::new(
-                        call_id,
-                        from,
-                        to,
-                        sdp,
-                        self.control.coordinator.clone(),
-                    ));
+                    // SIP_API_DESIGN_2 Phase A: prefer the typed
+                    // `Arc<Request>` view when the bus enriched the
+                    // inbound INVITE; falls back to the legacy empty
+                    // headers shape when synthesized in tests.
+                    let coord = self.control.coordinator.clone();
+                    let parsed = coord.session_registry.peek_pending_incoming_request().await;
+                    let incoming = match parsed {
+                        Some(req) => IncomingCall::with_request(
+                            call_id, from, to, sdp, coord, req,
+                        ),
+                        None => IncomingCall::new(call_id, from, to, sdp, coord),
+                    };
+                    return Ok(incoming);
                 }
                 None => return Err(SessionError::Other("Event channel closed".to_string())),
                 _ => {}
@@ -969,6 +1000,10 @@ impl StreamPeer {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.register_with(Registration::new(..)) or coord.register(..).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn register(
         &mut self,
         registrar_uri: &str,
@@ -978,9 +1013,10 @@ impl StreamPeer {
         password: &str,
         expires: u32,
     ) -> Result<crate::api::unified::RegistrationHandle> {
+        #[allow(deprecated)]
         self.control
             .coordinator
-            .register(
+            .register_legacy(
                 registrar_uri,
                 from_uri,
                 contact_uri,

@@ -337,6 +337,26 @@ pub enum Event {
         reason: String,
     },
 
+    /// SIP_API_DESIGN_2 Phase A — typed inspection of every inbound 1xx
+    /// provisional response. Carries an [`crate::api::incoming::IncomingResponse`] so B2BUA /
+    /// SBC code can inspect `Contact:`, `Allow:`, `Supported:`,
+    /// `Server:`, RFC 3262 reliability markers, and any custom headers
+    /// the upstream sent before mirroring them to the downstream 1xx.
+    /// Fires alongside the legacy [`Event::CallProgress`] variant; new
+    /// code subscribes to the detailed form.
+    CallProgressDetailed(crate::api::incoming::IncomingResponse),
+
+    /// SIP_API_DESIGN_2 Phase A — typed inspection of the inbound 200 OK
+    /// that established a call. Use for downstream 200 OK
+    /// carry-through (Allow / Supported / Session-Expires).
+    CallEstablishedDetailed(crate::api::incoming::IncomingResponse),
+
+    /// SIP_API_DESIGN_2 Phase A — typed inspection of an inbound final
+    /// failure response. Use to inspect `Retry-After:`, `Warning:`,
+    /// RFC 3326 `Reason:`, and similar fields that the legacy
+    /// [`Event::CallFailed`] discards.
+    CallFailedDetailed(crate::api::incoming::IncomingResponse),
+
     /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
     /// 487 Request Terminated following CANCEL). Distinct from `CallFailed`
     /// so UIs can render "missed call" rather than "call rejected".
@@ -398,6 +418,12 @@ pub enum Event {
         /// Raw transfer flavor. Prefer [`Event::transfer_kind`] for typed
         /// classification.
         transfer_type: String, // "blind" or "attended"
+        /// SIP_API_DESIGN_2 Phase E: typed `IncomingRequest` view of
+        /// the inbound REFER. Carries every header on the request
+        /// (custom routing hints, Target-Dialog per RFC 4538, etc.).
+        /// `None` for legacy publish sites that have not been migrated
+        /// yet.
+        request: Option<crate::api::incoming::IncomingRequest>,
     },
 
     /// Transfer accepted by recipient
@@ -502,6 +528,65 @@ pub enum Event {
         content_type: Option<String>,
         /// NOTIFY body, if any.
         body: Option<String>,
+        /// SIP_API_DESIGN_2 Phase E: typed view of the inbound NOTIFY
+        /// for B2BUA carry-through / generic header inspection. `None`
+        /// for legacy publish sites that have not been migrated yet.
+        request: Option<crate::api::incoming::IncomingRequest>,
+    },
+
+    /// SIP_API_DESIGN_2 Phase E — inbound in-dialog INFO (RFC 6086).
+    /// Today's stack drops INFO at the dialog layer; this variant
+    /// surfaces it to applications so SIP-INFO DTMF, fax flow control,
+    /// and other application-layer signalling can be observed.
+    InfoReceived {
+        /// Session identifier for the dialog that received INFO.
+        call_id: CallId,
+        /// Typed `IncomingRequest` view (raw INFO bytes re-parsed by
+        /// the receiving handler).
+        request: crate::api::incoming::IncomingRequest,
+    },
+
+    /// SIP_API_DESIGN_2 Phase E — inbound in-dialog MESSAGE
+    /// (RFC 3428). Distinct from the out-of-dialog `MessageDelivered`
+    /// confirmation — this is *receiving* a MESSAGE.
+    MessageReceived {
+        /// Session identifier for the dialog that received MESSAGE.
+        call_id: CallId,
+        /// Typed `IncomingRequest` view.
+        request: crate::api::incoming::IncomingRequest,
+    },
+
+    /// SIP_API_DESIGN_2 Phase E — inbound OPTIONS (RFC 3261 §11).
+    /// `call_id` is `None` when the OPTIONS arrived out-of-dialog
+    /// (capability query against the AOR).
+    OptionsReceived {
+        /// Session identifier for the dialog that received OPTIONS,
+        /// when one exists.
+        call_id: Option<CallId>,
+        /// Typed `IncomingRequest` view.
+        request: crate::api::incoming::IncomingRequest,
+    },
+
+    /// SIP_API_DESIGN_2 Phase E — inbound UPDATE (RFC 3311). This
+    /// fires alongside the legacy hold/resume state transitions that
+    /// run inside the state machine; subscribe to this variant for
+    /// header-level inspection (Session-Expires, RFC 6086 INFO over
+    /// UPDATE, custom X-* hints).
+    UpdateReceived {
+        /// Session identifier for the dialog that received UPDATE.
+        call_id: CallId,
+        /// Typed `IncomingRequest` view.
+        request: crate::api::incoming::IncomingRequest,
+    },
+
+    /// SIP_API_DESIGN_2 Phase D — inbound REGISTER (RFC 3261 §10).
+    /// Surfaces the typed `IncomingRegister` view so registrar
+    /// applications can author the response via `accept_builder` /
+    /// `challenge_builder` / `reject_builder` with Service-Route /
+    /// Path / P-Associated-URI under their full control.
+    IncomingRegister {
+        /// Typed `IncomingRegister` view of the inbound REGISTER.
+        register: crate::api::incoming::IncomingRegister,
     },
 
     /// Parsed RFC 4235 dialog-package NOTIFY.
@@ -707,11 +792,19 @@ impl Event {
             } => Some(subscription_id),
             Event::SipTrace(trace) => trace.session_id.as_ref(),
             Event::NetworkError { call_id, .. } => call_id.as_ref(),
+            Event::CallProgressDetailed(r)
+            | Event::CallEstablishedDetailed(r)
+            | Event::CallFailedDetailed(r) => Some(&r.call_id),
+            Event::InfoReceived { call_id, .. }
+            | Event::MessageReceived { call_id, .. }
+            | Event::UpdateReceived { call_id, .. } => Some(call_id),
+            Event::OptionsReceived { call_id, .. } => call_id.as_ref(),
             // Registration events don't have call_id
             Event::RegistrationSuccess { .. }
             | Event::RegistrationFailed { .. }
             | Event::UnregistrationSuccess { .. }
-            | Event::UnregistrationFailed { .. } => None,
+            | Event::UnregistrationFailed { .. }
+            | Event::IncomingRegister { .. } => None,
         }
     }
 
@@ -725,6 +818,13 @@ impl Event {
                 | Event::CallEnded { .. }
                 | Event::CallFailed { .. }
                 | Event::CallCancelled { .. }
+                | Event::CallProgressDetailed(_)
+                | Event::CallEstablishedDetailed(_)
+                | Event::CallFailedDetailed(_)
+                | Event::InfoReceived { .. }
+                | Event::MessageReceived { .. }
+                | Event::OptionsReceived { .. }
+                | Event::UpdateReceived { .. }
         )
     }
 

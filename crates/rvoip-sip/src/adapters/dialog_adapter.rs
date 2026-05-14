@@ -88,6 +88,14 @@ pub struct DialogAdapter {
     /// Store outgoing INVITE transaction IDs for UAC ACK sending
     pub(crate) outgoing_invite_tx: Arc<DashMap<SessionId, TransactionKey>>,
 
+    /// SIP_API_DESIGN_2 §7.4 — application-supplied headers stamped on
+    /// every outbound message the state machine emits automatically
+    /// (auto-BYE on session-timer expiry, auto-CANCEL on
+    /// dialog-terminated-during-INVITE, auto-NOTIFY on REFER
+    /// completion). Populated at construction from
+    /// [`crate::Config::auto_emit_extra_headers`]; empty by default.
+    pub(crate) auto_emit_extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+
     /// Global event coordinator for publishing events
     pub(crate) global_coordinator: Arc<GlobalEventCoordinator>,
 
@@ -124,6 +132,16 @@ pub struct DialogAdapter {
     registration_auto_refresh: bool,
     registration_refresh_jitter_percent: u8,
     registration_refresh_tasks: Arc<DashMap<SessionId, tokio::task::AbortHandle>>,
+
+    /// SIP_API_DESIGN_2 §12.4 — pluggable trace-output redactor. When
+    /// `Some`, the trace path consults this hook before emitting each
+    /// header to the trace sink so PII / carrier tokens can be
+    /// scrubbed without affecting the wire form. Populated at
+    /// construction from
+    /// [`crate::Config::trace_redaction`]; `None` keeps the legacy
+    /// log-verbatim behaviour. See
+    /// [`crate::TraceRedactor`] for the policy contract.
+    pub(crate) trace_redactor: Option<Arc<dyn crate::api::trace_redactor::TraceRedactor>>,
 }
 
 impl DialogAdapter {
@@ -145,6 +163,8 @@ impl DialogAdapter {
         symmetric_flow_params: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
         registration_auto_refresh: bool,
         registration_refresh_jitter_percent: u8,
+        auto_emit_extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+        trace_redactor: Option<Arc<dyn crate::api::trace_redactor::TraceRedactor>>,
     ) -> Self {
         Self {
             dialog_api,
@@ -153,6 +173,7 @@ impl DialogAdapter {
             dialog_to_session: Arc::new(DashMap::new()),
             callid_to_session: Arc::new(DashMap::new()),
             outgoing_invite_tx: Arc::new(DashMap::new()),
+            auto_emit_extra_headers,
             global_coordinator,
             state_machine: Arc::new(std::sync::OnceLock::new()),
             outbound_proxy_uri,
@@ -161,6 +182,7 @@ impl DialogAdapter {
             registration_auto_refresh,
             registration_refresh_jitter_percent,
             registration_refresh_tasks: Arc::new(DashMap::new()),
+            trace_redactor,
         }
     }
 
@@ -318,6 +340,7 @@ impl DialogAdapter {
                     &contact_uri,
                     attempt_expires,
                     credentials.as_ref(),
+                    Vec::new(),
                 )
                 .await?
             {
@@ -731,6 +754,7 @@ impl DialogAdapter {
         sdp: Option<String>,
         auth_header_name: &str,
         auth_header_value: String,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<()> {
         // Fast-RTT race: an auth challenge can arrive while the original
         // `SendINVITE` action is still awaiting dialog-core's
@@ -750,8 +774,13 @@ impl DialogAdapter {
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
 
+        // SIP_API_DESIGN_2 §7.3 — the application extras vector flows
+        // from `pending_invite_options.extra_headers` so the retry wire
+        // form matches the initial send. The §5.4 policy and the §6.1
+        // outbound-proxy Route already ran when the original snapshot
+        // was staged; the extras are passed through verbatim.
         self.dialog_api
-            .send_invite_with_auth(&dialog_id, sdp, auth_header_name, auth_header_value)
+            .send_invite_with_auth(&dialog_id, sdp, auth_header_name, auth_header_value, extras)
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!(
@@ -931,6 +960,47 @@ impl DialogAdapter {
         sdp: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<()> {
+        self.send_invite_with_extra_headers_inner(
+            session_id,
+            from,
+            to,
+            sdp,
+            extra_headers,
+            true, // apply global outbound-proxy Route
+        )
+        .await
+    }
+
+    /// SIP_API_DESIGN_2 §6.1 — variant used by builder dispatch when
+    /// the builder has set its own per-call `with_outbound_proxy(uri)`
+    /// override (already prepended as a `Route:` in
+    /// `Action::SendINVITEWithOptions`). Skips the global
+    /// `Config.outbound_proxy_uri` so the wire doesn't end up with two
+    /// stacked proxy Routes when the caller meant to override the
+    /// default.
+    pub async fn send_invite_with_extra_headers_no_global_proxy(
+        &self,
+        session_id: &SessionId,
+        from: &str,
+        to: &str,
+        sdp: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        self.send_invite_with_extra_headers_inner(
+            session_id, from, to, sdp, extra_headers, false,
+        )
+        .await
+    }
+
+    async fn send_invite_with_extra_headers_inner(
+        &self,
+        session_id: &SessionId,
+        from: &str,
+        to: &str,
+        sdp: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+        apply_global_proxy: bool,
+    ) -> Result<()> {
         let call_id = format!("{}@rvoip-sip", session_id.0);
 
         self.callid_to_session
@@ -941,8 +1011,12 @@ impl DialogAdapter {
         // the proxy regardless of the Request-URI target. We preserve caller-
         // supplied extras (e.g. `P-Asserted-Identity` from B1) by prepending,
         // not replacing.
-        let headers = prepend_outbound_proxy_route(extra_headers, self.outbound_proxy_uri.as_ref());
-        if self.outbound_proxy_uri.is_some() {
+        let headers = if apply_global_proxy {
+            prepend_outbound_proxy_route(extra_headers, self.outbound_proxy_uri.as_ref())
+        } else {
+            extra_headers
+        };
+        if apply_global_proxy && self.outbound_proxy_uri.is_some() {
             tracing::debug!(
                 "E4 outbound proxy: prepended Route to INVITE for session {}",
                 session_id.0
@@ -1032,6 +1106,41 @@ impl DialogAdapter {
         self.send_response(session_id, code.as_u16(), None).await
     }
 
+    /// SIP_API_DESIGN_2 Phase D — 3xx redirect dispatch with
+    /// application-staged extras (e.g., a registrar's 305 Use Proxy
+    /// with `Retry-After:`).
+    pub async fn send_redirect_response_with_options(
+        &self,
+        session_id: &SessionId,
+        status: u16,
+        contacts: Vec<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        tracing::info!(
+            "DialogAdapter sending {} redirect for session {} with {} contact(s), {} staged extras",
+            status,
+            session_id.0,
+            contacts.len(),
+            extra_headers.len()
+        );
+        self.dialog_api
+            .send_redirect_response_with_extras_for_session(
+                &session_id.0,
+                status,
+                contacts,
+                extra_headers,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to send redirect (with extras) for session {}: {}",
+                    session_id.0,
+                    e
+                );
+                SessionError::DialogError(format!("Failed to send redirect: {}", e))
+            })
+    }
+
     /// Send a 3xx redirect response with one or more `Contact:` URIs
     /// (RFC 3261 §8.1.3.4). Thin wrapper over
     /// `UnifiedDialogApi::send_redirect_response_for_session`.
@@ -1057,6 +1166,39 @@ impl DialogAdapter {
                     e
                 );
                 SessionError::DialogError(format!("Failed to send redirect: {}", e))
+            })
+    }
+
+    /// SIP_API_DESIGN_2 Phase D — UAS response dispatch that
+    /// threads application-staged headers to the wire. The session's
+    /// pending UAS transaction is resolved internally by
+    /// `UnifiedDialogApi::send_response_with_extras_for_session`,
+    /// which appends `extra_headers` *after* the stack-managed
+    /// `From` / `To` / `Via` / `Call-ID` / `CSeq` / `Content-Length`
+    /// / `Contact` / `Record-Route` are stamped.
+    pub async fn send_response_with_options(
+        &self,
+        session_id: &SessionId,
+        code: u16,
+        sdp: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<()> {
+        tracing::info!(
+            "DialogAdapter sending {} response for session {} with {} staged extras",
+            code,
+            session_id.0,
+            extra_headers.len()
+        );
+        self.dialog_api
+            .send_response_with_extras_for_session(&session_id.0, code, sdp, extra_headers)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to send response (with extras) for session {}: {}",
+                    session_id.0,
+                    e
+                );
+                SessionError::DialogError(format!("Failed to send response: {}", e))
             })
     }
 
@@ -1164,6 +1306,215 @@ impl DialogAdapter {
         Ok(())
     }
 
+    /// SIP_API_DESIGN_2 Phase C — UPDATE (RFC 3311) dispatch routed
+    /// through the new dialog-core options surface. SDP is optional;
+    /// when present it rides on the UPDATE body. The builder layer
+    /// supplies a fully-populated `UpdateRequestOptions`.
+    pub async fn send_update_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::UpdateRequestOptions,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Update,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_update_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send UPDATE: {}", e)))?;
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — re-INVITE dispatch routed through
+    /// the new dialog-core options surface so applications can
+    /// attach precomputed `Authorization:` or stage extra headers.
+    pub async fn send_reinvite_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::ReInviteRequestOptions,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Invite,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_reinvite_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send re-INVITE: {}", e)))?;
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — REFER dispatch through the new
+    /// dialog-core options surface; carries the full RFC 3891
+    /// `Replaces`, RFC 3892 `Referred-By`, RFC 4538 `Target-Dialog`
+    /// trio.
+    pub async fn send_refer_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::ReferRequestOptions,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Refer,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_refer_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — INFO dispatch through the new
+    /// dialog-core options surface, replacing the legacy
+    /// `send_info(content_type, body)` path.
+    pub async fn send_info_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::InfoRequestOptions,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Info,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_info_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send INFO: {}", e)))?;
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — BYE dispatch through the new
+    /// dialog-core options surface; carries the optional RFC 3326
+    /// `Reason:` header.
+    pub async fn send_bye_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::ByeRequestOptions,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Bye,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_bye_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — NOTIFY dispatch through the new
+    /// dialog-core options surface.
+    pub async fn send_notify_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::NotifyRequestOptions,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Notify,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_notify_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send NOTIFY: {}", e)))?;
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — out-of-dialog MESSAGE dispatch
+    /// through the new dialog-core options surface. Returns the
+    /// registrar's `Response` so the caller can inspect 200 OK vs
+    /// 401 auth-challenge vs 404. No session_id is required because
+    /// MESSAGE is fire-and-forget per RFC 3428.
+    pub async fn send_message_oob_with_options(
+        &self,
+        mut opts: rvoip_sip_dialog::api::unified::MessageRequestOptions,
+    ) -> Result<rvoip_sip_core::Response> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Message,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        self.dialog_api
+            .send_message_out_of_dialog_with_options(opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send MESSAGE: {}", e)))
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — out-of-dialog OPTIONS dispatch.
+    /// Today returns the wire-`Response` when dialog-core ships the
+    /// transaction-authorship; until then dialog-core's stub returns
+    /// `NotImplemented` and that error bubbles through unchanged.
+    pub async fn send_options_oob_with_options(
+        &self,
+        mut opts: rvoip_sip_dialog::api::unified::OptionsRequestOptions,
+    ) -> Result<rvoip_sip_core::Response> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Options,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        self.dialog_api
+            .send_options_out_of_dialog_with_options(opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send OPTIONS: {}", e)))
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — out-of-dialog SUBSCRIBE dispatch.
+    /// Returns the registrar's `Response` so callers can inspect
+    /// `Expires`, `Min-Expires`, or 401 challenge.
+    pub async fn send_subscribe_oob_with_options(
+        &self,
+        target: &str,
+        mut opts: rvoip_sip_dialog::api::unified::SubscribeRequestOptions,
+    ) -> Result<rvoip_sip_core::Response> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Subscribe,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        self.dialog_api
+            .send_subscribe_with_options(target, opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send SUBSCRIBE: {}", e)))
+    }
+
     /// Send CANCEL to cancel pending INVITE
     pub async fn send_cancel(&self, session_id: &SessionId) -> Result<()> {
         let dialog_id = {
@@ -1176,6 +1527,56 @@ impl DialogAdapter {
 
         self.dialog_api
             .send_cancel(&dialog_id)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send CANCEL: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// SIP_API_DESIGN_2 Phase C — CANCEL dispatch through the new
+    /// dialog-core options surface. Carries the optional RFC 3326
+    /// `Reason:` and any application-staged extras to the wire.
+    /// SIP_API_DESIGN_2 §7.1 — REGISTER dispatch through the new
+    /// dialog-core options surface with policy validation and outbound-
+    /// proxy route prepended. Used by `Action::SendREGISTERWithOptions`
+    /// for the unified builder path; the legacy `send_register` path
+    /// stays separate because its extras vector is empty and the route
+    /// goes through `outbound_proxy_uri` directly on the options struct.
+    pub async fn send_register_with_options(
+        &self,
+        mut opts: rvoip_sip_dialog::api::unified::RegisterRequestOptions,
+    ) -> Result<rvoip_sip_core::Response> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Register,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        self.dialog_api
+            .send_register_with_options(opts)
+            .await
+            .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))
+    }
+
+    pub async fn send_cancel_with_options(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::CancelRequestOptions,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy(
+            rvoip_sip_core::types::Method::Cancel,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+        )?;
+        let dialog_id = {
+            let entry = self
+                .session_to_dialog
+                .get(session_id)
+                .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?;
+            entry.value().clone()
+        };
+
+        self.dialog_api
+            .send_cancel_with_options(&dialog_id, opts)
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send CANCEL: {}", e)))?;
 
@@ -1397,7 +1798,13 @@ impl DialogAdapter {
         );
     }
 
-    /// Send REGISTER request and process response
+    /// Send REGISTER request and process response.
+    ///
+    /// `extras` carry application-staged additional headers (e.g. from
+    /// `coord.register(..).with_header(..)`); they ride alongside the
+    /// stack-managed headers per SIP_API_DESIGN_2.md §7.3. On auth retry
+    /// the caller passes the same extras snapshot so headers survive the
+    /// 401/407 hop.
     pub(crate) async fn send_register(
         &self,
         session_id: &SessionId,
@@ -1406,6 +1813,7 @@ impl DialogAdapter {
         contact_uri: &str,
         expires: u32,
         credentials: Option<&crate::types::Credentials>,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<RegisterAttemptOutcome> {
         tracing::info!(
             "Sending REGISTER for session {} to {} (expires={})",
@@ -1530,6 +1938,8 @@ impl DialogAdapter {
                 cseq: Some(registration_cseq),
                 outbound_contact: self.outbound_contact_params.clone(),
                 outbound_proxy_uri: self.outbound_proxy_uri.clone(),
+                extra_headers: extras,
+                refresh: false,
             })
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send REGISTER: {}", e)))?;
@@ -1899,6 +2309,7 @@ impl Clone for DialogAdapter {
             dialog_to_session: self.dialog_to_session.clone(),
             callid_to_session: self.callid_to_session.clone(),
             outgoing_invite_tx: self.outgoing_invite_tx.clone(),
+            auto_emit_extra_headers: self.auto_emit_extra_headers.clone(),
             global_coordinator: self.global_coordinator.clone(),
             state_machine: self.state_machine.clone(),
             outbound_proxy_uri: self.outbound_proxy_uri.clone(),
@@ -1907,6 +2318,7 @@ impl Clone for DialogAdapter {
             registration_auto_refresh: self.registration_auto_refresh,
             registration_refresh_jitter_percent: self.registration_refresh_jitter_percent,
             registration_refresh_tasks: self.registration_refresh_tasks.clone(),
+            trace_redactor: self.trace_redactor.clone(),
         }
     }
 }
@@ -2093,4 +2505,33 @@ pub(crate) fn prepend_outbound_proxy_route(
         headers.insert(0, TypedHeader::Route(Route::with_uri(uri.clone())));
     }
     headers
+}
+
+/// SIP_API_DESIGN_2 §5.4 + §6.1 — the canonical pre-dispatch step for
+/// every `send_*_with_options` mirror on [`DialogAdapter`]. Runs
+/// [`crate::api::headers::policy::validate_outbound`] against the
+/// application extras (catches stack-managed names that bypassed the
+/// builder's strictness gate), then prepends the configured outbound
+/// proxy's `Route:` header via [`prepend_outbound_proxy_route`].
+///
+/// Returns the rewritten extras vector or a typed `SessionError` if
+/// the header policy rejects the staged set. The dialog-adapter
+/// mirror passes the returned vector through to dialog-core.
+pub(crate) fn apply_outbound_extras_policy(
+    method: rvoip_sip_core::types::Method,
+    extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    outbound_proxy_uri: Option<&rvoip_sip_core::types::uri::Uri>,
+) -> Result<Vec<rvoip_sip_core::types::TypedHeader>> {
+    if let Err(violations) = crate::api::headers::policy::validate_outbound(method, &extras) {
+        // Map the first violation to SessionError::HeaderPolicy; the
+        // policy returns the StackManaged-in-extras case as a
+        // MissingRequiredHeader-shaped violation today.
+        let first = violations.into_iter().next().expect("non-empty on Err");
+        return Err(SessionError::HeaderPolicy {
+            method: first.method,
+            header: first.name,
+            reason: crate::api::headers::ViolationReason::StackManaged,
+        });
+    }
+    Ok(prepend_outbound_proxy_route(extras, outbound_proxy_uri))
 }

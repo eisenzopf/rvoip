@@ -46,6 +46,51 @@ pub struct StateMachine {
     // SimplePeer events now handled by SessionCrossCrateEventHandler
 }
 
+/// SIP_API_DESIGN_2 §7.3 — typed wrapper that carries one of the twelve
+/// outbound option snapshots from a builder's `.send()` into
+/// `StateMachine::stage_outbound_options`. The wrapper matches the
+/// shape of the `pending_<method>_options` slot on `SessionState`; the
+/// helper unwraps it to write the exact slot and reports
+/// `SessionError::Conflict { method }` if the slot is already
+/// occupied. Carrying the typed Arc (not a `Box<dyn Any>`) keeps the
+/// builder → stash path monomorphic and statically checked.
+#[derive(Debug, Clone)]
+pub enum PendingOptionsSlot {
+    Invite(Arc<crate::api::send::outbound_call::OutboundCallOptionsSnapshot>),
+    ReInvite(Arc<rvoip_sip_dialog::api::unified::ReInviteRequestOptions>),
+    Register(Arc<rvoip_sip_dialog::api::unified::RegisterRequestOptions>),
+    Refer(Arc<rvoip_sip_dialog::api::unified::ReferRequestOptions>),
+    Bye(Arc<rvoip_sip_dialog::api::unified::ByeRequestOptions>),
+    Cancel(Arc<rvoip_sip_dialog::api::unified::CancelRequestOptions>),
+    Notify(Arc<rvoip_sip_dialog::api::unified::NotifyRequestOptions>),
+    Subscribe(Arc<rvoip_sip_dialog::api::unified::SubscribeRequestOptions>),
+    Info(Arc<rvoip_sip_dialog::api::unified::InfoRequestOptions>),
+    Update(Arc<rvoip_sip_dialog::api::unified::UpdateRequestOptions>),
+    Message(Arc<rvoip_sip_dialog::api::unified::MessageRequestOptions>),
+    Options(Arc<rvoip_sip_dialog::api::unified::OptionsRequestOptions>),
+}
+
+impl PendingOptionsSlot {
+    /// Returns the SIP method this slot represents — used by the
+    /// conflict-guard error path.
+    pub fn method(&self) -> rvoip_sip_core::Method {
+        use rvoip_sip_core::Method;
+        match self {
+            Self::Invite(_) | Self::ReInvite(_) => Method::Invite,
+            Self::Register(_) => Method::Register,
+            Self::Refer(_) => Method::Refer,
+            Self::Bye(_) => Method::Bye,
+            Self::Cancel(_) => Method::Cancel,
+            Self::Notify(_) => Method::Notify,
+            Self::Subscribe(_) => Method::Subscribe,
+            Self::Info(_) => Method::Info,
+            Self::Update(_) => Method::Update,
+            Self::Message(_) => Method::Message,
+            Self::Options(_) => Method::Options,
+        }
+    }
+}
+
 /// Events that flow through the system
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -140,6 +185,72 @@ impl StateMachine {
         self.table.has_transition(key)
     }
 
+    /// SIP_API_DESIGN_2 §7.3 invariants #1 + #5 — atomically check the
+    /// matching `pending_<method>_options` slot on the session, and if
+    /// it is `None` write the provided `Arc<XxxRequestOptions>`. If the
+    /// slot is already `Some` (a prior `.send()` is still in flight for
+    /// the same method on this session) return
+    /// `Err(SessionError::Conflict { method })` without mutating
+    /// anything.
+    ///
+    /// Builders call this *before* queuing the matching
+    /// `EventType::SendOutbound<METHOD>` event so the state-table
+    /// transition's `Action::Send<METHOD>WithOptions` handler can read
+    /// from a populated stash. The set-once / consumed-once invariant
+    /// is enforced here (and cleared by
+    /// `Action::ClearPending<METHOD>Options` on final response or by
+    /// the executor's `Terminated` backstop).
+    pub async fn stage_outbound_options(
+        &self,
+        session_id: &SessionId,
+        slot: PendingOptionsSlot,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut session = self.store.get_session(session_id).await.map_err(|e| {
+            Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                "stage_outbound_options: session {} not found: {}",
+                session_id, e
+            ))
+        })?;
+
+        let method = slot.method();
+        let occupied = match &slot {
+            PendingOptionsSlot::Invite(_) => session.pending_invite_options.is_some(),
+            PendingOptionsSlot::ReInvite(_) => session.pending_reinvite_options.is_some(),
+            PendingOptionsSlot::Register(_) => session.pending_register_options.is_some(),
+            PendingOptionsSlot::Refer(_) => session.pending_refer_options.is_some(),
+            PendingOptionsSlot::Bye(_) => session.pending_bye_options.is_some(),
+            PendingOptionsSlot::Cancel(_) => session.pending_cancel_options.is_some(),
+            PendingOptionsSlot::Notify(_) => session.pending_notify_options.is_some(),
+            PendingOptionsSlot::Subscribe(_) => session.pending_subscribe_options.is_some(),
+            PendingOptionsSlot::Info(_) => session.pending_info_options.is_some(),
+            PendingOptionsSlot::Update(_) => session.pending_update_options.is_some(),
+            PendingOptionsSlot::Message(_) => session.pending_message_options.is_some(),
+            PendingOptionsSlot::Options(_) => session.pending_options_options.is_some(),
+        };
+
+        if occupied {
+            return Err(crate::errors::SessionError::Conflict { method }.into());
+        }
+
+        match slot {
+            PendingOptionsSlot::Invite(a) => session.pending_invite_options = Some(a),
+            PendingOptionsSlot::ReInvite(a) => session.pending_reinvite_options = Some(a),
+            PendingOptionsSlot::Register(a) => session.pending_register_options = Some(a),
+            PendingOptionsSlot::Refer(a) => session.pending_refer_options = Some(a),
+            PendingOptionsSlot::Bye(a) => session.pending_bye_options = Some(a),
+            PendingOptionsSlot::Cancel(a) => session.pending_cancel_options = Some(a),
+            PendingOptionsSlot::Notify(a) => session.pending_notify_options = Some(a),
+            PendingOptionsSlot::Subscribe(a) => session.pending_subscribe_options = Some(a),
+            PendingOptionsSlot::Info(a) => session.pending_info_options = Some(a),
+            PendingOptionsSlot::Update(a) => session.pending_update_options = Some(a),
+            PendingOptionsSlot::Message(a) => session.pending_message_options = Some(a),
+            PendingOptionsSlot::Options(a) => session.pending_options_options = Some(a),
+        }
+
+        self.store.update_session(session).await?;
+        Ok(())
+    }
+
     /// Process an event for a session
     pub async fn process_event(
         &self,
@@ -198,7 +309,12 @@ impl StateMachine {
         let mut session = match self.store.get_session(session_id).await {
             Ok(s) => s,
             Err(e) => {
-                error!("Failed to get session {}: {}", session_id, e);
+                // Demoted from error — under test teardown races the
+                // session can be removed between event enqueue and
+                // dispatch. The caller still surfaces SessionNotFound
+                // through the return value, which is the load-bearing
+                // signal; the log line is purely diagnostic.
+                debug!("Failed to get session {}: {}", session_id, e);
                 return Err(
                     crate::errors::SessionError::SessionNotFound(session_id.to_string()).into(),
                 );
@@ -406,6 +522,29 @@ impl StateMachine {
             info!("State transition: {:?} -> {:?}", old_state, new_state);
             session.call_state = new_state;
             session.entered_state_at = Instant::now();
+
+            // SIP_API_DESIGN_2 §7.3 invariant #2 — Terminated backstop.
+            // Clear every pending-options slot unconditionally on entry
+            // to `Terminated` so a YAML row that forgets to emit the
+            // matching `ClearPending*Options` action can never leave a
+            // stash permanently occupied. The per-method clear actions
+            // emitted on final-response transitions are the primary
+            // mechanism; this is the safety net.
+            if new_state == crate::types::CallState::Terminated {
+                session.pending_invite_options = None;
+                session.pending_reinvite_options = None;
+                session.pending_register_options = None;
+                session.pending_refer_options = None;
+                session.pending_bye_options = None;
+                session.pending_cancel_options = None;
+                session.pending_notify_options = None;
+                session.pending_subscribe_options = None;
+                session.pending_info_options = None;
+                session.pending_update_options = None;
+                session.pending_message_options = None;
+                session.pending_options_options = None;
+            }
+
             self.store.update_session(session.clone()).await?;
         }
 

@@ -2603,6 +2603,18 @@ impl TransactionManager {
         &self,
         invite_tx_id: &TransactionKey,
     ) -> Result<TransactionKey> {
+        self.cancel_invite_transaction_with_extras(invite_tx_id, Vec::new())
+            .await
+    }
+
+    /// CANCEL with caller-supplied `extra_headers` (RFC 3326 `Reason:`,
+    /// X-* application headers, etc.) appended after the RFC 3261
+    /// §9.1 mandatory header copy from the targeted INVITE.
+    pub async fn cancel_invite_transaction_with_extras(
+        &self,
+        invite_tx_id: &TransactionKey,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> Result<TransactionKey> {
         debug!(id=%invite_tx_id, "Canceling invite transaction");
 
         // Check that this is an INVITE client transaction
@@ -2626,7 +2638,13 @@ impl TransactionManager {
             .map_err(|e| Error::transport_error(e, "Failed to get local address"))?;
 
         // Use the method utility to create the CANCEL request
-        let cancel_request = cancel::create_cancel_request(&invite_request, &local_addr)?;
+        let mut cancel_request = cancel::create_cancel_request(&invite_request, &local_addr)?;
+
+        // SIP_API_DESIGN_2 §5.2 — append application extras after the
+        // stack-managed slice (Via/From/To/CSeq/Call-ID/Max-Forwards).
+        for hdr in extra_headers {
+            cancel_request.headers.push(hdr);
+        }
 
         // Log and validate the CANCEL request to help with debugging
         if let Err(e) = cancel::validate_cancel_request(&cancel_request) {

@@ -225,7 +225,10 @@ fn add_contact_header(response: &mut Response, contact_uri: &str) -> ApiResult<(
 }
 
 /// Options for constructing a non-dialog REGISTER request.
-#[derive(Debug, Clone)]
+///
+/// SIP_API_DESIGN_2 Phase B added `Default`, `extra_headers`, and
+/// `refresh` to support the unified builder dispatch on top.
+#[derive(Default, Debug, Clone)]
 pub struct RegisterRequestOptions {
     pub registrar_uri: String,
     pub aor_uri: String,
@@ -236,6 +239,140 @@ pub struct RegisterRequestOptions {
     pub cseq: Option<u32>,
     pub outbound_contact: Option<rvoip_sip_core::types::outbound::OutboundContactParams>,
     pub outbound_proxy_uri: Option<rvoip_sip_core::types::uri::Uri>,
+    /// SIP_API_DESIGN_2 Phase B: application-staged headers appended
+    /// after the stack stamps Call-ID / CSeq / Via / Max-Forwards.
+    pub extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    /// SIP_API_DESIGN_2 Phase B: `false` for initial REGISTER, `true`
+    /// for an in-dialog refresh. The state machine routes accordingly.
+    pub refresh: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// SIP_API_DESIGN_2 Phase B — additive option structs and `*_with_options`
+// methods on `UnifiedDialogApi`. Each struct derives `Default` so builders
+// can compose with `..Default::default()`. `extra_headers` rides through
+// to the request-builder template path
+// (`transaction/dialog/request_builder_from_dialog_template`) which
+// appends them *after* the stack-managed headers are stamped.
+// ─────────────────────────────────────────────────────────────────────────
+
+use bytes::Bytes;
+use rvoip_sip_core::types::TypedHeader;
+use std::time::Duration;
+
+/// REFER options (RFC 3515 + 3891 Replaces + 4538 Target-Dialog).
+#[derive(Default, Debug, Clone)]
+pub struct ReferRequestOptions {
+    pub refer_to: String,
+    pub replaces: Option<String>,
+    pub referred_by: Option<String>,
+    pub target_dialog: Option<String>,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// NOTIFY options (RFC 6665).
+#[derive(Default, Debug, Clone)]
+pub struct NotifyRequestOptions {
+    pub event: String,
+    pub subscription_state: String,
+    pub content_type: Option<String>,
+    pub body: Option<Bytes>,
+    /// Multi-subscription dialogs (RFC 6665 §4.5.2). `None` selects
+    /// the single-subscription default.
+    pub subscription_id: Option<String>,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// INFO options (RFC 6086).
+#[derive(Default, Debug, Clone)]
+pub struct InfoRequestOptions {
+    pub content_type: String,
+    pub body: Bytes,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// BYE options (RFC 3326 `Reason`).
+#[derive(Default, Debug, Clone)]
+pub struct ByeRequestOptions {
+    pub reason: Option<String>,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// CANCEL options (RFC 3326 `Reason`).
+#[derive(Default, Debug, Clone)]
+pub struct CancelRequestOptions {
+    pub reason: Option<String>,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// UPDATE options (RFC 3311).
+#[derive(Default, Debug, Clone)]
+pub struct UpdateRequestOptions {
+    pub sdp: Option<String>,
+    pub session_timer_refresh: bool,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// re-INVITE options.
+#[derive(Default, Debug, Clone)]
+pub struct ReInviteRequestOptions {
+    pub sdp: Option<String>,
+    pub session_timer_refresh: bool,
+    pub precomputed_authorization: Option<String>,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// SUBSCRIBE options (RFC 6665).
+#[derive(Default, Debug, Clone)]
+pub struct SubscribeRequestOptions {
+    pub event: String,
+    pub expires: u32,
+    pub accept: Option<String>,
+    pub from_uri: Option<String>,
+    pub contact_uri: Option<String>,
+    pub authorization: Option<String>,
+    /// `false` = initial out-of-dialog SUBSCRIBE; `true` = in-dialog
+    /// refresh.
+    pub refresh: bool,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// out-of-dialog MESSAGE options (RFC 3428).
+#[derive(Default, Debug, Clone)]
+pub struct MessageRequestOptions {
+    pub from_uri: String,
+    pub to_uri: String,
+    pub content_type: String,
+    pub body: Bytes,
+    pub authorization: Option<String>,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// out-of-dialog OPTIONS options (RFC 3261 §11).
+#[derive(Default, Debug, Clone)]
+pub struct OptionsRequestOptions {
+    pub from_uri: String,
+    pub to_uri: String,
+    pub accept: Option<String>,
+    pub timeout: Option<Duration>,
+    pub extra_headers: Vec<TypedHeader>,
+}
+
+/// SIP_API_DESIGN_2 Phase D — defence-in-depth header filter for the
+/// response extras path. Names that the dialog or transaction layer
+/// owns on every response are dropped here even though the
+/// rvoip-sip builder's `HeaderPolicy::validate_outbound` already
+/// rejects them at staging time.
+fn is_response_stack_managed(name: &rvoip_sip_core::types::headers::HeaderName) -> bool {
+    use rvoip_sip_core::types::headers::HeaderName;
+    matches!(
+        name,
+        HeaderName::CallId
+            | HeaderName::CSeq
+            | HeaderName::Via
+            | HeaderName::ContentLength
+            | HeaderName::RecordRoute
+    )
 }
 
 /// Build a RFC 5626 outbound-aware Contact header from a raw URI string and
@@ -751,9 +888,10 @@ impl UnifiedDialogApi {
         sdp: Option<String>,
         auth_header_name: &str,
         auth_header_value: String,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<TransactionKey> {
         self.manager
-            .send_invite_with_auth(dialog_id, sdp, auth_header_name, auth_header_value)
+            .send_invite_with_auth(dialog_id, sdp, auth_header_name, auth_header_value, extras)
             .await
     }
 
@@ -844,6 +982,25 @@ impl UnifiedDialogApi {
         status_code: u16,
         contacts: Vec<String>,
     ) -> ApiResult<()> {
+        self.send_redirect_response_with_extras_for_session(
+            session_id,
+            status_code,
+            contacts,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// SIP_API_DESIGN_2 Phase D — redirect response dispatch that
+    /// accepts application-staged extras (e.g., a UAS author wants
+    /// `Retry-After` on a 305 Use Proxy).
+    pub async fn send_redirect_response_with_extras_for_session(
+        &self,
+        session_id: &str,
+        status_code: u16,
+        contacts: Vec<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<()> {
         use rvoip_sip_core::types::{
             address::Address,
             contact::{Contact, ContactParamInfo},
@@ -904,12 +1061,25 @@ impl UnifiedDialogApi {
             .headers
             .push(TypedHeader::Contact(Contact::new_params(params)));
 
+        for hdr in &extra_headers {
+            if is_response_stack_managed(&hdr.name()) {
+                warn!(
+                    "Dropping stack-managed header {:?} from redirect extras on session {}",
+                    hdr.name(),
+                    session_id
+                );
+                continue;
+            }
+            response.headers.push(hdr.clone());
+        }
+
         info!(
-            "Sending {} redirect response for session {} via transaction {} with {} contact(s)",
+            "Sending {} redirect response for session {} via transaction {} with {} contact(s), {} extras",
             status_code,
             session_id,
             transaction_id,
-            contacts.len()
+            contacts.len(),
+            extra_headers.len()
         );
 
         self.send_response(&transaction_id, response).await
@@ -924,11 +1094,46 @@ impl UnifiedDialogApi {
     /// * `session_id` - Session ID to respond for
     /// * `status_code` - Status code to send
     /// * `body` - Optional response body (e.g., SDP)
+    /// SIP_API_DESIGN_2 Phase D — response dispatch that accepts an
+    /// application-staged header list. The session's pending UAS
+    /// transaction is resolved internally and the headers are
+    /// appended to the response *after* the stack-managed `From` /
+    /// `To` / `Via` / `Call-ID` / `CSeq` / `Content-Length` /
+    /// `Contact` / `Record-Route` fields are stamped, mirroring the
+    /// request-side `extra_headers` semantics on
+    /// `request_builder_from_dialog_template`.
+    ///
+    /// The legacy [`send_response_for_session`](Self::send_response_for_session)
+    /// is now a thin wrapper that forwards `Vec::new()` for
+    /// `extra_headers`.
+    pub async fn send_response_with_extras_for_session(
+        &self,
+        session_id: &str,
+        status_code: u16,
+        body: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<()> {
+        self.send_response_for_session_inner(session_id, status_code, body, extra_headers).await
+    }
+
     pub async fn send_response_for_session(
         &self,
         session_id: &str,
         status_code: u16,
         body: Option<String>,
+    ) -> ApiResult<()> {
+        self.send_response_for_session_inner(session_id, status_code, body, Vec::new()).await
+    }
+
+    /// Internal implementation backing both the legacy
+    /// `send_response_for_session` and the new
+    /// `send_response_with_extras_for_session`.
+    async fn send_response_for_session_inner(
+        &self,
+        session_id: &str,
+        status_code: u16,
+        body: Option<String>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<()> {
         debug!(
             "send_response_for_session called for session {} with status {}",
@@ -1023,7 +1228,7 @@ impl UnifiedDialogApi {
         // generated To tag. In-dialog re-INVITEs already carry the dialog's To
         // tag; regenerating it forks the dialog identity and breaks the next
         // mid-call request.
-        let response = if status_code == 200 {
+        let mut response = if status_code == 200 {
             // Get original request to check if it's an INVITE
             let original_request = self
                 .manager
@@ -1078,9 +1283,30 @@ impl UnifiedDialogApi {
             .await?
         };
 
+        // SIP_API_DESIGN_2 Phase D — append application-staged headers
+        // *after* the stack stamps From/To/Via/Call-ID/CSeq/Content-Length
+        // /Contact/Record-Route, mirroring the request-side semantics
+        // (see `request_builder_from_dialog_template`). Stack-managed
+        // names are filtered defensively even though
+        // `HeaderPolicy::validate_outbound` already rejects them at the
+        // rvoip-sip builder layer.
+        if !extra_headers.is_empty() {
+            for header in &extra_headers {
+                if is_response_stack_managed(&header.name()) {
+                    warn!(
+                        "Dropping stack-managed header {:?} from application-staged extras on response for session {}",
+                        header.name(),
+                        session_id
+                    );
+                    continue;
+                }
+                response.headers.push(header.clone());
+            }
+        }
+
         info!(
-            "Sending {} response for session {} via transaction {}",
-            status_code, session_id, transaction_id
+            "Sending {} response for session {} via transaction {} ({} staged extras)",
+            status_code, session_id, transaction_id, extra_headers.len()
         );
 
         // Call pre-send lifecycle hook for dialog state management
@@ -1211,6 +1437,8 @@ impl UnifiedDialogApi {
             cseq: None,
             outbound_contact: None,
             outbound_proxy_uri: None,
+            extra_headers: Vec::new(),
+            refresh: false,
         })
         .await
     }
@@ -1243,6 +1471,8 @@ impl UnifiedDialogApi {
             cseq: None,
             outbound_contact: Some(outbound_params.clone()),
             outbound_proxy_uri: None,
+            extra_headers: Vec::new(),
+            refresh: false,
         })
         .await
     }
@@ -1255,11 +1485,32 @@ impl UnifiedDialogApi {
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::TypedHeader;
 
+        // SIP_API_DESIGN_2 §7.1 — `options.refresh` distinguishes the
+        // initial REGISTER from an in-dialog refresh per RFC 3261
+        // §10.2.4. A refresh MUST reuse the original Call-ID and bump
+        // CSeq; we treat missing identifiers on a refresh as an
+        // error so the caller can't accidentally start a fresh
+        // registration triple under the refresh banner.
+        if options.refresh {
+            if options.call_id.is_none() {
+                return Err(ApiError::protocol(
+                    "RegisterRequestOptions { refresh: true } requires call_id to be \
+                     set (RFC 3261 §10.2.4 — refresh REGISTER reuses the original Call-ID)",
+                ));
+            }
+            if options.cseq.is_none() {
+                return Err(ApiError::protocol(
+                    "RegisterRequestOptions { refresh: true } requires cseq to be set \
+                     (the caller is responsible for bumping the original registration's CSeq)",
+                ));
+            }
+        }
         let cseq = options.cseq.unwrap_or(1);
 
         debug!(
-            "Building REGISTER request to {} (expires={}, cseq={}, auth={}, outbound={}, outbound_proxy={})",
+            "Building REGISTER request to {} (refresh={}, expires={}, cseq={}, auth={}, outbound={}, outbound_proxy={})",
             options.registrar_uri,
+            options.refresh,
             options.expires,
             cseq,
             options.authorization.is_some(),
@@ -1310,6 +1561,13 @@ impl UnifiedDialogApi {
             debug!("Added Authorization header to REGISTER");
         }
 
+        // SIP_API_DESIGN_2 §5.2 — application-staged extras ride after
+        // the stack-managed prefix (Call-ID, CSeq, Via, Max-Forwards,
+        // Authorization/Contact dedicated setters).
+        for hdr in &options.extra_headers {
+            builder = builder.header(hdr.clone());
+        }
+
         let request = builder
             .build()
             .map_err(|e| ApiError::protocol(format!("Failed to build REGISTER request: {}", e)))?;
@@ -1342,11 +1600,39 @@ impl UnifiedDialogApi {
         event_package: &str,
         expires: u32,
     ) -> ApiResult<Response> {
+        self.send_subscribe_out_of_dialog_with_extras(
+            target_uri,
+            from_uri,
+            contact_uri,
+            event_package,
+            expires,
+            Vec::new(),
+        )
+        .await
+    }
+
+    /// Out-of-dialog SUBSCRIBE with application-staged `extra_headers`
+    /// appended after the stack-managed slice. See SIP_API_DESIGN_2
+    /// §5.2.
+    pub async fn send_subscribe_out_of_dialog_with_extras(
+        &self,
+        target_uri: &str,
+        from_uri: &str,
+        contact_uri: &str,
+        event_package: &str,
+        expires: u32,
+        extra_headers: Vec<TypedHeader>,
+    ) -> ApiResult<Response> {
         let dest_uri = target_uri
             .parse::<rvoip_sip_core::Uri>()
             .map_err(|e| ApiError::protocol(format!("Invalid SUBSCRIBE target URI: {}", e)))?;
         let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
-        let request = crate::transaction::dialog::subscribe_out_of_dialog(
+        let extras_opt = if extra_headers.is_empty() {
+            None
+        } else {
+            Some(extra_headers)
+        };
+        let request = crate::transaction::dialog::subscribe_out_of_dialog_with_extras(
             target_uri,
             from_uri,
             contact_uri,
@@ -1354,6 +1640,7 @@ impl UnifiedDialogApi {
             expires,
             1,
             local_addr,
+            extras_opt,
         )
         .map_err(|e| ApiError::protocol(format!("Failed to build SUBSCRIBE request: {}", e)))?;
 
@@ -1411,12 +1698,38 @@ impl UnifiedDialogApi {
         from_uri: &str,
         body: String,
     ) -> ApiResult<Response> {
+        self.send_message_out_of_dialog_with_extras(target_uri, from_uri, body, None, Vec::new())
+            .await
+    }
+
+    /// Out-of-dialog MESSAGE with caller-chosen Content-Type and
+    /// application-staged `extra_headers` appended after the
+    /// stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+    pub async fn send_message_out_of_dialog_with_extras(
+        &self,
+        target_uri: &str,
+        from_uri: &str,
+        body: String,
+        content_type: Option<String>,
+        extra_headers: Vec<TypedHeader>,
+    ) -> ApiResult<Response> {
         let dest_uri = target_uri
             .parse::<rvoip_sip_core::Uri>()
             .map_err(|e| ApiError::protocol(format!("Invalid MESSAGE target URI: {}", e)))?;
         let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
-        let request = crate::transaction::dialog::message_out_of_dialog(
-            target_uri, from_uri, body, 1, local_addr,
+        let extras_opt = if extra_headers.is_empty() {
+            None
+        } else {
+            Some(extra_headers)
+        };
+        let request = crate::transaction::dialog::message_out_of_dialog_with_extras(
+            target_uri,
+            from_uri,
+            body,
+            1,
+            local_addr,
+            content_type,
+            extras_opt,
         )
         .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?;
 
@@ -1431,6 +1744,52 @@ impl UnifiedDialogApi {
 
         self.send_non_dialog_request(request, destination, std::time::Duration::from_secs(10))
             .await
+    }
+
+    /// Internal helper used by `send_info_with_options` (and any other
+    /// per-method builder path that pre-builds the in-dialog request).
+    /// Creates a non-INVITE client transaction, associates it with the
+    /// dialog, and sends.
+    pub(crate) async fn send_in_dialog_built_request(
+        &self,
+        dialog_id: &DialogId,
+        _method: Method,
+        request: rvoip_sip_core::Request,
+    ) -> ApiResult<TransactionKey> {
+        let fallback_destination = {
+            let dialog = self.manager.inner_manager().get_dialog(dialog_id).map_err(ApiError::from)?;
+            dialog
+                .get_remote_target_address()
+                .await
+                .ok_or_else(|| ApiError::protocol("No remote target address".to_string()))?
+        };
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+        )
+        .await
+        .unwrap_or(fallback_destination);
+
+        let transaction_id = self
+            .manager
+            .inner_manager()
+            .transaction_manager()
+            .create_non_invite_client_transaction(request, destination)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to create transaction: {}", e)))?;
+
+        self.manager
+            .inner_manager()
+            .transaction_to_dialog
+            .insert(transaction_id.clone(), dialog_id.clone());
+
+        self.manager
+            .inner_manager()
+            .transaction_manager()
+            .send_request(&transaction_id)
+            .await
+            .map_err(|e| ApiError::internal(format!("Failed to send request: {}", e)))?;
+
+        Ok(transaction_id)
     }
 
     /// Send REFER request for call transfer
@@ -1530,6 +1889,411 @@ impl UnifiedDialogApi {
     /// - No pending INVITE transaction found
     pub async fn send_cancel(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
         self.manager.send_cancel(dialog_id).await
+    }
+
+    /// REFER with full options (replaces / referred-by / target-dialog).
+    ///
+    /// `opts.extra_headers` is threaded through the request builder
+    /// after the stack-managed slice so applications can attach
+    /// arbitrary headers (X-*, Diversion, History-Info, …) without
+    /// the dialog stack interfering with Call-ID/CSeq/Via.
+    pub async fn send_refer_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: ReferRequestOptions,
+    ) -> ApiResult<TransactionKey> {
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
+
+        // The legacy `send_refer` builds a `Refer-To: <uri>\r\n` body —
+        // preserve that shape when no custom body is desired.
+        let body = if opts.replaces.is_some()
+            || opts.referred_by.is_some()
+            || opts.target_dialog.is_some()
+        {
+            let mut s = format!("Refer-To: {}\r\n", opts.refer_to);
+            if let Some(rb) = &opts.referred_by {
+                s.push_str(&format!("Referred-By: {}\r\n", rb));
+            }
+            if let Some(rep) = &opts.replaces {
+                s.push_str(&format!("Replaces: {}\r\n", rep));
+            }
+            if let Some(td) = &opts.target_dialog {
+                s.push_str(&format!("Target-Dialog: {}\r\n", td));
+            }
+            s
+        } else {
+            format!("Refer-To: {}\r\n", opts.refer_to)
+        };
+
+        // RFC 3891 + 3892 + 4538 — typed headers added on the request
+        // alongside any application extras. The `body` payload above
+        // is preserved for legacy parsers that read these from the
+        // body, but the canonical wire form has them as real headers.
+        let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
+        if let Some(rb) = &opts.referred_by {
+            extras.push(TypedHeader::Other(
+                HeaderName::Other("Referred-By".to_string()),
+                HeaderValue::Raw(rb.clone().into_bytes()),
+            ));
+        }
+        if let Some(rep) = &opts.replaces {
+            extras.push(TypedHeader::Other(
+                HeaderName::Other("Replaces".to_string()),
+                HeaderValue::Raw(rep.clone().into_bytes()),
+            ));
+        }
+        if let Some(td) = &opts.target_dialog {
+            extras.push(TypedHeader::Other(
+                HeaderName::Other("Target-Dialog".to_string()),
+                HeaderValue::Raw(td.clone().into_bytes()),
+            ));
+        }
+
+        self.manager
+            .inner_manager()
+            .send_request_in_dialog_with_extras(
+                dialog_id,
+                Method::Refer,
+                Some(bytes::Bytes::from(body)),
+                extras,
+            )
+            .await
+            .map_err(ApiError::from)
+    }
+
+    /// NOTIFY with full options.
+    pub async fn send_notify_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: NotifyRequestOptions,
+    ) -> ApiResult<TransactionKey> {
+        // Update event package + subscription state on the dialog so the
+        // NOTIFY-builder reads them off the dialog as the legacy path did.
+        {
+            let mut dialog = self
+                .manager
+                .inner_manager()
+                .get_dialog_mut(dialog_id)
+                .map_err(ApiError::from)?;
+            // RFC 6665 §4.5.2 — multi-subscription dialogs distinguish
+            // their NOTIFY streams via the `id` parameter on `Event:`.
+            // SIP_API_DESIGN_2 §7.1 plumbs the optional subscription_id
+            // through to the wire by appending the id parameter to the
+            // event package string when set; the NOTIFY builder
+            // stamps the Event header from this combined value.
+            let event_with_id = match &opts.subscription_id {
+                Some(sid) if !sid.is_empty() => format!("{};id={}", opts.event, sid),
+                _ => opts.event.clone(),
+            };
+            if dialog.event_package.as_ref() != Some(&event_with_id) {
+                dialog.event_package = Some(event_with_id);
+            }
+            use crate::dialog::subscription_state::{
+                SubscriptionState, SubscriptionTerminationReason,
+            };
+            use std::time::Duration;
+            let state_str = &opts.subscription_state;
+            let sub_state = if state_str.starts_with("active") {
+                let expires = if let Some(pos) = state_str.find("expires=") {
+                    let exp_str = &state_str[pos + 8..];
+                    exp_str
+                        .split(';')
+                        .next()
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(3600)
+                } else {
+                    3600
+                };
+                SubscriptionState::Active {
+                    remaining_duration: Duration::from_secs(expires),
+                    original_duration: Duration::from_secs(expires),
+                }
+            } else if state_str.starts_with("pending") {
+                SubscriptionState::Pending
+            } else if state_str.starts_with("terminated") {
+                let reason = if state_str.contains("noresource") {
+                    Some(SubscriptionTerminationReason::NoResource)
+                } else if state_str.contains("deactivated") {
+                    Some(SubscriptionTerminationReason::ClientRequested)
+                } else if state_str.contains("rejected") {
+                    Some(SubscriptionTerminationReason::Rejected)
+                } else if state_str.contains("timeout") {
+                    Some(SubscriptionTerminationReason::Expired)
+                } else {
+                    None
+                };
+                SubscriptionState::Terminated { reason }
+            } else {
+                SubscriptionState::Terminated { reason: None }
+            };
+            dialog.subscription_state = Some(sub_state);
+        }
+
+        let body = opts.body.map(|b| bytes::Bytes::from(b.to_vec()));
+        self.manager
+            .inner_manager()
+            .send_request_in_dialog_with_extras(
+                dialog_id,
+                Method::Notify,
+                body,
+                opts.extra_headers,
+            )
+            .await
+            .map_err(ApiError::from)
+    }
+
+    /// INFO with full options.
+    pub async fn send_info_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: InfoRequestOptions,
+    ) -> ApiResult<TransactionKey> {
+        // INFO carries a caller-chosen Content-Type; the in-dialog
+        // request builder defaults to application/info, so when the
+        // caller picks a different type we go through the specialized
+        // path that overrides it. Either way, extras ride through.
+        use crate::transaction::dialog::quick as dialog_quick;
+
+        let mut dialog = self
+            .manager
+            .inner_manager()
+            .get_dialog_mut(dialog_id)
+            .map_err(ApiError::from)?;
+
+        let template = dialog.create_request_template(Method::Info);
+        let local_tag = match &template.local_tag {
+            Some(tag) if !tag.is_empty() => tag.clone(),
+            _ => {
+                return Err(ApiError::protocol(
+                    "INFO requires local tag in established dialog".to_string(),
+                ));
+            }
+        };
+        let remote_tag = template
+            .remote_tag
+            .clone()
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| {
+                ApiError::protocol("INFO requires remote tag in established dialog".to_string())
+            })?;
+
+        let local_address = self
+            .manager
+            .inner_manager()
+            .local_address_for_target_and_routes(&template.target_uri, &template.route_set);
+        let body_str = String::from_utf8_lossy(&opts.body).into_owned();
+        let extras_opt = if opts.extra_headers.is_empty() {
+            None
+        } else {
+            Some(opts.extra_headers.clone())
+        };
+        let request = dialog_quick::info_for_dialog_with_extras(
+            template.call_id.clone(),
+            template.local_uri.to_string(),
+            local_tag,
+            template.remote_uri.to_string(),
+            remote_tag,
+            body_str,
+            Some(opts.content_type.clone()),
+            template.cseq_number,
+            local_address,
+            if template.route_set.is_empty() {
+                None
+            } else {
+                Some(template.route_set.clone())
+            },
+            extras_opt,
+        )
+        .map_err(|e| ApiError::protocol(format!("Failed to build INFO request: {}", e)))?;
+        drop(dialog);
+
+        self.send_in_dialog_built_request(dialog_id, Method::Info, request).await
+    }
+
+    /// BYE with full options.
+    ///
+    /// When `opts.reason` is set, an RFC 3326 `Reason:` header is
+    /// stamped alongside any application extras.
+    pub async fn send_bye_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: ByeRequestOptions,
+    ) -> ApiResult<TransactionKey> {
+        use rvoip_sip_core::types::reason::Reason;
+        use rvoip_sip_core::types::TypedHeader;
+
+        let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
+        if let Some(reason_text) = opts.reason {
+            // RFC 3326 — protocol="SIP", cause=200 is the conventional
+            // pairing when the application supplies free-form text.
+            let reason = Reason::new("SIP", 200u16, Some(reason_text));
+            extras.push(TypedHeader::Reason(reason));
+        }
+
+        self.manager
+            .inner_manager()
+            .send_request_in_dialog_with_extras(dialog_id, Method::Bye, None, extras)
+            .await
+            .map_err(ApiError::from)
+    }
+
+    /// CANCEL with full options.
+    ///
+    /// RFC 3261 §9.1 — CANCEL targets the most-recently-sent INVITE
+    /// on the dialog. `opts.reason` rides as an RFC 3326 `Reason:`
+    /// header alongside any application extras; both are appended to
+    /// the CANCEL after the stack copies INVITE's mandatory headers.
+    pub async fn send_cancel_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: CancelRequestOptions,
+    ) -> ApiResult<TransactionKey> {
+        use rvoip_sip_core::types::reason::Reason;
+        use rvoip_sip_core::types::TypedHeader;
+
+        let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
+        if let Some(reason_text) = opts.reason {
+            let reason = Reason::new("SIP", 200u16, Some(reason_text));
+            extras.push(TypedHeader::Reason(reason));
+        }
+
+        self.manager
+            .send_cancel_with_extras(dialog_id, extras)
+            .await
+    }
+
+    /// UPDATE with full options.
+    pub async fn send_update_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: UpdateRequestOptions,
+    ) -> ApiResult<TransactionKey> {
+        let body = opts.sdp.map(bytes::Bytes::from);
+        self.manager
+            .inner_manager()
+            .send_request_in_dialog_with_extras(dialog_id, Method::Update, body, opts.extra_headers)
+            .await
+            .map_err(ApiError::from)
+    }
+
+    /// re-INVITE with full options.
+    pub async fn send_reinvite_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: ReInviteRequestOptions,
+    ) -> ApiResult<TransactionKey> {
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
+
+        // Precomputed Authorization rides as a typed extra alongside
+        // application headers — the in-dialog request builder will
+        // append both after the stack-managed slice.
+        let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
+        if let Some(auth) = opts.precomputed_authorization {
+            extras.push(TypedHeader::Other(
+                HeaderName::Authorization,
+                HeaderValue::Raw(auth.into_bytes()),
+            ));
+        }
+        let body = opts.sdp.map(bytes::Bytes::from);
+        self.manager
+            .inner_manager()
+            .send_request_in_dialog_with_extras(dialog_id, Method::Invite, body, extras)
+            .await
+            .map_err(ApiError::from)
+    }
+
+    /// In-dialog SUBSCRIBE refresh with full options.
+    pub async fn send_subscribe_refresh_with_options(
+        &self,
+        dialog_id: &DialogId,
+        opts: SubscribeRequestOptions,
+    ) -> ApiResult<()> {
+        self.manager
+            .send_subscribe_refresh_with_extras(
+                dialog_id,
+                &opts.event,
+                opts.expires,
+                opts.extra_headers,
+            )
+            .await
+    }
+
+    /// Out-of-dialog SUBSCRIBE with full options.
+    pub async fn send_subscribe_with_options(
+        &self,
+        target: &str,
+        opts: SubscribeRequestOptions,
+    ) -> ApiResult<Response> {
+        let from_uri = opts.from_uri.unwrap_or_else(|| target.to_string());
+        let contact_uri = opts.contact_uri.unwrap_or_else(|| from_uri.clone());
+        self.send_subscribe_out_of_dialog_with_extras(
+            target,
+            &from_uri,
+            &contact_uri,
+            &opts.event,
+            opts.expires,
+            opts.extra_headers,
+        )
+        .await
+    }
+
+    /// Out-of-dialog MESSAGE with full options.
+    pub async fn send_message_out_of_dialog_with_options(
+        &self,
+        opts: MessageRequestOptions,
+    ) -> ApiResult<Response> {
+        let body_string = String::from_utf8_lossy(&opts.body).to_string();
+        let content_type = if opts.content_type.is_empty() {
+            None
+        } else {
+            Some(opts.content_type.clone())
+        };
+        self.send_message_out_of_dialog_with_extras(
+            &opts.to_uri,
+            &opts.from_uri,
+            body_string,
+            content_type,
+            opts.extra_headers,
+        )
+        .await
+    }
+
+    /// Out-of-dialog OPTIONS with full options. RFC 3261 §11.
+    pub async fn send_options_out_of_dialog_with_options(
+        &self,
+        opts: OptionsRequestOptions,
+    ) -> ApiResult<Response> {
+        let dest_uri = opts
+            .to_uri
+            .parse::<rvoip_sip_core::Uri>()
+            .map_err(|e| ApiError::protocol(format!("Invalid OPTIONS target URI: {}", e)))?;
+        let local_addr = self.manager.core().local_address_for_uri(&dest_uri);
+        let extras_opt = if opts.extra_headers.is_empty() {
+            None
+        } else {
+            Some(opts.extra_headers.clone())
+        };
+        let request = crate::transaction::dialog::options_out_of_dialog_with_extras(
+            &opts.to_uri,
+            &opts.from_uri,
+            1,
+            local_addr,
+            opts.accept,
+            extras_opt,
+        )
+        .map_err(|e| ApiError::protocol(format!("Failed to build OPTIONS request: {}", e)))?;
+
+        let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
+            .await
+            .ok_or_else(|| {
+                ApiError::protocol(format!("Failed to resolve OPTIONS target URI: {}", opts.to_uri))
+            })?;
+
+        let timeout = opts.timeout.unwrap_or_else(|| Duration::from_secs(8));
+        self.send_non_dialog_request(request, destination, timeout)
+            .await
     }
 
     // ========================================

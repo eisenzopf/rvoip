@@ -3,8 +3,10 @@
 //! Defines all events that cross crate boundaries, enabling event-driven
 //! communication between session-core, dialog-core, media-core, etc.
 
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::events::types::{Event, EventPriority};
 use crate::planes::routing::RoutableEvent;
@@ -204,6 +206,15 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::MessageFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::IncomingRegister { .. } => None, // No session_id yet for incoming REGISTER
                 DialogToSessionEvent::OutboundFlowFailed { .. } => None, // Flow-level, not session-level
+                DialogToSessionEvent::InfoReceived { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::MessageReceived { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::OptionsReceived { session_id, .. } => {
+                    if session_id.is_empty() {
+                        None
+                    } else {
+                        Some(session_id)
+                    }
+                }
             },
             RvoipCrossCrateEvent::SessionToMedia(event) => match event {
                 SessionToMediaEvent::StartMediaStream { session_id, .. } => Some(session_id),
@@ -506,6 +517,28 @@ pub enum SessionToDialogEvent {
         www_authenticate: Option<String>, // For 401 challenge
         contact: Option<String>,          // For 200 OK
         expires: Option<u32>,             // For 200 OK
+        /// SIP_API_DESIGN_2 Phase D — RFC 3261 §20.23 `Min-Expires` for
+        /// 423 Interval Too Brief responses.
+        min_expires: Option<u32>,
+        /// SIP_API_DESIGN_2 Phase D — RFC 3608 `Service-Route` URIs
+        /// returned on REGISTER 2xx; out-of-dialog requests within the
+        /// registration binding SHOULD pre-load these as Route headers.
+        service_route: Vec<String>,
+        /// SIP_API_DESIGN_2 Phase D — RFC 3327 `Path` echo flag. When
+        /// true, the registrar echoes any `Path:` headers seen on the
+        /// inbound REGISTER back on the 2xx so subsequent re-targeted
+        /// requests reach the UA through the same waypoints.
+        path_echo: bool,
+        /// SIP_API_DESIGN_2 Phase D — RFC 3455 `P-Associated-URI` list
+        /// returned on REGISTER 2xx so the UA learns the additional
+        /// AORs the registrar has provisioned for the same subscriber.
+        associated_uri: Vec<String>,
+        /// SIP_API_DESIGN_2 Phase D — additional application-staged
+        /// headers as `(name, value)` wire-format tuples. The
+        /// receiving dialog-core handler reconstructs `TypedHeader`s
+        /// via sip-core; infra-common stays SIP-agnostic by carrying
+        /// only strings here.
+        extra_headers: Vec<(String, String)>,
     },
 }
 
@@ -524,6 +557,14 @@ pub enum DialogToSessionEvent {
         transaction_id: String,
         /// Source address for responses
         source_addr: String,
+        /// SIP_API_DESIGN_2 Phase A: original inbound INVITE bytes,
+        /// preserved end-to-end so `IncomingCall::raw_request()` can
+        /// expose the parsed `Arc<Request>`. `infra-common` stays
+        /// SIP-agnostic by carrying `Bytes`, not the typed Request.
+        /// `None` for legacy publish sites that haven't been migrated
+        /// yet.
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
     },
 
     /// Call state change notification
@@ -542,12 +583,22 @@ pub enum DialogToSessionEvent {
         reason_phrase: String,
         /// SDP body carried by the provisional response, if present.
         sdp: Option<String>,
+        /// SIP_API_DESIGN_2 Phase A: original inbound response bytes
+        /// so B2BUA callers can build an `IncomingResponse` view
+        /// (`Allow` / `Supported` / `Server` carry-through to the
+        /// downstream 183).
+        #[serde(skip)]
+        raw_response: Option<Arc<Bytes>>,
     },
 
     /// Call successfully established
     CallEstablished {
         session_id: String,
         sdp_answer: Option<String>,
+        /// SIP_API_DESIGN_2 Phase A: original inbound 200 OK bytes
+        /// for downstream carry-through.
+        #[serde(skip)]
+        raw_response: Option<Arc<Bytes>>,
     },
 
     /// Call terminated notification
@@ -563,6 +614,11 @@ pub enum DialogToSessionEvent {
         session_id: String,
         status_code: u16,
         reason_phrase: String,
+        /// SIP_API_DESIGN_2 Phase A: original inbound failure response
+        /// bytes so applications can inspect `Retry-After`, `Warning`,
+        /// `Reason`, and friends via `IncomingResponse::raw_response()`.
+        #[serde(skip)]
+        raw_response: Option<Arc<Bytes>>,
     },
 
     /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
@@ -661,6 +717,11 @@ pub enum DialogToSessionEvent {
         session_id: String,
         sdp: Option<String>,
         method: String,
+        /// SIP_API_DESIGN_2 Phase E: original inbound re-INVITE / UPDATE
+        /// bytes so applications can build an `IncomingRequest` view
+        /// for B2BUA carry-through to the downstream leg.
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
     },
 
     /// Transfer requested
@@ -674,6 +735,11 @@ pub enum DialogToSessionEvent {
         /// Optional Replaces value, either from a Replaces header or the
         /// Refer-To URI for attended-transfer primitives.
         replaces: Option<String>,
+        /// SIP_API_DESIGN_2 Phase E: original inbound REFER bytes so
+        /// applications can inspect History-Info / Diversion / custom
+        /// headers via the `IncomingRequest` view.
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
     },
 
     /// ACK received (for UAS state transitions)
@@ -719,6 +785,41 @@ pub enum DialogToSessionEvent {
         /// Raw `Content-Type:` header value, e.g. `"message/sipfrag"`.
         content_type: Option<String>,
         body: Option<String>,
+        /// SIP_API_DESIGN_2 Phase E: original inbound NOTIFY bytes
+        /// for `IncomingRequest`-style typed inspection.
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
+    },
+
+    /// SIP_API_DESIGN_2 Phase E — in-dialog INFO (RFC 6086) received.
+    /// Today's stack drops inbound INFO at the dialog-core layer; this
+    /// variant bridges it to session-core so applications can wire
+    /// SIP-INFO DTMF, fax flow control, and other mid-dialog
+    /// signalling through a typed `IncomingRequest`.
+    InfoReceived {
+        session_id: String,
+        /// Raw inbound INFO bytes; subscribers reconstruct an
+        /// `Arc<Request>` via `parse_message`.
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
+    },
+
+    /// SIP_API_DESIGN_2 Phase E — in-dialog MESSAGE (RFC 3428)
+    /// received.
+    MessageReceived {
+        session_id: String,
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
+    },
+
+    /// SIP_API_DESIGN_2 Phase E — OPTIONS received. May arrive
+    /// in-dialog (keep-alive probe on an established call) or
+    /// out-of-dialog (capability query against the AOR); `session_id`
+    /// is empty when out-of-dialog.
+    OptionsReceived {
+        session_id: String,
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
     },
 
     /// MESSAGE delivered
@@ -739,6 +840,12 @@ pub enum DialogToSessionEvent {
         expires: u32,
         authorization: Option<String>, // Authorization header if present
         call_id: String,
+        /// SIP_API_DESIGN_2 Phase A: original inbound REGISTER bytes,
+        /// preserved so registrar surfaces can build an
+        /// `IncomingRegister::raw_request()` view. `None` for legacy
+        /// publish sites until migration.
+        #[serde(skip)]
+        raw_request: Option<Arc<Bytes>>,
     },
 
     /// RFC 5626 outbound flow has failed — the keep-alive ping either
@@ -1145,6 +1252,7 @@ impl RvoipCrossCrateEvent {
             headers: HashMap::new(),
             transaction_id: String::new(), // Must be set by caller
             source_addr: String::new(),    // Must be set by caller
+            raw_request: None,
         })
     }
 
@@ -1173,6 +1281,7 @@ impl RvoipCrossCrateEvent {
             status_code,
             reason_phrase,
             sdp,
+            raw_response: None,
         })
     }
 

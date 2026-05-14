@@ -11,11 +11,24 @@ use rvoip_infra_common::events::cross_crate::{
 use rvoip_sip_core::Message;
 use rvoip_sip_transport::transport::TransportType;
 
+/// SIP_API_DESIGN_2 §12.4 — pluggable trace redactor hook.
+///
+/// The redactor takes the rendered SIP message text and returns a
+/// trace-friendly variant. Consulted in
+/// [`SipTraceRuntime::publish`] before the static
+/// `format_sip_trace_message` transform runs, so application-specific
+/// scrubs (e.g. drop `X-Customer-Token`) compose with the built-in
+/// auth-header redaction.
+///
+/// The wire form (the bytes actually sent) is untouched.
+pub type TraceRedactorFn = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 #[derive(Clone)]
 pub(crate) struct SipTraceRuntime {
     owner_id: String,
     config: SipTraceConfig,
     coordinator: Arc<GlobalEventCoordinator>,
+    redactor: Option<TraceRedactorFn>,
 }
 
 impl SipTraceRuntime {
@@ -24,11 +37,21 @@ impl SipTraceRuntime {
         config: SipTraceConfig,
         coordinator: Arc<GlobalEventCoordinator>,
     ) -> Option<Arc<Self>> {
+        Self::new_with_redactor(owner_id, config, coordinator, None)
+    }
+
+    pub(crate) fn new_with_redactor(
+        owner_id: String,
+        config: SipTraceConfig,
+        coordinator: Arc<GlobalEventCoordinator>,
+        redactor: Option<TraceRedactorFn>,
+    ) -> Option<Arc<Self>> {
         config.enabled.then(|| {
             Arc::new(Self {
                 owner_id,
                 config,
                 coordinator,
+                redactor,
             })
         })
     }
@@ -45,7 +68,14 @@ impl SipTraceRuntime {
             return;
         }
 
-        let rendered = String::from_utf8_lossy(&message.to_bytes()).into_owned();
+        let raw = String::from_utf8_lossy(&message.to_bytes()).into_owned();
+        // Phase 7 — consult the configured `TraceRedactor` (if any)
+        // before the static `format_sip_trace_message` pipeline. The
+        // wire form is unaffected.
+        let rendered = match &self.redactor {
+            Some(redact) => redact(&raw),
+            None => raw,
+        };
         let original_len = rendered.len();
         let (raw_message, truncated) = format_sip_trace_message(&rendered, &self.config);
         let event = SipTraceEvent {

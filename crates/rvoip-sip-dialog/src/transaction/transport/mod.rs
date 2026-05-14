@@ -16,10 +16,11 @@ use rvoip_sip_transport::{
 use crate::transaction::error::{Error, Result};
 
 pub mod multiplexed;
-mod trace;
+pub mod trace;
 pub use multiplexed::MultiplexedTransport;
 pub use rvoip_sip_transport::transport::tls::TlsRole;
 pub(crate) use trace::SipTraceRuntime;
+pub use trace::TraceRedactorFn;
 
 /// Configuration options for the TransportManager
 #[derive(Debug, Clone)]
@@ -304,6 +305,22 @@ impl TransportManager {
         coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
     ) {
         self.sip_trace = SipTraceRuntime::new(owner_id, config, coordinator);
+    }
+
+    /// Enable transport-boundary SIP tracing with an application-supplied
+    /// trace redactor (see SIP_API_DESIGN_2.md §12.4). The redactor
+    /// transforms the rendered SIP message text before the static
+    /// `format_sip_trace_message` pipeline runs; the wire form is
+    /// untouched.
+    pub fn enable_sip_trace_with_redactor(
+        &mut self,
+        owner_id: String,
+        config: rvoip_infra_common::events::cross_crate::SipTraceConfig,
+        coordinator: Arc<rvoip_infra_common::events::coordinator::GlobalEventCoordinator>,
+        redactor: Option<TraceRedactorFn>,
+    ) {
+        self.sip_trace =
+            SipTraceRuntime::new_with_redactor(owner_id, config, coordinator, redactor);
     }
 
     /// Return the configured SIP trace runtime, if any.

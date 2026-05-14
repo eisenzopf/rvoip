@@ -890,6 +890,10 @@ pub trait CallHandler: Send + Sync + 'static {
     /// Called when a REFER (transfer request) is received.
     ///
     /// Return `true` to allow the transfer (send 202 Accepted); `false` to reject.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use on_refer_received(IncomingRequest) — see SIP_API_DESIGN_2.md Phase E"
+    )]
     #[allow(unused_variables)]
     async fn on_transfer_request(&self, handle: SessionHandle, target: String) -> bool {
         false
@@ -976,6 +980,10 @@ pub trait CallHandler: Send + Sync + 'static {
     async fn on_dialog_state_changed(&self, subscription_id: CallId, dialog: DialogInfo) {}
 
     /// Called for inbound NOTIFY requests.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use on_notify_received(IncomingRequest) — see SIP_API_DESIGN_2.md Phase E"
+    )]
     #[allow(unused_variables)]
     async fn on_notify(
         &self,
@@ -986,6 +994,55 @@ pub trait CallHandler: Send + Sync + 'static {
         body: Option<String>,
     ) {
     }
+
+    /// SIP_API_DESIGN_2 Phase E — typed inbound NOTIFY hook. Carries
+    /// the full `IncomingRequest` so applications can inspect every
+    /// header on the NOTIFY (Server, Allow-Events, custom routing
+    /// hints) in addition to the legacy pre-decoded fields. Default
+    /// impl is a no-op.
+    #[allow(unused_variables)]
+    async fn on_notify_received(&self, request: crate::api::incoming::IncomingRequest) {}
+
+    /// SIP_API_DESIGN_2 Phase E — typed inbound REFER hook. The
+    /// existing [`Self::on_transfer_request`] continues to fire on the
+    /// pre-decoded `target: String`; new code subscribes here for
+    /// header-level access (Referred-By, Replaces, Target-Dialog,
+    /// custom X-*).
+    #[allow(unused_variables)]
+    async fn on_refer_received(&self, request: crate::api::incoming::IncomingRequest) {}
+
+    /// SIP_API_DESIGN_2 Phase E — typed inbound INFO hook. Today's
+    /// stack drops INFO at the dialog layer; this hook surfaces it so
+    /// SIP-INFO DTMF (`application/dtmf-relay`), fax flow control,
+    /// and other application-layer signalling can be observed.
+    #[allow(unused_variables)]
+    async fn on_info_received(&self, request: crate::api::incoming::IncomingRequest) {}
+
+    /// SIP_API_DESIGN_2 Phase E — typed inbound MESSAGE hook (RFC 3428).
+    #[allow(unused_variables)]
+    async fn on_message_received(&self, request: crate::api::incoming::IncomingRequest) {}
+
+    /// SIP_API_DESIGN_2 Phase E — typed inbound OPTIONS hook
+    /// (RFC 3261 §11). Both in-dialog and out-of-dialog OPTIONS reach
+    /// here; `request.call_id` discriminates.
+    #[allow(unused_variables)]
+    async fn on_options_received(&self, request: crate::api::incoming::IncomingRequest) {}
+
+    /// SIP_API_DESIGN_2 Phase E — typed inbound UPDATE hook
+    /// (RFC 3311). Fires in addition to the legacy hold/resume state
+    /// transitions; subscribe here for Session-Expires / X-*
+    /// header inspection.
+    #[allow(unused_variables)]
+    async fn on_update_received(&self, request: crate::api::incoming::IncomingRequest) {}
+
+    /// SIP_API_DESIGN_2 Phase D — typed inbound REGISTER hook
+    /// (RFC 3261 §10). Registrar surfaces author the response via
+    /// `register.accept_builder()` / `register.challenge_builder(..)` /
+    /// `register.reject_builder(status)`; if the handler returns
+    /// without authoring a response, the dialog stack falls back to
+    /// the auto-response path.
+    #[allow(unused_variables)]
+    async fn on_register_received(&self, register: crate::api::incoming::IncomingRegister) {}
 
     /// Called when registration succeeds.
     #[allow(unused_variables)]
@@ -1040,7 +1097,12 @@ impl CallbackPeerControl {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call(&self, target: &str) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         let id = self.coordinator.make_call(&self.local_uri, target).await?;
         Ok(SessionHandle::new(id, self.coordinator.clone()))
     }
@@ -1059,11 +1121,16 @@ impl CallbackPeerControl {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).with_credentials(c).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call_with_auth(
         &self,
         target: &str,
         credentials: crate::types::Credentials,
     ) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         let id = self
             .coordinator
             .make_call_with_auth(&self.local_uri, target, credentials)
@@ -1098,11 +1165,16 @@ impl CallbackPeerControl {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use peer.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call_with_headers(
         &self,
         target: &str,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<SessionHandle> {
+        #[allow(deprecated)]
         let id = self
             .coordinator
             .make_call_with_headers(&self.local_uri, target, extra_headers)
@@ -1620,8 +1692,30 @@ impl<H: CallHandler> CallbackPeer<H> {
                     // by consuming IncomingCall. If it only returns a decision
                     // without consuming the call, the dispatch applies it via the
                     // coordinator below. Handler Drop still acts as a safety net.
-                    let incoming =
-                        IncomingCall::new(call_id.clone(), from, to, sdp, coordinator.clone());
+                    //
+                    // SIP_API_DESIGN_2 Phase A: prefer the parsed
+                    // `Arc<Request>` view when the bus enriched it.
+                    let parsed = coordinator
+                        .session_registry
+                        .peek_pending_incoming_request()
+                        .await;
+                    let incoming = match parsed {
+                        Some(req) => IncomingCall::with_request(
+                            call_id.clone(),
+                            from,
+                            to,
+                            sdp,
+                            coordinator.clone(),
+                            req,
+                        ),
+                        None => IncomingCall::new(
+                            call_id.clone(),
+                            from,
+                            to,
+                            sdp,
+                            coordinator.clone(),
+                        ),
+                    };
                     let decision = handler.on_incoming_call(incoming).await;
                     // These coordinator calls are idempotent — if the handler
                     // already resolved the call, the session has transitioned
@@ -1803,9 +1897,23 @@ impl<H: CallHandler> CallbackPeer<H> {
                 }
 
                 Event::ReferReceived {
-                    call_id, refer_to, ..
+                    call_id, refer_to, request, ..
                 } => {
+                    // SIP_API_DESIGN_2 Phase E §9.5 — fire the typed
+                    // `on_refer_received(IncomingRequest)` hook first
+                    // so applications can inspect every header on
+                    // the REFER (Referred-By / Replaces / Target-
+                    // Dialog / custom X-*); then call the legacy
+                    // positional `on_transfer_request` so existing
+                    // accept/reject decisions still work. Both fire
+                    // on every inbound REFER until the legacy form is
+                    // removed in a future breaking release.
+                    if let Some(mut req) = request {
+                        req.set_coordinator(coordinator.clone());
+                        handler.on_refer_received(req).await;
+                    }
                     let handle = SessionHandle::new(call_id, coordinator);
+                    #[allow(deprecated)]
                     let accepted = handler.on_transfer_request(handle.clone(), refer_to).await;
                     let result = if accepted {
                         handle.accept_refer().await
@@ -1926,8 +2034,21 @@ impl<H: CallHandler> CallbackPeer<H> {
                     subscription_state,
                     content_type,
                     body,
+                    request,
                 } => {
+                    // SIP_API_DESIGN_2 Phase E §9.5 — fire the typed
+                    // `on_notify_received(IncomingRequest)` hook first
+                    // so applications get header-level access (full
+                    // Subscription-State parameters, custom routing
+                    // hints, etc.); then call the legacy positional
+                    // `on_notify` so existing handlers continue to
+                    // work until the deprecated form is removed.
+                    if let Some(mut req) = request {
+                        req.set_coordinator(coordinator.clone());
+                        handler.on_notify_received(req).await;
+                    }
                     let handle = SessionHandle::new(call_id, coordinator);
+                    #[allow(deprecated)]
                     handler
                         .on_notify(
                             handle,
@@ -1985,7 +2106,40 @@ impl<H: CallHandler> CallbackPeer<H> {
                 | Event::CallUnmuted { .. }
                 | Event::MediaQualityChanged { .. }
                 | Event::NetworkError { .. }
-                | Event::AuthenticationRequired { .. } => {}
+                | Event::AuthenticationRequired { .. }
+                // SIP_API_DESIGN_2 Phase A: detailed-response events are
+                // an additive surface alongside the legacy `CallProgress`
+                // / `CallEnded` / `CallFailed` variants. The callback
+                // surface routes the existing variants today; consumers
+                // can also pattern-match on the detailed variant via
+                // `handler.on_event(...)`.
+                | Event::CallProgressDetailed(_)
+                | Event::CallEstablishedDetailed(_)
+                | Event::CallFailedDetailed(_) => {}
+                // SIP_API_DESIGN_2 Phase E: typed mid-dialog inbound
+                // events. Rehydrate the coordinator hook on the
+                // IncomingRequest before forwarding to the handler so
+                // any *_builder() it calls can dispatch.
+                Event::InfoReceived { call_id: _, mut request } => {
+                    request.set_coordinator(coordinator.clone());
+                    handler.on_info_received(request).await;
+                }
+                Event::MessageReceived { call_id: _, mut request } => {
+                    request.set_coordinator(coordinator.clone());
+                    handler.on_message_received(request).await;
+                }
+                Event::OptionsReceived { call_id: _, mut request } => {
+                    request.set_coordinator(coordinator.clone());
+                    handler.on_options_received(request).await;
+                }
+                Event::UpdateReceived { call_id: _, mut request } => {
+                    request.set_coordinator(coordinator.clone());
+                    handler.on_update_received(request).await;
+                }
+                Event::IncomingRegister { mut register } => {
+                    register.set_coordinator(coordinator.clone());
+                    handler.on_register_received(register).await;
+                }
             }
         });
     }
@@ -2385,6 +2539,7 @@ mod tests {
                 replaces: None,
                 transaction_id: "tx-1".into(),
                 transfer_type: "blind".into(),
+                request: None,
             },
             Event::TransferAccepted {
                 call_id: call_id.clone(),
@@ -2419,6 +2574,7 @@ mod tests {
                 subscription_state: Some("active".into()),
                 content_type: Some("message/sipfrag".into()),
                 body: Some("SIP/2.0 100 Trying".into()),
+                request: None,
             },
             Event::RegistrationSuccess {
                 registrar: "sip:registrar.example.test".into(),
@@ -2580,6 +2736,7 @@ mod tests {
                 replaces: None,
                 transaction_id: "tx-builder".into(),
                 transfer_type: "blind".into(),
+                request: None,
             },
             Event::CallEnded {
                 call_id,

@@ -161,8 +161,13 @@ impl Endpoint {
     /// Full `sip:` and `sips:` URIs are used unchanged. Bare extensions such
     /// as `"1002"` are resolved through the endpoint registrar when one is
     /// configured.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use endpoint.invite(target).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call(&self, target: &str) -> Result<EndpointCall> {
         let target = self.resolve_target(target)?;
+        #[allow(deprecated)]
         let handle = self.peer.control().call(&target).await?;
         Ok(EndpointCall::new(
             handle,
@@ -198,12 +203,17 @@ impl Endpoint {
     /// # Ok(())
     /// # }
     /// ```
+    #[deprecated(
+        since = "0.3.0",
+        note = "use endpoint.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call_with_headers(
         &self,
         target: &str,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<EndpointCall> {
         let target = self.resolve_target(target)?;
+        #[allow(deprecated)]
         let handle = self
             .peer
             .control()
@@ -319,8 +329,13 @@ impl EndpointControl {
     }
 
     /// Initiate an outgoing call using Endpoint target resolution.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use endpoint.coordinator().invite(from, to).send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call(&self, target: &str) -> Result<EndpointCall> {
         let target = self.resolve_target(target)?;
+        #[allow(deprecated)]
         let handle = self.control.call(&target).await?;
         Ok(EndpointCall::new(
             handle,
@@ -336,12 +351,17 @@ impl EndpointControl {
     /// [`PeerControl::call_with_headers`]. See
     /// [`Endpoint::call_with_headers`](super::endpoint::Endpoint::call_with_headers)
     /// for the canonical example.
+    #[deprecated(
+        since = "0.3.0",
+        note = "use endpoint.coordinator().invite(from, to).with_header(..)?.send().await — see SIP_API_DESIGN_2.md"
+    )]
     pub async fn call_with_headers(
         &self,
         target: &str,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<EndpointCall> {
         let target = self.resolve_target(target)?;
+        #[allow(deprecated)]
         let handle = self
             .control
             .call_with_headers(&target, extra_headers)

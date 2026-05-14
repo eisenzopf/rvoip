@@ -173,6 +173,33 @@ impl TransactionIntegration for DialogManager {
         method: Method,
         body: Option<bytes::Bytes>,
     ) -> DialogResult<TransactionKey> {
+        self.send_request_in_dialog_with_extras(dialog_id, method, body, Vec::new())
+            .await
+    }
+
+    /// Send a response using transaction-core
+    async fn send_transaction_response(
+        &self,
+        transaction_id: &TransactionKey,
+        response: Response,
+    ) -> DialogResult<()> {
+        Self::send_transaction_response_impl(self, transaction_id, response).await
+    }
+}
+
+impl DialogManager {
+    /// SIP_API_DESIGN_2 §7.2 — in-dialog request dispatch with
+    /// application-staged `extra_headers` appended after the
+    /// stack-managed slice. Used by every `send_*_with_options` path on
+    /// `UnifiedDialogApi`. The legacy `send_request_in_dialog` (no
+    /// extras) forwards to this with an empty Vec.
+    pub async fn send_request_in_dialog_with_extras(
+        &self,
+        dialog_id: &DialogId,
+        method: Method,
+        body: Option<bytes::Bytes>,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> DialogResult<TransactionKey> {
         debug!(
             "Sending {} request for dialog {} using Phase 3 dialog functions",
             method, dialog_id
@@ -247,6 +274,17 @@ impl TransactionIntegration for DialogManager {
             let local_address =
                 self.local_address_for_target_and_routes(&template.target_uri, &template.route_set);
 
+            // SIP_API_DESIGN_2 §7.2 — applications stage headers on the
+            // builder; the dialog stack stamps Call-ID/CSeq/Via/From-tag
+            // and appends application extras after that fixed prefix.
+            // Empty Vec means legacy path (no extras to stamp).
+            let extras_opt: Option<Vec<rvoip_sip_core::types::TypedHeader>> =
+                if extra_headers.is_empty() {
+                    None
+                } else {
+                    Some(extra_headers.clone())
+                };
+
             // Build request using Phase 3 dialog quick functions (MUCH simpler!)
             let request = match method {
                 Method::Invite => {
@@ -259,7 +297,7 @@ impl TransactionIntegration for DialogManager {
                                 crate::errors::DialogError::protocol_error("re-INVITE request requires SDP content for session modification")
                             })?;
 
-                            dialog_quick::reinvite_for_dialog(
+                            dialog_quick::reinvite_for_dialog_with_extras(
                                 &template.call_id,
                                 &template.local_uri.to_string(),
                                 &local_tag,
@@ -269,7 +307,8 @@ impl TransactionIntegration for DialogManager {
                                 template.cseq_number,
                                 local_address,
                                 if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
-                                self.local_contact_uri()
+                                self.local_contact_uri(),
+                                extras_opt.clone(),
                             )
                         },
                         None => {
@@ -306,7 +345,13 @@ impl TransactionIntegration for DialogManager {
                                 invite_builder = invite_builder.with_sdp(sdp_content);
                             }
 
-                            invite_builder.build()
+                            // SIP_API_DESIGN_2 §5.2 — extras after stack-managed prefix.
+                            invite_builder.build().map(|mut request| {
+                                for hdr in extra_headers.iter().cloned() {
+                                    request.headers.push(hdr);
+                                }
+                                request
+                            })
                         }
                     }
                 },
@@ -327,7 +372,7 @@ impl TransactionIntegration for DialogManager {
                         template.cseq_number,
                         local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
-                        None,
+                        extras_opt.clone(),
                     )
                 },
 
@@ -350,7 +395,7 @@ impl TransactionIntegration for DialogManager {
                         "sip:unknown".to_string()
                     };
 
-                    dialog_quick::refer_for_dialog_with_contact(
+                    dialog_quick::refer_for_dialog_with_extras(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
@@ -361,6 +406,7 @@ impl TransactionIntegration for DialogManager {
                         local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
                         self.local_contact_uri(),
+                        extras_opt.clone(),
                     )
                 },
 
@@ -370,7 +416,7 @@ impl TransactionIntegration for DialogManager {
                         crate::errors::DialogError::protocol_error("UPDATE request requires remote tag in established dialog")
                     })?;
 
-                    dialog_quick::update_for_dialog_with_contact(
+                    dialog_quick::update_for_dialog_with_extras(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
@@ -381,6 +427,7 @@ impl TransactionIntegration for DialogManager {
                         local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
                         self.local_contact_uri(),
+                        extras_opt.clone(),
                     )
                 },
 
@@ -391,7 +438,7 @@ impl TransactionIntegration for DialogManager {
                     })?;
 
                     let content = body_string.unwrap_or_else(|| "Application info".to_string());
-                    dialog_quick::info_for_dialog(
+                    dialog_quick::info_for_dialog_with_extras(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
@@ -401,7 +448,8 @@ impl TransactionIntegration for DialogManager {
                         Some("application/info".to_string()),
                         template.cseq_number,
                         local_address,
-                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                        extras_opt.clone(),
                     )
                 },
 
@@ -411,7 +459,7 @@ impl TransactionIntegration for DialogManager {
                         crate::errors::DialogError::protocol_error("NOTIFY request requires remote tag in established dialog")
                     })?;
 
-                    dialog_quick::notify_for_dialog(
+                    dialog_quick::notify_for_dialog_with_extras(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
@@ -422,7 +470,8 @@ impl TransactionIntegration for DialogManager {
                         notify_subscription_state.clone(),
                         template.cseq_number,
                         local_address,
-                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                        extras_opt.clone(),
                     )
                 },
 
@@ -433,7 +482,7 @@ impl TransactionIntegration for DialogManager {
                     })?;
 
                     let content = body_string.unwrap_or_else(|| "".to_string());
-                    dialog_quick::message_for_dialog(
+                    dialog_quick::message_for_dialog_with_extras(
                         &template.call_id,
                         &template.local_uri.to_string(),
                         &local_tag,
@@ -443,7 +492,8 @@ impl TransactionIntegration for DialogManager {
                         Some("text/plain".to_string()),
                         template.cseq_number,
                         local_address,
-                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                        if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                        extras_opt.clone(),
                     )
                 },
 
@@ -478,7 +528,7 @@ impl TransactionIntegration for DialogManager {
                         method.clone(),
                         body_string,
                         None, // Auto-detect content type
-                        None,
+                        extras_opt.clone(),
                     )
                 }
             }.map_err(|e| crate::errors::DialogError::InternalError {
@@ -568,7 +618,7 @@ impl TransactionIntegration for DialogManager {
     /// response with a body on a dialog whose peer advertised `100rel` is
     /// rewritten with `Require: 100rel` + `RSeq: <n>` and retransmitted with
     /// T1 backoff until PRACK acknowledges it.
-    async fn send_transaction_response(
+    pub async fn send_transaction_response_impl(
         &self,
         transaction_id: &TransactionKey,
         mut response: Response,
@@ -756,6 +806,7 @@ impl DialogManager {
         body: Option<bytes::Bytes>,
         auth_header_name: &str,
         auth_header_value: String,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
@@ -846,6 +897,15 @@ impl DialogManager {
                 header_name,
                 HeaderValue::Raw(auth_header_value.into_bytes()),
             ));
+
+            // SIP_API_DESIGN_2 §7.3 — preserve application-staged extras
+            // across the 401/407 → retry hop. The original INVITE's
+            // extras live in `pending_invite_options` on session-core's
+            // SessionState; the caller forwards them here so the retry
+            // wire form matches the initial send.
+            for extra in extras {
+                request.headers.push(extra);
+            }
 
             let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
@@ -2122,15 +2182,31 @@ impl DialogManager {
         &self,
         invite_tx_id: &TransactionKey,
     ) -> DialogResult<TransactionKey> {
+        self.cancel_invite_transaction_with_dialog_and_extras(invite_tx_id, Vec::new())
+            .await
+    }
+
+    /// CANCEL with application extras. The transaction-manager helper
+    /// builds the wire CANCEL from the targeted INVITE (RFC 3261 §9.1
+    /// — same Call-ID/From/To/CSeq-num/Via-branch/Route). When extras
+    /// are supplied, they are appended to that wire form after the
+    /// stack-managed slice; the resulting CANCEL is sent on its own
+    /// new non-INVITE client transaction.
+    pub async fn cancel_invite_transaction_with_dialog_and_extras(
+        &self,
+        invite_tx_id: &TransactionKey,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> DialogResult<TransactionKey> {
         debug!(
-            "Cancelling INVITE transaction {} with dialog cleanup",
-            invite_tx_id
+            "Cancelling INVITE transaction {} with dialog cleanup ({} extra headers)",
+            invite_tx_id,
+            extra_headers.len()
         );
 
         // Cancel the transaction using transaction-core
         let cancel_tx_id = self
             .transaction_manager
-            .cancel_invite_transaction(invite_tx_id)
+            .cancel_invite_transaction_with_extras(invite_tx_id, extra_headers)
             .await
             .map_err(|e| crate::errors::DialogError::TransactionError {
                 message: format!("Failed to cancel INVITE transaction: {}", e),

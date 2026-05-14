@@ -19,6 +19,11 @@ pub struct SessionRegistry {
     current_media: Arc<RwLock<Option<MediaSessionId>>>,
     /// Temporary storage for pending incoming call
     pending_incoming_call: Arc<RwLock<Option<IncomingCallInfo>>>,
+    /// SIP_API_DESIGN_2 Phase A: parsed inbound INVITE request,
+    /// retained while the call is in `Ringing` so
+    /// `IncomingCall::raw_request()` can surface it.
+    pending_incoming_request:
+        Arc<RwLock<Option<Arc<rvoip_sip_core::Request>>>>,
 }
 
 impl SessionRegistry {
@@ -29,6 +34,7 @@ impl SessionRegistry {
             current_dialog: Arc::new(RwLock::new(None)),
             current_media: Arc::new(RwLock::new(None)),
             pending_incoming_call: Arc::new(RwLock::new(None)),
+            pending_incoming_request: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -116,6 +122,7 @@ impl SessionRegistry {
         *self.current_dialog.write().await = None;
         *self.current_media.write().await = None;
         *self.pending_incoming_call.write().await = None;
+        *self.pending_incoming_request.write().await = None;
     }
 
     /// Store pending incoming call info (single session version)
@@ -133,6 +140,36 @@ impl SessionRegistry {
         _session_id: &SessionId,
     ) -> Option<IncomingCallInfo> {
         self.pending_incoming_call.write().await.take()
+    }
+
+    /// SIP_API_DESIGN_2 Phase A: store the parsed inbound INVITE so
+    /// `IncomingCall::raw_request()` can surface it. The companion
+    /// take/peek accessors are used by the four API surfaces when
+    /// constructing the user-facing `IncomingCall`.
+    pub async fn store_pending_incoming_request(
+        &self,
+        request: Arc<rvoip_sip_core::Request>,
+    ) {
+        *self.pending_incoming_request.write().await = Some(request);
+    }
+
+    /// Peek at the parsed inbound INVITE without consuming it. Used
+    /// when multiple surfaces (StreamPeer, CallbackPeer event stream,
+    /// Endpoint) may build their own `IncomingCall` view of the same
+    /// inbound call.
+    pub async fn peek_pending_incoming_request(
+        &self,
+    ) -> Option<Arc<rvoip_sip_core::Request>> {
+        self.pending_incoming_request.read().await.clone()
+    }
+
+    /// Consume the parsed inbound INVITE once an
+    /// `IncomingCall::accept()` / `reject()` / `defer()` resolves the
+    /// call. Idempotent — repeated calls return `None`.
+    pub async fn take_pending_incoming_request(
+        &self,
+    ) -> Option<Arc<rvoip_sip_core::Request>> {
+        self.pending_incoming_request.write().await.take()
     }
 }
 

@@ -590,6 +590,20 @@ impl UnifiedDialogManager {
         event_package: &str,
         expires: u32,
     ) -> ApiResult<()> {
+        self.send_subscribe_refresh_with_extras(dialog_id, event_package, expires, Vec::new())
+            .await
+    }
+
+    /// In-dialog SUBSCRIBE refresh with application-staged
+    /// `extra_headers` appended after the stack-managed slice. See
+    /// SIP_API_DESIGN_2 §5.2.
+    pub async fn send_subscribe_refresh_with_extras(
+        &self,
+        dialog_id: &DialogId,
+        event_package: &str,
+        expires: u32,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<()> {
         use crate::transaction::dialog::{
             request_builder_from_dialog_template, DialogRequestTemplate,
         };
@@ -640,6 +654,12 @@ impl UnifiedDialogManager {
             request
                 .headers
                 .push(TypedHeader::Expires(Expires::new(expires)));
+            // SIP_API_DESIGN_2 §5.2 — append application extras after
+            // the stack-managed prefix + dedicated setters (Event,
+            // Expires).
+            for hdr in extra_headers {
+                request.headers.push(hdr);
+            }
             let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
@@ -1411,10 +1431,11 @@ impl UnifiedDialogManager {
         sdp: Option<String>,
         auth_header_name: &str,
         auth_header_value: String,
+        extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<TransactionKey> {
         let body = sdp.map(bytes::Bytes::from);
         self.core
-            .send_invite_with_auth(dialog_id, body, auth_header_name, auth_header_value)
+            .send_invite_with_auth(dialog_id, body, auth_header_name, auth_header_value, extras)
             .await
             .map_err(ApiError::from)
     }
@@ -1455,6 +1476,19 @@ impl UnifiedDialogManager {
     /// - Dialog is not in Early or Initial state
     /// - No pending INVITE transaction found
     pub async fn send_cancel(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
+        self.send_cancel_with_extras(dialog_id, Vec::new()).await
+    }
+
+    /// CANCEL with caller-supplied `extra_headers` appended to the
+    /// generated CANCEL after the RFC 3261 §9.1 mandatory header copy
+    /// (From / To / Call-ID / CSeq-num / Max-Forwards / Via /
+    /// optionally Route). The new CANCEL transaction is created and
+    /// sent on the same destination as the targeted INVITE.
+    pub async fn send_cancel_with_extras(
+        &self,
+        dialog_id: &DialogId,
+        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    ) -> ApiResult<TransactionKey> {
         // Get the dialog state to verify it can be cancelled
         let dialog_state = self.get_dialog_state(dialog_id).await?;
 
@@ -1488,10 +1522,12 @@ impl UnifiedDialogManager {
                 }
             })?;
 
-        // Cancel the INVITE transaction
+        // Cancel the INVITE transaction. Application extras ride
+        // alongside the RFC 3261-mandated copies — appended after the
+        // stack-managed slice per §5.2.
         let cancel_tx_id = self
             .core
-            .cancel_invite_transaction_with_dialog(&invite_tx_id)
+            .cancel_invite_transaction_with_dialog_and_extras(&invite_tx_id, extra_headers)
             .await
             .map_err(|e| {
                 error!(

@@ -20,6 +20,7 @@ fn test_transfer_request_event_exists() {
         refer_to: refer_to.clone(),
         referred_by: Some("sip:alice@example.com".to_string()),
         replaces: None,
+        raw_request: None,
     };
 
     match event {
@@ -29,6 +30,7 @@ fn test_transfer_request_event_exists() {
             refer_to: parsed_refer_to,
             referred_by,
             replaces,
+            raw_request: _,
         } => {
             assert!(!dialog_id.to_string().is_empty());
             assert!(!transaction_id.to_string().is_empty());
@@ -54,6 +56,7 @@ fn test_transfer_request_with_replaces() {
         refer_to,
         referred_by: None,
         replaces: Some("call-id=abc123;to-tag=456;from-tag=789".to_string()),
+        raw_request: None,
     };
 
     match event {
@@ -97,6 +100,7 @@ fn test_transfer_request_minimal() {
         refer_to,
         referred_by: None,
         replaces: None,
+        raw_request: None,
     };
 
     match event {

@@ -28,6 +28,19 @@ use crate::dialog::{
 use crate::errors::{DialogError, DialogResult};
 use crate::events::DialogEvent;
 
+/// Build the shared `dialog_lookup` key for a subscription, including the
+/// RFC 6665 §4.5.2 `Event: pkg;id=<sid>` disambiguator. A 4th segment
+/// distinguishes subscription keys from the 3-tuple keys used by regular
+/// INVITE-driven dialogs, so the two key namespaces never collide.
+fn subscription_lookup_key(
+    call_id: &str,
+    tag_a: &str,
+    tag_b: &str,
+    event_id: Option<&str>,
+) -> String {
+    format!("{}:{}:{}:{}", call_id, tag_a, tag_b, event_id.unwrap_or(""))
+}
+
 /// Manages SIP event subscriptions
 pub struct SubscriptionManager {
     /// Shared dialog store from DialogManager
@@ -218,12 +231,14 @@ impl SubscriptionManager {
         // Store the dialog
         self.dialogs.insert(dialog_id.clone(), dialog.clone());
 
-        // Add to lookup table
-        let lookup_key = format!(
-            "{}:{}:{}",
-            dialog.call_id,
+        // Add to lookup table. The key includes the subscription's event id
+        // parameter so multiple subscriptions on the same dialog (RFC 6665
+        // §4.5.2) don't clobber each other in the shared lookup map.
+        let lookup_key = subscription_lookup_key(
+            &dialog.call_id,
             dialog.local_tag.as_deref().unwrap_or(""),
-            dialog.remote_tag.as_deref().unwrap_or("")
+            dialog.remote_tag.as_deref().unwrap_or(""),
+            dialog.event_id.as_deref(),
         );
         self.dialog_lookup.insert(lookup_key, dialog_id.clone());
 
@@ -284,7 +299,9 @@ impl SubscriptionManager {
                 DialogError::protocol_error("NOTIFY requires Subscription-State header")
             })?;
 
-        // Find subscription by Call-ID and tags
+        // Find subscription by Call-ID, tags, and Event header `id` parameter.
+        // Per RFC 6665 §4.5.2, multiple subscriptions can share one dialog;
+        // the `Event: pkg;id=<sid>` parameter disambiguates them.
         let call_id = request
             .call_id()
             .map(|c| c.value().to_string())
@@ -294,12 +311,18 @@ impl SubscriptionManager {
 
         let from_tag = request.from().and_then(|f| f.tag().map(|s| s.to_string()));
 
-        // Find matching dialog using lookup
-        let lookup_key = format!(
-            "{}:{}:{}",
-            call_id,
+        let event_id = request
+            .header(&HeaderName::Event)
+            .and_then(|h| match h {
+                TypedHeader::Event(e) => e.id.clone(),
+                _ => None,
+            });
+
+        let lookup_key = subscription_lookup_key(
+            &call_id,
             to_tag.as_deref().unwrap_or(""),
-            from_tag.as_deref().unwrap_or("")
+            from_tag.as_deref().unwrap_or(""),
+            event_id.as_deref(),
         );
 
         if let Some(dialog_id_entry) = self.dialog_lookup.get(&lookup_key) {

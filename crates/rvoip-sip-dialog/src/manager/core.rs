@@ -924,17 +924,34 @@ impl DialogManager {
         &self,
         event: SessionCoordinationEvent,
     ) -> DialogResult<bool> {
+        // Try the legacy in-process session_coordinator first — it
+        // signals "definite consumer" because the receiver is held by
+        // the application (rather than the event-hub fan-out which can
+        // succeed even when no subscriber is listening). This is the
+        // path the OPTIONS-fallback test relies on: in test setups
+        // without a session_coordinator wired, the protocol handler
+        // must observe `false` here and emit a basic 200 OK locally.
+        let mut delivered = false;
+        if let Some(sender) = self.session_coordinator.read().await.as_ref() {
+            match sender.send(event.clone()).await {
+                Ok(()) => delivered = true,
+                Err(e) => {
+                    warn!("Failed to send session coordination event: {}", e);
+                }
+            }
+        }
+
+        // Best-effort fan-out via the event hub. Success here is not
+        // sufficient to claim "consumer exists" because the global bus
+        // accepts publishes whether or not any subscriber is wired.
         if let Some(hub) = self.event_hub.read().await.as_ref() {
             match hub
                 .try_publish_session_coordination_event(event.clone())
                 .await
             {
-                Ok(true) => return Ok(true),
-                Ok(false) => {
-                    debug!(
-                        "Session coordination event did not map to a cross-crate event: {:?}",
-                        event
-                    );
+                Ok(true) | Ok(false) => {
+                    // either mapped or not; either way the in-process
+                    // delivered flag above is the authoritative signal.
                 }
                 Err(e) => {
                     warn!(
@@ -945,16 +962,7 @@ impl DialogManager {
             }
         }
 
-        if let Some(sender) = self.session_coordinator.read().await.as_ref() {
-            match sender.send(event.clone()).await {
-                Ok(()) => return Ok(true),
-                Err(e) => {
-                    warn!("Failed to send session coordination event: {}", e);
-                }
-            }
-        }
-
-        Ok(false)
+        Ok(delivered)
     }
 
     /// **CENTRAL DISPATCHER**: Handle incoming SIP messages
@@ -1012,8 +1020,41 @@ impl DialogManager {
             Method::Subscribe => self.handle_subscribe(request, source).await,
             Method::Notify => self.handle_notify(request, source).await,
             Method::Prack => self.handle_prack(request).await,
+            Method::Message => {
+                // RFC 3428 — MESSAGE is a fire-and-forget transport that
+                // dialog-core does not parse for application semantics.
+                // Reply with a basic 200 OK so the transaction settles
+                // and the application can observe the wire bytes via
+                // the SIP trace channel. Out-of-dialog MESSAGE creates
+                // no dialog state per RFC 3428 §4.
+                debug!("Replying 200 OK to inbound MESSAGE from {}", source);
+                let server_transaction = self
+                    .transaction_manager
+                    .create_server_transaction(request.clone(), source)
+                    .await
+                    .map_err(|e| DialogError::TransactionError {
+                        message: format!("Failed to create server transaction for MESSAGE: {}", e),
+                    })?;
+                let transaction_id = server_transaction.id().clone();
+                let response = crate::transaction::utils::response_builders::create_response(
+                    &request,
+                    rvoip_sip_core::StatusCode::Ok,
+                );
+                if let Err(e) = self
+                    .transaction_manager
+                    .send_response(&transaction_id, response)
+                    .await
+                {
+                    debug!("Failed to send 200 OK for MESSAGE: {}", e);
+                }
+                Ok(())
+            }
             method => {
-                warn!("Unsupported SIP method: {}", method);
+                // Demoted from warn — under the test harness this fires
+                // for every method we haven't implemented yet (e.g.
+                // PUBLISH); spurious error-level logs make pass output
+                // noisier than the failure they're supposed to flag.
+                debug!("Unsupported SIP method: {}", method);
                 Err(DialogError::protocol_error(&format!(
                     "Unsupported method: {}",
                     method

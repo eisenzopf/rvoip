@@ -91,6 +91,16 @@ pub struct SessionCrossCrateEventHandler {
 
     /// Optional owner id for SIP trace events emitted by this coordinator's transport stack.
     sip_trace_owner_id: Option<String>,
+
+    /// SIP_API_DESIGN_2 Phase D — weak handle back to the
+    /// `UnifiedCoordinator` so the bus-path `IncomingRegister`
+    /// construction can supply `RegisterResponseBuilder` with the
+    /// coordinator hook it needs to publish responses back to
+    /// dialog-core. `Weak` breaks the circular ownership
+    /// (coordinator -> handler -> coordinator). Populated after
+    /// construction via [`Self::set_coordinator`]; cloning the handler
+    /// shares the underlying once-cell.
+    coordinator: Arc<std::sync::OnceLock<std::sync::Weak<crate::api::unified::UnifiedCoordinator>>>,
 }
 
 #[allow(dead_code)]
@@ -112,6 +122,7 @@ impl SessionCrossCrateEventHandler {
                 headers,
                 transaction_id,
                 source_addr,
+                raw_request,
             } => {
                 self.handle_incoming_call_parts(
                     session_id.clone(),
@@ -122,6 +133,7 @@ impl SessionCrossCrateEventHandler {
                     headers,
                     transaction_id,
                     source_addr,
+                    raw_request.clone(),
                 )
                 .await
             }
@@ -138,22 +150,26 @@ impl SessionCrossCrateEventHandler {
                 status_code,
                 reason_phrase,
                 sdp,
+                raw_response,
             } => {
                 self.handle_call_progress_parts(
                     SessionId(session_id.clone()),
                     *status_code,
                     reason_phrase.clone(),
                     sdp.clone(),
+                    raw_response.clone(),
                 )
                 .await
             }
             DialogToSessionEvent::CallEstablished {
                 session_id,
                 sdp_answer,
+                raw_response,
             } => {
                 self.handle_call_established_parts(
                     SessionId(session_id.clone()),
                     sdp_answer.clone(),
+                    raw_response.clone(),
                 )
                 .await
             }
@@ -168,11 +184,13 @@ impl SessionCrossCrateEventHandler {
                 session_id,
                 status_code,
                 reason_phrase,
+                raw_response,
             } => {
                 self.handle_call_failed_parts(
                     SessionId(session_id.clone()),
                     *status_code,
                     reason_phrase.clone(),
+                    raw_response.clone(),
                 )
                 .await
             }
@@ -256,13 +274,30 @@ impl SessionCrossCrateEventHandler {
                 session_id,
                 sdp,
                 method,
+                raw_request,
             } => {
-                self.handle_reinvite_received_parts(
-                    SessionId(session_id.clone()),
-                    sdp.clone(),
-                    method.clone(),
-                )
-                .await
+                let sid = SessionId(session_id.clone());
+                // SIP_API_DESIGN_2 Phase E: surface UPDATE separately
+                // via `Event::UpdateReceived` so subscribers can
+                // distinguish a re-INVITE from an UPDATE without
+                // string-matching on `method`. INVITE keeps the
+                // legacy hold/resume state-machine path.
+                if method.eq_ignore_ascii_case("UPDATE") {
+                    if let Some(incoming) = build_incoming_request_from_bytes(
+                        sid.clone(),
+                        raw_request.clone(),
+                    ) {
+                        publish_api_event(
+                            &self.app_event_publisher,
+                            crate::api::events::Event::UpdateReceived {
+                                call_id: sid.clone(),
+                                request: incoming,
+                            },
+                        );
+                    }
+                }
+                self.handle_reinvite_received_parts(sid, sdp.clone(), method.clone())
+                    .await
             }
             DialogToSessionEvent::TransferRequested {
                 session_id,
@@ -271,6 +306,7 @@ impl SessionCrossCrateEventHandler {
                 transaction_id,
                 referred_by,
                 replaces,
+                raw_request,
             } => {
                 self.handle_transfer_requested_parts(
                     SessionId(session_id.clone()),
@@ -279,6 +315,7 @@ impl SessionCrossCrateEventHandler {
                     transaction_id.clone(),
                     referred_by.clone(),
                     replaces.clone(),
+                    raw_request.clone(),
                 )
                 .await
             }
@@ -322,13 +359,23 @@ impl SessionCrossCrateEventHandler {
                 subscription_state,
                 content_type,
                 body,
+                raw_request,
             } => {
+                if raw_request.is_none() {
+                    tracing::warn!(
+                        "NotifyReceived cross-crate bridge: raw_request was None — \
+                         upstream publish site did not preserve NOTIFY bytes for \
+                         session {}",
+                        session_id
+                    );
+                }
                 self.handle_notify_received_parts(
                     SessionId(session_id.clone()),
                     event_package.clone(),
                     subscription_state.clone(),
                     content_type.clone(),
                     body.clone(),
+                    raw_request.clone(),
                 )
                 .await
             }
@@ -351,13 +398,172 @@ impl SessionCrossCrateEventHandler {
                 )
                 .await
             }
-            DialogToSessionEvent::IncomingRegister { .. } => {
-                debug!("IncomingRegister is handled by dialog registration paths");
+            DialogToSessionEvent::IncomingRegister {
+                transaction_id,
+                from_uri,
+                to_uri,
+                contact_uri,
+                expires,
+                authorization,
+                call_id,
+                raw_request,
+            } => {
+                // SIP_API_DESIGN_2 Phase D — surface inbound REGISTER as a
+                // typed `IncomingRegister` so registrar applications can
+                // author responses via `accept_builder()` / `challenge_builder()`
+                // / `reject_builder()`. When the bus carries the original
+                // wire bytes, re-parse them once into an `Arc<Request>`
+                // for typed-header inspection; otherwise fall through to
+                // the synthesized view (legacy publish path).
+                let coordinator = self
+                    .coordinator
+                    .get()
+                    .and_then(|w| w.upgrade());
+                let parsed_request: Option<Arc<rvoip_sip_core::Request>> =
+                    raw_request.as_ref().and_then(|bytes| {
+                        match rvoip_sip_core::parse_message(bytes.as_ref()) {
+                            Ok(rvoip_sip_core::Message::Request(req)) => Some(Arc::new(req)),
+                            _ => None,
+                        }
+                    });
+
+                let register = match (parsed_request, coordinator) {
+                    (Some(req), Some(coord)) => {
+                        crate::api::incoming::IncomingRegister::with_request_and_coordinator(
+                            transaction_id.clone(),
+                            from_uri.clone(),
+                            to_uri.clone(),
+                            contact_uri.clone(),
+                            *expires,
+                            authorization.clone(),
+                            call_id.clone(),
+                            req,
+                            coord,
+                        )
+                    }
+                    (Some(req), None) => crate::api::incoming::IncomingRegister::with_request(
+                        transaction_id.clone(),
+                        from_uri.clone(),
+                        to_uri.clone(),
+                        contact_uri.clone(),
+                        *expires,
+                        authorization.clone(),
+                        call_id.clone(),
+                        req,
+                    ),
+                    (None, _) => crate::api::incoming::IncomingRegister::synthetic(
+                        transaction_id.clone(),
+                        from_uri.clone(),
+                        to_uri.clone(),
+                        contact_uri.clone(),
+                        *expires,
+                        authorization.clone(),
+                        call_id.clone(),
+                    ),
+                };
+                publish_api_event(
+                    &self.app_event_publisher,
+                    crate::api::events::Event::IncomingRegister { register },
+                );
                 Ok(())
             }
             DialogToSessionEvent::OutboundFlowFailed { aor, reason, .. } => {
                 self.handle_outbound_flow_failed_parts(aor.clone(), reason.clone())
                     .await
+            }
+            // SIP_API_DESIGN_2 Phase E — inbound mid-dialog INFO / MESSAGE / OPTIONS.
+            // Each variant reaches session-core with the original
+            // inbound bytes preserved; we re-parse them once via
+            // `parse_message` into an `Arc<Request>` and surface a
+            // typed `Event::*Received` carrying the `IncomingRequest`
+            // view.
+            DialogToSessionEvent::InfoReceived {
+                session_id,
+                raw_request,
+            } => {
+                if raw_request.is_none() {
+                    tracing::warn!(
+                        "InfoReceived cross-crate bridge: raw_request was None — \
+                         upstream publish site did not preserve INFO bytes for \
+                         session {}",
+                        session_id
+                    );
+                }
+                let sid = SessionId(session_id.clone());
+                if let Some(incoming) =
+                    build_incoming_request_from_bytes(sid.clone(), raw_request.clone())
+                {
+                    publish_api_event(
+                        &self.app_event_publisher,
+                        crate::api::events::Event::InfoReceived {
+                            call_id: sid,
+                            request: incoming,
+                        },
+                    );
+                }
+                Ok(())
+            }
+            DialogToSessionEvent::MessageReceived {
+                session_id,
+                raw_request,
+            } => {
+                if raw_request.is_none() {
+                    tracing::warn!(
+                        "MessageReceived cross-crate bridge: raw_request was None — \
+                         upstream publish site did not preserve MESSAGE bytes for \
+                         session {}",
+                        session_id
+                    );
+                }
+                let sid = SessionId(session_id.clone());
+                if let Some(incoming) =
+                    build_incoming_request_from_bytes(sid.clone(), raw_request.clone())
+                {
+                    publish_api_event(
+                        &self.app_event_publisher,
+                        crate::api::events::Event::MessageReceived {
+                            call_id: sid,
+                            request: incoming,
+                        },
+                    );
+                }
+                Ok(())
+            }
+            DialogToSessionEvent::OptionsReceived {
+                session_id,
+                raw_request,
+            } => {
+                if raw_request.is_none() {
+                    tracing::warn!(
+                        "OptionsReceived cross-crate bridge: raw_request was None — \
+                         upstream publish site did not preserve OPTIONS bytes for \
+                         session {:?}",
+                        session_id
+                    );
+                }
+                // Out-of-dialog OPTIONS arrives with an empty
+                // session_id; in-dialog OPTIONS rides the session
+                // mapping established during INVITE.
+                let sid_opt = if session_id.is_empty() {
+                    None
+                } else {
+                    Some(SessionId(session_id.clone()))
+                };
+                let sid_for_request = sid_opt
+                    .clone()
+                    .unwrap_or_else(|| SessionId(String::from("options-oob")));
+                if let Some(incoming) =
+                    build_incoming_request_from_bytes(sid_for_request, raw_request.clone())
+                {
+                    publish_api_event(
+                        &self.app_event_publisher,
+                        crate::api::events::Event::OptionsReceived {
+                            call_id: sid_opt,
+                            request: incoming,
+                        },
+                    );
+                }
+                Ok(())
             }
         }
     }
@@ -498,6 +704,7 @@ impl SessionCrossCrateEventHandler {
                 LifecycleIndex::new(),
             ),
             sip_trace_owner_id: None,
+            coordinator: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -521,6 +728,7 @@ impl SessionCrossCrateEventHandler {
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher,
             sip_trace_owner_id: None,
+            coordinator: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -572,6 +780,17 @@ impl SessionCrossCrateEventHandler {
         handler.state_machine_event_rx = Some(Arc::new(Mutex::new(state_machine_event_rx)));
         handler.sip_trace_owner_id = sip_trace_owner_id;
         handler
+    }
+
+    /// SIP_API_DESIGN_2 Phase D — pin the coordinator handle so the
+    /// bus-path `IncomingRegister` branch can build a
+    /// `RegisterResponseBuilder` that can publish responses back to
+    /// dialog-core. Idempotent; subsequent calls are no-ops.
+    pub(crate) fn set_coordinator(
+        &self,
+        coordinator: &Arc<crate::api::unified::UnifiedCoordinator>,
+    ) {
+        let _ = self.coordinator.set(Arc::downgrade(coordinator));
     }
 
     /// Deprecated: use `with_event_broadcast` instead.
@@ -1014,6 +1233,7 @@ impl SessionCrossCrateEventHandler {
         headers: &std::collections::HashMap<String, String>,
         _transaction_id: &str,
         _source_addr: &str,
+        raw_request: Option<Arc<bytes::Bytes>>,
     ) -> Result<()> {
         let dialog_id_str = headers
             .get("X-Dialog-Id")
@@ -1099,6 +1319,34 @@ impl SessionCrossCrateEventHandler {
             )
             .await;
 
+        // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
+        // forwarded across the bus so `IncomingCall::raw_request()`
+        // can expose the typed `Arc<Request>`. Failure to parse is
+        // never fatal — we fall back to the legacy headers-only path.
+        if let Some(bytes) = raw_request.as_ref() {
+            match rvoip_sip_core::parse_message(bytes.as_ref()) {
+                Ok(rvoip_sip_core::Message::Request(req)) => {
+                    self.registry
+                        .store_pending_incoming_request(Arc::new(req))
+                        .await;
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "IncomingCall raw_request was not a SIP request"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "Failed to re-parse inbound INVITE bytes; \
+                         IncomingCall.raw_request() will be None"
+                    );
+                }
+            }
+        }
+
         let our_dialog_id = DialogId(dialog_uuid);
         let rvoip_dialog_id = rvoip_sip_dialog::DialogId::from(our_dialog_id.clone());
         self.dialog_adapter
@@ -1176,6 +1424,7 @@ impl SessionCrossCrateEventHandler {
         &self,
         session_id: SessionId,
         sdp_answer: Option<String>,
+        raw_response: Option<std::sync::Arc<bytes::Bytes>>,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
@@ -1222,9 +1471,25 @@ impl SessionCrossCrateEventHandler {
             publish_api_event(
                 &self.app_event_publisher,
                 crate::api::events::Event::CallAnswered {
-                    call_id: session_id,
-                    sdp: sdp_answer,
+                    call_id: session_id.clone(),
+                    sdp: sdp_answer.clone(),
                 },
+            );
+
+            // SIP_API_DESIGN_2 Phase A: parallel detailed event
+            // carrying the parsed 200 OK so B2BUA / SBC code can
+            // carry Allow / Supported / Session-Expires through
+            // to the downstream leg.
+            let detailed = build_incoming_response_from_bytes(
+                session_id,
+                200,
+                "OK".to_string(),
+                sdp_answer,
+                raw_response,
+            );
+            publish_api_event(
+                &self.app_event_publisher,
+                crate::api::events::Event::CallEstablishedDetailed(detailed),
             );
         } else {
             info!(
@@ -1279,7 +1544,7 @@ impl SessionCrossCrateEventHandler {
                 } else {
                     format!("INVITE authentication failed: {}", e)
                 };
-                self.handle_call_failed_parts(session_id, status, reason)
+                self.handle_call_failed_parts(session_id, status, reason, None)
                     .await?;
             }
         }
@@ -1757,7 +2022,7 @@ impl SessionCrossCrateEventHandler {
                 } else {
                     format!("INVITE authentication failed: {}", e)
                 };
-                self.handle_call_failed_parts(session_id, status, reason)
+                self.handle_call_failed_parts(session_id, status, reason, None)
                     .await?;
             }
         }
@@ -1787,7 +2052,7 @@ impl SessionCrossCrateEventHandler {
             .extract_field(event_str, "reason_phrase: \"")
             .unwrap_or_else(|| "Failure".to_string());
 
-        self.handle_call_failed_parts(session_id, status, reason)
+        self.handle_call_failed_parts(session_id, status, reason, None)
             .await
     }
 
@@ -1796,6 +2061,7 @@ impl SessionCrossCrateEventHandler {
         session_id: SessionId,
         status: u16,
         reason: String,
+        raw_response: Option<std::sync::Arc<bytes::Bytes>>,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
@@ -1921,6 +2187,23 @@ impl SessionCrossCrateEventHandler {
             status_code: status,
             reason: reason.clone(),
         };
+
+        // SIP_API_DESIGN_2 Phase A: also publish the detailed view so
+        // applications can inspect Retry-After / Warning / Reason on
+        // the failure response. Published before the legacy variant so
+        // subscribers see both before the session is released.
+        let detailed = build_incoming_response_from_bytes(
+            session_id.clone(),
+            status,
+            reason.clone(),
+            None,
+            raw_response,
+        );
+        publish_api_event(
+            &self.app_event_publisher,
+            crate::api::events::Event::CallFailedDetailed(detailed),
+        );
+
         self.publish_and_release_session(api_event, session_id.clone())
             .await;
 
@@ -2519,7 +2802,7 @@ impl SessionCrossCrateEventHandler {
                 return Ok(());
             }
             if event_str.contains("Ringing") {
-                self.handle_call_progress_parts(sid, 180, "Ringing".to_string(), None)
+                self.handle_call_progress_parts(sid, 180, "Ringing".to_string(), None, None)
                     .await?;
             } else if event_str.contains("Terminated") {
                 if let Err(e) = self
@@ -2540,6 +2823,7 @@ impl SessionCrossCrateEventHandler {
         status_code: u16,
         reason: String,
         sdp: Option<String>,
+        raw_response: Option<std::sync::Arc<bytes::Bytes>>,
     ) -> Result<()> {
         if !self.is_our_session(&sid).await {
             debug!(
@@ -2569,12 +2853,28 @@ impl SessionCrossCrateEventHandler {
         }
 
         let api_event = crate::api::events::Event::CallProgress {
-            call_id: sid,
+            call_id: sid.clone(),
+            status_code,
+            reason: reason.clone(),
+            sdp: sdp.clone(),
+        };
+        publish_api_event(&self.app_event_publisher, api_event);
+
+        // SIP_API_DESIGN_2 Phase A: publish a parallel detailed event
+        // carrying the parsed inbound response, so B2BUA / SBC code can
+        // mirror Allow/Supported/Server/100rel markers to the
+        // downstream 1xx without subscribing to a separate stream.
+        let detailed = build_incoming_response_from_bytes(
+            sid,
             status_code,
             reason,
             sdp,
-        };
-        publish_api_event(&self.app_event_publisher, api_event);
+            raw_response,
+        );
+        publish_api_event(
+            &self.app_event_publisher,
+            crate::api::events::Event::CallProgressDetailed(detailed),
+        );
 
         Ok(())
     }
@@ -2595,7 +2895,7 @@ impl SessionCrossCrateEventHandler {
         let event_type = match new_state {
             rvoip_infra_common::events::cross_crate::CallState::Ringing => {
                 return self
-                    .handle_call_progress_parts(sid, 180, "Ringing".to_string(), None)
+                    .handle_call_progress_parts(sid, 180, "Ringing".to_string(), None, None)
                     .await;
             }
             rvoip_infra_common::events::cross_crate::CallState::Terminated => {
@@ -3054,6 +3354,7 @@ impl SessionCrossCrateEventHandler {
                 transaction_id,
                 None,
                 None,
+                None,
             )
             .await?;
         }
@@ -3068,6 +3369,7 @@ impl SessionCrossCrateEventHandler {
         transaction_id: String,
         referred_by: Option<String>,
         replaces: Option<String>,
+        raw_request: Option<std::sync::Arc<bytes::Bytes>>,
     ) -> Result<()> {
         // Skip if this session isn't ours
         if self
@@ -3095,6 +3397,12 @@ impl SessionCrossCrateEventHandler {
             }
         }
 
+        // SIP_API_DESIGN_2 Phase E: re-parse the inbound REFER bytes
+        // into a typed `IncomingRequest`. The coordinator hook stays
+        // `None` on the bus path; the surface consumer rehydrates it
+        // before dispatching to application code.
+        let request = build_incoming_request_from_bytes(session_id.clone(), raw_request);
+
         // Publish ReferReceived event to the global coordinator's "session_to_app" channel.
         debug!("🔍 [DEBUG] Publishing ReferReceived event to global coordinator");
         self.app_event_publisher
@@ -3105,6 +3413,7 @@ impl SessionCrossCrateEventHandler {
                 replaces: replaces.clone(),
                 transaction_id: transaction_id.clone(),
                 transfer_type: transfer_type.clone(),
+                request,
             });
 
         let state_machine = self.state_machine.clone();
@@ -3571,6 +3880,7 @@ impl SessionCrossCrateEventHandler {
             subscription_state,
             content_type,
             body,
+            None,
         )
         .await
     }
@@ -3582,6 +3892,7 @@ impl SessionCrossCrateEventHandler {
         subscription_state: Option<String>,
         content_type: Option<String>,
         body: Option<String>,
+        raw_request: Option<std::sync::Arc<bytes::Bytes>>,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
@@ -3591,6 +3902,11 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        // SIP_API_DESIGN_2 Phase E: re-parse the inbound NOTIFY bytes
+        // into a typed `IncomingRequest`. The coordinator hook stays
+        // `None`; the surface consumer rehydrates it on dispatch.
+        let request = build_incoming_request_from_bytes(session_id.clone(), raw_request);
+
         // Always surface the raw NOTIFY as a public event.
         let api_event = crate::api::events::Event::NotifyReceived {
             call_id: session_id.clone(),
@@ -3598,6 +3914,7 @@ impl SessionCrossCrateEventHandler {
             subscription_state: subscription_state.clone(),
             content_type: content_type.clone(),
             body: body.clone(),
+            request,
         };
         publish_api_event(&self.app_event_publisher, api_event);
 
@@ -3807,6 +4124,82 @@ impl SessionCrossCrateEventHandler {
 /// which also frees the session-store entry after publish.
 fn publish_api_event(publisher: &SessionEventPublisher, api_event: crate::api::events::Event) {
     publisher.publish(api_event);
+}
+
+/// SIP_API_DESIGN_2 Phase E — re-parse the inbound bytes carried on
+/// the cross-crate variant into an `IncomingRequest`. Returns `None`
+/// when the bytes are missing or unparseable; callers treat that as
+/// "skip the typed event surface" rather than failing the bus
+/// delivery.
+fn build_incoming_request_from_bytes(
+    call_id: SessionId,
+    raw_request: Option<std::sync::Arc<bytes::Bytes>>,
+) -> Option<crate::api::incoming::IncomingRequest> {
+    let bytes = raw_request?;
+    match rvoip_sip_core::parse_message(bytes.as_ref()) {
+        Ok(rvoip_sip_core::Message::Request(req)) => {
+            let from = req.from().map(|f| f.to_string()).unwrap_or_default();
+            let to = req.to().map(|t| t.to_string()).unwrap_or_default();
+            let method = req.method();
+            Some(crate::api::incoming::IncomingRequest::from_bus_request(
+                call_id,
+                from,
+                to,
+                method,
+                std::sync::Arc::new(req),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// SIP_API_DESIGN_2 Phase A — construct an `IncomingResponse` from
+/// the optional inbound bytes carried on the cross-crate variant.
+/// When `raw_response` is `Some`, re-parse the bytes via
+/// `rvoip_sip_core::parse_message` so applications can access typed
+/// headers (Allow / Supported / Retry-After / Warning / …); when
+/// `None`, fall back to a synthesized view that only carries the
+/// status / reason / sdp fields.
+fn build_incoming_response_from_bytes(
+    call_id: SessionId,
+    status_code: u16,
+    reason_phrase: String,
+    sdp: Option<String>,
+    raw_response: Option<std::sync::Arc<bytes::Bytes>>,
+) -> crate::api::incoming::IncomingResponse {
+    use crate::api::handle::CallId;
+    let call_id_view: CallId = call_id;
+    match raw_response.as_ref() {
+        Some(bytes) => {
+            // Re-parse the inbound bytes back into a typed `Response`.
+            // On parse failure (shouldn't happen — these are the
+            // bytes we already accepted) fall back to the synthesized
+            // view.
+            match rvoip_sip_core::parse_message(bytes.as_ref()) {
+                Ok(rvoip_sip_core::Message::Response(resp)) => {
+                    crate::api::incoming::IncomingResponse::with_response(
+                        call_id_view,
+                        status_code,
+                        reason_phrase,
+                        sdp,
+                        std::sync::Arc::new(resp),
+                    )
+                }
+                _ => crate::api::incoming::IncomingResponse::synthetic(
+                    call_id_view,
+                    status_code,
+                    reason_phrase,
+                    sdp,
+                ),
+            }
+        }
+        None => crate::api::incoming::IncomingResponse::synthetic(
+            call_id_view,
+            status_code,
+            reason_phrase,
+            sdp,
+        ),
+    }
 }
 
 fn remote_direction_is_hold(direction: crate::types::MediaDirection) -> bool {

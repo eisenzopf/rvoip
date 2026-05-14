@@ -186,6 +186,10 @@ transitions:
       # Ordered after media commit so a NOTIFY-send failure can't roll
       # back call establishment.
       - type: "SendTransferNotifySuccess"
+      # SIP_API_DESIGN_2 §7.3 invariant #2 — final response for the
+      # INVITE; release the stash so a subsequent re-INVITE / new call
+      # is not rejected by the conflict guard.
+      - type: "ClearPendingINVITEOptions"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -209,6 +213,9 @@ transitions:
       # non-transfer calls. Placed after media commit for the same reason
       # as the Initiating→Active path above.
       - type: "SendTransferNotifySuccess"
+      # SIP_API_DESIGN_2 §7.3 invariant #2 — final response on the
+      # INVITE; release the stash.
+      - type: "ClearPendingINVITEOptions"
     conditions:
       dialog_established: true
       sdp_negotiated: true
@@ -967,6 +974,9 @@ transitions:
       # the transferor via a final sipfrag NOTIFY. No-op for
       # non-transfer sessions.
       - type: "SendTransferNotifyFailure"
+      # SIP_API_DESIGN_2 §7.3 invariant #2 — final response on the
+      # INVITE; release the stash even though the call failed.
+      - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
     description: "Call failed with 4xx error"
@@ -980,6 +990,7 @@ transitions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
       - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
     description: "Call failed with 5xx error"
@@ -992,6 +1003,7 @@ transitions:
     actions:
       - type: "CleanupDialog"
       - type: "CleanupMedia"
+      - type: "ClearPendingINVITEOptions"
     publish:
       - "CallFailed"
     description: "INVITE timed out before a provisional response; do not send CANCEL"
@@ -1020,7 +1032,7 @@ transitions:
       type: "Dialog180Ringing"
     next_state: "Cancelling"
     actions:
-      - type: "SendCANCEL"
+      - type: "SendCANCELWithOptions"
       - type: "CleanupMedia"
     description: "Provisional response arrived after pending cancel; send CANCEL"
 
@@ -1030,7 +1042,7 @@ transitions:
       type: "Dialog183SessionProgress"
     next_state: "Cancelling"
     actions:
-      - type: "SendCANCEL"
+      - type: "SendCANCELWithOptions"
       - type: "CleanupMedia"
     description: "Early-media provisional arrived after pending cancel; send CANCEL without starting media"
 
@@ -1100,7 +1112,7 @@ transitions:
       type: "CancelCall"
     next_state: "Cancelling"
     actions:
-      - type: "SendCANCEL"
+      - type: "SendCANCELWithOptions"
       - type: "CleanupMedia"
     description: "Cancel ringing call; wait for final INVITE response"
 
@@ -1117,7 +1129,7 @@ transitions:
       type: "HangupCall"
     next_state: "Cancelling"
     actions:
-      - type: "SendCANCEL"
+      - type: "SendCANCELWithOptions"
       - type: "CleanupMedia"
     description: "Hangup while ringing; send CANCEL and wait for final INVITE response"
 
@@ -1127,7 +1139,7 @@ transitions:
       type: "CancelCall"
     next_state: "Cancelling"
     actions:
-      - type: "SendCANCEL"
+      - type: "SendCANCELWithOptions"
       - type: "CleanupMedia"
     description: "Cancel during early media; send CANCEL and wait for final INVITE response"
 
@@ -1139,7 +1151,7 @@ transitions:
       type: "HangupCall"
     next_state: "Cancelling"
     actions:
-      - type: "SendCANCEL"
+      - type: "SendCANCELWithOptions"
       - type: "CleanupMedia"
     description: "Hangup during early media; send CANCEL and wait for final INVITE response"
 
@@ -1515,3 +1527,185 @@ transitions:
     publish:
       - "UnregistrationFailed"
     description: "Unregistration failed but cleared local state"
+
+  # ─────────────────────────────────────────────────────────────────────
+  # SIP_API_DESIGN_2 §7.1 — builder-staged outbound dispatch.
+  #
+  # Each row routes the matching `SendOutbound<METHOD>` event (queued by
+  # the builder's `.send()` after `stage_outbound_options` populates the
+  # stash) to the `Send<METHOD>WithOptions` action. The action handler
+  # drains `pending_<method>_options` with `.take()` and dispatches via
+  # the dialog-adapter mirror. Same-state transitions (no `next_state`)
+  # preserve the call's lifecycle — these events are not state-changing,
+  # only request-emitting.
+  #
+  # In-dialog requests (BYE, REFER, NOTIFY, INFO, UPDATE, re-INVITE) fire
+  # from `Active`. Out-of-dialog requests (INVITE, REGISTER, SUBSCRIBE,
+  # MESSAGE, OPTIONS) fire from `Idle`. CANCEL fires from `Initiating`.
+  # ─────────────────────────────────────────────────────────────────────
+
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "SendOutboundInvite"
+    next_state: "Initiating"
+    actions:
+      - type: "CreateDialog"
+      - type: "CreateMediaSession"
+      - type: "GenerateLocalSDP"
+      - type: "SendINVITEWithOptions"
+    publish:
+      - "SessionCreated"
+    description: "Builder-staged INVITE dispatch (full setup: dialog + media + SDP + WithOptions)"
+
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "SendOutboundReInvite"
+    actions:
+      - type: "SendReINVITEWithOptions"
+    description: "Builder-staged re-INVITE dispatch"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "SendOutboundReInvite"
+    actions:
+      - type: "SendReINVITEWithOptions"
+    description: "Builder-staged re-INVITE dispatch (UAS)"
+
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "SendOutboundBye"
+    actions:
+      - type: "SendBYEWithOptions"
+    description: "Builder-staged BYE dispatch"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "SendOutboundBye"
+    actions:
+      - type: "SendBYEWithOptions"
+    description: "Builder-staged BYE dispatch (UAS)"
+
+  - role: "UAC"
+    state: "Initiating"
+    event:
+      type: "SendOutboundCancel"
+    actions:
+      - type: "SendCANCELWithOptions"
+    description: "Builder-staged CANCEL dispatch"
+
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "SendOutboundRefer"
+    actions:
+      - type: "SendREFERWithOptions"
+    description: "Builder-staged REFER dispatch"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "SendOutboundRefer"
+    actions:
+      - type: "SendREFERWithOptions"
+    description: "Builder-staged REFER dispatch (UAS)"
+
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "SendOutboundNotify"
+    actions:
+      - type: "SendNOTIFYWithOptions"
+    description: "Builder-staged NOTIFY dispatch"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "SendOutboundNotify"
+    actions:
+      - type: "SendNOTIFYWithOptions"
+    description: "Builder-staged NOTIFY dispatch (UAS)"
+
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "SendOutboundInfo"
+    actions:
+      - type: "SendINFOWithOptions"
+    description: "Builder-staged INFO dispatch"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "SendOutboundInfo"
+    actions:
+      - type: "SendINFOWithOptions"
+    description: "Builder-staged INFO dispatch (UAS)"
+
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "SendOutboundUpdate"
+    actions:
+      - type: "SendUPDATEWithOptions"
+    description: "Builder-staged UPDATE dispatch"
+
+  - role: "UAS"
+    state: "Active"
+    event:
+      type: "SendOutboundUpdate"
+    actions:
+      - type: "SendUPDATEWithOptions"
+    description: "Builder-staged UPDATE dispatch (UAS)"
+
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "SendOutboundMessage"
+    actions:
+      - type: "SendMESSAGEWithOptions"
+    description: "Builder-staged MESSAGE dispatch (OOB)"
+
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "SendOutboundOptions"
+    actions:
+      - type: "SendOPTIONSWithOptions"
+    description: "Builder-staged OPTIONS dispatch (OOB)"
+
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "SendOutboundSubscribe"
+    actions:
+      - type: "SendSUBSCRIBEWithOptions"
+    description: "Builder-staged SUBSCRIBE dispatch"
+
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "SendOutboundSubscribe"
+    actions:
+      - type: "SendSUBSCRIBEWithOptions"
+    description: "Builder-staged SUBSCRIBE refresh dispatch (in-dialog)"
+
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "SendOutboundRegister"
+    actions:
+      - type: "SendREGISTERWithOptions"
+    description: "Builder-staged REGISTER dispatch"
+
+  - role: "UAC"
+    state: "Registered"
+    event:
+      type: "SendOutboundRegister"
+    actions:
+      - type: "SendREGISTERWithOptions"
+    description: "Builder-staged REGISTER refresh dispatch"
