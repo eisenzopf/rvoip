@@ -2553,6 +2553,22 @@ impl UnifiedCoordinator {
     // ===== Event System Integration =====
     // Callback registry removed - using event-driven approach via SimplePeer
 
+    /// Materialize a [`SessionHandle`](crate::api::handle::SessionHandle)
+    /// for an existing call_id.
+    ///
+    /// Returns a handle for invoking control APIs (hangup, hold, resume,
+    /// DTMF, …) on a session created via the canonical builder chain
+    /// (`coord.invite(...).send()` returns a [`CallId`](crate::api::handle::CallId);
+    /// pair it with this helper to get the rich `SessionHandle` that
+    /// the deprecated `.make_call()` / `.call()` paths returned
+    /// directly).
+    pub fn session(
+        self: &Arc<Self>,
+        call_id: &crate::api::handle::CallId,
+    ) -> crate::api::handle::SessionHandle {
+        crate::api::handle::SessionHandle::new(call_id.clone(), self.clone())
+    }
+
     /// Terminate the current session tracked by the session store.
     ///
     /// This is an advanced compatibility helper for single-session flows. New

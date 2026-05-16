@@ -193,6 +193,7 @@ async fn execute_register_action(
                 return Ok(ActionOutcome::with_event(EventType::AuthRequired {
                     status_code,
                     challenge,
+                    method: "REGISTER".to_string(),
                 }));
             }
             RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
@@ -1439,6 +1440,263 @@ pub(crate) async fn execute_action(
             );
         }
 
+        Action::SendRequestWithAuth => {
+            // SIP_API_DESIGN_2 R2 — auth-retry for non-INVITE/non-REGISTER
+            // methods. Reads `session.pending_auth_method` to discriminate
+            // which `pending_<method>_options` to re-issue (falls back to
+            // inspecting which stash is set when method is missing or
+            // empty), computes the digest via auth-core, and dispatches
+            // via the matching `DialogAdapter::send_<method>_with_auth`.
+            info!(
+                "Action::SendRequestWithAuth for session {} (method={:?})",
+                session.session_id, session.pending_auth_method
+            );
+            const CAP: u8 = 1;
+            if session.request_auth_retry_count >= CAP {
+                return Err(format!(
+                    "request auth retry cap ({}) exceeded for session {}",
+                    CAP, session.session_id
+                )
+                .into());
+            }
+            session.request_auth_retry_count += 1;
+
+            let challenge = session.auth_challenge.clone().ok_or_else(|| {
+                format!(
+                    "SendRequestWithAuth: no auth_challenge on session {}",
+                    session.session_id
+                )
+            })?;
+            let creds = session.credentials.clone().ok_or_else(|| {
+                Box::new(crate::errors::SessionError::MissingCredentialsForInviteAuth)
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
+
+            // Resolve the method. Prefer the explicit field; fall back
+            // to inspecting which stash is set. The conflict guard
+            // guarantees at most one non-INVITE/non-REGISTER stash is
+            // populated per session.
+            let method = resolve_auth_method(session);
+
+            let (status, _) = session.pending_auth.take().unwrap_or((401, String::new()));
+            let header_name = if status == 407 {
+                "Proxy-Authorization"
+            } else {
+                "Authorization"
+            };
+
+            // Method-specific request URI. In-dialog methods use the
+            // remote URI (= the remote target URI per RFC 3261); OOB
+            // methods (SUBSCRIBE, MESSAGE, OPTIONS) use the stash's
+            // explicit target.
+            let request_uri = resolve_auth_request_uri(session, &method).ok_or_else(|| {
+                format!(
+                    "SendRequestWithAuth: no request_uri for method {} on session {}",
+                    method, session.session_id
+                )
+            })?;
+
+            // RFC 7616 §3.4.5 — per-(realm, nonce) NC counter.
+            let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+            let nc_value = *session
+                .digest_nc
+                .entry(nc_key)
+                .and_modify(|n| *n += 1)
+                .or_insert(1);
+
+            // Most non-INVITE methods don't carry a body that's folded
+            // into HA2 under qop=auth-int. The exceptions are MESSAGE
+            // (which has a body) and re-INVITE (handled by the INVITE
+            // path). Pull the body from the stash for MESSAGE.
+            let body_bytes_owned: Option<Vec<u8>> = match method.as_str() {
+                "MESSAGE" => session
+                    .pending_message_options
+                    .as_ref()
+                    .map(|opts| opts.body.to_vec())
+                    .filter(|b| !b.is_empty()),
+                _ => None,
+            };
+            let body_bytes_ref = body_bytes_owned.as_deref();
+
+            let computed = rvoip_auth_core::DigestClient::compute_response_with_state(
+                &creds.username,
+                &creds.password,
+                &challenge,
+                &method,
+                &request_uri,
+                nc_value,
+                body_bytes_ref,
+            )?;
+            let header_value = rvoip_auth_core::DigestClient::format_authorization_with_state(
+                &creds.username,
+                &challenge,
+                &request_uri,
+                &computed,
+            );
+
+            // Dispatch per method. Each branch reads the matching
+            // `pending_<method>_options` stash so the application
+            // extras / typed parameters ride the retry.
+            match method.as_str() {
+                "BYE" => {
+                    let opts = session
+                        .pending_bye_options
+                        .as_ref()
+                        .map(|a| (**a).clone())
+                        .unwrap_or_default();
+                    dialog_adapter
+                        .send_bye_with_auth(
+                            &session.session_id,
+                            opts,
+                            header_name,
+                            header_value,
+                        )
+                        .await?;
+                }
+                "REFER" => {
+                    let opts = session
+                        .pending_refer_options
+                        .as_ref()
+                        .map(|a| (**a).clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(REFER): no pending_refer_options for session {}",
+                                session.session_id
+                            )
+                        })?;
+                    dialog_adapter
+                        .send_refer_with_auth(
+                            &session.session_id,
+                            opts,
+                            header_name,
+                            header_value,
+                        )
+                        .await?;
+                }
+                "NOTIFY" => {
+                    let opts = session
+                        .pending_notify_options
+                        .as_ref()
+                        .map(|a| (**a).clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(NOTIFY): no pending_notify_options for session {}",
+                                session.session_id
+                            )
+                        })?;
+                    dialog_adapter
+                        .send_notify_with_auth(
+                            &session.session_id,
+                            opts,
+                            header_name,
+                            header_value,
+                        )
+                        .await?;
+                }
+                "INFO" => {
+                    let opts = session
+                        .pending_info_options
+                        .as_ref()
+                        .map(|a| (**a).clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(INFO): no pending_info_options for session {}",
+                                session.session_id
+                            )
+                        })?;
+                    dialog_adapter
+                        .send_info_with_auth(
+                            &session.session_id,
+                            opts,
+                            header_name,
+                            header_value,
+                        )
+                        .await?;
+                }
+                "UPDATE" => {
+                    let opts = session
+                        .pending_update_options
+                        .as_ref()
+                        .map(|a| (**a).clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(UPDATE): no pending_update_options for session {}",
+                                session.session_id
+                            )
+                        })?;
+                    dialog_adapter
+                        .send_update_with_auth(
+                            &session.session_id,
+                            opts,
+                            header_name,
+                            header_value,
+                        )
+                        .await?;
+                }
+                "MESSAGE" => {
+                    let opts = session
+                        .pending_message_options
+                        .as_ref()
+                        .map(|a| (**a).clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(MESSAGE): no pending_message_options for session {}",
+                                session.session_id
+                            )
+                        })?;
+                    let _resp = dialog_adapter
+                        .send_message_oob_with_auth(opts, header_name, header_value)
+                        .await?;
+                }
+                "OPTIONS" => {
+                    let opts = session
+                        .pending_options_options
+                        .as_ref()
+                        .map(|a| (**a).clone())
+                        .ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(OPTIONS): no pending_options_options for session {}",
+                                session.session_id
+                            )
+                        })?;
+                    let _resp = dialog_adapter
+                        .send_options_oob_with_auth(opts, header_name, header_value)
+                        .await?;
+                }
+                "SUBSCRIBE" => {
+                    let opts_arc =
+                        session.pending_subscribe_options.as_ref().ok_or_else(|| {
+                            format!(
+                                "SendRequestWithAuth(SUBSCRIBE): no pending_subscribe_options for session {}",
+                                session.session_id
+                            )
+                        })?;
+                    let target = session.remote_uri.clone().ok_or_else(|| {
+                        format!(
+                            "SendRequestWithAuth(SUBSCRIBE): no remote_uri on session {}",
+                            session.session_id
+                        )
+                    })?;
+                    let opts = (**opts_arc).clone();
+                    let _resp = dialog_adapter
+                        .send_subscribe_oob_with_auth(&target, opts, header_name, header_value)
+                        .await?;
+                }
+                other => {
+                    return Err(format!(
+                        "SendRequestWithAuth: unsupported method {} for session {}",
+                        other, session.session_id
+                    )
+                    .into());
+                }
+            }
+
+            info!(
+                "Auth-retry {} sent for session {} (retry #{}, header {})",
+                method, session.session_id, session.request_auth_retry_count, header_name
+            );
+        }
+
         Action::SendINVITEWithBumpedSessionExpires => {
             // RFC 4028 §6 — on 422 Session Interval Too Small the UAS's
             // `Min-SE` header dictates the required floor. Bump the retry
@@ -1799,11 +2057,24 @@ pub(crate) async fn execute_action(
         // CANCEL lives in the auto-emit handlers above
         // (`Action::SendBYE`, `Action::SendCANCEL`, `Action::SendNOTIFY`).
         // ──────────────────────────────────────────────────────────────
+        // SIP_API_DESIGN_2 §7.3 — R2: snapshot-then-clear-after-dispatch.
+        // Mirrors `execute_register_action`'s `.as_ref().clone()` pattern
+        // so the application-staged extras stay readable for the entire
+        // duration of `send_X_with_options(...)`. Today these dialog
+        // adapter calls do not internally drive 401/407 retries for the
+        // non-INVITE/non-REGISTER methods; when that auth-retry plumbing
+        // lands the snapshot will already be available. The post-dispatch
+        // `= None` mirrors today's `.take()` semantics for the success
+        // path, and the `Terminated` backstop in `executor.rs:533-546`
+        // still sweeps the slot on session teardown if a dispatch errors
+        // out unexpectedly.
         Action::SendBYEWithOptions => {
-            if let Some(opts) = session.pending_bye_options.take() {
+            if let Some(opts) = session.pending_bye_options.as_ref() {
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_bye_with_options(&session.session_id, (*opts).clone())
+                    .send_bye_with_options(&session.session_id, snapshot)
                     .await?;
+                session.pending_bye_options = None;
             }
         }
         Action::SendCANCELWithOptions => {
@@ -1811,11 +2082,12 @@ pub(crate) async fn execute_action(
             // back to `Config.auto_emit_extra_headers` (operators stamp
             // tenant/trace headers on every CANCEL); else legacy fast
             // path. Consolidated from the deleted `Action::SendCANCEL`.
-            if let Some(opts_arc) = session.pending_cancel_options.take() {
-                let opts = (*opts_arc).clone();
+            if let Some(opts_arc) = session.pending_cancel_options.as_ref() {
+                let opts = (**opts_arc).clone();
                 dialog_adapter
                     .send_cancel_with_options(&session.session_id, opts)
                     .await?;
+                session.pending_cancel_options = None;
             } else {
                 let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
                 if auto_extras.is_empty() {
@@ -1832,10 +2104,12 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendREFERWithOptions => {
-            if let Some(opts) = session.pending_refer_options.take() {
+            if let Some(opts) = session.pending_refer_options.as_ref() {
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_refer_with_options(&session.session_id, (*opts).clone())
+                    .send_refer_with_options(&session.session_id, snapshot)
                     .await?;
+                session.pending_refer_options = None;
             }
         }
         Action::SendNOTIFYWithOptions => {
@@ -1843,11 +2117,12 @@ pub(crate) async fn execute_action(
             // consult `Config.auto_emit_extra_headers` so operator
             // headers ride every stack-emitted NOTIFY. Consolidated from
             // the deleted `Action::SendNOTIFY`.
-            if let Some(opts_arc) = session.pending_notify_options.take() {
-                let opts = (*opts_arc).clone();
+            if let Some(opts_arc) = session.pending_notify_options.as_ref() {
+                let opts = (**opts_arc).clone();
                 dialog_adapter
                     .send_notify_with_options(&session.session_id, opts)
                     .await?;
+                session.pending_notify_options = None;
             } else {
                 let auto_extras = dialog_adapter.auto_emit_extra_headers.clone();
                 let event_package = "presence";
@@ -1872,49 +2147,61 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendINFOWithOptions => {
-            if let Some(opts) = session.pending_info_options.take() {
+            if let Some(opts) = session.pending_info_options.as_ref() {
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_info_with_options(&session.session_id, (*opts).clone())
+                    .send_info_with_options(&session.session_id, snapshot)
                     .await?;
+                session.pending_info_options = None;
             }
         }
         Action::SendUPDATEWithOptions => {
-            if let Some(opts) = session.pending_update_options.take() {
+            if let Some(opts) = session.pending_update_options.as_ref() {
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_update_with_options(&session.session_id, (*opts).clone())
+                    .send_update_with_options(&session.session_id, snapshot)
                     .await?;
+                session.pending_update_options = None;
             }
         }
         Action::SendReINVITEWithOptions => {
-            if let Some(opts) = session.pending_reinvite_options.take() {
+            if let Some(opts) = session.pending_reinvite_options.as_ref() {
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_reinvite_with_options(&session.session_id, (*opts).clone())
+                    .send_reinvite_with_options(&session.session_id, snapshot)
                     .await?;
+                session.pending_reinvite_options = None;
             }
         }
         Action::SendMESSAGEWithOptions => {
-            if let Some(opts) = session.pending_message_options.take() {
+            if let Some(opts) = session.pending_message_options.as_ref() {
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_message_oob_with_options((*opts).clone())
+                    .send_message_oob_with_options(snapshot)
                     .await?;
+                session.pending_message_options = None;
             }
         }
         Action::SendOPTIONSWithOptions => {
-            if let Some(opts) = session.pending_options_options.take() {
+            if let Some(opts) = session.pending_options_options.as_ref() {
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_options_oob_with_options((*opts).clone())
+                    .send_options_oob_with_options(snapshot)
                     .await?;
+                session.pending_options_options = None;
             }
         }
         Action::SendSUBSCRIBEWithOptions => {
-            if let Some(opts) = session.pending_subscribe_options.take() {
+            if let Some(opts) = session.pending_subscribe_options.as_ref() {
                 // Out-of-dialog SUBSCRIBE uses the target as the
                 // request URI; falls back to the session's remote
                 // URI for in-dialog refresh.
                 let target = session.remote_uri.clone().unwrap_or_default();
+                let snapshot = (**opts).clone();
                 dialog_adapter
-                    .send_subscribe_oob_with_options(&target, (*opts).clone())
+                    .send_subscribe_oob_with_options(&target, snapshot)
                     .await?;
+                session.pending_subscribe_options = None;
             }
         }
         Action::SendREGISTERWithOptions => {
@@ -2034,13 +2321,20 @@ pub(crate) async fn execute_action(
                     ProxyOverride::Suppress | ProxyOverride::Use(_)
                 );
 
+                // SDP precedence: builder-supplied snapshot.sdp wins;
+                // otherwise fall back to `session.local_sdp` populated by
+                // the preceding `GenerateLocalSDP` action. Mirrors the
+                // legacy `Action::SendINVITE` shape so the new builder
+                // path negotiates media identically.
+                let sdp_for_wire = snapshot.sdp.clone().or_else(|| session.local_sdp.clone());
+
                 if suppress_global_proxy {
                     dialog_adapter
                         .send_invite_with_extra_headers_no_global_proxy(
                             &session.session_id,
                             &from,
                             &snapshot.to,
-                            snapshot.sdp.clone(),
+                            sdp_for_wire,
                             extras,
                         )
                         .await?;
@@ -2050,7 +2344,7 @@ pub(crate) async fn execute_action(
                             &session.session_id,
                             &from,
                             &snapshot.to,
-                            snapshot.sdp.clone(),
+                            sdp_for_wire,
                             extras,
                         )
                         .await?;
@@ -2108,6 +2402,71 @@ pub(crate) async fn execute_action(
     }
 
     Ok(ActionOutcome::default())
+}
+
+/// SIP_API_DESIGN_2 R2 — resolve the SIP method for a non-INVITE/
+/// non-REGISTER auth retry. Prefers the explicit
+/// `session.pending_auth_method` (populated by the cross-crate
+/// `AuthRequired` event's `method` field, originally extracted from
+/// the response `CSeq:`). Falls back to inspecting which
+/// `pending_<method>_options` stash is set — the conflict guard
+/// guarantees at most one is populated per session.
+fn resolve_auth_method(session: &crate::session_store::SessionState) -> String {
+    if let Some(m) = session.pending_auth_method.as_ref() {
+        if !m.is_empty() {
+            return m.to_ascii_uppercase();
+        }
+    }
+    if session.pending_bye_options.is_some() {
+        return "BYE".to_string();
+    }
+    if session.pending_refer_options.is_some() {
+        return "REFER".to_string();
+    }
+    if session.pending_notify_options.is_some() {
+        return "NOTIFY".to_string();
+    }
+    if session.pending_info_options.is_some() {
+        return "INFO".to_string();
+    }
+    if session.pending_update_options.is_some() {
+        return "UPDATE".to_string();
+    }
+    if session.pending_message_options.is_some() {
+        return "MESSAGE".to_string();
+    }
+    if session.pending_options_options.is_some() {
+        return "OPTIONS".to_string();
+    }
+    if session.pending_subscribe_options.is_some() {
+        return "SUBSCRIBE".to_string();
+    }
+    // Default fallback — caller will treat the unknown method as an
+    // error.
+    String::new()
+}
+
+/// SIP_API_DESIGN_2 R2 — pick the request-URI to fold into HA2 for the
+/// digest computation. In-dialog methods (BYE, REFER, NOTIFY, INFO,
+/// UPDATE) target `session.remote_uri`. OOB methods (MESSAGE,
+/// OPTIONS) carry their target on the options struct; SUBSCRIBE
+/// targets `session.remote_uri` (which the builder stashes there
+/// before dispatch).
+fn resolve_auth_request_uri(
+    session: &crate::session_store::SessionState,
+    method: &str,
+) -> Option<String> {
+    match method {
+        "MESSAGE" => session
+            .pending_message_options
+            .as_ref()
+            .map(|opts| opts.to_uri.clone()),
+        "OPTIONS" => session
+            .pending_options_options
+            .as_ref()
+            .map(|opts| opts.to_uri.clone()),
+        _ => session.remote_uri.clone(),
+    }
 }
 
 /// Publish an app-level `Event` to the global coordinator's session-to-app

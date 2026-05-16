@@ -355,8 +355,14 @@ impl StateMachine {
             EventType::AuthRequired {
                 status_code,
                 challenge,
+                method,
             } => {
                 session.pending_auth = Some((*status_code, challenge.clone()));
+                session.pending_auth_method = if method.is_empty() {
+                    None
+                } else {
+                    Some(method.clone())
+                };
             }
             EventType::SessionIntervalTooSmall { min_se_secs } => {
                 // RFC 4028 §6 — stash the peer's required floor for the

@@ -28,9 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut alice = StreamPeer::with_config(Config::local("alice", alice_port)).await?;
 
     println!("[ALICE] Calling Bob...");
-    let handle = alice
-        .call(&format!("sip:bob@127.0.0.1:{}", bob_port))
+    let call_id = alice
+        .invite(format!("sip:bob@127.0.0.1:{}", bob_port))
+        .send()
         .await?;
+    let handle = alice.coordinator().session(&call_id);
     alice.wait_for_answered(handle.id()).await?;
     println!("[ALICE] Connected to Bob!");
 
@@ -46,7 +48,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 alice.wait_for_ended(handle.id()).await?;
 
                 println!("[ALICE] Calling Charlie...");
-                let charlie_handle = alice.call(&refer_to).await?;
+                let charlie_id = alice.invite(refer_to.clone()).send().await?;
+                let charlie_handle = alice.coordinator().session(&charlie_id);
                 alice.wait_for_answered(charlie_handle.id()).await?;
                 println!("[ALICE] Connected to Charlie!");
 

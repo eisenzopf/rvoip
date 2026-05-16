@@ -584,6 +584,15 @@ impl PeerControl {
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
         &self.coordinator
     }
+
+    /// Begin building an outbound INVITE from this peer's configured
+    /// `local_uri`. Equivalent to
+    /// `peer.coordinator().invite(Some(local_uri), target)` — the
+    /// canonical replacement for the deprecated [`Self::call`].
+    pub fn invite(&self, target: impl Into<String>) -> crate::api::send::OutboundCallBuilder {
+        self.coordinator
+            .invite(Some(self.local_uri.clone()), target)
+    }
 }
 
 // ===== StreamPeer =====
@@ -720,6 +729,11 @@ impl StreamPeer {
         &self.control
     }
 
+    /// Shorthand for [`control().coordinator()`](PeerControl::coordinator).
+    pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
+        self.control.coordinator()
+    }
+
     // ===== Sequential helpers =====
 
     /// Initiate an outgoing call and return a [`SessionHandle`].
@@ -748,6 +762,16 @@ impl StreamPeer {
     pub async fn call(&mut self, target: &str) -> Result<SessionHandle> {
         #[allow(deprecated)]
         self.control.call(target).await
+    }
+
+    /// Begin building an outbound INVITE from this peer's configured
+    /// `local_uri`. Canonical replacement for the deprecated
+    /// [`Self::call`]. Returns an
+    /// [`OutboundCallBuilder`](crate::api::send::OutboundCallBuilder)
+    /// that exposes `with_header`, `with_credentials`, `with_pai`,
+    /// `with_headers_from`, etc. before dispatching.
+    pub fn invite(&self, target: impl Into<String>) -> crate::api::send::OutboundCallBuilder {
+        self.control.invite(target)
     }
 
     /// Initiate an outgoing call attaching caller-supplied extra typed

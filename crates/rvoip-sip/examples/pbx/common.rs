@@ -1305,7 +1305,8 @@ async fn run_stream_peer_two_party(
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
             let target = target_user_for(transport);
-            let handle = peer.call(&cfg.outbound_call_uri(target)).await?;
+            let call_id = peer.invite(cfg.outbound_call_uri(target)).send().await?;
+            let handle = peer.coordinator().session(&call_id);
             let mut events = handle.events().await?;
             let (status, _) =
                 wait_for_call_failed_on_events(&mut events, remote_test_timeout(provider)?).await?;
@@ -1355,8 +1356,9 @@ async fn run_endpoint_two_party(
         (Scenario::HoldResume, Role::Caller) => {
             settle_after_register(provider).await;
             let target = cfg.outbound_call_uri(target_user_for(transport));
-            let handle = endpoint.call(&target).await?;
-            let handle = handle
+            let call_id = endpoint.invite(&target)?.send().await?;
+            let handle = endpoint
+                .wrap_call(call_id)
                 .wait_for_answered(Some(remote_test_timeout(provider)?))
                 .await?;
             run_hold_on_handle(provider, cfg, handle.as_session_handle(), transport).await?;
@@ -1376,7 +1378,8 @@ async fn run_endpoint_two_party(
         }
         (Scenario::RingCancel, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = endpoint.call(&cfg.remote_call_uri()).await?;
+            let call_id = endpoint.invite(&cfg.remote_call_uri())?.send().await?;
+            let handle = endpoint.wrap_call(call_id);
             handle
                 .as_session_handle()
                 .wait_for_progress(
@@ -1429,7 +1432,8 @@ async fn run_endpoint_two_party(
         }
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = endpoint.call(target_user_for(transport)).await?;
+            let call_id = endpoint.invite(target_user_for(transport))?.send().await?;
+            let handle = endpoint.wrap_call(call_id);
             let mut events = handle.as_session_handle().events().await?;
             let (status, _) =
                 wait_for_call_failed_on_events(&mut events, remote_test_timeout(provider)?).await?;
@@ -1500,7 +1504,12 @@ async fn run_callback_two_party(
         }
         (Scenario::RingCancel, Role::Caller) => {
             settle_after_register(provider).await;
-            let handle = runtime.control.call(&runtime.cfg.remote_call_uri()).await?;
+            let call_id = runtime
+                .control
+                .invite(runtime.cfg.remote_call_uri())
+                .send()
+                .await?;
+            let handle = runtime.control.coordinator().session(&call_id);
             wait_for_callback_progress(
                 &mut runtime.events,
                 handle.id(),
@@ -1565,7 +1574,8 @@ async fn run_callback_two_party(
         (Scenario::Reject, Role::Caller) => {
             settle_after_register(provider).await;
             let target = runtime.cfg.outbound_call_uri(target_user_for(transport));
-            let handle = runtime.control.call(&target).await?;
+            let call_id = runtime.control.invite(target).send().await?;
+            let handle = runtime.control.coordinator().session(&call_id);
             wait_for_call_failed(
                 &mut runtime.events,
                 handle.id(),
@@ -2139,7 +2149,8 @@ pub async fn call_with_answer_retry(
             .max(1);
     let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     for attempt in 1..=attempts {
-        let handle = peer.call(target).await?;
+        let call_id = peer.invite(target).send().await?;
+        let handle = peer.coordinator().session(&call_id);
         match handle.wait_for_answered(Some(timeout_duration)).await {
             Ok(answered) => return Ok(answered),
             Err(e) => {
@@ -2167,7 +2178,8 @@ pub async fn call_with_ringing_retry(
             .max(1);
     let mut last_error: Option<Box<dyn std::error::Error + Send + Sync>> = None;
     for attempt in 1..=attempts {
-        let handle = peer.call(target).await?;
+        let call_id = peer.invite(target).send().await?;
+        let handle = peer.coordinator().session(&call_id);
         match handle
             .wait_for_progress(
                 |event| {
@@ -2207,7 +2219,8 @@ pub async fn callback_call_with_answer_retry(
     let attempts = call_retry_attempts(runtime.cfg.provider).max(1);
     let mut last_error: Option<String> = None;
     for attempt in 1..=attempts {
-        let handle = runtime.control.call(target).await?;
+        let call_id = runtime.control.invite(target).send().await?;
+        let handle = runtime.control.coordinator().session(&call_id);
         match wait_for_established(&mut runtime.events, handle.id(), timeout_duration).await {
             Ok(answered) => return Ok(answered),
             Err(e) => {

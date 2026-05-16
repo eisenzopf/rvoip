@@ -17,7 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Caller 1: "friend@" URI — should be accepted
     let mut friend = StreamPeer::with_config(Config::local("friend", 5061)).await?;
     println!("friend@ calling (should be accepted)...");
-    let h = friend.call("sip:gatekeeper@127.0.0.1:5060").await?;
+    let call_id = friend.invite("sip:gatekeeper@127.0.0.1:5060").send().await?;
+    let h = friend.coordinator().session(&call_id);
     let _ = timeout(Duration::from_secs(3), friend.wait_for_answered(h.id())).await;
     sleep(Duration::from_secs(2)).await;
     let _ = h.hangup().await;
@@ -28,7 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Caller 2: "stranger@" URI — should be rejected
     let mut stranger = StreamPeer::with_config(Config::local("stranger", 5062)).await?;
     println!("stranger@ calling (should be rejected)...");
-    let h = stranger.call("sip:gatekeeper@127.0.0.1:5060").await?;
+    let call_id = stranger.invite("sip:gatekeeper@127.0.0.1:5060").send().await?;
+    let h = stranger.coordinator().session(&call_id);
     // Rejection usually arrives in <1s
     let _ = timeout(Duration::from_secs(2), stranger.wait_for_ended(h.id())).await;
 

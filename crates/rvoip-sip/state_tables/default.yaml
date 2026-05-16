@@ -1448,6 +1448,37 @@ transitions:
       - type: "SendREGISTERWithAuth"
     description: "REGISTER auth retry (RFC 3261 §22.2)"
 
+  # SIP_API_DESIGN_2 R2 — auth retry for non-INVITE / non-REGISTER
+  # methods (BYE, REFER, NOTIFY, INFO, UPDATE, MESSAGE, OPTIONS,
+  # SUBSCRIBE). The shared `AuthRequired` event arrives with `method`
+  # populated from the response `CSeq:`; `SendRequestWithAuth` reads
+  # that field (stashed on `session.pending_auth_method` by the
+  # executor) plus the matching `pending_<method>_options` stash to
+  # re-issue the request with the computed Authorization. Two rows:
+  # one for in-dialog (`Active`), one for out-of-dialog (`Idle`).
+  # `Initiating` (INVITE) and `Registering` (REGISTER) are handled by
+  # their dedicated rows above; the state discriminator keeps the
+  # paths from colliding.
+  - role: "UAC"
+    state: "Active"
+    event:
+      type: "AuthRequired"
+    next_state: "Active"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendRequestWithAuth"
+    description: "In-dialog request auth retry (BYE/REFER/NOTIFY/INFO/UPDATE)"
+
+  - role: "UAC"
+    state: "Idle"
+    event:
+      type: "AuthRequired"
+    next_state: "Idle"
+    actions:
+      - type: "StoreAuthChallenge"
+      - type: "SendRequestWithAuth"
+    description: "Out-of-dialog request auth retry (SUBSCRIBE/MESSAGE/OPTIONS)"
+
   # Authentication successful
   - role: "UAC"
     state: "Authenticating"

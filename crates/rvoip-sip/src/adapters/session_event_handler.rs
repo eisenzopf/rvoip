@@ -216,12 +216,14 @@ impl SessionCrossCrateEventHandler {
                 session_id,
                 status_code,
                 challenge,
+                method,
                 ..
             } => {
                 self.handle_auth_required_parts(
                     SessionId(session_id.clone()),
                     *status_code,
                     challenge.clone(),
+                    method.clone(),
                 )
                 .await
             }
@@ -1506,6 +1508,7 @@ impl SessionCrossCrateEventHandler {
         session_id: SessionId,
         status: u16,
         challenge: String,
+        method: String,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
@@ -1530,6 +1533,7 @@ impl SessionCrossCrateEventHandler {
                 EventType::AuthRequired {
                     status_code: status,
                     challenge,
+                    method,
                 },
             )
             .await
@@ -1985,11 +1989,15 @@ impl SessionCrossCrateEventHandler {
         let challenge = self
             .extract_debug_string_field(event_str, "challenge: \"")
             .unwrap_or_default();
+        let method = self
+            .extract_debug_string_field(event_str, "method: \"")
+            .unwrap_or_default();
 
         info!(
-            "🎯 [handle_auth_required] session={} status={} challenge.len={}",
+            "🎯 [handle_auth_required] session={} status={} method={} challenge.len={}",
             session_id,
             status,
+            method,
             challenge.len()
         );
 
@@ -2008,6 +2016,7 @@ impl SessionCrossCrateEventHandler {
                 EventType::AuthRequired {
                     status_code: status,
                     challenge,
+                    method,
                 },
             )
             .await

@@ -136,15 +136,23 @@ async fn run_runtime_inner(
     let mut on_hold = false;
 
     if let Some(target) = options.dial.as_ref() {
-        match control.call(target).await {
-            Ok(call) => {
-                let _ = event_tx.send(UiEvent::Calling {
-                    id: call.id().to_string(),
-                    target: target.clone(),
-                });
-                let _ = event_tx.send(UiEvent::Log(format!("calling {target} ({})", call.id())));
-                active_call = Some(call);
-            }
+        match control.invite(target).map(|b| b.send()) {
+            Ok(send) => match send.await.map(|cid| control.wrap_call(cid)) {
+                Ok(call) => {
+                    let _ = event_tx.send(UiEvent::Calling {
+                        id: call.id().to_string(),
+                        target: target.clone(),
+                    });
+                    let _ = event_tx.send(UiEvent::Log(format!(
+                        "calling {target} ({})",
+                        call.id()
+                    )));
+                    active_call = Some(call);
+                }
+                Err(err) => {
+                    let _ = event_tx.send(UiEvent::Error(format!("dial failed: {err}")));
+                }
+            },
             Err(err) => {
                 let _ = event_tx.send(UiEvent::Error(format!("dial failed: {err}")));
             }
@@ -164,16 +172,24 @@ async fn run_runtime_inner(
                             let _ = event_tx.send(UiEvent::Log("already in a call".into()));
                             continue;
                         }
-                        match control.call(&target).await {
-                            Ok(call) => {
-                                let _ = event_tx.send(UiEvent::Calling {
-                                    id: call.id().to_string(),
-                                    target: target.clone(),
-                                });
-                                let _ = event_tx.send(UiEvent::Log(format!("calling {target} ({})", call.id())));
-                                active_call = Some(call);
-                                on_hold = false;
-                            }
+                        match control.invite(&target).map(|b| b.send()) {
+                            Ok(send) => match send.await.map(|cid| control.wrap_call(cid)) {
+                                Ok(call) => {
+                                    let _ = event_tx.send(UiEvent::Calling {
+                                        id: call.id().to_string(),
+                                        target: target.clone(),
+                                    });
+                                    let _ = event_tx.send(UiEvent::Log(format!(
+                                        "calling {target} ({})",
+                                        call.id()
+                                    )));
+                                    active_call = Some(call);
+                                    on_hold = false;
+                                }
+                                Err(err) => {
+                                    let _ = event_tx.send(UiEvent::Error(format!("dial failed: {err}")));
+                                }
+                            },
                             Err(err) => {
                                 let _ = event_tx.send(UiEvent::Error(format!("dial failed: {err}")));
                             }

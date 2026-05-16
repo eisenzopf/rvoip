@@ -1515,6 +1515,221 @@ impl DialogAdapter {
             .map_err(|e| SessionError::DialogError(format!("Failed to send SUBSCRIBE: {}", e)))
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // SIP_API_DESIGN_2 R2 — auth-retry mirrors for non-INVITE/non-REGISTER
+    // methods. Each `send_<method>_with_auth` takes the same options
+    // struct as its non-auth sibling plus a pre-computed `Authorization:`
+    // (or `Proxy-Authorization:`) header, validates the application
+    // extras via `apply_outbound_extras_policy_with_auth`, then injects
+    // the stack-computed auth header at the end before handing off to
+    // dialog-core. Called by `Action::SendRequestWithAuth` after the
+    // digest is computed against the cached challenge.
+    // ─────────────────────────────────────────────────────────────────────
+
+    pub async fn send_bye_with_auth(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::ByeRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Bye,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_bye_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send BYE with auth: {}", e))
+            })?;
+        Ok(())
+    }
+
+    pub async fn send_refer_with_auth(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::ReferRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Refer,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_refer_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send REFER with auth: {}", e))
+            })?;
+        Ok(())
+    }
+
+    pub async fn send_notify_with_auth(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::NotifyRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Notify,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_notify_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send NOTIFY with auth: {}", e))
+            })?;
+        Ok(())
+    }
+
+    pub async fn send_info_with_auth(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::InfoRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Info,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_info_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send INFO with auth: {}", e))
+            })?;
+        Ok(())
+    }
+
+    pub async fn send_update_with_auth(
+        &self,
+        session_id: &SessionId,
+        mut opts: rvoip_sip_dialog::api::unified::UpdateRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<()> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Update,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        let dialog_id = self
+            .session_to_dialog
+            .get(session_id)
+            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
+            .clone();
+        self.dialog_api
+            .send_update_with_options(&dialog_id, opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send UPDATE with auth: {}", e))
+            })?;
+        Ok(())
+    }
+
+    pub async fn send_message_oob_with_auth(
+        &self,
+        mut opts: rvoip_sip_dialog::api::unified::MessageRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<rvoip_sip_core::Response> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Message,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        self.dialog_api
+            .send_message_out_of_dialog_with_options(opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send MESSAGE with auth: {}", e))
+            })
+    }
+
+    pub async fn send_options_oob_with_auth(
+        &self,
+        mut opts: rvoip_sip_dialog::api::unified::OptionsRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<rvoip_sip_core::Response> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Options,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        self.dialog_api
+            .send_options_out_of_dialog_with_options(opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send OPTIONS with auth: {}", e))
+            })
+    }
+
+    pub async fn send_subscribe_oob_with_auth(
+        &self,
+        target: &str,
+        mut opts: rvoip_sip_dialog::api::unified::SubscribeRequestOptions,
+        auth_header_name: &str,
+        auth_header_value: String,
+    ) -> Result<rvoip_sip_core::Response> {
+        opts.extra_headers = apply_outbound_extras_policy_with_auth(
+            rvoip_sip_core::types::Method::Subscribe,
+            opts.extra_headers,
+            self.outbound_proxy_uri.as_ref(),
+            auth_header_name,
+            auth_header_value,
+        )?;
+        self.dialog_api
+            .send_subscribe_with_options(target, opts)
+            .await
+            .map_err(|e| {
+                SessionError::DialogError(format!("Failed to send SUBSCRIBE with auth: {}", e))
+            })
+    }
+
     /// Send CANCEL to cancel pending INVITE
     pub async fn send_cancel(&self, session_id: &SessionId) -> Result<()> {
         let dialog_id = {
@@ -2534,4 +2749,40 @@ pub(crate) fn apply_outbound_extras_policy(
         });
     }
     Ok(prepend_outbound_proxy_route(extras, outbound_proxy_uri))
+}
+
+/// SIP_API_DESIGN_2 R2 — auth-retry mirror of
+/// [`apply_outbound_extras_policy`]. Runs the same policy validation
+/// on the application extras, then **appends** the
+/// `Authorization:` / `Proxy-Authorization:` header *after* policy
+/// validation. The auth header bypasses the policy because:
+///
+/// 1. The HeaderPolicy classifies `Authorization` as `MethodShaped`
+///    for INVITE / REGISTER / SUBSCRIBE / MESSAGE / OPTIONS / REFER,
+///    meaning application code can't stage it via `with_raw_header`.
+/// 2. But the state machine *itself* stages it on the auth-retry hop
+///    via `Action::SendRequestWithAuth`, computed from the digest
+///    challenge. That's a stack-managed injection, not an application
+///    one, so the policy guard is intentionally bypassed.
+///
+/// `auth_header_name` is the raw wire name (`"Authorization"` or
+/// `"Proxy-Authorization"`); `auth_header_value` is the rendered
+/// `Digest username="..", ...` body.
+pub(crate) fn apply_outbound_extras_policy_with_auth(
+    method: rvoip_sip_core::types::Method,
+    extras: Vec<rvoip_sip_core::types::TypedHeader>,
+    outbound_proxy_uri: Option<&rvoip_sip_core::types::uri::Uri>,
+    auth_header_name: &str,
+    auth_header_value: String,
+) -> Result<Vec<rvoip_sip_core::types::TypedHeader>> {
+    let mut validated = apply_outbound_extras_policy(method, extras, outbound_proxy_uri)?;
+    let header_name = match auth_header_name {
+        "Proxy-Authorization" => rvoip_sip_core::types::header::HeaderName::ProxyAuthorization,
+        _ => rvoip_sip_core::types::header::HeaderName::Authorization,
+    };
+    validated.push(rvoip_sip_core::types::TypedHeader::Other(
+        header_name,
+        rvoip_sip_core::types::headers::HeaderValue::Raw(auth_header_value.into_bytes()),
+    ));
+    Ok(validated)
 }

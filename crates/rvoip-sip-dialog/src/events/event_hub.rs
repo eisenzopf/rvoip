@@ -541,12 +541,24 @@ impl DialogEventHub {
                             // future auth-challenged request. Malformed 401/
                             // 407 without a parseable challenge falls through
                             // to CallFailed below.
+                            //
+                            // SIP_API_DESIGN_2 R2 — also extract the SIP
+                            // method from `CSeq:` so session-core can route
+                            // the retry to the matching per-method auth
+                            // handler. CSeq's method field is mandatory per
+                            // RFC 3261 §20.16; if it's somehow absent we
+                            // fall back to "" and the consumer treats it as
+                            // method-agnostic.
                             use rvoip_sip_core::types::headers::HeaderAccess;
                             let header_name = if response.status_code() == 407 {
                                 rvoip_sip_core::types::header::HeaderName::ProxyAuthenticate
                             } else {
                                 rvoip_sip_core::types::header::HeaderName::WwwAuthenticate
                             };
+                            let method = response
+                                .cseq()
+                                .map(|c| c.method.to_string())
+                                .unwrap_or_default();
                             if let Some(challenge) = response.raw_header_value(&header_name) {
                                 let realm = extract_digest_realm(&challenge);
                                 Some(RvoipCrossCrateEvent::DialogToSession(
@@ -555,6 +567,7 @@ impl DialogEventHub {
                                         status_code: response.status_code(),
                                         challenge,
                                         realm,
+                                        method,
                                     },
                                 ))
                             } else {

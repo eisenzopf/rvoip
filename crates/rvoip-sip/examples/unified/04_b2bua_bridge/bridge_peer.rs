@@ -95,10 +95,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let outbound_target = format!("sip:carol@127.0.0.1:{}", carol_port);
     println!("[BRIDGE] Calling Carol at {}", outbound_target);
     let outbound_id = coord
-        .make_call(
-            &format!("sip:bridge@127.0.0.1:{}", bridge_port),
+        .invite(
+            Some(format!("sip:bridge@127.0.0.1:{}", bridge_port)),
             &outbound_target,
         )
+        .send()
         .await?;
     println!("[BRIDGE] Outbound leg B = {}", outbound_id.0);
 

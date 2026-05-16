@@ -654,6 +654,16 @@ pub enum DialogToSessionEvent {
         /// Pre-extracted realm, convenience for logging / app-level routing.
         /// Authoritative parse is still done by auth-core.
         realm: Option<String>,
+        /// SIP method of the challenged request, extracted from the
+        /// response `CSeq:` header (`"INVITE"`, `"REGISTER"`, `"BYE"`,
+        /// `"SUBSCRIBE"`, …). Empty string for legacy publish paths
+        /// that haven't been updated to populate this field; the
+        /// session-side handler treats `""` as "method-agnostic" and
+        /// falls back to inspecting which `pending_*_options` stash
+        /// is set on the session. Populated by
+        /// `rvoip-sip-dialog/src/events/event_hub.rs` for the canonical
+        /// 401/407 response path.
+        method: String,
     },
 
     /// 3xx redirect response received (RFC 3261 §8.1.3.4 / §21.3). The UAC

@@ -28,7 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut peer = StreamPeer::with_config(config).await?;
 
     println!("Placing SRTP-mandatory call to sip:server@127.0.0.1:5060…");
-    let handle = peer.call("sip:server@127.0.0.1:5060").await?;
+    let call_id = peer.invite("sip:server@127.0.0.1:5060").send().await?;
+    let handle = peer.coordinator().session(&call_id);
     peer.wait_for_answered(handle.id()).await?;
     println!("Call answered — SRTP negotiation completed, media is encrypted.");
 

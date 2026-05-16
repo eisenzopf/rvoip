@@ -22,7 +22,8 @@ async fn main() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut alice = StreamPeer::with_config(Config::local("alice", 5100)).await?;
-    let call = alice.call("sip:bob@127.0.0.1:5101").await?;
+    let call_id = alice.invite("sip:bob@127.0.0.1:5101").send().await?;
+    let call = alice.coordinator().session(&call_id);
     alice.wait_for_answered(call.id()).await?;
     println!("[alice] connected as {}", call.id());
 

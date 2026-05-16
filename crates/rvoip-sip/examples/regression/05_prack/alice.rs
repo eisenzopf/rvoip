@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         RelUsage::NotSupported
     };
 
-    let mut alice = StreamPeer::with_config(config).await?;
+    let alice = StreamPeer::with_config(config).await?;
     let mut events = alice.control().subscribe_events().await?;
 
     if positive {
@@ -55,8 +55,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         println!("[ALICE] Calling Bob (100rel=NotSupported; expecting 420)…");
     }
-    let _handle = alice
-        .call(&format!("sip:bob@127.0.0.1:{}", bob_port))
+    let _call_id = alice
+        .invite(format!("sip:bob@127.0.0.1:{}", bob_port))
+        .send()
         .await?;
 
     // Positive path allows more time because Bob sleeps mid-flow before

@@ -540,9 +540,15 @@ impl YamlTableLoader {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        let method = parameters
+                            .get("method")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         Ok(EventType::AuthRequired {
                             status_code,
                             challenge,
+                            method,
                         })
                     }
                     _ => self.parse_event_by_name(&event_type),
@@ -571,6 +577,7 @@ impl YamlTableLoader {
             "AuthRequired" => Ok(EventType::AuthRequired {
                 status_code: 0,
                 challenge: String::new(),
+                method: String::new(),
             }),
             // RFC 4028 §6 — 422 Session Interval Too Small. Field-less YAML
             // name maps to a default `min_se_secs: 0`; the runtime event
@@ -583,6 +590,7 @@ impl YamlTableLoader {
             "Registration401" => Ok(EventType::AuthRequired {
                 status_code: 401,
                 challenge: String::new(),
+                method: "REGISTER".to_string(),
             }),
             "HangupCall" => Ok(EventType::HangupCall),
             "CancelCall" => Ok(EventType::CancelCall),
@@ -821,6 +829,7 @@ impl YamlTableLoader {
             "SendINVITEWithAuth" => Ok(Action::SendINVITEWithAuth),
             "SendINVITEWithBumpedSessionExpires" => Ok(Action::SendINVITEWithBumpedSessionExpires),
             "SendREGISTERWithAuth" => Ok(Action::SendREGISTERWithAuth),
+            "SendRequestWithAuth" => Ok(Action::SendRequestWithAuth),
             "SuspendMedia" => Ok(Action::Custom("SuspendMedia".to_string())),
             "ResumeMedia" => Ok(Action::Custom("ResumeMedia".to_string())),
 

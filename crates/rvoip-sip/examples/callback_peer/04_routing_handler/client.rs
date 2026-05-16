@@ -19,9 +19,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut caller =
             StreamPeer::with_config(Config::local(&format!("caller{}", i), port)).await?;
         println!("Calling {}@...", target);
-        let h = caller
-            .call(&format!("sip:{}@127.0.0.1:5060", target))
+        let call_id = caller
+            .invite(format!("sip:{}@127.0.0.1:5060", target))
+            .send()
             .await?;
+        let h = caller.coordinator().session(&call_id);
 
         // Wait up to 2s for the call to be answered (or rejected).
         let _ = timeout(Duration::from_secs(2), caller.wait_for_answered(h.id())).await;

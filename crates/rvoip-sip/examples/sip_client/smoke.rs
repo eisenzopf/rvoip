@@ -79,7 +79,8 @@ async fn smoke_caller(
         .dial
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("caller smoke mode requires --dial"))?;
-    let call = control.call(target).await?;
+    let call_id = control.invite(target)?.send().await?;
+    let call = control.wrap_call(call_id);
     println!("calling {target} ({})", call.id());
     let call = wait_for_answered(&mut events, call.id(), options.test_timeout, trace_file).await?;
     println!("answered {}", call.id());

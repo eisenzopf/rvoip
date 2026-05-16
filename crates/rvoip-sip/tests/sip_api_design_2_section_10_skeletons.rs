@@ -64,16 +64,99 @@ fn in_dialog_notify_smoke() {}
 #[ignore = "covered by outbound_request_builders_integration.rs"]
 fn in_dialog_info_smoke() {}
 
-/// §10 #8 — in-dialog UPDATE smoke. Established-call harness needed.
-#[test]
-#[ignore = "scaffolding pending"]
-fn in_dialog_update_smoke() {}
+/// §10 #8 — in-dialog UPDATE smoke. Drives `coord.update(&session)`
+/// against an established call (via the shared `tests/support/`
+/// harness) and asserts the staged `X-Test: smoke` header reaches
+/// the wire.
+#[path = "support/mod.rs"]
+mod support_for_section_10;
 
-/// §10 #9 — re-INVITE with extras. Established-call + media-renegotiation
-/// harness.
-#[test]
-#[ignore = "scaffolding pending"]
-fn in_dialog_reinvite_smoke() {}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_dialog_update_smoke() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::headers::SipRequestOptions;
+
+    use support_for_section_10::{
+        establish_call, wait_for_inbound_method, SMOKE_HEADER_NAME, SMOKE_HEADER_VALUE,
+    };
+
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut call = establish_call(16700, 16710).await;
+
+    call.alice
+        .update(&call.call_id)
+        .with_raw_header(
+            rvoip_sip::HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+            SMOKE_HEADER_VALUE,
+        )
+        .expect("with_raw_header on UPDATE builder")
+        .send()
+        .await
+        .expect("update().send()");
+
+    let trace = wait_for_inbound_method(&mut call.bob_events, "UPDATE", Duration::from_secs(10))
+        .await
+        .expect("bob did not see inbound UPDATE trace");
+    assert!(
+        trace.raw_message.contains(SMOKE_HEADER_NAME)
+            && trace.raw_message.contains(SMOKE_HEADER_VALUE),
+        "UPDATE must carry the staged smoke header; wire =\n{}",
+        trace.raw_message
+    );
+
+    call.teardown().await;
+}
+
+/// §10 #9 — re-INVITE with extras. Drives `coord.reinvite(&session)`
+/// against an established call and asserts the staged `X-Test: smoke`
+/// header reaches the wire on the mid-dialog INVITE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn in_dialog_reinvite_smoke() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::headers::SipRequestOptions;
+
+    use support_for_section_10::{
+        establish_call, wait_for_inbound_method, SMOKE_HEADER_NAME, SMOKE_HEADER_VALUE,
+    };
+
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut call = establish_call(16720, 16730).await;
+
+    // Minimal SDP suffices — the re-INVITE builder rejects empty bodies
+    // since RFC 3261 requires SDP for session modification.
+    const SDP_OFFER: &str = "v=0\r\n\
+o=alice 0 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 17000 RTP/AVP 0\r\n";
+
+    call.alice
+        .reinvite(&call.call_id)
+        .with_sdp(SDP_OFFER)
+        .with_raw_header(
+            rvoip_sip::HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+            SMOKE_HEADER_VALUE,
+        )
+        .expect("with_raw_header on re-INVITE builder")
+        .send()
+        .await
+        .expect("reinvite().send()");
+
+    let trace = wait_for_inbound_method(&mut call.bob_events, "INVITE", Duration::from_secs(10))
+        .await
+        .expect("bob did not see inbound re-INVITE trace");
+    assert!(
+        trace.raw_message.contains(SMOKE_HEADER_NAME)
+            && trace.raw_message.contains(SMOKE_HEADER_VALUE),
+        "re-INVITE must carry the staged smoke header; wire =\n{}",
+        trace.raw_message
+    );
+
+    call.teardown().await;
+}
 
 /// §10 #29 — Cancel-safety: dropping `.send().await` at various
 /// stages doesn't leak `SessionState.pending_*_options`. The §12.1
@@ -282,41 +365,452 @@ fn outbound_proxy_per_method_routing() {}
 /// §10 #16 — Auto-emit headers stamp internally-emitted CANCEL.
 /// Closed by Phase 5 (`Action::SendCANCELWithOptions` consults
 /// `dialog_adapter.auto_emit_extra_headers` when the stash is empty).
-#[test]
-#[ignore = "scaffolding pending — needs pre-180 INVITE+timeout to trigger internal CANCEL"]
-fn auto_emit_cancel_carries_headers() {}
+///
+/// The auto-emit fallback fires only when SendCANCELWithOptions is
+/// emitted by the YAML *without* having gone through the cancel()
+/// builder (which always stages `pending_cancel_options`). The
+/// reachable trigger is: `coord.hangup(session_id)` fires `HangupCall`,
+/// which in `Initiating` state transitions to `CancelPending` without
+/// staging; then bob's 180 Ringing triggers
+/// `CancelPending + Dialog180Ringing → SendCANCELWithOptions` with an
+/// empty stash.
+///
+/// The UAS is a raw-UDP ringing-only peer (replies with 100 Trying,
+/// then 180 Ringing after a short delay, and 487 once it sees the
+/// CANCEL). The UDP UAS gives us exact control over the timing so the
+/// `hangup` arrives in `Initiating` (before the 180) and the CANCEL is
+/// then triggered by the 180 transition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_emit_cancel_carries_headers() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+    use rvoip_sip::HeaderName;
+    use rvoip_sip_core::types::headers::HeaderValue;
+    use rvoip_sip_core::types::TypedHeader;
+
+    use support_for_section_10::{boot_ringing_uas, SMOKE_HEADER_NAME};
+
+    const AUTO_EMIT_VALUE: &str = "cancel-auto";
+    const UAS_PORT: u16 = 35280;
+    const UAC_PORT: u16 = 35281;
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    // Ringing-only UAS — 180 arrives after a 250ms delay, giving the
+    // UAC time to call hangup() while still in Initiating.
+    let uas = boot_ringing_uas(UAS_PORT, Duration::from_millis(250)).await;
+
+    let mut cfg = Config::local("alice-cancel-auto", UAC_PORT);
+    cfg.sip_trace = rvoip_sip::SipTraceConfig {
+        enabled: true,
+        redact_sensitive_headers: false,
+        include_body: true,
+        ..rvoip_sip::SipTraceConfig::default()
+    };
+    cfg.auto_emit_extra_headers = vec![TypedHeader::Other(
+        HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+        HeaderValue::Raw(AUTO_EMIT_VALUE.as_bytes().to_vec()),
+    )];
+
+    let coord = UnifiedCoordinator::new(cfg).await.expect("UAC coordinator");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{UAS_PORT}");
+    let call_id = coord
+        .invite(Some(format!("sip:alice@127.0.0.1:{UAC_PORT}")), target)
+        .send()
+        .await
+        .expect("invite().send()");
+
+    // Call hangup() BEFORE the 180 arrives. The state machine routes:
+    //   Initiating + HangupCall → CancelPending (no stash)
+    // and the subsequent 180 then fires SendCANCELWithOptions with an
+    // empty stash → auto_emit_extra_headers kicks in.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let _ = coord.hangup(&call_id).await;
+
+    // Wait for a CANCEL on the UAS.
+    let captured = uas
+        .wait_for(
+            |r| r.method == "CANCEL",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("UAS never saw inbound CANCEL");
+
+    assert!(
+        captured.raw.contains(SMOKE_HEADER_NAME),
+        "CANCEL must carry the auto-emit header name `{SMOKE_HEADER_NAME}`; wire =\n{}",
+        captured.raw
+    );
+    assert!(
+        captured.raw.contains(AUTO_EMIT_VALUE),
+        "CANCEL must carry the auto-emit header value `{AUTO_EMIT_VALUE}`; wire =\n{}",
+        captured.raw
+    );
+
+    uas.shutdown();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
 
 /// §10 #17 — Auto-emit headers stamp internally-emitted NOTIFY.
 /// Closed by Phase 5 (`Action::SendNOTIFYWithOptions` consults
-/// auto-emit fallback when the stash is empty).
-#[test]
-#[ignore = "scaffolding pending — needs subscription teardown to trigger internal NOTIFY"]
-fn auto_emit_notify_carries_headers() {}
+/// `dialog_adapter.auto_emit_extra_headers` when the stash is empty).
+///
+/// Subscription teardown isn't auto-wired to `SendNOTIFYWithOptions`
+/// today — the only emit row is `Active + SendOutboundNotify →
+/// SendNOTIFYWithOptions` (`state_tables/default.yaml:1617`). The
+/// `notify()` builder always stages `pending_notify_options`, so the
+/// stash-empty branch is exercised by dispatching `SendOutboundNotify`
+/// directly via the public `coord.dispatch_outbound` entry point. That
+/// is exactly the shape the future subscription-teardown driver will
+/// take when it fires the final RFC 6665 `terminated;reason=*` NOTIFY.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn auto_emit_notify_carries_headers() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::callback_peer::{CallbackPeer, ShutdownHandle};
+    use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+    use rvoip_sip::state_table::EventType;
+    use rvoip_sip::HeaderName;
+    use rvoip_sip_core::types::headers::HeaderValue;
+    use rvoip_sip_core::types::TypedHeader;
+
+    use support_for_section_10::{
+        wait_for_call_answered, wait_for_inbound_method, AutoAccept, SMOKE_HEADER_NAME,
+    };
+
+    const AUTO_EMIT_VALUE: &str = "notify-auto";
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let mut alice_cfg = Config::local("alice-notify-auto", 16760);
+    alice_cfg.sip_trace = rvoip_sip::SipTraceConfig {
+        enabled: true,
+        redact_sensitive_headers: false,
+        include_body: true,
+        ..rvoip_sip::SipTraceConfig::default()
+    };
+    alice_cfg.auto_emit_extra_headers = vec![TypedHeader::Other(
+        HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+        HeaderValue::Raw(AUTO_EMIT_VALUE.as_bytes().to_vec()),
+    )];
+
+    let alice = UnifiedCoordinator::new(alice_cfg)
+        .await
+        .expect("alice coordinator");
+    let mut alice_events = alice.events().await.expect("alice events");
+
+    let mut bob_cfg = Config::local("bob-notify-auto", 16770);
+    bob_cfg.sip_trace = rvoip_sip::SipTraceConfig {
+        enabled: true,
+        redact_sensitive_headers: false,
+        include_body: true,
+        ..rvoip_sip::SipTraceConfig::default()
+    };
+    let bob_peer = CallbackPeer::new(AutoAccept, bob_cfg)
+        .await
+        .expect("bob callback peer");
+    let bob = bob_peer.coordinator().clone();
+    let bob_shutdown: ShutdownHandle = bob_peer.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob_peer.run().await;
+    });
+    let mut bob_events = bob.events().await.expect("bob events");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{}", 16770);
+    let call_id = alice
+        .invite(Some("sip:alice@127.0.0.1:16760".to_string()), target)
+        .send()
+        .await
+        .expect("invite().send()");
+
+    assert!(
+        wait_for_call_answered(&mut alice_events, &call_id, Duration::from_secs(10)).await,
+        "alice did not see CallAnswered"
+    );
+    let _ = wait_for_inbound_method(&mut bob_events, "INVITE", Duration::from_secs(2)).await;
+
+    // Fire `SendOutboundNotify` WITHOUT staging via the notify() builder.
+    // This is the natural shape a subscription-teardown driver would
+    // use — it would dispatch the terminal `SendOutboundNotify` after
+    // clearing or never populating `pending_notify_options`, so the
+    // auto-emit fallback in `Action::SendNOTIFYWithOptions` fires.
+    alice
+        .dispatch_outbound(&call_id, EventType::SendOutboundNotify)
+        .await
+        .expect("dispatch_outbound NOTIFY");
+
+    let trace = wait_for_inbound_method(&mut bob_events, "NOTIFY", Duration::from_secs(10))
+        .await
+        .expect("bob did not see inbound NOTIFY trace");
+
+    assert!(
+        trace.raw_message.contains(SMOKE_HEADER_NAME),
+        "NOTIFY must carry auto-emit header name `{SMOKE_HEADER_NAME}`; wire =\n{}",
+        trace.raw_message
+    );
+    assert!(
+        trace.raw_message.contains(AUTO_EMIT_VALUE),
+        "NOTIFY must carry auto-emit header value `{AUTO_EMIT_VALUE}`; wire =\n{}",
+        trace.raw_message
+    );
+
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
 
 /// §10 #18 — Stash wins over auto-emit on BYE per §7.4 precedence.
 /// Closed by Phase 5 (`Action::SendBYE` prefers `pending_bye_options`).
-#[test]
-#[ignore = "scaffolding pending — needs established call to drive bye() builder"]
-fn bye_stash_wins_over_auto_emit() {}
+///
+/// The bye() builder dispatches `SendOutboundBye` → `SendBYEWithOptions`,
+/// which only ever consumes the stash and does not consult auto-emit.
+/// The precedence assertion this test exercises: when both auto-emit
+/// and a stash are populated, the wire carries the *stash* extras and
+/// the auto-emit value with the same header name is not appended.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bye_stash_wins_over_auto_emit() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::callback_peer::{CallbackPeer, ShutdownHandle};
+    use rvoip_sip::api::headers::SipRequestOptions;
+    use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+    use rvoip_sip::HeaderName;
+    use rvoip_sip_core::types::TypedHeader;
+
+    use support_for_section_10::{
+        wait_for_call_answered, wait_for_inbound_method, AutoAccept, SMOKE_HEADER_NAME,
+    };
+
+    const STASH_VALUE: &str = "stash-side";
+    const AUTO_EMIT_VALUE: &str = "stack-side";
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    // Alice's config carries auto_emit_extra_headers for the same name
+    // we'll later set via bye().
+    let mut alice_cfg = Config::local("alice", 16740);
+    alice_cfg.sip_trace = rvoip_sip::SipTraceConfig {
+        enabled: true,
+        redact_sensitive_headers: false,
+        include_body: true,
+        ..rvoip_sip::SipTraceConfig::default()
+    };
+    alice_cfg.auto_emit_extra_headers = vec![TypedHeader::Other(
+        HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+        rvoip_sip_core::types::headers::HeaderValue::Raw(AUTO_EMIT_VALUE.as_bytes().to_vec()),
+    )];
+
+    let alice = UnifiedCoordinator::new(alice_cfg)
+        .await
+        .expect("alice coordinator");
+    let mut alice_events = alice.events().await.expect("alice events");
+
+    let mut bob_cfg = Config::local("bob", 16750);
+    bob_cfg.sip_trace = rvoip_sip::SipTraceConfig {
+        enabled: true,
+        redact_sensitive_headers: false,
+        include_body: true,
+        ..rvoip_sip::SipTraceConfig::default()
+    };
+    let bob_peer = CallbackPeer::new(AutoAccept, bob_cfg)
+        .await
+        .expect("bob callback peer");
+    let bob = bob_peer.coordinator().clone();
+    let bob_shutdown: ShutdownHandle = bob_peer.shutdown_handle();
+    let bob_task = tokio::spawn(async move {
+        let _ = bob_peer.run().await;
+    });
+    let mut bob_events = bob.events().await.expect("bob events");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let target = format!("sip:bob@127.0.0.1:{}", 16750);
+    let call_id = alice
+        .invite(Some("sip:alice@127.0.0.1:16740".to_string()), target)
+        .send()
+        .await
+        .expect("invite().send()");
+
+    assert!(
+        wait_for_call_answered(&mut alice_events, &call_id, Duration::from_secs(10)).await,
+        "alice did not see CallAnswered"
+    );
+    let _ = wait_for_inbound_method(&mut bob_events, "INVITE", Duration::from_secs(2)).await;
+
+    // Stage BYE via the builder with the *stash* value for the same
+    // header name as auto_emit_extra_headers. The precedence rule says
+    // the stash wins and the auto-emit value is not appended.
+    alice
+        .bye(&call_id)
+        .with_raw_header(
+            HeaderName::Other(SMOKE_HEADER_NAME.to_string()),
+            STASH_VALUE,
+        )
+        .expect("with_raw_header on BYE builder")
+        .send()
+        .await
+        .expect("bye().send()");
+
+    let trace = wait_for_inbound_method(&mut bob_events, "BYE", Duration::from_secs(10))
+        .await
+        .expect("bob did not see inbound BYE trace");
+    assert!(
+        trace.raw_message.contains(STASH_VALUE),
+        "BYE must carry the stash value `{STASH_VALUE}`; wire =\n{}",
+        trace.raw_message
+    );
+    assert!(
+        !trace.raw_message.contains(AUTO_EMIT_VALUE),
+        "BYE must NOT carry the auto-emit value `{AUTO_EMIT_VALUE}` when stash is set; wire =\n{}",
+        trace.raw_message
+    );
+
+    bob_shutdown.shutdown();
+    let _ = tokio::time::timeout(Duration::from_secs(2), bob_task).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+}
 
 /// §10 #19 — RFC 6665 multi-subscription NOTIFY routes by
-/// subscription_id. Closed by Phase 6 deep plumbing: the
-/// `SubscriptionManager`'s `dialog_lookup` key now includes the
-/// `Event: pkg;id=<sid>` parameter, so two subscriptions on the same
-/// dialog tuple no longer clobber each other and inbound NOTIFYs
-/// disambiguate by event id. Direct manager-level coverage lives in
-/// `rvoip-sip-dialog/tests/subscription_multi_id.rs`; this skeleton
-/// is kept as the §10-numbered breadcrumb.
-#[test]
-#[ignore = "covered by rvoip-sip-dialog/tests/subscription_multi_id.rs"]
-fn notify_subscription_id_routing() {}
+/// subscription_id (R5).
+///
+/// The dialog-core layer keys subscriptions by the tuple
+/// `(call_id, to_tag, from_tag, event_id)` via
+/// `SubscriptionManager::subscription_lookup_key`, so two
+/// subscriptions sharing one dialog tuple but distinguished by
+/// `Event: pkg;id=<sid>` don't clobber each other and inbound NOTIFYs
+/// disambiguate. Direct manager-level proof (UAS-side SUBSCRIBE
+/// coexistence + UAC-side NOTIFY routing) is in
+/// `rvoip-sip-dialog/tests/subscription_multi_id.rs` (both tests
+/// passing).
+///
+/// This session-core-side test exercises the contract at the
+/// `coord.notify()` builder layer: NOTIFY built with
+/// `.for_subscription(id)` stamps the matching `id=` parameter on the
+/// outbound `Event:` header, which is the wire-level prerequisite for
+/// the dialog-core routing to work.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn notify_subscription_id_routing() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::headers::SipRequestOptions;
+
+    use support_for_section_10::{
+        establish_call, wait_for_inbound_method,
+    };
+
+    let _ = tracing_subscriber::fmt::try_init();
+    let mut call = establish_call(16800, 16810).await;
+
+    // Send a NOTIFY targeted at a specific subscription id. The wire
+    // must carry `Event: presence;id=presence-7` so a multi-subscription
+    // UAS routes it correctly per RFC 6665 §4.5.2.
+    call.alice
+        .notify(&call.call_id, "presence")
+        .for_subscription("presence-7")
+        .with_subscription_state("active;expires=600")
+        .send()
+        .await
+        .expect("notify with subscription id");
+
+    let trace = wait_for_inbound_method(&mut call.bob_events, "NOTIFY", Duration::from_secs(10))
+        .await
+        .expect("bob did not see inbound NOTIFY trace");
+    assert!(
+        trace.raw_message.contains("Event:") && trace.raw_message.contains("presence"),
+        "NOTIFY must carry Event: presence; wire =\n{}",
+        trace.raw_message
+    );
+    assert!(
+        trace.raw_message.contains("id=presence-7"),
+        "NOTIFY must carry the subscription id parameter `id=presence-7` so dialog-core's \
+         multi-subscription routing can disambiguate; wire =\n{}",
+        trace.raw_message
+    );
+
+    call.teardown().await;
+}
 
 /// §10 #20 — Initial REGISTER vs refresh REGISTER reuse Call-ID
 /// differently. Closed by Phase 6's `options.refresh` guard at the
 /// `Action::SendREGISTERWithOptions` handler.
-#[test]
-#[ignore = "scaffolding pending — needs mock registrar to capture Call-ID"]
-fn register_refresh_vs_initial() {}
+///
+/// Boots the shared `support::registrar` mock, runs an initial REGISTER
+/// via the `RegisterBuilder`, then a refresh via `RegisterRefreshBuilder`.
+/// Asserts:
+/// - Initial REGISTER carries a fresh Call-ID and CSeq=1 (or whatever
+///   dialog-core's first stamp is).
+/// - Refresh REGISTER reuses the same Call-ID and increments CSeq.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn register_refresh_vs_initial() {
+    use std::time::Duration;
+
+    use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+
+    use support_for_section_10::{boot_mock_registrar, RegistrarReply};
+
+    const REGISTRAR_PORT: u16 = 35260;
+    const CLIENT_PORT: u16 = 35261;
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let registrar =
+        boot_mock_registrar(REGISTRAR_PORT, |_idx| RegistrarReply::ok_hour()).await;
+
+    let coord = UnifiedCoordinator::new(Config::local("alice-refresh", CLIENT_PORT))
+        .await
+        .expect("UAC coordinator");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let registrar_uri = format!("sip:127.0.0.1:{REGISTRAR_PORT}");
+    let handle = coord
+        .register(registrar_uri.clone(), "alice", "password")
+        .with_expires(3600)
+        .send()
+        .await
+        .expect("initial register.send()");
+
+    // Wait for the initial REGISTER to be captured + responded.
+    let captured = registrar
+        .wait_for_n(1, Duration::from_secs(5))
+        .await;
+    assert_eq!(captured.len(), 1, "expected one captured REGISTER");
+    let initial_call_id = captured[0].call_id.clone();
+    let initial_cseq = captured[0].cseq;
+
+    // Trigger the refresh via the canonical builder.
+    coord
+        .refresh(&handle)
+        .with_expires(1800)
+        .send()
+        .await
+        .expect("refresh register send");
+
+    let captured = registrar
+        .wait_for_n(2, Duration::from_secs(5))
+        .await;
+    assert_eq!(captured.len(), 2, "expected two captured REGISTERs");
+    let refresh_call_id = captured[1].call_id.clone();
+    let refresh_cseq = captured[1].cseq;
+
+    assert_eq!(
+        refresh_call_id, initial_call_id,
+        "refresh REGISTER must reuse the initial Call-ID per RFC 3261 §10.2.4"
+    );
+    assert!(
+        refresh_cseq > initial_cseq,
+        "refresh REGISTER must increment CSeq: initial={initial_cseq}, refresh={refresh_cseq}"
+    );
+    assert_eq!(
+        captured[1].expires_header,
+        Some(1800),
+        "refresh REGISTER must carry the requested Expires=1800"
+    );
+
+    registrar.shutdown();
+}
 
 /// §10 #21 — TraceRedactor scrubs Authorization in trace but not
 /// wire. Closed by Phase 7's `apply_message_redactor` consultation
@@ -406,21 +900,22 @@ fn trace_redactor_drop_omits_header_from_trace() {
     assert!(out.contains("Via: SIP/2.0/UDP 127.0.0.1:5060"));
 }
 
-/// §10 #22 — B2BUA carry-through with header policy.
+/// §10 #22 — B2BUA carry-through with header policy. Closed by the
+/// `tests/b2bua_carry_through_integration.rs` suite, which now ships
+/// two coverage flavors:
 ///
-/// The wire-side guarantee is exercised by
-/// `topology_hiding_guarantee.rs` (every stack-managed name lands in
-/// `report.skipped`) and `forbidden_header_guard_integration.rs`
-/// (policy classification of carry-through names). End-to-end
-/// three-leg coordination through an in-process B2BUA still needs the
-/// inbound-INVITE re-parse fix in
-/// `rvoip-sip-dialog/src/events/adapter.rs:282-283` (the cross-crate
-/// publish site reserializes via `Request::to_string()` which fails
-/// round-trip parse — `IncomingCall::raw_request()` returns `None`),
-/// so `IncomingCall`'s `SipHeaderView` impl can't drive
-/// `with_headers_from(&incoming, ...)` end-to-end here yet.
+/// - `b2bua_carry_through_runs_strip_and_rewrite_end_to_end` — fast
+///   smoke test against a hand-built `SipHeaderView`.
+/// - `b2bua_carry_through_drives_real_incoming_call` — full three-coord
+///   alice → b2bua → bob flow that drives `with_headers_from(&call,
+///   ...)` against the real `IncomingCall`'s typed `Arc<Request>` view
+///   (round-trips via the adapter.rs:282 re-parse fix landed 2026-05-13).
+///
+/// Wire-side stack-managed filtering is additionally exercised by
+/// `topology_hiding_guarantee.rs` and
+/// `forbidden_header_guard_integration.rs`.
 #[test]
-#[ignore = "covered by topology_hiding_guarantee.rs + forbidden_header_guard_integration.rs; full end-to-end blocked on adapter.rs:282 reserialization fix"]
+#[ignore = "covered by tests/b2bua_carry_through_integration.rs (synthetic + real-IncomingCall flavors)"]
 fn b2bua_carry_through_integration() {}
 
 /// §10 #27 — `RegisterResponseBuilder` setters

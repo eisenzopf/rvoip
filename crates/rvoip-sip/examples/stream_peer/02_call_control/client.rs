@@ -12,7 +12,8 @@ use rvoip_sip::{Config, StreamPeer};
 async fn main() -> rvoip_sip::Result<()> {
     let mut peer = StreamPeer::with_config(Config::local("controller", 5111)).await?;
 
-    let call = peer.call("sip:server@127.0.0.1:5110").await?;
+    let call_id = peer.invite("sip:server@127.0.0.1:5110").send().await?;
+    let call = peer.coordinator().session(&call_id);
     peer.wait_for_answered(call.id()).await?;
     println!("[client] connected as {}", call.id());
 

@@ -123,6 +123,23 @@ pub struct SessionState {
     // based on status code. Carried as a tuple to keep the field count low.
     pub pending_auth: Option<(u16, String)>,
 
+    // SIP_API_DESIGN_2 R2 — SIP method of the challenged request,
+    // extracted from the AuthRequired event (originally from the
+    // response's CSeq:). Consumed by `SendRequestWithAuth` to route
+    // the retry to the right per-method dispatcher. Empty string means
+    // method-agnostic (legacy publish path); the action falls back to
+    // inspecting which `pending_*_options` stash is set.
+    pub pending_auth_method: Option<String>,
+
+    // SIP_API_DESIGN_2 R2 — retry cap counter for the generic
+    // `SendRequestWithAuth` action. Mirrors `invite_auth_retry_count`
+    // but covers BYE / REFER / NOTIFY / INFO / UPDATE / MESSAGE /
+    // OPTIONS / SUBSCRIBE. Capped at 1 (one retry total) to prevent
+    // loops when credentials are wrong. The conflict guard ensures
+    // only one method has an in-flight request per session so a single
+    // counter is sufficient.
+    pub request_auth_retry_count: u8,
+
     // RFC 3261 §22.2 — INVITE auth retry counter, capped at 1 (two attempts
     // total: initial + one authenticated retry). Prevents infinite loops when
     // the server keeps re-challenging with the same nonce.
@@ -299,6 +316,8 @@ impl SessionState {
             redirect_response_contacts: Vec::new(),
             early_media_sdp: None,
             pending_auth: None,
+            pending_auth_method: None,
+            request_auth_retry_count: 0,
             invite_auth_retry_count: 0,
             redirect_targets: Vec::new(),
             redirect_attempts: 0,

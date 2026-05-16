@@ -41,9 +41,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut events = alice.control().subscribe_events().await?;
 
     println!("[ALICE] Calling Bob (session timer = 4s, min-SE = 2s)…");
-    let handle = alice
-        .call(&format!("sip:bob@127.0.0.1:{}", bob_port))
+    let call_id = alice
+        .invite(format!("sip:bob@127.0.0.1:{}", bob_port))
+        .send()
         .await?;
+    let handle = alice.coordinator().session(&call_id);
     alice.wait_for_answered(handle.id()).await?;
     println!("[ALICE] Connected. Waiting for SessionRefreshFailed…");
 

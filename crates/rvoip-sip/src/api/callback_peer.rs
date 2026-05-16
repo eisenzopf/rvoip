@@ -1287,6 +1287,15 @@ impl CallbackPeerControl {
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
         &self.coordinator
     }
+
+    /// Begin building an outbound INVITE from this peer's configured
+    /// `local_uri`. Canonical replacement for the deprecated
+    /// [`Self::call`]. Returns an
+    /// [`OutboundCallBuilder`](crate::api::send::OutboundCallBuilder).
+    pub fn invite(&self, target: impl Into<String>) -> crate::api::send::OutboundCallBuilder {
+        self.coordinator
+            .invite(Some(self.local_uri.clone()), target)
+    }
 }
 
 // ===== CallbackPeer =====
@@ -1422,6 +1431,14 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// ```
     pub fn coordinator(&self) -> &Arc<UnifiedCoordinator> {
         &self.coordinator
+    }
+
+    /// Begin building an outbound INVITE from this peer's configured
+    /// `local_uri`. Equivalent to
+    /// `peer.coordinator().invite(Some(local_uri), target)`.
+    pub fn invite(&self, target: impl Into<String>) -> crate::api::send::OutboundCallBuilder {
+        self.coordinator
+            .invite(Some(self.local_uri.clone()), target)
     }
 
     /// Return a cloneable control handle for calls, registration, and shutdown.

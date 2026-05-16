@@ -12,7 +12,8 @@ use rvoip_sip::{Config, StreamPeer};
 async fn main() -> rvoip_sip::Result<()> {
     let mut caller = StreamPeer::with_config(Config::local("caller", 5121)).await?;
 
-    let call = caller.call("sip:ivr@127.0.0.1:5120").await?;
+    let call_id = caller.invite("sip:ivr@127.0.0.1:5120").send().await?;
+    let call = caller.coordinator().session(&call_id);
     caller.wait_for_answered(call.id()).await?;
 
     for digit in ['1', '2', '#'] {

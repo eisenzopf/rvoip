@@ -28,7 +28,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
 
             println!("[CALLER-{}] Calling answerer...", id);
-            let handle = peer.call("sip:answerer@127.0.0.1:6000").await?;
+            let call_id = peer.invite("sip:answerer@127.0.0.1:6000").send().await?;
+            let handle = peer.coordinator().session(&call_id);
             peer.wait_for_answered(handle.id()).await?;
             println!("[CALLER-{}] Connected!", id);
 

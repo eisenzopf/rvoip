@@ -288,6 +288,33 @@ impl Endpoint {
         normalize_target(self.registrar.as_deref(), target, self.transport)
     }
 
+    /// Begin building an outbound INVITE from this endpoint's
+    /// registered AOR (or `local_uri`). Resolves bare extensions
+    /// through the configured registrar — the same shape
+    /// [`call`](Self::call) used. Returns an
+    /// [`OutboundCallBuilder`](crate::api::send::OutboundCallBuilder).
+    ///
+    /// Returns `Err` only if the target can't be normalized into a SIP
+    /// URI (e.g. a bare extension without a configured registrar).
+    pub fn invite(&self, target: &str) -> Result<crate::api::send::OutboundCallBuilder> {
+        let resolved = self.resolve_target(target)?;
+        Ok(self.peer.control().invite(resolved))
+    }
+
+    /// Materialize an [`EndpointCall`] for a `CallId` returned by
+    /// [`invite(...).send()`](Self::invite). Pairs with `invite()` the
+    /// same way [`UnifiedCoordinator::session`] pairs with the bare
+    /// coordinator builder — gives back the rich call wrapper that the
+    /// deprecated [`call`](Self::call) returned directly.
+    pub fn wrap_call(&self, call_id: crate::api::handle::CallId) -> EndpointCall {
+        let coord = self.peer.control().coordinator().clone();
+        EndpointCall::new(
+            crate::api::handle::SessionHandle::new(call_id, coord),
+            self.registrar.clone(),
+            self.transport,
+        )
+    }
+
     /// Consume this endpoint and return the wrapped [`StreamPeer`].
     pub fn into_stream_peer(self) -> StreamPeer {
         self.peer
@@ -458,6 +485,26 @@ impl EndpointControl {
     /// Resolve a dial target using this endpoint's account context.
     pub fn resolve_target(&self, target: &str) -> Result<String> {
         normalize_target(self.registrar.as_deref(), target, self.transport)
+    }
+
+    /// Begin building an outbound INVITE from this endpoint's
+    /// account context. Resolves bare extensions through the configured
+    /// registrar. Canonical replacement for the deprecated
+    /// [`Self::call`].
+    pub fn invite(&self, target: &str) -> Result<crate::api::send::OutboundCallBuilder> {
+        let resolved = self.resolve_target(target)?;
+        Ok(self.control.invite(resolved))
+    }
+
+    /// Materialize an [`EndpointCall`] for a `CallId` returned by
+    /// [`invite(...).send()`](Self::invite).
+    pub fn wrap_call(&self, call_id: crate::api::handle::CallId) -> EndpointCall {
+        let coord = self.control.coordinator().clone();
+        EndpointCall::new(
+            crate::api::handle::SessionHandle::new(call_id, coord),
+            self.registrar.clone(),
+            self.transport,
+        )
     }
 
     /// Gracefully shut down the endpoint runtime.

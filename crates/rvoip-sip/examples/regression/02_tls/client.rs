@@ -75,7 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut peer = StreamPeer::with_config(config).await?;
 
     println!("Placing TLS call to sips:server@127.0.0.1:5061…");
-    let handle = peer.call("sips:server@127.0.0.1:5061").await?;
+    let call_id = peer.invite("sips:server@127.0.0.1:5061").send().await?;
+    let handle = peer.coordinator().session(&call_id);
     peer.wait_for_answered(handle.id()).await?;
     println!("Call answered over TLS — holding for 500 ms…");
 

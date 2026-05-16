@@ -76,9 +76,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     .await?;
 
     println!("[ALICE] Calling bridge at 127.0.0.1:{}...", bridge_port);
-    let handle = alice
-        .call(&format!("sip:bridge@127.0.0.1:{}", bridge_port))
+    let call_id = alice
+        .invite(format!("sip:bridge@127.0.0.1:{}", bridge_port))
+        .send()
         .await?;
+    let handle = alice.coordinator().session(&call_id);
     alice.wait_for_answered(handle.id()).await?;
     println!("[ALICE] Connected through bridge!");
 

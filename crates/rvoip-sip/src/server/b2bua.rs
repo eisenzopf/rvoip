@@ -61,7 +61,11 @@ impl SipB2bua {
         target_uri: &str,
     ) -> Result<BridgeHandle, B2buaError> {
         self.coordinator.accept_call(incoming).await?;
-        let outbound = self.coordinator.make_call(from_uri, target_uri).await?;
+        let outbound = self
+            .coordinator
+            .invite(Some(from_uri.to_string()), target_uri.to_string())
+            .send()
+            .await?;
         let handle = sip_bridge(&self.coordinator, incoming, &outbound).await?;
         Ok(handle)
     }

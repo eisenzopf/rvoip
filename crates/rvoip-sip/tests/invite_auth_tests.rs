@@ -22,6 +22,7 @@ fn auth_event() -> EventType {
     EventType::AuthRequired {
         status_code: 401,
         challenge: String::new(),
+        method: "INVITE".to_string(),
     }
 }
 
@@ -71,6 +72,7 @@ fn auth_required_normalizes_for_lookup() {
         EventType::AuthRequired {
             status_code: 407,
             challenge: "Digest realm=\"rvoip-test\", nonce=\"abcd\"".to_string(),
+            method: "INVITE".to_string(),
         },
     ));
     let empty = table.get(&key(Role::UAC, CallState::Initiating, auth_event()));

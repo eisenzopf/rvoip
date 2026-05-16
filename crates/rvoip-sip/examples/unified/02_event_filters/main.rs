@@ -32,10 +32,11 @@ async fn main() -> Result<()> {
 
     let alice = UnifiedCoordinator::new(Config::local("alice", 5140)).await?;
     let call_id = alice
-        .make_call(
-            "sip:alice@127.0.0.1:5140",
+        .invite(
+            Some("sip:alice@127.0.0.1:5140".to_string()),
             "sip:bob@127.0.0.1:5141",
         )
+        .send()
         .await?;
     let mut call_events = alice.events_for_session(&call_id).await?;
 

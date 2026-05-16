@@ -26,13 +26,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bob_port = env_port("BOB_PORT", 35092);
 
     let config = Config::local("alice", alice_port);
-    let mut alice = StreamPeer::with_config(config).await?;
+    let alice = StreamPeer::with_config(config).await?;
     let mut events = alice.control().subscribe_events().await?;
 
     println!("[ALICE] Calling Bob on port {}…", bob_port);
-    let handle = alice
-        .call(&format!("sip:bob@127.0.0.1:{}", bob_port))
+    let call_id = alice
+        .invite(format!("sip:bob@127.0.0.1:{}", bob_port))
+        .send()
         .await?;
+    let handle = alice.coordinator().session(&call_id);
 
     let answered = timeout(Duration::from_secs(8), async {
         loop {

@@ -17,7 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut caller = StreamPeer::with_config(Config::local("caller", 5061)).await?;
 
     println!("Calling auto-answer server...");
-    let handle = caller.call("sip:server@127.0.0.1:5060").await?;
+    let call_id = caller.invite("sip:server@127.0.0.1:5060").send().await?;
+    let handle = caller.coordinator().session(&call_id);
     caller.wait_for_answered(handle.id()).await?;
     println!("Connected! Hanging up in 3 seconds...");
 

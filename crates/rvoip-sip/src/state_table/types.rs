@@ -153,6 +153,15 @@ pub enum EventType {
     AuthRequired {
         status_code: u16,
         challenge: String,
+        /// SIP method of the challenged request — `"INVITE"`,
+        /// `"REGISTER"`, `"BYE"`, `"SUBSCRIBE"`, … — extracted from the
+        /// response `CSeq:`. Used by `Action::SendRequestWithAuth` to
+        /// route the retry to the right per-method dispatcher. Empty
+        /// string preserves the legacy method-agnostic shape used by
+        /// the existing `Initiating + AuthRequired` (INVITE) and
+        /// `Registering + AuthRequired` (REGISTER) rows; new
+        /// per-method rows match on this field via YAML conditions.
+        method: String,
     },
     /// RFC 4028 §6 — UAS replied 422 Session Interval Too Small. `min_se_secs`
     /// is the peer's required floor, parsed from the `Min-SE` response header.
@@ -372,6 +381,7 @@ impl EventType {
             EventType::AuthRequired { .. } => EventType::AuthRequired {
                 status_code: 0,
                 challenge: String::new(),
+                method: String::new(),
             },
             EventType::SessionIntervalTooSmall { .. } => {
                 EventType::SessionIntervalTooSmall { min_se_secs: 0 }
@@ -558,6 +568,14 @@ pub enum Action {
     /// the INVITE via `DialogAdapter::resend_invite_with_auth`. Bumps
     /// `session.invite_auth_retry_count`; errors if the cap is exceeded.
     SendINVITEWithAuth,
+    /// SIP_API_DESIGN_2 R2 — auth-retry for non-INVITE/non-REGISTER
+    /// methods. Reads `session.pending_auth_method` to discriminate
+    /// which `pending_<method>_options` to re-issue (falls back to
+    /// inspecting which stash is set when method is missing), computes
+    /// the digest via `auth-core`, and dispatches via the matching
+    /// `DialogAdapter::send_<method>_with_auth` mirror. Covers BYE,
+    /// REFER, NOTIFY, INFO, UPDATE, MESSAGE, OPTIONS, SUBSCRIBE.
+    SendRequestWithAuth,
     /// RFC 4028 §6 — resend the INVITE with a bumped `Session-Expires` /
     /// `Min-SE` header derived from `session.session_timer_min_se` after a
     /// 422 Session Interval Too Small. Bumps `session.session_timer_retry_count`;

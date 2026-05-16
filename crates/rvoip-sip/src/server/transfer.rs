@@ -6,6 +6,8 @@
 //! provides B2BUA-side scenario glue — pick which leg, build the target,
 //! choose blind vs attended — that calls into those methods.
 
+use std::sync::Arc;
+
 use crate::api::unified::UnifiedCoordinator;
 use crate::SessionId;
 use thiserror::Error;
@@ -26,12 +28,13 @@ impl From<crate::errors::SessionError> for TransferError {
 /// The transferee dials `target_uri` directly; no Replaces header involved.
 /// (RFC 3515.)
 pub async fn blind_transfer(
-    coordinator: &UnifiedCoordinator,
+    coordinator: &Arc<UnifiedCoordinator>,
     source_session: &SessionId,
     target_uri: &str,
 ) -> Result<(), TransferError> {
     coordinator
-        .send_refer(source_session, target_uri)
+        .refer(source_session, target_uri.to_string())
+        .send()
         .await
         .map_err(Into::into)
 }
@@ -42,13 +45,15 @@ pub async fn blind_transfer(
 /// established `replacing_session` and `target_uri` should encode the
 /// transferee leg appropriately.
 pub async fn attended_transfer(
-    coordinator: &UnifiedCoordinator,
+    coordinator: &Arc<UnifiedCoordinator>,
     source_session: &SessionId,
     target_uri: &str,
     replaces: &str,
 ) -> Result<(), TransferError> {
     coordinator
-        .send_refer_with_replaces(source_session, target_uri, replaces)
+        .refer(source_session, target_uri.to_string())
+        .with_replaces(replaces.to_string())
+        .send()
         .await
         .map_err(Into::into)
 }

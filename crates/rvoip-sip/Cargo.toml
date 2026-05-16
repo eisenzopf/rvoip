@@ -105,6 +105,24 @@ path = "examples/callback_peer/06_trait_handler/client.rs"
 name = "sip_b2bua"
 path = "examples/sip_b2bua.rs"
 
+# SIP_API_DESIGN_2 §11 use-case walkthroughs — runnable end-to-end
+# demonstrations of the four target patterns (endpoint, gateway,
+# call-center agent, SBC). Each example boots multiple coordinators
+# in-process so it runs via `cargo run --example <name>` without any
+# external infrastructure.
+[[example]]
+name = "endpoint_softphone"
+path = "examples/endpoint_softphone/main.rs"
+[[example]]
+name = "gateway_pstn"
+path = "examples/gateway_pstn/main.rs"
+[[example]]
+name = "call_center_agent"
+path = "examples/call_center_agent/main.rs"
+[[example]]
+name = "sbc_topology_hiding"
+path = "examples/sbc_topology_hiding/main.rs"
+
 # UnifiedCoordinator examples (explicit session orchestration API)
 [[example]]
 name = "unified_basic_call"
