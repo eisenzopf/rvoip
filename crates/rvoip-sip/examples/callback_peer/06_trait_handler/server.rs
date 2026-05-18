@@ -31,13 +31,22 @@ impl CallHandler for MyHandler {
         println!("[HANDLER] Call {} received DTMF: {}", handle.id(), digit);
     }
 
-    async fn on_transfer_request(&self, handle: SessionHandle, target: String) -> bool {
+    async fn on_refer_received(&self, request: rvoip_sip::IncomingRequest) {
         println!(
-            "[HANDLER] Call {} transfer request to {}",
-            handle.id(),
-            target
+            "[HANDLER] Call {} REFER received (method={:?})",
+            request.call_id, request.method
         );
-        true
+        // Auto-accept the transfer.
+        let handle = match request.session_handle() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[HANDLER] session_handle unavailable: {e}");
+                return;
+            }
+        };
+        if let Err(e) = handle.accept_refer().await {
+            eprintln!("[HANDLER] accept_refer failed: {e}");
+        }
     }
 }
 

@@ -5,7 +5,7 @@
 //!
 //! Sequencing:
 //! 1. Wait for Alice's INVITE (`Event::IncomingCall`).
-//! 2. Originate outbound to Carol with `make_call`.
+//! 2. Originate outbound to Carol with `coord.invite(...).send()`.
 //! 3. Wait for Carol to answer (`CallAnswered` on the outbound leg).
 //! 4. Accept Alice's INVITE.
 //! 5. Poll both legs until `CallState::Active`, then call `bridge()`.

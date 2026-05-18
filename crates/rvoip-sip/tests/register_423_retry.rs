@@ -21,7 +21,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
-use rvoip_sip::api::unified::{Config, Registration, RegistrationStatus};
+use rvoip_sip::api::unified::{Config, RegistrationStatus};
 use rvoip_sip::StreamPeer;
 
 use rvoip_sip_core::parser::parse_message;
@@ -208,17 +208,16 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
 
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", REGISTRAR_PORT),
                 "alice",
                 "password",
             )
-            .contact_uri(CLIENT_CONTACT)
-            .expires(CLIENT_INITIAL_EXPIRES),
-        )
+            .with_contact_uri(CLIENT_CONTACT)
+            .with_expires(CLIENT_INITIAL_EXPIRES)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     // Wait until both REGISTERs have landed on the mock (retry = count >= 2).
     let wait_for_retry = timeout(Duration::from_secs(10), async {
@@ -395,16 +394,15 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
 
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", AUTH_REGISTRAR_PORT),
                 "alice",
                 "password",
             )
-            .contact_uri(AUTH_CLIENT_CONTACT),
-        )
+            .with_contact_uri(AUTH_CLIENT_CONTACT)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     let wait_for_retry = timeout(Duration::from_secs(10), async {
         loop {
@@ -535,17 +533,16 @@ async fn registration_info_tracks_success_refresh_shape_and_unregister_wait() {
 
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", INFO_REGISTRAR_PORT),
                 "alice",
                 "password",
             )
-            .contact_uri(INFO_CLIENT_CONTACT)
-            .expires(300),
-        )
+            .with_contact_uri(INFO_CLIENT_CONTACT)
+            .with_expires(300)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     timeout(Duration::from_secs(5), async {
         loop {
@@ -674,16 +671,15 @@ async fn registration_info_tracks_auth_failure_metadata() {
 
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", FAIL_REGISTRAR_PORT),
                 "alice",
                 "wrong-password",
             )
-            .contact_uri(FAIL_CLIENT_CONTACT),
-        )
+            .with_contact_uri(FAIL_CLIENT_CONTACT)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     timeout(Duration::from_secs(5), async {
         loop {
@@ -786,17 +782,16 @@ async fn registration_info_uses_contact_expires_and_exposes_route_and_gruu() {
 
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
                 "alice",
                 "password",
             )
-            .contact_uri("sip:alice@127.0.0.1:40170")
-            .expires(300),
-        )
+            .with_contact_uri("sip:alice@127.0.0.1:40170")
+            .with_expires(300)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     timeout(Duration::from_secs(5), async {
         loop {
@@ -883,17 +878,16 @@ async fn registration_accepted_expiry_falls_back_to_header_then_request() {
         config.registration_auto_refresh = false;
         let mut peer = StreamPeer::with_config(config).await.expect("peer");
         let handle = peer
-            .register_with(
-                Registration::new(
+            .register(
                     format!("sip:127.0.0.1:{}", registrar_port),
                     "alice",
                     "password",
                 )
-                .contact_uri("sip:alice@127.0.0.1:40190")
-                .expires(requested),
-            )
+                .with_contact_uri("sip:alice@127.0.0.1:40190")
+                .with_expires(requested)
+                .send()
             .await
-            .expect("register_with");
+            .expect("register");
 
         timeout(Duration::from_secs(5), async {
             loop {
@@ -973,17 +967,16 @@ async fn automatic_registration_refresh_reuses_call_id_and_increments_cseq() {
     config.registration_refresh_jitter_percent = 0;
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
                 "alice",
                 "password",
             )
-            .contact_uri("sip:alice@127.0.0.1:40210")
-            .expires(2),
-        )
+            .with_contact_uri("sip:alice@127.0.0.1:40210")
+            .with_expires(2)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     timeout(Duration::from_secs(5), async {
         loop {
@@ -1050,17 +1043,16 @@ async fn unregister_aborts_pending_automatic_refresh() {
     config.registration_refresh_jitter_percent = 0;
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
                 "alice",
                 "password",
             )
-            .contact_uri("sip:alice@127.0.0.1:40230")
-            .expires(2),
-        )
+            .with_contact_uri("sip:alice@127.0.0.1:40230")
+            .with_expires(2)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     timeout(Duration::from_secs(5), async {
         loop {
@@ -1133,17 +1125,16 @@ async fn stream_peer_shutdown_gracefully_unregisters_active_registration() {
     config.registration_refresh_jitter_percent = 0;
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
+        .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
                 "alice",
                 "password",
             )
-            .contact_uri("sip:alice@127.0.0.1:40250")
-            .expires(300),
-        )
+            .with_contact_uri("sip:alice@127.0.0.1:40250")
+            .with_expires(300)
+            .send()
         .await
-        .expect("register_with");
+        .expect("register");
 
     timeout(Duration::from_secs(5), async {
         loop {
@@ -1208,13 +1199,13 @@ async fn register_uses_outbound_proxy_as_destination_and_route_header() {
     config.outbound_proxy_uri = Some(outbound_proxy_uri.clone());
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(registrar_uri, "alice", "password")
-                .contact_uri("sip:alice@127.0.0.1:40270")
-                .expires(300),
-        )
+        .register(registrar_uri, "alice", "password")
+                .with_contact_uri("sip:alice@127.0.0.1:40270")
+                .with_expires(300)
+
+            .send()
         .await
-        .expect("register_with through proxy");
+        .expect("register through proxy");
 
     timeout(Duration::from_secs(5), async {
         loop {

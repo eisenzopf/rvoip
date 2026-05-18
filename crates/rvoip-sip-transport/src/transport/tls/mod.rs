@@ -386,13 +386,14 @@ impl TlsTransport {
                             None => {}
                         }
                         match try_parse_one(&mut buffer) {
-                            Some(message) => {
+                            Some((message, raw_bytes)) => {
                                 let _ = event_tx
                                     .send(TransportEvent::MessageReceived {
                                         message,
                                         source: remote_addr,
                                         destination: local_addr,
                                         transport_type: TransportType::Tls,
+                                        raw_bytes: Some(std::sync::Arc::new(raw_bytes)),
                                     })
                                     .await;
                             }
@@ -653,6 +654,20 @@ impl Transport for TlsTransport {
             ))
         })
     }
+
+    async fn send_message_raw(
+        &self,
+        bytes: Bytes,
+        destination: SocketAddr,
+    ) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        // No server-name hint — verbatim-bytes callers pre-canonicalised
+        // their request; we route by destination IP. Auto-dial when no
+        // pooled connection exists (modulo ServerOnly role).
+        self.send_to_addr(bytes, destination, None).await
+    }
 }
 
 fn tls_server_name_for_message(
@@ -870,7 +885,9 @@ fn load_certs(path: &Path) -> Result<Vec<Certificate>> {
 /// framing; returns `None` when more bytes are needed. Mirrors
 /// `transport::tcp::connection::TcpConnection::try_parse_message` so
 /// TLS framing matches TCP's behaviour exactly.
-fn try_parse_one(buffer: &mut BytesMut) -> Option<rvoip_sip_core::Message> {
+fn try_parse_one(
+    buffer: &mut BytesMut,
+) -> Option<(rvoip_sip_core::Message, bytes::Bytes)> {
     if buffer.is_empty() {
         return None;
     }
@@ -904,11 +921,14 @@ fn try_parse_one(buffer: &mut BytesMut) -> Option<rvoip_sip_core::Message> {
         return None;
     }
 
-    let slice = buffer[..total].to_vec();
-    match rvoip_sip_core::parse_message(&slice) {
+    // Snapshot the wire bytes BEFORE parsing so we can hand them
+    // downstream byte-exact (RFC 8224 STIR/SHAKEN, SBC signature
+    // preservation, replay tooling). Matches the TCP path's shape.
+    let raw_bytes = bytes::Bytes::copy_from_slice(&buffer[..total]);
+    match rvoip_sip_core::parse_message(&raw_bytes) {
         Ok(message) => {
             buffer.advance(total);
-            Some(message)
+            Some((message, raw_bytes))
         }
         Err(e) => {
             warn!(

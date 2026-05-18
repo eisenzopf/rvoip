@@ -204,11 +204,11 @@ async fn invite_422_retry_bumps_session_expires_and_succeeds() {
     let config = client_config(client_port);
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
 
-    let handle = peer
-        .call(&format!("sip:bob@127.0.0.1:{}", uas_port))
+    let call_id = peer
+        .invite(format!("sip:bob@127.0.0.1:{}", uas_port))
+        .send()
         .await
-        .expect("make_call");
-    let call_id = handle.id().clone();
+        .expect("invite.send()");
 
     let outcome = timeout(
         Duration::from_secs(10),
@@ -282,11 +282,11 @@ async fn invite_422_retry_cap_surfaces_call_failed() {
     let config = client_config(client_port);
     let mut peer = StreamPeer::with_config(config).await.expect("peer");
 
-    let handle = peer
-        .call(&format!("sip:bob@127.0.0.1:{}", uas_port))
+    let call_id = peer
+        .invite(format!("sip:bob@127.0.0.1:{}", uas_port))
+        .send()
         .await
-        .expect("make_call");
-    let call_id = handle.id().clone();
+        .expect("invite.send()");
 
     let outcome = timeout(
         Duration::from_secs(10),

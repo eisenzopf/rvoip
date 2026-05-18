@@ -243,16 +243,24 @@ impl DialogEventHub {
                     }
                 }
 
-                // SIP_API_DESIGN_2 Phase A: serialize the parsed INVITE
-                // back to bytes so the receiving side can reconstruct an
-                // `Arc<Request>` via `parse_message` without breaking
-                // foundation-crate isolation. Use `Message::to_bytes()`
-                // — `Request::Display` skips the RFC 3261 header/body
-                // separator CRLF on empty-body messages, which makes
-                // the bytes unparseable.
-                let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
-                    rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
-                )));
+                // SIP_API_DESIGN_2 §7.5: surface the original wire
+                // bytes that the transport parsed. The transaction
+                // manager cached them via
+                // `TransactionEvent::MessageReceived.raw_bytes`;
+                // consuming here keeps the upstream form byte-exact for
+                // STIR/SHAKEN Identity validation (RFC 8224) and
+                // signature-preserving SBC pass-through. Fall back to
+                // re-serialising if the cache entry is missing (e.g.,
+                // mock transports that publish `raw_bytes: None`).
+                let raw_request = self
+                    .dialog_manager
+                    .transaction_manager()
+                    .take_inbound_bytes(&transaction_id)
+                    .or_else(|| {
+                        Some(std::sync::Arc::new(bytes::Bytes::from(
+                            rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
+                        )))
+                    });
 
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
@@ -365,16 +373,25 @@ impl DialogEventHub {
             SessionCoordinationEvent::ResponseReceived {
                 dialog_id,
                 response,
-                ..
+                transaction_id,
             } => {
                 // Try to get session ID from stored mapping first
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    // SIP_API_DESIGN_2 Phase A: preserve the inbound
-                    // response bytes once so every publish branch below
-                    // can attach them without serializing twice.
-                    let raw_response = Some(std::sync::Arc::new(bytes::Bytes::from(
-                        response.to_string().into_bytes(),
-                    )));
+                    // SIP_API_DESIGN_2 §7.5: pull the original wire
+                    // bytes the transport cached so STIR/SHAKEN and
+                    // signature-preserving consumers see the upstream
+                    // form. Fall back to re-serialising for synthetic
+                    // responses (auto-100, fabricated timeouts) that
+                    // never crossed the wire.
+                    let raw_response = self
+                        .dialog_manager
+                        .transaction_manager()
+                        .take_inbound_bytes(&transaction_id)
+                        .or_else(|| {
+                            Some(std::sync::Arc::new(bytes::Bytes::from(
+                                response.to_string().into_bytes(),
+                            )))
+                        });
                     // Handle specific response codes
                     match response.status_code() {
                         200 => {
@@ -414,11 +431,21 @@ impl DialogEventHub {
                         }
                         487 => {
                             // RFC 3261 §15.1.2 — 487 Request Terminated follows a
-                            // CANCEL. Distinct from generic CallFailed so UIs can
-                            // render "missed call" rather than "call rejected".
-                            Some(RvoipCrossCrateEvent::DialogToSession(
-                                DialogToSessionEvent::CallCancelled { session_id },
-                            ))
+                            // CANCEL. `handle_transaction_failure_response`
+                            // emits `SessionCoordinationEvent::CallCancelled`
+                            // explicitly for this status (see the dedicated
+                            // 487 arm there), which the `CallCancelled`
+                            // branch above maps to
+                            // `DialogToSessionEvent::CallCancelled`. Returning
+                            // `None` here avoids publishing the cross-crate
+                            // event twice — the duplicate caused
+                            // `handle_call_cancelled_session` to fire a
+                            // second time after the first invocation had
+                            // already removed the session, logging a
+                            // spurious "Failed to process CallCancelled:
+                            // Session not found" line on every ring_cancel
+                            // run.
+                            None
                         }
                         491 => {
                             // RFC 3261 §14.1 — 491 Request Pending on a re-INVITE
@@ -776,12 +803,20 @@ impl DialogEventHub {
             // variant). We dispatch by method so each gets its own
             // cross-crate variant.
             SessionCoordinationEvent::ReInvite {
-                dialog_id, request, ..
+                dialog_id,
+                request,
+                transaction_id,
             } => {
                 let method = request.method();
-                let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
-                    request.to_string().into_bytes(),
-                )));
+                let raw_request = self
+                    .dialog_manager
+                    .transaction_manager()
+                    .take_inbound_bytes(&transaction_id)
+                    .or_else(|| {
+                        Some(std::sync::Arc::new(bytes::Bytes::from(
+                            request.to_string().into_bytes(),
+                        )))
+                    });
                 let session_id = match self.dialog_manager.get_session_id(&dialog_id) {
                     Some(s) => s,
                     None => {
@@ -840,11 +875,19 @@ impl DialogEventHub {
             // session_id (the cross-crate `session_id()` accessor
             // normalizes the empty string to `None`).
             SessionCoordinationEvent::CapabilityQuery {
-                request, ..
+                request,
+                transaction_id,
+                ..
             } => {
-                let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
-                    request.to_string().into_bytes(),
-                )));
+                let raw_request = self
+                    .dialog_manager
+                    .transaction_manager()
+                    .take_inbound_bytes(&transaction_id)
+                    .or_else(|| {
+                        Some(std::sync::Arc::new(bytes::Bytes::from(
+                            request.to_string().into_bytes(),
+                        )))
+                    });
                 // CapabilityQuery in today's dialog-core does not carry
                 // a dialog id; OPTIONS therefore surfaces as
                 // out-of-dialog (empty session_id, which the cross-

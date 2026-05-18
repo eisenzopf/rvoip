@@ -795,30 +795,6 @@ impl SessionCrossCrateEventHandler {
         let _ = self.coordinator.set(Arc::downgrade(coordinator));
     }
 
-    /// Deprecated: use `with_event_broadcast` instead.
-    #[deprecated(note = "Use with_event_broadcast")]
-    pub fn with_simple_peer_events(
-        state_machine: Arc<StateMachineExecutor>,
-        global_coordinator: Arc<GlobalEventCoordinator>,
-        dialog_adapter: Arc<DialogAdapter>,
-        media_adapter: Arc<MediaAdapter>,
-        registry: Arc<SessionRegistry>,
-        incoming_call_tx: mpsc::Sender<crate::types::IncomingCallInfo>,
-        _simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>,
-    ) -> Self {
-        let app_event_publisher =
-            SessionEventPublisher::new(global_coordinator.clone(), LifecycleIndex::new());
-        Self::with_incoming_call_channel(
-            state_machine,
-            global_coordinator,
-            dialog_adapter,
-            media_adapter,
-            registry,
-            incoming_call_tx,
-            app_event_publisher,
-        )
-    }
-
     /// Publish a terminal app-level event, then release the session from the
     /// store + registry.
     ///

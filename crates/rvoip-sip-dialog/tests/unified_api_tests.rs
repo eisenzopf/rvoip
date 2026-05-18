@@ -20,6 +20,10 @@ use rvoip_sip_dialog::transaction::transport::{TransportManager, TransportManage
 use rvoip_sip_dialog::transaction::TransactionManager;
 use rvoip_sip_core::{Method, Request, StatusCode};
 
+use rvoip_sip_dialog::api::unified::{
+    ByeRequestOptions, InfoRequestOptions, NotifyRequestOptions, ReferRequestOptions,
+    UpdateRequestOptions,
+};
 use rvoip_sip_dialog::{
     api::{unified::UnifiedDialogApi, ApiError, DialogConfig},
     // Core unified types
@@ -536,36 +540,55 @@ async fn test_unified_api_sip_method_helpers() -> Result<(), Box<dyn std::error:
 
     // Test SIP method helpers (these will fail because no actual dialog exists yet,
     // but we're testing the API surface)
-    let bye_result = api.send_bye(&dialog_id).await;
+    let bye_result = api
+        .send_bye_with_options(&dialog_id, ByeRequestOptions::default())
+        .await;
     // Should fail gracefully with dialog not found
     assert!(bye_result.is_err());
 
     let refer_result = api
-        .send_refer(
+        .send_refer_with_options(
             &dialog_id,
-            "sip:transfer-target@example.com".to_string(),
-            None,
+            ReferRequestOptions {
+                refer_to: "sip:transfer-target@example.com".to_string(),
+                ..Default::default()
+            },
         )
         .await;
     assert!(refer_result.is_err());
 
     let notify_result = api
-        .send_notify(
+        .send_notify_with_options(
             &dialog_id,
-            "presence".to_string(),
-            Some("online".to_string()),
-            None, // subscription_state
+            NotifyRequestOptions {
+                event: "presence".to_string(),
+                body: Some(bytes::Bytes::from("online")),
+                ..Default::default()
+            },
         )
         .await;
     assert!(notify_result.is_err());
 
     let update_result = api
-        .send_update(&dialog_id, Some("SDP update".to_string()))
+        .send_update_with_options(
+            &dialog_id,
+            UpdateRequestOptions {
+                sdp: Some("SDP update".to_string()),
+                ..Default::default()
+            },
+        )
         .await;
     assert!(update_result.is_err());
 
     let info_result = api
-        .send_info(&dialog_id, "Application data".to_string())
+        .send_info_with_options(
+            &dialog_id,
+            InfoRequestOptions {
+                content_type: "application/octet-stream".to_string(),
+                body: bytes::Bytes::from("Application data"),
+                ..Default::default()
+            },
+        )
         .await;
     assert!(info_result.is_err());
 

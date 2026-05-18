@@ -6,9 +6,8 @@
 //! usually need first.
 //!
 //! For PBX or SBC integrations that require non-standard or vendor INVITE
-//! headers, [`Endpoint::call_with_headers`] and
-//! [`EndpointControl::call_with_headers`] attach a caller-supplied
-//! `Vec<TypedHeader>` to the very first INVITE.
+//! headers, call `endpoint.invite(to).with_extra_headers(...).send()` to
+//! attach a caller-supplied `Vec<TypedHeader>` to the first INVITE.
 
 #![deny(missing_docs)]
 
@@ -130,7 +129,21 @@ impl Endpoint {
                     .to_string(),
             )
         })?;
-        let handle = self.peer.register_with(registration).await?;
+        let mut b = self
+            .peer
+            .register(
+                registration.registrar.clone(),
+                registration.username.clone(),
+                registration.password.clone(),
+            )
+            .with_expires(registration.expires);
+        if let Some(from) = registration.from_uri.clone() {
+            b = b.with_from_uri(from);
+        }
+        if let Some(contact) = registration.contact_uri.clone() {
+            b = b.with_contact_uri(contact);
+        }
+        let handle = b.send().await?;
         *stored = Some(handle.clone());
         Ok(handle)
     }
@@ -156,83 +169,14 @@ impl Endpoint {
         Ok(())
     }
 
-    /// Initiate an outgoing call and return its [`SessionHandle`].
-    ///
-    /// Full `sip:` and `sips:` URIs are used unchanged. Bare extensions such
-    /// as `"1002"` are resolved through the endpoint registrar when one is
-    /// configured.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use endpoint.invite(target).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call(&self, target: &str) -> Result<EndpointCall> {
-        let target = self.resolve_target(target)?;
-        #[allow(deprecated)]
-        let handle = self.peer.control().call(&target).await?;
-        Ok(EndpointCall::new(
-            handle,
-            self.registrar.clone(),
-            self.transport,
-        ))
-    }
-
-    /// Initiate an outgoing call attaching caller-supplied extra typed
-    /// headers to the very first INVITE.
-    ///
-    /// Use for headers RFC 3261 leaves outside the standard request line —
-    /// e.g. `Diversion`, `History-Info`, `Call-Info`, `User-to-User`, or
-    /// vendor `X-*` headers required by a PBX or SBC. Target resolution is
-    /// identical to [`call`](Self::call); the extras pass through to
-    /// [`crate::UnifiedCoordinator::make_call_with_headers`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(endpoint: rvoip_sip::Endpoint) -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::{HeaderName, TypedHeader};
-    /// use rvoip_sip_core::types::header::HeaderValue;
-    ///
-    /// let tenant = TypedHeader::Other(
-    ///     HeaderName::Other("X-Tenant-ID".into()),
-    ///     HeaderValue::text("acme-prod"),
-    /// );
-    /// let call = endpoint
-    ///     .call_with_headers("1002", vec![tenant])
-    ///     .await?;
-    /// # let _ = call;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use endpoint.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call_with_headers(
-        &self,
-        target: &str,
-        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<EndpointCall> {
-        let target = self.resolve_target(target)?;
-        #[allow(deprecated)]
-        let handle = self
-            .peer
-            .control()
-            .call_with_headers(&target, extra_headers)
-            .await?;
-        Ok(EndpointCall::new(
-            handle,
-            self.registrar.clone(),
-            self.transport,
-        ))
-    }
-
     /// Initiate an outgoing call and wait for it to answer.
     pub async fn call_and_wait(
         &self,
         target: &str,
         timeout: Option<Duration>,
     ) -> Result<EndpointCall> {
-        let call = self.call(target).await?;
+        let call_id = self.invite(target)?.send().await?;
+        let call = self.wrap_call(call_id);
         call.wait_for_answered(timeout).await
     }
 
@@ -280,7 +224,7 @@ impl Endpoint {
         self.peer.control()
     }
 
-    /// Resolve a dial target the same way [`call`](Self::call) does.
+    /// Resolve a dial target the same way [`invite`](Self::invite) does.
     ///
     /// This is useful for logging or for handing the resolved URI to a lower
     /// level API.
@@ -290,8 +234,7 @@ impl Endpoint {
 
     /// Begin building an outbound INVITE from this endpoint's
     /// registered AOR (or `local_uri`). Resolves bare extensions
-    /// through the configured registrar — the same shape
-    /// [`call`](Self::call) used. Returns an
+    /// through the configured registrar. Returns an
     /// [`OutboundCallBuilder`](crate::api::send::OutboundCallBuilder).
     ///
     /// Returns `Err` only if the target can't be normalized into a SIP
@@ -303,9 +246,9 @@ impl Endpoint {
 
     /// Materialize an [`EndpointCall`] for a `CallId` returned by
     /// [`invite(...).send()`](Self::invite). Pairs with `invite()` the
-    /// same way [`UnifiedCoordinator::session`] pairs with the bare
-    /// coordinator builder — gives back the rich call wrapper that the
-    /// deprecated [`call`](Self::call) returned directly.
+    /// same way the unified coordinator's `session(...)` pairs with its
+    /// bare builder — gives back the rich call wrapper around the raw
+    /// [`SessionHandle`].
     pub fn wrap_call(&self, call_id: crate::api::handle::CallId) -> EndpointCall {
         let coord = self.peer.control().coordinator().clone();
         EndpointCall::new(
@@ -355,51 +298,6 @@ impl EndpointControl {
         }
     }
 
-    /// Initiate an outgoing call using Endpoint target resolution.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use endpoint.coordinator().invite(from, to).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call(&self, target: &str) -> Result<EndpointCall> {
-        let target = self.resolve_target(target)?;
-        #[allow(deprecated)]
-        let handle = self.control.call(&target).await?;
-        Ok(EndpointCall::new(
-            handle,
-            self.registrar.clone(),
-            self.transport,
-        ))
-    }
-
-    /// Initiate an outgoing call attaching caller-supplied extra typed
-    /// headers to the very first INVITE.
-    ///
-    /// Sibling of [`call`](Self::call) that forwards through
-    /// [`PeerControl::call_with_headers`]. See
-    /// [`Endpoint::call_with_headers`](super::endpoint::Endpoint::call_with_headers)
-    /// for the canonical example.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use endpoint.coordinator().invite(from, to).with_header(..)?.send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call_with_headers(
-        &self,
-        target: &str,
-        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<EndpointCall> {
-        let target = self.resolve_target(target)?;
-        #[allow(deprecated)]
-        let handle = self
-            .control
-            .call_with_headers(&target, extra_headers)
-            .await?;
-        Ok(EndpointCall::new(
-            handle,
-            self.registrar.clone(),
-            self.transport,
-        ))
-    }
-
     /// Register the configured account.
     pub async fn register(&self) -> Result<()> {
         let mut stored = self.registration_handle.lock().await;
@@ -412,11 +310,22 @@ impl EndpointControl {
                     .to_string(),
             )
         })?;
-        let handle = self
+        let mut b = self
             .control
             .coordinator()
-            .register_with(registration)
-            .await?;
+            .register(
+                registration.registrar,
+                registration.username,
+                registration.password,
+            )
+            .with_expires(registration.expires);
+        if let Some(from) = registration.from_uri {
+            b = b.with_from_uri(from);
+        }
+        if let Some(contact) = registration.contact_uri {
+            b = b.with_contact_uri(contact);
+        }
+        let handle = b.send().await?;
         *stored = Some(handle);
         Ok(())
     }
@@ -489,8 +398,7 @@ impl EndpointControl {
 
     /// Begin building an outbound INVITE from this endpoint's
     /// account context. Resolves bare extensions through the configured
-    /// registrar. Canonical replacement for the deprecated
-    /// [`Self::call`].
+    /// registrar.
     pub fn invite(&self, target: &str) -> Result<crate::api::send::OutboundCallBuilder> {
         let resolved = self.resolve_target(target)?;
         Ok(self.control.invite(resolved))

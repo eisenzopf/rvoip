@@ -212,9 +212,10 @@ impl Default for TransferLifecycleOptions {
 
 /// Handle for controlling an active SIP call session.
 ///
-/// Returned by [`StreamPeer::call`](crate::api::stream_peer::StreamPeer::call),
-/// [`IncomingCall::accept`](crate::api::incoming::IncomingCall::accept), and
-/// similar methods.
+/// Returned by `peer.invite(...).send()`, then resolved via
+/// [`coordinator().session(call_id)`](crate::api::unified::UnifiedCoordinator::session),
+/// and by [`IncomingCall::accept`](crate::api::incoming::IncomingCall::accept)
+/// and similar methods.
 ///
 /// `SessionHandle` is cheap to clone — all clones control the same underlying session.
 /// It is `Send + Sync` and safe to share across tasks.
@@ -380,7 +381,9 @@ impl SessionHandle {
             return Ok(cached);
         }
         self.coordinator
-            .hangup_with_reason(&self.call_id, reason)
+            .bye(&self.call_id)
+            .with_sip_reason(reason)
+            .send()
             .await?;
 
         let fut = async {
@@ -501,7 +504,7 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn transfer_blind(&self, target: &str) -> Result<()> {
-        self.coordinator.send_refer(&self.call_id, target).await
+        self.coordinator.refer(&self.call_id, target).send().await
     }
 
     /// Initiate a blind transfer and wait for a raw terminal transfer event.
@@ -736,7 +739,7 @@ impl SessionHandle {
     ///
     /// Use this from `StreamPeer` or direct coordinator event handling after an
     /// [`Event::ReferReceived`] event. `CallbackPeer` usually drives this from
-    /// [`CallHandler::on_transfer_request`](crate::api::callback_peer::CallHandler::on_transfer_request).
+    /// its `on_refer_received` builder hook.
     ///
     /// # Examples
     ///
@@ -794,7 +797,9 @@ impl SessionHandle {
     /// ```
     pub async fn transfer_attended(&self, target: &str, replaces: &str) -> Result<()> {
         self.coordinator
-            .send_refer_with_replaces(&self.call_id, target, replaces)
+            .refer(&self.call_id, target)
+            .with_replaces(replaces)
+            .send()
             .await
     }
 
@@ -859,7 +864,9 @@ impl SessionHandle {
     /// ```
     pub async fn send_info(&self, content_type: &str, body: &[u8]) -> Result<()> {
         self.coordinator
-            .send_info(&self.call_id, content_type, body)
+            .info(&self.call_id, content_type)
+            .with_body(bytes::Bytes::copy_from_slice(body))
+            .send()
             .await
     }
 
@@ -898,9 +905,14 @@ impl SessionHandle {
         body: Option<String>,
         subscription_state: Option<String>,
     ) -> Result<()> {
-        self.coordinator
-            .send_notify(&self.call_id, event_package, body, subscription_state)
-            .await
+        let mut b = self.coordinator.notify(&self.call_id, event_package);
+        if let Some(text) = body {
+            b = b.with_body(bytes::Bytes::from(text.into_bytes()));
+        }
+        if let Some(state) = subscription_state {
+            b = b.with_subscription_state(state);
+        }
+        b.send().await
     }
 
     // ===== Audio =====

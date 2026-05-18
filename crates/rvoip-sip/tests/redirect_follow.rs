@@ -126,11 +126,12 @@ async fn uac_follows_302_and_reissues_invite_to_new_contact() {
     config.media_port_start = 40200;
     config.media_port_end = 40300;
 
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
-    let _handle = peer
-        .call(&format!("sip:bob@127.0.0.1:{}", REDIRECTOR_PORT))
+    let peer = StreamPeer::with_config(config).await.expect("peer");
+    let _call_id = peer
+        .invite(format!("sip:bob@127.0.0.1:{}", REDIRECTOR_PORT))
+        .send()
         .await
-        .expect("call");
+        .expect("invite.send()");
 
     // Wait for (a) the redirector to see at least one INVITE, and (b) the
     // acceptor to see at least one INVITE as a consequence of the 302.

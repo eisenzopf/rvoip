@@ -356,10 +356,13 @@ fn header_policy_outbound_validation() {
     );
 }
 
-/// §10 #15 — Outbound proxy Route prepended on all 11 methods.
-/// Closed by Phase 3's `prepend_outbound_proxy_route` propagation.
+/// §10 #15 — Outbound proxy Route prepended on every application-driven
+/// SIP method. Closed by
+/// `outbound_proxy_per_method_routing::outbound_proxy_per_method_routing`,
+/// which stands up a mock UDP proxy and asserts INVITE / REGISTER /
+/// OPTIONS / MESSAGE all carry the configured proxy `Route:` header.
 #[test]
-#[ignore = "scaffolding pending — needs two-coordinator capture with a third-leg proxy"]
+#[ignore = "covered by outbound_proxy_per_method_routing.rs"]
 fn outbound_proxy_per_method_routing() {}
 
 /// §10 #16 — Auto-emit headers stamp internally-emitted CANCEL.
@@ -694,8 +697,6 @@ async fn bye_stash_wins_over_auto_emit() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn notify_subscription_id_routing() {
     use std::time::Duration;
-
-    use rvoip_sip::api::headers::SipRequestOptions;
 
     use support_for_section_10::{
         establish_call, wait_for_inbound_method,

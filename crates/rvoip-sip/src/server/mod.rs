@@ -16,9 +16,10 @@
 //!   with a SIP-flavored `ContactRequest` input (the workforce-flavored
 //!   `Agent` parameter stays in orchestration-core).
 //! - [`transfer`] — B2BUA-side transfer orchestration helpers (blind /
-//!   attended / external) wrapping `UnifiedCoordinator::send_refer` /
-//!   `send_refer_with_replaces` / `accept_refer`. The actual REFER mechanics
-//!   stay in `api::unified`; these helpers add scenario-specific glue.
+//!   attended / external) wrapping the `UnifiedCoordinator::refer(...)`
+//!   builder and `UnifiedCoordinator::accept_refer`. The actual REFER
+//!   mechanics stay in `api::unified`; these helpers add scenario-specific
+//!   glue.
 //! - [`b2bua`] — Optional convenience `SipB2bua` that wires the canonical
 //!   pattern (incoming INVITE → originate outbound → bridge) entirely
 //!   through `api::UnifiedCoordinator`.

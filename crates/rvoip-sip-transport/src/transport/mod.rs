@@ -51,6 +51,16 @@ pub enum TransportEvent {
         destination: SocketAddr,
         /// Transport flavour that received the message.
         transport_type: TransportType,
+        /// Original wire bytes the parser consumed, when available.
+        ///
+        /// Carried through the bus end-to-end so byte-exact consumers
+        /// (STIR/SHAKEN Identity verification per RFC 8224,
+        /// signature-preserving SBCs, stateless proxies, fuzz harnesses,
+        /// replay tools) can recover the upstream form without
+        /// re-serializing the parsed `Message`. `None` for synthetic
+        /// events that have no real wire bytes (mock transports,
+        /// internally-fabricated messages).
+        raw_bytes: Option<Arc<Bytes>>,
     },
 
     /// Error occurred in the transport
@@ -208,6 +218,30 @@ pub trait Transport: Send + Sync + fmt::Debug {
     async fn send_raw(&self, _destination: SocketAddr, _data: Bytes) -> Result<()> {
         Err(crate::error::Error::NotImplemented(
             "send_raw is not supported on this transport".to_string(),
+        ))
+    }
+
+    /// Send pre-built SIP-formatted bytes verbatim to `destination`.
+    ///
+    /// Unlike [`Transport::send_raw`] (RFC 5626 §3.5.1 keep-alive
+    /// pings on already-open connection-oriented transports), this
+    /// method works for any transport and may open new connections as
+    /// needed. The bytes MUST form a valid SIP message per RFC 3261
+    /// §25 — no validation is performed at this layer. Use cases:
+    /// signature-preserving SBC pass-through (RFC 8224 STIR/SHAKEN
+    /// Identity header is canonicalised by the upstream signer; any
+    /// re-serialisation would invalidate the signature), stateless
+    /// proxy forwarding, fuzz harnesses, and replay tooling.
+    ///
+    /// The default returns `NotImplemented` so each transport opts in
+    /// explicitly.
+    async fn send_message_raw(
+        &self,
+        _bytes: Bytes,
+        _destination: SocketAddr,
+    ) -> Result<()> {
+        Err(crate::error::Error::NotImplemented(
+            "send_message_raw is not supported on this transport".to_string(),
         ))
     }
 }

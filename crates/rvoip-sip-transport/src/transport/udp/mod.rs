@@ -137,6 +137,7 @@ impl UdpTransport {
                                             source: src,
                                             destination: local_addr,
                                             transport_type: TransportType::Udp,
+                                            raw_bytes: Some(std::sync::Arc::new(packet.clone())),
                                         };
 
                                         if let Err(e) = inner.events_tx.send(event).await {
@@ -200,6 +201,22 @@ impl Transport for UdpTransport {
         );
 
         // Send the message using the sender
+        self.inner.sender.send(&bytes, destination).await
+    }
+
+    async fn send_message_raw(
+        &self,
+        bytes: bytes::Bytes,
+        destination: SocketAddr,
+    ) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        debug!(
+            "UDP: sending {} pre-built bytes to {}",
+            bytes.len(),
+            destination
+        );
         self.inner.sender.send(&bytes, destination).await
     }
 

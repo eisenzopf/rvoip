@@ -133,12 +133,13 @@ async fn sips_call_establishes_through_tls_transport() {
     // the TLS listener rather than UDP.
     let target = format!("sips:bob@127.0.0.1:{}", bob_tls_port);
     let _alice_session = alice
-        .make_call(
-            &format!("sips:alice@127.0.0.1:{};transport=tls", alice_tls_port),
+        .invite(
+            Some(format!("sips:alice@127.0.0.1:{};transport=tls", alice_tls_port)),
             &target,
         )
+        .send()
         .await
-        .expect("alice make_call");
+        .expect("alice invite");
 
     // Bob should see an IncomingCall event. The session_id field
     // identifies the new session for accept_call.

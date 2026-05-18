@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_sip::api::events::Event;
+use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::{
@@ -124,9 +125,12 @@ async fn unified_coordinator_extra_headers_appear_on_invite() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     alice
-        .make_call_with_headers("sip:alice@127.0.0.1", &target, extra_headers_fixture())
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .with_headers(extra_headers_fixture())
+        .expect("staging extra headers")
+        .send()
         .await
-        .expect("make_call_with_headers");
+        .expect("invite.send()");
 
     let trace = wait_for_inbound_invite(&mut bob_events, Duration::from_secs(8))
         .await
@@ -147,16 +151,19 @@ async fn stream_peer_call_with_headers_appears_on_invite() {
     let bob = boot_receiver(bob_port, "bob").await;
     let mut bob_events = bob.events().await.expect("bob events");
 
-    let mut alice = StreamPeer::with_config(Config::local("alice", alice_port))
+    let alice = StreamPeer::with_config(Config::local("alice", alice_port))
         .await
         .expect("alice stream peer");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
-    let _handle = alice
-        .call_with_headers(&target, extra_headers_fixture())
+    let _call_id = alice
+        .invite(target)
+        .with_headers(extra_headers_fixture())
+        .expect("staging extra headers")
+        .send()
         .await
-        .expect("StreamPeer::call_with_headers");
+        .expect("StreamPeer invite.send()");
 
     let trace = wait_for_inbound_invite(&mut bob_events, Duration::from_secs(8))
         .await
@@ -199,10 +206,13 @@ async fn callback_peer_call_with_headers_appears_on_invite() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
-    let _handle = alice_control
-        .call_with_headers(&target, extra_headers_fixture())
+    let _call_id = alice_control
+        .invite(target)
+        .with_headers(extra_headers_fixture())
+        .expect("staging extra headers")
+        .send()
         .await
-        .expect("CallbackPeerControl::call_with_headers");
+        .expect("CallbackPeerControl invite.send()");
 
     let trace = wait_for_inbound_invite(&mut bob_events, Duration::from_secs(8))
         .await
@@ -233,10 +243,14 @@ async fn endpoint_call_with_headers_appears_on_invite() {
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
-    let _call = alice
-        .call_with_headers(&target, extra_headers_fixture())
+    let _call_id = alice
+        .invite(&target)
+        .expect("Endpoint invite")
+        .with_headers(extra_headers_fixture())
+        .expect("staging extra headers")
+        .send()
         .await
-        .expect("Endpoint::call_with_headers");
+        .expect("Endpoint invite.send()");
 
     let trace = wait_for_inbound_invite(&mut bob_events, Duration::from_secs(8))
         .await
@@ -267,9 +281,12 @@ async fn pai_appears_before_extra_headers_on_wire() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     alice
-        .make_call_with_headers("sip:alice@127.0.0.1", &target, extra_headers_fixture())
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .with_headers(extra_headers_fixture())
+        .expect("staging extra headers")
+        .send()
         .await
-        .expect("make_call_with_headers");
+        .expect("invite.send()");
 
     let trace = wait_for_inbound_invite(&mut bob_events, Duration::from_secs(8))
         .await
@@ -308,9 +325,10 @@ async fn default_make_call_omits_extra_headers() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     alice
-        .make_call("sip:alice@127.0.0.1", &target)
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
         .await
-        .expect("make_call");
+        .expect("invite send");
 
     let trace = wait_for_inbound_invite(&mut bob_events, Duration::from_secs(8))
         .await
@@ -318,12 +336,12 @@ async fn default_make_call_omits_extra_headers() {
 
     assert!(
         !trace.raw_message.contains(TENANT_HEADER_NAME),
-        "plain make_call must not include {TENANT_HEADER_NAME}; got:\n{}",
+        "plain invite must not include {TENANT_HEADER_NAME}; got:\n{}",
         trace.raw_message
     );
     assert!(
         !trace.raw_message.contains(CALL_INFO_URI),
-        "plain make_call must not include the Call-Info fixture URI; got:\n{}",
+        "plain invite must not include the Call-Info fixture URI; got:\n{}",
         trace.raw_message
     );
 

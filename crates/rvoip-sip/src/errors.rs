@@ -52,7 +52,7 @@ pub enum SessionError {
     /// RFC 3261 §22.2 — the server challenged our INVITE with 401/407 but the
     /// session has no credentials on file. Set credentials via
     /// `StreamPeerBuilder::with_credentials` (per-peer default) or
-    /// `PeerControl::call_with_auth` (per-call).
+    /// `control.invite(...).with_credentials(...)` (per-call).
     #[error("server challenged INVITE but no credentials are on file")]
     MissingCredentialsForInviteAuth,
 

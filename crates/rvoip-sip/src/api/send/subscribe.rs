@@ -86,6 +86,25 @@ impl SubscribeBuilder {
         self
     }
 
+    /// Convenience entry for RFC 4235 dialog-package subscriptions.
+    /// Equivalent to `self.send().await?` followed by wrapping the
+    /// returned `SubscriptionHandle` in a `DialogSubscriptionHandle`
+    /// that exposes typed dialog-info accessors. Panics at compile
+    /// time if `event_package` was set to anything other than `"dialog"`?
+    /// No — this is a runtime convenience; the builder takes whatever
+    /// event package the caller passed, so misuse silently produces a
+    /// `DialogSubscriptionHandle` whose `wait_for_dialog` will never
+    /// fire. Callers should ensure the event package is `"dialog"`.
+    pub async fn send_dialog_events(
+        self,
+    ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
+        let target = self.target.clone();
+        let handle = self.send().await?;
+        crate::api::dialog_subscription::DialogSubscriptionHandle::from_subscription(
+            handle, target,
+        )
+    }
+
     pub async fn send(mut self) -> Result<SubscriptionHandle> {
         let from_uri = self
             .from_uri

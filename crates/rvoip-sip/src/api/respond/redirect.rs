@@ -46,6 +46,7 @@ impl RedirectBuilder {
         if extras.is_empty() {
             return self
                 .coord
+                .helpers
                 .redirect_call(&self.call_id, self.status, self.contacts)
                 .await;
         }

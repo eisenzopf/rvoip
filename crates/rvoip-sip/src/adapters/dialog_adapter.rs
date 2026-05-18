@@ -27,7 +27,13 @@ use crate::session_store::SessionStore;
 use crate::state_table::types::{DialogId, SessionId};
 use dashmap::DashMap;
 use rvoip_sip_dialog::{
-    api::unified::UnifiedDialogApi, transaction::TransactionKey, DialogId as RvoipDialogId,
+    api::unified::{
+        ByeRequestOptions, CancelRequestOptions, InfoRequestOptions, MessageRequestOptions,
+        NotifyRequestOptions, ReferRequestOptions, SubscribeRequestOptions, UnifiedDialogApi,
+        UpdateRequestOptions,
+    },
+    transaction::TransactionKey,
+    DialogId as RvoipDialogId,
 };
 use rvoip_infra_common::events::{
     coordinator::GlobalEventCoordinator,
@@ -655,7 +661,7 @@ impl DialogAdapter {
 
             // Send BYE through dialog API
             self.dialog_api
-                .send_bye(&rvoip_dialog_id)
+                .send_bye_with_options(&rvoip_dialog_id, ByeRequestOptions::default())
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
 
@@ -683,7 +689,13 @@ impl DialogAdapter {
 
             // Use UPDATE method for re-INVITE
             self.dialog_api
-                .send_update(&rvoip_dialog_id, Some(sdp))
+                .send_update_with_options(
+                    &rvoip_dialog_id,
+                    UpdateRequestOptions {
+                        sdp: Some(sdp),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .map_err(|e| {
                     SessionError::DialogError(format!("Failed to send re-INVITE: {}", e))
@@ -712,15 +724,22 @@ impl DialogAdapter {
             let session_id = entry.value().clone();
             drop(entry);
 
-            // Send REFER through dialog API
-            let transfer_info = if attended {
-                Some("attended".to_string()) // Or use proper transfer info structure
-            } else {
-                None
-            };
-
+            // Send REFER through dialog API. Attended-transfer Replaces
+            // belongs in `ReferRequestOptions.replaces` (an RFC 3891
+            // header param on Refer-To), not as a REFER body — the
+            // legacy code passed the literal "attended" string, which
+            // had no on-wire effect. Attended transfers route through
+            // `send_refer_with_options` paths that compute Replaces
+            // from the held session's dialog identifiers.
+            let _ = attended;
             self.dialog_api
-                .send_refer(&rvoip_dialog_id, target.to_string(), transfer_info)
+                .send_refer_with_options(
+                    &rvoip_dialog_id,
+                    ReferRequestOptions {
+                        refer_to: target.to_string(),
+                        ..Default::default()
+                    },
+                )
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
 
@@ -1273,7 +1292,7 @@ impl DialogAdapter {
         };
 
         self.dialog_api
-            .send_bye(&dialog_id)
+            .send_bye_with_options(&dialog_id, ByeRequestOptions::default())
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send BYE: {}", e)))?;
 
@@ -1295,9 +1314,13 @@ impl DialogAdapter {
         };
 
         self.dialog_api
-            .dialog_manager()
-            .core()
-            .send_bye_with_reason(&dialog_id, reason)
+            .send_bye_with_options(
+                &dialog_id,
+                ByeRequestOptions {
+                    reason: Some(reason.to_string()),
+                    ..Default::default()
+                },
+            )
             .await
             .map_err(|e| {
                 SessionError::DialogError(format!("Failed to send BYE with Reason: {}", e))
@@ -1741,7 +1764,7 @@ impl DialogAdapter {
         };
 
         self.dialog_api
-            .send_cancel(&dialog_id)
+            .send_cancel_with_options(&dialog_id, CancelRequestOptions::default())
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send CANCEL: {}", e)))?;
 
@@ -1815,10 +1838,13 @@ impl DialogAdapter {
             .clone();
 
         self.dialog_api
-            .send_info_with_content_type(
+            .send_info_with_options(
                 &dialog_id,
-                content_type.to_string(),
-                bytes::Bytes::copy_from_slice(body),
+                InfoRequestOptions {
+                    content_type: content_type.to_string(),
+                    body: bytes::Bytes::copy_from_slice(body),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send INFO: {}", e)))?;
@@ -1842,54 +1868,17 @@ impl DialogAdapter {
 
         // Send REFER through dialog API
         self.dialog_api
-            .send_refer(&dialog_id, refer_to.to_string(), None)
+            .send_refer_with_options(
+                &dialog_id,
+                ReferRequestOptions {
+                    refer_to: refer_to.to_string(),
+                    ..Default::default()
+                },
+            )
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send REFER: {}", e)))?;
 
         tracing::info!("Sent REFER to {} for session {}", refer_to, session_id.0);
-        Ok(())
-    }
-
-    /// Send REFER with a pre-built `Replaces` header value (RFC 3891).
-    ///
-    /// This is the attended-transfer primitive: the caller is responsible for
-    /// constructing the Replaces value from the target dialog's Call-ID,
-    /// to-tag, and from-tag (accessible via `SessionHandle::call_id()` etc.
-    /// on the consultation session). Linking original + consultation sessions
-    /// is an orchestration concern that lives outside this crate.
-    ///
-    /// The emitted header is:
-    /// `Refer-To: <sip:target?Replaces=<url-encoded-replaces>>`
-    pub async fn send_refer_with_replaces(
-        &self,
-        session_id: &SessionId,
-        target_uri: &str,
-        replaces: &str,
-    ) -> Result<()> {
-        let dialog_id = self
-            .session_to_dialog
-            .get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
-            .clone();
-
-        // The target URI in the Refer-To header needs a URI-escaped Replaces
-        // query parameter. Semicolons and equals signs must be percent-encoded
-        // so the URI parses as a single unit (RFC 3891 §3).
-        let encoded_replaces = url_escape_replaces(replaces);
-        let refer_to = format!("<{}?Replaces={}>", target_uri, encoded_replaces);
-
-        self.dialog_api
-            .send_refer(&dialog_id, refer_to, None)
-            .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to send REFER with Replaces: {}", e))
-            })?;
-
-        tracing::info!(
-            session = %session_id.0,
-            target = %target_uri,
-            "Sent REFER with Replaces"
-        );
         Ok(())
     }
 
@@ -2267,7 +2256,16 @@ impl DialogAdapter {
         // owns the wire-ready SIP request construction.
         let response = self
             .dialog_api
-            .send_subscribe_out_of_dialog(to_uri, from_uri, from_uri, event_package, expires)
+            .send_subscribe_with_options(
+                to_uri,
+                SubscribeRequestOptions {
+                    event: event_package.to_string(),
+                    expires,
+                    from_uri: Some(from_uri.to_string()),
+                    contact_uri: Some(from_uri.to_string()),
+                    ..Default::default()
+                },
+            )
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send SUBSCRIBE: {}", e)))?;
 
@@ -2301,60 +2299,6 @@ impl DialogAdapter {
         Ok(())
     }
 
-    /// Send an RFC 4235 dialog-package SUBSCRIBE and pre-register the
-    /// session↔dialog mapping so NOTIFY events route back to rvoip-sip.
-    pub async fn send_dialog_subscribe(
-        &self,
-        session_id: &SessionId,
-        from_uri: &str,
-        target_uri: &str,
-        contact_uri: &str,
-        expires: u32,
-    ) -> Result<()> {
-        let dialog_id = self
-            .dialog_api
-            .send_subscribe_out_of_dialog_for_session(
-                &session_id.0,
-                target_uri,
-                from_uri,
-                contact_uri,
-                "dialog",
-                expires,
-            )
-            .await
-            .map_err(|e| {
-                SessionError::DialogError(format!("Failed to subscribe to dialog package: {}", e))
-            })?;
-
-        self.session_to_dialog
-            .insert(session_id.clone(), dialog_id.clone());
-        self.dialog_to_session
-            .insert(dialog_id.clone(), session_id.clone());
-
-        Ok(())
-    }
-
-    /// Terminate an RFC 4235 dialog-package subscription with Expires: 0.
-    pub async fn unsubscribe_dialog_package(&self, session_id: &SessionId) -> Result<()> {
-        let dialog_id = self
-            .session_to_dialog
-            .get(session_id)
-            .ok_or_else(|| SessionError::SessionNotFound(session_id.0.clone()))?
-            .clone();
-
-        self.dialog_api
-            .send_subscribe_refresh(&dialog_id, "dialog", 0)
-            .await
-            .map_err(|e| {
-                SessionError::DialogError(format!(
-                    "Failed to unsubscribe from dialog package: {}",
-                    e
-                ))
-            })?;
-
-        Ok(())
-    }
-
     /// Send a NOTIFY request within a subscription dialog
     pub async fn send_notify(
         &self,
@@ -2379,11 +2323,14 @@ impl DialogAdapter {
 
         // Send NOTIFY within the dialog
         self.dialog_api
-            .send_notify(
+            .send_notify_with_options(
                 &dialog_id,
-                event_package.to_string(),
-                body,
-                subscription_state,
+                NotifyRequestOptions {
+                    event: event_package.to_string(),
+                    subscription_state: subscription_state.unwrap_or_default(),
+                    body: body.map(bytes::Bytes::from),
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|e| SessionError::DialogError(format!("Failed to send NOTIFY: {}", e)))?;
@@ -2472,7 +2419,13 @@ impl DialogAdapter {
             // wire-ready SIP request construction.
             let response = self
                 .dialog_api
-                .send_message_out_of_dialog(to_uri, from_uri, body)
+                .send_message_out_of_dialog_with_options(MessageRequestOptions {
+                    from_uri: from_uri.to_string(),
+                    to_uri: to_uri.to_string(),
+                    content_type: String::from("text/plain"),
+                    body: bytes::Bytes::from(body),
+                    ..Default::default()
+                })
                 .await
                 .map_err(|e| SessionError::DialogError(format!("Failed to send MESSAGE: {}", e)))?;
 
@@ -2538,35 +2491,9 @@ impl Clone for DialogAdapter {
     }
 }
 
-// Percent-encode the characters in a Replaces header value that would
-// otherwise terminate the URI header embedded in Refer-To. Per RFC 3891
-// §3 + RFC 3261 §19.1.1, reserved/delimiter characters (`;`, `=`, `?`)
-// must be escaped when a header value is carried as a URI header
-// parameter. Space and `@` are escaped too since they may appear in
-// pathological but still valid tag values.
-fn url_escape_replaces(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for b in value.bytes() {
-        match b {
-            b';' | b'=' | b'?' | b' ' | b'@' | b'&' | b'#' | b'<' | b'>' | b'"' | b'%' => {
-                out.push_str(&format!("%{:02X}", b));
-            }
-            _ => out.push(b as char),
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escapes_replaces_header_value() {
-        let replaces = "abc@host;to-tag=xyz;from-tag=pqr";
-        let escaped = url_escape_replaces(replaces);
-        assert_eq!(escaped, "abc%40host%3Bto-tag%3Dxyz%3Bfrom-tag%3Dpqr");
-    }
 
     // ---- NAT-aware Contact rewrite (Sprint 1.A3) -------------------
 

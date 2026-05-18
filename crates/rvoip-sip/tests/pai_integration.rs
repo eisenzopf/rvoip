@@ -7,7 +7,7 @@
 //!
 //! 1. `Config::pai_uri` set on the caller — every outbound INVITE
 //!    carries the typed PAI header.
-//! 2. `make_call_with_pai(..., Some(uri))` — per-call override.
+//! 2. `coord.invite(...).with_pai(uri).send()` — per-call override.
 //! 3. No PAI configured anywhere — receiving side sees `None`.
 //!
 //! Closes the wire-level test gap called out in
@@ -91,9 +91,10 @@ async fn config_pai_uri_surfaces_on_inbound_call() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     let _alice_session = alice
-        .make_call("sip:alice@127.0.0.1", &target)
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
         .await
-        .expect("alice make_call");
+        .expect("alice invite.send()");
 
     // Bob's IncomingCall event signals that the INVITE has been parsed
     // and the call is sitting in the incoming queue. The structured
@@ -139,9 +140,11 @@ async fn per_call_pai_overrides_config() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     let _alice_session = alice
-        .make_call_with_pai("sip:alice@127.0.0.1", &target, Some(per_call_pai.clone()))
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .with_pai(per_call_pai.clone())
+        .send()
         .await
-        .expect("alice make_call_with_pai");
+        .expect("alice invite.send() with PAI");
 
     let _incoming = wait_for(&mut bob_events, Duration::from_secs(8), |ev| {
         matches!(ev, Event::IncomingCall { .. })
@@ -185,9 +188,10 @@ async fn no_pai_when_neither_config_nor_per_call() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     let _alice_session = alice
-        .make_call("sip:alice@127.0.0.1", &target)
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target)
+        .send()
         .await
-        .expect("alice make_call");
+        .expect("alice invite.send()");
 
     let _incoming = wait_for(&mut bob_events, Duration::from_secs(8), |ev| {
         matches!(ev, Event::IncomingCall { .. })

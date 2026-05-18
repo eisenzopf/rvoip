@@ -1,10 +1,10 @@
 //! B2BUA-side transfer orchestration helpers.
 //!
 //! Per CARVE_PLAN §3 (transfer row): the actual SIP REFER mechanics
-//! (`send_refer`, `accept_refer`, `transfer_attended`, etc.) already live in
-//! [`UnifiedCoordinator`] and are NOT re-implemented here. This module
-//! provides B2BUA-side scenario glue — pick which leg, build the target,
-//! choose blind vs attended — that calls into those methods.
+//! (the `refer(...)` builder, `accept_refer`, `transfer_attended`, etc.)
+//! already live in [`UnifiedCoordinator`] and are NOT re-implemented here.
+//! This module provides B2BUA-side scenario glue — pick which leg, build
+//! the target, choose blind vs attended — that calls into those methods.
 
 use std::sync::Arc;
 

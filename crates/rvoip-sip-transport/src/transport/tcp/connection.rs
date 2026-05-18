@@ -24,8 +24,13 @@ const MAX_MESSAGE_SIZE: usize = 65535;
 /// regular SIP message.
 #[derive(Debug)]
 pub enum ReceivedFrame {
-    /// A parsed SIP message.
-    Message(Message),
+    /// A parsed SIP message paired with the original wire bytes that
+    /// the parser consumed. The bytes are preserved end-to-end so
+    /// byte-exact consumers (STIR/SHAKEN Identity per RFC 8224,
+    /// signature-preserving SBCs, replay tools) can recover the
+    /// upstream form without re-serializing. See `SIP_API_DESIGN_2.md`
+    /// §7.5.
+    Message(Message, bytes::Bytes),
     /// RFC 5626 §3.5.1 keep-alive pong — a single `\r\n` received.
     KeepAlivePong,
     /// RFC 5626 §3.5.1 server-initiated ping — `\r\n\r\n` at offset 0
@@ -161,7 +166,7 @@ impl TcpConnection {
     pub async fn receive_message(&self) -> Result<Option<Message>> {
         loop {
             match self.receive_frame().await? {
-                Some(ReceivedFrame::Message(m)) => return Ok(Some(m)),
+                Some(ReceivedFrame::Message(m, _bytes)) => return Ok(Some(m)),
                 Some(ReceivedFrame::KeepAlivePong) | Some(ReceivedFrame::KeepAlivePing) => {
                     // Silently skip — legacy callers aren't aware of
                     // RFC 5626 frames. New code should call
@@ -210,8 +215,8 @@ impl TcpConnection {
                 recv_buffer.advance(2);
                 return Ok(Some(ReceivedFrame::KeepAlivePong));
             }
-            if let Some(frame) = self.try_parse_message(&mut recv_buffer)? {
-                return Ok(Some(ReceivedFrame::Message(frame)));
+            if let Some((frame, raw_bytes)) = self.try_parse_message(&mut recv_buffer)? {
+                return Ok(Some(ReceivedFrame::Message(frame, raw_bytes)));
             }
 
             // No complete frame, read more data
@@ -256,8 +261,15 @@ impl TcpConnection {
         }
     }
 
-    /// Tries to parse a SIP message from the buffer
-    fn try_parse_message(&self, buffer: &mut BytesMut) -> Result<Option<Message>> {
+    /// Tries to parse a SIP message from the buffer, returning both the
+    /// parsed [`Message`] and a frozen [`Bytes`] snapshot of the wire
+    /// bytes that the parser consumed. The Bytes copy lets downstream
+    /// code preserve the upstream byte form (STIR/SHAKEN, SBC
+    /// pass-through) without re-serializing.
+    fn try_parse_message(
+        &self,
+        buffer: &mut BytesMut,
+    ) -> Result<Option<(Message, bytes::Bytes)>> {
         if buffer.is_empty() {
             return Ok(None);
         }
@@ -278,6 +290,13 @@ impl TcpConnection {
                 // We have a complete message, extract it
                 let message_slice = &buffer[0..total_length];
 
+                // Snapshot the wire bytes BEFORE parsing so we can hand
+                // them downstream byte-exact (RFC 8224 STIR/SHAKEN, SBC
+                // signature preservation, replay tooling). One
+                // allocation per inbound frame; matches the UDP path's
+                // shape (Bytes::copy_from_slice).
+                let raw_bytes = bytes::Bytes::copy_from_slice(message_slice);
+
                 // Parse the message
                 match parse_message(message_slice) {
                     Ok(message) => {
@@ -287,7 +306,7 @@ impl TcpConnection {
                         // Remove the message from the buffer
                         buffer.advance(total_length);
 
-                        return Ok(Some(message));
+                        return Ok(Some((message, raw_bytes)));
                     }
                     Err(e) => {
                         // Parsing error
@@ -611,7 +630,7 @@ mod tests {
         // Second frame is the SIP message — must parse cleanly.
         let second = connection.receive_frame().await.unwrap();
         match second {
-            Some(ReceivedFrame::Message(Message::Request(req))) => {
+            Some(ReceivedFrame::Message(Message::Request(req), _raw)) => {
                 assert_eq!(req.method(), Method::Register);
                 assert_eq!(req.call_id().unwrap().to_string(), "after-pong@example.com");
             }

@@ -423,12 +423,18 @@ impl MethodHandler for DialogManager {
             // Forward to session layer FIRST - let session-core decide Accept/Reject
             // Session-core will send the appropriate response (202 Accepted or 4xx/5xx rejection)
             // via the transaction_id that we include in the event.
-            // SIP_API_DESIGN_2 §7.5 — preserve the inbound REFER bytes
-            // so the cross-crate `TransferRequested` variant carries them
-            // through to session-core's `IncomingRequest` view.
-            let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
-                request.to_string().into_bytes(),
-            )));
+            // SIP_API_DESIGN_2 §7.5 — pull the original wire bytes the
+            // transport cached so STIR/SHAKEN-style consumers see the
+            // upstream form unchanged. Synthetic / mock-transport paths
+            // fall back to re-serialising the parsed Request.
+            let raw_request = self
+                .transaction_manager
+                .take_inbound_bytes(&transaction_id)
+                .or_else(|| {
+                    Some(std::sync::Arc::new(bytes::Bytes::from(
+                        request.to_string().into_bytes(),
+                    )))
+                });
             let event = crate::events::SessionCoordinationEvent::TransferRequest {
                 dialog_id: dialog_id.clone(),
                 transaction_id: transaction_id.clone(),
@@ -554,7 +560,7 @@ impl MethodHandler for DialogManager {
         // Extract the fields session-core needs before we move `request` into
         // the server transaction. Values are raw strings so session-core
         // owns parsing (sipfrag / subscription-state / etc.).
-        let notify_fields = extract_notify_fields(&request);
+        let notify_fields = extract_notify_fields(&request, &self.transaction_manager);
 
         // Use SubscriptionManager if available
         if let Some(ref subscription_manager) = self.subscription_manager {
@@ -664,7 +670,10 @@ struct NotifyFields {
     raw_request: Option<std::sync::Arc<bytes::Bytes>>,
 }
 
-fn extract_notify_fields(request: &Request) -> NotifyFields {
+fn extract_notify_fields(
+    request: &Request,
+    transaction_manager: &crate::transaction::TransactionManager,
+) -> NotifyFields {
     let event_package = request
         .header(&HeaderName::Event)
         .and_then(|h| match h {
@@ -694,9 +703,18 @@ fn extract_notify_fields(request: &Request) -> NotifyFields {
         Some(String::from_utf8_lossy(body_bytes).into_owned())
     };
 
-    let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
-        request.to_string().into_bytes(),
-    )));
+    // SIP_API_DESIGN_2 §7.5: prefer the transport-cached wire bytes so
+    // STIR/SHAKEN consumers verify against the upstream form. Mock /
+    // synthetic paths fall back to re-serialising the parsed Request.
+    let raw_request = crate::transaction::utils::transaction_key_from_message(
+        &rvoip_sip_core::Message::Request(request.clone()),
+    )
+    .and_then(|key| transaction_manager.peek_inbound_bytes(&key))
+    .or_else(|| {
+        Some(std::sync::Arc::new(bytes::Bytes::from(
+            request.to_string().into_bytes(),
+        )))
+    });
 
     NotifyFields {
         event_package,

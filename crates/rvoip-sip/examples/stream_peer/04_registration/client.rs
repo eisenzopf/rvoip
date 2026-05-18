@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use rvoip_sip::{Config, Registration, StreamPeer};
+use rvoip_sip::{Config, StreamPeer};
 
 #[tokio::main]
 async fn main() -> rvoip_sip::Result<()> {
@@ -20,11 +20,8 @@ async fn main() -> rvoip_sip::Result<()> {
     println!("[alice] registering with sip:127.0.0.1:5060");
 
     let handle = peer
-        .register_with(Registration::new(
-            "sip:127.0.0.1:5060",
-            "alice",
-            "password123",
-        ))
+        .register("sip:127.0.0.1:5060", "alice", "password123")
+        .send()
         .await?;
 
     tokio::time::sleep(Duration::from_secs(1)).await;

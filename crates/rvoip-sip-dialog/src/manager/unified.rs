@@ -590,18 +590,21 @@ impl UnifiedDialogManager {
         event_package: &str,
         expires: u32,
     ) -> ApiResult<()> {
-        self.send_subscribe_refresh_with_extras(dialog_id, event_package, expires, Vec::new())
+        self.send_subscribe_refresh_with_extras(dialog_id, event_package, expires, None, None, Vec::new())
             .await
     }
 
     /// In-dialog SUBSCRIBE refresh with application-staged
     /// `extra_headers` appended after the stack-managed slice. See
     /// SIP_API_DESIGN_2 §5.2.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_subscribe_refresh_with_extras(
         &self,
         dialog_id: &DialogId,
         event_package: &str,
         expires: u32,
+        accept: Option<String>,
+        authorization: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<()> {
         use crate::transaction::dialog::{
@@ -609,6 +612,7 @@ impl UnifiedDialogManager {
         };
         use rvoip_sip_core::types::event::{Event, EventType};
         use rvoip_sip_core::types::expires::Expires;
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::TypedHeader;
 
         let (destination, request) = {
@@ -654,9 +658,25 @@ impl UnifiedDialogManager {
             request
                 .headers
                 .push(TypedHeader::Expires(Expires::new(expires)));
+            // RFC 6665 §3.1.1 — Accept on SUBSCRIBE refresh advertises
+            // body MIME types the subscriber accepts on NOTIFY.
+            if let Some(accept_value) = accept {
+                request.headers.push(TypedHeader::Other(
+                    HeaderName::Accept,
+                    HeaderValue::Raw(accept_value.into_bytes()),
+                ));
+            }
+            // Pre-computed Digest / Bearer authorization. Required by
+            // the 401 retry path on SUBSCRIBE refresh.
+            if let Some(auth) = authorization {
+                request.headers.push(TypedHeader::Other(
+                    HeaderName::Authorization,
+                    HeaderValue::Raw(auth.into_bytes()),
+                ));
+            }
             // SIP_API_DESIGN_2 §5.2 — append application extras after
             // the stack-managed prefix + dedicated setters (Event,
-            // Expires).
+            // Expires, Accept, Authorization).
             for hdr in extra_headers {
                 request.headers.push(hdr);
             }

@@ -10,9 +10,10 @@
 //! auth retry notifications. The peer also exposes [`CallbackPeerControl`] so
 //! supervisors and handler-owned tasks can place outbound calls, register,
 //! inspect registration metadata through the coordinator, and shut down the
-//! running peer. [`CallbackPeerControl::call_with_headers`] attaches
-//! caller-supplied extra typed headers to the very first INVITE for
-//! PBX/SBC integrations that require non-standard or vendor headers.
+//! running peer. Outbound calls flow through `control.invite(to)` and chain
+//! `.with_extra_headers(...)` to attach caller-supplied typed headers to the
+//! very first INVITE for PBX/SBC integrations that require non-standard or
+//! vendor headers.
 //!
 //! # Use cases
 //!
@@ -62,7 +63,7 @@ use crate::api::events::{
 };
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
-use crate::api::unified::{Config, Registration, RegistrationHandle, UnifiedCoordinator};
+use crate::api::unified::{Config, RegistrationHandle, UnifiedCoordinator};
 use crate::errors::{Result, SessionError};
 
 // ===== ShutdownHandle =====
@@ -165,8 +166,11 @@ type CancelledHook = Arc<dyn Fn(CallId) -> CallbackFuture<Result<()>> + Send + S
 type MediaSecurityHook =
     Arc<dyn Fn(SessionHandle, MediaSecurityState) -> CallbackFuture<Result<()>> + Send + Sync>;
 type HoldHook = Arc<dyn Fn(SessionHandle) -> CallbackFuture<Result<()>> + Send + Sync>;
-type TransferRequestHook =
-    Arc<dyn Fn(SessionHandle, String) -> CallbackFuture<Result<bool>> + Send + Sync>;
+type ReferReceivedHook = Arc<
+    dyn Fn(SessionHandle, crate::api::incoming::IncomingRequest) -> CallbackFuture<Result<bool>>
+        + Send
+        + Sync,
+>;
 type TransferAcceptedHook =
     Arc<dyn Fn(SessionHandle, String) -> CallbackFuture<Result<()>> + Send + Sync>;
 type ReferProgressHook =
@@ -203,7 +207,7 @@ pub struct CallbackPeerBuilder {
     local_resume: Option<HoldHook>,
     remote_hold: Option<HoldHook>,
     remote_resume: Option<HoldHook>,
-    transfer_request: Option<TransferRequestHook>,
+    refer_received: Option<ReferReceivedHook>,
     transfer_accepted: Option<TransferAcceptedHook>,
     refer_progress: Option<ReferProgressHook>,
     refer_completed: Option<ReferCompletedHook>,
@@ -233,7 +237,7 @@ impl CallbackPeerBuilder {
             local_resume: None,
             remote_hold: None,
             remote_resume: None,
-            transfer_request: None,
+            refer_received: None,
             transfer_accepted: None,
             refer_progress: None,
             refer_completed: None,
@@ -385,13 +389,24 @@ impl CallbackPeerBuilder {
         self
     }
 
-    /// Decide whether to accept inbound REFER transfer requests.
-    pub fn on_transfer_request<F, Fut>(mut self, f: F) -> Self
+    /// Decide whether to accept an inbound REFER (transfer request).
+    ///
+    /// SIP_API_DESIGN_2 Phase E. The closure receives a
+    /// [`SessionHandle`] for the original call and an
+    /// [`IncomingRequest`](crate::api::incoming::IncomingRequest) carrying
+    /// every REFER header (Referred-By, Replaces, Target-Dialog, custom
+    /// X-*). Return `Ok(true)` to send `202 Accepted` and have the
+    /// transferee follow the Refer-To URI; return `Ok(false)` (or an
+    /// `Err`) to send `603 Decline`.
+    pub fn on_refer_received<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(SessionHandle, String) -> Fut + Send + Sync + 'static,
+        F: Fn(SessionHandle, crate::api::incoming::IncomingRequest) -> Fut
+            + Send
+            + Sync
+            + 'static,
         Fut: Future<Output = Result<bool>> + Send + 'static,
     {
-        self.transfer_request = Some(Arc::new(move |handle, target| Box::pin(f(handle, target))));
+        self.refer_received = Some(Arc::new(move |handle, req| Box::pin(f(handle, req))));
         self
     }
 
@@ -521,7 +536,7 @@ impl CallbackPeerBuilder {
                 local_resume: self.local_resume,
                 remote_hold: self.remote_hold,
                 remote_resume: self.remote_resume,
-                transfer_request: self.transfer_request,
+                refer_received: self.refer_received,
                 transfer_accepted: self.transfer_accepted,
                 refer_progress: self.refer_progress,
                 refer_completed: self.refer_completed,
@@ -554,7 +569,7 @@ pub struct CallbackBuilderHandler {
     local_resume: Option<HoldHook>,
     remote_hold: Option<HoldHook>,
     remote_resume: Option<HoldHook>,
-    transfer_request: Option<TransferRequestHook>,
+    refer_received: Option<ReferReceivedHook>,
     transfer_accepted: Option<TransferAcceptedHook>,
     refer_progress: Option<ReferProgressHook>,
     refer_completed: Option<ReferCompletedHook>,
@@ -674,19 +689,36 @@ impl CallHandler for CallbackBuilderHandler {
         }
     }
 
-    async fn on_transfer_request(&self, handle: SessionHandle, target: String) -> bool {
-        let Some(hook) = &self.transfer_request else {
-            return false;
+    async fn on_refer_received(&self, request: crate::api::incoming::IncomingRequest) {
+        let Some(hook) = &self.refer_received else {
+            return;
         };
-        match hook(handle, target).await {
-            Ok(accepted) => accepted,
+        let Some(coord) = request.coordinator.clone() else {
+            tracing::warn!(
+                "[CallbackPeerBuilder] on_refer_received fired without a coordinator hook; \
+                 dropping REFER for call {}",
+                request.call_id
+            );
+            return;
+        };
+        let handle = SessionHandle::new(request.call_id.clone(), coord);
+        let accepted = match hook(handle.clone(), request).await {
+            Ok(b) => b,
             Err(err) => {
                 tracing::warn!(
-                    "[CallbackPeerBuilder] on_transfer_request failed; rejecting transfer: {}",
+                    "[CallbackPeerBuilder] on_refer_received failed; rejecting REFER: {}",
                     err
                 );
                 false
             }
+        };
+        let result = if accepted {
+            handle.accept_refer().await
+        } else {
+            handle.reject_refer(603, "Decline").await
+        };
+        if let Err(err) = result {
+            tracing::warn!("[CallbackPeerBuilder] applying REFER decision failed: {}", err);
         }
     }
 
@@ -887,18 +919,6 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_remote_call_resumed(&self, handle: SessionHandle) {}
 
-    /// Called when a REFER (transfer request) is received.
-    ///
-    /// Return `true` to allow the transfer (send 202 Accepted); `false` to reject.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use on_refer_received(IncomingRequest) — see SIP_API_DESIGN_2.md Phase E"
-    )]
-    #[allow(unused_variables)]
-    async fn on_transfer_request(&self, handle: SessionHandle, target: String) -> bool {
-        false
-    }
-
     /// Called when an outbound REFER is accepted by the peer.
     #[allow(unused_variables)]
     async fn on_transfer_accepted(&self, handle: SessionHandle, refer_to: String) {}
@@ -979,22 +999,6 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_dialog_state_changed(&self, subscription_id: CallId, dialog: DialogInfo) {}
 
-    /// Called for inbound NOTIFY requests.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use on_notify_received(IncomingRequest) — see SIP_API_DESIGN_2.md Phase E"
-    )]
-    #[allow(unused_variables)]
-    async fn on_notify(
-        &self,
-        handle: SessionHandle,
-        event_package: String,
-        subscription_state: Option<String>,
-        content_type: Option<String>,
-        body: Option<String>,
-    ) {
-    }
-
     /// SIP_API_DESIGN_2 Phase E — typed inbound NOTIFY hook. Carries
     /// the full `IncomingRequest` so applications can inspect every
     /// header on the NOTIFY (Server, Allow-Events, custom routing
@@ -1003,11 +1007,10 @@ pub trait CallHandler: Send + Sync + 'static {
     #[allow(unused_variables)]
     async fn on_notify_received(&self, request: crate::api::incoming::IncomingRequest) {}
 
-    /// SIP_API_DESIGN_2 Phase E — typed inbound REFER hook. The
-    /// existing [`Self::on_transfer_request`] continues to fire on the
-    /// pre-decoded `target: String`; new code subscribes here for
-    /// header-level access (Referred-By, Replaces, Target-Dialog,
-    /// custom X-*).
+    /// SIP_API_DESIGN_2 Phase E — typed inbound REFER hook. Apps drive
+    /// accept/reject via `req.accept_refer()` / `req.reject_refer(...)`
+    /// inside this callback. Use for header-level access (Referred-By,
+    /// Replaces, Target-Dialog, custom X-*).
     #[allow(unused_variables)]
     async fn on_refer_received(&self, request: crate::api::incoming::IncomingRequest) {}
 
@@ -1068,11 +1071,10 @@ pub trait CallHandler: Send + Sync + 'static {
     /// about to retry with `Authorization` / `Proxy-Authorization` (RFC 3261
     /// §22.2). Informational — the retry proceeds automatically if credentials
     /// are on file via [`Config.credentials`] or
-    /// [`UnifiedCoordinator::make_call_with_auth`]; this hook does not alter
+    /// `coord.invite(...).with_credentials(...)`; this hook does not alter
     /// flow. Useful for logging or surfacing auth activity in a UI.
     ///
     /// [`Config.credentials`]: crate::api::unified::Config::credentials
-    /// [`UnifiedCoordinator::make_call_with_auth`]: crate::api::unified::UnifiedCoordinator::make_call_with_auth
     #[allow(unused_variables)]
     async fn on_auth_retrying(&self, call_id: CallId, status_code: u16, realm: String) {}
 }
@@ -1086,122 +1088,19 @@ pub struct CallbackPeerControl {
 }
 
 impl CallbackPeerControl {
-    /// Initiate an outgoing call from this peer's configured local URI.
+    /// Begin building an outbound REGISTER from this peer.
     ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(control: rvoip_sip::CallbackPeerControl) -> rvoip_sip::Result<()> {
-    /// let call = control.call("sip:bob@example.com").await?;
-    /// # let _ = call;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call(&self, target: &str) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        let id = self.coordinator.make_call(&self.local_uri, target).await?;
-        Ok(SessionHandle::new(id, self.coordinator.clone()))
-    }
-
-    /// Initiate an outgoing call with explicit digest-auth credentials.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(control: rvoip_sip::CallbackPeerControl) -> rvoip_sip::Result<()> {
-    /// let call = control.call_with_auth(
-    ///     "sip:bob@example.com",
-    ///     rvoip_sip::types::Credentials::new("alice", "secret"),
-    /// ).await?;
-    /// # let _ = call;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).with_credentials(c).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call_with_auth(
+    /// Returns a [`RegisterBuilder`](crate::api::send::RegisterBuilder)
+    /// — chain `.with_expires(..)`, `.with_from_uri(..)`,
+    /// `.with_contact_uri(..)`, `.with_credentials(..)` etc. and finish
+    /// with `.send().await`.
+    pub fn register(
         &self,
-        target: &str,
-        credentials: crate::types::Credentials,
-    ) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        let id = self
-            .coordinator
-            .make_call_with_auth(&self.local_uri, target, credentials)
-            .await?;
-        Ok(SessionHandle::new(id, self.coordinator.clone()))
-    }
-
-    /// Initiate an outgoing call attaching caller-supplied extra typed
-    /// headers to the very first INVITE.
-    ///
-    /// Use for headers RFC 3261 leaves outside the standard request line —
-    /// e.g. `Diversion`, `History-Info`, `Call-Info`, `User-to-User`, or
-    /// vendor `X-*` headers. Wraps
-    /// [`crate::UnifiedCoordinator::make_call_with_headers`]; see it for header
-    /// ordering guarantees and composition limits.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(control: rvoip_sip::CallbackPeerControl) -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::{HeaderName, TypedHeader};
-    /// use rvoip_sip_core::types::header::HeaderValue;
-    ///
-    /// let tenant = TypedHeader::Other(
-    ///     HeaderName::Other("X-Tenant-ID".into()),
-    ///     HeaderValue::text("acme-prod"),
-    /// );
-    /// let call = control
-    ///     .call_with_headers("sip:bob@example.com", vec![tenant])
-    ///     .await?;
-    /// # let _ = call;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call_with_headers(
-        &self,
-        target: &str,
-        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        let id = self
-            .coordinator
-            .make_call_with_headers(&self.local_uri, target, extra_headers)
-            .await?;
-        Ok(SessionHandle::new(id, self.coordinator.clone()))
-    }
-
-    /// Register with a SIP server.
-    ///
-    /// Successful registration uses the same lifecycle as
-    /// [`UnifiedCoordinator::register_with`]: accepted expiry and refresh
-    /// timing are stored, automatic refresh may be scheduled, and the handler
-    /// receives `on_registration_success`.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(control: rvoip_sip::CallbackPeerControl) -> rvoip_sip::Result<()> {
-    /// let handle = control.register_with(
-    ///     rvoip_sip::Registration::new("sip:registrar.example.com", "alice", "secret")
-    /// ).await?;
-    /// # let _ = handle;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn register_with(&self, reg: Registration) -> Result<RegistrationHandle> {
-        self.coordinator.register_with(reg).await
+        registrar: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> crate::api::send::RegisterBuilder {
+        self.coordinator.register(registrar, username, password)
     }
 
     /// Query whether a registration handle is currently registered.
@@ -1289,8 +1188,7 @@ impl CallbackPeerControl {
     }
 
     /// Begin building an outbound INVITE from this peer's configured
-    /// `local_uri`. Canonical replacement for the deprecated
-    /// [`Self::call`]. Returns an
+    /// `local_uri`. Returns an
     /// [`OutboundCallBuilder`](crate::api::send::OutboundCallBuilder).
     pub fn invite(&self, target: impl Into<String>) -> crate::api::send::OutboundCallBuilder {
         self.coordinator
@@ -1394,8 +1292,7 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// # }
     /// ```
     ///
-    /// For per-call overrides, use
-    /// [`UnifiedCoordinator::make_call_with_auth`](crate::api::unified::UnifiedCoordinator::make_call_with_auth)
+    /// For per-call overrides, use `coordinator().invite(...).with_credentials(...)`
     /// via [`coordinator()`](Self::coordinator).
     pub async fn new(handler: H, config: Config) -> Result<Self> {
         let local_uri = config.local_uri.clone();
@@ -1452,7 +1349,7 @@ impl<H: CallHandler> CallbackPeer<H> {
     /// # async fn example(peer: rvoip_sip::CallbackPeer<rvoip_sip::AutoAnswerHandler>) -> rvoip_sip::Result<()> {
     /// let control = peer.control();
     /// tokio::spawn(async move { peer.run().await });
-    /// let call = control.call("sip:bob@example.com").await?;
+    /// let call = control.invite("sip:bob@example.com").send().await?;
     /// # let _ = call;
     /// # Ok(())
     /// # }
@@ -1472,27 +1369,15 @@ impl<H: CallHandler> CallbackPeer<H> {
     // calls. These are thin wrappers over the coordinator; use
     // `coordinator()` for metadata and deterministic wait helpers.
 
-    /// Register with a SIP server using a [`Registration`] builder.
-    ///
-    /// Registration success/failure is surfaced through the corresponding
-    /// [`CallHandler`] hooks and through the coordinator event stream.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(peer: rvoip_sip::CallbackPeer<rvoip_sip::AutoAnswerHandler>) -> rvoip_sip::Result<()> {
-    /// let handle = peer.register_with(
-    ///     rvoip_sip::Registration::new("sip:registrar.example.com", "alice", "secret")
-    /// ).await?;
-    /// # let _ = handle;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn register_with(
+    /// Begin building an outbound REGISTER. Delegates to
+    /// [`CallbackPeerControl::register`].
+    pub fn register(
         &self,
-        reg: crate::api::unified::Registration,
-    ) -> Result<crate::api::unified::RegistrationHandle> {
-        self.coordinator.register_with(reg).await
+        registrar: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> crate::api::send::RegisterBuilder {
+        self.coordinator.register(registrar, username, password)
     }
 
     /// Query whether a registration handle is currently registered.
@@ -1783,10 +1668,20 @@ impl<H: CallHandler> CallbackPeer<H> {
                             }
                         }
                         CallHandlerDecision::Reject { status, reason } => {
-                            let _ = coordinator.reject_call(&call_id, status, &reason).await;
+                            let _ = coordinator
+                                .reject(&call_id)
+                                .with_status(status)
+                                .with_reason(reason)
+                                .send()
+                                .await;
                         }
                         CallHandlerDecision::Redirect(target) => {
-                            let _ = coordinator.redirect_call(&call_id, 302, vec![target]).await;
+                            let _ = coordinator
+                                .redirect(&call_id)
+                                .with_status(302)
+                                .with_contacts(vec![target])
+                                .send()
+                                .await;
                         }
                         CallHandlerDecision::Defer(guard) => {
                             deferred_calls.lock().await.insert(call_id, guard);
@@ -1914,31 +1809,16 @@ impl<H: CallHandler> CallbackPeer<H> {
                 }
 
                 Event::ReferReceived {
-                    call_id, refer_to, request, ..
+                    call_id: _, refer_to: _, request, ..
                 } => {
-                    // SIP_API_DESIGN_2 Phase E §9.5 — fire the typed
-                    // `on_refer_received(IncomingRequest)` hook first
-                    // so applications can inspect every header on
-                    // the REFER (Referred-By / Replaces / Target-
-                    // Dialog / custom X-*); then call the legacy
-                    // positional `on_transfer_request` so existing
-                    // accept/reject decisions still work. Both fire
-                    // on every inbound REFER until the legacy form is
-                    // removed in a future breaking release.
+                    // SIP_API_DESIGN_2 Phase E §9.5 — typed
+                    // `on_refer_received(IncomingRequest)` hook only.
+                    // Applications drive accept/reject via
+                    // `req.accept_refer()` / `req.reject_refer(...)`
+                    // inside the callback.
                     if let Some(mut req) = request {
                         req.set_coordinator(coordinator.clone());
                         handler.on_refer_received(req).await;
-                    }
-                    let handle = SessionHandle::new(call_id, coordinator);
-                    #[allow(deprecated)]
-                    let accepted = handler.on_transfer_request(handle.clone(), refer_to).await;
-                    let result = if accepted {
-                        handle.accept_refer().await
-                    } else {
-                        handle.reject_refer(603, "Decline").await
-                    };
-                    if let Err(e) = result {
-                        tracing::warn!("Failed to apply REFER handler decision: {}", e);
                     }
                 }
 
@@ -2046,35 +1926,21 @@ impl<H: CallHandler> CallbackPeer<H> {
                 }
 
                 Event::NotifyReceived {
-                    call_id,
-                    event_package,
-                    subscription_state,
-                    content_type,
-                    body,
+                    call_id: _,
+                    event_package: _,
+                    subscription_state: _,
+                    content_type: _,
+                    body: _,
                     request,
                 } => {
-                    // SIP_API_DESIGN_2 Phase E §9.5 — fire the typed
-                    // `on_notify_received(IncomingRequest)` hook first
-                    // so applications get header-level access (full
-                    // Subscription-State parameters, custom routing
-                    // hints, etc.); then call the legacy positional
-                    // `on_notify` so existing handlers continue to
-                    // work until the deprecated form is removed.
+                    // SIP_API_DESIGN_2 Phase E §9.5 — typed
+                    // `on_notify_received(IncomingRequest)` hook only.
+                    // Applications inspect headers/body via the
+                    // `IncomingRequest` directly.
                     if let Some(mut req) = request {
                         req.set_coordinator(coordinator.clone());
                         handler.on_notify_received(req).await;
                     }
-                    let handle = SessionHandle::new(call_id, coordinator);
-                    #[allow(deprecated)]
-                    handler
-                        .on_notify(
-                            handle,
-                            event_package,
-                            subscription_state,
-                            content_type,
-                            body,
-                        )
-                        .await;
                 }
 
                 Event::RegistrationSuccess {
@@ -2384,11 +2250,6 @@ mod tests {
             self.push("remote-resume");
         }
 
-        async fn on_transfer_request(&self, _handle: SessionHandle, _target: String) -> bool {
-            self.push("refer");
-            false
-        }
-
         async fn on_transfer_accepted(&self, _handle: SessionHandle, _refer_to: String) {
             self.push("transfer-accepted");
         }
@@ -2430,17 +2291,6 @@ mod tests {
             _reason: String,
         ) {
             self.push(format!("transfer-failed:{status_code}"));
-        }
-
-        async fn on_notify(
-            &self,
-            _handle: SessionHandle,
-            event_package: String,
-            _subscription_state: Option<String>,
-            _content_type: Option<String>,
-            _body: Option<String>,
-        ) {
-            self.push(format!("notify:{event_package}"));
         }
 
         async fn on_registration_success(
@@ -2631,13 +2481,11 @@ mod tests {
             "remote-resume",
             "dtmf:5",
             "media-security:true",
-            "refer",
             "transfer-accepted",
             "refer-notify:100",
             "refer-progress:180",
             "refer-completed:200",
             "transfer-failed:503",
-            "notify:refer",
             "registration-success",
             "registration-failed:403",
             "unregistration-success",
@@ -2715,16 +2563,6 @@ mod tests {
                     }
                 }
             })
-            .on_transfer_request({
-                let seen = seen.clone();
-                move |_handle, target| {
-                    let seen = seen.clone();
-                    async move {
-                        seen.lock().unwrap().push(format!("refer:{target}"));
-                        Ok(true)
-                    }
-                }
-            })
             .build()
             .await
             .unwrap();
@@ -2769,7 +2607,6 @@ mod tests {
             "incoming",
             "established",
             "dtmf:7",
-            "refer:sip:c@example.test",
             "ended",
         ] {
             assert!(
@@ -2811,11 +2648,12 @@ mod tests {
         let stop = peer.shutdown_handle();
         let run_task = tokio::spawn(async move { peer.run().await });
 
-        let handle = control
-            .call("sip:unreachable@127.0.0.1:15443")
+        let call_id = control
+            .invite("sip:unreachable@127.0.0.1:15443")
+            .send()
             .await
             .unwrap();
-        assert!(!handle.id().to_string().is_empty());
+        assert!(!call_id.to_string().is_empty());
 
         control.shutdown();
         stop.shutdown();

@@ -862,23 +862,6 @@ impl UnifiedDialogApi {
             .await
     }
 
-    /// Send an INFO request (RFC 6086) with a caller-chosen `Content-Type`.
-    ///
-    /// The generic `send_request_in_dialog` path stamps INFO bodies with
-    /// `application/info`. This method lets the caller specify the type —
-    /// e.g. `application/dtmf-relay` for DTMF-over-INFO,
-    /// `application/sipfrag` for fax flow control.
-    pub async fn send_info_with_content_type(
-        &self,
-        dialog_id: &DialogId,
-        content_type: String,
-        body: bytes::Bytes,
-    ) -> ApiResult<TransactionKey> {
-        self.manager
-            .send_info_with_content_type(dialog_id, content_type, body)
-            .await
-    }
-
     /// RFC 3261 §22.2 — resend an INVITE with digest auth after a 401/407
     /// challenge. Session-core-v3 uses this to transparently retry call setup
     /// when the UAS or proxy challenged the original INVITE.
@@ -1340,11 +1323,6 @@ impl UnifiedDialogApi {
     // SIP METHOD HELPERS (ALL MODES)
     // ========================================
 
-    /// Send BYE request to terminate a dialog
-    pub async fn send_bye(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
-        self.manager.send_bye(dialog_id).await
-    }
-
     /// Send REGISTER request for SIP registration
     ///
     /// Note: REGISTER is a non-dialog request, so it doesn't use a dialog_id.
@@ -1591,29 +1569,10 @@ impl UnifiedDialogApi {
         Ok(response)
     }
 
-    /// Send an out-of-dialog SUBSCRIBE request.
-    pub async fn send_subscribe_out_of_dialog(
-        &self,
-        target_uri: &str,
-        from_uri: &str,
-        contact_uri: &str,
-        event_package: &str,
-        expires: u32,
-    ) -> ApiResult<Response> {
-        self.send_subscribe_out_of_dialog_with_extras(
-            target_uri,
-            from_uri,
-            contact_uri,
-            event_package,
-            expires,
-            Vec::new(),
-        )
-        .await
-    }
-
     /// Out-of-dialog SUBSCRIBE with application-staged `extra_headers`
     /// appended after the stack-managed slice. See SIP_API_DESIGN_2
     /// §5.2.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_subscribe_out_of_dialog_with_extras(
         &self,
         target_uri: &str,
@@ -1621,6 +1580,8 @@ impl UnifiedDialogApi {
         contact_uri: &str,
         event_package: &str,
         expires: u32,
+        accept: Option<String>,
+        authorization: Option<String>,
         extra_headers: Vec<TypedHeader>,
     ) -> ApiResult<Response> {
         let dest_uri = target_uri
@@ -1638,6 +1599,8 @@ impl UnifiedDialogApi {
             contact_uri,
             event_package,
             expires,
+            accept,
+            authorization,
             1,
             local_addr,
             extras_opt,
@@ -1657,60 +1620,17 @@ impl UnifiedDialogApi {
             .await
     }
 
-    /// Send an out-of-dialog SUBSCRIBE and pre-register a session mapping.
-    pub async fn send_subscribe_out_of_dialog_for_session(
-        &self,
-        session_id: &str,
-        target_uri: &str,
-        from_uri: &str,
-        contact_uri: &str,
-        event_package: &str,
-        expires: u32,
-    ) -> ApiResult<crate::dialog::DialogId> {
-        self.manager
-            .send_subscribe_out_of_dialog_for_session(
-                session_id,
-                target_uri,
-                from_uri,
-                contact_uri,
-                event_package,
-                expires,
-            )
-            .await
-    }
-
-    /// Refresh or terminate an existing SUBSCRIBE dialog.
-    pub async fn send_subscribe_refresh(
-        &self,
-        dialog_id: &crate::dialog::DialogId,
-        event_package: &str,
-        expires: u32,
-    ) -> ApiResult<()> {
-        self.manager
-            .send_subscribe_refresh(dialog_id, event_package, expires)
-            .await
-    }
-
-    /// Send an out-of-dialog MESSAGE request.
-    pub async fn send_message_out_of_dialog(
-        &self,
-        target_uri: &str,
-        from_uri: &str,
-        body: String,
-    ) -> ApiResult<Response> {
-        self.send_message_out_of_dialog_with_extras(target_uri, from_uri, body, None, Vec::new())
-            .await
-    }
-
     /// Out-of-dialog MESSAGE with caller-chosen Content-Type and
     /// application-staged `extra_headers` appended after the
     /// stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message_out_of_dialog_with_extras(
         &self,
         target_uri: &str,
         from_uri: &str,
         body: String,
         content_type: Option<String>,
+        authorization: Option<String>,
         extra_headers: Vec<TypedHeader>,
     ) -> ApiResult<Response> {
         let dest_uri = target_uri
@@ -1729,6 +1649,7 @@ impl UnifiedDialogApi {
             1,
             local_addr,
             content_type,
+            authorization,
             extras_opt,
         )
         .map_err(|e| ApiError::protocol(format!("Failed to build MESSAGE request: {}", e)))?;
@@ -1792,32 +1713,7 @@ impl UnifiedDialogApi {
         Ok(transaction_id)
     }
 
-    /// Send REFER request for call transfer
-    pub async fn send_refer(
-        &self,
-        dialog_id: &DialogId,
-        target_uri: String,
-        refer_body: Option<String>,
-    ) -> ApiResult<TransactionKey> {
-        self.manager
-            .send_refer(dialog_id, target_uri, refer_body)
-            .await
-    }
-
-    /// Send NOTIFY request for event notifications
-    pub async fn send_notify(
-        &self,
-        dialog_id: &DialogId,
-        event: String,
-        body: Option<String>,
-        subscription_state: Option<String>,
-    ) -> ApiResult<TransactionKey> {
-        self.manager
-            .send_notify(dialog_id, event, body, subscription_state)
-            .await
-    }
-
-    /// Send NOTIFY for REFER implicit subscription (RFC 3515)
+/// Send NOTIFY for REFER implicit subscription (RFC 3515)
     pub async fn send_refer_notify(
         &self,
         dialog_id: &DialogId,
@@ -1829,66 +1725,9 @@ impl UnifiedDialogApi {
             .await
     }
 
-    /// Send UPDATE request for media modifications
-    pub async fn send_update(
-        &self,
-        dialog_id: &DialogId,
-        sdp: Option<String>,
-    ) -> ApiResult<TransactionKey> {
-        self.manager.send_update(dialog_id, sdp).await
-    }
-
-    /// Send a re-INVITE on an established dialog. Used by RFC 4028 session
-    /// timer refreshers as a fallback when UPDATE is not supported (501
-    /// Not Implemented), and by hold/resume flows.
-    pub async fn send_reinvite(
-        &self,
-        dialog_id: &DialogId,
-        sdp: Option<String>,
-    ) -> ApiResult<TransactionKey> {
-        self.manager
-            .inner_manager()
-            .send_request(
-                dialog_id,
-                rvoip_sip_core::Method::Invite,
-                sdp.map(bytes::Bytes::from),
-            )
-            .await
-            .map_err(ApiError::from)
-    }
-
-    /// Send PRACK for a reliable provisional response (RFC 3262).
+/// Send PRACK for a reliable provisional response (RFC 3262).
     pub async fn send_prack(&self, dialog_id: &DialogId, rseq: u32) -> ApiResult<TransactionKey> {
         self.manager.send_prack(dialog_id, rseq).await
-    }
-
-    /// Send INFO request for application-specific information
-    pub async fn send_info(
-        &self,
-        dialog_id: &DialogId,
-        info_body: String,
-    ) -> ApiResult<TransactionKey> {
-        self.manager.send_info(dialog_id, info_body).await
-    }
-
-    /// Send CANCEL request to cancel a pending INVITE
-    ///
-    /// This method cancels a pending INVITE transaction that hasn't received a final response.
-    /// Only works for dialogs in the Early state (before 200 OK is received).
-    ///
-    /// # Arguments
-    /// * `dialog_id` - The dialog to cancel
-    ///
-    /// # Returns
-    /// Transaction key for the CANCEL request
-    ///
-    /// # Errors
-    /// Returns an error if:
-    /// - Dialog is not found
-    /// - Dialog is not in Early state
-    /// - No pending INVITE transaction found
-    pub async fn send_cancel(&self, dialog_id: &DialogId) -> ApiResult<TransactionKey> {
-        self.manager.send_cancel(dialog_id).await
     }
 
     /// REFER with full options (replaces / referred-by / target-dialog).
@@ -1905,31 +1744,19 @@ impl UnifiedDialogApi {
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::TypedHeader;
 
-        // The legacy `send_refer` builds a `Refer-To: <uri>\r\n` body —
-        // preserve that shape when no custom body is desired.
-        let body = if opts.replaces.is_some()
-            || opts.referred_by.is_some()
-            || opts.target_dialog.is_some()
-        {
-            let mut s = format!("Refer-To: {}\r\n", opts.refer_to);
-            if let Some(rb) = &opts.referred_by {
-                s.push_str(&format!("Referred-By: {}\r\n", rb));
-            }
-            if let Some(rep) = &opts.replaces {
-                s.push_str(&format!("Replaces: {}\r\n", rep));
-            }
-            if let Some(td) = &opts.target_dialog {
-                s.push_str(&format!("Target-Dialog: {}\r\n", td));
-            }
-            s
-        } else {
-            format!("Refer-To: {}\r\n", opts.refer_to)
-        };
+        // The body must remain single-line `Refer-To: <uri>\r\n`. The
+        // downstream NOTIFY/REFER request builder extracts `target_uri`
+        // from the body via a `trim_start_matches("Refer-To: ")` /
+        // `trim_end_matches("\r\n")` shim
+        // (`manager/transaction_integration.rs::send_request_in_dialog_with_extras`),
+        // which can't survive any embedded newlines. RFC 3891 (Replaces),
+        // RFC 3892 (Referred-By), and RFC 4538 (Target-Dialog) ride on
+        // the request as real typed headers below — never as additional
+        // body lines.
+        let body = format!("Refer-To: {}\r\n", opts.refer_to);
 
         // RFC 3891 + 3892 + 4538 — typed headers added on the request
-        // alongside any application extras. The `body` payload above
-        // is preserved for legacy parsers that read these from the
-        // body, but the canonical wire form has them as real headers.
+        // alongside any application extras.
         let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
         if let Some(rb) = &opts.referred_by {
             extras.push(TypedHeader::Other(
@@ -1963,84 +1790,144 @@ impl UnifiedDialogApi {
     }
 
     /// NOTIFY with full options.
+    ///
+    /// Builds the NOTIFY request directly rather than routing through
+    /// the generic `send_request_in_dialog_with_extras` path so we can
+    /// thread `content_type` and `subscription_id` explicitly without
+    /// mutating persistent `dialog.event_package` state. This keeps
+    /// per-NOTIFY `;id=` parameters (RFC 6665 §4.5.2) from leaking
+    /// across concurrent NOTIFYs on the same multi-subscription dialog.
     pub async fn send_notify_with_options(
         &self,
         dialog_id: &DialogId,
         opts: NotifyRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        // Update event package + subscription state on the dialog so the
-        // NOTIFY-builder reads them off the dialog as the legacy path did.
-        {
+        use crate::transaction::dialog::quick as dialog_quick;
+
+        // Mutate `dialog.subscription_state` only when the caller
+        // supplied an explicit `Subscription-State:` value — the
+        // dialog's subscription lifetime tracker needs the parsed
+        // value to arm expiry timers. An empty `opts.subscription_state`
+        // is treated as "not supplied"; we don't synthesize a
+        // `Terminated` state in that case (auto-emit NOTIFY paths
+        // pass empty when no application state was staged).
+        // `dialog.event_package` is no longer mutated by this method.
+        let template = {
             let mut dialog = self
                 .manager
                 .inner_manager()
                 .get_dialog_mut(dialog_id)
                 .map_err(ApiError::from)?;
-            // RFC 6665 §4.5.2 — multi-subscription dialogs distinguish
-            // their NOTIFY streams via the `id` parameter on `Event:`.
-            // SIP_API_DESIGN_2 §7.1 plumbs the optional subscription_id
-            // through to the wire by appending the id parameter to the
-            // event package string when set; the NOTIFY builder
-            // stamps the Event header from this combined value.
-            let event_with_id = match &opts.subscription_id {
-                Some(sid) if !sid.is_empty() => format!("{};id={}", opts.event, sid),
-                _ => opts.event.clone(),
-            };
-            if dialog.event_package.as_ref() != Some(&event_with_id) {
-                dialog.event_package = Some(event_with_id);
+            if !opts.subscription_state.is_empty() {
+                use crate::dialog::subscription_state::{
+                    SubscriptionState, SubscriptionTerminationReason,
+                };
+                use std::time::Duration;
+                let state_str = &opts.subscription_state;
+                let sub_state = if state_str.starts_with("active") {
+                    let expires = if let Some(pos) = state_str.find("expires=") {
+                        let exp_str = &state_str[pos + 8..];
+                        exp_str
+                            .split(';')
+                            .next()
+                            .and_then(|s| s.parse::<u64>().ok())
+                            .unwrap_or(3600)
+                    } else {
+                        3600
+                    };
+                    SubscriptionState::Active {
+                        remaining_duration: Duration::from_secs(expires),
+                        original_duration: Duration::from_secs(expires),
+                    }
+                } else if state_str.starts_with("pending") {
+                    SubscriptionState::Pending
+                } else if state_str.starts_with("terminated") {
+                    let reason = if state_str.contains("noresource") {
+                        Some(SubscriptionTerminationReason::NoResource)
+                    } else if state_str.contains("deactivated") {
+                        Some(SubscriptionTerminationReason::ClientRequested)
+                    } else if state_str.contains("rejected") {
+                        Some(SubscriptionTerminationReason::Rejected)
+                    } else if state_str.contains("timeout") {
+                        Some(SubscriptionTerminationReason::Expired)
+                    } else {
+                        None
+                    };
+                    SubscriptionState::Terminated { reason }
+                } else {
+                    SubscriptionState::Terminated { reason: None }
+                };
+                dialog.subscription_state = Some(sub_state);
             }
-            use crate::dialog::subscription_state::{
-                SubscriptionState, SubscriptionTerminationReason,
-            };
-            use std::time::Duration;
-            let state_str = &opts.subscription_state;
-            let sub_state = if state_str.starts_with("active") {
-                let expires = if let Some(pos) = state_str.find("expires=") {
-                    let exp_str = &state_str[pos + 8..];
-                    exp_str
-                        .split(';')
-                        .next()
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(3600)
-                } else {
-                    3600
-                };
-                SubscriptionState::Active {
-                    remaining_duration: Duration::from_secs(expires),
-                    original_duration: Duration::from_secs(expires),
-                }
-            } else if state_str.starts_with("pending") {
-                SubscriptionState::Pending
-            } else if state_str.starts_with("terminated") {
-                let reason = if state_str.contains("noresource") {
-                    Some(SubscriptionTerminationReason::NoResource)
-                } else if state_str.contains("deactivated") {
-                    Some(SubscriptionTerminationReason::ClientRequested)
-                } else if state_str.contains("rejected") {
-                    Some(SubscriptionTerminationReason::Rejected)
-                } else if state_str.contains("timeout") {
-                    Some(SubscriptionTerminationReason::Expired)
-                } else {
-                    None
-                };
-                SubscriptionState::Terminated { reason }
-            } else {
-                SubscriptionState::Terminated { reason: None }
-            };
-            dialog.subscription_state = Some(sub_state);
-        }
+            dialog.create_request_template(Method::Notify)
+        };
 
-        let body = opts.body.map(|b| bytes::Bytes::from(b.to_vec()));
-        self.manager
+        let local_tag = template
+            .local_tag
+            .clone()
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| {
+                ApiError::protocol("NOTIFY requires local tag in established dialog".to_string())
+            })?;
+        let remote_tag = template
+            .remote_tag
+            .clone()
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| {
+                ApiError::protocol("NOTIFY requires remote tag in established dialog".to_string())
+            })?;
+
+        let local_address = self
+            .manager
             .inner_manager()
-            .send_request_in_dialog_with_extras(
-                dialog_id,
-                Method::Notify,
-                body,
-                opts.extra_headers,
-            )
+            .local_address_for_target_and_routes(&template.target_uri, &template.route_set);
+
+        // RFC 6665 §4.5.2 — `id=<subscription_id>` rides as a parameter on
+        // the Event header for THIS NOTIFY only. Without a subscription id
+        // we emit the bare package name (legacy behavior).
+        let event_with_id = match &opts.subscription_id {
+            Some(sid) if !sid.is_empty() => format!("{};id={}", opts.event, sid),
+            _ => opts.event.clone(),
+        };
+
+        let body_string = opts.body.as_ref().map(|b| String::from_utf8_lossy(b).into_owned());
+        let extras_opt = if opts.extra_headers.is_empty() {
+            None
+        } else {
+            Some(opts.extra_headers.clone())
+        };
+
+        // Empty subscription_state means "not supplied" — pass None so
+        // the NOTIFY builder doesn't try to parse an empty header.
+        let sub_state_opt = if opts.subscription_state.is_empty() {
+            None
+        } else {
+            Some(opts.subscription_state.clone())
+        };
+
+        let request = dialog_quick::notify_for_dialog_with_extras(
+            template.call_id.clone(),
+            template.local_uri.to_string(),
+            local_tag,
+            template.remote_uri.to_string(),
+            remote_tag,
+            event_with_id,
+            body_string,
+            sub_state_opt,
+            opts.content_type.clone(),
+            template.cseq_number,
+            local_address,
+            if template.route_set.is_empty() {
+                None
+            } else {
+                Some(template.route_set.clone())
+            },
+            extras_opt,
+        )
+        .map_err(|e| ApiError::protocol(format!("Failed to build NOTIFY request: {}", e)))?;
+
+        self.send_in_dialog_built_request(dialog_id, Method::Notify, request)
             .await
-            .map_err(ApiError::from)
     }
 
     /// INFO with full options.
@@ -2169,10 +2056,29 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: UpdateRequestOptions,
     ) -> ApiResult<TransactionKey> {
+        use rvoip_sip_core::types::min_se::MinSE;
+        use rvoip_sip_core::types::session_expires::SessionExpires;
+        use rvoip_sip_core::types::supported::Supported;
+        use rvoip_sip_core::types::TypedHeader;
+
         let body = opts.sdp.map(bytes::Bytes::from);
+        let mut extras = opts.extra_headers;
+        if opts.session_timer_refresh {
+            // RFC 4028 session-timer refresh: stamp Session-Expires +
+            // Min-SE + Supported: timer. Conventional defaults are
+            // Session-Expires=1800s, Min-SE=90s; callers wanting other
+            // values can pre-stage their own headers in `extra_headers`
+            // before flipping this flag, and the duplicates rule per
+            // RFC 3261 §7.3.1 keeps the application's values authoritative.
+            extras.push(TypedHeader::SessionExpires(SessionExpires::new(1800, None)));
+            extras.push(TypedHeader::MinSE(MinSE::new(90)));
+            extras.push(TypedHeader::Supported(Supported::new(vec![
+                "timer".to_string(),
+            ])));
+        }
         self.manager
             .inner_manager()
-            .send_request_in_dialog_with_extras(dialog_id, Method::Update, body, opts.extra_headers)
+            .send_request_in_dialog_with_extras(dialog_id, Method::Update, body, extras)
             .await
             .map_err(ApiError::from)
     }
@@ -2184,6 +2090,9 @@ impl UnifiedDialogApi {
         opts: ReInviteRequestOptions,
     ) -> ApiResult<TransactionKey> {
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::min_se::MinSE;
+        use rvoip_sip_core::types::session_expires::SessionExpires;
+        use rvoip_sip_core::types::supported::Supported;
         use rvoip_sip_core::types::TypedHeader;
 
         // Precomputed Authorization rides as a typed extra alongside
@@ -2195,6 +2104,16 @@ impl UnifiedDialogApi {
                 HeaderName::Authorization,
                 HeaderValue::Raw(auth.into_bytes()),
             ));
+        }
+        if opts.session_timer_refresh {
+            // RFC 4028 session-timer refresh on re-INVITE. Defaults match
+            // `send_update_with_options`; see notes there on per-call
+            // override via `extra_headers`.
+            extras.push(TypedHeader::SessionExpires(SessionExpires::new(1800, None)));
+            extras.push(TypedHeader::MinSE(MinSE::new(90)));
+            extras.push(TypedHeader::Supported(Supported::new(vec![
+                "timer".to_string(),
+            ])));
         }
         let body = opts.sdp.map(bytes::Bytes::from);
         self.manager
@@ -2215,6 +2134,8 @@ impl UnifiedDialogApi {
                 dialog_id,
                 &opts.event,
                 opts.expires,
+                opts.accept,
+                opts.authorization,
                 opts.extra_headers,
             )
             .await
@@ -2234,6 +2155,8 @@ impl UnifiedDialogApi {
             &contact_uri,
             &opts.event,
             opts.expires,
+            opts.accept,
+            opts.authorization,
             opts.extra_headers,
         )
         .await
@@ -2255,6 +2178,7 @@ impl UnifiedDialogApi {
             &opts.from_uri,
             body_string,
             content_type,
+            opts.authorization,
             opts.extra_headers,
         )
         .await

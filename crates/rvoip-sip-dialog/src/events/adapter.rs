@@ -266,23 +266,35 @@ impl DialogEventAdapter {
     ) -> Option<RvoipCrossCrateEvent> {
         match event {
             SessionCoordinationEvent::IncomingCall {
-                dialog_id, request, ..
+                dialog_id,
+                request,
+                transaction_id,
+                ..
             } => {
                 // Extract SIP headers for from/to URIs - simplified for now
                 let from = "unknown@unknown".to_string(); // TODO: Extract from SIP headers properly
                 let to = "unknown@unknown".to_string(); // TODO: Extract from SIP headers properly
                 let sdp_offer = None; // TODO: Extract SDP from request body
 
-                // Round-trip the parsed Request into wire bytes via
-                // `Message::to_bytes()`. `Request::Display` skips the
-                // RFC 3261 header/body separator CRLF when the body is
-                // empty, which leaves the bytes unparseable; the
-                // explicit `Message::to_bytes()` path always emits the
-                // separator and round-trips cleanly through
-                // `parse_message`.
-                let raw_bytes = std::sync::Arc::new(bytes::Bytes::from(
-                    rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
-                ));
+                // SIP_API_DESIGN_2 §7.5: prefer transport-cached wire
+                // bytes (RFC 8224 STIR/SHAKEN survives end-to-end).
+                // `try_read` avoids blocking the sync conversion path;
+                // when the manager is not wired or the lock is busy we
+                // fall back to re-serialising the parsed Request.
+                let raw_bytes = self
+                    .dialog_manager
+                    .try_read()
+                    .ok()
+                    .and_then(|guard| {
+                        guard
+                            .as_ref()
+                            .and_then(|m| m.transaction_manager().take_inbound_bytes(transaction_id))
+                    })
+                    .unwrap_or_else(|| {
+                        std::sync::Arc::new(bytes::Bytes::from(
+                            rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
+                        ))
+                    });
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {
                         session_id: dialog_id.to_string(),
@@ -291,7 +303,7 @@ impl DialogEventAdapter {
                         to,
                         sdp_offer,
                         headers: std::collections::HashMap::new(),
-                        transaction_id: "unknown".to_string(), // TODO: Extract from request
+                        transaction_id: transaction_id.to_string(),
                         source_addr: "unknown".to_string(),    // TODO: Extract from source
                         raw_request: Some(raw_bytes),
                     },

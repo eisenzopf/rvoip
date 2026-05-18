@@ -14,10 +14,19 @@ members = [
     "crates/media-core",
     "crates/rvoip-sip",
     "crates/rvoip-core",
-    "crates/orchestration-core",
     "crates/codec-core",
     "crates/infra-common",
     "crates/users-core",
+]
+
+# orchestration-core is excluded from the workspace as part of the
+# SIP_API_DESIGN_2 migration: it still consumes legacy
+# `UnifiedCoordinator::reject_call` / `make_call` entries that have
+# been removed. The directory stays on disk; resume membership by
+# putting `crates/orchestration-core` back in `members` once the
+# orchestrator is migrated to the new builder API.
+exclude = [
+    "crates/orchestration-core",
 ]
 
 # Default members - when you run cargo commands without -p or --workspace,
@@ -31,7 +40,6 @@ default-members = [
     "crates/media-core",
     "crates/rvoip-sip",
     "crates/rvoip-core",
-    "crates/orchestration-core",
     "crates/codec-core",
     "crates/infra-common",
 ]
@@ -59,7 +67,11 @@ dead_code = "allow"
 unused_comparisons = "allow"
 elided_named_lifetimes = "allow"
 ambiguous_glob_reexports = "allow"
-deprecated = "allow"
+# SIP_API_DESIGN_2 migration (2026-05-18): legacy methods were removed
+# outright rather than `#[deprecated]`-wrapped. There are no remaining
+# `#[deprecated]` annotations in the workspace, so this lint is no
+# longer load-bearing. Surfacing deprecation warnings makes future
+# migrations easier — the previous setting was hiding the gap.
 unexpected_cfgs = "allow"
 unreachable_patterns = "allow"
 irrefutable_let_patterns = "allow"
@@ -130,7 +142,8 @@ rvoip-rtp-core = { path = "crates/rtp-core", version = "0.1.26" }
 rvoip-media-core = { path = "crates/media-core", version = "0.1.26" }
 rvoip-sip = { path = "crates/rvoip-sip", version = "0.2.0" }
 rvoip-core = { path = "crates/rvoip-core", version = "0.1.26" }
-rvoip-orchestration-core = { path = "crates/orchestration-core", version = "0.1.26" }
+# rvoip-orchestration-core excluded from workspace pending migration to
+# SIP_API_DESIGN_2 builder API; restore alongside `members` entry.
 rvoip-call-engine = { path = "crates/call-engine", version = "0.1.26" }
 rvoip-client-core = { path = "crates/client-core", version = "0.1.26" }
 rvoip-codec-core = { path = "crates/codec-core", version = "0.1.26" }

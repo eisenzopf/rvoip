@@ -93,77 +93,15 @@ impl StateMachineHelpers {
     }
 
     // ========== Convenience Methods ==========
-    // High-level operations that coordinate multiple events
-
-    /// Make an outgoing call (creates session + sends MakeCall event)
-    pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
-        self.make_call_with_credentials(from, to, None).await
-    }
-
-    /// Make an outgoing call with explicit digest-auth credentials attached
-    /// to the session. The credentials land on `SessionState.credentials`
-    /// before the INVITE goes on the wire, so if the server challenges with
-    /// 401/407 the state machine can compute a response without a round-trip
-    /// back to the caller. `None` = no auth retry on 401/407 for this call.
-    pub async fn make_call_with_credentials(
-        &self,
-        from: &str,
-        to: &str,
-        credentials: Option<crate::types::Credentials>,
-    ) -> Result<SessionId> {
-        self.make_call_inner(from, to, credentials, None, None, Vec::new())
-            .await
-    }
-
-    /// Make an outgoing call attaching a `P-Asserted-Identity` URI
-    /// (RFC 3325 §9.1) to the very first INVITE. The URI lands on
-    /// `SessionState.pai_uri` *before* `MakeCall` is dispatched, so the
-    /// `SendINVITE` action picks it up and routes through dialog-core's
-    /// `make_call_with_extra_headers_for_session` path. `None` for `pai`
-    /// is equivalent to plain [`make_call`](Self::make_call).
-    ///
-    /// Per-call override of [`Config::pai_uri`](crate::api::unified::Config::pai_uri).
-    pub async fn make_call_with_pai(
-        &self,
-        from: &str,
-        to: &str,
-        pai: Option<String>,
-    ) -> Result<SessionId> {
-        self.make_call_inner(from, to, None, None, pai, Vec::new()).await
-    }
-
-    /// Combined entry point used by
-    /// [`UnifiedCoordinator::make_call`](crate::api::unified::UnifiedCoordinator::make_call) /
-    /// `make_call_with_auth` to apply both the digest credentials and the
-    /// `P-Asserted-Identity` from `Config` in a single dispatch. Either or
-    /// both of `credentials` / `pai` may be `None`.
-    pub async fn make_call_with_credentials_and_pai(
-        &self,
-        from: &str,
-        to: &str,
-        credentials: Option<crate::types::Credentials>,
-        pai: Option<String>,
-    ) -> Result<SessionId> {
-        self.make_call_inner(from, to, credentials, None, pai, Vec::new())
-            .await
-    }
-
-    /// Combined entry point used by
-    /// [`UnifiedCoordinator::make_call_with_headers`](crate::api::unified::UnifiedCoordinator::make_call_with_headers)
-    /// and the `_with_headers` variants on the peer surfaces. Attaches a
-    /// caller-supplied `Vec<TypedHeader>` to the very first INVITE alongside
-    /// any credentials and `P-Asserted-Identity` already configured.
-    pub async fn make_call_with_headers_and_credentials_and_pai(
-        &self,
-        from: &str,
-        to: &str,
-        credentials: Option<crate::types::Credentials>,
-        pai: Option<String>,
-        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<SessionId> {
-        self.make_call_inner(from, to, credentials, None, pai, extra_headers)
-            .await
-    }
+    // High-level operations that coordinate multiple events.
+    //
+    // The basic `make_call*` family was removed when the SIP_API_DESIGN_2
+    // deprecation cycle completed; the canonical outbound INVITE entry
+    // point is [`OutboundCallBuilder`](crate::api::send::OutboundCallBuilder)
+    // (`coord.invite(from, to).with_credentials(...)?.send().await`),
+    // which does its own session setup + state plumbing without going
+    // through `helpers.make_call*`. `make_call_inner` is retained as
+    // shared kitchen logic for the transfer-leg path below.
 
     /// Spawn an outbound leg that will carry RFC 3515 §2.4.5 progress
     /// NOTIFYs back to `transferor_session_id` as its dialog advances.
@@ -172,7 +110,7 @@ impl StateMachineHelpers {
     /// leg's `SessionState` *before* the `MakeCall` event enters the
     /// state machine. That ordering closes the race where
     /// `Dialog180Ringing` (or a fast `Dialog200OK` on loopback) could
-    /// fire between `make_call` returning and the caller setting the
+    /// fire between this helper returning and the caller setting the
     /// linkage — the `SendTransferNotify*` actions no-op when linkage is
     /// absent, so early progress NOTIFYs would otherwise be lost.
     ///

@@ -34,6 +34,24 @@ impl ByeBuilder {
         self
     }
 
+    /// Attach a structured RFC 3326 `Reason:` header (preserving
+    /// `protocol`/`cause`/`text` exactly — e.g. `Q.850 ;cause=16 ;text="…"`).
+    ///
+    /// Use this when the caller needs a non-SIP protocol token or a
+    /// numeric `cause` other than 200; [`with_reason`](Self::with_reason)
+    /// is a shorthand that always renders as `SIP ;cause=200 ;text="…"`.
+    pub fn with_sip_reason(mut self, reason: crate::api::handle::SipReason) -> Self {
+        let typed = rvoip_sip_core::types::headers::TypedHeader::Reason(
+            rvoip_sip_core::types::reason::Reason::new(
+                reason.protocol,
+                reason.cause,
+                reason.text,
+            ),
+        );
+        self.state.headers.push(typed);
+        self
+    }
+
     /// Send the BYE through dialog-core's
     /// `send_bye_with_options` so staged application headers ride to
     /// the wire after stack-managed headers are stamped.

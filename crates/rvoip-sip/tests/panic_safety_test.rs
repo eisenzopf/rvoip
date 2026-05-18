@@ -63,7 +63,7 @@ async fn panicking_handler_triggers_drop_safety_net() {
 
     // Subscribe to UAC events before placing the call so we don't race
     // against the 500 arriving.
-    let mut caller = StreamPeer::with_config(Config::local("caller", CLIENT_PORT))
+    let caller = StreamPeer::with_config(Config::local("caller", CLIENT_PORT))
         .await
         .expect("build caller");
     let mut events = caller
@@ -71,10 +71,12 @@ async fn panicking_handler_triggers_drop_safety_net() {
         .subscribe_events()
         .await
         .expect("subscribe");
-    let handle = caller
-        .call(&format!("sip:srv@127.0.0.1:{}", SERVER_PORT))
+    let call_id = caller
+        .invite(format!("sip:srv@127.0.0.1:{}", SERVER_PORT))
+        .send()
         .await
         .expect("send INVITE");
+    let handle = caller.coordinator().session(&call_id);
 
     // Wait up to 5 seconds for CallFailed — well under Timer C's 3 minutes.
     let status = timeout(Duration::from_secs(5), async {
@@ -141,10 +143,12 @@ async fn normal_path_drop_is_noop() {
     let mut caller = StreamPeer::with_config(Config::local("caller", CLIENT_PORT))
         .await
         .expect("build caller");
-    let handle = caller
-        .call(&format!("sip:srv@127.0.0.1:{}", SERVER_PORT))
+    let call_id = caller
+        .invite(format!("sip:srv@127.0.0.1:{}", SERVER_PORT))
+        .send()
         .await
         .expect("send INVITE");
+    let handle = caller.coordinator().session(&call_id);
 
     // If Drop had spuriously fired, the call would have been rejected and
     // wait_for_answered would fail/time out.

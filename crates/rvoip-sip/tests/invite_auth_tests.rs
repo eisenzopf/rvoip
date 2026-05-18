@@ -1,9 +1,11 @@
 //! Unit tests for RFC 3261 §22.2 digest auth retry wiring.
 //!
-//! Covers the state-table transitions added alongside `StreamPeerBuilder::
-//! with_credentials` / `PeerControl::call_with_auth`. End-to-end wire
-//! behaviour is exercised by `tests/invite_auth_integration.rs` when a
-//! challenging UAS fixture is available.
+//! Covers the state-table transitions for digest auth retry, exercised
+//! at the API surface by `StreamPeerBuilder::with_credentials` and
+//! per-call `control.invite(...).with_credentials(...).send()`.
+//! End-to-end wire behaviour is exercised by
+//! `tests/invite_auth_integration.rs` when a challenging UAS fixture is
+//! available.
 
 use rvoip_sip::state_table::{
     Action, EventType, Role, StateKey, StateTable, YamlTableLoader,

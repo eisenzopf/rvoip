@@ -189,8 +189,8 @@ impl AuthChallengeBuilder {
         session.reject_response_extras = Some(extras);
         self.coord.update_session_state(session).await?;
 
-        #[allow(deprecated)]
         self.coord
+            .helpers
             .reject_call(
                 &self.call_id,
                 status,

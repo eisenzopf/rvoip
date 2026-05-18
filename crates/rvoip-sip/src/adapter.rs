@@ -214,7 +214,8 @@ impl ConnectionAdapter for SipAdapter {
         let from = "sip:anonymous@invalid";
         let session_id = self
             .coordinator
-            .make_call(from, &request.target)
+            .invite(Some(from.to_string()), request.target.clone())
+            .send()
             .await
             .map_err(Self::map_session_err)?;
         let conn_id = self.ensure_mapped(session_id);
@@ -247,7 +248,10 @@ impl ConnectionAdapter for SipAdapter {
             RejectReason::Custom { code, ref phrase } => (code, phrase.as_str()),
         };
         self.coordinator
-            .reject_call(&session_id, status, phrase)
+            .reject(&session_id)
+            .with_status(status)
+            .with_reason(phrase)
+            .send()
             .await
             .map_err(Self::map_session_err)
     }
@@ -287,7 +291,8 @@ impl ConnectionAdapter for SipAdapter {
             }
         };
         self.coordinator
-            .send_refer(&session_id, &refer_to)
+            .refer(&session_id, refer_to)
+            .send()
             .await
             .map_err(Self::map_session_err)
     }

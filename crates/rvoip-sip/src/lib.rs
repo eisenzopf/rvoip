@@ -72,8 +72,7 @@
 //!     .await?;
 //!
 //! endpoint.register().await?;
-//! let call = endpoint.call("1002").await?;
-//! call.wait_for_answered(Some(Duration::from_secs(30))).await?;
+//! let call = endpoint.call_and_wait("1002", Some(Duration::from_secs(30))).await?;
 //! call.hangup().await?;
 //! endpoint.shutdown().await?;
 //! # Ok(())
@@ -94,7 +93,8 @@
 //!
 //! # async fn example() -> Result<()> {
 //! let mut alice = StreamPeer::new("alice").await?;
-//! let call = alice.call("sip:bob@192.168.1.50:5060").await?;
+//! let call_id = alice.invite("sip:bob@192.168.1.50:5060").send().await?;
+//! let call = alice.coordinator().session(&call_id);
 //! let call = call.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
 //!
 //! call.send_dtmf('1').await?;
@@ -165,7 +165,8 @@
 //! let mut events = coordinator.events().await?;
 //!
 //! let outbound = coordinator
-//!     .make_call("sip:bridge@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
+//!     .invite(Some("sip:bridge@127.0.0.1:5060".to_string()), "sip:bob@127.0.0.1:5070")
+//!     .send()
 //!     .await?;
 //!
 //! while let Some(event) = events.next().await {
@@ -275,18 +276,14 @@
 //!
 //! ## Custom INVITE headers
 //!
-//! Each API surface exposes a `_with_headers` variant that accepts a
-//! `Vec<`[`TypedHeader`]`>` and attaches the extras to the very first
-//! outgoing INVITE: [`UnifiedCoordinator::make_call_with_headers`],
-//! [`PeerControl::call_with_headers`], [`StreamPeer::call_with_headers`],
-//! [`CallbackPeerControl::call_with_headers`],
-//! [`EndpointControl::call_with_headers`], and
-//! [`Endpoint::call_with_headers`]. Use this for headers RFC 3261 leaves
-//! outside the request line — `Diversion`, `History-Info`, `Call-Info`,
-//! `User-to-User`, or vendor `X-*` headers required by a specific PBX or
-//! SBC. The extras append after any synthesized `P-Asserted-Identity` and
-//! before the outbound-proxy Route, so the on-wire ordering is
-//! deterministic. [`HeaderName`] and [`TypedHeader`] are re-exported at the
+//! All API surfaces share one builder: call `invite(from, to)` (or the
+//! peer-scoped `invite(to)`), then attach `.with_extra_headers(...)` to
+//! ship a `Vec<`[`TypedHeader`]`>` with the outgoing INVITE. Use this for
+//! headers RFC 3261 leaves outside the request line — `Diversion`,
+//! `History-Info`, `Call-Info`, `User-to-User`, or vendor `X-*` headers
+//! required by a specific PBX or SBC. The extras append after any
+//! synthesized `P-Asserted-Identity` and before the outbound-proxy Route,
+//! so the on-wire ordering is deterministic. [`HeaderName`] and [`TypedHeader`] are re-exported at the
 //! crate root for ergonomic authoring without pulling in `rvoip-sip-core`
 //! directly.
 //!
@@ -339,7 +336,7 @@
 //!
 //! | If you say… | Use | Example |
 //! |---|---|---|
-//! | "I just want to make a call, library handles SIP" | Pure Config | `coord.make_call(target)` (deprecated wrapper) |
+//! | "I just want to make a call, library handles SIP" | Pure Config | `coord.invite(None, target).send()` |
 //! | "I need credentials on outbound calls" | One builder | `coord.invite(from, to).with_credentials(c).send()` |
 //! | "I need to attach one custom X-* header" | One builder | `coord.invite(from, to).with_raw_header("X-Foo", "bar")?.send()` |
 //! | "I'm building a B2BUA — carry headers across legs" | Builder + carry-through | `coord.invite(...).with_headers_from(&inbound, &[...])?.send()` |
@@ -490,7 +487,7 @@ pub use api::trace_redactor::{PassthroughRedactor, RedactionDecision, TraceRedac
 /// helper returns `(content_type, Bytes)` for attachment to a SIP
 /// body via the new outbound builders. The §10 #24 `multipart_mixed`
 /// / `multipart_parse` helpers live in
-/// [`api::headers::convenience`](crate::api::headers::convenience) and
+/// [`crate::api::headers::convenience`] and
 /// are re-exported here for surface symmetry.
 pub mod bodies {
     pub use crate::api::bodies::*;
@@ -559,16 +556,6 @@ pub mod prelude {
         TypedHeader,
     };
 }
-
-// ── Legacy API (deprecated) ─────────────────────────────────────────────────
-
-/// Deprecated: use [`StreamPeer`] instead.
-#[deprecated(note = "Use StreamPeer instead")]
-pub use api::simple::SimplePeer;
-
-/// Deprecated: use [`SessionHandle`] instead.
-#[deprecated(note = "Use SessionHandle instead")]
-pub use api::events::CallHandle;
 
 // ── Internals (for power users / testing) ───────────────────────────────────
 

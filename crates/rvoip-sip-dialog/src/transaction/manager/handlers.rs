@@ -795,10 +795,19 @@ impl TransactionManager {
                 source,
                 destination,
                 transport_type,
+                raw_bytes,
             } => {
                 debug!("Received message from {}", source);
                 self.publish_inbound_sip_trace(&message, source, destination, transport_type)
                     .await;
+                if let Some(bytes) = raw_bytes.as_ref() {
+                    if let Some(key) = crate::transaction::utils::transaction_key_from_message(
+                        &message,
+                    ) {
+                        self.pending_inbound_bytes
+                            .insert(key, std::sync::Arc::clone(bytes));
+                    }
+                }
                 self.handle_message(message, source, destination).await
             }
             TransportEvent::KeepAlivePongReceived { source, .. } => {

@@ -22,24 +22,11 @@ use std::fs;
 use std::path::Path;
 
 /// (file relative to the rvoip-sip crate root, function declaration substring)
-const EXPECTED_DEPRECATIONS: &[(&str, &str)] = &[
-    // UnifiedCoordinator legacy entry points (§9 Phase C matrix).
-    ("src/api/unified.rs", "pub async fn make_call"),
-    ("src/api/unified.rs", "pub async fn make_call_with_auth"),
-    ("src/api/unified.rs", "pub async fn make_call_with_pai"),
-    ("src/api/unified.rs", "pub async fn make_call_with_headers"),
-    ("src/api/unified.rs", "pub async fn reject_call"),
-    ("src/api/unified.rs", "pub async fn redirect_call"),
-    ("src/api/unified.rs", "pub async fn register_with"),
-    ("src/api/unified.rs", "pub async fn register_legacy"),
-    // Phase 12 — renamed surfaces; old names kept as deprecated aliases.
-    ("src/api/unified.rs", "pub fn subscribe_event("),
-    ("src/api/unified.rs", "pub fn register_builder("),
-    // CallbackPeer / handler trait callbacks superseded by the new
-    // event stream and typed dispatch.
-    ("src/api/callback_peer.rs", "async fn on_transfer_request(&self,"),
-    ("src/api/callback_peer.rs", "async fn on_notify("),
-];
+///
+/// All entries from the §9 Phase C / Phase 12 deprecation cycle have
+/// completed: the methods have been deleted. The list is kept (empty)
+/// so the CI grep guard remains armed for future deprecation cycles.
+const EXPECTED_DEPRECATIONS: &[(&str, &str)] = &[];
 
 #[test]
 fn each_phase_c_deprecated_item_is_annotated() {

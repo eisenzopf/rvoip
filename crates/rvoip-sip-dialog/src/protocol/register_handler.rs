@@ -93,12 +93,19 @@ impl RegisterHandler for DialogManager {
             use rvoip_infra_common::events::cross_crate::{
                 DialogToSessionEvent, RvoipCrossCrateEvent,
             };
-            // SIP_API_DESIGN_2 Phase A: preserve inbound REGISTER bytes
-            // so the registrar surface can build an `IncomingRegister`
-            // view with `raw_request()`.
-            let raw_request = Some(std::sync::Arc::new(bytes::Bytes::from(
-                request.to_string().into_bytes(),
-            )));
+            // SIP_API_DESIGN_2 §7.5: surface the original wire bytes
+            // the transport cached so STIR/SHAKEN and signature-
+            // preserving consumers see the upstream form unchanged.
+            // Fall back to re-serialising for synthetic events / mock
+            // transports that publish `raw_bytes: None`.
+            let raw_request = self
+                .transaction_manager
+                .take_inbound_bytes(&transaction_id)
+                .or_else(|| {
+                    Some(std::sync::Arc::new(bytes::Bytes::from(
+                        request.to_string().into_bytes(),
+                    )))
+                });
             let event =
                 RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingRegister {
                     transaction_id: transaction_id.to_string(),

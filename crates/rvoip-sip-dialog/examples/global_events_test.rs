@@ -9,7 +9,9 @@ use tracing::{info, Level};
 use tracing_subscriber;
 
 use rvoip_sip_dialog::{
-    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::DialogEventHub,
+    api::unified::{InfoRequestOptions, UnifiedDialogApi, UpdateRequestOptions},
+    config::DialogManagerConfig,
+    events::DialogEventHub,
 };
 use rvoip_infra_common::events::{
     cross_crate::RvoipCrossCrateEvent, EventCoordinatorConfig, GlobalEventCoordinator,
@@ -156,7 +158,14 @@ impl GlobalEventsTest {
         info!("🔥 Test 3: INFO request on established dialog with event integration...");
         let info_result = self
             .api
-            .send_info(dialog.id(), "Global events test info".to_string())
+            .send_info_with_options(
+                dialog.id(),
+                InfoRequestOptions {
+                    content_type: "application/octet-stream".to_string(),
+                    body: bytes::Bytes::from("Global events test info"),
+                    ..Default::default()
+                },
+            )
             .await;
         match info_result {
             Ok(_) => {
@@ -171,12 +180,15 @@ impl GlobalEventsTest {
         info!("🔥 Test 4: UPDATE request on established dialog with event integration...");
         let update_result = self
             .api
-            .send_update(
+            .send_update_with_options(
                 dialog.id(),
-                Some(
-                    "v=0\r\no=global 123456 654321 IN IP4 127.0.0.1\r\nm=audio 5008 RTP/AVP 0\r\n"
-                        .to_string(),
-                ),
+                UpdateRequestOptions {
+                    sdp: Some(
+                        "v=0\r\no=global 123456 654321 IN IP4 127.0.0.1\r\nm=audio 5008 RTP/AVP 0\r\n"
+                            .to_string(),
+                    ),
+                    ..Default::default()
+                },
             )
             .await;
         match update_result {

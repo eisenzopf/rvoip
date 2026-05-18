@@ -27,7 +27,7 @@ use tokio::time::{sleep, timeout};
 
 use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 use rvoip_sip::api::stream_peer::EventReceiver;
-use rvoip_sip::api::unified::{Config, Registration, UnifiedCoordinator};
+use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::types::Credentials;
 use rvoip_sip::{CallState, Event, StreamPeer};
 use rvoip_sip_core::builder::SimpleRequestBuilder;
@@ -172,14 +172,13 @@ async fn generated_sip_compliance_register_auth_retry_and_unregister_are_generat
         .await
         .expect("coordinator");
     let handle = coordinator
-        .register_with(
-            Registration::new(
-                format!("sip:127.0.0.1:{registrar_port}"),
-                "alice",
-                "password",
-            )
-            .contact_uri(&contact),
+        .register(
+            format!("sip:127.0.0.1:{registrar_port}"),
+            "alice",
+            "password",
         )
+        .with_contact_uri(&contact)
+        .send()
         .await
         .expect("register");
 
@@ -274,15 +273,14 @@ async fn generated_sip_compliance_register_423_retry_is_generated_valid() {
         .await
         .expect("peer");
     let handle = peer
-        .register_with(
-            Registration::new(
-                format!("sip:127.0.0.1:{registrar_port}"),
-                "alice",
-                "password",
-            )
-            .contact_uri(&contact)
-            .expires(60),
+        .register(
+            format!("sip:127.0.0.1:{registrar_port}"),
+            "alice",
+            "password",
         )
+        .with_contact_uri(&contact)
+        .with_expires(60)
+        .send()
         .await
         .expect("register");
 
@@ -361,10 +359,9 @@ async fn generated_sip_compliance_invite_401_retry_is_generated_valid() {
         .expect("peer");
     let _ = peer
         .control()
-        .call_with_auth(
-            &format!("sip:bob@127.0.0.1:{uas_port}"),
-            Credentials::new("alice", "password"),
-        )
+        .invite(format!("sip:bob@127.0.0.1:{uas_port}"))
+        .with_credentials(Credentials::new("alice", "password"))
+        .send()
         .await;
 
     wait_for_count(&count, 2, "INVITE auth retry").await;
@@ -428,10 +425,9 @@ async fn generated_sip_compliance_invite_407_retry_uses_proxy_authorization() {
         .expect("peer");
     let _ = peer
         .control()
-        .call_with_auth(
-            &format!("sip:bob@127.0.0.1:{uas_port}"),
-            Credentials::new("alice", "password"),
-        )
+        .invite(format!("sip:bob@127.0.0.1:{uas_port}"))
+        .with_credentials(Credentials::new("alice", "password"))
+        .send()
         .await;
 
     wait_for_count(&invite_count, 2, "INVITE proxy-auth retry").await;
@@ -486,16 +482,18 @@ async fn generated_sip_compliance_invite_407_without_credentials_fails_fast() {
         }
     });
 
-    let mut peer = StreamPeer::with_config(config("alice", client_port))
+    let peer = StreamPeer::with_config(config("alice", client_port))
         .await
         .expect("peer");
     let mut events = peer.control().subscribe_events().await.expect("events");
-    let handle = peer
-        .call(&format!("sip:bob@127.0.0.1:{uas_port}"))
+    let call_id = peer
+        .control()
+        .invite(format!("sip:bob@127.0.0.1:{uas_port}"))
+        .send()
         .await
-        .expect("make_call");
+        .expect("invite send");
 
-    let (status, reason) = wait_for_call_failed(&mut events, handle.id()).await;
+    let (status, reason) = wait_for_call_failed(&mut events, &call_id).await;
     assert_eq!(status, 407);
     assert!(
         reason.contains("no credentials"),
@@ -544,14 +542,16 @@ async fn generated_sip_compliance_invite_407_second_challenge_fails_fast() {
 
     let mut cfg = config("alice", client_port);
     cfg.credentials = Some(Credentials::new("alice", "password"));
-    let mut peer = StreamPeer::with_config(cfg).await.expect("peer");
+    let peer = StreamPeer::with_config(cfg).await.expect("peer");
     let mut events = peer.control().subscribe_events().await.expect("events");
-    let handle = peer
-        .call(&format!("sip:bob@127.0.0.1:{uas_port}"))
+    let call_id = peer
+        .control()
+        .invite(format!("sip:bob@127.0.0.1:{uas_port}"))
+        .send()
         .await
-        .expect("make_call");
+        .expect("invite send");
 
-    let (status, reason) = wait_for_call_failed(&mut events, handle.id()).await;
+    let (status, reason) = wait_for_call_failed(&mut events, &call_id).await;
     assert_eq!(status, 407);
     assert!(
         reason.contains("retry limit"),
@@ -616,8 +616,12 @@ async fn generated_sip_compliance_invite_422_retry_is_generated_valid() {
 
     let mut cfg = config("alice", client_port);
     cfg.session_timer_secs = Some(90);
-    let mut peer = StreamPeer::with_config(cfg).await.expect("peer");
-    let _ = peer.call(&format!("sip:bob@127.0.0.1:{uas_port}")).await;
+    let peer = StreamPeer::with_config(cfg).await.expect("peer");
+    let _ = peer
+        .control()
+        .invite(format!("sip:bob@127.0.0.1:{uas_port}"))
+        .send()
+        .await;
 
     wait_for_count(&count, 2, "INVITE 422 retry").await;
     let captured = captured.lock().await;

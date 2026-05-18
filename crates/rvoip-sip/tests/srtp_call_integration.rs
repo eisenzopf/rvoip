@@ -83,9 +83,10 @@ async fn srtp_call_negotiates_and_establishes_end_to_end() {
 
     let target = format!("sip:bob@127.0.0.1:{}", bob_port);
     let _alice_session = alice
-        .make_call("sip:alice@127.0.0.1", &target)
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send()
         .await
-        .expect("alice make_call");
+        .expect("alice invite.send()");
 
     // Bob should see the IncomingCall.
     let incoming = wait_for(&mut bob_events, Duration::from_secs(8), |ev| {

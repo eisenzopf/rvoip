@@ -205,13 +205,21 @@ impl OutboundCallBuilder {
             PaiOverride::Default => self.coord.config_pai_uri(),
         };
 
+        // Fall back to `Config::credentials` when the application did
+        // not stage per-call credentials, so PBX-auth flows that only
+        // configure peer-level credentials keep working.
+        let credentials = self
+            .credentials
+            .clone()
+            .or_else(|| self.coord.config_credentials());
+
         // Build the snapshot — folds every override into a frozen
         // struct that the state-machine handler reads back verbatim.
         let snapshot = std::sync::Arc::new(OutboundCallOptionsSnapshot {
             from: Some(from.clone()),
             to: to.clone(),
             sdp: self.sdp,
-            credentials: self.credentials,
+            credentials,
             pai_override: self.pai,
             contact_uri: self.contact_uri,
             outbound_proxy_override: self.outbound_proxy,

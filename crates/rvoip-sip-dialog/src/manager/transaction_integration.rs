@@ -468,6 +468,7 @@ impl DialogManager {
                         &notify_event_package,
                         body_string,
                         notify_subscription_state.clone(),
+                        None, // content_type — legacy path infers from event package
                         template.cseq_number,
                         local_address,
                         if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
@@ -1172,7 +1173,30 @@ impl DialogManager {
                 invite_builder = invite_builder.add_route(route.clone());
             }
 
-            if let Some(contact) = self.local_contact_uri() {
+            // SIP_API_DESIGN_2 §7.2 — caller may supply a Contact override
+            // via `extra_headers` (e.g. B2BUA rewriting the upstream Contact
+            // to its own public address). InviteBuilder always emits exactly
+            // one Contact header (falling back to a socket-derived default),
+            // so we partition the override out of `extra_headers` and feed it
+            // through the typed `.contact(...)` setter instead. If the caller
+            // did not pre-stage a Contact, fall back to the local UA binding.
+            let (caller_contact, extra_headers): (
+                Vec<rvoip_sip_core::types::TypedHeader>,
+                Vec<rvoip_sip_core::types::TypedHeader>,
+            ) = extra_headers.into_iter().partition(|h| {
+                matches!(h, rvoip_sip_core::types::TypedHeader::Contact(_))
+            });
+            let override_contact_uri = caller_contact
+                .into_iter()
+                .find_map(|h| match h {
+                    rvoip_sip_core::types::TypedHeader::Contact(c) => c
+                        .address()
+                        .map(|addr| addr.uri.to_string()),
+                    _ => None,
+                });
+            if let Some(uri) = override_contact_uri {
+                invite_builder = invite_builder.contact(uri);
+            } else if let Some(contact) = self.local_contact_uri() {
                 invite_builder = invite_builder.contact(contact);
             }
 

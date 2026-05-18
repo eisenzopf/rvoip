@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::io;
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -170,6 +170,7 @@ impl UdpTransport {
                             source: src,
                             destination: local_addr,
                             transport_type: TransportType::Udp,
+                            raw_bytes: Some(std::sync::Arc::new(packet_data.clone())),
                         };
 
                         if let Err(e) = inner.events_tx.send(event).await {
@@ -224,6 +225,26 @@ impl Transport for UdpTransport {
             },
             Err(e) => {
                 error!("Failed to send message to {}: {}", destination, e);
+                Err(Error::SendFailed(destination, e))
+            }
+        }
+    }
+
+    async fn send_message_raw(&self, bytes: Bytes, destination: SocketAddr) -> Result<()> {
+        use tracing::{debug, error};
+
+        debug!(
+            "UDP: sending {} pre-built bytes to {}",
+            bytes.len(),
+            destination
+        );
+        match self.inner.socket.send_to(&bytes, destination).await {
+            Ok(bytes_sent) => {
+                debug!("UDP: sent {} raw bytes to {}", bytes_sent, destination);
+                Ok(())
+            }
+            Err(e) => {
+                error!("UDP: failed to send raw bytes to {}: {}", destination, e);
                 Err(Error::SendFailed(destination, e))
             }
         }

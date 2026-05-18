@@ -59,6 +59,7 @@ impl GenericResponseBuilder {
         if (300..=399).contains(&self.status) {
             if extras.is_empty() {
                 self.coord
+                    .helpers
                     .redirect_call(&self.call_id, self.status, vec![reason])
                     .await
             } else {
@@ -74,6 +75,7 @@ impl GenericResponseBuilder {
             }
         } else if extras.is_empty() {
             self.coord
+                .helpers
                 .reject_call(&self.call_id, self.status, &reason)
                 .await
         } else {
@@ -84,6 +86,7 @@ impl GenericResponseBuilder {
             // Mirror the legacy reject path's state-machine teardown
             // so the session settles to the correct terminal state.
             self.coord
+                .helpers
                 .reject_call(&self.call_id, self.status, &reason)
                 .await
                 .or(Ok(()))

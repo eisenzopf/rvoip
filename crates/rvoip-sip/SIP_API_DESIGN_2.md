@@ -1012,10 +1012,22 @@ stack-managed headers are stamped. For out-of-dialog methods
 OPTIONS is brand-new authorship on top of the transaction layer
 (today no `send_options*` exists in dialog-core at all).
 
-Existing dialog-core methods (`send_refer`, `send_notify`, etc.) are
-**not deprecated** — they continue to delegate to the options form
-with `extra_headers: Vec::new()` and default fields. Other crates
-(`rvoip-sip-registrar`) depend on them.
+Dialog-core's legacy public methods on `UnifiedDialogApi`
+(`send_refer`, `send_notify`, `send_info`, `send_info_with_content_type`,
+`send_bye`, `send_cancel`, `send_update`, `send_reinvite`,
+`send_subscribe_out_of_dialog`, `send_subscribe_out_of_dialog_for_session`,
+`send_subscribe_refresh`, `send_message_out_of_dialog`) were
+**removed** in the 2026-05-18 / Gap 1 revision after the
+`DialogAdapter` cutover proved no rvoip-sip caller reached them. The
+`*_with_extras` helpers backing the `*_with_options` family
+(`send_subscribe_out_of_dialog_with_extras`,
+`send_message_out_of_dialog_with_extras`) stayed because the new
+canonical methods delegate to them internally. `rvoip-sip-registrar`
+does not depend on any legacy method. Dialog-core's internal parallel
+handle APIs (`DialogHandle` in `api/common.rs`, `DialogClient` in
+`api/client.rs`) still go directly to the manager layer — they are
+out of scope for this design and are tracked as Gap 2 / Gap 3 in
+the post-shipping audit.
 
 Dialog state machine, route-set logic, transaction core, CSeq
 management are untouched. `DialogImpl.local_cseq` line 47,
@@ -1129,29 +1141,45 @@ can wrap a typed Request.
 **Constraint:** `infra-common` cannot depend on `rvoip-sip-core`. The
 bus payload is `Arc<bytes::Bytes>`, not `Arc<rvoip_sip_core::Request>`.
 
-**Implementation — no double-parse:** the transport layer already
-holds the original wire bytes from the inbound parse. Dialog-core's
-inbound handlers receive the typed `Request` from the transport
-layer along with the original bytes. The cross-crate event variants
-carry `Arc<bytes::Bytes>` of the *original inbound bytes* (not a
-re-serialization). The receiving side in `rvoip-sip` re-parses these
-bytes once when constructing the `IncomingRequest` wrapper.
+**Implementation — no double-parse (shipped):** the transport
+layer preserves the original wire bytes from the inbound parse on
+`TransportEvent::MessageReceived.raw_bytes: Option<Arc<Bytes>>`
+(UDP/TCP/TLS/WS — see `crates/rvoip-sip-transport/src/transport/mod.rs`).
+Dialog-core's transaction manager caches those bytes on a
+per-transaction key in `pending_inbound_bytes`. The cross-crate
+event bridges (`events/event_hub.rs`, `events/adapter.rs`,
+`protocol/register_handler.rs`, `manager/protocol_handlers.rs`)
+call `TransactionManager::take_inbound_bytes(&transaction_id)` to
+source the upstream byte form when constructing
+`DialogToSessionEvent::{IncomingCall, IncomingRegister, CallProgress,
+CallEstablished, CallFailed, ReinviteReceived, InfoReceived,
+MessageReceived, OptionsReceived, TransferRequested, NotifyReceived}`.
+Synthetic / mock-transport paths (raw_bytes = None) fall back to
+re-serialising the parsed Request/Response.
 
 This avoids the round-trip the earlier design proposed (serialize
 parsed Request → ship bytes → re-parse) which would have double-parsed
-every inbound mid-dialog request for the system's lifetime.
+every inbound mid-dialog request for the system's lifetime. **It also
+enables STIR/SHAKEN Identity verification (RFC 8224)** — the signed
+canonical form survives end-to-end, so downstream verifiers recompute
+the signature against the upstream signer's exact bytes.
 
-**Plumbing (additive to dialog-core's transport adapter):**
+**Plumbing (additive to transport + dialog-core):**
 
-1. The transport adapter in dialog-core preserves the original
-   inbound `Bytes` alongside the typed `Request` when handing the
-   message to the protocol handler. This is a one-line addition at
-   the parse site.
-2. Protocol handlers (`register_handler.rs:92-108`,
-   `protocol_handlers.rs:656-728`, `event_hub.rs:588-596`) pass the
-   `Bytes` to the publish site.
-3. The publish site populates `raw_request: Arc<Bytes>` on the
-   cross-crate variant.
+1. `TransportEvent::MessageReceived` gained
+   `raw_bytes: Option<Arc<Bytes>>`. Each transport
+   (`udp.rs`, `transport/udp/mod.rs`, `transport/tcp/connection.rs`,
+   `transport/tls/mod.rs`, `transport/ws/connection.rs`) freezes
+   the parser's input buffer via `Bytes::copy_from_slice` (TCP/TLS/WS)
+   or `packet.clone()` (UDP) and ships it on the event.
+2. `TransactionManager::handle_transport_event` keys the bytes by
+   `transaction_key_from_message(&message)` and inserts them into
+   `pending_inbound_bytes: DashMap<TransactionKey, Arc<Bytes>>`.
+3. Cross-crate bridge sites consume via
+   `take_inbound_bytes(&transaction_id)` (or `peek_inbound_bytes`
+   when multiple bridges fire for one inbound message).
+4. Cache entries are swept on `TransactionEvent::TransactionTerminated`
+   so unconsumed bytes don't leak.
 
 **Cross-crate variant changes in `infra-common::events::cross_crate.rs`:**
 
@@ -1190,6 +1218,42 @@ added — smaller bus payload, single handler path.
 The `infra-common/Cargo.toml` adds `bytes = { workspace = true }`
 (needed for the `Bytes` type). No new transitive dependencies; `bytes`
 is already pulled in by `rvoip-sip-core` and `rvoip-sip-transport`.
+
+### 7.6 Outbound verbatim bytes — `Transport::send_message_raw`
+
+Symmetric to §7.5 on the receive side: the `Transport` trait
+gained `send_message_raw(bytes: Bytes, dest: SocketAddr) -> Result<()>`
+so applications can ship a pre-built byte buffer to the wire without
+round-tripping through `Message::to_bytes()`. Each transport
+implements:
+
+- **UDP** — `socket.send_to(&bytes, destination)` directly.
+- **TCP** — resolve/open a pooled connection and call
+  `TcpConnection::send_raw_bytes(&bytes)` (existing helper).
+- **TLS** — route through the per-connection mpsc channel
+  (`send_to_addr(bytes, dest, server_name=None)`); auto-dials when
+  no pooled connection exists.
+- **WebSocket** — wrap in a `WsMessage::Binary` frame and write to
+  the sink.
+
+This is distinct from the existing `Transport::send_raw`, which is
+the RFC 5626 §3.5.1 CRLFCRLF keep-alive ping path (works only on
+already-open connection-oriented transports).
+
+**Use cases unlocked:**
+
+- **Signature-preserving SBC pass-through.** Receive `raw_bytes`
+  from `IncomingCall::raw_request`, rewrite only the headers the
+  SBC owns (Via, Record-Route, Contact), forward via
+  `send_message_raw`. Identity, P-Asserted-Identity, and other
+  signed/opaque headers retain their exact upstream byte form
+  (RFC 8224).
+- **Stateless proxy forwarding** — RFC 3261 §16 minimal mutations,
+  no AST round-trip.
+- **Fuzz testing and compliance suites** — ship arbitrary byte
+  buffers (including malformed) without transport-layer validation.
+- **Replay tooling** — feed captured `raw_bytes` (pcap-extracted or
+  recorded from a previous session) back through the wire.
 
 ---
 
@@ -1622,6 +1686,8 @@ End-to-end test plan, run in order; each must pass before the next:
 | "I'm authoring custom 4xx with Retry-After" | `RejectBuilder` | `incoming.reject_builder().with_status(503).with_retry_after(120).send()` |
 | "I'm a registrar with Service-Route on 200 OK" | `RegisterResponseBuilder` | `incoming.accept_builder().with_service_route(...).send()` |
 | "I have an app on `make_call_with_pai` — will it work?" | Yes — deprecated but functional | call sites compile, emit deprecation warning |
+| "I need to verify STIR/SHAKEN Identity signatures on incoming calls" | `IncomingCall::raw_request()` | upstream byte-exact form survives end-to-end; recompute signature over `raw_request` bytes |
+| "I'm building a signature-preserving SBC pass-through" | `Transport::send_message_raw(bytes, dest)` | take inbound `raw_request`, rewrite only Via/Record-Route, forward verbatim |
 
 ### 11.2 B2BUA composition (the litmus test)
 
@@ -1924,14 +1990,27 @@ breaking the API.
 
 ## 14. Out of scope
 
-- Removing deprecated methods. They stay through at least version
-  0.3.0; a separate breaking-change PR removes them later.
-- Migrating in-tree examples and tests onto the builder API. Follow-up
-  sweep PR once the builders are stable.
-- Migrating `rvoip-sip-registrar` onto `IncomingRegister` /
+- ~~Removing deprecated methods. They stay through at least version
+  0.3.0; a separate breaking-change PR removes them later.~~
+  **Brought forward in the 2026-05-18 revision** — `register_with`,
+  `subscribe_dialogs` / `unsubscribe_dialogs`, and the corresponding
+  surface forwarders were removed outright rather than `#[deprecated]`-
+  wrapped. The workspace `deprecated = "allow"` lint setting was also
+  removed.
+- ~~Migrating in-tree examples and tests onto the builder API. Follow-up
+  sweep PR once the builders are stable.~~ **Brought forward in the
+  2026-05-18 revision** — `examples/pbx/common.rs`,
+  `examples/stream_peer/04_registration/client.rs`, and the ~20
+  call sites in `tests/register_423_retry.rs` +
+  `tests/generated_sip_compliance.rs` now use the explicit builder
+  chain.
+- ~~Migrating `rvoip-sip-registrar` onto `IncomingRegister` /
   `RegisterResponseBuilder`. The registrar crate today reads inbound
   REGISTER directly; the new types are additive, so registrar
-  continues to compile and run unchanged. Migration is a follow-up PR.
+  continues to compile and run unchanged. Migration is a follow-up PR.~~
+  **Audited in the 2026-05-18 revision** — registrar calls no
+  legacy dialog-core methods (it never did); inbound REGISTER reads
+  remain a follow-up if the new typed surface is desired.
 - New SIP methods beyond INVITE / re-INVITE / REGISTER / REFER / BYE
   / CANCEL / NOTIFY / SUBSCRIBE / INFO / UPDATE / MESSAGE / OPTIONS.
   The trait shape makes adding PUBLISH trivial later; not in this
@@ -2004,3 +2083,161 @@ breaking the API.
 - **`AuthChallengeBuilder` is in scope.** Wraps sip-core's existing
   `www_authenticate_digest` / `bearer` helpers for typed 401/407
   authoring — needed by registrars and B2BUA auth-relay code.
+
+---
+
+## 16. Revision log
+
+### 2026-05-18 — Transport `raw_bytes` end-to-end
+
+The transport layer now preserves the parser's input buffer on
+`TransportEvent::MessageReceived.raw_bytes: Option<Arc<Bytes>>`,
+populated by every shipping transport (UDP/TCP/TLS/WS). Dialog-core's
+transaction manager caches the bytes per-transaction key
+(`pending_inbound_bytes`), and the cross-crate bridges in
+`events/event_hub.rs`, `events/adapter.rs`,
+`protocol/register_handler.rs`, and `manager/protocol_handlers.rs`
+source those bytes via `take_inbound_bytes` instead of
+re-serialising via `Message::to_bytes()` / `Request::to_string()`.
+
+This closes the §7.5 promise to ship original wire bytes
+end-to-end. Concrete outcome: **STIR/SHAKEN Identity-header
+signatures (RFC 8224) now validate** — applications consuming
+`IncomingCall::raw_request` see the upstream signer's exact
+canonical form, not the normalised reprint sip-core's `Display`
+impl produced. Synthetic / mock-transport paths fall back to
+re-serialisation (`raw_bytes: None`).
+
+Companion: §7.6 adds `Transport::send_message_raw(bytes, dest)` so
+applications can ship pre-built byte buffers to the wire without
+round-tripping through the typed AST. Unlocks signature-preserving
+SBC pass-through, stateless proxy forwarding, fuzz harnesses, and
+replay tooling.
+
+### 2026-05-18 — Migration finalized; deferrals brought forward
+
+This revision brings forward §14 deferrals and removes legacy entries
+that previous revisions left behind with `#[deprecated]` intent (which
+the workspace's `[workspace.lints.rust] deprecated = "allow"` had been
+masking). Net effect: workspace builds `--all-features --workspace`
+green with zero deprecation warnings.
+
+**Workspace surgery.**
+- `crates/orchestration-core` moved from `members` to `exclude` in
+  the root `Cargo.toml`. The crate still depends on `make_call` and
+  `reject_call` on `UnifiedCoordinator` — entries removed in an
+  earlier revision without migrating callers. Re-include once the
+  orchestrator is migrated.
+
+**rvoip-sip surface removals (no deprecation grace period).**
+- `UnifiedCoordinator::subscribe_dialogs` and
+  `UnifiedCoordinator::unsubscribe_dialogs` removed. The new entry is
+  `coord.subscribe(target, "dialog").send_dialog_events().await?`
+  returning a `DialogSubscriptionHandle` that wraps the generic
+  `SubscriptionHandle` (`src/api/send/subscribe.rs`).
+- `PeerControl::subscribe_dialogs`, `StreamPeer::subscribe_dialogs`
+  removed. Use the builder via `coord.subscribe(...)`.
+- `CallbackPeerControl::register_with`, `CallbackPeer::register_with`,
+  `PeerControl::register_with` removed. `peer.register(registrar,
+  user, pw).with_expires(..).with_from_uri(..).with_contact_uri(..).send()`
+  is the canonical path. `PeerControl::register` and
+  `CallbackPeerControl::register` builder entries added.
+- `Endpoint::register` body rewritten to use the builder chain
+  directly (no longer delegates to `register_with`).
+- `DialogAdapter::send_dialog_subscribe` and
+  `DialogAdapter::unsubscribe_dialog_package` removed (callers gone).
+
+**rvoip-sip → dialog-core wire migration.** `DialogAdapter` now
+calls dialog-core's `*_with_options` exclusively. Migrated sites:
+- `send_bye` → `send_bye_with_options` (2 sites)
+- `send_update` (via re-INVITE adapter) → `send_update_with_options`
+- `send_refer` → `send_refer_with_options` (3 sites)
+- `send_cancel` → `send_cancel_with_options`
+- `send_info_with_content_type` → `send_info_with_options`
+- `send_subscribe_out_of_dialog` → `send_subscribe_with_options`
+- `send_subscribe_refresh` → `send_subscribe_refresh_with_options`
+- `send_notify` → `send_notify_with_options`
+- `send_message_out_of_dialog` → `send_message_out_of_dialog_with_options`
+- `send_bye_with_reason` (via `dialog_manager().core()`) →
+  `send_bye_with_options { reason: Some(reason.to_string()), .. }`
+
+The `send_refer(dialog, target, refer_body)` call site that
+previously passed the literal string `"attended"` as the REFER body
+was dropped — the legacy code had no on-wire effect (attended
+transfers belong in the Refer-To header's Replaces parameter, not the
+body). Attended transfers now route through the proper
+`send_refer_with_options` paths that populate
+`ReferRequestOptions.replaces`.
+
+**Examples and tests migration (§14 deferral, brought forward).**
+- `examples/pbx/common.rs:1053, 1086` — explicit builder chain
+- `examples/stream_peer/04_registration/client.rs:23` — explicit
+  builder chain (no `Registration` struct needed)
+- `tests/register_423_retry.rs` — 9 call sites rewritten by paren-
+  balanced script
+- `tests/generated_sip_compliance.rs:276` — explicit builder chain
+
+**Workspace lint.** `[workspace.lints.rust] deprecated = "allow"`
+removed. The workspace now surfaces deprecation warnings if any
+future caller drifts back to a deprecated method, instead of hiding
+them.
+
+**What was NOT removed (out of scope for this revision).** Dialog-core
+parallel handle APIs (`DialogHandle` in `api/common.rs`,
+`DialogClient` in `api/client.rs`, `CallHandle` in dialog-core)
+go directly to the manager layer with their own legacy method
+shape. External callers (rvoip-sip) no longer touch any legacy path.
+Removing dialog-core's internal parallel handles is a separate
+refactor (Gap 2 / Gap 3 in the post-shipping audit).
+
+### 2026-05-18 (later) — Gap 1: UnifiedDialogApi legacy method removal
+
+After confirming the workspace migration in the previous revision
+left dialog-core's `UnifiedDialogApi` with a half-old/half-new
+public surface, this addendum removed the 12 legacy methods that
+no rvoip-sip caller could reach.
+
+**Methods removed from `UnifiedDialogApi`** (`src/api/unified.rs`):
+- `send_bye(dialog_id)`
+- `send_refer(dialog_id, target, body)`
+- `send_notify(dialog_id, event, body, sub_state)`
+- `send_update(dialog_id, sdp)`
+- `send_reinvite(dialog_id, sdp)`
+- `send_info(dialog_id, body)`
+- `send_info_with_content_type(dialog_id, ct, body)`
+- `send_cancel(dialog_id)`
+- `send_subscribe_out_of_dialog(target, from, contact, event, expires)`
+- `send_subscribe_out_of_dialog_for_session(session, target, from, contact, event, expires)`
+- `send_subscribe_refresh(dialog_id, event, expires)`
+- `send_message_out_of_dialog(target, from, body)`
+
+**Kept** (internal infrastructure backing the `*_with_options` API):
+- `send_subscribe_out_of_dialog_with_extras` — called by
+  `send_subscribe_with_options`
+- `send_message_out_of_dialog_with_extras` — called by
+  `send_message_out_of_dialog_with_options`
+- `send_refer_notify(dialog_id, status, reason)` — REFER-progress
+  NOTIFY (RFC 3515 §2.4.5), special-case, not a UAC method
+
+**Dialog-core's own callers migrated:**
+- `tests/unified_api_tests.rs:539-570` — 5 sites migrated to
+  `*_with_options` family.
+- `examples/global_events_test.rs:159, 174` — `send_info` /
+  `send_update` migrated.
+- `examples/phase3_integration_showcase.rs:200-312` — 7 sites
+  migrated. (`self.client_api` here is `Arc<UnifiedDialogApi>`,
+  not `DialogClient`.)
+
+`tests/phase3_integration_tests.rs` and `unified_api_tests.rs` calls
+through `env.client: Arc<DialogClient>` — Layer B — are unchanged.
+DialogClient is a separate parallel surface and was not in Gap 1
+scope.
+
+**Verification.** `cargo build --workspace --all-features` clean;
+`cargo test --all-features -p rvoip-sip-dialog` 280+ tests pass;
+`cargo test --all-features -p rvoip-sip` all green.
+
+**Verification.** `cargo build --workspace --all-features` clean.
+`cargo test --all-features -p rvoip-sip --no-run` clean. Workspace
+metadata excludes orchestration-core. No `register_with` or
+`subscribe_dialogs` references remain in `crates/rvoip-sip{,-dialog,-registrar}/src/`.

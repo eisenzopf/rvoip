@@ -11,7 +11,6 @@
 //! `IncomingRequest` synthetically and asserts the builder's `method()`
 //! comes out matching.
 
-use rvoip_sip::api::headers::SipRequestOptions;
 use rvoip_sip_core::types::Method;
 
 #[test]

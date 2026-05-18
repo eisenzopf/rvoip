@@ -104,8 +104,8 @@ impl RejectBuilder {
             self.coord.update_session_state(session).await?;
         }
 
-        #[allow(deprecated)]
         self.coord
+            .helpers
             .reject_call(&self.call_id, self.status, &reason)
             .await
     }

@@ -31,10 +31,10 @@ async fn test_create_peer() {
 #[tokio::test]
 #[serial]
 async fn test_make_outgoing_call() {
-    let mut peer = StreamPeer::with_config(test_config(15100)).await.unwrap();
+    let peer = StreamPeer::with_config(test_config(15100)).await.unwrap();
 
     // Make a call - returns a SessionHandle
-    let handle = peer.call("sip:bob@localhost:15101").await;
+    let handle = peer.invite("sip:bob@localhost:15101").send().await;
     assert!(handle.is_ok());
 }
 
@@ -49,7 +49,7 @@ async fn test_hold_resume_call_via_coordinator() {
 
     // Make a call
     let session_id = coordinator
-        .make_call("sip:alice@localhost", "sip:bob@localhost:15103")
+        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15103").send()
         .await
         .unwrap();
 
@@ -72,7 +72,7 @@ async fn test_send_dtmf_via_coordinator() {
 
     // Make a call
     let session_id = coordinator
-        .make_call("sip:alice@localhost", "sip:bob@localhost:15105")
+        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15105").send()
         .await
         .unwrap();
 
@@ -99,7 +99,7 @@ async fn test_recording_via_coordinator() {
 
     // Make a call
     let session_id = coordinator
-        .make_call("sip:alice@localhost", "sip:bob@localhost:15110")
+        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15110").send()
         .await
         .unwrap();
 
@@ -120,7 +120,7 @@ async fn test_conference_creation_via_coordinator() {
 
     // Make first call
     let call1 = coordinator
-        .make_call("sip:alice@localhost", "sip:bob@localhost:15112")
+        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15112").send()
         .await
         .unwrap();
 
@@ -132,7 +132,7 @@ async fn test_conference_creation_via_coordinator() {
 
     // Make second call
     let call2 = coordinator
-        .make_call("sip:alice@localhost", "sip:charlie@localhost:15113")
+        .invite(Some("sip:alice@localhost".to_string()), "sip:charlie@localhost:15113").send()
         .await
         .unwrap();
 
@@ -168,7 +168,12 @@ async fn test_accept_reject_incoming_via_coordinator() {
     assert!(accept_result.is_err());
 
     // Simulate rejecting a call
-    let reject_result = coordinator.reject_call(&fake_session_id, 486, "Busy").await;
+    let reject_result = coordinator
+        .reject(&fake_session_id)
+        .with_status(486)
+        .with_reason("Busy")
+        .send()
+        .await;
     // Will fail because session doesn't exist, but API works
     assert!(reject_result.is_err());
 }
@@ -176,10 +181,11 @@ async fn test_accept_reject_incoming_via_coordinator() {
 #[tokio::test]
 #[serial]
 async fn test_hangup_call() {
-    let mut peer = StreamPeer::with_config(test_config(15117)).await.unwrap();
+    let peer = StreamPeer::with_config(test_config(15117)).await.unwrap();
 
     // Make a call
-    let handle = peer.call("sip:bob@localhost:15118").await.unwrap();
+    let call_id = peer.invite("sip:bob@localhost:15118").send().await.unwrap();
+    let handle = peer.coordinator().session(&call_id);
 
     // Hang up via SessionHandle
     let hangup_result = handle.hangup().await;
@@ -191,11 +197,12 @@ async fn test_hangup_call() {
 #[serial]
 async fn test_peer_to_peer_call() {
     // Create two peers
-    let mut alice = StreamPeer::with_config(test_config(15119)).await.unwrap();
+    let alice = StreamPeer::with_config(test_config(15119)).await.unwrap();
     let _bob = StreamPeer::with_config(test_config(15120)).await.unwrap();
 
     // Alice calls Bob
-    let handle = alice.call("sip:bob@localhost:15120").await.unwrap();
+    let call_id = alice.invite("sip:bob@localhost:15120").send().await.unwrap();
+    let handle = alice.coordinator().session(&call_id);
 
     // Alice hangs up
     assert!(handle.hangup().await.is_ok());

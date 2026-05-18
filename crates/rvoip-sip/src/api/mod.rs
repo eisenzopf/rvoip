@@ -53,7 +53,7 @@
 //!     .await?;
 //!
 //! endpoint.register().await?;
-//! let call = endpoint.call("1002").await?;
+//! let call = endpoint.call_and_wait("1002", Some(Duration::from_secs(30))).await?;
 //! call.wait_for_answered(Some(Duration::from_secs(30))).await?;
 //! call.hangup().await?;
 //! # Ok(())
@@ -68,7 +68,8 @@
 //! #[tokio::main]
 //! async fn main() -> Result<()> {
 //!     let mut peer = StreamPeer::new("alice").await?;
-//!     let handle = peer.call("sip:bob@192.168.1.100:5060").await?;
+//!     let call_id = peer.invite("sip:bob@192.168.1.100:5060").send().await?;
+//!     let handle = peer.coordinator().session(&call_id);
 //!
 //!     // Wait for the remote side to answer
 //!     let handle = handle.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
@@ -178,7 +179,8 @@
 //! let mut events = coordinator.events().await?;
 //!
 //! let call_id = coordinator
-//!     .make_call("sip:app@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
+//!     .invite(Some("sip:app@127.0.0.1:5060".to_string()), "sip:bob@127.0.0.1:5070")
+//!     .send()
 //!     .await?;
 //! let mut call_events = coordinator.events_for_session(&call_id).await?;
 //!
@@ -206,10 +208,11 @@
 //!
 //! # async fn example() -> Result<()> {
 //! let coordinator = UnifiedCoordinator::new(Config::local("alice", 5060)).await?;
-//! let handle = coordinator.register_with(
-//!     Registration::new("sip:registrar.example.com", "alice", "secret")
-//!         .expires(600)
-//! ).await?;
+//! let handle = coordinator
+//!     .register("sip:registrar.example.com", "alice", "secret")
+//!     .with_expires(600)
+//!     .send()
+//!     .await?;
 //!
 //! let info = coordinator.registration_info(&handle).await?;
 //! if info.status == RegistrationStatus::Registered {
@@ -286,37 +289,35 @@
 //! to item names so refactors break documentation at build time instead of
 //! leaving stale text behind.
 
-// Core modules only
+pub mod audio; // AudioStream, AudioSender, AudioReceiver
+pub mod bodies; // SIP_API_DESIGN_2 §3.6 — Convenience body constructors
 pub mod builder; // Session builder
+pub mod callback_peer; // CallbackPeer, CallHandler, CallHandlerDecision, EndReason
 pub mod dialog_package;
 pub mod dialog_subscription;
 pub mod endpoint;
-pub mod events; // Event-driven API for v3
-pub mod simple;
-pub mod types; // Core types (legacy)
-pub mod unified; // Unified API // Simple peer API (legacy — use StreamPeer instead)
-
-// New v3 API modules
-pub mod audio; // AudioStream, AudioSender, AudioReceiver
-pub mod bodies; // SIP_API_DESIGN_2 §3.6 — Convenience body constructors
-pub mod callback_peer; // CallbackPeer, CallHandler, CallHandlerDecision, EndReason
+pub mod events; // Event enum + supporting types
 pub mod handle; // SessionHandle, CallId
-pub mod handlers;
+pub mod handlers; // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
 pub mod headers; // SipHeaderView, SipRequestOptions, HeaderPolicy (SIP_API_DESIGN_2)
 pub mod incoming; // IncomingCall, IncomingCallGuard, IncomingRequest, IncomingResponse, IncomingRegister
-pub mod send; // Outbound builders (SIP_API_DESIGN_2 Phase C)
-pub mod respond; // Response builders (SIP_API_DESIGN_2 Phase D)
 pub mod lifecycle;
-pub mod stream_peer; // StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder // Built-in CallHandler impls: AutoAnswerHandler, RejectAllHandler, etc.
+pub mod respond; // Response builders (SIP_API_DESIGN_2 Phase D)
+pub mod send; // Outbound builders (SIP_API_DESIGN_2 Phase C)
+pub mod stream_peer; // StreamPeer, PeerControl, EventReceiver, StreamPeerBuilder
 pub mod trace_redactor; // SIP_API_DESIGN_2 §12.4 — pluggable trace-output redaction
+pub mod types; // Core data types shared across surfaces
+pub mod unified; // UnifiedCoordinator (lowest-level surface)
 
 // Re-export the main types
 pub use types::{
     parse_sdp_connection, AudioStreamConfig, CallDecision, CallSession, MediaInfo, SdpInfo,
     SessionId, SessionStats,
 };
-// IncomingCall from types (data-only, legacy) is NOT re-exported here to avoid
-// clash with the new IncomingCall in `incoming`. Use `api::types::IncomingCall` if needed.
+// `api::types::IncomingCall` is a legacy data-only struct (no SIP control surface);
+// the canonical type for application code is `incoming::IncomingCall`. The legacy
+// type stays available via `api::types::IncomingCall` only to avoid a breaking
+// re-export change for any out-of-tree consumer that still references it.
 pub use crate::types::CallState;
 
 // Re-export the unified API
@@ -325,14 +326,11 @@ pub use unified::{
     SrtpSuitePolicy, UnifiedCoordinator,
 };
 
-// Re-export the simple API (legacy)
-pub use simple::SimplePeer;
-
 // Re-export event types
 pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState};
 pub use dialog_subscription::DialogSubscriptionHandle;
 pub use events::{
-    CallHandle, CallId, Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
+    CallId, Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
     SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
     TransferTargetEvidence,
 };
@@ -385,7 +383,7 @@ pub use respond::{
 };
 pub use lifecycle::{CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo};
 
-// StreamPeer (replaces SimplePeer for new code)
+// StreamPeer
 pub use stream_peer::{EventReceiver, PeerControl, StreamPeer};
 
 // CallbackPeer (reactive server-style)

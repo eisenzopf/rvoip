@@ -61,7 +61,11 @@ impl ByeHandler for DialogManager {
             self.process_bye_in_dialog(transaction_id, request, dialog_id)
                 .await
         } else {
-            // Send 481 Call/Transaction Does Not Exist using transaction-core helper
+            // RFC 3261 §15.1.2: a BYE that does not match an existing dialog
+            // gets a 481 Call/Transaction Does Not Exist. This happens in
+            // normal operation when a peer retransmits a BYE past our dialog
+            // teardown (e.g. its 200 OK was lost), so it is not an error —
+            // mirror update_handler.rs and return Ok after replying.
             let response = response_builders::create_response(
                 &request,
                 StatusCode::CallOrTransactionDoesNotExist,
@@ -73,7 +77,8 @@ impl ByeHandler for DialogManager {
                     message: format!("Failed to send 481 response to BYE: {}", e),
                 })?;
 
-            Err(DialogError::dialog_not_found("BYE request dialog"))
+            debug!("BYE processed with 481 response (no dialog found)");
+            Ok(())
         }
     }
 }

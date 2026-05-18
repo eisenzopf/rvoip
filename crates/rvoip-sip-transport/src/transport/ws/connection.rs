@@ -127,9 +127,58 @@ impl WebSocketConnection {
         Ok(())
     }
 
-    /// Processes a WebSocket message and attempts to parse it as a SIP message
+    /// Send pre-built SIP-formatted bytes verbatim over the WebSocket
+    /// connection as a Binary frame. The caller has already produced
+    /// wire-format bytes (e.g., copied from an inbound `raw_bytes` for
+    /// SBC pass-through); we don't re-canonicalise or re-frame.
     #[cfg(feature = "ws")]
-    pub fn process_ws_message(&self, ws_message: WsMessage) -> Result<Option<Message>> {
+    pub async fn send_raw_bytes(&self, bytes: bytes::Bytes) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+
+        // RFC 7118 §5 allows either Text or Binary; choose Binary so we
+        // don't re-validate as UTF-8 (the bytes may be arbitrary SIP
+        // payload from a previous capture).
+        let ws_message = WsMessage::Binary(bytes.to_vec());
+
+        let mut writer = self.ws_writer.lock().await;
+        writer.send(ws_message).await.map_err(|e| {
+            self.closed.store(true, Ordering::Relaxed);
+            match e {
+                tungstenite::Error::ConnectionClosed => {
+                    Error::ConnectionClosedByPeer(self.peer_addr)
+                }
+                tungstenite::Error::Protocol(msg) => Error::WebSocketProtocolError(msg.to_string()),
+                tungstenite::Error::Io(io_err) => {
+                    if io_err.kind() == io::ErrorKind::BrokenPipe
+                        || io_err.kind() == io::ErrorKind::ConnectionReset
+                    {
+                        Error::ConnectionReset
+                    } else {
+                        Error::SendFailed(self.peer_addr, io_err)
+                    }
+                }
+                _ => Error::SendFailed(
+                    self.peer_addr,
+                    io::Error::new(io::ErrorKind::Other, e.to_string()),
+                ),
+            }
+        })?;
+
+        Ok(())
+    }
+
+    /// Processes a WebSocket message and attempts to parse it as a SIP message.
+    /// Returns the parsed [`Message`] paired with a frozen [`bytes::Bytes`]
+    /// snapshot of the wire bytes (text or binary frame body) the parser
+    /// consumed. The snapshot is preserved end-to-end for byte-exact
+    /// consumers (STIR/SHAKEN, signature-preserving SBC).
+    #[cfg(feature = "ws")]
+    pub fn process_ws_message(
+        &self,
+        ws_message: WsMessage,
+    ) -> Result<Option<(Message, bytes::Bytes)>> {
         match ws_message {
             WsMessage::Text(text) => {
                 // RFC 7118 section 7: SIP messages are sent as text frames
@@ -138,9 +187,11 @@ impl WebSocketConnection {
                     self.peer_addr
                 );
 
-                // Parse the text as a SIP message
-                match parse_message(text.as_bytes()) {
-                    Ok(message) => Ok(Some(message)),
+                // Snapshot the wire bytes before parsing so the upstream
+                // form rides through the bus unchanged.
+                let raw_bytes = bytes::Bytes::copy_from_slice(text.as_bytes());
+                match parse_message(&raw_bytes) {
+                    Ok(message) => Ok(Some((message, raw_bytes))),
                     Err(e) => {
                         warn!("Failed to parse SIP message from WebSocket: {}", e);
                         Err(Error::ParseError(e.to_string()))
@@ -154,9 +205,9 @@ impl WebSocketConnection {
                     self.peer_addr
                 );
 
-                // Parse the binary data as a SIP message
-                match parse_message(&data) {
-                    Ok(message) => Ok(Some(message)),
+                let raw_bytes = bytes::Bytes::copy_from_slice(&data);
+                match parse_message(&raw_bytes) {
+                    Ok(message) => Ok(Some((message, raw_bytes))),
                     Err(e) => {
                         warn!("Failed to parse SIP message from WebSocket binary: {}", e);
                         Err(Error::ParseError(e.to_string()))

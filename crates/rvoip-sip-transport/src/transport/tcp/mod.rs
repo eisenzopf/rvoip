@@ -157,7 +157,7 @@ impl TcpTransport {
                 }
 
                 match connection.receive_frame().await {
-                    Ok(Some(ReceivedFrame::Message(message))) => {
+                    Ok(Some(ReceivedFrame::Message(message, raw_bytes))) => {
                         debug!("Received SIP message from {}", peer_addr);
 
                         let local_addr = match connection.local_addr() {
@@ -173,6 +173,7 @@ impl TcpTransport {
                             source: peer_addr,
                             destination: local_addr,
                             transport_type: TransportType::Tcp,
+                            raw_bytes: Some(std::sync::Arc::new(raw_bytes)),
                         };
 
                         if let Err(e) = events_tx.send(event).await {
@@ -286,6 +287,26 @@ impl Transport for TcpTransport {
 
         // Send the message
         connection.send_message(&message).await
+    }
+
+    async fn send_message_raw(
+        &self,
+        bytes: Bytes,
+        destination: SocketAddr,
+    ) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        debug!(
+            "TCP: sending {} pre-built bytes to {}",
+            bytes.len(),
+            destination
+        );
+        // Resolve or open a connection — `send_message_raw` is the
+        // general-purpose verbatim-bytes path (unlike `send_raw`,
+        // which is RFC 5626 keep-alive on already-open flows only).
+        let connection = self.connect_to(destination).await?;
+        connection.send_raw_bytes(&bytes).await
     }
 
     async fn close(&self) -> Result<()> {

@@ -329,6 +329,16 @@ pub struct TransactionManager {
     >,
     /// Optional SIP trace publisher for inbound transport-boundary events.
     sip_trace: Option<Arc<SipTraceRuntime>>,
+    /// Cache of original wire bytes for inbound messages, keyed by
+    /// transaction key. Populated by `handle_transport_event` when the
+    /// transport supplies `TransportEvent::MessageReceived.raw_bytes`,
+    /// consumed by cross-crate event bridges (`IncomingCall`,
+    /// `IncomingRegister`, `CallEstablished`, etc.) so STIR/SHAKEN
+    /// signatures and other byte-exact consumers see the upstream
+    /// form without an intermediate `Message::to_bytes()` round-trip.
+    /// See `SIP_API_DESIGN_2.md` §7.5.
+    pub(crate) pending_inbound_bytes:
+        Arc<dashmap::DashMap<TransactionKey, Arc<bytes::Bytes>>>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -356,6 +366,32 @@ impl TransactionManager {
     /// re-INVITE responses.
     pub fn timer_settings(&self) -> &TimerSettings {
         &self.timer_settings
+    }
+
+    /// Take (and remove) the original wire bytes for an inbound message
+    /// keyed by transaction. Returns `Some` once for the first caller; a
+    /// subsequent call returns `None`. Cross-crate event bridges call
+    /// this when constructing `IncomingCall` / `IncomingRegister` /
+    /// response-side variants so STIR/SHAKEN consumers see the
+    /// upstream byte form. See `SIP_API_DESIGN_2.md` §7.5.
+    pub fn take_inbound_bytes(
+        &self,
+        key: &TransactionKey,
+    ) -> Option<Arc<bytes::Bytes>> {
+        self.pending_inbound_bytes.remove(key).map(|(_, v)| v)
+    }
+
+    /// Peek at the original wire bytes for an inbound message without
+    /// removing the cache entry. Useful when multiple bridge sites
+    /// derive views from the same inbound message (e.g., NOTIFY routes
+    /// that emit both a transaction event and a SubscriptionUpdate).
+    pub fn peek_inbound_bytes(
+        &self,
+        key: &TransactionKey,
+    ) -> Option<Arc<bytes::Bytes>> {
+        self.pending_inbound_bytes
+            .get(key)
+            .map(|v| Arc::clone(v.value()))
     }
 
     /// Install a forwarder for transport-side events (pong received,
@@ -460,6 +496,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
         };
 
         // Start the message processing loop
@@ -567,6 +604,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
         };
 
         // Start the message processing loop
@@ -709,6 +747,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
         };
 
         // Start the message processing loop
@@ -795,6 +834,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -855,6 +895,7 @@ impl TransactionManager {
             next_subscriber_id,
             transport_rx: Arc::new(Mutex::new(transport_rx)),
             sip_trace: None,
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
         }
     }
 
@@ -1781,6 +1822,12 @@ impl TransactionManager {
                 // Process the termination in a separate task to avoid deadlocks
                 let tx_id = transaction_id.clone();
                 let manager_clone = manager_instance.clone();
+                // Sweep any unconsumed raw-bytes cache entry for this
+                // transaction. The cross-crate bridges normally
+                // `take_` the entry; this guards against bridge paths
+                // that never run (e.g., events filtered before the
+                // hub) so the cache cannot grow unboundedly.
+                manager_clone.pending_inbound_bytes.remove(&tx_id);
                 tokio::spawn(async move {
                     manager_clone.process_transaction_terminated(&tx_id).await;
                 });

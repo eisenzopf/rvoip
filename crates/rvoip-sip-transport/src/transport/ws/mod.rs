@@ -177,7 +177,7 @@ impl WebSocketTransport {
 
                 // Process the WebSocket message
                 match connection.process_ws_message(ws_message) {
-                    Ok(Some(sip_message)) => {
+                    Ok(Some((sip_message, raw_bytes))) => {
                         debug!("Received SIP message from {}", peer_addr);
 
                         // Get local address (for consistency with other transports)
@@ -199,6 +199,7 @@ impl WebSocketTransport {
                             } else {
                                 TransportType::Ws
                             },
+                            raw_bytes: Some(std::sync::Arc::new(raw_bytes)),
                         };
 
                         if let Err(e) = inner.events_tx.send(event).await {
@@ -291,6 +292,32 @@ impl Transport for WebSocketTransport {
 
             // Send the message
             connection.send_message(&message).await
+        }
+
+        #[cfg(not(feature = "ws"))]
+        Err(Error::NotImplemented(
+            "WebSocket transport not implemented".into(),
+        ))
+    }
+
+    async fn send_message_raw(
+        &self,
+        bytes: bytes::Bytes,
+        destination: SocketAddr,
+    ) -> Result<()> {
+        if self.is_closed() {
+            return Err(Error::TransportClosed);
+        }
+        debug!(
+            "WS: sending {} pre-built bytes to {}",
+            bytes.len(),
+            destination
+        );
+
+        #[cfg(feature = "ws")]
+        {
+            let connection = self.connect_to(destination).await?;
+            connection.send_raw_bytes(bytes).await
         }
 
         #[cfg(not(feature = "ws"))]

@@ -702,6 +702,7 @@ pub fn notify_for_dialog(
         event_type,
         notification_body,
         subscription_state,
+        None, // content_type — fall back to per-event-package inference
         cseq,
         local_address,
         route_set,
@@ -711,6 +712,11 @@ pub fn notify_for_dialog(
 
 /// NOTIFY builder with application-staged `extra_headers` appended after
 /// the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+///
+/// `content_type` overrides the per-event-package default inferred by
+/// `InDialogRequestBuilder::for_notify` (e.g., `application/dialog-info+xml`
+/// for `event=dialog`). When `None`, the inferred default rides.
+#[allow(clippy::too_many_arguments)]
 pub fn notify_for_dialog_with_extras(
     call_id: impl Into<String>,
     from_uri: impl Into<String>,
@@ -720,6 +726,7 @@ pub fn notify_for_dialog_with_extras(
     event_type: impl Into<String>,
     notification_body: Option<String>,
     subscription_state: Option<String>,
+    content_type: Option<String>,
     cseq: u32,
     local_address: SocketAddr,
     route_set: Option<Vec<Uri>>,
@@ -745,6 +752,13 @@ pub fn notify_for_dialog_with_extras(
 
     // Use InDialogRequestBuilder directly for NOTIFY since it handles Event headers properly
     let mut builder = InDialogRequestBuilder::for_notify(event_type, notification_body);
+
+    // Caller-supplied Content-Type wins over the package-inferred default
+    // (`InDialogRequestBuilder::for_notify` always sets one when a body
+    // is present; calling `with_content_type` again replaces the value).
+    if let Some(ct) = content_type {
+        builder = builder.with_content_type(ct);
+    }
 
     // Add subscription state if provided (required for RFC 6665 compliance)
     if let Some(state) = subscription_state {
@@ -1056,6 +1070,8 @@ pub fn subscribe_out_of_dialog(
         contact_uri,
         event_package,
         expires,
+        None, // accept
+        None, // authorization
         cseq,
         local_address,
         None,
@@ -1064,16 +1080,21 @@ pub fn subscribe_out_of_dialog(
 
 /// Out-of-dialog SUBSCRIBE with application-staged `extra_headers`
 /// appended after the stack-managed slice. See SIP_API_DESIGN_2 §5.2.
+#[allow(clippy::too_many_arguments)]
 pub fn subscribe_out_of_dialog_with_extras(
     target_uri: impl Into<String>,
     from_uri: impl Into<String>,
     contact_uri: impl Into<String>,
     event_package: impl Into<String>,
     expires: u32,
+    accept: Option<String>,
+    authorization: Option<String>,
     cseq: u32,
     local_address: SocketAddr,
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
+    use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+
     let target_uri = target_uri.into();
     let from_uri = from_uri.into();
     let contact_uri = contact_uri.into();
@@ -1099,6 +1120,25 @@ pub fn subscribe_out_of_dialog_with_extras(
     .max_forwards(70)
     .contact(&contact_uri, None)
     .build();
+
+    // RFC 6665 §3.1.1 — Accept on SUBSCRIBE advertises the body MIME
+    // types the subscriber will accept on NOTIFY (e.g.,
+    // `application/dialog-info+xml`, `application/pidf+xml`).
+    if let Some(accept_value) = accept {
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Accept,
+            HeaderValue::Raw(accept_value.into_bytes()),
+        ));
+    }
+
+    // Pre-computed Digest / Bearer authorization (used by 401 retry
+    // and by callers with externally-computed credentials).
+    if let Some(auth) = authorization {
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Authorization,
+            HeaderValue::Raw(auth.into_bytes()),
+        ));
+    }
 
     if let Some(headers) = extra_headers {
         for hdr in headers {
@@ -1196,14 +1236,16 @@ pub fn message_out_of_dialog(
         body,
         cseq,
         local_address,
-        None,
-        None,
+        None, // content_type
+        None, // authorization
+        None, // extra_headers
     )
 }
 
 /// Out-of-dialog MESSAGE with caller-chosen Content-Type and
 /// application-staged `extra_headers` appended after the stack-managed
 /// slice. See SIP_API_DESIGN_2 §5.2.
+#[allow(clippy::too_many_arguments)]
 pub fn message_out_of_dialog_with_extras(
     target_uri: impl Into<String>,
     from_uri: impl Into<String>,
@@ -1211,8 +1253,11 @@ pub fn message_out_of_dialog_with_extras(
     cseq: u32,
     local_address: SocketAddr,
     content_type: Option<String>,
+    authorization: Option<String>,
     extra_headers: Option<Vec<TypedHeader>>,
 ) -> Result<Request> {
+    use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+
     let target_uri = target_uri.into();
     let from_uri = from_uri.into();
     let body = body.into();
@@ -1235,6 +1280,15 @@ pub fn message_out_of_dialog_with_extras(
         .content_type(&ct)
         .body(bytes::Bytes::from(body))
         .build();
+
+    // Pre-computed Digest / Bearer authorization (used by 401 retry
+    // and by callers with externally-computed credentials).
+    if let Some(auth) = authorization {
+        request.headers.push(TypedHeader::Other(
+            HeaderName::Authorization,
+            HeaderValue::Raw(auth.into_bytes()),
+        ));
+    }
 
     if let Some(headers) = extra_headers {
         for hdr in headers {

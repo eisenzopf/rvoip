@@ -15,12 +15,11 @@
 //! reactive server endpoints, [`CallbackPeer`] is usually the better starting
 //! point.
 //!
-//! Outbound-call variants: [`UnifiedCoordinator::make_call`],
-//! [`UnifiedCoordinator::make_call_with_auth`] (per-call digest credentials),
-//! [`UnifiedCoordinator::make_call_with_pai`] (per-call
-//! `P-Asserted-Identity`), and
-//! [`UnifiedCoordinator::make_call_with_headers`] (caller-supplied extra
-//! typed headers on the first INVITE).
+//! Outbound calls flow through one builder, [`UnifiedCoordinator::invite`],
+//! with chainable modifiers — `.with_credentials(...)` for per-call digest
+//! auth, `.with_pai(...)` for per-call `P-Asserted-Identity`, and
+//! `.with_extra_headers(...)` for caller-supplied typed headers on the
+//! first INVITE. Terminate the chain with `.send()`.
 //!
 //! # Example
 //!
@@ -32,7 +31,8 @@
 //! let mut events = coordinator.events().await?;
 //!
 //! let call_id = coordinator
-//!     .make_call("sip:app@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
+//!     .invite(Some("sip:app@127.0.0.1:5060".to_string()), "sip:bob@127.0.0.1:5070")
+//!     .send()
 //!     .await?;
 //!
 //! while let Some(event) = events.next().await {
@@ -61,7 +61,7 @@ use crate::errors::{Result, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::session_store::SessionStore;
 use crate::state_machine::{StateMachine, StateMachineHelpers};
-use crate::state_table::types::{Action, EventType, Role, SessionId};
+use crate::state_table::types::{Action, EventType, SessionId};
 use crate::types::CallState;
 use crate::types::{IncomingCallInfo, SessionInfo};
 // Callback system removed - using event-driven approach
@@ -222,7 +222,7 @@ pub struct Config {
     /// Default credentials to apply to every outgoing call for RFC 3261 §22.2
     /// INVITE digest auth retry. When the server responds 401/407 to our
     /// INVITE, rvoip-sip looks here (or at per-call credentials passed
-    /// via `PeerControl::call_with_auth`) to compute the digest response. When
+    /// via `control.invite(...).with_credentials(...)`) to compute the digest response. When
     /// `None`, a 401/407 on INVITE surfaces as `CallFailed` instead of
     /// retrying. Default: `None`.
     pub credentials: Option<crate::types::Credentials>,
@@ -232,7 +232,7 @@ pub struct Config {
     /// trunks) require PAI for caller-ID assertion on outbound trunk calls;
     /// without it the call is often hard-rejected or stripped of caller ID.
     /// `None` (the default) suppresses the header entirely. Per-call override
-    /// is available via [`UnifiedCoordinator::make_call_with_pai`].
+    /// is available via [`UnifiedCoordinator::invite`] + `.with_pai(...)`.
     pub pai_uri: Option<String>,
 
     /// Optional SIP transport-boundary tracing for diagnostics.
@@ -1145,6 +1145,13 @@ impl UnifiedCoordinator {
         self.config.pai_uri.clone()
     }
 
+    /// Read-only access to [`Config::credentials`] so outbound builders
+    /// can fall back to the peer-level default when the application
+    /// did not stage per-call credentials via `with_credentials(..)`.
+    pub fn config_credentials(&self) -> Option<crate::types::Credentials> {
+        self.config.credentials.clone()
+    }
+
     /// SIP_API_DESIGN_2 Phase C — internal accessor to the
     /// [`DialogAdapter`] so send/respond builders can route their
     /// dispatch through the same translation layer used by the legacy
@@ -1245,22 +1252,6 @@ impl UnifiedCoordinator {
         crate::api::send::SubscribeBuilder::new(self.clone(), target, event_package)
     }
 
-    /// Deprecated alias for [`subscribe`](Self::subscribe).
-    ///
-    /// Kept for one cycle per SIP_API_DESIGN_2.md Phase 12; new code should
-    /// call `coord.subscribe(target, event_package).send().await`.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.subscribe(target, event_package).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub fn subscribe_event(
-        self: &Arc<Self>,
-        target: impl Into<String>,
-        event_package: impl Into<String>,
-    ) -> crate::api::send::SubscribeBuilder {
-        self.subscribe(target, event_package)
-    }
-
     /// Begin building an out-of-dialog MESSAGE.
     pub fn message(
         self: &Arc<Self>,
@@ -1319,8 +1310,9 @@ impl UnifiedCoordinator {
     ///
     /// Canonical REGISTER verb-builder per SIP_API_DESIGN_2.md §3.3. The
     /// legacy 6-arg `register(uri, from, contact, user, pw, exp)` method
-    /// was deleted in Phase 12; use this entry or [`register_with`](Self::register_with)
-    /// for the [`Registration`] struct form.
+    /// was deleted in Phase 12; use this builder entry with
+    /// `.with_expires(...)`, `.with_extra_headers(...)`, etc. before
+    /// terminating with `.send()`.
     pub fn register(
         self: &Arc<Self>,
         registrar: impl Into<String>,
@@ -1328,22 +1320,6 @@ impl UnifiedCoordinator {
         password: impl Into<String>,
     ) -> crate::api::send::RegisterBuilder {
         crate::api::send::RegisterBuilder::new(self.clone(), registrar, user, password)
-    }
-
-    /// Deprecated alias for [`register`](Self::register).
-    ///
-    /// Kept for one cycle per SIP_API_DESIGN_2.md Phase 12.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.register(registrar, user, pw).with_expires(s).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub fn register_builder(
-        self: &Arc<Self>,
-        registrar: impl Into<String>,
-        user: impl Into<String>,
-        password: impl Into<String>,
-    ) -> crate::api::send::RegisterBuilder {
-        self.register(registrar, user, password)
     }
 
     /// Begin building a generic UAS response (3xx / 4xx / 5xx / 6xx)
@@ -1642,34 +1618,6 @@ impl UnifiedCoordinator {
         Ok(coordinator)
     }
 
-    /// Create a new coordinator with SimplePeer event integration.
-    ///
-    /// **Deprecated** — use [`UnifiedCoordinator::new()`] then [`subscribe_events()`][Self::subscribe_events].
-    /// The `simple_peer_event_tx` parameter is ignored; events are now broadcast internally.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::{Config, Event, UnifiedCoordinator};
-    ///
-    /// let (tx, _rx) = tokio::sync::mpsc::channel::<Event>(8);
-    /// let coordinator = UnifiedCoordinator::with_simple_peer_events(
-    ///     Config::local("alice", 5060),
-    ///     tx,
-    /// ).await?;
-    /// coordinator.shutdown();
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(note = "Use UnifiedCoordinator::new() then subscribe_events()")]
-    pub async fn with_simple_peer_events(
-        config: Config,
-        _simple_peer_event_tx: tokio::sync::mpsc::Sender<crate::api::events::Event>,
-    ) -> Result<Arc<Self>> {
-        Self::new(config).await
-    }
-
     // ===== Shutdown =====
 
     /// Shut down this coordinator and all its background tasks.
@@ -1928,9 +1876,9 @@ impl UnifiedCoordinator {
 
         // Race repair: SESSION_TO_APP_CHANNEL is broadcast — a subscriber
         // added here cannot observe events that fired before this call
-        // returned. On a fast loopback, `make_call → 200 OK → CallAnswered`
+        // returned. On a fast loopback, `invite → 200 OK → CallAnswered`
         // can complete in well under a millisecond, so callers that follow
-        // the documented `make_call → events_for_session → wait for
+        // the documented `invite().send() → events_for_session → wait for
         // CallAnswered` pattern would otherwise deadlock. Inspect the
         // session's *current* state and synthesize the events the caller
         // would have observed had they been subscribed earlier.
@@ -1982,173 +1930,6 @@ impl UnifiedCoordinator {
     }
 
     // ===== Simple Call Operations =====
-
-    /// Make an outgoing call. If the `Config.credentials` default is set,
-    /// those credentials are applied to the session before dispatch so the
-    /// state machine can transparently retry on a 401/407 INVITE challenge
-    /// (RFC 3261 §22.2). Likewise, if `Config.pai_uri` is set, a typed
-    /// `P-Asserted-Identity` (RFC 3325) header is attached to the very
-    /// first INVITE.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>) -> rvoip_sip::Result<()> {
-    /// let call_id = coordinator
-    ///     .make_call("sip:alice@127.0.0.1:5060", "sip:bob@127.0.0.1:5070")
-    ///     .await?;
-    /// let mut events = coordinator.events_for_session(&call_id).await?;
-    /// // Wait for Event::CallAnswered before assuming media is established.
-    /// # let _ = events.next().await;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.invite(from, to).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn make_call(&self, from: &str, to: &str) -> Result<SessionId> {
-        self.helpers
-            .make_call_with_credentials_and_pai(
-                from,
-                to,
-                self.config.credentials.clone(),
-                self.config.pai_uri.clone(),
-            )
-            .await
-    }
-
-    /// Make an outgoing call with explicit credentials, overriding the
-    /// per-peer default. Useful for multi-tenant clients where each call
-    /// authenticates with a different user.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>) -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::types::Credentials;
-    ///
-    /// let call_id = coordinator.make_call_with_auth(
-    ///     "sip:alice@127.0.0.1:5060",
-    ///     "sip:bob@example.com",
-    ///     Credentials::new("alice", "secret"),
-    /// ).await?;
-    /// # let _ = call_id;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.invite(from, to).with_credentials(c).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn make_call_with_auth(
-        &self,
-        from: &str,
-        to: &str,
-        credentials: crate::types::Credentials,
-    ) -> Result<SessionId> {
-        self.helpers
-            .make_call_with_credentials_and_pai(
-                from,
-                to,
-                Some(credentials),
-                self.config.pai_uri.clone(),
-            )
-            .await
-    }
-
-    /// Make an outgoing call attaching a per-call `P-Asserted-Identity` URI
-    /// (RFC 3325 §9.1), overriding `Config::pai_uri`. Useful for
-    /// multi-tenant trunking where each call asserts a different identity.
-    /// Pass `None` for `pai` to suppress the header for this call only.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>) -> rvoip_sip::Result<()> {
-    /// let call_id = coordinator.make_call_with_pai(
-    ///     "sip:alice@127.0.0.1:5060",
-    ///     "sip:+15551234567@carrier.example.com",
-    ///     Some("sip:+15557654321@example.com".to_string()),
-    /// ).await?;
-    /// # let _ = call_id;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.invite(from, to).with_pai(uri).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn make_call_with_pai(
-        &self,
-        from: &str,
-        to: &str,
-        pai: Option<String>,
-    ) -> Result<SessionId> {
-        self.helpers
-            .make_call_with_credentials_and_pai(from, to, self.config.credentials.clone(), pai)
-            .await
-    }
-
-    /// Make an outgoing call attaching caller-supplied extra typed headers to
-    /// the very first INVITE. Use this for headers RFC 3261 leaves outside
-    /// the standard request line — e.g. `Diversion` (RFC 5806),
-    /// `History-Info` (RFC 7044), `Call-Info` (RFC 3261 §20.9),
-    /// `User-to-User` (RFC 7433), or vendor `X-*` headers required by a
-    /// specific PBX or SBC.
-    ///
-    /// Header ordering on the wire is: synthesized `P-Asserted-Identity`
-    /// (from [`Config::pai_uri`]) first, then `extra_headers` in the order
-    /// supplied, then a Route header pre-pended by
-    /// [`Config::outbound_proxy_uri`] when configured. Credentials and PAI
-    /// continue to come from [`Config`] — for a per-call override of
-    /// credentials use [`make_call_with_auth`](Self::make_call_with_auth);
-    /// for a per-call override of PAI use
-    /// [`make_call_with_pai`](Self::make_call_with_pai). Combining either of
-    /// those with custom headers is intentionally out of scope for this
-    /// release; configure the default through [`Config`] instead.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>) -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::{HeaderName, TypedHeader};
-    /// use rvoip_sip_core::types::header::HeaderValue;
-    ///
-    /// let tenant = TypedHeader::Other(
-    ///     HeaderName::Other("X-Tenant-ID".into()),
-    ///     HeaderValue::text("acme-prod"),
-    /// );
-    ///
-    /// let call_id = coordinator.make_call_with_headers(
-    ///     "sip:alice@127.0.0.1:5060",
-    ///     "sip:bob@example.com",
-    ///     vec![tenant],
-    /// ).await?;
-    /// # let _ = call_id;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.invite(from, to).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn make_call_with_headers(
-        &self,
-        from: &str,
-        to: &str,
-        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<SessionId> {
-        self.helpers
-            .make_call_with_headers_and_credentials_and_pai(
-                from,
-                to,
-                self.config.credentials.clone(),
-                self.config.pai_uri.clone(),
-                extra_headers,
-            )
-            .await
-    }
 
     /// Spawn an outbound leg linked to a transferor session for RFC 3515
     /// §2.4.5 progress reporting. The new leg's `SessionState` carries
@@ -2237,61 +2018,6 @@ impl UnifiedCoordinator {
         self.helpers.accept_call_with_sdp(session_id, sdp).await
     }
 
-    /// Reject an incoming call with a specific SIP status code and reason phrase.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, incoming: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// coordinator.reject_call(&incoming, 486, "Busy Here").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.reject(&session).with_status(s).with_reason(r).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn reject_call(
-        &self,
-        session_id: &SessionId,
-        status: u16,
-        reason: &str,
-    ) -> Result<()> {
-        self.helpers.reject_call(session_id, status, reason).await
-    }
-
-    /// Redirect an incoming call to one or more alternate URIs (RFC 3261
-    /// §8.1.3.4 / §21.3). Sends a 3xx response with a `Contact:` header
-    /// listing the supplied URIs. `status` should be 300-399; `contacts`
-    /// must be non-empty.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, incoming: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// coordinator.redirect_call(
-    ///     &incoming,
-    ///     302,
-    ///     vec!["sip:voicemail@example.com".to_string()],
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.redirect(&session).with_status(s).with_contacts(uris).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn redirect_call(
-        &self,
-        session_id: &SessionId,
-        status: u16,
-        contacts: Vec<String>,
-    ) -> Result<()> {
-        self.helpers
-            .redirect_call(session_id, status, contacts)
-            .await
-    }
-
     /// Hang up or cancel a call.
     ///
     /// Established calls send BYE. Ringing or early-media outbound calls send
@@ -2314,36 +2040,6 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
-        self.helpers.hangup(session_id).await
-    }
-
-    /// Hang up an established call with an RFC 3326 `Reason` header.
-    ///
-    /// The Reason value is attached to the BYE sent by the normal state-machine
-    /// teardown path, so media cleanup and terminal events match
-    /// [`hangup`](Self::hangup).
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.bye(&session).with_reason(r).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn hangup_with_reason(
-        &self,
-        session_id: &SessionId,
-        reason: crate::api::handle::SipReason,
-    ) -> Result<()> {
-        let mut session = self
-            .helpers
-            .state_machine
-            .store
-            .get_session(session_id)
-            .await
-            .map_err(|_| SessionError::SessionNotFound(session_id.to_string()))?;
-        session.pending_bye_reason = Some((reason.protocol, reason.cause, reason.text));
-        self.helpers
-            .state_machine
-            .store
-            .update_session(session)
-            .await?;
         self.helpers.hangup(session_id).await
     }
 
@@ -2559,9 +2255,8 @@ impl UnifiedCoordinator {
     /// Returns a handle for invoking control APIs (hangup, hold, resume,
     /// DTMF, …) on a session created via the canonical builder chain
     /// (`coord.invite(...).send()` returns a [`CallId`](crate::api::handle::CallId);
-    /// pair it with this helper to get the rich `SessionHandle` that
-    /// the deprecated `.make_call()` / `.call()` paths returned
-    /// directly).
+    /// pair it with this helper to get the rich `SessionHandle` for
+    /// in-call control).
     pub fn session(
         self: &Arc<Self>,
         call_id: &crate::api::handle::CallId,
@@ -2596,47 +2291,6 @@ impl UnifiedCoordinator {
         } else {
             Ok(()) // No session to terminate
         }
-    }
-
-    /// Send REFER to initiate a blind transfer.
-    ///
-    /// The remote peer should report progress with NOTIFY. Higher-level callers
-    /// can observe [`Event::TransferAccepted`](crate::api::events::Event::TransferAccepted),
-    /// transfer progress, and transfer completion/failure through the event
-    /// stream.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, call_id: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// coordinator.send_refer(&call_id, "sip:charlie@example.com").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.refer(&session, target).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn send_refer(&self, session_id: &SessionId, refer_to: &str) -> Result<()> {
-        if let Ok(mut session) = self
-            .helpers
-            .state_machine
-            .store
-            .get_session(session_id)
-            .await
-        {
-            session.transfer_target = Some(refer_to.to_string());
-            session.transfer_state = crate::session_store::state::TransferState::TransferInitiated;
-            self.helpers
-                .state_machine
-                .store
-                .update_session(session)
-                .await?;
-        }
-
-        self.dialog_adapter
-            .send_refer_session(session_id, refer_to)
-            .await
     }
 
     /// Accept a pending inbound REFER request and send RFC 3515 acceptance
@@ -2770,147 +2424,6 @@ impl UnifiedCoordinator {
         Ok(())
     }
 
-    /// Send an in-dialog INFO request (RFC 6086) with a caller-chosen
-    /// `Content-Type`.
-    ///
-    /// Used for SIP-INFO DTMF (`application/dtmf-relay` — some carriers
-    /// prefer this over in-band RFC 2833), fax flow control
-    /// (`application/sipfrag`), and other application-level mid-dialog
-    /// signalling.
-    ///
-    /// The call must already be in an established dialog (past `Active`).
-    /// The supplied `body` is sent verbatim; the method does not transcode
-    /// or validate it against the declared content type.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, call_id: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// coordinator.send_info(
-    ///     &call_id,
-    ///     "application/dtmf-relay",
-    ///     b"Signal=1\r\nDuration=100\r\n",
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.info(&session, content_type).with_body(b).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn send_info(
-        &self,
-        session_id: &SessionId,
-        content_type: &str,
-        body: &[u8],
-    ) -> Result<()> {
-        self.dialog_adapter
-            .send_info(session_id, content_type, body)
-            .await
-    }
-
-    /// Send a general-purpose NOTIFY request (RFC 6665) on an established
-    /// dialog. `event_package` populates the `Event:` header; the raw
-    /// `subscription_state` string is forwarded verbatim to dialog-core,
-    /// which parses it into a typed `Subscription-State:` header.
-    ///
-    /// RFC 3515 §2.4.5 REFER progress NOTIFYs are emitted automatically
-    /// by the state machine for transfer legs created through
-    /// [`UnifiedCoordinator::make_transfer_leg`]. This method is the
-    /// escape hatch for other event packages (dialog, message-summary,
-    /// presence, custom) and for non-standard REFER orchestration.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, call_id: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// coordinator.send_notify(
-    ///     &call_id,
-    ///     "message-summary",
-    ///     Some("Messages-Waiting: no\r\n".to_string()),
-    ///     Some("active;expires=3600".to_string()),
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.notify(&session, event_package).with_body(b).with_subscription_state(s).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn send_notify(
-        &self,
-        session_id: &SessionId,
-        event_package: &str,
-        body: Option<String>,
-        subscription_state: Option<String>,
-    ) -> Result<()> {
-        self.dialog_adapter
-            .send_notify(session_id, event_package, body, subscription_state)
-            .await
-    }
-
-    /// Subscribe to RFC 4235 dialog-package state for `target_uri`.
-    ///
-    /// The returned handle owns a synthetic session id used to correlate
-    /// dialog-package NOTIFY events.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.subscribe(target, \"dialog\").with_from_uri(..).with_contact_uri(..).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn subscribe_dialogs(
-        self: &Arc<Self>,
-        target_uri: &str,
-        from_uri: &str,
-        contact_uri: &str,
-        expires: u32,
-    ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
-        let subscription_id = SessionId::new();
-        self.helpers
-            .state_machine
-            .store
-            .create_session(subscription_id.clone(), Role::UAC, true)
-            .await?;
-        let mut session = self
-            .helpers
-            .state_machine
-            .store
-            .get_session(&subscription_id)
-            .await?;
-        session.local_uri = Some(from_uri.to_string());
-        session.remote_uri = Some(target_uri.to_string());
-        session.call_state = CallState::Subscribed;
-        self.helpers
-            .state_machine
-            .store
-            .update_session(session)
-            .await?;
-
-        self.dialog_adapter
-            .send_dialog_subscribe(&subscription_id, from_uri, target_uri, contact_uri, expires)
-            .await?;
-
-        Ok(
-            crate::api::dialog_subscription::DialogSubscriptionHandle::new(
-                subscription_id,
-                target_uri.to_string(),
-                self.clone(),
-            ),
-        )
-    }
-
-    pub(crate) async fn unsubscribe_dialogs(&self, subscription_id: &SessionId) -> Result<()> {
-        self.dialog_adapter
-            .unsubscribe_dialog_package(subscription_id)
-            .await?;
-        self.helpers
-            .state_machine
-            .store
-            .remove_session(subscription_id)
-            .await
-            .ok();
-        Ok(())
-    }
-
     /// Send a REFER progress NOTIFY with a SIP status code and reason.
     ///
     /// This is the low-level helper for custom REFER orchestration. Transfer
@@ -2933,59 +2446,6 @@ impl UnifiedCoordinator {
     ) -> Result<()> {
         self.dialog_adapter
             .send_refer_notify(session_id, status_code, reason)
-            .await
-    }
-
-    /// Send REFER with a pre-built `Replaces` header value (RFC 3891).
-    ///
-    /// Primitive for attended-transfer orchestration: a caller managing two
-    /// sessions (original + consultation) constructs the Replaces value from
-    /// the consultation session's [`DialogIdentity`](crate::api::types::DialogIdentity) and passes it here for
-    /// the original session to send.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>, original: rvoip_sip::SessionId, consultation: rvoip_sip::SessionId) -> rvoip_sip::Result<()> {
-    /// if let Some(identity) = coordinator.dialog_identity(&consultation).await? {
-    ///     if let Some(replaces) = identity.to_replaces_value() {
-    ///         coordinator
-    ///             .send_refer_with_replaces(&original, "sip:charlie@example.com", &replaces)
-    ///             .await?;
-    ///     }
-    /// }
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.refer(&session, target).with_replaces(r).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn send_refer_with_replaces(
-        &self,
-        session_id: &SessionId,
-        target_uri: &str,
-        replaces: &str,
-    ) -> Result<()> {
-        if let Ok(mut session) = self
-            .helpers
-            .state_machine
-            .store
-            .get_session(session_id)
-            .await
-        {
-            session.transfer_target = Some(target_uri.to_string());
-            session.replaces_header = Some(replaces.to_string());
-            session.transfer_state = crate::session_store::state::TransferState::TransferInitiated;
-            self.helpers
-                .state_machine
-                .store
-                .update_session(session)
-                .await?;
-        }
-
-        self.dialog_adapter
-            .send_refer_with_replaces(session_id, target_uri, replaces)
             .await
     }
 
@@ -3670,116 +3130,31 @@ impl UnifiedCoordinator {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn quick_call(&self, from: &str, to: &str) -> Result<SessionId> {
-        self.make_call(from, to).await
+    pub async fn quick_call(self: &Arc<Self>, from: &str, to: &str) -> Result<SessionId> {
+        self.invite(Some(from.to_string()), to.to_string())
+            .send()
+            .await
     }
 }
 
 /// Registration API
 impl UnifiedCoordinator {
-    /// Register with a SIP server.
+    /// Internal REGISTER dispatch used by
+    /// [`RegisterBuilder`](crate::api::send::RegisterBuilder).
     ///
-    /// This low-level form requires explicit AoR and Contact URIs. Prefer
-    /// [`register_with`](Self::register_with) for new code so the peer config
-    /// can provide defaults.
-    ///
-    /// On a 2xx response, rvoip-sip stores the registrar-accepted expiry.
-    /// It prefers the echoed matching Contact `expires` parameter, then the
-    /// response `Expires` header, then the requested `expires` value. When
-    /// [`Config::registration_auto_refresh`] is enabled, a refresh REGISTER is
-    /// scheduled from that accepted expiry.
-    ///
-    /// # Arguments
-    /// * `registrar_uri` - URI of the registrar server (e.g., "sip:registrar.example.com")
-    /// * `from_uri` - From URI (e.g., "sip:user@example.com")
-    /// * `contact_uri` - Contact URI (e.g., "sip:user@192.168.1.100:5060")
-    /// * `username` - Username for authentication
-    /// * `password` - Password for digest authentication
-    /// * `expires` - Registration expiry in seconds (typically 3600)
-    ///
-    /// # Returns
-    /// A `RegistrationHandle` that can be used to query status, refresh, or
-    /// unregister.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>) -> rvoip_sip::Result<()> {
-    /// # #[allow(deprecated)]
-    /// let handle = coordinator.register_legacy(
-    ///     "sip:registrar.example.com",
-    ///     "sip:alice@example.com",
-    ///     "sip:alice@192.168.1.50:5060",
-    ///     "alice",
-    ///     "secret",
-    ///     3600,
-    /// ).await?;
-    /// # let _ = handle;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.register(registrar, user, pw).with_expires(s).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    #[doc(hidden)]
-    pub async fn register_legacy(
-        &self,
-        registrar_uri: &str,
-        from_uri: &str,
-        contact_uri: &str,
-        username: &str,
-        password: &str,
-        expires: u32,
-    ) -> Result<RegistrationHandle> {
-        // Create registration session
-        let session_id = SessionId::new();
-        tracing::info!("📝 Created registration session: {}", session_id.0);
-        self.helpers
-            .create_session(
-                session_id.clone(),
-                from_uri.to_string(),
-                registrar_uri.to_string(),
-                crate::state_table::types::Role::UAC,
-            )
-            .await?;
-
-        // Store credentials
-        let credentials = crate::types::Credentials::new(username, password);
-
-        // Get session store and update
-        let session_store = &self.helpers.state_machine.store;
-        let mut session = session_store.get_session(&session_id).await?;
-        session.credentials = Some(credentials);
-        session.registrar_uri = Some(registrar_uri.to_string());
-        session.registration_contact = Some(contact_uri.to_string());
-        session.registration_expires = Some(expires);
-        session_store.update_session(session).await?;
-
-        // Trigger registration via state machine
-        let _result = self
-            .helpers
-            .state_machine
-            .process_event(
-                &session_id,
-                crate::state_table::types::EventType::StartRegistration,
-            )
-            .await
-            .map_err(|e| {
-                SessionError::InternalError(format!("Failed to trigger registration: {}", e))
-            })?;
-
-        Ok(RegistrationHandle { session_id })
-    }
-
-    /// SIP_API_DESIGN_2 §10 #19 — REGISTER initiated by
-    /// [`RegisterBuilder`](crate::api::send::RegisterBuilder) when the
-    /// application has staged extra headers via `with_raw_header` /
-    /// `with_header`. Identical lifecycle to [`register_legacy`] except
-    /// that `pending_register_options.extra_headers` is stashed on the
-    /// session *before* the `StartRegistration` event fires, so
-    /// `execute_register_action` reads the slice on the very first
+    /// When `extra_headers` is non-empty we follow SIP_API_DESIGN_2 §10 #19
+    /// and stash a `RegisterRequestOptions` on the session *before* the
+    /// `StartRegistration` event fires, so `execute_register_action`
+    /// (`state_machine/actions.rs`) reads the slice on the very first
     /// dispatch (not just on the 401-retry).
+    ///
+    /// When `extra_headers` is empty we skip the stash entirely. Stashing
+    /// here would occupy `pending_register_options`; the slot is only
+    /// cleared once the first REGISTER reaches a final response, so a
+    /// caller that fires a `RegisterRefreshBuilder::send` before that
+    /// would race the stash check in
+    /// [`stage_outbound_options`](crate::state_machine::executor::StateMachineExecutor::stage_outbound_options)
+    /// and get back `SessionError::Conflict { method: Register }`.
     pub(crate) async fn register_with_extras(
         &self,
         registrar_uri: &str,
@@ -3809,25 +3184,23 @@ impl UnifiedCoordinator {
         session.registration_contact = Some(contact_uri.to_string());
         session.registration_expires = Some(expires);
 
-        // Stash a `RegisterRequestOptions` carrying the application
-        // extras so `execute_register_action` (state_machine/actions.rs)
-        // reads them on the very first REGISTER dispatch, not just on
-        // the auth retry.
-        session.pending_register_options = Some(std::sync::Arc::new(
-            rvoip_sip_dialog::api::unified::RegisterRequestOptions {
-                registrar_uri: registrar_uri.to_string(),
-                aor_uri: from_uri.to_string(),
-                contact_uri: contact_uri.to_string(),
-                expires,
-                authorization: None,
-                call_id: None,
-                cseq: None,
-                outbound_contact: None,
-                outbound_proxy_uri: None,
-                extra_headers,
-                refresh: false,
-            },
-        ));
+        if !extra_headers.is_empty() {
+            session.pending_register_options = Some(std::sync::Arc::new(
+                rvoip_sip_dialog::api::unified::RegisterRequestOptions {
+                    registrar_uri: registrar_uri.to_string(),
+                    aor_uri: from_uri.to_string(),
+                    contact_uri: contact_uri.to_string(),
+                    expires,
+                    authorization: None,
+                    call_id: None,
+                    cseq: None,
+                    outbound_contact: None,
+                    outbound_proxy_uri: None,
+                    extra_headers,
+                    refresh: false,
+                },
+            ));
+        }
         session_store.update_session(session).await?;
 
         let _ = self
@@ -3843,53 +3216,6 @@ impl UnifiedCoordinator {
             })?;
 
         Ok(RegistrationHandle { session_id })
-    }
-
-    /// Register with a SIP server using a [`Registration`] builder.
-    ///
-    /// This is the preferred way to register. `from_uri` and `contact_uri`
-    /// default to the peer's `local_uri` from [`Config`], unless overridden on
-    /// the builder.
-    ///
-    /// Successful registration starts the same lifecycle as
-    /// [`register`](Self::register): accepted expiry is stored, automatic
-    /// refresh may be scheduled, and `RegistrationSuccess` is published on the
-    /// coordinator event stream. Use [`registration_info`](Self::registration_info)
-    /// to inspect the negotiated values.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # async fn example(coordinator: std::sync::Arc<rvoip_sip::UnifiedCoordinator>) -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::Registration;
-    ///
-    /// let handle = coordinator.register_with(
-    ///     Registration::new("sip:registrar.example.com", "alice", "secret123")
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use coord.register(reg.registrar, reg.user, reg.pw).with_expires(reg.expires).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn register_with(&self, reg: Registration) -> Result<RegistrationHandle> {
-        let from_uri = reg.from_uri.as_deref().unwrap_or(&self.config.local_uri);
-        let contact_uri = reg
-            .contact_uri
-            .as_deref()
-            .or(self.config.contact_uri.as_deref())
-            .unwrap_or(&self.config.local_uri);
-        #[allow(deprecated)]
-        self.register_legacy(
-            &reg.registrar,
-            from_uri,
-            contact_uri,
-            &reg.username,
-            &reg.password,
-            reg.expires,
-        )
-        .await
     }
 
     /// Unregister from the SIP server.

@@ -3,10 +3,10 @@
 //! [`StreamPeer`] wraps a [`UnifiedCoordinator`]
 //! with two ergonomic pieces:
 //!
-//! - [`PeerControl`] for commands such as `call`, `accept`, registration, and
-//!   early media. [`PeerControl::call_with_headers`] attaches caller-supplied
-//!   extra typed headers to the very first INVITE for PBX/SBC integrations
-//!   that require non-standard or vendor headers.
+//! - [`PeerControl`] for commands such as `invite`, `accept`, registration, and
+//!   early media. Chain `.with_extra_headers(...)` on the `invite` builder to
+//!   attach caller-supplied typed headers to the very first INVITE for PBX/SBC
+//!   integrations that require non-standard or vendor headers.
 //! - [`EventReceiver`] for typed application events.
 //!
 //! The unsplit [`StreamPeer`] exposes common `wait_for_*` helpers that consume
@@ -367,118 +367,6 @@ pub struct PeerControl {
 }
 
 impl PeerControl {
-    /// Initiate an outgoing call. Returns a [`SessionHandle`] immediately; the
-    /// call enters `Ringing` state until the remote answers.
-    ///
-    /// If the peer was configured with [`Config.credentials`] (or via
-    /// [`StreamPeerBuilder::with_credentials`]), those credentials are
-    /// attached to the session and used to transparently retry on a 401/407
-    /// INVITE challenge (RFC 3261 §22.2).
-    ///
-    /// Use [`subscribe_events()`] to watch for [`Event::CallAnswered`].
-    ///
-    /// [`subscribe_events()`]: Self::subscribe_events
-    /// [`Config.credentials`]: crate::api::unified::Config::credentials
-    /// [`StreamPeerBuilder::with_credentials`]: StreamPeerBuilder::with_credentials
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(control: rvoip_sip::PeerControl) -> rvoip_sip::Result<()> {
-    /// let call = control.call("sip:bob@example.com").await?;
-    /// let mut events = control.subscribe_events().await?;
-    /// // Wait for Event::CallAnswered for `call.id()` before using media.
-    /// # let _ = (call, events.next().await);
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call(&self, target: &str) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        let id = self.coordinator.make_call(&self.local_uri, target).await?;
-        Ok(SessionHandle::new(id, self.coordinator.clone()))
-    }
-
-    /// Initiate an outgoing call with explicit digest-auth credentials,
-    /// overriding any per-peer default. Useful for multi-tenant clients
-    /// where each call authenticates as a different user.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(control: rvoip_sip::PeerControl) -> rvoip_sip::Result<()> {
-    /// let call = control.call_with_auth(
-    ///     "sip:bob@example.com",
-    ///     rvoip_sip::types::Credentials::new("alice", "secret"),
-    /// ).await?;
-    /// # let _ = call;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).with_credentials(c).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call_with_auth(
-        &self,
-        target: &str,
-        credentials: crate::types::Credentials,
-    ) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        let id = self
-            .coordinator
-            .make_call_with_auth(&self.local_uri, target, credentials)
-            .await?;
-        Ok(SessionHandle::new(id, self.coordinator.clone()))
-    }
-
-    /// Initiate an outgoing call attaching caller-supplied extra typed
-    /// headers to the very first INVITE.
-    ///
-    /// Use for headers RFC 3261 leaves outside the standard request line —
-    /// e.g. `Diversion`, `History-Info`, `Call-Info`, `User-to-User`, or
-    /// vendor `X-*` headers required by a specific PBX or SBC. Wraps
-    /// [`crate::UnifiedCoordinator::make_call_with_headers`]; see it for header
-    /// ordering guarantees and composition limits.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(control: rvoip_sip::PeerControl) -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::{HeaderName, TypedHeader};
-    /// use rvoip_sip_core::types::header::HeaderValue;
-    ///
-    /// let tenant = TypedHeader::Other(
-    ///     HeaderName::Other("X-Tenant-ID".into()),
-    ///     HeaderValue::text("acme-prod"),
-    /// );
-    /// let call = control
-    ///     .call_with_headers("sip:bob@example.com", vec![tenant])
-    ///     .await?;
-    /// # let _ = call;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call_with_headers(
-        &self,
-        target: &str,
-        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        let id = self
-            .coordinator
-            .make_call_with_headers(&self.local_uri, target, extra_headers)
-            .await?;
-        Ok(SessionHandle::new(id, self.coordinator.clone()))
-    }
-
     /// Accept an incoming call that was presented as an event.
     ///
     /// # Examples
@@ -509,7 +397,12 @@ impl PeerControl {
     /// # }
     /// ```
     pub async fn reject(&self, call_id: &CallId, status: u16, reason: &str) -> Result<()> {
-        self.coordinator.reject_call(call_id, status, reason).await
+        self.coordinator
+            .reject(call_id)
+            .with_status(status)
+            .with_reason(reason.to_string())
+            .send()
+            .await
     }
 
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
@@ -566,17 +459,6 @@ impl PeerControl {
         Ok(EventReceiver::new(rx))
     }
 
-    /// Subscribe to RFC 4235 dialog-package state for a target URI.
-    pub async fn subscribe_dialogs(
-        &self,
-        target_uri: &str,
-        expires: u32,
-    ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
-        self.coordinator
-            .subscribe_dialogs(target_uri, &self.local_uri, &self.local_uri, expires)
-            .await
-    }
-
     /// Access the underlying [`UnifiedCoordinator`] for advanced use.
     ///
     /// This accessor is intentionally trivial and does not clone the
@@ -587,11 +469,21 @@ impl PeerControl {
 
     /// Begin building an outbound INVITE from this peer's configured
     /// `local_uri`. Equivalent to
-    /// `peer.coordinator().invite(Some(local_uri), target)` — the
-    /// canonical replacement for the deprecated [`Self::call`].
+    /// `peer.coordinator().invite(Some(local_uri), target)`.
     pub fn invite(&self, target: impl Into<String>) -> crate::api::send::OutboundCallBuilder {
         self.coordinator
             .invite(Some(self.local_uri.clone()), target)
+    }
+
+    /// Begin building an outbound REGISTER from this peer. Equivalent to
+    /// `peer.coordinator().register(registrar, user, pw)`.
+    pub fn register(
+        &self,
+        registrar: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> crate::api::send::RegisterBuilder {
+        self.coordinator.register(registrar, username, password)
     }
 }
 
@@ -620,7 +512,8 @@ impl PeerControl {
 ///
 /// // UAC: make a call
 /// let mut uac = StreamPeer::new("alice").await?;
-/// let handle = uac.call("sip:bob@192.168.1.100:5060").await?;
+/// let call_id = uac.invite("sip:bob@192.168.1.100:5060").send().await?;
+/// let handle = uac.coordinator().session(&call_id);
 /// let handle = handle.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
 /// handle.hangup_and_wait(Some(std::time::Duration::from_secs(5))).await?;
 ///
@@ -736,37 +629,8 @@ impl StreamPeer {
 
     // ===== Sequential helpers =====
 
-    /// Initiate an outgoing call and return a [`SessionHandle`].
-    ///
-    /// The handle is returned as soon as the INVITE has been dispatched; wait
-    /// for [`Event::CallAnswered`] with
-    /// [`SessionHandle::wait_for_answered`] before assuming media is
-    /// established. The stream-style [`wait_for_answered`](Self::wait_for_answered)
-    /// helper remains useful when a single task owns and consumes the peer's
-    /// event stream.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(mut peer: rvoip_sip::StreamPeer) -> rvoip_sip::Result<()> {
-    /// let call = peer.call("sip:bob@example.com").await?;
-    /// let answered = call.wait_for_answered(Some(std::time::Duration::from_secs(30))).await?;
-    /// # let _ = answered;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call(&mut self, target: &str) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        self.control.call(target).await
-    }
-
     /// Begin building an outbound INVITE from this peer's configured
-    /// `local_uri`. Canonical replacement for the deprecated
-    /// [`Self::call`]. Returns an
+    /// `local_uri`. Returns an
     /// [`OutboundCallBuilder`](crate::api::send::OutboundCallBuilder)
     /// that exposes `with_header`, `with_credentials`, `with_pai`,
     /// `with_headers_from`, etc. before dispatching.
@@ -774,22 +638,15 @@ impl StreamPeer {
         self.control.invite(target)
     }
 
-    /// Initiate an outgoing call attaching caller-supplied extra typed
-    /// headers to the very first INVITE.
-    ///
-    /// Sequential wrapper over [`PeerControl::call_with_headers`]; see it
-    /// for the canonical example and header ordering details.
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.invite(target).with_headers(h)?.send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn call_with_headers(
-        &mut self,
-        target: &str,
-        extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
-    ) -> Result<SessionHandle> {
-        #[allow(deprecated)]
-        self.control.call_with_headers(target, extra_headers).await
+    /// Begin building an outbound REGISTER. Delegates to
+    /// [`PeerControl::register`].
+    pub fn register(
+        &self,
+        registrar: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> crate::api::send::RegisterBuilder {
+        self.control.register(registrar, username, password)
     }
 
     /// Wait for the next incoming call.
@@ -990,93 +847,6 @@ impl StreamPeer {
     /// ```
     pub async fn next_event(&mut self) -> Option<Event> {
         self.events.next().await
-    }
-
-    /// Subscribe to RFC 4235 dialog-package state for a target URI.
-    pub async fn subscribe_dialogs(
-        &self,
-        target_uri: &str,
-        expires: u32,
-    ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
-        self.control.subscribe_dialogs(target_uri, expires).await
-    }
-
-    /// Register with a SIP server (6-arg form).
-    ///
-    /// Prefer [`register_with()`](Self::register_with) which uses a builder and
-    /// derives `from_uri`/`contact_uri` from the peer's config. Successful
-    /// registration stores registrar-accepted expiry and may schedule
-    /// automatic refresh according to [`Config::registration_auto_refresh`].
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
-    /// # async fn example(mut peer: rvoip_sip::StreamPeer) -> rvoip_sip::Result<()> {
-    /// let handle = peer.register(
-    ///     "sip:registrar.example.com",
-    ///     "sip:alice@example.com",
-    ///     "sip:alice@192.168.1.50:5060",
-    ///     "alice",
-    ///     "secret",
-    ///     3600,
-    /// ).await?;
-    /// # let _ = handle;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[deprecated(
-        since = "0.3.0",
-        note = "use peer.register_with(Registration::new(..)) or coord.register(..).send().await — see SIP_API_DESIGN_2.md"
-    )]
-    pub async fn register(
-        &mut self,
-        registrar_uri: &str,
-        from_uri: &str,
-        contact_uri: &str,
-        username: &str,
-        password: &str,
-        expires: u32,
-    ) -> Result<crate::api::unified::RegistrationHandle> {
-        #[allow(deprecated)]
-        self.control
-            .coordinator
-            .register_legacy(
-                registrar_uri,
-                from_uri,
-                contact_uri,
-                username,
-                password,
-                expires,
-            )
-            .await
-    }
-
-    /// Register with a SIP server using a [`Registration`](crate::Registration) builder.
-    ///
-    /// The returned handle identifies the registration lifecycle. Use
-    /// [`is_registered`](Self::is_registered) for a simple boolean or
-    /// [`UnifiedCoordinator::registration_info`](crate::UnifiedCoordinator::registration_info)
-    /// through [`control`](Self::control) for accepted expiry, refresh timing,
-    /// Service-Route, GRUU, and failure metadata.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # async fn example() -> rvoip_sip::Result<()> {
-    /// use rvoip_sip::{StreamPeer, Registration};
-    ///
-    /// let mut peer = StreamPeer::new("alice").await?;
-    /// let handle = peer.register_with(
-    ///     Registration::new("sip:registrar.example.com", "alice", "secret123")
-    /// ).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn register_with(
-        &mut self,
-        reg: crate::api::unified::Registration,
-    ) -> Result<crate::api::unified::RegistrationHandle> {
-        self.control.coordinator.register_with(reg).await
     }
 
     /// Query whether a registration handle is currently registered.
@@ -1357,7 +1127,7 @@ impl StreamPeerBuilder {
     /// 401/407, these credentials are applied automatically so the call can
     /// recover without intervention.
     ///
-    /// Per-call override via [`PeerControl::call_with_auth`].
+    /// Per-call override via `control.invite(...).with_credentials(...)`.
     ///
     /// # Examples
     ///

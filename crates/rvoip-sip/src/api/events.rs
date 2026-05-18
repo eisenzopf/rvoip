@@ -11,11 +11,9 @@
 //! [`StreamPeer`]: crate::StreamPeer
 
 use crate::api::dialog_package::{DialogInfo, DialogInfoDocument};
-use crate::errors::Result;
 use crate::state_table::types::SessionId;
 pub use rvoip_infra_common::events::cross_crate::{SipTraceConfig, SipTraceDirection};
 use rvoip_sip_core::types::sdp::CryptoSuite;
-use tokio::sync::mpsc;
 
 /// Type alias for call ID (same as SessionId)
 pub type CallId = SessionId;
@@ -175,98 +173,6 @@ pub struct MediaSecurityState {
     pub profile: MediaSecurityProfile,
     /// Whether SRTP send/receive contexts have been installed in media-core.
     pub contexts_installed: bool,
-}
-
-/// Handle for managing a specific call
-///
-/// Provides audio channels and call identification for a specific call session.
-/// Each call gets its own handle with dedicated audio send/receive channels.
-#[derive(Debug)]
-pub struct CallHandle {
-    /// The call ID for this handle
-    call_id: CallId,
-    /// Channel for sending audio to this call
-    audio_tx: mpsc::Sender<Vec<i16>>,
-    /// Channel for receiving audio from this call
-    audio_rx: mpsc::Receiver<Vec<i16>>,
-}
-
-impl CallHandle {
-    /// Create a new call handle
-    pub fn new(call_id: CallId) -> (Self, mpsc::Receiver<Vec<i16>>, mpsc::Sender<Vec<i16>>) {
-        let (audio_tx, audio_rx_for_handle) = mpsc::channel(100);
-        let (audio_tx_for_coordinator, audio_rx) = mpsc::channel(100);
-
-        let handle = Self {
-            call_id,
-            audio_tx,
-            audio_rx,
-        };
-
-        (handle, audio_rx_for_handle, audio_tx_for_coordinator)
-    }
-
-    /// Get the call ID for this handle
-    pub fn call_id(&self) -> &CallId {
-        &self.call_id
-    }
-
-    /// Send audio samples to this call
-    ///
-    /// # Arguments
-    /// * `samples` - PCM audio samples (16-bit, mono, 8kHz)
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// # use rvoip_sip::api::events::CallHandle;
-    /// # async fn example(mut call_handle: CallHandle) -> rvoip_sip::Result<()> {
-    /// let samples = vec![100, 200, 300]; // Simple audio data
-    /// call_handle.send_audio(samples).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn send_audio(&mut self, samples: Vec<i16>) -> Result<()> {
-        self.audio_tx
-            .send(samples)
-            .await
-            .map_err(|_| crate::errors::SessionError::Other("Audio channel closed".to_string()))?;
-        Ok(())
-    }
-
-    /// Receive audio samples from this call (non-blocking)
-    ///
-    /// # Returns
-    /// * `Some(samples)` - Audio data received from remote party
-    /// * `None` - No audio available right now
-    ///
-    /// # Example
-    /// ```rust,no_run
-    /// # use rvoip_sip::api::events::CallHandle;
-    /// # async fn example(mut call_handle: CallHandle) {
-    /// if let Some(samples) = call_handle.recv_audio().await {
-    ///     // Play or process the received audio
-    ///     println!("Received {} audio samples", samples.len());
-    /// }
-    /// # }
-    /// ```
-    pub async fn recv_audio(&mut self) -> Option<Vec<i16>> {
-        self.audio_rx.recv().await
-    }
-
-    /// Try to receive audio samples (non-blocking)
-    ///
-    /// # Returns
-    /// * `Ok(samples)` - Audio data received
-    /// * `Err(TryRecvError::Empty)` - No audio available
-    /// * `Err(TryRecvError::Disconnected)` - Call ended
-    pub fn try_recv_audio(&mut self) -> std::result::Result<Vec<i16>, mpsc::error::TryRecvError> {
-        self.audio_rx.try_recv()
-    }
-
-    /// Check if the call handle is still connected
-    pub fn is_connected(&self) -> bool {
-        !self.audio_tx.is_closed() && !self.audio_rx.is_closed()
-    }
 }
 
 /// Typed session events delivered to applications.

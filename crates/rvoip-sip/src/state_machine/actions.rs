@@ -1416,9 +1416,9 @@ pub(crate) async fn execute_action(
             // persists across the auth-retry hop because the stash is
             // not consumed by `Action::SendINVITEWithOptions` until the
             // final response (200 / 4xx-after-retry / 5xx / 6xx).
-            // Today only the OutboundCallBuilder path fills this; the
-            // legacy `make_call_*` paths leave it empty, in which case
-            // we send an empty extras vector (matching prior behaviour).
+            // The OutboundCallBuilder path fills this; transfer-leg and
+            // internal helper paths leave it empty, in which case we
+            // send an empty extras vector.
             let auth_extras: Vec<rvoip_sip_core::types::TypedHeader> = session
                 .pending_invite_options
                 .as_ref()
@@ -2320,6 +2320,38 @@ pub(crate) async fn execute_action(
                     &snapshot.outbound_proxy_override,
                     ProxyOverride::Suppress | ProxyOverride::Use(_)
                 );
+
+                // SIP_API_DESIGN_2 §7.2 — per-call Contact override.
+                // The builder's `with_contact_uri(uri)` stages a value into
+                // `snapshot.contact_uri`; emit it as a typed `Contact` in
+                // extras so dialog-core honors it instead of stamping the
+                // default socket-derived Contact. Prepended so it sits
+                // ahead of application extras, deterministic on the wire.
+                if let Some(contact_uri) = snapshot.contact_uri.as_ref() {
+                    use rvoip_sip_core::types::address::Address;
+                    use rvoip_sip_core::types::contact::{
+                        Contact, ContactParamInfo,
+                    };
+                    use rvoip_sip_core::types::{uri::Uri, TypedHeader};
+                    use std::str::FromStr;
+                    match Uri::from_str(contact_uri) {
+                        Ok(uri) => {
+                            let address = Address::new(uri);
+                            let contact = Contact::new_params(vec![
+                                ContactParamInfo { address },
+                            ]);
+                            extras.insert(0, TypedHeader::Contact(contact));
+                        }
+                        Err(e) => {
+                            return Err(format!(
+                                "SendINVITEWithOptions: contact_uri override \
+                                 ({}) is not a valid URI: {}",
+                                contact_uri, e
+                            )
+                            .into());
+                        }
+                    }
+                }
 
                 // SDP precedence: builder-supplied snapshot.sdp wins;
                 // otherwise fall back to `session.local_sdp` populated by

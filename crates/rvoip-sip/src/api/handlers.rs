@@ -19,7 +19,6 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use crate::api::callback_peer::{CallHandler, CallHandlerDecision};
-use crate::api::handle::SessionHandle;
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 
 // ===== AutoAnswerHandler =====
@@ -48,10 +47,6 @@ impl CallHandler for AutoAnswerHandler {
     async fn on_incoming_call(&self, _call: IncomingCall) -> CallHandlerDecision {
         // Dispatch applies the decision — no need to consume `call` manually.
         CallHandlerDecision::Accept
-    }
-
-    async fn on_transfer_request(&self, _handle: SessionHandle, _target: String) -> bool {
-        true
     }
 }
 

@@ -19,7 +19,12 @@ use tracing_subscriber;
 
 use rvoip_sip_dialog::transaction::builders::client_quick;
 use rvoip_sip_dialog::{
-    api::unified::UnifiedDialogApi, config::DialogManagerConfig, DialogId, DialogState,
+    api::unified::{
+        ByeRequestOptions, InfoRequestOptions, NotifyRequestOptions, ReferRequestOptions,
+        UnifiedDialogApi, UpdateRequestOptions,
+    },
+    config::DialogManagerConfig,
+    DialogId, DialogState,
 };
 use uuid;
 
@@ -196,8 +201,14 @@ impl LifecycleTest {
         info!("🔥 Testing INFO request...");
         let info_result = timeout(
             Duration::from_secs(5),
-            self.client_api
-                .send_info(dialog_id, "Unified API info data".to_string()),
+            self.client_api.send_info_with_options(
+                dialog_id,
+                InfoRequestOptions {
+                    content_type: "application/octet-stream".to_string(),
+                    body: bytes::Bytes::from("Unified API info data"),
+                    ..Default::default()
+                },
+            ),
         )
         .await;
 
@@ -212,8 +223,13 @@ impl LifecycleTest {
         let updated_sdp = "v=0\r\no=alice 456 789 IN IP4 127.0.0.1\r\nc=IN IP4 127.0.0.1\r\nm=audio 5008 RTP/AVP 0\r\n";
         let update_result = timeout(
             Duration::from_secs(5),
-            self.client_api
-                .send_update(dialog_id, Some(updated_sdp.to_string())),
+            self.client_api.send_update_with_options(
+                dialog_id,
+                UpdateRequestOptions {
+                    sdp: Some(updated_sdp.to_string()),
+                    ..Default::default()
+                },
+            ),
         )
         .await;
 
@@ -228,7 +244,13 @@ impl LifecycleTest {
         let refer_target = format!("sip:transfer@{}", self.server_addr);
         let refer_result = timeout(
             Duration::from_secs(5),
-            self.client_api.send_refer(dialog_id, refer_target, None),
+            self.client_api.send_refer_with_options(
+                dialog_id,
+                ReferRequestOptions {
+                    refer_to: refer_target,
+                    ..Default::default()
+                },
+            ),
         )
         .await;
 
@@ -242,11 +264,14 @@ impl LifecycleTest {
         info!("🔥 Testing NOTIFY request...");
         let notify_result = timeout(
             Duration::from_secs(5),
-            self.client_api.send_notify(
+            self.client_api.send_notify_with_options(
                 dialog_id,
-                "test-event".to_string(),
-                Some("Unified API notification".to_string()),
-                Some("active;expires=60".to_string()),
+                NotifyRequestOptions {
+                    event: "test-event".to_string(),
+                    subscription_state: "active;expires=60".to_string(),
+                    body: Some(bytes::Bytes::from("Unified API notification")),
+                    ..Default::default()
+                },
             ),
         )
         .await;
@@ -277,7 +302,12 @@ impl LifecycleTest {
         info!("=== Testing Call Termination (Unified API BYE) ===");
 
         // Send BYE request using unified API
-        let bye_result = timeout(Duration::from_secs(5), self.client_api.send_bye(dialog_id)).await;
+        let bye_result = timeout(
+            Duration::from_secs(5),
+            self.client_api
+                .send_bye_with_options(dialog_id, ByeRequestOptions::default()),
+        )
+        .await;
 
         match bye_result {
             Ok(Ok(_)) => info!("✓ BYE sent successfully using unified API"),
@@ -300,7 +330,10 @@ impl LifecycleTest {
         // Test with non-existent dialog
         let fake_dialog_id = DialogId::new();
 
-        let bye_result = self.client_api.send_bye(&fake_dialog_id).await;
+        let bye_result = self
+            .client_api
+            .send_bye_with_options(&fake_dialog_id, ByeRequestOptions::default())
+            .await;
         assert!(
             bye_result.is_err(),
             "BYE to non-existent dialog should fail"
@@ -309,7 +342,14 @@ impl LifecycleTest {
 
         let info_result = self
             .client_api
-            .send_info(&fake_dialog_id, "test".to_string())
+            .send_info_with_options(
+                &fake_dialog_id,
+                InfoRequestOptions {
+                    content_type: "application/octet-stream".to_string(),
+                    body: bytes::Bytes::from("test"),
+                    ..Default::default()
+                },
+            )
             .await;
         assert!(
             info_result.is_err(),

@@ -926,11 +926,11 @@ pub async fn callback_runtime(
                 Ok(())
             }
         })
-        .on_transfer_request(|handle, target| async move {
+        .on_refer_received(|handle, request| async move {
             println!(
-                "[callback-transfer] accepting REFER on call {} to {}",
+                "[callback-transfer] accepting REFER on call {} (method={:?})",
                 handle.id(),
-                target
+                request.method
             );
             Ok(true)
         })
@@ -1050,7 +1050,17 @@ pub async fn register_stream_peer(
     cfg: &EndpointConfig,
 ) -> ExampleResult<RegistrationHandle> {
     print_registration_context(cfg);
-    let handle = peer.register_with(cfg.registration()).await?;
+    let reg = cfg.registration();
+    let mut b = peer
+        .register(reg.registrar, reg.username, reg.password)
+        .with_expires(reg.expires);
+    if let Some(from) = reg.from_uri {
+        b = b.with_from_uri(from);
+    }
+    if let Some(contact) = reg.contact_uri {
+        b = b.with_contact_uri(contact);
+    }
+    let handle = b.send().await?;
     wait_for_stream_registration(peer, &handle, &cfg.username).await?;
     println!("[{}] Registered.", cfg.username);
     Ok(handle)
@@ -1081,10 +1091,18 @@ pub async fn register_callback_endpoint(
     runtime: &mut CallbackRuntime,
 ) -> ExampleResult<RegistrationHandle> {
     print_registration_context(&runtime.cfg);
-    let handle = runtime
+    let reg = runtime.cfg.registration();
+    let mut b = runtime
         .control
-        .register_with(runtime.cfg.registration())
-        .await?;
+        .register(reg.registrar, reg.username, reg.password)
+        .with_expires(reg.expires);
+    if let Some(from) = reg.from_uri {
+        b = b.with_from_uri(from);
+    }
+    if let Some(contact) = reg.contact_uri {
+        b = b.with_contact_uri(contact);
+    }
+    let handle = b.send().await?;
     for _ in 0..50 {
         if runtime.control.is_registered(&handle).await? {
             wait_for_registration_success(&mut runtime.events, Duration::from_secs(10)).await?;
@@ -1884,6 +1902,14 @@ async fn run_transferor(
             .stop_and_save(&cfg.output_dir, transferor_wav(transport))
             .await?;
     }
+    // RFC 5589 §6.1: after a successful blind transfer (final NOTIFY received),
+    // the Transferor terminates its leg of the original call with BYE. Without
+    // this the dialog stays open on the PBX, which eventually retransmits a
+    // BYE that may land on whichever process binds the original Contact next.
+    handle
+        .hangup_and_wait(Some(Duration::from_secs(8)))
+        .await
+        .ok();
     Ok(())
 }
 

@@ -101,33 +101,11 @@ impl RegisterBuilder {
         let contact_uri = self.contact_uri.clone().unwrap_or_else(|| from_uri.clone());
         let extra_headers = take_staged(&mut self.state);
 
-        // Fast path: no application extras → legacy 6-arg dispatch keeps
-        // working unchanged. The auth-retry + 423-retry paths flow
-        // through this branch with empty extras and remain wire-bit
-        // identical to before SIP_API_DESIGN_2.
-        if extra_headers.is_empty() {
-            #[allow(deprecated)]
-            return self
-                .coord
-                .register_legacy(
-                    &self.registrar,
-                    &from_uri,
-                    &contact_uri,
-                    &self.user,
-                    &self.password,
-                    self.expires,
-                )
-                .await;
-        }
-
-        // SIP_API_DESIGN_2 §10 #19 — application stamped extras (raw
+        // SIP_API_DESIGN_2 §10 #19 — application-staged extras (raw
         // `P-Asserted-Identity`, custom `X-*`, RFC 3327 `Path`, …) ride
-        // through dialog-core's `extra_headers` channel. Stage them on
-        // the freshly-created session BEFORE the state machine fires
-        // `Action::SendREGISTER`, since `execute_register_action`
-        // (state_machine/actions.rs:88) reads
-        // `pending_register_options.extra_headers` to thread the slice
-        // into `DialogAdapter::send_register`.
+        // through dialog-core's `extra_headers` channel. The empty-extras
+        // case (auth-retry / 423-retry / plain register) takes the same
+        // path; the slice is just empty.
         self.coord
             .register_with_extras(
                 &self.registrar,

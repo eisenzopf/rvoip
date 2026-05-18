@@ -113,11 +113,11 @@ async fn config_auto_emit_extra_headers_stamps_legacy_bye() {
 
     // Establish a call.
     let target = format!("sip:bob@127.0.0.1:{bob_port}");
-    #[allow(deprecated)]
     let session_id = alice
-        .make_call("sip:alice@127.0.0.1", &target)
+        .invite(Some("sip:alice@127.0.0.1".to_string()), &target)
+        .send()
         .await
-        .expect("make_call");
+        .expect("invite");
 
     // Wait for Alice to see CallAnswered before hanging up.
     let mut answered = false;

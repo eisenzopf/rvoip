@@ -2,7 +2,7 @@
 //!
 //! Inbound SIP messages reach the application through one of four typed
 //! wrappers that all implement
-//! [`SipHeaderView`](crate::api::headers::SipHeaderView):
+//! [`crate::api::headers::SipHeaderView`]:
 //!
 //! | Wrapper | What it wraps |
 //! |---|---|
@@ -74,7 +74,7 @@ pub struct IncomingCall {
     /// Additional SIP headers (lower-cased names).
     ///
     /// **Deprecated:** prefer
-    /// [`SipHeaderView`](crate::api::headers::SipHeaderView) inspection
+    /// [`crate::api::headers::SipHeaderView`] inspection
     /// via [`Self::header`], [`Self::header_str`], or
     /// [`Self::raw_request`]. This field is populated from the parsed
     /// INVITE for back-compat and may carry only a curated subset of
@@ -301,7 +301,13 @@ impl IncomingCall {
         let call_id = self.call_id.clone();
         let reason = reason.to_string();
         tokio::spawn(async move {
-            if let Err(e) = coordinator.reject_call(&call_id, status, &reason).await {
+            if let Err(e) = coordinator
+                .reject(&call_id)
+                .with_status(status)
+                .with_reason(reason)
+                .send()
+                .await
+            {
                 tracing::warn!("[IncomingCall] reject failed for {}: {}", call_id, e);
             }
         });
@@ -373,26 +379,11 @@ impl IncomingCall {
         }
         self.resolved = true;
         self.coordinator
-            .redirect_call(&self.call_id, status, contacts)
+            .redirect(&self.call_id)
+            .with_status(status)
+            .with_contacts(contacts)
+            .send()
             .await
-    }
-
-    /// Redirect the caller to another URI with **302 Moved Temporarily**.
-    ///
-    /// This legacy fire-and-forget method is kept for compatibility. Prefer
-    /// [`redirect_to`](Self::redirect_to) when the caller needs a result.
-    #[deprecated(note = "Use redirect_to(...).await instead")]
-    pub fn redirect(self, target: &str) {
-        let coordinator = self.coordinator.clone();
-        let call_id = self.call_id.clone();
-        let target = target.to_string();
-        let mut this = self;
-        this.resolved = true;
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.redirect_call(&call_id, 302, vec![target]).await {
-                tracing::warn!("[IncomingCall] redirect failed for {}: {}", call_id, e);
-            }
-        });
     }
 
     /// Defer the accept/reject decision, keeping the call in `Ringing` state
@@ -551,11 +542,14 @@ impl Drop for IncomingCall {
         );
         tokio::spawn(async move {
             if let Err(e) = coordinator
-                .reject_call(&call_id, 500, "Server Internal Error")
+                .reject(&call_id)
+                .with_status(500)
+                .with_reason("Server Internal Error")
+                .send()
                 .await
             {
                 tracing::error!(
-                    "[IncomingCall] panic-path reject_call failed for {}: {}",
+                    "[IncomingCall] panic-path reject failed for {}: {}",
                     call_id,
                     e
                 );
@@ -597,7 +591,10 @@ impl IncomingCallGuard {
             if !watchdog_resolved.swap(true, Ordering::SeqCst) {
                 // The coordinator will silently ignore this if the session is already gone
                 let _ = coordinator_clone
-                    .reject_call(&call_id_clone, 503, "Service Unavailable")
+                    .reject(&call_id_clone)
+                    .with_status(503)
+                    .with_reason("Service Unavailable")
+                    .send()
                     .await;
             }
         });
@@ -678,7 +675,12 @@ impl IncomingCallGuard {
         let call_id = self.call_id.clone();
         let reason = reason.to_string();
         tokio::spawn(async move {
-            let _ = coordinator.reject_call(&call_id, status, &reason).await;
+            let _ = coordinator
+                .reject(&call_id)
+                .with_status(status)
+                .with_reason(reason)
+                .send()
+                .await;
         });
     }
 
@@ -724,7 +726,10 @@ impl IncomingCallGuard {
 
         let mut events = self.coordinator.events_for_session(&self.call_id).await?;
         self.coordinator
-            .reject_call(&self.call_id, status, reason)
+            .reject(&self.call_id)
+            .with_status(status)
+            .with_reason(reason.to_string())
+            .send()
             .await?;
 
         let fut = async {
@@ -915,7 +920,10 @@ impl Drop for IncomingCallGuard {
             let call_id = self.call_id.clone();
             tokio::spawn(async move {
                 let _ = coordinator
-                    .reject_call(&call_id, 503, "Service Unavailable")
+                    .reject(&call_id)
+                    .with_status(503)
+                    .with_reason("Service Unavailable")
+                    .send()
                     .await;
             });
         }
@@ -975,6 +983,31 @@ impl IncomingRequest {
     // ─────────────────────────────────────────────────────────────────
     // SIP_API_DESIGN_2 Phase D — response builder entry points.
     // ─────────────────────────────────────────────────────────────────
+
+    /// Borrow a [`SessionHandle`] for the dialog this inbound request
+    /// belongs to.
+    ///
+    /// Returns `Err(SessionError::InvalidInput)` when the bus path has
+    /// not yet rehydrated the coordinator hook (only possible while an
+    /// `IncomingRequest` is in flight between the event bus and the
+    /// surface consumer).
+    ///
+    /// Use this from `on_refer_received` / `on_notify_received` trait
+    /// impls when you need to drive in-dialog actions on the session
+    /// (e.g. `handle.accept_refer().await`).
+    pub fn session_handle(&self) -> Result<crate::api::handle::SessionHandle> {
+        let coord = self.coordinator.clone().ok_or_else(|| {
+            SessionError::InvalidInput(
+                "IncomingRequest.session_handle() requires a coordinator hook; \
+                 the bus path has not yet rehydrated it"
+                    .to_string(),
+            )
+        })?;
+        Ok(crate::api::handle::SessionHandle::new(
+            self.call_id.clone(),
+            coord,
+        ))
+    }
 
     /// Begin a `GenericResponseBuilder` for the inbound request.
     /// Returns `Err(SessionError::InvalidInput)` when this
