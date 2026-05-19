@@ -383,7 +383,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::ProxyRequire(proxy_require)) =
             request.header(&HeaderName::ProxyRequire)
@@ -402,7 +402,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::ProxyRequire(proxy_require)) =
             response.header(&HeaderName::ProxyRequire)

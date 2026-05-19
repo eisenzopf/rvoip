@@ -1,6 +1,7 @@
 use futures_util::stream::SplitStream;
 use futures_util::StreamExt;
 use std::net::SocketAddr;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info, trace, warn};
@@ -10,10 +11,15 @@ use http::HeaderValue;
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
 #[cfg(feature = "ws")]
-use tokio_tungstenite::{accept_async, tungstenite, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{accept_async, tungstenite, WebSocketStream};
+
+#[cfg(feature = "wss")]
+use tokio_rustls::rustls::ServerConfig;
+#[cfg(feature = "wss")]
+use tokio_rustls::TlsAcceptor;
 
 use super::connection::WebSocketConnection;
-use super::{SIP_WSS_SUBPROTOCOL, SIP_WS_SUBPROTOCOL};
+use super::{SipWsStream, SIP_WSS_SUBPROTOCOL, SIP_WS_SUBPROTOCOL};
 use crate::error::{Error, Result};
 
 /// WebSocket listener for accepting SIP WebSocket connections
@@ -26,10 +32,20 @@ pub struct WebSocketListener {
     cert_path: Option<String>,
     /// TLS key path if secure
     key_path: Option<String>,
+    /// Pre-built TLS acceptor for WSS. Built once at `bind()` time so
+    /// every accept() reuses the same `ServerConfig` (and therefore
+    /// the same cert chain + session resumption cache).
+    #[cfg(feature = "wss")]
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl WebSocketListener {
-    /// Binds a WebSocket listener to the specified address
+    /// Binds a WebSocket listener to the specified address.
+    ///
+    /// For WSS (`secure = true`), `cert_path` and `key_path` must both
+    /// be supplied — the same PEM cert / PKCS#8 key shape used by the
+    /// TLS transport. The `TlsAcceptor` is built once here so per-
+    /// accept handshakes don't re-parse cert material.
     pub async fn bind(
         addr: SocketAddr,
         secure: bool,
@@ -46,11 +62,41 @@ impl WebSocketListener {
             if secure { "wss" } else { "ws" }
         );
 
+        // Build the TLS acceptor up-front when the listener is secure.
+        // Reuses the TLS transport's PEM loaders (re-exported as
+        // `pub(crate)`) so cert/key handling is identical to the TLS
+        // path — same root config, same error surface.
+        #[cfg(feature = "wss")]
+        let tls_acceptor = if secure {
+            let (cert_p, key_p) = match (cert_path, key_path) {
+                (Some(c), Some(k)) => (c, k),
+                _ => {
+                    return Err(Error::TlsHandshakeFailed(
+                        "WSS listener requires both cert_path and key_path".into(),
+                    ))
+                }
+            };
+            let certs = crate::transport::tls::load_certs(Path::new(cert_p))?;
+            let key = crate::transport::tls::load_private_key(Path::new(key_p))?;
+            let server_config = ServerConfig::builder()
+                .with_safe_defaults()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .map_err(|e| {
+                    Error::TlsHandshakeFailed(format!("WSS server config: {}", e))
+                })?;
+            Some(TlsAcceptor::from(Arc::new(server_config)))
+        } else {
+            None
+        };
+
         Ok(Self {
             listener,
             secure,
             cert_path: cert_path.map(String::from),
             key_path: key_path.map(String::from),
+            #[cfg(feature = "wss")]
+            tls_acceptor,
         })
     }
 
@@ -67,7 +113,7 @@ impl WebSocketListener {
         &self,
     ) -> Result<(
         WebSocketConnection,
-        SplitStream<WebSocketStream<MaybeTlsStream<TcpStream>>>,
+        SplitStream<WebSocketStream<SipWsStream>>,
     )> {
         // Accept a TCP connection
         let (stream, peer_addr) = self
@@ -78,8 +124,35 @@ impl WebSocketListener {
 
         debug!("Accepted TCP connection for WebSocket from {}", peer_addr);
 
-        // TODO: If this is a secure WebSocket, perform TLS handshake
-        let maybe_tls_stream = MaybeTlsStream::Plain(stream);
+        // For WSS, run the TLS handshake on the freshly accepted TCP
+        // socket BEFORE handing it to `accept_async`. The resulting
+        // server-side `TlsStream` is wrapped in `SipWsStream::ServerTls`
+        // (the client-side `MaybeTlsStream::Rustls` variant doesn't
+        // cover the server direction). Plain WS skips the handshake and
+        // wraps the raw TCP stream as `SipWsStream::Plain`.
+        let maybe_tls_stream: SipWsStream = if self.secure {
+            #[cfg(feature = "wss")]
+            {
+                let acceptor = self.tls_acceptor.as_ref().ok_or_else(|| {
+                    Error::TlsHandshakeFailed(
+                        "WSS listener marked secure but no TLS acceptor configured".into(),
+                    )
+                })?;
+                let tls_stream = acceptor.accept(stream).await.map_err(|e| {
+                    error!("WSS TLS handshake with {} failed: {}", peer_addr, e);
+                    Error::TlsHandshakeFailed(format!("WSS handshake from {}: {}", peer_addr, e))
+                })?;
+                SipWsStream::ServerTls(tls_stream)
+            }
+            #[cfg(not(feature = "wss"))]
+            {
+                return Err(Error::NotImplemented(
+                    "WSS listener requires the `wss` feature (rustls plumbing)".into(),
+                ));
+            }
+        } else {
+            SipWsStream::Plain(stream)
+        };
 
         // Custom callback for WebSocket handshake to handle subprotocol negotiation
         let callback = |request: &Request, response: Response| {
@@ -155,9 +228,9 @@ impl WebSocketListener {
     /// Helper to accept WebSocket connections with subprotocol selection
     #[cfg(feature = "ws")]
     async fn accept_async_with_subprotocol<F>(
-        stream: MaybeTlsStream<TcpStream>,
+        stream: SipWsStream,
         _callback: F,
-    ) -> std::result::Result<(WebSocketStream<MaybeTlsStream<TcpStream>>, String), tungstenite::Error>
+    ) -> std::result::Result<(WebSocketStream<SipWsStream>, String), tungstenite::Error>
     where
         F: FnOnce(
             &Request,
@@ -212,13 +285,40 @@ mod tests {
         assert!(!listener.is_secure());
     }
 
-    /// Test binding a secure WebSocket listener
+    /// Test binding a secure WebSocket listener.
+    ///
+    /// Phase 4 wired real TLS into `bind()`: when `secure = true`, the
+    /// listener now actually opens the cert/key files and builds a
+    /// `TlsAcceptor`. So the test has to generate real PEM material
+    /// (via `rcgen`, the same dev-dep the TLS handshake test uses).
+    /// Gated on `wss` because the TLS acceptor lives behind that
+    /// feature.
+    #[cfg(feature = "wss")]
     #[tokio::test]
     async fn test_websocket_listener_bind_secure() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cert_path = tmp.path().join("server.crt");
+        let key_path = tmp.path().join("server.key");
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("rcgen self-signed");
+        std::fs::File::create(&cert_path)
+            .and_then(|mut f| f.write_all(cert.serialize_pem().unwrap().as_bytes()))
+            .expect("write cert");
+        std::fs::File::create(&key_path)
+            .and_then(|mut f| f.write_all(cert.serialize_private_key_pem().as_bytes()))
+            .expect("write key");
+
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = WebSocketListener::bind(addr, true, Some("cert.pem"), Some("key.pem"))
-            .await
-            .unwrap();
+        let listener = WebSocketListener::bind(
+            addr,
+            true,
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+        )
+        .await
+        .unwrap();
 
         let bound_addr = listener.local_addr().unwrap();
         assert!(bound_addr.port() > 0); // Random port assigned
@@ -226,8 +326,8 @@ mod tests {
         assert!(listener.is_secure());
 
         // Verify certificate paths are stored
-        assert_eq!(listener.cert_path.as_deref(), Some("cert.pem"));
-        assert_eq!(listener.key_path.as_deref(), Some("key.pem"));
+        assert_eq!(listener.cert_path.as_deref(), cert_path.to_str());
+        assert_eq!(listener.key_path.as_deref(), key_path.to_str());
     }
 
     /// Tests accepting a WebSocket connection

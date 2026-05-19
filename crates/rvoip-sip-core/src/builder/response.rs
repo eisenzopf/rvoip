@@ -1657,6 +1657,7 @@ impl SimpleResponseBuilder {
             TypedHeader::AuthenticationInfo(_) |
             TypedHeader::PAssertedIdentity(_) |   // RFC 3325 — appendable list
             TypedHeader::PPreferredIdentity(_) |  // RFC 3325 — appendable list
+            TypedHeader::Identity(_) |            // RFC 8224 — multiple PASSporT tokens allowed
             TypedHeader::Reason(_) => {
                 // No retain logic, these headers are appended.
             }
@@ -1759,14 +1760,22 @@ impl SimpleResponseBuilder {
     ///     .build();
     /// ```
     pub fn build(mut self) -> Response {
-        self.response
+        // RFC 3261 §20.14: Content-Length is mandatory. Auto-stamp it
+        // to match the body if (and ONLY if) the user did not already
+        // set one explicitly — preserves `.content_length(N)` values
+        // and the value `with_body` stamps when called.
+        if !self
+            .response
             .headers
-            .retain(|h| h.name() != HeaderName::ContentLength);
-        self.response
-            .headers
-            .push(TypedHeader::ContentLength(ContentLength::new(
-                self.response.body.len() as u32,
-            )));
+            .iter()
+            .any(|h| h.name() == HeaderName::ContentLength)
+        {
+            self.response
+                .headers
+                .push(TypedHeader::ContentLength(ContentLength::new(
+                    self.response.body.len() as u32,
+                )));
+        }
         self.response
     }
 }

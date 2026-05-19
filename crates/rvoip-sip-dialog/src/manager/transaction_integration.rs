@@ -549,7 +549,7 @@ impl DialogManager {
                 }
             }
 
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            let destination = self.resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
             .await
@@ -557,6 +557,18 @@ impl DialogManager {
 
             (destination, request)
         };
+
+        // STIR/SHAKEN (RFC 8224) — fire RequestLifecycle::pre_send_request
+        // for INVITE so the installed PASSporTSigner can attach an
+        // `Identity:` header. No-op for non-INVITE methods (they ride
+        // within the dialog established at INVITE time, so re-signing
+        // is not required by RFC 8224) and when no signer is installed
+        // (the default — existing callers see no behaviour change).
+        let mut request = request;
+        if method == Method::Invite {
+            use crate::manager::RequestLifecycle;
+            self.pre_send_request(&mut request, destination).await?;
+        }
 
         // Use transaction-core helpers to create appropriate transaction
         let transaction_id = if method == Method::Invite {
@@ -908,7 +920,7 @@ impl DialogManager {
                 request.headers.push(extra);
             }
 
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            let destination = self.resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
             .await
@@ -916,6 +928,16 @@ impl DialogManager {
 
             (destination, request)
         };
+
+        // STIR/SHAKEN (RFC 8224) — sign auth-retry INVITE with a fresh
+        // PASSporT. The 401-challenge retry MUST re-attest since the
+        // first PASSporT covered the original request's CSeq; a new
+        // CSeq on the retry would invalidate the signature.
+        let mut request = request;
+        {
+            use crate::manager::RequestLifecycle;
+            self.pre_send_request(&mut request, destination).await?;
+        }
 
         let transaction_id = self
             .transaction_manager
@@ -1047,7 +1069,7 @@ impl DialogManager {
             inject_100rel_policy(&mut request, self.config_100rel_policy());
             inject_session_timer_headers(&mut request, session_secs, min_se);
 
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            let destination = self.resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
             .await
@@ -1055,6 +1077,15 @@ impl DialogManager {
 
             (destination, request)
         };
+
+        // STIR/SHAKEN — re-sign the 422-retry INVITE. The retry
+        // carries a new CSeq + adjusted Session-Expires; the original
+        // PASSporT no longer covers the canonical form.
+        let mut request = request;
+        {
+            use crate::manager::RequestLifecycle;
+            self.pre_send_request(&mut request, destination).await?;
+        }
 
         let transaction_id = self
             .transaction_manager
@@ -1223,7 +1254,7 @@ impl DialogManager {
                 inject_session_timer_headers(&mut request, secs, min_se);
             }
 
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            let destination = self.resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
             .await
@@ -1231,6 +1262,16 @@ impl DialogManager {
 
             (destination, request)
         };
+
+        // STIR/SHAKEN (RFC 8224) — sign the initial outbound INVITE.
+        // This is the PRIMARY attestation point per ATIS-1000074 —
+        // the originating service provider's signer attests to the
+        // calling number's authorisation to use the From identity.
+        let mut request = request;
+        {
+            use crate::manager::RequestLifecycle;
+            self.pre_send_request(&mut request, destination).await?;
+        }
 
         let transaction_id = self
             .transaction_manager
@@ -2104,6 +2145,17 @@ impl DialogManager {
             method, destination
         );
 
+        // STIR/SHAKEN (RFC 8224) — fire the request lifecycle for
+        // INVITE so the installed PASSporTSigner attaches an
+        // `Identity:` header. Generic helper paths land here when
+        // dialog-core's bespoke per-method send paths can't be used
+        // (e.g. raw out-of-dialog INVITE injection from upper layers).
+        let mut request = request;
+        if *method == Method::Invite {
+            use crate::manager::RequestLifecycle;
+            self.pre_send_request(&mut request, destination).await?;
+        }
+
         let transaction_id = if *method == Method::Invite {
             self.transaction_manager
                 .create_invite_client_transaction(request, destination)
@@ -2360,7 +2412,7 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            let destination = self.resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
             .await

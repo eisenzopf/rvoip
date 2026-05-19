@@ -1268,6 +1268,7 @@ impl SimpleRequestBuilder {
             TypedHeader::ReplyTo(_) |
             TypedHeader::PAssertedIdentity(_) |     // RFC 3325 — appendable list
             TypedHeader::PPreferredIdentity(_) |    // RFC 3325 — appendable list
+            TypedHeader::Identity(_) |              // RFC 8224 — multiple PASSporT tokens allowed (e.g. shaken + div)
             TypedHeader::Path(_) |
             TypedHeader::ServiceRoute(_) => {  // RFC 3327 / RFC 3608 — appendable list of URIs
                 // For appendable headers, no special action is needed before pushing.
@@ -1352,14 +1353,22 @@ impl SimpleRequestBuilder {
     ///     .build();
     /// ```
     pub fn build(mut self) -> Request {
-        self.request
+        // RFC 3261 §20.14: Content-Length is mandatory. Auto-stamp it
+        // to match the body if (and ONLY if) the user did not already
+        // set one explicitly — preserves `.content_length(N)` values
+        // and the value `with_body` stamps when called.
+        if !self
+            .request
             .headers
-            .retain(|h| h.name() != HeaderName::ContentLength);
-        self.request
-            .headers
-            .push(TypedHeader::ContentLength(ContentLength::new(
-                self.request.body.len() as u32,
-            )));
+            .iter()
+            .any(|h| h.name() == HeaderName::ContentLength)
+        {
+            self.request
+                .headers
+                .push(TypedHeader::ContentLength(ContentLength::new(
+                    self.request.body.len() as u32,
+                )));
+        }
         self.request
     }
 }

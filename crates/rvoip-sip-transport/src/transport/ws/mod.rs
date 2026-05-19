@@ -1,16 +1,21 @@
 mod connection;
 mod listener;
+mod stream;
 
 pub use connection::WebSocketConnection;
 pub use listener::WebSocketListener;
+pub(crate) use stream::SipWsStream;
 
 use futures_util::StreamExt;
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+#[cfg(feature = "ws")]
+use tokio_tungstenite::tungstenite;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::error::{Error, Result};
@@ -138,9 +143,7 @@ impl WebSocketTransport {
         &self,
         connection: Arc<WebSocketConnection>,
         mut reader: futures_util::stream::SplitStream<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
+            tokio_tungstenite::WebSocketStream<SipWsStream>,
         >,
     ) {
         let transport = self.clone();
@@ -154,17 +157,51 @@ impl WebSocketTransport {
                 let ws_message = match reader.next().await {
                     Some(Ok(msg)) => msg,
                     Some(Err(e)) => {
-                        error!(
-                            "Error reading from WebSocket connection {}: {}",
-                            peer_addr, e
-                        );
+                        // Distinguish "peer disconnected" from a real
+                        // protocol fault. RFC 6455 §5.5.1 says peers
+                        // SHOULD send a Close frame, but in practice
+                        // browsers, mobile networks, and load
+                        // balancers routinely just drop the socket.
+                        // tokio-tungstenite surfaces those as
+                        // `ConnectionClosed`, `AlreadyClosed`, or an
+                        // I/O error with `UnexpectedEof` /
+                        // `ConnectionReset` / `BrokenPipe`. None of
+                        // those should fire `TransportEvent::Error` or
+                        // log at ERROR — they're the normal disconnect
+                        // path. Anything else (`Protocol`, `Utf8`,
+                        // bad frame, etc.) is a real fault.
+                        let is_normal_close = match &e {
+                            tungstenite::Error::ConnectionClosed
+                            | tungstenite::Error::AlreadyClosed => true,
+                            tungstenite::Error::Io(io_err) => matches!(
+                                io_err.kind(),
+                                io::ErrorKind::UnexpectedEof
+                                    | io::ErrorKind::ConnectionReset
+                                    | io::ErrorKind::BrokenPipe
+                            ),
+                            _ => false,
+                        };
 
-                        let _ = inner
-                            .events_tx
-                            .send(TransportEvent::Error {
-                                error: format!("WebSocket read error from {}: {}", peer_addr, e),
-                            })
-                            .await;
+                        if is_normal_close {
+                            debug!(
+                                "WebSocket connection from {} closed by peer: {}",
+                                peer_addr, e
+                            );
+                        } else {
+                            error!(
+                                "Error reading from WebSocket connection {}: {}",
+                                peer_addr, e
+                            );
+                            let _ = inner
+                                .events_tx
+                                .send(TransportEvent::Error {
+                                    error: format!(
+                                        "WebSocket read error from {}: {}",
+                                        peer_addr, e
+                                    ),
+                                })
+                                .await;
+                        }
 
                         break;
                     }
@@ -244,7 +281,26 @@ impl WebSocketTransport {
         });
     }
 
-    /// Connect to a remote WebSocket server
+    /// Connect to a remote WebSocket server.
+    ///
+    /// Implements RFC 7118 §4.5 client-side WebSocket establishment:
+    ///
+    /// 1. Open a TCP connection to `addr`.
+    /// 2. For WSS, wrap the TCP stream with a `tokio_rustls`
+    ///    `TlsConnector` (planned follow-up — currently only plain
+    ///    `ws://` is implemented client-side; WSS client returns
+    ///    `NotImplemented` until the TLS connector plumbing lands).
+    /// 3. Build a WS handshake request with
+    ///    `Sec-WebSocket-Protocol: sip` (or `sips` for WSS) per
+    ///    RFC 7118 §4.5.
+    /// 4. Call `tokio_tungstenite::client_async` to negotiate the
+    ///    WS upgrade on the established TCP stream.
+    /// 5. Register the resulting connection in the pool and spawn
+    ///    its reader so inbound messages from the server reach
+    ///    `TransportEvent::MessageReceived`.
+    ///
+    /// Idempotent: a second call for the same `addr` returns the
+    /// existing connection if it's still open.
     #[cfg(feature = "ws")]
     async fn connect_to(&self, addr: SocketAddr) -> Result<Arc<WebSocketConnection>> {
         // Check if we already have an open connection
@@ -257,10 +313,85 @@ impl WebSocketTransport {
             }
         }
 
-        // Not implemented yet - we'll need to implement client-side WebSocket connection
-        Err(Error::NotImplemented(
-            "WebSocket client connections not yet implemented".into(),
-        ))
+        if self.inner.secure {
+            // WSS client (TLS-wrapped) is not yet implemented; it
+            // needs a `tokio_rustls::TlsConnector` plus webpki root
+            // anchors threaded through from the transport config.
+            // Plain WS client below works today.
+            return Err(Error::NotImplemented(
+                "WSS client connections (TLS handshake) not yet implemented; \
+                 use ws:// or implement TlsConnector wiring"
+                    .into(),
+            ));
+        }
+
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        // Step 1 — open TCP. The destination IP/port were resolved
+        // by the upper layer; we don't do DNS here.
+        let tcp_stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| Error::ConnectFailed(addr, e))?;
+
+        // Step 2 — build the WS handshake URL + subprotocol header.
+        // Per RFC 7118 §4.5 the client advertises `sip` for ws:// and
+        // `sips` for wss://. We're in the plain-WS arm here.
+        let url = format!("ws://{}/", addr);
+        let mut request = url
+            .into_client_request()
+            .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            http::HeaderValue::from_static(SIP_WS_SUBPROTOCOL),
+        );
+
+        // Step 3 — wrap as SipWsStream::Plain to match the
+        // connection storage type, then run the WS upgrade.
+        let plain_stream = SipWsStream::Plain(tcp_stream);
+        let (ws_stream, response) = tokio_tungstenite::client_async(request, plain_stream)
+            .await
+            .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
+
+        // Capture the server's selected subprotocol so the connection
+        // wrapper carries the negotiated value (mirrors what the
+        // listener path does).
+        let selected_subprotocol = response
+            .headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
+            .unwrap_or_else(|| SIP_WS_SUBPROTOCOL.to_string());
+
+        let (ws_writer, ws_reader) = ws_stream.split();
+
+        let connection = WebSocketConnection::from_writer(
+            ws_writer,
+            addr,
+            self.inner.secure,
+            selected_subprotocol,
+        );
+        let connection_arc = Arc::new(connection);
+
+        // Register in the pool so subsequent send_message calls
+        // reuse the same connection.
+        {
+            let mut connections = self.inner.connections.lock().await;
+            connections.insert(addr, connection_arc.clone());
+        }
+
+        // Spawn the reader so server-pushed responses (typical SIP
+        // case — UAS replies on the same WS the UAC opened) reach
+        // TransportEvent::MessageReceived.
+        self.clone()
+            .spawn_connection_reader(connection_arc.clone(), ws_reader);
+
+        debug!(
+            "WebSocket client connected to {} (subprotocol={})",
+            addr,
+            connection_arc.subprotocol()
+        );
+
+        Ok(connection_arc)
     }
 }
 
@@ -380,41 +511,81 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "ws")]
+    /// Phase 4 wired real cert/key loading into the WSS bind path, so
+    /// this test needs PEM material that actually exists on disk.
+    /// Gated on `wss` because the TLS acceptor lives behind that
+    /// feature.
+    #[cfg(feature = "wss")]
     #[tokio::test]
     async fn test_websocket_transport_secure_bind() {
-        // Test binding with secure WebSocket (WSS)
-        let result = WebSocketTransport::bind(
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cert_path = tmp.path().join("server.crt");
+        let key_path = tmp.path().join("server.key");
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("rcgen self-signed");
+        std::fs::File::create(&cert_path)
+            .and_then(|mut f| f.write_all(cert.serialize_pem().unwrap().as_bytes()))
+            .expect("write cert");
+        std::fs::File::create(&key_path)
+            .and_then(|mut f| f.write_all(cert.serialize_private_key_pem().as_bytes()))
+            .expect("write key");
+
+        let (transport, _rx) = WebSocketTransport::bind(
             "127.0.0.1:0".parse().unwrap(),
             true,
-            Some("cert.pem"),
-            Some("key.pem"),
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
             None,
         )
-        .await;
+        .await
+        .unwrap();
 
-        if cfg!(feature = "ws") {
-            let (transport, _rx) = result.unwrap();
-            let addr = transport.local_addr().unwrap();
-            assert!(addr.port() > 0);
+        let addr = transport.local_addr().unwrap();
+        assert!(addr.port() > 0);
 
-            transport.close().await.unwrap();
-            assert!(transport.is_closed());
-        } else {
-            assert!(result.is_err());
-        }
+        transport.close().await.unwrap();
+        assert!(transport.is_closed());
     }
 
-    #[cfg(feature = "ws")]
+    /// Phase 4 implemented the plain-WS client (see `connect_to`). The
+    /// WSS *client* (TLS-wrapped outbound) is still deferred — verify
+    /// that path still returns `NotImplemented` so we notice if it
+    /// silently starts attempting handshakes against an unconfigured
+    /// `TlsConnector`. Only requires the listener to bind cert+key
+    /// material when secure, so this test is gated on `wss`.
+    #[cfg(feature = "wss")]
     #[tokio::test]
-    async fn test_websocket_transport_not_implemented_send() {
-        // Test sending to a non-existent connection (this should fail with NotImplemented)
-        let (transport, _rx) =
-            WebSocketTransport::bind("127.0.0.1:0".parse().unwrap(), false, None, None, None)
-                .await
-                .unwrap();
+    async fn test_wss_client_send_still_not_implemented() {
+        use std::io::Write;
 
-        // Create a test SIP message
+        // The listener side needs cert+key now that `secure=true`
+        // actually loads them. Generate self-signed material — the test
+        // never accepts a connection, just verifies the *client* path
+        // bails out.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let cert_path = tmp.path().join("server.crt");
+        let key_path = tmp.path().join("server.key");
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+            .expect("rcgen self-signed");
+        std::fs::File::create(&cert_path)
+            .and_then(|mut f| f.write_all(cert.serialize_pem().unwrap().as_bytes()))
+            .expect("write cert");
+        std::fs::File::create(&key_path)
+            .and_then(|mut f| f.write_all(cert.serialize_private_key_pem().as_bytes()))
+            .expect("write key");
+
+        let (transport, _rx) = WebSocketTransport::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            true,
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+            None,
+        )
+        .await
+        .unwrap();
+
         let request = SimpleRequestBuilder::new(Method::Register, "sip:example.com")
             .unwrap()
             .from("alice", "sip:alice@example.com", Some("tag1"))
@@ -423,14 +594,20 @@ mod tests {
             .cseq(1)
             .build();
 
-        // Try to send the message (should fail since client connections aren't implemented yet)
+        // Sending via this WSS transport routes through `connect_to`'s
+        // secure arm, which currently returns NotImplemented.
+        // Destination doesn't have to be live — the failure happens
+        // before any TCP connect is attempted.
         let result = transport
-            .send_message(request.into(), "127.0.0.1:5060".parse().unwrap())
+            .send_message(request.into(), "127.0.0.1:1".parse().unwrap())
             .await;
         assert!(result.is_err());
-
         if let Err(e) = result {
-            assert!(matches!(e, Error::NotImplemented(_)));
+            assert!(
+                matches!(e, Error::NotImplemented(_)),
+                "expected NotImplemented for WSS client, got {:?}",
+                e
+            );
         }
 
         transport.close().await.unwrap();

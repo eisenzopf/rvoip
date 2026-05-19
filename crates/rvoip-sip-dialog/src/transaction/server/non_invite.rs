@@ -438,6 +438,15 @@ impl ServerTransaction for ServerNonInviteTransaction {
             let is_provisional = status.is_provisional();
             let current_state = data.state.get();
 
+            // RFC 3581 §4 / RFC 3261 §18.2.1 — stamp received= / rport=
+            // on the top Via BEFORE storing in last_response, so any
+            // subsequent retransmit emits the stamped form.
+            let mut response = response;
+            crate::transaction::utils::stamp_response_via_with_source(
+                &mut response,
+                data.remote_addr,
+            );
+
             // Store this response
             {
                 let mut response_guard = data.last_response.lock().await;

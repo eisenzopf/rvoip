@@ -14,6 +14,7 @@ mod request;
 mod response;
 pub mod uri;
 pub mod utils;
+pub mod via_locator;
 // Re-export the address parser under the expected name
 pub use address::name_addr_or_addr_spec as parse_address;
 mod common_params;

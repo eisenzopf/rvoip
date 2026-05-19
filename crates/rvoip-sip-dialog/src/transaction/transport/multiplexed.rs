@@ -74,34 +74,10 @@ pub fn select_transport_for_request(request: &Request) -> TransportType {
 
 /// Select transport from a URI alone.
 ///
-/// Precedence (highest first):
-/// 1. URI `;transport=` parameter (`udp` / `tcp` / `tls` / `ws` / `wss`).
-/// 2. Scheme: `sips:` → TLS.
-/// 3. Default: UDP.
-pub fn select_transport_for_uri(uri: &rvoip_sip_core::Uri) -> TransportType {
-    use rvoip_sip_core::types::uri::Scheme;
-
-    if let Some(transport_param) = uri.transport() {
-        match transport_param.to_ascii_lowercase().as_str() {
-            "udp" => return TransportType::Udp,
-            "tcp" => return TransportType::Tcp,
-            "tls" => return TransportType::Tls,
-            "ws" => return TransportType::Ws,
-            "wss" => return TransportType::Wss,
-            other => {
-                warn!(
-                    "Unrecognised transport= URI parameter '{}'; falling back to scheme-based selection",
-                    other
-                );
-            }
-        }
-    }
-
-    match uri.scheme() {
-        Scheme::Sips => TransportType::Tls,
-        _ => TransportType::Udp,
-    }
-}
+/// Re-exported from
+/// [`rvoip_sip_transport::resolver::select_transport_for_uri`] so the
+/// dialog layer and the resolver share a single source of truth.
+pub use rvoip_sip_transport::resolver::select_transport_for_uri;
 
 /// `Transport` implementation that owns a registry of underlying
 /// transports keyed by `TransportType` and dispatches `send_message`
@@ -131,6 +107,16 @@ impl MultiplexedTransport {
     /// is the per-flavour registry (typically UDP + TCP, plus TLS when
     /// configured). `default` does not have to appear in `transports` —
     /// the dispatcher will fall back to it explicitly.
+    /// Build a multiplexer without the (crate-private) SIP-trace runtime.
+    /// Convenience entry point for integration tests and external callers
+    /// that don't need transport-boundary tracing.
+    pub fn new_without_trace(
+        default: Arc<dyn Transport>,
+        transports: HashMap<TransportType, Arc<dyn Transport>>,
+    ) -> TransportResult<Self> {
+        Self::new(default, transports, None)
+    }
+
     pub fn new(
         default: Arc<dyn Transport>,
         transports: HashMap<TransportType, Arc<dyn Transport>>,
@@ -233,8 +219,42 @@ impl Transport for MultiplexedTransport {
         Ok(self.local_addr)
     }
 
-    async fn send_message(&self, message: Message, destination: SocketAddr) -> TransportResult<()> {
-        let (transport_type, transport) = self.pick_transport(&message, destination)?;
+    async fn send_message(&self, mut message: Message, destination: SocketAddr) -> TransportResult<()> {
+        let (mut transport_type, mut transport) = self.pick_transport(&message, destination)?;
+
+        // RFC 3261 §18.1.1 — if the URI selected UDP but the request
+        // would exceed UDP's safe size, fail over to TCP when a TCP
+        // transport is registered. If none is, fail closed: this is a
+        // protocol MUST.
+        if transport_type == TransportType::Udp {
+            if let Message::Request(ref req) = message {
+                let size = message.to_bytes().len();
+                let limit = transport.max_safe_message_size();
+                if size > limit {
+                    match self.transports.get(&TransportType::Tcp) {
+                        Some(tcp) => {
+                            debug!(
+                                "MultiplexedTransport: {} is {} bytes (UDP limit {}), failing over to TCP per RFC 3261 §18.1.1",
+                                req.method(), size, limit
+                            );
+                            if let Message::Request(ref mut req_mut) = message {
+                                crate::transaction::utils::set_top_via_protocol(req_mut, "TCP");
+                            }
+                            transport_type = TransportType::Tcp;
+                            transport = tcp.clone();
+                        }
+                        None => {
+                            warn!(
+                                "MultiplexedTransport: {} is {} bytes (UDP limit {}) and no TCP transport is registered; refusing to send",
+                                req.method(), size, limit
+                            );
+                            return Err(TransportError::MessageTooLarge(size));
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(trace) = &self.sip_trace {
             let local_addr = transport.local_addr().unwrap_or(self.local_addr);
             trace.publish(

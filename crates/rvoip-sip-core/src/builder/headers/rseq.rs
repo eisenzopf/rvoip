@@ -224,7 +224,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::RSeq(rseq)) = response.header(&HeaderName::RSeq) {
             assert_eq!(rseq.value, 42);
@@ -241,7 +241,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::RSeq(rseq)) = response.header(&HeaderName::RSeq) {
             assert_eq!(rseq.value, 100); // 99 + 1

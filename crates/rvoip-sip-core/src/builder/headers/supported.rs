@@ -388,7 +388,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Supported(supported)) = request.header(&HeaderName::Supported) {
             assert_eq!(supported.option_tags.len(), 1);
@@ -405,7 +405,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Supported(supported)) = response.header(&HeaderName::Supported) {
             assert_eq!(supported.option_tags.len(), 2);

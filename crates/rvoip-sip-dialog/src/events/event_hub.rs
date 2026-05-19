@@ -104,7 +104,39 @@ impl DialogEventHub {
         debug!("Publishing session coordination event: {:?}", event);
 
         // Convert to cross-crate event
-        if let Some(cross_crate_event) = self.convert_coordination_to_cross_crate(event.clone()) {
+        if let Some(mut cross_crate_event) =
+            self.convert_coordination_to_cross_crate(event.clone())
+        {
+            // STIR/SHAKEN (RFC 8224): run the installed verifier on
+            // IncomingCall events before publishing. Uses the shared
+            // `DialogManager::run_identity_verification` helper so the
+            // adapter's publish path and this one apply the same
+            // policy + reject contract — no drift between bridges.
+            if let RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::IncomingCall {
+                    ref raw_request,
+                    identity_verification: ref mut iv,
+                    ..
+                },
+            ) = cross_crate_event
+            {
+                match self
+                    .dialog_manager
+                    .run_identity_verification(&event, raw_request)
+                    .await
+                {
+                    crate::manager::IdentityVerificationDecision::Drop => {
+                        info!(
+                            "🛑 [event_hub] STIR/SHAKEN rejected event; not publishing"
+                        );
+                        return Ok(false);
+                    }
+                    crate::manager::IdentityVerificationDecision::Publish(status) => {
+                        *iv = status;
+                    }
+                }
+            }
+
             info!(
                 "🚀 [event_hub] About to publish cross-crate event for event: {:?}",
                 event
@@ -273,6 +305,15 @@ impl DialogEventHub {
                         transaction_id: transaction_id.to_string(),
                         source_addr: source.to_string(),
                         raw_request,
+                        // STIR/SHAKEN Phase 1: verification is performed in
+                        // `events/adapter.rs` (the legacy `convert_*` path
+                        // that owns the raw bytes lifecycle). This bridge
+                        // does not currently run the verifier; populated as
+                        // `None` until the call lands on the verifier-aware
+                        // publish path. Safe default — `Annotate` policy
+                        // treats `None` identically to "no verifier
+                        // installed."
+                        identity_verification: None,
                     },
                 ))
             }

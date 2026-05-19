@@ -542,6 +542,31 @@ pub enum SessionToDialogEvent {
     },
 }
 
+/// RFC 8224 STIR/SHAKEN PASSporT verification status, surfaced from
+/// the dialog adapter to session-core through `IncomingCall`. Kept as
+/// a plain SIP-agnostic enum so `infra-common` does not pull rvoip
+/// types in. The dialog crate maps its richer `VerificationOutcome`
+/// onto this enum via `IdentityVerificationStatus::from(&outcome)`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum IdentityVerificationStatus {
+    /// Signature verified, certificate chain trusted, claims match
+    /// the SIP request, iat within the freshness window.
+    Valid,
+    /// `iat` outside the freshness window. RFC 8224 § 6.2.2 — 403.
+    Stale,
+    /// JWS signature did not verify. RFC 8224 § 6.2.2 — 438.
+    BadSignature,
+    /// Certificate chain failed to validate. RFC 8224 § 6.2.2 — 437.
+    BadChain,
+    /// PASSporT claim does not match the SIP request. RFC 8224
+    /// § 6.2.2 — 438.
+    ClaimMismatch,
+    /// `info=` URL malformed or unsupported. RFC 8224 § 6.2.2 — 436.
+    BadInfo,
+    /// Inbound request had no `Identity:` header.
+    NoIdentity,
+}
+
 /// Events sent from dialog-core to session-core
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum DialogToSessionEvent {
@@ -565,6 +590,17 @@ pub enum DialogToSessionEvent {
         /// yet.
         #[serde(skip)]
         raw_request: Option<Arc<Bytes>>,
+        /// STIR/SHAKEN Phase 1: outcome of `PASSporTVerifier::verify`
+        /// on the inbound INVITE. `None` when no verifier is
+        /// installed (the default), so existing callers see no
+        /// behaviour change. Reject paths (RFC 8224 §6.2.2 4xx)
+        /// short-circuit at the dialog adapter and never reach this
+        /// event — by the time session-core sees the call, the
+        /// outcome is `Valid`, `NoIdentity`, or whatever the
+        /// configured `VerificationPolicy` chose to annotate without
+        /// rejecting.
+        #[serde(default)]
+        identity_verification: Option<IdentityVerificationStatus>,
     },
 
     /// Call state change notification
@@ -1263,6 +1299,7 @@ impl RvoipCrossCrateEvent {
             transaction_id: String::new(), // Must be set by caller
             source_addr: String::new(),    // Must be set by caller
             raw_request: None,
+            identity_verification: None,
         })
     }
 

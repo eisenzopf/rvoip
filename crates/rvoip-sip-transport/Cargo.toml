@@ -48,20 +48,35 @@ webpki-roots = { version = "0.25", optional = true }
 tokio-tungstenite = { version = "0.19", optional = true }
 http = { version = "0.2", optional = true }
 
+# RFC 3263 NAPTR/SRV/A resolver (opt-in via `dns` feature).
+# `HickoryResolver` and the `hickory` submodule are gated on this.
+hickory-resolver = { workspace = true, optional = true }
+fastrand = { workspace = true, optional = true }
+
 # Add futures-util dependency
 futures-util = "0.3"
 
 [features]
-default = ["udp", "tcp", "tls", "ws"]
+default = ["udp", "tcp", "tls", "ws", "wss"]
 udp = []
 tls = ["dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:webpki-roots"]
 tcp = []
 ws = ["dep:tokio-tungstenite", "dep:http"]
+# WebSocket Secure (WSS) server-side accept. Requires the same rustls
+# plumbing as the regular TLS transport. Plain `ws` still works when
+# this is disabled — only WSS bind/accept paths gate on `wss`.
+wss = ["ws", "tls"]
 # Dev-only: compile the accept-all-certs TLS client verifier. NEVER
 # enable in production — the `TlsClientConfig::insecure_skip_verify` flag
 # has no effect without it. Gated so production builds physically cannot
 # ship with cert validation disabled.
 dev-insecure-tls = ["tls"]
+# RFC 3263 reference resolver implementation (`HickoryResolver`). The
+# `Resolver` trait itself is always compiled; only the hickory-backed
+# impl + NAPTR/SRV/A ladder lives behind this flag so consumers that
+# bring their own resolver can opt out of `hickory-resolver` /
+# `fastrand`.
+dns = ["dep:hickory-resolver", "dep:fastrand"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
@@ -69,3 +84,16 @@ tracing-subscriber = { workspace = true }
 # Generate self-signed certs in TLS handshake tests.
 rcgen = "0.12"
 tempfile = "3"
+# Authoritative DNS fixture for the RFC 3263 end-to-end test.
+hickory-server = "0.24"
+hickory-proto = "0.24"
+fastrand = { workspace = true }
+
+[[test]]
+name = "resolver_hickory_e2e"
+path = "tests/resolver_hickory_e2e.rs"
+required-features = ["dns"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

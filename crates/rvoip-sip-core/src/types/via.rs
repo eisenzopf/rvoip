@@ -773,6 +773,95 @@ impl Via {
             }
         }
     }
+
+    /// Push a new Via entry onto the top of the stack — the shape a
+    /// proxy uses when forwarding a request (RFC 3261 §16.6 step 8).
+    ///
+    /// The new entry has `sent-protocol = SIP/2.0/<transport>` and a
+    /// single `branch=<branch>` parameter. The caller is responsible
+    /// for branch policy: a **stateful** proxy can generate a random
+    /// `z9hG4bK…` value; a **stateless** proxy MUST derive it
+    /// deterministically from the inbound message (RFC 3261 §16.11)
+    /// so responses can be matched without state.
+    ///
+    /// Returns an error if `sent_by_host` fails to parse as a `Host`.
+    pub fn push_proxy_branch(
+        &mut self,
+        transport: impl Into<String>,
+        sent_by_host: impl AsRef<str>,
+        sent_by_port: Option<u16>,
+        branch: impl Into<String>,
+    ) -> Result<()> {
+        let sent_protocol = SentProtocol {
+            name: "SIP".to_string(),
+            version: "2.0".to_string(),
+            transport: transport.into(),
+        };
+        let host = Host::from_str(sent_by_host.as_ref())?;
+        let entry = ViaHeader {
+            sent_protocol,
+            sent_by_host: host,
+            sent_by_port,
+            params: vec![Param::branch(branch.into())],
+        };
+        self.0.insert(0, entry);
+        Ok(())
+    }
+
+    /// Remove and return the top Via entry — the shape a proxy uses
+    /// when forwarding a response (RFC 3261 §16.7 step 3: pop our own
+    /// Via, then route to the address in the new top entry).
+    ///
+    /// Returns `None` if the Via stack is empty.
+    pub fn pop_top(&mut self) -> Option<ViaHeader> {
+        if self.0.is_empty() {
+            None
+        } else {
+            Some(self.0.remove(0))
+        }
+    }
+
+    /// Detect a forwarding loop by comparing branch values (RFC 3261
+    /// §16.6 step 4).
+    ///
+    /// Returns `true` when any entry in `self` has a branch that also
+    /// appears in any entry of `against`. The typical use is:
+    ///
+    /// - **Stateful** proxy: `against` is the list of Vias the proxy
+    ///   has previously stamped (kept in transaction state).
+    /// - **Stateless** proxy: `against` is the deterministic Via the
+    ///   proxy would generate for this inbound (computed on the fly).
+    ///
+    /// Branch comparison is case-sensitive per RFC 3261 §16.6 step 4
+    /// (branches are RFC 3261 §7.3.1 tokens; the magic-cookie portion
+    /// `z9hG4bK` is itself case-sensitive in practice).
+    pub fn detect_loop(&self, against: &[Via]) -> bool {
+        let our_branches: std::collections::HashSet<&str> = self
+            .0
+            .iter()
+            .flat_map(|h| {
+                h.params.iter().filter_map(|p| match p {
+                    Param::Branch(b) => Some(b.as_str()),
+                    _ => None,
+                })
+            })
+            .collect();
+        if our_branches.is_empty() {
+            return false;
+        }
+        for via in against {
+            for entry in &via.0 {
+                for param in &entry.params {
+                    if let Param::Branch(b) = param {
+                        if our_branches.contains(b.as_str()) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 impl fmt::Display for Via {

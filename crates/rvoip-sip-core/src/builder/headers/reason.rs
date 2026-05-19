@@ -387,7 +387,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Reason(reason)) = request.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "SIP");
@@ -405,7 +405,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Reason(reason)) = response.header(&HeaderName::Reason) {
             assert_eq!(reason.protocol(), "SIP");

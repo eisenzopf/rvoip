@@ -17,6 +17,7 @@ members = [
     "crates/codec-core",
     "crates/infra-common",
     "crates/users-core",
+    "crates/rvoip-stir-shaken",
 ]
 
 # orchestration-core is excluded from the workspace as part of the

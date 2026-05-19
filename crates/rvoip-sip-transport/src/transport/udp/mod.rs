@@ -19,6 +19,11 @@ use rvoip_sip_core::Message;
 // Default channel capacity
 const DEFAULT_CHANNEL_CAPACITY: usize = 100;
 
+/// RFC 3261 §18.1.1 — outbound SIP requests larger than this MUST be
+/// shipped over a congestion-controlled transport (TCP) rather than UDP
+/// when path MTU is unknown.
+pub const UDP_SAFE_MAX_BYTES: usize = 1300;
+
 /// UDP transport for SIP messages
 #[derive(Clone)]
 pub struct UdpTransport {
@@ -256,6 +261,10 @@ impl Transport for UdpTransport {
 
     fn is_closed(&self) -> bool {
         self.inner.closed.load(Ordering::Relaxed)
+    }
+
+    fn max_safe_message_size(&self) -> usize {
+        UDP_SAFE_MAX_BYTES
     }
 }
 

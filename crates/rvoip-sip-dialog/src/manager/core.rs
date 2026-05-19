@@ -21,7 +21,30 @@ use crate::events::{DialogEvent, FlowFailureReason, SessionCoordinationEvent};
 use crate::manager::outbound_flow::OutboundFlow;
 use crate::subscription::SubscriptionManager;
 
-#[derive(Debug, Clone)]
+// STIR/SHAKEN — the SIP-agnostic enum lives in infra-common so the
+// cross-crate bus stays free of rvoip types; alias it here for
+// readability at the publish-decision call site.
+use rvoip_infra_common::events::cross_crate::IdentityVerificationStatus;
+
+/// Outcome of [`DialogManager::run_identity_verification`].
+///
+/// - `Publish(Some(status))` — verifier ran and produced an outcome
+///   the policy did not reject. Attach `status` to the published
+///   cross-crate event.
+/// - `Publish(None)` — no verifier installed (or event was not an
+///   `IncomingCall`). Publish without an identity-verification
+///   field.
+/// - `Drop` — policy rejected the outcome and the matching RFC 8224
+///   §6.2.2 4xx response has already been sent through the
+///   transaction layer. Caller must drop the event so it never
+///   reaches session-core.
+#[derive(Debug)]
+pub enum IdentityVerificationDecision {
+    Publish(Option<IdentityVerificationStatus>),
+    Drop,
+}
+
+#[derive(Clone)]
 pub struct DialogManager {
     /// Reference to transaction manager (handles transport for us)
     pub(crate) transaction_manager: Arc<TransactionManager>,
@@ -173,6 +196,75 @@ pub struct DialogManager {
     /// disables keep-alive entirely — `start_outbound_ping` becomes a
     /// no-op.
     pub(crate) outbound_keepalive_interval: Arc<std::sync::RwLock<Option<std::time::Duration>>>,
+
+    /// Pluggable RFC 8224 STIR/SHAKEN PASSporT verifier. When `Some`,
+    /// the inbound event adapter runs verification on every inbound
+    /// request that carries an `Identity:` header before the
+    /// cross-crate `IncomingCall` event is published. Reference impl
+    /// lives in `rvoip-stir-shaken`. Application sets this via
+    /// [`DialogManager::set_identity_verifier`].
+    pub(crate) identity_verifier:
+        Arc<std::sync::RwLock<Option<crate::manager::SharedVerifier>>>,
+
+    /// Pluggable RFC 8224 STIR/SHAKEN PASSporT signer. When `Some`,
+    /// the outbound request lifecycle attaches an `Identity:` header
+    /// to dialog-creating requests before they hit the wire.
+    /// Reference impl lives in `rvoip-stir-shaken`.
+    pub(crate) identity_signer:
+        Arc<std::sync::RwLock<Option<crate::manager::SharedSigner>>>,
+
+    /// Policy for what to do when verification fails or `Identity:` is
+    /// absent. Defaults to [`VerificationPolicy::Annotate`] (forward
+    /// outcome to session-core without rejecting). See
+    /// [`VerificationPolicy`] for the full semantics.
+    pub(crate) verification_policy:
+        Arc<std::sync::RwLock<crate::manager::VerificationPolicy>>,
+
+    /// Pluggable RFC 3263 URI → next-hop resolver. When `Some`, the
+    /// manager consults this resolver to translate destination URIs into
+    /// `SocketAddr`s on its outbound paths (INVITE send and friends).
+    /// When `None` (default), resolution falls back to the process-wide
+    /// system `HickoryResolver`, preserving pre-Phase-5 behaviour.
+    /// Application sets this via [`DialogManager::set_resolver`].
+    pub(crate) resolver: Arc<
+        std::sync::RwLock<Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>>,
+    >,
+}
+
+impl std::fmt::Debug for DialogManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialogManager")
+            .field("local_address", &self.local_address)
+            .field("dialogs_len", &self.dialogs.len())
+            .field(
+                "identity_verifier",
+                &self
+                    .identity_verifier
+                    .read()
+                    .ok()
+                    .map(|g| if g.is_some() { "Some" } else { "None" })
+                    .unwrap_or("?"),
+            )
+            .field(
+                "identity_signer",
+                &self
+                    .identity_signer
+                    .read()
+                    .ok()
+                    .map(|g| if g.is_some() { "Some" } else { "None" })
+                    .unwrap_or("?"),
+            )
+            .field(
+                "resolver",
+                &self
+                    .resolver
+                    .read()
+                    .ok()
+                    .map(|g| if g.is_some() { "Some" } else { "None" })
+                    .unwrap_or("?"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl DialogManager {
@@ -233,6 +325,12 @@ impl DialogManager {
             outbound_flow_tasks: Arc::new(DashMap::new()),
             flow_by_destination: Arc::new(DashMap::new()),
             outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
+            identity_verifier: Arc::new(std::sync::RwLock::new(None)),
+            identity_signer: Arc::new(std::sync::RwLock::new(None)),
+            verification_policy: Arc::new(std::sync::RwLock::new(
+                crate::manager::VerificationPolicy::default(),
+            )),
+            resolver: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -253,6 +351,246 @@ impl DialogManager {
             .read()
             .ok()
             .and_then(|g| *g)
+    }
+
+    /// Install a pluggable RFC 8224 STIR/SHAKEN PASSporT verifier.
+    ///
+    /// When set, the inbound event adapter runs verification on every
+    /// inbound request that carries an `Identity:` header before the
+    /// cross-crate `IncomingCall` event is published. The reference
+    /// implementation lives in `rvoip-stir-shaken`.
+    ///
+    /// Pass `None` to disable verification — inbound `Identity:`
+    /// headers will be carried through as raw bytes for downstream
+    /// consumers without semantic checking.
+    pub fn set_identity_verifier(&self, verifier: Option<crate::manager::SharedVerifier>) {
+        if let Ok(mut guard) = self.identity_verifier.write() {
+            *guard = verifier;
+        }
+    }
+
+    /// Read the currently-installed PASSporT verifier (if any).
+    pub fn identity_verifier(&self) -> Option<crate::manager::SharedVerifier> {
+        self.identity_verifier.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Install a pluggable RFC 8224 STIR/SHAKEN PASSporT signer.
+    ///
+    /// When set, the outbound request lifecycle attaches an
+    /// `Identity:` header to dialog-creating requests before they hit
+    /// the wire. The reference implementation lives in
+    /// `rvoip-stir-shaken`.
+    pub fn set_identity_signer(&self, signer: Option<crate::manager::SharedSigner>) {
+        if let Ok(mut guard) = self.identity_signer.write() {
+            *guard = signer;
+        }
+    }
+
+    /// Read the currently-installed PASSporT signer (if any).
+    pub fn identity_signer(&self) -> Option<crate::manager::SharedSigner> {
+        self.identity_signer.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Set the policy that decides how the dialog layer reacts to a
+    /// failed PASSporT verification or a missing `Identity:` header.
+    /// Defaults to `Annotate` — the outcome is forwarded to
+    /// session-core without rejecting.
+    pub fn set_verification_policy(&self, policy: crate::manager::VerificationPolicy) {
+        if let Ok(mut guard) = self.verification_policy.write() {
+            *guard = policy;
+        }
+    }
+
+    /// Read the currently-configured verification policy.
+    pub fn verification_policy(&self) -> crate::manager::VerificationPolicy {
+        self.verification_policy
+            .read()
+            .ok()
+            .map(|g| *g)
+            .unwrap_or_default()
+    }
+
+    /// Install a pluggable RFC 3263 URI resolver.
+    ///
+    /// When set, the manager consults this resolver to translate
+    /// destination URIs into `SocketAddr`s before passing them to the
+    /// transaction layer. Pass `None` to revert to the process-wide
+    /// default (system `HickoryResolver`).
+    pub fn set_resolver(
+        &self,
+        resolver: Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>,
+    ) {
+        if let Ok(mut guard) = self.resolver.write() {
+            *guard = resolver;
+        }
+    }
+
+    /// Read the currently-installed RFC 3263 resolver (if any).
+    pub fn resolver(&self) -> Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>> {
+        self.resolver.read().ok().and_then(|g| g.clone())
+    }
+
+    /// Resolve a destination URI to a `SocketAddr`, consulting the
+    /// configured [`Resolver`](rvoip_sip_transport::resolver::Resolver)
+    /// when one is installed and falling back to the process-wide
+    /// `HickoryResolver` otherwise. IP-literal URIs short-circuit
+    /// without touching DNS so this works in sandboxed environments
+    /// even when no system resolver is available.
+    ///
+    /// Returns `None` when the URI cannot be resolved.
+    pub async fn resolve_uri_to_socketaddr(
+        &self,
+        uri: &rvoip_sip_core::Uri,
+    ) -> Option<std::net::SocketAddr> {
+        if let Some(resolver) = self.resolver() {
+            match resolver.resolve(uri).await {
+                Ok(candidates) => return candidates.into_iter().next().map(|t| t.addr),
+                Err(e) => {
+                    tracing::debug!("Configured resolver returned error: {}", e);
+                    return None;
+                }
+            }
+        }
+        crate::dialog::dialog_utils::resolve_uri_to_socketaddr(uri).await
+    }
+
+    /// Decision returned by [`Self::run_identity_verification`].
+    ///
+    /// Owned by [`crate::manager`] (re-exported) so both publish paths
+    /// — [`DialogEventAdapter`](crate::events::DialogEventAdapter) and
+    /// [`DialogEventHub`](crate::events::DialogEventHub) — apply the
+    /// same RFC 8224 §6.2.2 reject contract.
+    pub async fn run_identity_verification(
+        &self,
+        event: &crate::events::SessionCoordinationEvent,
+        raw_request: &Option<std::sync::Arc<bytes::Bytes>>,
+    ) -> IdentityVerificationDecision {
+        // No verifier installed → annotate as `None`, never reject.
+        let verifier = match self.identity_verifier() {
+            Some(v) => v,
+            None => return IdentityVerificationDecision::Publish(None),
+        };
+
+        // Only IncomingCall events carry an inbound INVITE worth
+        // verifying; other coordination events ride through untouched.
+        let request = match event {
+            crate::events::SessionCoordinationEvent::IncomingCall { request, .. } => {
+                request.clone()
+            }
+            _ => return IdentityVerificationDecision::Publish(None),
+        };
+
+        // Extract the typed Identity header.
+        let identity_opt = request.headers.iter().find_map(|h| match h {
+            rvoip_sip_core::types::TypedHeader::Identity(id) => Some(id.clone()),
+            _ => None,
+        });
+
+        // Resolve the byte-exact upstream form. Fall back to
+        // re-serialising the parsed Request only when the transport
+        // cache missed (synthetic / mock transport paths).
+        let raw_bytes = raw_request.clone().unwrap_or_else(|| {
+            std::sync::Arc::new(bytes::Bytes::from(
+                rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
+            ))
+        });
+
+        let outcome = match identity_opt {
+            Some(identity) => verifier.verify(&raw_bytes, &identity, &request).await,
+            None => crate::manager::VerificationOutcome::NoIdentity,
+        };
+
+        let policy = self.verification_policy();
+        if outcome.should_reject(policy) {
+            // Wire the RFC 8224 §6.2.2 4xx response back through the
+            // server transaction. Identical to the adapter's reject
+            // helper; lives here so both publish paths share one
+            // implementation.
+            self.reject_inbound_identity_internal(event, &outcome)
+                .await;
+            return IdentityVerificationDecision::Drop;
+        }
+
+        let cc_status = match &outcome {
+            crate::manager::VerificationOutcome::Valid { .. } => {
+                IdentityVerificationStatus::Valid
+            }
+            crate::manager::VerificationOutcome::Stale { .. } => {
+                IdentityVerificationStatus::Stale
+            }
+            crate::manager::VerificationOutcome::BadSignature => {
+                IdentityVerificationStatus::BadSignature
+            }
+            crate::manager::VerificationOutcome::BadChain { .. } => {
+                IdentityVerificationStatus::BadChain
+            }
+            crate::manager::VerificationOutcome::ClaimMismatch { .. } => {
+                IdentityVerificationStatus::ClaimMismatch
+            }
+            crate::manager::VerificationOutcome::BadInfo { .. } => {
+                IdentityVerificationStatus::BadInfo
+            }
+            crate::manager::VerificationOutcome::NoIdentity => {
+                IdentityVerificationStatus::NoIdentity
+            }
+        };
+        IdentityVerificationDecision::Publish(Some(cc_status))
+    }
+
+    /// Send the RFC 8224 §6.2.2 4xx response back through the server
+    /// transaction. Internal helper used by [`Self::run_identity_verification`];
+    /// kept on `DialogManager` so both publish paths reach the same
+    /// code.
+    async fn reject_inbound_identity_internal(
+        &self,
+        event: &crate::events::SessionCoordinationEvent,
+        outcome: &crate::manager::VerificationOutcome,
+    ) {
+        use rvoip_sip_core::builder::SimpleResponseBuilder;
+        use rvoip_sip_core::types::StatusCode;
+
+        let (transaction_id, request) = match event {
+            crate::events::SessionCoordinationEvent::IncomingCall {
+                transaction_id,
+                request,
+                ..
+            } => (transaction_id.clone(), request.clone()),
+            _ => return,
+        };
+
+        let status_u16 = outcome.reject_status().unwrap_or(428);
+        let reason = match status_u16 {
+            403 => "Stale Date",
+            428 => "Use Identity Header",
+            436 => "Bad Identity Info",
+            437 => "Unsupported Credential",
+            438 => "Invalid Identity Header",
+            _ => "Forbidden",
+        };
+        let status = StatusCode::from_u16(status_u16).unwrap_or(StatusCode::Forbidden);
+
+        tracing::info!(
+            "STIR/SHAKEN reject: outcome={:?} → {} {} on transaction {}",
+            outcome,
+            status_u16,
+            reason,
+            transaction_id
+        );
+
+        let response =
+            SimpleResponseBuilder::response_from_request(&request, status, Some(reason)).build();
+
+        if let Err(e) = self
+            .transaction_manager
+            .send_response(&transaction_id, response)
+            .await
+        {
+            tracing::error!(
+                "Failed to send STIR/SHAKEN reject response on transaction {}: {}",
+                transaction_id,
+                e
+            );
+        }
     }
 
     /// Spawn (or replace) a RFC 5626 §3.5.1 CRLFCRLF keep-alive flow
@@ -449,6 +787,12 @@ impl DialogManager {
             outbound_flow_tasks: Arc::new(DashMap::new()),
             flow_by_destination: Arc::new(DashMap::new()),
             outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
+            identity_verifier: Arc::new(std::sync::RwLock::new(None)),
+            identity_signer: Arc::new(std::sync::RwLock::new(None)),
+            verification_policy: Arc::new(std::sync::RwLock::new(
+                crate::manager::VerificationPolicy::default(),
+            )),
+            resolver: Arc::new(std::sync::RwLock::new(None)),
         };
 
         // Spawn global transaction event processor
@@ -1612,7 +1956,7 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            let destination = self.resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
             .await
@@ -1713,7 +2057,7 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
+            let destination = self.resolve_uri_to_socketaddr(
                 &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
             )
             .await

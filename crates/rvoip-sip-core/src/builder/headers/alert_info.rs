@@ -308,7 +308,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::AlertInfo(header)) = request.header(&HeaderName::AlertInfo) {
             assert_eq!(header.alert_info_list.len(), 1);
@@ -407,13 +407,15 @@ mod tests {
 
     #[test]
     fn test_invalid_uri() {
-        // This should not add a header at all
+        // alert_info_uri must reject the invalid URI — only the auto
+        // Content-Length should remain.
         let request = RequestBuilder::new(Method::Invite, "sip:bob@example.com")
             .unwrap()
             .alert_info_uri("not a valid uri")
             .build();
 
-        assert_eq!(request.headers.len(), 0);
+        assert_eq!(request.headers.len(), 1); // only auto Content-Length
+        assert!(request.header(&HeaderName::AlertInfo).is_none());
     }
 
     #[test]

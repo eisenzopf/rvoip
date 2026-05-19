@@ -187,13 +187,17 @@ pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
 
     // We need at least one character after the colon
     if colon_pos + 1 >= input.len() {
-        // For torture tests, allow a trailing colon with no content
+        // For torture tests, allow a trailing colon with no content —
+        // but only for schemes that aren't subject to strict hier-part
+        // rules. http/https require a non-empty hier-part per
+        // RFC 2396/3986, so we reject `http:` even under lenient.
         #[cfg(feature = "lenient_parsing")]
         {
-            return Ok((&input[input.len()..], input));
+            if scheme != b"http" && scheme != b"https" {
+                return Ok((&input[input.len()..], input));
+            }
         }
 
-        #[cfg(not(feature = "lenient_parsing"))]
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
             nom::error::ErrorKind::TakeWhile1,
@@ -202,15 +206,20 @@ pub fn parse_absolute_uri(input: &[u8]) -> ParseResult<&[u8]> {
 
     let rest = &input[colon_pos + 1..];
 
-    // For torture tests, be more lenient with exotic URI formats
+    // For torture tests (RFC 4475), be more lenient with exotic URI
+    // formats — accept the entire input verbatim for schemes the
+    // strict parser doesn't model. http/https remain on the strict
+    // path because they have well-defined validation requirements
+    // (mandatory `//authority`, IPv6 well-formedness, etc.) and
+    // tests in this module exercise those rules.
     #[cfg(feature = "lenient_parsing")]
     {
-        // For unknown or custom scheme formats, just accept the entire input
-        // This is needed for RFC 4475 compliance tests
-        if str::from_utf8(scheme).map(|s| s.to_lowercase()) != Ok("sip".to_string())
-            && str::from_utf8(scheme).map(|s| s.to_lowercase()) != Ok("sips".to_string())
-            && str::from_utf8(scheme).map(|s| s.to_lowercase()) != Ok("tel".to_string())
-        {
+        let lowered = str::from_utf8(scheme).map(|s| s.to_lowercase());
+        let needs_strict = matches!(
+            lowered.as_deref(),
+            Ok("sip") | Ok("sips") | Ok("tel") | Ok("http") | Ok("https")
+        );
+        if !needs_strict {
             return Ok((&[], input));
         }
     }

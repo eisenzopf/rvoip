@@ -220,13 +220,21 @@ impl ServerInviteLogic {
                     // Create 100 Trying response
                     let original_request = data.request.lock().await;
                     let request = &*original_request;
-                    let trying_response =
+                    let mut trying_response =
                         rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
                             request,
                             rvoip_sip_core::StatusCode::Trying,
                             Some("Trying"),
                         )
                         .build();
+
+                    // RFC 3581 §4 — stamp received= / rport= on the
+                    // auto-100 Trying just like any other server-side
+                    // response.
+                    crate::transaction::utils::stamp_response_via_with_source(
+                        &mut trying_response,
+                        data.remote_addr,
+                    );
 
                     // Send the 100 Trying response
                     if let Err(e) = data
@@ -1001,6 +1009,18 @@ impl ServerTransaction for ServerInviteTransaction {
             let is_provisional = status.is_provisional();
             let is_success = status.is_success();
             let current_state = data.state.get();
+
+            // RFC 3581 §4 / RFC 3261 §18.2.1 — stamp `received=<src_ip>`
+            // and (when the inbound Via carried `;rport`) `rport=<src_port>`
+            // on the top Via BEFORE storing in `last_response`, so the
+            // retransmit paths (Timer G, etc.) emit the same stamped
+            // form. Lets NAT'd UACs discover their externally-visible
+            // address.
+            let mut response = response;
+            crate::transaction::utils::stamp_response_via_with_source(
+                &mut response,
+                data.remote_addr,
+            );
 
             // Store this response
             {

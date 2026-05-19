@@ -155,6 +155,8 @@ pub enum HeaderName {
     PAssertedIdentity,
     /// P-Preferred-Identity: Caller-preferred asserted identity (RFC 3325)
     PPreferredIdentity,
+    /// Identity: STIR signed PASSporT token (RFC 8224)
+    Identity,
 }
 
 impl HeaderName {
@@ -222,6 +224,7 @@ impl HeaderName {
             HeaderName::AllowEvents => "Allow-Events",
             HeaderName::PAssertedIdentity => "P-Asserted-Identity",
             HeaderName::PPreferredIdentity => "P-Preferred-Identity",
+            HeaderName::Identity => "Identity",
         }
     }
 }
@@ -305,6 +308,7 @@ impl FromStr for HeaderName {
             "allow-events" | "u" => Ok(HeaderName::AllowEvents),
             "p-asserted-identity" => Ok(HeaderName::PAssertedIdentity),
             "p-preferred-identity" => Ok(HeaderName::PPreferredIdentity),
+            "identity" => Ok(HeaderName::Identity),
             _ => Ok(HeaderName::Other(s.to_string())),
         }
     }

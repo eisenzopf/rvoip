@@ -176,13 +176,50 @@ impl DialogEventAdapter {
         Ok(())
     }
 
-    /// Publish a session coordination event (cross-crate only)
+    /// Publish a session coordination event (cross-crate only).
+    ///
+    /// **STIR/SHAKEN Phase 1 (RFC 8224):** when the event is an
+    /// `IncomingCall`, runs the installed `PASSporTVerifier` (if any)
+    /// on the byte-exact upstream INVITE before publishing. The
+    /// verifier outcome rides on `IncomingCall.identity_verification`
+    /// for the session layer to consume. When the configured
+    /// `VerificationPolicy` says to reject (`RequireValid` /
+    /// `StrictReject` with a failing outcome), the event is dropped
+    /// here — the actual 4xx response is sent by the transaction
+    /// layer in response to the inbound INVITE rather than reaching
+    /// session-core as a call.
     pub async fn publish_session_coordination_event(
         &self,
         event: SessionCoordinationEvent,
     ) -> Result<()> {
         // Convert to cross-crate event if applicable
-        if let Some(cross_crate_event) = self.convert_coordination_to_cross_crate_event(&event) {
+        if let Some(mut cross_crate_event) =
+            self.convert_coordination_to_cross_crate_event(&event)
+        {
+            // Run STIR/SHAKEN verification on IncomingCall before publishing.
+            // Routes through `DialogManager::run_identity_verification` so
+            // both this path and `DialogEventHub::try_publish_*` apply
+            // the same RFC 8224 contract (no drift between bridges).
+            if let RvoipCrossCrateEvent::DialogToSession(
+                DialogToSessionEvent::IncomingCall {
+                    ref raw_request,
+                    identity_verification: ref mut iv,
+                    ..
+                },
+            ) = cross_crate_event
+            {
+                if let Some(manager) = self.dialog_manager.read().await.as_ref() {
+                    match manager.run_identity_verification(&event, raw_request).await {
+                        crate::manager::IdentityVerificationDecision::Drop => {
+                            return Ok(());
+                        }
+                        crate::manager::IdentityVerificationDecision::Publish(status) => {
+                            *iv = status;
+                        }
+                    }
+                }
+            }
+
             // Publish cross-crate event
             if let Err(e) = self
                 .global_coordinator
@@ -198,6 +235,12 @@ impl DialogEventAdapter {
 
         Ok(())
     }
+
+    /// Read the configured PASSporT verification policy from the
+    // STIR/SHAKEN verify + reject logic moved to
+    // `DialogManager::run_identity_verification` so both publish paths
+    // (this adapter + `DialogEventHub::try_publish_*`) share one
+    // implementation — see core.rs.
 
     /// Check if adapter is running
     pub async fn is_running(&self) -> bool {
@@ -306,6 +349,12 @@ impl DialogEventAdapter {
                         transaction_id: transaction_id.to_string(),
                         source_addr: "unknown".to_string(),    // TODO: Extract from source
                         raw_request: Some(raw_bytes),
+                        // STIR/SHAKEN Phase 1: filled in by the async
+                        // `publish_session_coordination_event` wrapper
+                        // after running the installed verifier (if any).
+                        // The sync converter cannot await, so it sets
+                        // `None` here and the wrapper rewrites the field.
+                        identity_verification: None,
                     },
                 ))
             }

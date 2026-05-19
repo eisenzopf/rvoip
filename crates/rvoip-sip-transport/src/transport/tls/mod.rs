@@ -303,7 +303,15 @@ impl TlsTransport {
                                 .await;
                             }
                             Err(e) => {
-                                error!("TLS handshake with {} failed: {}", remote_addr, e);
+                                // Warn, not error: a failed inbound
+                                // handshake is recoverable and usually
+                                // benign (misconfigured peer, expired
+                                // cert, port probe). The accept loop
+                                // resumes on the next iteration. Real
+                                // operators still see this at default
+                                // log levels; CI test output doesn't
+                                // look like a regression.
+                                warn!("TLS handshake with {} failed: {}", remote_addr, e);
                             }
                         }
                     });
@@ -862,7 +870,7 @@ fn ip_to_server_name(addr: SocketAddr) -> ServerName {
 }
 
 /// Load PEM-encoded certificates from a file.
-fn load_certs(path: &Path) -> Result<Vec<Certificate>> {
+pub(crate) fn load_certs(path: &Path) -> Result<Vec<Certificate>> {
     let mut cert_file = File::open(path)
         .map_err(|e| Error::Other(format!("Failed to open cert {}: {}", path.display(), e)))?;
     let mut cert_data = Vec::new();
@@ -943,7 +951,7 @@ fn try_parse_one(
 }
 
 /// Load a PEM-encoded PKCS#8 private key from a file.
-fn load_private_key(path: &Path) -> Result<PrivateKey> {
+pub(crate) fn load_private_key(path: &Path) -> Result<PrivateKey> {
     let mut key_file = File::open(path)
         .map_err(|e| Error::Other(format!("Failed to open key {}: {}", path.display(), e)))?;
     let mut key_data = Vec::new();

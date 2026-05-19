@@ -29,6 +29,7 @@ pub mod media_type;
 pub mod mime_version;
 pub mod min_expires;
 pub mod min_se; // Added
+pub mod identity;
 pub mod organization;
 pub mod p_asserted_identity;
 pub mod priority;
@@ -96,6 +97,7 @@ pub use min_expires::parse_min_expires as parse_min_expires_value;
 pub use min_se::parse_min_se_value; // Added
 pub use organization::parse_organization;
 pub use organization::parse_organization as parse_organization_value;
+pub use identity::parse_identity;
 pub use p_asserted_identity::{parse_p_asserted_identity, parse_p_preferred_identity};
 pub use priority::parse_priority;
 pub use proxy_authenticate::parse_proxy_authenticate;

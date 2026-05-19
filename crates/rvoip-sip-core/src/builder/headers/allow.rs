@@ -300,7 +300,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Allow(allow)) = request.header(&HeaderName::Allow) {
             assert_eq!(allow.0.len(), 1);
@@ -317,7 +317,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Allow(allow)) = response.header(&HeaderName::Allow) {
             assert_eq!(allow.0.len(), 2);

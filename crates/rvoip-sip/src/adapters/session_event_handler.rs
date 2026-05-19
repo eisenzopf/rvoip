@@ -123,6 +123,7 @@ impl SessionCrossCrateEventHandler {
                 transaction_id,
                 source_addr,
                 raw_request,
+                identity_verification: _,
             } => {
                 self.handle_incoming_call_parts(
                     session_id.clone(),

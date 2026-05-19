@@ -7,7 +7,7 @@ pub mod session_event_handler;
 pub mod srtp_negotiator;
 
 // Re-export adapters
-pub use dialog_adapter::DialogAdapter;
+pub use dialog_adapter::{strip_record_route_below_self, strip_via_below_top, DialogAdapter};
 pub use media_adapter::{MediaAdapter, NegotiatedConfig};
 pub use registration_adapter::RegistrationAdapter;
 pub use session_api_event::{SessionApiCrossCrateEvent, SESSION_TO_APP_CHANNEL};

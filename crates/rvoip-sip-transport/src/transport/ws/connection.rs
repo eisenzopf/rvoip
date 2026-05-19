@@ -13,7 +13,10 @@ use tracing::{debug, error, trace, warn};
 #[cfg(feature = "ws")]
 use tokio_tungstenite::tungstenite::protocol::{Message as WsMessage, Role};
 #[cfg(feature = "ws")]
-use tokio_tungstenite::{tungstenite, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{tungstenite, WebSocketStream};
+
+#[cfg(feature = "ws")]
+use super::SipWsStream;
 
 use crate::error::{Error, Result};
 use rvoip_sip_core::{parse_message, Message};
@@ -29,7 +32,7 @@ const MAX_MESSAGE_SIZE: usize = 65535;
 pub struct WebSocketConnection {
     /// The WebSocket stream (writer half)
     #[cfg(feature = "ws")]
-    ws_writer: Mutex<SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>>,
+    ws_writer: Mutex<SplitSink<WebSocketStream<SipWsStream>, WsMessage>>,
     /// The peer's address
     peer_addr: SocketAddr,
     /// Whether the connection is closed
@@ -44,7 +47,7 @@ impl WebSocketConnection {
     /// Creates a WebSocket connection from an existing WebSocket stream
     #[cfg(feature = "ws")]
     pub fn from_writer(
-        ws_writer: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>,
+        ws_writer: SplitSink<WebSocketStream<SipWsStream>, WsMessage>,
         peer_addr: SocketAddr,
         secure: bool,
         subprotocol: String,

@@ -317,7 +317,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::RetryAfter(retry_after)) = response.header(&HeaderName::RetryAfter)
         {

@@ -125,21 +125,79 @@ pub fn extract_uri_from_contact(contact: &ContactValue) -> Result<Uri, &'static 
 
 /// Resolve a SIP URI to a socket address (convenience function).
 ///
-/// RFC 3263 §4 — walks NAPTR/SRV/A as appropriate (see
-/// `crate::dialog::dns_resolver`). Back-compat alias: returns just the
-/// `SocketAddr`. Callers that also need the resolved transport should use
-/// `dns_resolver::resolve_uri` directly.
+/// Walks RFC 3263 §4 (NAPTR → SRV → A/AAAA, with IP-literal /
+/// explicit-port short-circuits) via the process-wide
+/// [`HickoryResolver`](rvoip_sip_transport::resolver::HickoryResolver).
+/// Returns `None` on unresolvable URIs or DNS failures.
+///
+/// IP-literal URIs short-circuit before consulting the resolver so this
+/// function works in sandboxed environments (no `/etc/resolv.conf`)
+/// where the system resolver fails to initialise.
+///
+/// Per-`DialogManager` resolver overrides go through
+/// [`DialogManager::resolve_uri_to_socketaddr`](crate::manager::DialogManager::resolve_uri_to_socketaddr)
+/// rather than this free function.
 pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
-    crate::dialog::dns_resolver::resolve_uri_to_socketaddr(uri).await
+    use rvoip_sip_core::types::uri::{Host, Scheme};
+
+    // IP-literal short-circuit so this works even if the system DNS
+    // resolver is unavailable.
+    if let Host::Address(ip) = &uri.host {
+        let default_port = match uri.scheme() {
+            Scheme::Sips => 5061,
+            _ => 5060,
+        };
+        let port = uri.port.filter(|p| *p > 0).unwrap_or(default_port);
+        return Some(SocketAddr::new(ip.clone(), port));
+    }
+
+    let resolver = process_default_resolver().await?;
+    match resolver.resolve(uri).await {
+        Ok(candidates) => candidates.into_iter().next().map(|t| t.addr),
+        Err(e) => {
+            tracing::debug!("Default resolver returned error for {}: {}", uri, e);
+            None
+        }
+    }
 }
 
-/// URI resolution utilities (historical module path).
-///
-/// Kept as an alias to `crate::dialog::dns_resolver` so existing callers
-/// continue to compile. New code should import from `dns_resolver`
-/// directly.
+/// URI resolution utilities (historical module path). Re-exports of the
+/// free function above are kept so existing call sites compile unchanged.
 pub mod uri_resolver {
-    pub use crate::dialog::dns_resolver::{resolve_uri, resolve_uri_to_socketaddr, ResolvedTarget};
+    pub use super::resolve_uri_to_socketaddr;
+}
+
+/// Process-wide lazy-init system resolver. The first call constructs a
+/// [`HickoryResolver`](rvoip_sip_transport::resolver::HickoryResolver)
+/// from `/etc/resolv.conf` (or the OS resolver). Failure to construct
+/// (sandboxed CI without resolv.conf) is logged once and `None` is
+/// cached forever so IP-literal-only code paths still work.
+async fn process_default_resolver() -> Option<std::sync::Arc<
+    dyn rvoip_sip_transport::resolver::Resolver,
+>> {
+    use std::sync::Arc;
+    static DEFAULT_RESOLVER: tokio::sync::OnceCell<
+        Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>,
+    > = tokio::sync::OnceCell::const_new();
+
+    DEFAULT_RESOLVER
+        .get_or_init(|| async {
+            match rvoip_sip_transport::resolver::HickoryResolver::new_system() {
+                Ok(r) => {
+                    let arc: Arc<dyn rvoip_sip_transport::resolver::Resolver> = Arc::new(r);
+                    Some(arc)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "system DNS resolver init failed: {} — only IP-literal URIs will resolve",
+                        e
+                    );
+                    None
+                }
+            }
+        })
+        .await
+        .clone()
 }
 
 #[cfg(test)]

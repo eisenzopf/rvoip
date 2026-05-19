@@ -1,0 +1,71 @@
+[package]
+name = "rvoip-stir-shaken"
+version = "0.1.0"
+edition = "2021"
+authors = ["RVoIP Contributors"]
+description = "STIR/SHAKEN (RFC 8224 / RFC 8225 / ATIS-1000074) signing and verification for rvoip"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/eisenzopf/rvoip"
+repository = "https://github.com/eisenzopf/rvoip"
+
+# Optional sibling crate consumed via path dependency by applications
+# that need STIR/SHAKEN signing / verification. Same packaging pattern
+# as `rvoip-auth-core`. Heavy crypto/HTTP deps (jsonwebtoken,
+# x509-parser, webpki, reqwest) are isolated here so consumers of
+# rvoip-sip-dialog that don't need STIR/SHAKEN don't pay for them.
+#
+# The trait surface (PASSporTSigner / PASSporTVerifier / VerificationOutcome)
+# lives in rvoip-sip-dialog where the hooks attach; this crate provides
+# the reference implementations.
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.40", features = ["rt", "macros", "sync"] }
+async-trait = "0.1"
+
+# Internal — typed Identity header (RFC 8224) and Request/Response types
+rvoip-sip-core = { path = "../rvoip-sip-core" }
+
+# Trait surface that this crate's impls satisfy
+rvoip-sip-dialog = { path = "../rvoip-sip-dialog" }
+
+# JWS / JWT for PASSporT (RFC 8225)
+jsonwebtoken = "9.3"
+
+# Certificate-chain validation (SHAKEN STI-CA)
+x509-parser = "0.16"
+
+# HTTP fetch of the info= cert URL
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# URL handling
+url = "2.5"
+
+# Time handling (iat freshness window)
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUIDs (origid claim — RFC 8588)
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Errors
+thiserror = "1.0"
+
+# Base64url for PASSporT JWT segments
+base64 = "0.22"
+
+# Logging
+tracing = "0.1"
+
+# Shared types
+bytes = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1.40", features = ["full", "test-util"] }
+# rcgen lets the integration tests generate a self-signed P-256
+# cert paired with the signer's private key, so the sign → verify
+# round-trip runs without any external infrastructure.
+rcgen = "0.13"

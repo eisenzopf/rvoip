@@ -183,6 +183,8 @@ pub enum TypedHeader {
     PAssertedIdentity(crate::types::p_asserted_identity::PAssertedIdentity),
     /// P-Preferred-Identity (RFC 3325)
     PPreferredIdentity(crate::types::p_asserted_identity::PPreferredIdentity),
+    /// Identity (RFC 8224) — STIR signed PASSporT token
+    Identity(crate::types::identity::Identity),
 
     /// Represents an unknown or unparsed header.
     Other(HeaderName, HeaderValue),
@@ -252,6 +254,7 @@ impl TypedHeader {
             TypedHeader::AllowEvents(_) => HeaderName::AllowEvents,
             TypedHeader::PAssertedIdentity(_) => HeaderName::PAssertedIdentity,
             TypedHeader::PPreferredIdentity(_) => HeaderName::PPreferredIdentity,
+            TypedHeader::Identity(_) => HeaderName::Identity,
             TypedHeader::Other(name, _) => name.clone(),
         }
     }
@@ -573,6 +576,7 @@ impl fmt::Display for TypedHeader {
             TypedHeader::PPreferredIdentity(val) => {
                 write!(f, "{}: {}", HeaderName::PPreferredIdentity, val)
             }
+            TypedHeader::Identity(val) => write!(f, "{}: {}", HeaderName::Identity, val),
             TypedHeader::Other(name, value) => write!(f, "{}: {}", name, value),
         }
     }
@@ -1566,6 +1570,12 @@ impl TryFrom<Header> for TypedHeader {
             HeaderName::PPreferredIdentity => {
                 match all_consuming(parser::headers::parse_p_preferred_identity)(value_bytes) {
                     Ok((_, ppi)) => Ok(TypedHeader::PPreferredIdentity(ppi)),
+                    Err(e) => Err(Error::from(e.to_owned())),
+                }
+            }
+            HeaderName::Identity => {
+                match parser::headers::parse_identity(value_bytes) {
+                    Ok((_, id)) => Ok(TypedHeader::Identity(id)),
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }

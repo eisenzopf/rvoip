@@ -224,7 +224,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Path(path)) = request.header(&HeaderName::Path) {
             assert_eq!(path.len(), 1);
@@ -243,7 +243,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Path(path)) = request.header(&HeaderName::Path) {
             assert_eq!(path.len(), 2);

@@ -22,7 +22,11 @@ workspace = true
 [dependencies]
 # 🎯 INTERNAL CRATES - Use workspace dependencies
 rvoip-sip-core.workspace = true
-rvoip-sip-transport.workspace = true
+# `dns` activates `HickoryResolver` + NAPTR/SRV/A ladder. Phase 5
+# default behaviour preserves pre-Phase-5 URI resolution; consumers
+# that want a leaner build can `default-features = false` on this
+# crate and re-add only the features they need.
+rvoip-sip-transport = { workspace = true, features = ["dns"] }
 rvoip-infra-common.workspace = true
 # transaction-core has been merged into this crate
 
@@ -41,8 +45,6 @@ thiserror.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 rand.workspace = true
-hickory-resolver.workspace = true
-fastrand.workspace = true
 
 # Crate-specific dependencies not in workspace
 http = "0.2"

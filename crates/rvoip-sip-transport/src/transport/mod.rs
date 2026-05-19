@@ -174,6 +174,21 @@ pub trait Transport: Send + Sync + fmt::Debug {
         TransportType::Udp
     }
 
+    /// Largest serialized SIP message size this transport can safely
+    /// ship in a single send.
+    ///
+    /// Per RFC 3261 §18.1.1, datagram transports (UDP) MUST switch to
+    /// a congestion-controlled transport once a request exceeds 1300
+    /// bytes (or comes within 200 bytes of path MTU). The dialog
+    /// layer's transport multiplexer consults this method to decide
+    /// when to auto-failover UDP → TCP.
+    ///
+    /// Stream-oriented transports (TCP/TLS/WS/WSS) take the default
+    /// `usize::MAX` — they are not byte-bounded at this layer.
+    fn max_safe_message_size(&self) -> usize {
+        usize::MAX
+    }
+
     /// Check if a specific transport is currently connected
     fn is_transport_connected(&self, transport_type: TransportType) -> bool {
         // For UDP, always considered connected
@@ -244,6 +259,83 @@ pub trait Transport: Send + Sync + fmt::Debug {
             "send_message_raw is not supported on this transport".to_string(),
         ))
     }
+
+    /// Forward a serialized SIP message verbatim while pushing or
+    /// popping the top `Via` header in-place at the byte level.
+    ///
+    /// Designed for stateless-proxy forwarders that need byte-exact
+    /// preservation of the RFC 8224 `Identity` header (re-serializing
+    /// the structured message would canonicalise the JWT-bearing
+    /// header and invalidate the JWS signature). Only the top Via
+    /// line is rewritten; every other byte — Identity, body, all
+    /// remaining headers — flows through untouched.
+    ///
+    /// Direction conventions:
+    /// - `ViaRewrite::Push(line)` — request forwarding: insert the
+    ///   caller-supplied Via line (must include trailing `\r\n`) at
+    ///   the top of the Via stack, in front of the existing top
+    ///   entry (RFC 3261 §16.6 step 8).
+    /// - `ViaRewrite::Pop` — response forwarding: remove the existing
+    ///   top Via line (RFC 3261 §16.7 step 3).
+    ///
+    /// Errors:
+    /// - `Error::ProtocolError` when the message has no Via header to
+    ///   rewrite (push needs an anchor; pop needs something to remove).
+    /// - Whatever `send_message_raw` returns on transport failure.
+    ///
+    /// The default implementation rewrites the bytes here and then
+    /// delegates to `send_message_raw`. Transports do not normally
+    /// need to override.
+    async fn forward_raw_with_via_rewrite(
+        &self,
+        bytes: Bytes,
+        rewrite: ViaRewrite,
+        destination: SocketAddr,
+    ) -> Result<()> {
+        let rewritten = apply_via_rewrite(bytes, rewrite)?;
+        self.send_message_raw(rewritten, destination).await
+    }
+}
+
+/// Direction-specific Via-stack edit for
+/// [`Transport::forward_raw_with_via_rewrite`].
+#[derive(Debug, Clone)]
+pub enum ViaRewrite {
+    /// Request forwarding — insert the supplied Via line (caller is
+    /// responsible for the trailing `\r\n`) above the existing top.
+    Push(Bytes),
+    /// Response forwarding — remove the existing top Via line.
+    Pop,
+}
+
+/// Apply a `ViaRewrite` to a serialized SIP message, returning the
+/// edited byte buffer. Public so callers that want to inspect or
+/// further-process the rewritten bytes can do so without owning a
+/// `Transport`.
+pub fn apply_via_rewrite(bytes: Bytes, rewrite: ViaRewrite) -> Result<Bytes> {
+    use bytes::BytesMut;
+    use rvoip_sip_core::parser::via_locator::find_top_via_line;
+
+    let top_range = find_top_via_line(&bytes).ok_or_else(|| {
+        crate::error::Error::ProtocolError(
+            "forward_raw_with_via_rewrite: message has no top Via header".to_string(),
+        )
+    })?;
+
+    let mut buf = BytesMut::with_capacity(bytes.len() + 256);
+    buf.extend_from_slice(&bytes[..top_range.start]);
+    match rewrite {
+        ViaRewrite::Push(new_line) => {
+            buf.extend_from_slice(&new_line);
+            // Existing top Via stays — slide it down to position 2.
+            buf.extend_from_slice(&bytes[top_range.start..]);
+        }
+        ViaRewrite::Pop => {
+            // Drop the top Via line entirely (range includes its CRLF).
+            buf.extend_from_slice(&bytes[top_range.end..]);
+        }
+    }
+    Ok(buf.freeze())
 }
 
 #[cfg(test)]

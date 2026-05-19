@@ -9,9 +9,19 @@
 
 pub mod dialog_utils;
 pub mod message_extractors;
+pub mod mtu;
 pub mod request_builders;
 pub mod response_builders;
+pub mod rport;
 pub mod transaction_helpers;
+
+// Re-export the rport stamping helpers for callers in the server-side
+// response path (RFC 3581 §4 / RFC 3261 §18.2.1).
+pub use rport::{stamp_received_rport, stamp_response_via_with_source};
+
+// Re-export the MTU helper used by the transport multiplexer when it
+// auto-fails an oversized UDP request to TCP (RFC 3261 §18.1.1).
+pub use mtu::set_top_via_protocol;
 
 // Re-export everything for backward compatibility
 // This ensures existing code using `use crate::transaction::utils::*` continues to work

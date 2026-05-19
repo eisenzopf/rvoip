@@ -301,7 +301,7 @@ mod tests {
             .build();
 
         let headers = &request.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Expires(expires)) = request.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 3600);
@@ -317,7 +317,7 @@ mod tests {
             .build();
 
         let headers = &response.headers;
-        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.len(), 2); // user header + auto Content-Length
 
         if let Some(TypedHeader::Expires(expires)) = response.header(&HeaderName::Expires) {
             assert_eq!(expires.0, 1800);

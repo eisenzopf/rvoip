@@ -2630,6 +2630,91 @@ pub(crate) fn rewrite_contact_host(input: &str, public: std::net::SocketAddr) ->
     format!("{}{}{}{}", scheme_prefix, user_at, public, params_suffix)
 }
 
+/// SBC topology hiding (RFC 3261 §16-style) — strip every `Via:`
+/// header below the topmost one.
+///
+/// Used when an SBC or stateless proxy mutates an inbound request
+/// in-place before forwarding it, and wants to hide upstream hop
+/// identities from the downstream peer. The top Via is preserved so
+/// that the response can route back to *some* sender (typically the
+/// SBC itself after it re-stamps the top Via with its own sent-by).
+///
+/// **NOT used by the B2BUA pattern in this codebase** — the standard
+/// `coord.invite(...)` path builds a fresh outbound Request with the
+/// SBC's own Via stamped fresh, so there's nothing to strip. This
+/// helper is meaningful for proxy-style flows on top of
+/// `Transport::send_message_raw` (i.e. the helpers planned for Phase
+/// 8.5 stateless-proxy support).
+///
+/// Returns the number of Via headers removed (0 if there was only
+/// one to begin with — common for endpoints that talk directly to
+/// the SBC without intermediate proxies).
+pub fn strip_via_below_top(request: &mut rvoip_sip_core::Request) -> usize {
+    use rvoip_sip_core::types::TypedHeader;
+    let mut seen_first_via = false;
+    let mut removed = 0;
+    request.headers.retain(|h| {
+        if matches!(h, TypedHeader::Via(_)) {
+            if seen_first_via {
+                removed += 1;
+                false
+            } else {
+                seen_first_via = true;
+                true
+            }
+        } else {
+            true
+        }
+    });
+    removed
+}
+
+/// SBC topology hiding — strip every `Record-Route:` header whose
+/// host does NOT match the supplied `self_host` (the SBC's own
+/// public-facing host).
+///
+/// RFC 3261 §16.6 requires proxies to insert their own Record-Route
+/// before forwarding so subsequent in-dialog requests come back
+/// through them. An SBC doing topology hiding wants downstream to
+/// see ONLY the SBC's own entry, not the upstream proxies that
+/// previously inserted theirs.
+///
+/// `self_host` is matched against `Address.uri.host` as a case-
+/// insensitive string. Pass the SBC's externally-visible host (e.g.
+/// `"sbc.example.com"` or `"203.0.113.5"`) — typically what's also
+/// used in `rewrite_contact_host`.
+///
+/// Returns the number of Record-Route entries (across all headers)
+/// removed.
+pub fn strip_record_route_below_self(
+    request: &mut rvoip_sip_core::Request,
+    self_host: &str,
+) -> usize {
+    use rvoip_sip_core::types::TypedHeader;
+    let self_lower = self_host.to_ascii_lowercase();
+    let mut removed = 0;
+
+    // First pass: filter each RecordRoute header's entries.
+    for header in request.headers.iter_mut() {
+        if let TypedHeader::RecordRoute(rr) = header {
+            let before = rr.0.len();
+            rr.0.retain(|entry| {
+                let host = entry.0.uri.host.to_string().to_ascii_lowercase();
+                host == self_lower
+            });
+            removed += before - rr.0.len();
+        }
+    }
+
+    // Second pass: drop any RecordRoute headers that became empty.
+    request.headers.retain(|h| match h {
+        TypedHeader::RecordRoute(rr) => !rr.0.is_empty(),
+        _ => true,
+    });
+
+    removed
+}
+
 /// E4 / RFC 3261 §8.1.2: produce the full `extra_headers` list for an
 /// outgoing INVITE, prepending a pre-loaded `Route` header when an outbound
 /// proxy is configured on the `DialogAdapter`.

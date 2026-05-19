@@ -8,6 +8,7 @@ pub mod error;
 pub mod events;
 pub mod factory;
 pub mod manager;
+pub mod resolver;
 pub mod transport;
 
 // Internal modules
@@ -16,6 +17,7 @@ mod tests;
 
 // Re-export commonly used types and functions
 pub use error::{Error, Result};
+pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
 pub use transport::tcp::TcpTransport;
 pub use transport::tls::TlsTransport;
 pub use transport::udp::UdpTransport;
