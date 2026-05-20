@@ -1,5 +1,5 @@
 //! Reference [`PASSporTVerifier`] implementation for STIR/SHAKEN
-//! (RFC 8224 / RFC 8225 / RFC 8588 / ATIS-1000074).
+//! (RFC 8224 / RFC 8225 / RFC 8588 / ATIS-1000074 / ATIS-1000080).
 //!
 //! Given an inbound SIP request's byte-exact raw bytes and the
 //! parsed `Identity:` header, this verifier:
@@ -7,33 +7,42 @@
 //! 1. Splits the compact-form PASSporT JWT into header / payload /
 //!    signature segments.
 //! 2. Resolves the certificate via the configured
-//!    [`CertResolver`] (default: HTTPS fetch with size cap).
-//! 3. Extracts the EC public key from the certificate's
-//!    SubjectPublicKeyInfo.
-//! 4. Verifies the JWS signature against `header.payload` using
+//!    [`CertResolver`] (default: HTTPS fetch with size cap). The
+//!    response may be a single DER cert or a PEM bundle (leaf
+//!    first, intermediates next), matching the SHAKEN STI-CA
+//!    convention.
+//! 3. (Optional) Validates the chain against an application-supplied
+//!    [`TrustStore`] (STI-CA roots per ATIS-1000080). Skipped when
+//!    the store is empty — preserves prior behaviour for callers
+//!    that haven't opted into chain validation.
+//! 4. (Optional) Enforces the SHAKEN leaf-cert profile per RFC 8226:
+//!    TNAuthList must be present, and (when set) the JWT Claim
+//!    Constraints `permittedValues` for `attest` must allow the
+//!    PASSporT's claimed level. TNAuthList SPC entries authorise
+//!    any orig.tn (ambient SP cert); TN / range entries must match.
+//! 5. Extracts the EC public key from the leaf's
+//!    SubjectPublicKeyInfo and verifies the JWS signature using
 //!    ES256.
-//! 5. Cross-checks PASSporT `orig` / `dest` claims against the SIP
+//! 6. Cross-checks PASSporT `orig` / `dest` claims against the SIP
 //!    `From` / `To` URIs.
-//! 6. Validates that `iat` is within the configured freshness
+//! 7. Validates that `iat` is within the configured freshness
 //!    window (default ±60 s per ATIS-1000074 §5.3.1).
 //!
 //! ## Out of scope for this reference impl
 //!
-//! - **Full SHAKEN certificate-chain validation** (STI-CA → STI-PA
-//!   anchors per ATIS-1000080). The current impl trusts the cert
-//!   returned by the `CertResolver` directly. Applications that
-//!   need chain validation should compose this verifier with a
-//!   `webpki`-based pre-check, or wrap the `CertResolver` with a
-//!   chain-validating decorator that returns only the leaf cert
-//!   after successful validation.
-//! - **OCSP / CRL checks** for cert revocation. Out of scope for
-//!   the in-band SIP path; deployments rely on STI-CA
-//!   short-lived certs.
+//! - **OCSP / CRL checks** for cert revocation. webpki's path
+//!   validation does not consult revocation; deployments that
+//!   need revocation should layer it on top of the [`CertResolver`].
 //! - **`ppt=div` / `ppt=rcd` PASSporT extensions** beyond the base
 //!   SHAKEN profile. Add follow-on impls per profile.
 
 use crate::cert_resolver::CertResolver;
+use crate::profile::{
+    parse_jwt_claim_constraints, parse_tnauth_list, JwtClaimConstraints, TNAuthList,
+    JWT_CLAIM_CONSTRAINTS_OID, TN_AUTH_LIST_OID,
+};
 use crate::signer::split_compact_jwt;
+use crate::trust::{decode_pem_bundle, TrustStore};
 use async_trait::async_trait;
 use bytes::Bytes;
 use jsonwebtoken::{Algorithm, DecodingKey};
@@ -46,6 +55,11 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use url::Url;
 use x509_parser::prelude::*;
+
+// SHAKEN leaf certs commonly carry the `id-kp-clientAuth` EKU
+// (rustls-webpki 0.101's `KeyUsage::client_auth()` enforces this).
+// STIR/SHAKEN does not define its own EKU; STI-PA-issued certs
+// most commonly carry `id-kp-clientAuth`.
 
 /// Configuration for the reference [`ShakenVerifier`].
 #[derive(Clone)]
@@ -62,6 +76,13 @@ pub struct ShakenVerifierConfig {
     /// profiles (`div`, `rcd`) should set this to `false`.
     /// Default: `true`.
     pub require_shaken_ppt: bool,
+
+    /// Trusted STI-CA root certificates. When empty (the default),
+    /// chain validation and SHAKEN cert-profile checks are skipped
+    /// — the verifier falls back to trusting whatever the resolver
+    /// returned (legacy behaviour, suitable only for tests or for
+    /// callers that compose their own validation layer).
+    pub trust_store: TrustStore,
 }
 
 impl Default for ShakenVerifierConfig {
@@ -69,7 +90,18 @@ impl Default for ShakenVerifierConfig {
         Self {
             freshness_window: Duration::from_secs(60),
             require_shaken_ppt: true,
+            trust_store: TrustStore::empty(),
         }
+    }
+}
+
+impl ShakenVerifierConfig {
+    /// Install operator-supplied STI-CA trust anchors. When set, the
+    /// verifier runs full chain validation (webpki) AND enforces the
+    /// SHAKEN leaf-cert profile (TNAuthList, JWT Claim Constraints).
+    pub fn with_trust_anchors(mut self, store: TrustStore) -> Self {
+        self.trust_store = store;
+        self
     }
 }
 
@@ -78,6 +110,7 @@ impl std::fmt::Debug for ShakenVerifierConfig {
         f.debug_struct("ShakenVerifierConfig")
             .field("freshness_window", &self.freshness_window)
             .field("require_shaken_ppt", &self.require_shaken_ppt)
+            .field("trust_store", &self.trust_store)
             .finish()
     }
 }
@@ -223,7 +256,8 @@ impl PASSporTVerifier for ShakenVerifier {
             }
         };
 
-        // Step 3 — fetch and parse the cert.
+        // Step 3 — fetch and parse the cert bundle (leaf first,
+        // intermediates next per SHAKEN STI-CA convention).
         let cert_bytes = match self.resolver.fetch(&cert_url).await {
             Ok(b) => b,
             Err(e) => {
@@ -234,12 +268,15 @@ impl PASSporTVerifier for ShakenVerifier {
             }
         };
 
-        let cert_der = match maybe_decode_pem_cert(&cert_bytes) {
-            Some(der) => der,
-            None => cert_bytes.clone(),
+        let bundle = match decode_cert_bundle(&cert_bytes) {
+            Ok(b) => b,
+            Err(reason) => return VerificationOutcome::BadChain { reason },
         };
+        let leaf_der = &bundle[0];
+        let intermediates_der: Vec<&[u8]> =
+            bundle.iter().skip(1).map(|d| d.as_slice()).collect();
 
-        let (_, cert) = match X509Certificate::from_der(&cert_der) {
+        let (_, cert) = match X509Certificate::from_der(leaf_der) {
             Ok(c) => c,
             Err(e) => {
                 return VerificationOutcome::BadChain {
@@ -247,6 +284,25 @@ impl PASSporTVerifier for ShakenVerifier {
                 };
             }
         };
+
+        // Step 3a — optional path validation against operator-supplied
+        // STI-CA trust anchors. Skipped (legacy behaviour) when the
+        // trust store is empty.
+        if !self.config.trust_store.is_empty() {
+            if let Err(reason) =
+                validate_chain(leaf_der, &intermediates_der, &self.config.trust_store)
+            {
+                return VerificationOutcome::BadChain { reason };
+            }
+
+            // Step 3b — SHAKEN leaf-cert profile enforcement
+            // (TNAuthList + JWT Claim Constraints). Only run when
+            // chain validation is active; otherwise we'd reject test
+            // certs that the legacy path accepts.
+            if let Err(outcome) = enforce_shaken_profile(&cert, &payload) {
+                return outcome;
+            }
+        }
 
         let spki_bytes = cert.tbs_certificate.subject_pki.subject_public_key.data.as_ref();
 
@@ -308,23 +364,162 @@ impl PASSporTVerifier for ShakenVerifier {
     }
 }
 
-/// If `bytes` is PEM-encoded with a CERTIFICATE armour, return the
-/// DER body. Returns `None` if the input doesn't look like a PEM
-/// certificate envelope (caller falls back to treating it as DER).
-fn maybe_decode_pem_cert(bytes: &[u8]) -> Option<Vec<u8>> {
-    let s = std::str::from_utf8(bytes).ok()?;
-    if !s.contains("-----BEGIN CERTIFICATE-----") {
-        return None;
+/// Decode the resolver's response as either a PEM bundle (one or
+/// more `-----BEGIN CERTIFICATE-----` blocks; leaf first,
+/// intermediates next) or a single DER blob. Returns a non-empty
+/// list of DER cert blobs on success.
+fn decode_cert_bundle(bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+    // Heuristic: a PEM body always starts with ASCII armour.
+    let looks_like_pem = std::str::from_utf8(bytes)
+        .map(|s| s.contains("-----BEGIN CERTIFICATE-----"))
+        .unwrap_or(false);
+
+    if looks_like_pem {
+        decode_pem_bundle(bytes)
+            .map_err(|e| format!("PEM bundle decode: {:?}", e))
+            .and_then(|ders| {
+                if ders.is_empty() {
+                    Err("PEM bundle contained no CERTIFICATE blocks".into())
+                } else {
+                    Ok(ders)
+                }
+            })
+    } else {
+        Ok(vec![bytes.to_vec()])
     }
-    let body = s
-        .split("-----BEGIN CERTIFICATE-----")
-        .nth(1)?
-        .split("-----END CERTIFICATE-----")
-        .next()?;
-    use base64::engine::general_purpose::STANDARD;
-    use base64::Engine as _;
-    let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-    STANDARD.decode(cleaned).ok()
+}
+
+/// Run webpki path validation for the leaf cert against the
+/// configured trust anchors. Allowed signature algorithms are
+/// ES256 only (SHAKEN profile); EKU `id-kp-clientAuth` is checked
+/// only when the leaf carries an Extended Key Usage extension.
+fn validate_chain(
+    leaf_der: &[u8],
+    intermediates: &[&[u8]],
+    store: &TrustStore,
+) -> Result<(), String> {
+    let anchors = store
+        .as_trust_anchors()
+        .map_err(|e| format!("trust store: {:?}", e))?;
+
+    let leaf = webpki::EndEntityCert::try_from(leaf_der)
+        .map_err(|e| format!("leaf cert parse failed: {}", e))?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| "system clock before UNIX epoch".to_string())?
+        .as_secs();
+    let time = webpki::Time::from_seconds_since_unix_epoch(now_secs);
+
+    static ALGS: &[&webpki::SignatureAlgorithm] = &[&webpki::ECDSA_P256_SHA256];
+
+    leaf.verify_for_usage(
+        ALGS,
+        &anchors,
+        intermediates,
+        time,
+        webpki::KeyUsage::client_auth(),
+        &[],
+    )
+    .map_err(|e| format!("chain validation failed: {}", e))
+}
+
+/// Walk the leaf cert's extensions and enforce the SHAKEN profile:
+/// TNAuthList MUST be present and (when only TN/range entries are
+/// listed) MUST authorise the PASSporT's orig.tn. JWT Claim
+/// Constraints (when present) MUST permit the PASSporT's attest
+/// value.
+fn enforce_shaken_profile(
+    cert: &X509Certificate<'_>,
+    payload: &ParsedPassportPayload,
+) -> Result<(), VerificationOutcome> {
+    let mut tnauth: Option<TNAuthList> = None;
+    let mut jcc: Option<JwtClaimConstraints> = None;
+
+    for ext in cert.extensions() {
+        let oid_str = ext.oid.to_id_string();
+        if oid_str == TN_AUTH_LIST_OID {
+            match parse_tnauth_list(ext.value) {
+                Ok(parsed) => tnauth = Some(parsed),
+                Err(reason) => {
+                    return Err(VerificationOutcome::BadChain { reason });
+                }
+            }
+        } else if oid_str == JWT_CLAIM_CONSTRAINTS_OID {
+            match parse_jwt_claim_constraints(ext.value) {
+                Ok(parsed) => jcc = Some(parsed),
+                Err(reason) => {
+                    return Err(VerificationOutcome::BadChain { reason });
+                }
+            }
+        }
+    }
+
+    let Some(tnauth) = tnauth else {
+        return Err(VerificationOutcome::BadChain {
+            reason: "TNAuthList extension missing from SHAKEN leaf cert".into(),
+        });
+    };
+    if tnauth.is_empty() {
+        return Err(VerificationOutcome::BadChain {
+            reason: "TNAuthList present but empty".into(),
+        });
+    }
+
+    // SPC entry = ambient SP authority; any orig.tn signed by this
+    // cert is acceptable. If no SPC entries, the orig.tn must
+    // match a TN or fall inside a range entry.
+    if tnauth.spcs.is_empty() {
+        if let Some(orig_tn) = payload.orig.tn.as_deref() {
+            let matches_tn = tnauth.tns.iter().any(|t| t == orig_tn);
+            let matches_range = tnauth.tn_ranges.iter().any(|(start, count)| {
+                tn_within_range(orig_tn, start, *count)
+            });
+            if !matches_tn && !matches_range {
+                return Err(VerificationOutcome::BadChain {
+                    reason: format!(
+                        "PASSporT orig.tn {} not authorised by cert TNAuthList",
+                        orig_tn
+                    ),
+                });
+            }
+        }
+        // orig is a URI rather than TN: fall through. RFC 8226 §9
+        // doesn't speak to URI-only origs; treat the cert's
+        // TN/range entries as silent on URI-only PASSporTs.
+    }
+
+    if let Some(jcc) = jcc {
+        if let Some(permitted) = jcc.permitted_for("attest") {
+            if let Some(attest) = payload.attest.as_deref() {
+                if !permitted.iter().any(|p| p == attest) {
+                    return Err(VerificationOutcome::BadChain {
+                        reason: format!(
+                            "attest='{}' not permitted by JWT Claim Constraints (allowed: {:?})",
+                            attest, permitted
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// True when `tn` (an E.164-shaped string starting with `+`) falls
+/// within `[start, start+count)`. Implemented as numeric comparison
+/// over the digits after the leading `+`. Rejects malformed inputs
+/// silently (caller treats no-match as authorisation failure).
+fn tn_within_range(tn: &str, start: &str, count: u64) -> bool {
+    let tn_digits = tn.strip_prefix('+').unwrap_or(tn);
+    let start_digits = start.strip_prefix('+').unwrap_or(start);
+    let (Ok(tn_num), Ok(start_num)) = (tn_digits.parse::<u128>(), start_digits.parse::<u128>())
+    else {
+        return false;
+    };
+    let count = count as u128;
+    tn_num >= start_num && tn_num < start_num.saturating_add(count)
 }
 
 /// Build a `DecodingKey` from an X.509 SPKI public-key bytes
@@ -421,16 +616,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn maybe_decode_pem_cert_strips_armour() {
+    fn decode_bundle_strips_pem_armour() {
         let pem = b"-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----\n";
-        let der = maybe_decode_pem_cert(pem).expect("decode");
-        assert_eq!(der, b"ABCD");
+        let bundle = decode_cert_bundle(pem).expect("decode");
+        assert_eq!(bundle.len(), 1);
+        assert_eq!(bundle[0], b"ABCD");
     }
 
     #[test]
-    fn maybe_decode_pem_cert_returns_none_for_der() {
-        // DER blob without PEM armour
-        assert!(maybe_decode_pem_cert(&[0x30, 0x82, 0x01]).is_none());
+    fn decode_bundle_passes_through_der() {
+        let der = vec![0x30, 0x82, 0x01, 0x00];
+        let bundle = decode_cert_bundle(&der).expect("decode");
+        assert_eq!(bundle.len(), 1);
+        assert_eq!(bundle[0], der);
+    }
+
+    #[test]
+    fn decode_bundle_splits_multiple_pem_blocks() {
+        let pem = b"-----BEGIN CERTIFICATE-----\nQUJDRA==\n-----END CERTIFICATE-----\n\
+                    -----BEGIN CERTIFICATE-----\nWFlaWlpa\n-----END CERTIFICATE-----\n";
+        let bundle = decode_cert_bundle(pem).expect("decode");
+        assert_eq!(bundle.len(), 2);
+        assert_eq!(bundle[0], b"ABCD");
+        assert_eq!(bundle[1], b"XYZZZZ");
+    }
+
+    #[test]
+    fn tn_range_check_handles_e164_plus_prefix() {
+        assert!(tn_within_range("+15558000005", "+15558000000", 100));
+        assert!(!tn_within_range("+15558000200", "+15558000000", 100));
+        assert!(tn_within_range("+15558000000", "+15558000000", 1));
+        assert!(!tn_within_range("garbage", "+15558000000", 100));
     }
 
     #[test]

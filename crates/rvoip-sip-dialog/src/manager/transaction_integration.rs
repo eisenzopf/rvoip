@@ -207,7 +207,7 @@ impl DialogManager {
 
         // Get dialog context and build the request. Destination is resolved
         // from the final request next hop after Route headers are present.
-        let (destination, request) = {
+        let (fallback_destination, candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             let fallback_destination =
@@ -549,77 +549,36 @@ impl DialogManager {
                 }
             }
 
-            let destination = self.resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .unwrap_or(fallback_destination);
+            let candidates = self
+                .resolve_uri_to_candidates(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
+                        &request,
+                    ),
+                )
+                .await;
 
-            (destination, request)
+            (fallback_destination, candidates, request)
         };
 
-        // STIR/SHAKEN (RFC 8224) — fire RequestLifecycle::pre_send_request
-        // for INVITE so the installed PASSporTSigner can attach an
-        // `Identity:` header. No-op for non-INVITE methods (they ride
-        // within the dialog established at INVITE time, so re-signing
-        // is not required by RFC 8224) and when no signer is installed
-        // (the default — existing callers see no behaviour change).
-        let mut request = request;
-        if method == Method::Invite {
-            use crate::manager::RequestLifecycle;
-            self.pre_send_request(&mut request, destination).await?;
-        }
+        // RFC 3263 §4.3 multi-candidate failover. STIR/SHAKEN signing
+        // (`pre_send_request`) and the RFC 3261 §17.1.1.3 benign-
+        // terminate-after-2xx handling both live in the helper — only
+        // INVITE gets the benign-terminate suppression so non-INVITE
+        // methods (BYE / REFER / UPDATE / etc.) still surface real
+        // transport failures.
+        let (transaction_id, _addr) = self
+            .send_request_with_candidate_failover(
+                request,
+                candidates,
+                fallback_destination,
+                Some(dialog_id),
+            )
+            .await?;
 
-        // Use transaction-core helpers to create appropriate transaction
-        let transaction_id = if method == Method::Invite {
-            self.transaction_manager
-                .create_invite_client_transaction(request, destination)
-                .await
-        } else {
-            self.transaction_manager
-                .create_non_invite_client_transaction(request, destination)
-                .await
-        }
-        .map_err(|e| crate::errors::DialogError::TransactionError {
-            message: format!("Failed to create {} transaction: {}", method, e),
-        })?;
-
-        // Associate transaction with dialog BEFORE sending
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
         debug!(
-            "✅ Associated {} transaction {} with dialog {}",
-            method, transaction_id, dialog_id
+            "✅ Sent {} request for dialog {} (transaction: {}) via §4.3 failover path",
+            method, dialog_id, transaction_id
         );
-
-        // RFC 3261 §17.1.1.3 — an INVITE client transaction transitions from
-        // Proceeding to Terminated on receipt of a 2xx + automatic ACK. On a
-        // fast local loop the 200 OK can arrive and terminate the transaction
-        // inside `send_request().await`, so transaction-core surfaces
-        // "Transaction terminated after timeout" even though the SIP flow
-        // succeeded. Mirror the 422-retry path (below in this file) and the
-        // initial-INVITE path in `unified.rs::make_call` by swallowing the
-        // condition for INVITE — including re-INVITEs used for hold/resume.
-        // Non-INVITE methods keep the strict error path to avoid masking real
-        // transport failures on BYE / REFER / UPDATE / etc.
-        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
-            let msg = e.to_string();
-            let benign_terminate = method == Method::Invite
-                && (msg.contains("Transaction terminated after timeout")
-                    || msg.contains("Transaction terminated"));
-            if benign_terminate {
-                debug!(
-                    "{} transaction {} terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
-                    method, transaction_id, e
-                );
-            } else {
-                return Err(crate::errors::DialogError::TransactionError {
-                    message: format!("Failed to send request: {}", e),
-                });
-            }
-        }
-
-        debug!("Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions", method, dialog_id, transaction_id);
 
         Ok(transaction_id)
     }
@@ -827,7 +786,7 @@ impl DialogManager {
 
         debug!("Resending INVITE with auth for dialog {}", dialog_id);
 
-        let (destination, request) = {
+        let (fallback_destination, candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             let fallback_destination =
@@ -920,60 +879,31 @@ impl DialogManager {
                 request.headers.push(extra);
             }
 
-            let destination = self.resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .unwrap_or(fallback_destination);
+            let candidates = self
+                .resolve_uri_to_candidates(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
+                        &request,
+                    ),
+                )
+                .await;
 
-            (destination, request)
+            (fallback_destination, candidates, request)
         };
 
-        // STIR/SHAKEN (RFC 8224) — sign auth-retry INVITE with a fresh
-        // PASSporT. The 401-challenge retry MUST re-attest since the
-        // first PASSporT covered the original request's CSeq; a new
-        // CSeq on the retry would invalidate the signature.
-        let mut request = request;
-        {
-            use crate::manager::RequestLifecycle;
-            self.pre_send_request(&mut request, destination).await?;
-        }
-
-        let transaction_id = self
-            .transaction_manager
-            .create_invite_client_transaction(request, destination)
-            .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create auth-retry INVITE transaction: {}", e),
-            })?;
-
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
-        debug!(
-            "Associated auth-retry INVITE transaction {} with dialog {}",
-            transaction_id, dialog_id
-        );
-
-        // RFC 3261 §17.1.1.3 — suppress normal auto-termination after 2xx on
-        // fast loopback (see comment in `send_request_in_dialog` above).
-        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
-            let msg = e.to_string();
-            if msg.contains("Transaction terminated after timeout")
-                || msg.contains("Transaction terminated")
-            {
-                debug!(
-                    "Auth-retry INVITE transaction terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
-                    e
-                );
-            } else {
-                return Err(crate::errors::DialogError::TransactionError {
-                    message: format!("Failed to send auth-retry INVITE: {}", e),
-                });
-            }
-        }
+        // RFC 3263 §4.3 multi-candidate failover. The auth-retry path
+        // re-signs the PASSporT per attempt (fresh Via/branch) — the
+        // helper fires `pre_send_request` inside the retry loop.
+        let (transaction_id, _addr) = self
+            .send_request_with_candidate_failover(
+                request,
+                candidates,
+                fallback_destination,
+                Some(dialog_id),
+            )
+            .await?;
 
         debug!(
-            "Auth-retry INVITE sent for dialog {} (tx {})",
+            "Auth-retry INVITE sent for dialog {} (tx {}) via §4.3 failover path",
             dialog_id, transaction_id
         );
         Ok(transaction_id)
@@ -1004,7 +934,7 @@ impl DialogManager {
             session_secs, min_se, dialog_id
         );
 
-        let (destination, request) = {
+        let (fallback_destination, candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             let fallback_destination =
@@ -1069,64 +999,32 @@ impl DialogManager {
             inject_100rel_policy(&mut request, self.config_100rel_policy());
             inject_session_timer_headers(&mut request, session_secs, min_se);
 
-            let destination = self.resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .unwrap_or(fallback_destination);
+            let candidates = self
+                .resolve_uri_to_candidates(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
+                        &request,
+                    ),
+                )
+                .await;
 
-            (destination, request)
+            (fallback_destination, candidates, request)
         };
 
-        // STIR/SHAKEN — re-sign the 422-retry INVITE. The retry
-        // carries a new CSeq + adjusted Session-Expires; the original
-        // PASSporT no longer covers the canonical form.
-        let mut request = request;
-        {
-            use crate::manager::RequestLifecycle;
-            self.pre_send_request(&mut request, destination).await?;
-        }
-
-        let transaction_id = self
-            .transaction_manager
-            .create_invite_client_transaction(request, destination)
-            .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create 422-retry INVITE transaction: {}", e),
-            })?;
-
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
-        debug!(
-            "Associated 422-retry INVITE transaction {} with dialog {}",
-            transaction_id, dialog_id
-        );
-
-        // RFC 3261 §17.1.1.3 — INVITE client transactions terminate after
-        // 2xx + ACK. On a fast local loop the 200 OK + automatic ACK arrive
-        // and terminate the transaction before `send_request.await` returns,
-        // so transaction-core surfaces "Transaction terminated after timeout"
-        // even though the SIP flow succeeded. The existing `make_call` path
-        // in `unified.rs:477-482` swallows the same condition; mirror that
-        // here so callers see a clean success.
-        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
-            let msg = e.to_string();
-            if msg.contains("Transaction terminated after timeout")
-                || msg.contains("Transaction terminated")
-            {
-                debug!(
-                    "422-retry INVITE transaction terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
-                    e
-                );
-            } else {
-                return Err(crate::errors::DialogError::TransactionError {
-                    message: format!("Failed to send 422-retry INVITE: {}", e),
-                });
-            }
-        }
+        // RFC 3263 §4.3 multi-candidate failover. STIR/SHAKEN re-signs
+        // per attempt inside the helper since the 422-retry carries a
+        // new CSeq + adjusted Session-Expires (the original PASSporT
+        // no longer covers the canonical form).
+        let (transaction_id, _addr) = self
+            .send_request_with_candidate_failover(
+                request,
+                candidates,
+                fallback_destination,
+                Some(dialog_id),
+            )
+            .await?;
 
         debug!(
-            "422-retry INVITE sent for dialog {} (tx {}, SE={}, Min-SE={})",
+            "422-retry INVITE sent for dialog {} (tx {}, SE={}, Min-SE={}) via §4.3 failover path",
             dialog_id, transaction_id, session_secs, min_se
         );
         Ok(transaction_id)
@@ -1162,7 +1060,7 @@ impl DialogManager {
             dialog_id
         );
 
-        let (destination, request) = {
+        let (fallback_destination, candidates, request) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
             let fallback_destination =
@@ -1254,63 +1152,209 @@ impl DialogManager {
                 inject_session_timer_headers(&mut request, secs, min_se);
             }
 
-            let destination = self.resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .unwrap_or(fallback_destination);
+            let candidates = self
+                .resolve_uri_to_candidates(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
+                        &request,
+                    ),
+                )
+                .await;
 
-            (destination, request)
+            (fallback_destination, candidates, request)
         };
 
-        // STIR/SHAKEN (RFC 8224) — sign the initial outbound INVITE.
-        // This is the PRIMARY attestation point per ATIS-1000074 —
-        // the originating service provider's signer attests to the
-        // calling number's authorisation to use the From identity.
-        let mut request = request;
-        {
-            use crate::manager::RequestLifecycle;
-            self.pre_send_request(&mut request, destination).await?;
-        }
-
-        let transaction_id = self
-            .transaction_manager
-            .create_invite_client_transaction(request, destination)
-            .await
-            .map_err(|e| crate::errors::DialogError::TransactionError {
-                message: format!("Failed to create initial-INVITE transaction: {}", e),
-            })?;
-
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
-        debug!(
-            "Associated initial INVITE-with-extras transaction {} with dialog {}",
-            transaction_id, dialog_id
-        );
-
-        // RFC 3261 §17.1.1.3 normal termination after 2xx + ACK on fast loopback;
-        // mirror the suppression in the auth-retry / 422-retry / generic path.
-        if let Err(e) = self.transaction_manager.send_request(&transaction_id).await {
-            let msg = e.to_string();
-            if msg.contains("Transaction terminated after timeout")
-                || msg.contains("Transaction terminated")
-            {
-                debug!(
-                    "Initial INVITE-with-extras transaction terminated normally after 2xx (RFC 3261 §17.1.1.3): {}",
-                    e
-                );
-            } else {
-                return Err(crate::errors::DialogError::TransactionError {
-                    message: format!("Failed to send initial INVITE-with-extras: {}", e),
-                });
-            }
-        }
+        // RFC 3263 §4.3 multi-candidate failover. Walks the resolved
+        // candidates in order on transport-level failure. STIR/SHAKEN
+        // signing (`pre_send_request`) fires once per attempt inside
+        // the helper since Via/branch change between attempts. The
+        // helper also registers tx→dialog BEFORE send so 401-driven
+        // auth retry and other fast-response paths can locate the
+        // dialog without racing.
+        let (transaction_id, _addr) = self
+            .send_request_with_candidate_failover(
+                request,
+                candidates,
+                fallback_destination,
+                Some(dialog_id),
+            )
+            .await?;
 
         debug!(
             "Initial INVITE-with-extras sent for dialog {} (tx {})",
             dialog_id, transaction_id
         );
         Ok(transaction_id)
+    }
+
+    /// Send a freshly-built request via a new client transaction,
+    /// retrying with the next [`ResolvedTarget`] on transport-level
+    /// failure (RFC 3263 §4.3).
+    ///
+    /// On a recoverable transport error from `send_request` (the
+    /// transaction terminated immediately, transport error event, or
+    /// general transport failure), the helper destroys the failed
+    /// transaction by leaving it for the normal cleanup path and
+    /// creates a fresh client transaction targeted at the next
+    /// candidate. Non-transport errors (parse failures, state-machine
+    /// errors, signer errors) fail fast — retrying on a different
+    /// candidate would not help.
+    ///
+    /// For INVITE specifically, fires
+    /// [`RequestLifecycle::pre_send_request`] once per attempt so the
+    /// installed signer sees the per-attempt request (Via / branch
+    /// differ across attempts).
+    ///
+    /// Returns the transaction key of the first attempt that
+    /// successfully reached `send_request`-Ok, along with the
+    /// [`SocketAddr`] that succeeded. Caller is responsible for
+    /// registering it into `transaction_to_dialog`.
+    ///
+    /// When `candidates` is empty, makes a single attempt against
+    /// `fallback`. RFC 3261 §17.1.1.3 normal-termination after 2xx
+    /// on a fast loopback is treated as success (matches the
+    /// suppression already in [`Self::send_initial_invite_with_extra_headers`]).
+    ///
+    /// `tx_to_dialog`, when supplied, is the dialog id to register
+    /// against the freshly-created transaction *before* `send_request`
+    /// fires. Critical for paths whose response handling (e.g.,
+    /// 401-driven auth retry, dialog state transitions) looks the
+    /// dialog up via `transaction_to_dialog`: registering AFTER send
+    /// would race with a fast response and the dialog would be
+    /// unreachable. Pass `None` for stateless sends (e.g. the
+    /// proxy's per-leg failover).
+    pub async fn send_request_with_candidate_failover(
+        &self,
+        request: rvoip_sip_core::Request,
+        candidates: Vec<rvoip_sip_transport::resolver::ResolvedTarget>,
+        fallback: std::net::SocketAddr,
+        tx_to_dialog: Option<&DialogId>,
+    ) -> DialogResult<(TransactionKey, std::net::SocketAddr)> {
+        use crate::manager::RequestLifecycle;
+        use rvoip_sip_transport::resolver::ResolvedTarget;
+
+        let method = request.method();
+        let candidates: Vec<ResolvedTarget> = if candidates.is_empty() {
+            let next_hop = crate::transaction::transport::multiplexed::next_hop_uri_for_request(
+                &request,
+            );
+            let transport = rvoip_sip_transport::resolver::select_transport_for_uri(&next_hop);
+            vec![ResolvedTarget::immediate(fallback, transport)]
+        } else {
+            candidates
+        };
+
+        let total = candidates.len();
+        let mut last_err: Option<crate::errors::DialogError> = None;
+
+        for (idx, target) in candidates.iter().enumerate() {
+            let attempt = idx + 1;
+            let mut req = request.clone();
+
+            if method == Method::Invite {
+                if let Err(e) = self.pre_send_request(&mut req, target.addr).await {
+                    return Err(e);
+                }
+            }
+
+            let tx_result = if method == Method::Invite {
+                self.transaction_manager
+                    .create_invite_client_transaction(req, target.addr)
+                    .await
+            } else {
+                self.transaction_manager
+                    .create_non_invite_client_transaction(req, target.addr)
+                    .await
+            };
+            let tx_id = match tx_result {
+                Ok(id) => id,
+                Err(e) => {
+                    last_err = Some(crate::errors::DialogError::TransactionError {
+                        message: format!(
+                            "RFC 3263 §4.3 candidate {}/{} ({}): create_*_client_transaction failed: {}",
+                            attempt, total, target.addr, e
+                        ),
+                    });
+                    continue;
+                }
+            };
+
+            // Register tx→dialog mapping BEFORE send so a fast
+            // response (e.g. 401 hitting loopback before send_request
+            // returns) can locate the dialog. Removed on failed
+            // attempts so the next candidate's tx replaces it.
+            if let Some(dialog_id) = tx_to_dialog {
+                self.transaction_to_dialog
+                    .insert(tx_id.clone(), dialog_id.clone());
+            }
+
+            match self.transaction_manager.send_request(&tx_id).await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        debug!(
+                            "RFC 3263 §4.3: candidate {}/{} ({}) succeeded after {} prior failure(s)",
+                            attempt,
+                            total,
+                            target.addr,
+                            attempt - 1
+                        );
+                    }
+                    return Ok((tx_id, target.addr));
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let benign_terminate = method == Method::Invite
+                        && (msg.contains("Transaction terminated after timeout")
+                            || msg.contains("Transaction terminated"));
+                    if benign_terminate {
+                        // RFC 3261 §17.1.1.3 — INVITE client transitions
+                        // Calling → Terminated on automatic ACK for 2xx;
+                        // treat as success and don't fail over.
+                        if attempt > 1 {
+                            debug!(
+                                "RFC 3263 §4.3: candidate {}/{} ({}) succeeded after {} prior failure(s) (benign terminate)",
+                                attempt, total, target.addr, attempt - 1
+                            );
+                        }
+                        return Ok((tx_id, target.addr));
+                    }
+
+                    let is_transport_failure = matches!(
+                        &e,
+                        crate::transaction::error::Error::TransportError { .. }
+                    );
+                    if is_transport_failure && idx + 1 < total {
+                        debug!(
+                            "RFC 3263 §4.3: candidate {}/{} ({}) failed with transport error: {}; trying next",
+                            attempt, total, target.addr, e
+                        );
+                        // Drop the failed-leg mapping so the next
+                        // attempt's tx is the canonical one for this
+                        // dialog.
+                        if tx_to_dialog.is_some() {
+                            self.transaction_to_dialog.remove(&tx_id);
+                        }
+                        last_err = Some(crate::errors::DialogError::TransactionError {
+                            message: format!(
+                                "RFC 3263 §4.3 candidate {} ({}) transport failure: {}",
+                                attempt, target.addr, e
+                            ),
+                        });
+                        continue;
+                    }
+
+                    return Err(crate::errors::DialogError::TransactionError {
+                        message: format!("Failed to send {}: {}", method, e),
+                    });
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| crate::errors::DialogError::TransactionError {
+            message: format!(
+                "RFC 3263 §4.3 failover exhausted: all {} candidate(s) failed",
+                total
+            ),
+        }))
     }
 }
 

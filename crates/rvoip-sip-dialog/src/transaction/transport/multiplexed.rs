@@ -211,6 +211,76 @@ impl MultiplexedTransport {
             }
         }
     }
+
+    /// RFC 3263 §4.3 multi-candidate failover send.
+    ///
+    /// Walks `candidates` in order. For each, dispatches the message via
+    /// the normal [`Transport::send_message`] path (which honours the
+    /// usual URI-based transport selection and the RFC 3261 §18.1.1
+    /// UDP→TCP MTU failover). On a recoverable transport error
+    /// (`is_recoverable()` — connect failures, timeouts, send failures,
+    /// closed connections) it logs and advances to the next candidate.
+    /// On a non-recoverable error (e.g. `MessageTooLarge`,
+    /// `UnsupportedTransport`, `InvalidUri`) it returns immediately —
+    /// retrying a different candidate won't help.
+    ///
+    /// Returns the `SocketAddr` of the candidate that succeeded, or the
+    /// last error when every candidate failed. An empty input vec
+    /// returns `Err(InvalidAddress("no candidates"))`.
+    ///
+    /// Note: UDP sockets are connectionless, so a UDP `send_message` to
+    /// an unreachable host typically returns `Ok(())`. RFC 3263 §4.3
+    /// failover is most useful on TCP/TLS, where `ConnectFailed` is
+    /// surfaced synchronously.
+    pub async fn send_message_with_failover(
+        &self,
+        message: Message,
+        candidates: &[rvoip_sip_transport::resolver::ResolvedTarget],
+    ) -> TransportResult<SocketAddr> {
+        if candidates.is_empty() {
+            return Err(TransportError::InvalidAddress(
+                "send_message_with_failover called with no candidates".into(),
+            ));
+        }
+        let total = candidates.len();
+        let mut last_err: Option<TransportError> = None;
+        for (idx, target) in candidates.iter().enumerate() {
+            let attempt = idx + 1;
+            match self.send_message(message.clone(), target.addr).await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        debug!(
+                            "RFC 3263 §4.3: candidate {} of {} ({}/{}) succeeded after {} prior failures",
+                            attempt,
+                            total,
+                            target.transport,
+                            target.addr,
+                            attempt - 1
+                        );
+                    }
+                    return Ok(target.addr);
+                }
+                Err(e) if e.is_recoverable() => {
+                    debug!(
+                        "RFC 3263 §4.3: candidate {} of {} ({}/{}) failed recoverably: {}; trying next",
+                        attempt, total, target.transport, target.addr, e
+                    );
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => {
+                    debug!(
+                        "RFC 3263 §4.3: candidate {} of {} ({}/{}) failed non-recoverably: {}; aborting failover",
+                        attempt, total, target.transport, target.addr, e
+                    );
+                    return Err(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| {
+            TransportError::InvalidAddress("all candidates failed".into())
+        }))
+    }
 }
 
 #[async_trait]

@@ -723,7 +723,7 @@ fn try_consume_keepalive_frame(buffer: &mut BytesMut) -> Option<KeepAliveFrame> 
 /// any cert that fails standard validation. Optional extras: an extra
 /// CA bundle (added to the same root store) and an insecure-skip mode
 /// (dev only — accepts any cert without identity verification).
-fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
+pub(crate) fn build_client_config(cfg: &TlsClientConfig) -> Result<ClientConfig> {
     if cfg.client_cert_path.is_some() ^ cfg.client_key_path.is_some() {
         return Err(Error::InvalidState(
             "TLS client certificate and key must be provided together".to_string(),
@@ -860,7 +860,7 @@ impl rustls::client::ServerCertVerifier for InsecureCertVerifier {
 /// Best-effort SNI server-name from a destination `SocketAddr`.
 /// Loopback maps to `"localhost"` so test certs that include the
 /// `localhost` SAN match.
-fn ip_to_server_name(addr: SocketAddr) -> ServerName {
+pub(crate) fn ip_to_server_name(addr: SocketAddr) -> ServerName {
     if addr.ip().is_loopback() {
         if let Ok(name) = ServerName::try_from("localhost") {
             return name;

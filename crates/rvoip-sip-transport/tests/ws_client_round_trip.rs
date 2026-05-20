@@ -132,11 +132,11 @@ fn write_self_signed_localhost_cert() -> (tempfile::TempDir, std::path::PathBuf,
 /// and the WS upgrade completes — i.e., the new
 /// `ws/listener.rs::accept()` TLS branch wires through.
 ///
-/// Note: the production `WebSocketTransport::connect_to()` returns
-/// `NotImplemented` for `wss://` (client-side TlsConnector wiring is
-/// the deferred half of Phase 4). This test reaches under the
-/// `WebSocketTransport` API and uses tokio-tungstenite directly so the
-/// server-side TLS branch can still be exercised today.
+/// Note: this test still reaches under the `WebSocketTransport` API
+/// to drive the rustls handshake manually so the server-side accept
+/// branch is the unit under test in isolation. The end-to-end client
+/// round-trip via `WebSocketTransport::bind_with_client_tls` is
+/// covered by `wss_client_round_trip_delivers_register_to_server_event_bus`.
 #[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
@@ -237,4 +237,92 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
 
     let _ = server_transport;
     let _ = server_rx;
+}
+
+/// End-to-end WSS client + server smoke test via the public
+/// `WebSocketTransport` API. Binds a WSS server with a self-signed
+/// cert, builds a client transport via `bind_with_client_tls(..., Some(
+/// TlsClientConfig { insecure_skip_verify: true, .. }))`, sends a
+/// REGISTER, and asserts the server receives it on its event bus with
+/// `TransportType::Wss`.
+///
+/// Gated on `wss + dev-insecure-tls` because the self-signed cert
+/// requires the insecure verifier. Production deployments use real CA
+/// chains; the default `TlsClientConfig` (system roots, no insecure
+/// skip) handles that path with no API change.
+#[cfg(all(feature = "wss", feature = "dev-insecure-tls"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wss_client_round_trip_delivers_register_to_server_event_bus() {
+    use rvoip_sip_transport::transport::ws::TlsClientConfig;
+
+    let _ = tracing_subscriber::fmt::try_init();
+
+    let (_dir, cert_path, key_path) = write_self_signed_localhost_cert();
+
+    // Server-side: WSS bind with the self-signed cert.
+    let (server_transport, mut server_rx) = WebSocketTransport::bind(
+        loopback_addr(0),
+        true,
+        Some(cert_path.to_str().unwrap()),
+        Some(key_path.to_str().unwrap()),
+        None,
+    )
+    .await
+    .expect("wss server bind");
+    let server_addr = server_transport.local_addr().expect("server local addr");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Client-side: WSS bind WITH a TlsClientConfig that trusts the
+    // self-signed cert via the `dev-insecure-tls` skip-verify path.
+    // Bind to a separate ephemeral port. The bind requires cert/key
+    // for the server side of the same transport, but the listener
+    // never accepts here — only the outbound dial is exercised.
+    let client_tls = TlsClientConfig {
+        insecure_skip_verify: true,
+        ..TlsClientConfig::default()
+    };
+    let (client_transport, _client_rx_unused) = WebSocketTransport::bind_with_client_tls(
+        loopback_addr(0),
+        true,
+        Some(cert_path.to_str().unwrap()),
+        Some(key_path.to_str().unwrap()),
+        None,
+        Some(client_tls),
+    )
+    .await
+    .expect("wss client bind");
+
+    let register = build_register("wss-roundtrip-tls");
+    client_transport
+        .send_message(register.clone(), server_addr)
+        .await
+        .expect("client send wss");
+
+    let event = tokio::time::timeout(Duration::from_secs(3), server_rx.recv())
+        .await
+        .expect("timed out waiting for server-side MessageReceived")
+        .expect("server channel closed");
+
+    match event {
+        TransportEvent::MessageReceived {
+            message,
+            transport_type,
+            ..
+        } => {
+            assert_eq!(
+                transport_type,
+                rvoip_sip_transport::transport::TransportType::Wss,
+                "server should observe Wss transport on wss://"
+            );
+            match message {
+                Message::Request(req) => {
+                    assert_eq!(req.method(), Method::Register);
+                    assert_eq!(req.call_id().unwrap().to_string(), "wss-roundtrip-tls");
+                }
+                _ => panic!("expected REGISTER request"),
+            }
+        }
+        other => panic!("unexpected first event: {:?}", other),
+    }
 }

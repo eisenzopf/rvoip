@@ -161,6 +161,48 @@ pub async fn resolve_uri_to_socketaddr(uri: &Uri) -> Option<SocketAddr> {
     }
 }
 
+/// Resolve a destination URI to the FULL list of candidates produced
+/// by RFC 3263 §4 NAPTR/SRV walking. Callers iterate candidates in
+/// the returned order, trying the next one on transport-level failure
+/// per RFC 3263 §4.3.
+///
+/// IP-literal URIs short-circuit and produce a single candidate so
+/// this works in sandboxed environments (no `/etc/resolv.conf`).
+///
+/// Per-`DialogManager` resolver overrides go through
+/// [`DialogManager::resolve_uri_to_candidates`](crate::manager::DialogManager::resolve_uri_to_candidates)
+/// rather than this free function.
+pub async fn resolve_uri_to_candidates(
+    uri: &Uri,
+) -> Vec<rvoip_sip_transport::resolver::ResolvedTarget> {
+    use rvoip_sip_core::types::uri::{Host, Scheme};
+    use rvoip_sip_transport::resolver::{select_transport_for_uri, ResolvedTarget};
+
+    if let Host::Address(ip) = &uri.host {
+        let default_port = match uri.scheme() {
+            Scheme::Sips => 5061,
+            _ => 5060,
+        };
+        let port = uri.port.filter(|p| *p > 0).unwrap_or(default_port);
+        let transport = select_transport_for_uri(uri);
+        return vec![ResolvedTarget::immediate(
+            SocketAddr::new(ip.clone(), port),
+            transport,
+        )];
+    }
+
+    let Some(resolver) = process_default_resolver().await else {
+        return Vec::new();
+    };
+    match resolver.resolve(uri).await {
+        Ok(candidates) => candidates,
+        Err(e) => {
+            tracing::debug!("Default resolver returned error for {}: {}", uri, e);
+            Vec::new()
+        }
+    }
+}
+
 /// URI resolution utilities (historical module path). Re-exports of the
 /// free function above are kept so existing call sites compile unchanged.
 pub mod uri_resolver {

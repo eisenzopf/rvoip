@@ -22,6 +22,11 @@ use crate::error::{Error, Result};
 use crate::transport::{Transport, TransportEvent, TransportType};
 use rvoip_sip_core::Message;
 
+#[cfg(feature = "wss")]
+pub use crate::transport::tls::TlsClientConfig;
+#[cfg(feature = "wss")]
+use tokio_rustls::TlsConnector;
+
 // SIP WebSocket subprotocol names as per RFC 7118
 pub(crate) const SIP_WS_SUBPROTOCOL: &str = "sip";
 pub(crate) const SIP_WSS_SUBPROTOCOL: &str = "sips";
@@ -41,16 +46,83 @@ struct WebSocketTransportInner {
     connections: Mutex<HashMap<SocketAddr, Arc<WebSocketConnection>>>,
     closed: AtomicBool,
     events_tx: mpsc::Sender<TransportEvent>,
+    /// `TlsConnector` used by outbound `wss://` dials. `None` when
+    /// `secure=false` or when no `TlsClientConfig` was supplied at
+    /// bind time — `connect_to()` then errors with `NotImplemented`
+    /// for `wss://` (matches pre-Phase-4-polish behaviour).
+    #[cfg(feature = "wss")]
+    tls_connector: Option<TlsConnector>,
 }
 
 impl WebSocketTransport {
-    /// Creates a new WebSocket transport bound to the specified address
+    /// Creates a new WebSocket transport bound to the specified address.
+    ///
+    /// Equivalent to [`Self::bind_with_client_tls`] with `client_tls = None`
+    /// — outbound `wss://` dials remain `NotImplemented` until a
+    /// `TlsClientConfig` is supplied.
     pub async fn bind(
         addr: SocketAddr,
         secure: bool,
         cert_path: Option<&str>,
         key_path: Option<&str>,
         channel_capacity: Option<usize>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        #[cfg(feature = "wss")]
+        {
+            Self::bind_with_client_tls(addr, secure, cert_path, key_path, channel_capacity, None)
+                .await
+        }
+        #[cfg(not(feature = "wss"))]
+        {
+            Self::bind_inner(addr, secure, cert_path, key_path, channel_capacity).await
+        }
+    }
+
+    /// Creates a WebSocket transport with an optional outbound TLS
+    /// client configuration. When `secure = true` and `client_tls` is
+    /// `Some`, outbound `wss://` dials run a rustls handshake using
+    /// the supplied root-store / verifier policy before the WS upgrade.
+    /// When `client_tls` is `None`, outbound `wss://` still returns
+    /// `NotImplemented` for backwards compatibility with callers that
+    /// only need server-side WSS.
+    #[cfg(feature = "wss")]
+    pub async fn bind_with_client_tls(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        client_tls: Option<TlsClientConfig>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        let tls_connector = match (secure, client_tls) {
+            (true, Some(cfg)) => {
+                let client_config = crate::transport::tls::build_client_config(&cfg)?;
+                Some(TlsConnector::from(Arc::new(client_config)))
+            }
+            _ => None,
+        };
+        Self::bind_inner_with_connector(
+            addr,
+            secure,
+            cert_path,
+            key_path,
+            channel_capacity,
+            tls_connector,
+        )
+        .await
+    }
+
+    /// Internal bind path shared by [`Self::bind`] and
+    /// [`Self::bind_with_client_tls`]. Lives here so the non-WSS build
+    /// can use a slimmer signature without referencing `TlsConnector`.
+    #[cfg(feature = "wss")]
+    async fn bind_inner_with_connector(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+        tls_connector: Option<TlsConnector>,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
@@ -61,12 +133,55 @@ impl WebSocketTransport {
         let local_addr = listener.local_addr()?;
 
         info!(
+            "SIP WebSocket transport bound to {} ({}) [client_tls: {}]",
+            local_addr,
+            if secure { "wss" } else { "ws" },
+            if tls_connector.is_some() {
+                "configured"
+            } else {
+                "none"
+            }
+        );
+
+        let transport = WebSocketTransport {
+            inner: Arc::new(WebSocketTransportInner {
+                listener: Arc::new(listener),
+                secure,
+                connections: Mutex::new(HashMap::new()),
+                closed: AtomicBool::new(false),
+                events_tx: events_tx.clone(),
+                tls_connector,
+            }),
+        };
+
+        #[cfg(feature = "ws")]
+        transport.spawn_accept_loop();
+
+        Ok((transport, events_rx))
+    }
+
+    /// Non-WSS bind path — kept structurally identical so the
+    /// `#[cfg]` branches in `bind()` don't drift.
+    #[cfg(not(feature = "wss"))]
+    async fn bind_inner(
+        addr: SocketAddr,
+        secure: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+        channel_capacity: Option<usize>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
+        let (events_tx, events_rx) = mpsc::channel(capacity);
+
+        let listener = WebSocketListener::bind(addr, secure, cert_path, key_path).await?;
+        let local_addr = listener.local_addr()?;
+
+        info!(
             "SIP WebSocket transport bound to {} ({})",
             local_addr,
             if secure { "wss" } else { "ws" }
         );
 
-        // Create the transport
         let transport = WebSocketTransport {
             inner: Arc::new(WebSocketTransportInner {
                 listener: Arc::new(listener),
@@ -77,7 +192,6 @@ impl WebSocketTransport {
             }),
         };
 
-        // Start the accept loop to accept incoming connections
         #[cfg(feature = "ws")]
         transport.spawn_accept_loop();
 
@@ -287,14 +401,15 @@ impl WebSocketTransport {
     ///
     /// 1. Open a TCP connection to `addr`.
     /// 2. For WSS, wrap the TCP stream with a `tokio_rustls`
-    ///    `TlsConnector` (planned follow-up — currently only plain
-    ///    `ws://` is implemented client-side; WSS client returns
-    ///    `NotImplemented` until the TLS connector plumbing lands).
+    ///    `TlsConnector` (built at bind time from the supplied
+    ///    [`TlsClientConfig`]). `bind()` without a client TLS config
+    ///    leaves the connector unset and WSS dials error with
+    ///    `NotImplemented`; use [`Self::bind_with_client_tls`].
     /// 3. Build a WS handshake request with
     ///    `Sec-WebSocket-Protocol: sip` (or `sips` for WSS) per
     ///    RFC 7118 §4.5.
     /// 4. Call `tokio_tungstenite::client_async` to negotiate the
-    ///    WS upgrade on the established TCP stream.
+    ///    WS upgrade on the established stream (plain TCP or TLS).
     /// 5. Register the resulting connection in the pool and spawn
     ///    its reader so inbound messages from the server reach
     ///    `TransportEvent::MessageReceived`.
@@ -313,19 +428,21 @@ impl WebSocketTransport {
             }
         }
 
-        if self.inner.secure {
-            // WSS client (TLS-wrapped) is not yet implemented; it
-            // needs a `tokio_rustls::TlsConnector` plus webpki root
-            // anchors threaded through from the transport config.
-            // Plain WS client below works today.
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        // Pre-flight: for WSS dials, the TlsConnector must have been
+        // configured at bind time (via `bind_with_client_tls`).
+        // Surface this BEFORE opening TCP so the failure mode is
+        // obvious and doesn't depend on whether the destination is
+        // listening.
+        #[cfg(feature = "wss")]
+        if self.inner.secure && self.inner.tls_connector.is_none() {
             return Err(Error::NotImplemented(
-                "WSS client connections (TLS handshake) not yet implemented; \
-                 use ws:// or implement TlsConnector wiring"
+                "WSS client requires TlsClientConfig — use \
+                 WebSocketTransport::bind_with_client_tls instead of bind()"
                     .into(),
             ));
         }
-
-        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
         // Step 1 — open TCP. The destination IP/port were resolved
         // by the upper layer; we don't do DNS here.
@@ -333,22 +450,61 @@ impl WebSocketTransport {
             .await
             .map_err(|e| Error::ConnectFailed(addr, e))?;
 
-        // Step 2 — build the WS handshake URL + subprotocol header.
+        // Step 2 — when `secure=true`, run the rustls handshake on
+        // the TCP stream BEFORE the WS upgrade (RFC 7118 §3 — wss is
+        // WS-over-TLS). The connector was built once at bind time
+        // from the supplied `TlsClientConfig`.
+        let (stream, subprotocol_advertised, url_scheme): (SipWsStream, &'static str, &'static str) =
+            if self.inner.secure {
+                #[cfg(feature = "wss")]
+                {
+                    let connector = self
+                        .inner
+                        .tls_connector
+                        .as_ref()
+                        .expect("pre-flight guarantees tls_connector is Some when secure");
+                    let server_name = crate::transport::tls::ip_to_server_name(addr);
+                    let tls_stream = connector
+                        .connect(server_name, tcp_stream)
+                        .await
+                        .map_err(|e| {
+                            Error::TlsHandshakeFailed(format!(
+                                "WSS client handshake with {}: {}",
+                                addr, e
+                            ))
+                        })?;
+                    (
+                        SipWsStream::ClientTls(tls_stream),
+                        SIP_WSS_SUBPROTOCOL,
+                        "wss",
+                    )
+                }
+                #[cfg(not(feature = "wss"))]
+                {
+                    return Err(Error::NotImplemented(
+                        "WSS client requires the `wss` cargo feature (rustls plumbing)".into(),
+                    ));
+                }
+            } else {
+                (SipWsStream::Plain(tcp_stream), SIP_WS_SUBPROTOCOL, "ws")
+            };
+
+        // Step 3 — build the WS handshake URL + subprotocol header.
         // Per RFC 7118 §4.5 the client advertises `sip` for ws:// and
-        // `sips` for wss://. We're in the plain-WS arm here.
-        let url = format!("ws://{}/", addr);
+        // `sips` for wss://.
+        let url = format!("{}://{}/", url_scheme, addr);
         let mut request = url
             .into_client_request()
             .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
         request.headers_mut().insert(
             "Sec-WebSocket-Protocol",
-            http::HeaderValue::from_static(SIP_WS_SUBPROTOCOL),
+            http::HeaderValue::from_static(subprotocol_advertised),
         );
 
-        // Step 3 — wrap as SipWsStream::Plain to match the
-        // connection storage type, then run the WS upgrade.
-        let plain_stream = SipWsStream::Plain(tcp_stream);
-        let (ws_stream, response) = tokio_tungstenite::client_async(request, plain_stream)
+        // Step 4 — run the WS upgrade on whichever stream variant we
+        // ended up with (Plain or ClientTls — they both implement
+        // AsyncRead+AsyncWrite via SipWsStream).
+        let (ws_stream, response) = tokio_tungstenite::client_async(request, stream)
             .await
             .map_err(|e| Error::WebSocketHandshakeFailed(e.to_string()))?;
 
@@ -360,7 +516,7 @@ impl WebSocketTransport {
             .get("Sec-WebSocket-Protocol")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
-            .unwrap_or_else(|| SIP_WS_SUBPROTOCOL.to_string());
+            .unwrap_or_else(|| subprotocol_advertised.to_string());
 
         let (ws_writer, ws_reader) = ws_stream.split();
 
@@ -549,15 +705,15 @@ mod tests {
         assert!(transport.is_closed());
     }
 
-    /// Phase 4 implemented the plain-WS client (see `connect_to`). The
-    /// WSS *client* (TLS-wrapped outbound) is still deferred — verify
-    /// that path still returns `NotImplemented` so we notice if it
-    /// silently starts attempting handshakes against an unconfigured
-    /// `TlsConnector`. Only requires the listener to bind cert+key
-    /// material when secure, so this test is gated on `wss`.
+    /// Phase 4 polish: WSS client is wired through
+    /// `bind_with_client_tls`. Plain `bind()` callers still get
+    /// `NotImplemented` for WSS dials — this test ensures that opt-in
+    /// gate doesn't silently break (e.g., a future refactor that
+    /// auto-builds a TlsConnector with default roots regardless of
+    /// caller intent).
     #[cfg(feature = "wss")]
     #[tokio::test]
-    async fn test_wss_client_send_still_not_implemented() {
+    async fn test_wss_client_without_client_tls_config_is_not_implemented() {
         use std::io::Write;
 
         // The listener side needs cert+key now that `secure=true`

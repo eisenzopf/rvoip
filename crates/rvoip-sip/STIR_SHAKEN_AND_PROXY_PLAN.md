@@ -1,6 +1,6 @@
 # STIR/SHAKEN + Proxy/SBC + Transport Roadmap
 
-**Status:** In progress (2026-05-19). Phases **1, 2, 3, 4, 5, 6, 7, 8, 8.5, 10 shipped**; all roadmap phases complete.
+**Status:** Phases **1 (incl. STI-CA chain validation + SHAKEN profile polish), 2, 3, 4 (incl. WSS client polish), 5 (incl. §4.3 multi-candidate failover polish), 6, 7, 8, 8.5, 10 shipped** (latest update 2026-05-19); all roadmap phases complete.
 **Predecessors:** `SIP_API_DESIGN_2.md`, `SIP_API_DESIGN_2_GAP_PLAN.md`, `SIP_API_DESIGN_2_REMAINING_WORK.md` (R1–R6 all closed 2026-05-14)
 
 ## Context
@@ -80,11 +80,11 @@ Default implementations using `jsonwebtoken`, `x509-parser`, `webpki`, and `reqw
 
 | Phase | Scope | Crates | Weeks | Depends | Status |
 |---|---|---|---|---|---|
-| 1 | Identity header type + verify hook | `sip-core`, `sip-dialog`, **new** `rvoip-stir-shaken` | 1.0 | — | **DONE** |
+| 1 | Identity header type + verify hook | `sip-core`, `sip-dialog`, **new** `rvoip-stir-shaken` | 1.0 | — | **DONE** (incl. STI-CA chain + SHAKEN profile polish) |
 | 2 | Outbound signing hook | `sip-dialog`, `rvoip-stir-shaken` | 1.0 | 1 | **DONE** |
 | 3 | RFC 3581 restamp + multi-homed source selection | `sip-transport`, `sip-dialog` | 1.5 | — | **DONE** (restamp); multi-homed source deferred |
-| 4 | WebSocket client + WSS accept | `sip-transport` | 1.5 | — | **DONE** (WSS client deferred) |
-| 5 | RFC 3263 NAPTR/SRV | `sip-transport`, `sip-dialog` | 2.0 | — | **DONE** |
+| 4 | WebSocket client + WSS accept | `sip-transport` | 1.5 | — | **DONE** (incl. WSS client polish) |
+| 5 | RFC 3263 NAPTR/SRV | `sip-transport`, `sip-dialog` | 2.0 | — | **DONE** (incl. §4.3 multi-candidate failover polish) |
 | 6 | Stateful proxy: server+client txn co-ownership + Timer C | **new** `rvoip-sip-proxy`, `rvoip-sip` (ProxyCoordinator) | 2.5 | — | **DONE** (single-target) |
 | 7 | Forking + 3xx redirect-set | `rvoip-sip-proxy` | 2.0 | 6 | **DONE** |
 | 8 | SBC topology hiding (Record-Route strip, Via strip) | `rvoip-sip` | 0.75 | — | **DONE** |
@@ -122,7 +122,28 @@ rvoip-sip (UnifiedCoordinator + new ProxyCoordinator)
 - `crates/rvoip-sip-dialog/tests/identity_verify_inbound.rs` — canned verifier returns Valid → `IncomingCall.identity_verification == Some(Valid)`; tampered From → ClaimMismatch; missing Identity → NoIdentity (or absent under Annotate).
 - `crates/rvoip-stir-shaken/tests/sign_verify_round_trip.rs` — full round-trip with rcgen P-256 cert; tampered signature → BadSignature; claim mismatch / stale iat negative paths.
 
-**Deferred:** full SHAKEN STI-CA chain validation (verifier currently trusts the cert returned by the resolver).
+**Phase 1 polish — STI-CA chain validation + SHAKEN profile enforcement (shipped 2026-05-19):**
+- `crates/rvoip-stir-shaken/src/trust.rs` — `TrustStore` newtype (opaque, holds DER blobs; PEM-bundle and DER constructors; webpki types never leak into the public API).
+- `crates/rvoip-stir-shaken/src/profile.rs` — hand-rolled DER decoders for `TNAuthList` (RFC 8226 §9; SPC / TN / range entries) and `JWT Claim Constraints` (RFC 8226 §10; permittedValues only — mustInclude parse-and-skip). No new dep; reuses `x509-parser`.
+- `crates/rvoip-stir-shaken/src/verifier.rs` — multi-cert PEM bundle decode (leaf first, intermediates next), optional `webpki::EndEntityCert::verify_for_usage` against `TrustStore` anchors (ES256-only, `KeyUsage::client_auth`), then leaf profile enforcement: TNAuthList MUST be present and non-empty, SPC entries grant ambient authority for any `orig.tn`, TN/range entries must contain `orig.tn` otherwise BadChain; JWT Claim Constraints `permittedValues["attest"]` (when present) MUST contain the PASSporT's `attest`. Empty `TrustStore` preserves legacy behaviour — existing callers and `sign_verify_round_trip.rs` keep passing without changes.
+- `ShakenVerifierConfig::with_trust_anchors(TrustStore)` builder method on the existing config. `Cargo.toml` adds `rustls-webpki = "0.101"` (aligned with the rustls 0.21 / webpki 0.101 resolution already in the workspace TLS path).
+
+**Phase 1 polish acceptance (passing):** `crates/rvoip-stir-shaken/tests/chain_validation.rs` — 9 cases, all certs built at test time by rcgen 0.13 (root + leaf chain via `CertificateParams::signed_by`, SHAKEN extensions via `CustomExtension::from_oid_content`):
+- `empty_trust_store_preserves_legacy_behaviour` — no anchors → Valid even without TNAuthList.
+- `valid_chain_with_spc_tnauth_list_yields_valid` — root in TrustStore + SPC-only TNAuthList → Valid.
+- `untrusted_root_yields_bad_chain` — leaf signed by root A, only root B trusted → BadChain.
+- `expired_leaf_yields_bad_chain` — `not_after` set in the past → BadChain.
+- `p384_chain_yields_bad_chain` — root P-384 signs P-256 leaf → BadChain (webpki ALGS list rejects ECDSA_P384_SHA384 chain sig).
+- `missing_tnauth_list_yields_bad_chain` → BadChain { reason mentions TNAuthList }.
+- `unauthorised_orig_tn_yields_bad_chain` — TNAuthList lists only `+15558881111`, PASSporT orig.tn is `+15551234567` → BadChain { reason: "not authorised" }.
+- `attest_outside_jcc_yields_bad_chain` — JCC permits only attest=`"A"`, PASSporT signs `"B"` → BadChain.
+- `jcc_absent_does_not_block_arbitrary_attest` — no JCC extension + SPC TNAuthList → any attest accepted (Valid with attest=`"C"`).
+
+**Deferred (polish-round follow-ups):**
+- **OCSP / CRL revocation checks.** webpki 0.101 doesn't do revocation; add when carriers report stale-cert incidents.
+- **STI-PA root auto-refresh.** `TrustStore` is static; periodic refresh against the STI-PA's published CA list is an application concern.
+- **Cross-signing / bridge CAs.** Single-path validation only.
+- **SHAKEN-specific EKU enforcement.** STIR/SHAKEN has no IANA-allocated EKU OID; verifier accepts certs with no EKU extension or carrying `id-kp-clientAuth` (the common STI-PA-issued posture).
 
 ### Phase 2 — Outbound signing hook (1.0 wk, depends on Phase 1) — **DONE**
 
@@ -162,8 +183,15 @@ rvoip-sip (UnifiedCoordinator + new ProxyCoordinator)
 - `plain_ws_round_trip_delivers_register_to_server_event_bus` — UAS bind + UAC dial via `WebSocketTransport`, REGISTER round-trips to `TransportEvent::MessageReceived` with `TransportType::Ws`.
 - `wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol` (gated on `wss + dev-insecure-tls`) — `rcgen` self-signed cert; WSS bind; client runs rustls handshake (accept-self-signed verifier) and completes the WS upgrade with `Sec-WebSocket-Protocol: sips`.
 
-**Deferred (tracked for follow-up):**
-- `wss://` client (`connect_to()` for `secure=true`) — needs a `TlsConnector` + root-store / `extra_ca` policy plumbed through `WebSocketTransport::bind()`. Server side closes the gap that real users hit first; client side waits on a concrete user demand.
+**Phase 4 polish — WSS client (shipped 2026-05-19):**
+- `crates/rvoip-sip-transport/src/transport/ws/mod.rs::WebSocketTransport::bind_with_client_tls(addr, secure, cert_path, key_path, channel_capacity, client_tls: Option<TlsClientConfig>)` — new entry point that wires a `tokio_rustls::TlsConnector` into the WS transport for outbound `wss://` dials. Existing `bind()` callers keep the prior `NotImplemented` WSS-client behaviour (gated opt-in to avoid surprising root-store policy for callers that only need server-side WSS).
+- `crates/rvoip-sip-transport/src/transport/tls/mod.rs::build_client_config` / `::ip_to_server_name` promoted to `pub(crate)` so the WS module reuses the exact same root-store ladder (`rustls-native-certs` → `webpki-roots` fallback → optional `extra_ca_path` → dev-only `insecure_skip_verify`) as the TLS transport. No new root-store policy surface.
+- `connect_to()` secure branch: pre-flight check that `tls_connector` is present (returns `NotImplemented` BEFORE opening TCP so the failure is unambiguous), TCP connect, `TlsConnector::connect` with `ip_to_server_name(addr)` as the SNI hint (loopback → `"localhost"`), then `tokio_tungstenite::client_async` on the resulting `SipWsStream::ClientTls`. Advertises `Sec-WebSocket-Protocol: sips` per RFC 7118 §4.5; `wss://` URL scheme stamped into the upgrade request.
+
+**Phase 4 polish acceptance (passing):** `crates/rvoip-sip-transport/tests/ws_client_round_trip.rs::wss_client_round_trip_delivers_register_to_server_event_bus` (gated on `wss + dev-insecure-tls`) — `rcgen` self-signed cert; client transport built via `bind_with_client_tls` with `TlsClientConfig { insecure_skip_verify: true, .. }`; REGISTER round-trips end-to-end to `TransportEvent::MessageReceived` with `TransportType::Wss`. The original 2 round-trip tests (plain WS, WSS server accept) still pass; the unit-level guard `test_wss_client_without_client_tls_config_is_not_implemented` confirms callers using plain `bind()` still hit `NotImplemented` (preserves opt-in semantics).
+
+**Deferred (still on the polish list):**
+- **Hostname-derived SNI from upper layers.** The WSS dial uses an IP-derived SNI (`ip_to_server_name(addr)`) because `connect_to(addr)` doesn't see the original URI. Real CA-chain validation against carrier certs needs the hostname threaded down from the dialog/manager layer. The TLS transport already does this via `tls_server_name_for_message` — extending the pattern to WS is the natural follow-up.
 
 ### Phase 5 — RFC 3263 NAPTR/SRV (2.0 wk) — **DONE**
 
@@ -186,9 +214,28 @@ rvoip-sip (UnifiedCoordinator + new ProxyCoordinator)
 - `crates/rvoip-sip-transport/tests/resolver_hickory_e2e.rs` — `required-features = ["dns"]`. Binds a real `hickory_server::ServerFuture` to `127.0.0.1:0` with an `InMemoryAuthority` serving `example.test` (NAPTR records ordered `SIPS+D2T order=10` then `SIP+D2U order=20`, SRVs for both, A pointing at loopback). Points a `HickoryResolver` at the fixture and asserts the candidate vec contains both `(Tls, 127.0.0.1:5061)` and `(Udp, 127.0.0.1:5060)` with the TLS candidate ordered before UDP (NAPTR order honoured).
 - `crates/rvoip-sip-dialog/tests/rfc3263_resolution.rs` — 5 dialog-layer acceptance tests: `set_resolver` round-trips (set/get/unset), `manager_uses_configured_resolver_for_invite_destination` (configured mock sees the URI and returns the addr), `manager_returns_first_candidate_when_resolver_offers_multiple` (first candidate wins), `manager_falls_back_to_default_resolver_when_unset` (IP literal short-circuits even without resolver), `configured_resolver_overrides_default_for_ip_literal_uri_resolution_path` (configured resolver is authoritative — bypasses the IP-literal short-circuit when explicitly installed).
 
-**Deferred:**
-- **NAPTR algorithm unit tests with canned-DNS mock** — exercising every §4.1 branch (priority-pair sorting, unknown-service-token skip, fall-through to SRV chain when NAPTR returns nothing usable, weighted SRV selection within a priority group) currently relies on the `resolver_hickory_e2e.rs` real-DNS smoke. A `DnsBackend` abstraction inside `HickoryResolver` would let unit tests pin every lookup to a canned response; small refactor, low risk. Add when a regression in the ladder ordering surfaces or when carriers report NAPTR responses we don't handle.
-- **Multi-candidate failover at the dialog layer** — the manager-aware `resolve_uri_to_socketaddr` projects to a single `SocketAddr` (`candidates.into_iter().next()`). RFC 3263 §4.3 says the caller should try the next candidate on transport failure; today the transport layer surfaces the error and the dialog layer aborts. A `try_send_with_failover(uri, candidates)` helper is the natural follow-up; defer until a deployment needs it.
+**Phase 5 polish — RFC 3263 §4.3 multi-candidate failover (shipped 2026-05-19):**
+- `crates/rvoip-sip-dialog/src/dialog/dialog_utils.rs::resolve_uri_to_candidates` — new free function returning the FULL `Vec<ResolvedTarget>` (not just the first), IP-literal short-circuit preserved. Existing `resolve_uri_to_socketaddr` kept as a thin "first candidate" wrapper so all ~20 prior call sites compile unchanged.
+- `crates/rvoip-sip-dialog/src/manager/core.rs::DialogManager::resolve_uri_to_candidates` — manager-aware mirror that consults the configured `Resolver` first, falls back to the process-wide default.
+- `crates/rvoip-sip-dialog/src/transaction/transport/multiplexed.rs::MultiplexedTransport::send_message_with_failover(message, &[ResolvedTarget]) -> Result<SocketAddr>` — the primitive. Walks candidates in order, advancing on `is_recoverable()` transport errors (`ConnectFailed`, `SendFailed`, `ConnectionTimeout`, `ConnectionClosedByPeer`, etc.) and failing fast on non-recoverable ones (`MessageTooLarge`, `UnsupportedTransport`, `InvalidUri`). Returns the `SocketAddr` that succeeded.
+- `crates/rvoip-sip-dialog/src/manager/transaction_integration.rs::DialogManager::send_request_with_candidate_failover(request, candidates, fallback) -> (TransactionKey, SocketAddr)` — dialog-level helper that creates a fresh client transaction per attempt, fires `pre_send_request` (STIR/SHAKEN signing) once per attempt since Via/branch differ across retries, and treats `Error::TransportError { .. }` as the trigger for advancing to the next candidate. RFC 3261 §17.1.1.3 benign-terminate-after-2xx is recognised and returned as success.
+- `crates/rvoip-sip-dialog/src/manager/transaction_integration.rs` — four INVITE/in-dialog request paths now route through `send_request_with_candidate_failover`:
+  - `send_initial_invite_with_extra_headers` — primary outbound INVITE.
+  - `send_request_in_dialog_with_extras` — re-INVITE / BYE / REFER / OPTIONS / UPDATE / NOTIFY / MESSAGE / etc. in established dialogs.
+  - `send_invite_with_auth` — 401/407 challenge retry (preserves `builder_auth_retry_preserves_headers` test invariant: tx→dialog mapping registered BEFORE send so a fast 401 finds the dialog).
+  - `send_invite_with_session_timer_override` — 422 Session Interval Too Small retry.
+  Helper handles per-attempt STIR/SHAKEN signing, RFC 3261 §17.1.1.3 benign-terminate-after-2xx (INVITE only), and `transaction_to_dialog` registration BEFORE send_request.
+
+**Phase 5 polish acceptance (passing):** `crates/rvoip-sip-dialog/tests/rfc3263_failover.rs` — 8 cases:
+- Primitive (`send_message_with_failover`): empty candidate list → `InvalidAddress`; single candidate → Ok; first recoverable failure → second succeeds (both addrs touched in order); all recoverable failures → returns last error; non-recoverable failure → aborts immediately, second candidate NOT attempted.
+- Resolve API: `resolve_uri_to_candidates` returns full multi-candidate list; IP literal short-circuits to a single-element vector; resolver error → empty vector.
+
+The original 5 `rfc3263_resolution.rs` tests still pass — single-candidate API is unchanged.
+
+**Deferred (still on the polish list):**
+- **NAPTR algorithm unit tests with canned-DNS mock** — exercising every §4.1 branch currently relies on the `resolver_hickory_e2e.rs` real-DNS smoke. A `DnsBackend` abstraction inside `HickoryResolver` would let unit tests pin every lookup to a canned response; defer until a regression in the ladder ordering surfaces.
+- **Per-leg failover in `rvoip-sip-proxy`** — the dialog primitive demonstrates the pattern (resolve → loop → recreate-tx on transport error). The proxy's `RouteDecision::targets: Vec<SocketAddr>` is pre-resolved by the application, so adding §4.3 leg-level failover needs an API extension (e.g. `RouteDecision::targets_with_candidates: Vec<Vec<ResolvedTarget>>`). Small extension, gated on a deployment surfacing the need.
+- **Failover at remaining dialog call sites** — the four highest-value paths (initial INVITE, in-dialog requests, auth retry, 422 retry) are wired. A few smaller sites (`unified.rs::SUBSCRIBE` builder, `transaction_integration.rs::create_client_transaction_for_request` generic helper, `core.rs` ad-hoc resolvers) still use the single-addr `resolve_uri_to_socketaddr`. Extension is mechanical when an application surfaces a need.
 - **`wss://` client + DNS-aware connect** — see Phase 4 deferral notes; orthogonal to RFC 3263.
 
 ### Phase 6 — Stateful proxy single-target + Timer C (2.5 wk) — **DONE** (single-target)

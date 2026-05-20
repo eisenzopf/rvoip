@@ -454,6 +454,30 @@ impl DialogManager {
         crate::dialog::dialog_utils::resolve_uri_to_socketaddr(uri).await
     }
 
+    /// Resolve a destination URI to the FULL candidate list (RFC 3263
+    /// §4). Callers iterate candidates in returned order, trying the
+    /// next one on transport-level failure per RFC 3263 §4.3.
+    ///
+    /// Consults the configured [`Resolver`](rvoip_sip_transport::resolver::Resolver)
+    /// when one is installed; falls back to the process-wide default
+    /// otherwise. IP-literal URIs short-circuit to a single-element
+    /// vector.
+    pub async fn resolve_uri_to_candidates(
+        &self,
+        uri: &rvoip_sip_core::Uri,
+    ) -> Vec<rvoip_sip_transport::resolver::ResolvedTarget> {
+        if let Some(resolver) = self.resolver() {
+            match resolver.resolve(uri).await {
+                Ok(candidates) => return candidates,
+                Err(e) => {
+                    tracing::debug!("Configured resolver returned error: {}", e);
+                    return Vec::new();
+                }
+            }
+        }
+        crate::dialog::dialog_utils::resolve_uri_to_candidates(uri).await
+    }
+
     /// Decision returned by [`Self::run_identity_verification`].
     ///
     /// Owned by [`crate::manager`] (re-exported) so both publish paths
