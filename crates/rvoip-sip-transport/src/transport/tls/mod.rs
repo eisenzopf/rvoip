@@ -678,7 +678,7 @@ impl Transport for TlsTransport {
     }
 }
 
-fn tls_server_name_for_message(
+pub(crate) fn tls_server_name_for_message(
     message: &rvoip_sip_core::Message,
     destination: SocketAddr,
 ) -> Option<ServerName> {

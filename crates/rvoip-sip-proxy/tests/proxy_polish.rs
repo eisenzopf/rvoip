@@ -372,3 +372,84 @@ async fn redirect_3xx_emits_event_with_contact_uris() {
         })
         .await;
 }
+
+// ─────────────────── 4) RedirectInterceptor re-fork ───────────────────
+
+#[tokio::test]
+async fn redirect_interceptor_refork_swallows_3xx_and_spawns_new_leg() {
+    use rvoip_sip_proxy::{RedirectDecision, RedirectInfo, RedirectInterceptor};
+
+    struct ReForkToBackup {
+        backup: SocketAddr,
+    }
+
+    #[async_trait]
+    impl RedirectInterceptor for ReForkToBackup {
+        async fn on_redirect(
+            &self,
+            _info: RedirectInfo,
+        ) -> Option<RedirectDecision> {
+            Some(RedirectDecision::ReFork {
+                mode: rvoip_sip_proxy::ForkMode::Sequential,
+                targets: vec![self.backup],
+            })
+        }
+    }
+
+    let uas_addr: SocketAddr = UAS_ADDR.parse().unwrap();
+    let backup_addr: SocketAddr = "10.0.0.99:5060".parse().unwrap();
+    let harness = Harness::new(RouteDecision::to(uas_addr)).await;
+    harness
+        .proxy
+        .set_redirect_interceptor(Some(Arc::new(ReForkToBackup { backup: backup_addr })));
+
+    harness
+        .inject(
+            Message::Request(build_uac_invite("redirect-refork")),
+            UAC_ADDR.parse().unwrap(),
+        )
+        .await;
+
+    // First INVITE goes to the original UAS.
+    let (forwarded, _) = harness
+        .wait_for(1500, |m, d| {
+            matches!(m, Message::Request(r) if r.method() == Method::Invite) && *d == uas_addr
+        })
+        .await;
+    let Message::Request(forwarded) = forwarded else {
+        unreachable!();
+    };
+
+    // UAS returns 302 — interceptor swallows it and re-forks to backup.
+    let redirect = SimpleResponseBuilder::response_from_request(
+        &forwarded,
+        StatusCode::MovedTemporarily,
+        None,
+    )
+    .contact("sip:bob@elsewhere.example.com:5060", None)
+    .build();
+    harness.inject(Message::Response(redirect), uas_addr).await;
+
+    // Re-fork INVITE lands on the backup.
+    let _ = harness
+        .wait_for(1500, |m, d| {
+            matches!(m, Message::Request(r) if r.method() == Method::Invite) && *d == backup_addr
+        })
+        .await;
+
+    // Settle briefly, then verify the 302 did NOT reach the UAC.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let saw_302_upstream = harness
+        .transport
+        .sent()
+        .await
+        .iter()
+        .any(|(m, d)| {
+            matches!(m, Message::Response(r) if r.status() == StatusCode::MovedTemporarily)
+                && *d == UAC_ADDR.parse::<SocketAddr>().unwrap()
+        });
+    assert!(
+        !saw_302_upstream,
+        "interceptor returned ReFork — 302 must not propagate upstream"
+    );
+}

@@ -27,6 +27,7 @@ use std::sync::Arc;
 
 use rvoip_sip_dialog::transaction::TransactionManager;
 use rvoip_sip_proxy::{ProxyConfig, RouteFn, StatefulProxy};
+use rvoip_sip_transport::transport::tcp::TcpTransport;
 use rvoip_sip_transport::{Transport, TransportEvent, UdpTransport};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -82,6 +83,32 @@ impl ProxyCoordinator {
             .local_addr()
             .map_err(|e| ProxyError::Transport(format!("local_addr: {}", e)))?;
         let transport: Arc<dyn Transport> = Arc::new(udp);
+
+        Self::new(transport, local_addr, transport_rx, route_fn, config).await
+    }
+
+    /// Bind a TCP listener at `bind_addr` and start a stateful proxy
+    /// over it. Equivalent to [`Self::bind`] but uses TCP instead of
+    /// UDP — the right choice when carrier-fronting proxies need
+    /// connection-oriented transport (large SIP messages, NAT
+    /// pinholes, mutual-auth deployments).
+    pub async fn bind_tcp(bind_addr: SocketAddr, route_fn: RouteFn) -> ProxyResult<Arc<Self>> {
+        Self::bind_tcp_with_config(bind_addr, route_fn, ProxyConfig::default()).await
+    }
+
+    /// Like [`Self::bind_tcp`] but with an explicit [`ProxyConfig`].
+    pub async fn bind_tcp_with_config(
+        bind_addr: SocketAddr,
+        route_fn: RouteFn,
+        config: ProxyConfig,
+    ) -> ProxyResult<Arc<Self>> {
+        let (tcp, transport_rx) = TcpTransport::bind(bind_addr, None, None)
+            .await
+            .map_err(|e| ProxyError::Transport(format!("TCP bind: {}", e)))?;
+        let local_addr = tcp
+            .local_addr()
+            .map_err(|e| ProxyError::Transport(format!("local_addr: {}", e)))?;
+        let transport: Arc<dyn Transport> = Arc::new(tcp);
 
         Self::new(transport, local_addr, transport_rx, route_fn, config).await
     }

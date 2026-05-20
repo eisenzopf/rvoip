@@ -58,6 +58,13 @@ pub struct OutboundCallOptionsSnapshot {
     pub transfer_leg: Option<CallId>,
     pub supported_100rel: bool,
     pub extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
+    /// When true, the outbound INVITE applies SBC topology hiding:
+    /// stack-managed Via headers below the top entry are stripped
+    /// and Record-Route entries not pointing at this SBC are
+    /// removed before send. Default `false` — applications that
+    /// want B2BUA-style hiding turn this on per call via
+    /// [`OutboundCallBuilder::with_topology_hiding`].
+    pub topology_hiding: bool,
 }
 
 /// Outbound INVITE builder.
@@ -76,6 +83,7 @@ pub struct OutboundCallBuilder {
     transfer_leg: Option<CallId>,
     supported_100rel: bool,
     state: BuilderHeaderState,
+    topology_hiding: bool,
 }
 
 impl OutboundCallBuilder {
@@ -99,6 +107,7 @@ impl OutboundCallBuilder {
             transfer_leg: None,
             supported_100rel: false,
             state: BuilderHeaderState::default(),
+            topology_hiding: false,
         }
     }
 
@@ -179,6 +188,23 @@ impl OutboundCallBuilder {
         self
     }
 
+    /// Apply SBC topology hiding to this outbound INVITE. When enabled,
+    /// any Via headers below the SBC's own top Via are stripped, and
+    /// Record-Route entries that do not point at this SBC are removed
+    /// before the message reaches the wire. Use this on B2BUA forwards
+    /// where the inbound topology (upstream Via stack, intermediate
+    /// Record-Routes) must not leak to downstream peers.
+    ///
+    /// The default outbound-INVITE shape already builds a fresh Via
+    /// stack and Contact, so most call sites do not need this — the
+    /// flag matters only for forward paths that explicitly carry
+    /// inherited topology headers across (e.g. proxy-style B2BUA on
+    /// top of `Transport::send_message_raw`).
+    pub fn with_topology_hiding(mut self, enabled: bool) -> Self {
+        self.topology_hiding = enabled;
+        self
+    }
+
     /// Send the INVITE.
     ///
     /// Routes through the unified state-machine path: creates the
@@ -229,6 +255,7 @@ impl OutboundCallBuilder {
             transfer_leg: self.transfer_leg,
             supported_100rel: self.supported_100rel,
             extra_headers: self.state.headers.clone(),
+            topology_hiding: self.topology_hiding,
         });
 
         // Create the session up front — Idle UAC. Then mirror

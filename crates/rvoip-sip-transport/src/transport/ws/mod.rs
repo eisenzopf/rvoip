@@ -416,8 +416,20 @@ impl WebSocketTransport {
     ///
     /// Idempotent: a second call for the same `addr` returns the
     /// existing connection if it's still open.
+    ///
+    /// `server_name_hint` is the SNI override for the WSS handshake.
+    /// When `None`, falls back to `ip_to_server_name(addr)` (loopback
+    /// → `"localhost"`, otherwise an IP-typed `ServerName`). Callers
+    /// with a known DNS hostname (the URI's host) should pass it
+    /// through so production CA-validated WSS handshakes resolve
+    /// correctly. The plain-WS path ignores this argument.
     #[cfg(feature = "ws")]
-    async fn connect_to(&self, addr: SocketAddr) -> Result<Arc<WebSocketConnection>> {
+    async fn connect_to(
+        &self,
+        addr: SocketAddr,
+        #[cfg(feature = "wss")] server_name_hint: Option<tokio_rustls::rustls::ServerName>,
+        #[cfg(not(feature = "wss"))] _server_name_hint: (),
+    ) -> Result<Arc<WebSocketConnection>> {
         // Check if we already have an open connection
         {
             let connections = self.inner.connections.lock().await;
@@ -463,7 +475,8 @@ impl WebSocketTransport {
                         .tls_connector
                         .as_ref()
                         .expect("pre-flight guarantees tls_connector is Some when secure");
-                    let server_name = crate::transport::tls::ip_to_server_name(addr);
+                    let server_name = server_name_hint
+                        .unwrap_or_else(|| crate::transport::tls::ip_to_server_name(addr));
                     let tls_stream = connector
                         .connect(server_name, tcp_stream)
                         .await
@@ -574,8 +587,20 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            // Get or create a connection to the destination
-            let connection = self.connect_to(destination).await?;
+            // For WSS, derive SNI from the request's next-hop URI
+            // host so production CA-validated handshakes resolve.
+            // Mirrors the TLS transport's `tls_server_name_for_message`
+            // pattern. Plain WS ignores this.
+            #[cfg(feature = "wss")]
+            let server_name = if self.inner.secure {
+                crate::transport::tls::tls_server_name_for_message(&message, destination)
+            } else {
+                None
+            };
+            #[cfg(not(feature = "wss"))]
+            let server_name = ();
+
+            let connection = self.connect_to(destination, server_name).await?;
 
             // Send the message
             connection.send_message(&message).await
@@ -603,7 +628,14 @@ impl Transport for WebSocketTransport {
 
         #[cfg(feature = "ws")]
         {
-            let connection = self.connect_to(destination).await?;
+            // Raw-bytes send doesn't have a parsed message to derive
+            // SNI from. Fall back to IP-derived ServerName.
+            #[cfg(feature = "wss")]
+            let server_name: Option<tokio_rustls::rustls::ServerName> = None;
+            #[cfg(not(feature = "wss"))]
+            let server_name = ();
+
+            let connection = self.connect_to(destination, server_name).await?;
             connection.send_raw_bytes(bytes).await
         }
 

@@ -21,7 +21,8 @@ const DEFAULT_CHANNEL_CAPACITY: usize = 100;
 
 /// RFC 3261 §18.1.1 — outbound SIP requests larger than this MUST be
 /// shipped over a congestion-controlled transport (TCP) rather than UDP
-/// when path MTU is unknown.
+/// when path MTU is unknown. This is the safe default; deployments
+/// with known path MTU can override via [`UdpTransport::bind_with_mtu`].
 pub const UDP_SAFE_MAX_BYTES: usize = 1300;
 
 /// UDP transport for SIP messages
@@ -38,13 +39,33 @@ struct UdpTransportInner {
     receive_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    /// Per-instance MTU threshold for the RFC 3261 §18.1.1 UDP→TCP
+    /// failover. Defaults to [`UDP_SAFE_MAX_BYTES`]; configurable so
+    /// deployments with a known smaller path MTU (e.g. tunnelled SIP
+    /// over IPSec) or a known larger one (e.g. controlled DC fabric)
+    /// can tune the threshold.
+    safe_max_bytes: usize,
 }
 
 impl UdpTransport {
-    /// Creates a new UDP transport bound to the specified address
+    /// Creates a new UDP transport bound to the specified address.
+    /// Uses the RFC 3261 §18.1.1 default MTU threshold
+    /// ([`UDP_SAFE_MAX_BYTES`]).
     pub async fn bind(
         addr: SocketAddr,
         channel_capacity: Option<usize>,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_mtu(addr, channel_capacity, UDP_SAFE_MAX_BYTES).await
+    }
+
+    /// Same as [`Self::bind`] but with a caller-supplied MTU threshold
+    /// for the UDP→TCP failover decision (RFC 3261 §18.1.1). Useful
+    /// for deployments with a known smaller path MTU (e.g. SIP over
+    /// IPSec) or a known-safe larger one (DC fabric).
+    pub async fn bind_with_mtu(
+        addr: SocketAddr,
+        channel_capacity: Option<usize>,
+        safe_max_bytes: usize,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
@@ -53,7 +74,10 @@ impl UdpTransport {
         // Create the UDP listener
         let listener = UdpListener::bind(addr).await?;
         let local_addr = listener.local_addr()?;
-        info!("SIP UDP transport bound to {}", local_addr);
+        info!(
+            "SIP UDP transport bound to {} (MTU threshold {} bytes)",
+            local_addr, safe_max_bytes
+        );
 
         // Create the UDP sender (shares same socket)
         let sender = UdpSender::new(listener.clone_socket())?;
@@ -71,6 +95,7 @@ impl UdpTransport {
                 receive_task: tokio::sync::Mutex::new(None),
                 shutdown_tx,
                 shutdown_rx,
+                safe_max_bytes,
             }),
         };
 
@@ -104,6 +129,7 @@ impl UdpTransport {
                 receive_task: tokio::sync::Mutex::new(None),
                 shutdown_tx,
                 shutdown_rx,
+                safe_max_bytes: UDP_SAFE_MAX_BYTES,
             }),
         }
     }
@@ -264,7 +290,7 @@ impl Transport for UdpTransport {
     }
 
     fn max_safe_message_size(&self) -> usize {
-        UDP_SAFE_MAX_BYTES
+        self.inner.safe_max_bytes
     }
 }
 
@@ -275,5 +301,32 @@ impl fmt::Debug for UdpTransport {
         } else {
             write!(f, "UdpTransport(<e>)")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bind_uses_default_mtu_threshold() {
+        let (transport, _rx) = UdpTransport::bind("127.0.0.1:0".parse().unwrap(), None)
+            .await
+            .expect("bind");
+        assert_eq!(transport.max_safe_message_size(), UDP_SAFE_MAX_BYTES);
+        transport.close().await.ok();
+    }
+
+    #[tokio::test]
+    async fn bind_with_mtu_honours_explicit_override() {
+        let (transport, _rx) = UdpTransport::bind_with_mtu(
+            "127.0.0.1:0".parse().unwrap(),
+            None,
+            900,
+        )
+        .await
+        .expect("bind_with_mtu");
+        assert_eq!(transport.max_safe_message_size(), 900);
+        transport.close().await.ok();
     }
 }

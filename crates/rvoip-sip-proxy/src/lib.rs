@@ -33,4 +33,7 @@ pub mod error;
 pub mod proxy;
 
 pub use error::{ProxyError, ProxyResult};
-pub use proxy::{ForkMode, ProxyConfig, ProxyEvent, RouteDecision, RouteFn, StatefulProxy};
+pub use proxy::{
+    ForkMode, ProxyConfig, ProxyEvent, RedirectDecision, RedirectInfo, RedirectInterceptor,
+    RouteDecision, RouteFn, StatefulProxy,
+};

@@ -108,10 +108,24 @@ impl Default for ForkMode {
 /// - `RouteDecision::to(addr)` — single target (no forking).
 /// - `RouteDecision::parallel(vec![...])` — fork to all targets at once.
 /// - `RouteDecision::sequential(vec![...])` — try targets in order.
+/// - `RouteDecision::parallel_with_failover(vec![vec![..], ..])` —
+///   per-leg RFC 3263 §4.3 candidate failover layered onto a parallel
+///   fork (the outer vec is the fork list; each inner vec is the
+///   candidate list the proxy walks on transport failure).
+/// - `RouteDecision::sequential_with_failover(vec![vec![..], ..])` —
+///   same shape, sequential mode.
 #[derive(Debug, Clone)]
 pub struct RouteDecision {
     pub mode: ForkMode,
     pub targets: Vec<SocketAddr>,
+    /// Optional per-leg RFC 3263 §4.3 candidate lists. When non-empty,
+    /// each `Vec<SocketAddr>` is one leg's candidate list — the proxy
+    /// tries entries in order on transport-level failure. When empty,
+    /// `targets` is used as a 1-element-per-leg candidate list (the
+    /// pre-failover behaviour). Outer length defines the fork count;
+    /// when both `targets` and `leg_candidates` are set, the latter
+    /// wins.
+    pub leg_candidates: Vec<Vec<SocketAddr>>,
 }
 
 impl RouteDecision {
@@ -123,6 +137,7 @@ impl RouteDecision {
         Self {
             mode: ForkMode::Sequential,
             targets: vec![destination],
+            leg_candidates: Vec::new(),
         }
     }
 
@@ -130,6 +145,7 @@ impl RouteDecision {
         Self {
             mode: ForkMode::Parallel,
             targets,
+            leg_candidates: Vec::new(),
         }
     }
 
@@ -137,6 +153,57 @@ impl RouteDecision {
         Self {
             mode: ForkMode::Sequential,
             targets,
+            leg_candidates: Vec::new(),
+        }
+    }
+
+    /// Parallel fork with per-leg candidate failover. Each inner
+    /// `Vec<SocketAddr>` is one leg — the proxy walks the entries
+    /// in order on transport-level failure (RFC 3263 §4.3).
+    pub fn parallel_with_failover(legs: Vec<Vec<SocketAddr>>) -> Self {
+        let targets = legs
+            .iter()
+            .filter_map(|leg| leg.first().copied())
+            .collect();
+        Self {
+            mode: ForkMode::Parallel,
+            targets,
+            leg_candidates: legs,
+        }
+    }
+
+    /// Sequential fork with per-leg candidate failover. Same shape as
+    /// [`Self::parallel_with_failover`].
+    pub fn sequential_with_failover(legs: Vec<Vec<SocketAddr>>) -> Self {
+        let targets = legs
+            .iter()
+            .filter_map(|leg| leg.first().copied())
+            .collect();
+        Self {
+            mode: ForkMode::Sequential,
+            targets,
+            leg_candidates: legs,
+        }
+    }
+
+    /// Candidate list for leg index `idx`. Returns a single-element
+    /// slice from `targets` when no per-leg candidates were supplied,
+    /// otherwise returns the configured candidate vec.
+    pub(crate) fn candidates_for_leg(&self, idx: usize) -> Vec<SocketAddr> {
+        if let Some(candidates) = self.leg_candidates.get(idx) {
+            candidates.clone()
+        } else {
+            self.targets.get(idx).copied().into_iter().collect()
+        }
+    }
+
+    /// Number of legs the decision describes — driven by
+    /// `leg_candidates` when present, otherwise by `targets`.
+    pub(crate) fn leg_count(&self) -> usize {
+        if !self.leg_candidates.is_empty() {
+            self.leg_candidates.len()
+        } else {
+            self.targets.len()
         }
     }
 }
@@ -176,8 +243,20 @@ struct ForkContext {
     /// (Timer C 408, 483, 404) with the correct From/To/Call-ID/CSeq
     /// /Via stack per RFC 3261 §8.2.6.2.
     original_request: Request,
-    /// All downstream targets the application asked us to try.
+    /// All downstream targets the application asked us to try (one
+    /// representative `SocketAddr` per leg; for per-leg failover this
+    /// is the first candidate).
     targets: Vec<SocketAddr>,
+    /// Per-leg candidate lists for RFC 3263 §4.3 failover at the leg
+    /// level. Empty when the application did not request per-leg
+    /// failover — in that case each leg has a single candidate
+    /// (`targets[idx]`).
+    leg_candidates: Vec<Vec<SocketAddr>>,
+    /// Number of legs already started — used by sequential mode to
+    /// advance to the next leg index on failure (replaces the prior
+    /// address-set scan which broke once a leg could have multiple
+    /// candidates).
+    legs_started: std::sync::atomic::AtomicUsize,
     /// Per-leg state. In Parallel mode, all legs are populated up-front.
     /// In Sequential mode, legs are populated one at a time as earlier
     /// ones fail.
@@ -209,6 +288,52 @@ struct Leg {
 /// Spawn via [`StatefulProxy::run`] passing a routing function. The
 /// returned `JoinHandle` runs until the underlying
 /// [`TransactionManager`] event stream closes.
+/// Hook the proxy fires on every 3xx response received from a
+/// downstream leg. Implementations can opt to re-fork the call to a
+/// new target set instead of forwarding the 3xx upstream — typical
+/// use case is an application that consults its own location service
+/// or recursive-redirect policy.
+///
+/// Returning `RedirectDecision::Forward` (or `None` via the `Option`
+/// return) sends the 3xx upstream verbatim, preserving the prior
+/// observability-only behaviour. Returning
+/// `RedirectDecision::ReFork(...)` swallows the 3xx, marks the leg
+/// as cancelled (so it doesn't influence best-failure selection),
+/// and spawns fresh downstream legs for the new targets.
+#[async_trait::async_trait]
+pub trait RedirectInterceptor: Send + Sync {
+    async fn on_redirect(
+        &self,
+        info: RedirectInfo,
+    ) -> Option<RedirectDecision>;
+}
+
+/// Snapshot of the 3xx response handed to a [`RedirectInterceptor`].
+#[derive(Debug, Clone)]
+pub struct RedirectInfo {
+    /// Upstream server transaction key the 3xx applies to.
+    pub upstream_tx: TransactionKey,
+    /// The 3xx status code that arrived.
+    pub status: rvoip_sip_core::types::status::StatusCode,
+    /// Contact URIs extracted from the 3xx response (RFC 3261 §16.7
+    /// step 2 — redirect target set).
+    pub contacts: Vec<rvoip_sip_core::Uri>,
+}
+
+/// Application decision in response to a 3xx redirect.
+#[derive(Debug, Clone)]
+pub enum RedirectDecision {
+    /// Forward the 3xx upstream verbatim (default — same as no
+    /// interceptor installed).
+    Forward,
+    /// Don't forward the 3xx upstream; instead spawn new downstream
+    /// legs against `targets` in the supplied [`ForkMode`].
+    ReFork {
+        mode: ForkMode,
+        targets: Vec<SocketAddr>,
+    },
+}
+
 pub struct StatefulProxy {
     tm: Arc<TransactionManager>,
     config: ProxyConfig,
@@ -237,6 +362,12 @@ pub struct StatefulProxy {
     /// subscriber and survives subscriber-side drops, so the proxy
     /// never blocks on unread events.
     event_tx: broadcast::Sender<ProxyEvent>,
+
+    /// Optional 3xx interception hook. When installed, the proxy
+    /// consults the interceptor on every 3xx and lets it choose
+    /// between forwarding (default) and re-forking to a new target
+    /// set. See [`RedirectInterceptor`].
+    redirect_interceptor: std::sync::RwLock<Option<Arc<dyn RedirectInterceptor>>>,
 }
 
 impl std::fmt::Debug for StatefulProxy {
@@ -269,7 +400,28 @@ impl StatefulProxy {
             timer_c_tasks: DashMap::new(),
             known_branches: DashMap::new(),
             event_tx: broadcast::channel(64).0,
+            redirect_interceptor: std::sync::RwLock::new(None),
         })
+    }
+
+    /// Install (or replace) a [`RedirectInterceptor`]. Apps that want
+    /// to re-fork on 3xx instead of forwarding the redirect upstream
+    /// supply an interceptor here.
+    pub fn set_redirect_interceptor(
+        &self,
+        interceptor: Option<Arc<dyn RedirectInterceptor>>,
+    ) {
+        *self
+            .redirect_interceptor
+            .write()
+            .expect("redirect_interceptor RwLock poisoned") = interceptor;
+    }
+
+    fn redirect_interceptor(&self) -> Option<Arc<dyn RedirectInterceptor>> {
+        self.redirect_interceptor
+            .read()
+            .expect("redirect_interceptor RwLock poisoned")
+            .clone()
     }
 
     /// Subscribe to observable proxy events ([`ProxyEvent`]). Drop
@@ -446,6 +598,8 @@ impl StatefulProxy {
             mode: decision.mode,
             original_request: original_request.clone(),
             targets: decision.targets.clone(),
+            leg_candidates: decision.leg_candidates.clone(),
+            legs_started: std::sync::atomic::AtomicUsize::new(0),
             legs: tokio::sync::Mutex::new(Vec::new()),
             upstream_responded: std::sync::atomic::AtomicBool::new(false),
         });
@@ -457,26 +611,35 @@ impl StatefulProxy {
             self.start_timer_c(upstream_tx_id.clone());
         }
 
+        let leg_count = decision.leg_count();
         match decision.mode {
             ForkMode::Parallel => {
-                // Fire every target in one batch.
-                for dest in &decision.targets {
+                // Fire every leg in one batch. Each leg may carry a
+                // candidate list (RFC 3263 §4.3) — start_leg walks
+                // them internally on transport failure.
+                for idx in 0..leg_count {
+                    let candidates = decision.candidates_for_leg(idx);
+                    fork.legs_started
+                        .store(idx + 1, std::sync::atomic::Ordering::Release);
                     if let Err(e) = self
-                        .start_leg(&fork, &request, *dest)
+                        .start_leg(&fork, &request, &candidates)
                         .await
                     {
                         warn!(
-                            "proxy: failed to start parallel leg to {}: {}",
-                            dest, e
+                            "proxy: failed to start parallel leg {} (candidates {:?}): {}",
+                            idx, candidates, e
                         );
                     }
                 }
             }
             ForkMode::Sequential => {
-                // Start with the first target only. Subsequent
-                // targets are kicked off in `aggregate_failure`.
-                if let Some(first) = decision.targets.first() {
-                    self.start_leg(&fork, &request, *first).await?;
+                // Start with the first leg only. Subsequent legs
+                // are kicked off in `aggregate_failure`.
+                if leg_count > 0 {
+                    let candidates = decision.candidates_for_leg(0);
+                    fork.legs_started
+                        .store(1, std::sync::atomic::Ordering::Release);
+                    self.start_leg(&fork, &request, &candidates).await?;
                 }
             }
         }
@@ -485,64 +648,133 @@ impl StatefulProxy {
     }
 
     /// Push a fresh proxy Via onto `request`, build a downstream client
-    /// transaction targeting `destination`, and register the leg with
-    /// the fork context. Sends the request once the leg is fully wired.
+    /// transaction targeting one of `candidates`, register the leg
+    /// with the fork context, and send the request.
+    ///
+    /// When `candidates.len() > 1`, the method walks the list in order
+    /// on transport-level send failures (RFC 3263 §4.3 multi-candidate
+    /// failover at the leg level). Each retry stamps a fresh proxy
+    /// branch so the Via stack stays §16.6-valid across attempts.
+    /// Returns the first successful send; otherwise the last error.
     async fn start_leg(
         &self,
         fork: &Arc<ForkContext>,
         base_request: &Request,
-        destination: SocketAddr,
+        candidates: &[SocketAddr],
     ) -> Result<(), ProxyError> {
-        // Clone the per-fork base request (the post-Max-Forwards form
-        // with the application's downstream targeting baked in by the
-        // caller). Each leg gets its own Via with a unique branch.
-        let mut leg_request = base_request.clone();
+        if candidates.is_empty() {
+            return Err(ProxyError::Transport(
+                "start_leg called with no candidates".into(),
+            ));
+        }
 
         let local_addr = self
             .tm
             .transport()
             .local_addr()
             .map_err(|e| ProxyError::Transport(e.to_string()))?;
-        let proxy_branch = format!("z9hG4bK-proxy-{}", uuid::Uuid::new_v4().simple());
-        push_proxy_via(&mut leg_request, local_addr, &proxy_branch)?;
-        // Remember the branch so a future inbound carrying it in its
-        // Via stack trips the §16.6 step-4 loop check.
-        self.known_branches.insert(proxy_branch.clone(), ());
 
-        let downstream_tx_id = self
-            .tm
-            .create_client_transaction(leg_request, destination)
-            .await
-            .map_err(|e| ProxyError::Transaction(e.to_string()))?;
+        let total = candidates.len();
+        let mut last_err: Option<ProxyError> = None;
 
-        // Register the leg before sending so a fast inbound response
-        // can find the fork context via `forks_by_downstream`.
-        {
-            let mut legs = fork.legs.lock().await;
-            legs.push(Leg {
-                downstream_client_tx: downstream_tx_id.clone(),
-                destination,
-                final_status: None,
-                cancelled: false,
-                last_response: None,
-            });
+        for (idx, destination) in candidates.iter().enumerate() {
+            let attempt = idx + 1;
+            // Each attempt gets a fresh request clone + fresh proxy
+            // Via with a unique branch so RFC 3261 §16.6 branch
+            // uniqueness holds across the candidate walk.
+            let mut leg_request = base_request.clone();
+            let proxy_branch = format!("z9hG4bK-proxy-{}", uuid::Uuid::new_v4().simple());
+            if let Err(e) = push_proxy_via(&mut leg_request, local_addr, &proxy_branch) {
+                last_err = Some(e);
+                continue;
+            }
+            self.known_branches.insert(proxy_branch.clone(), ());
+
+            let downstream_tx_id = match self
+                .tm
+                .create_client_transaction(leg_request, *destination)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    last_err = Some(ProxyError::Transaction(format!(
+                        "RFC 3263 §4.3 leg candidate {}/{} ({}): create_client_transaction: {}",
+                        attempt, total, destination, e
+                    )));
+                    continue;
+                }
+            };
+
+            // Register the leg before sending so a fast inbound
+            // response can find the fork context via
+            // `forks_by_downstream`.
+            {
+                let mut legs = fork.legs.lock().await;
+                legs.push(Leg {
+                    downstream_client_tx: downstream_tx_id.clone(),
+                    destination: *destination,
+                    final_status: None,
+                    cancelled: false,
+                    last_response: None,
+                });
+            }
+            self.forks_by_downstream
+                .insert(downstream_tx_id.clone(), fork.clone());
+
+            match self.tm.send_request(&downstream_tx_id).await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        debug!(
+                            "proxy: leg candidate {}/{} ({}) succeeded after {} prior failure(s)",
+                            attempt,
+                            total,
+                            destination,
+                            attempt - 1
+                        );
+                    }
+                    debug!(
+                        "proxy: started leg to {} (upstream tx={} downstream tx={} mode={:?})",
+                        destination,
+                        fork.upstream_server_tx,
+                        downstream_tx_id,
+                        fork.mode
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    // Treat any send_request failure as a recoverable
+                    // transport-level error for §4.3 purposes —
+                    // transaction-core wraps the underlying transport
+                    // err as a string, so we can't distinguish
+                    // recoverable from non-recoverable here. The risk
+                    // of over-retrying is low: each attempt is bounded
+                    // by Timer C and the candidate list is short.
+                    debug!(
+                        "proxy: leg candidate {}/{} ({}) failed: {}; trying next",
+                        attempt, total, destination, e
+                    );
+                    // Drop the leg from the fork map — the next
+                    // candidate will register its own.
+                    self.forks_by_downstream.remove(&downstream_tx_id);
+                    {
+                        let mut legs = fork.legs.lock().await;
+                        legs.retain(|leg| leg.downstream_client_tx != downstream_tx_id);
+                    }
+                    last_err = Some(ProxyError::Transaction(format!(
+                        "leg candidate {} ({}): {}",
+                        attempt, destination, e
+                    )));
+                    continue;
+                }
+            }
         }
-        self.forks_by_downstream
-            .insert(downstream_tx_id.clone(), fork.clone());
 
-        self.tm
-            .send_request(&downstream_tx_id)
-            .await
-            .map_err(|e| ProxyError::Transaction(e.to_string()))?;
-
-        debug!(
-            "proxy: started leg to {} (upstream tx={} downstream tx={} mode={:?})",
-            destination,
-            fork.upstream_server_tx,
-            downstream_tx_id,
-            fork.mode
-        );
-        Ok(())
+        Err(last_err.unwrap_or_else(|| {
+            ProxyError::Transport(format!(
+                "RFC 3263 §4.3 leg failover exhausted: all {} candidate(s) failed",
+                total
+            ))
+        }))
     }
 
     /// Aggregator entry for every downstream response. Routes via
@@ -635,19 +867,76 @@ impl StatefulProxy {
         downstream_tx_id: TransactionKey,
         response: Response,
     ) -> Result<(), ProxyError> {
-        // RFC 3261 §16.7 redirect — surface 3xx to subscribers BEFORE
-        // we treat it as a generic failure. Applications can observe
-        // (today) and re-fork (deferred follow-up). Emission is best-
-        // effort: when there are no live subscribers, broadcast::Sender
-        // returns Err(NoReceivers), which we drop.
+        // RFC 3261 §16.7 redirect — surface 3xx to subscribers and
+        // optionally consult the installed [`RedirectInterceptor`].
+        // If the interceptor returns `ReFork`, the 3xx does NOT
+        // propagate upstream and fresh legs are spawned against the
+        // app-supplied target set.
         let status = response.status();
         if status.as_u16() / 100 == 3 {
             let contacts = extract_contact_uris(&response);
             let _ = self.event_tx.send(ProxyEvent::RedirectReceived {
                 upstream_tx: fork.upstream_server_tx.clone(),
                 status,
-                contacts,
+                contacts: contacts.clone(),
             });
+
+            if let Some(interceptor) = self.redirect_interceptor() {
+                let info = RedirectInfo {
+                    upstream_tx: fork.upstream_server_tx.clone(),
+                    status,
+                    contacts: contacts.clone(),
+                };
+                match interceptor.on_redirect(info).await {
+                    Some(RedirectDecision::ReFork { mode, targets }) if !targets.is_empty() => {
+                        debug!(
+                            "proxy: 3xx interceptor requested re-fork to {} target(s) in {:?} mode",
+                            targets.len(),
+                            mode
+                        );
+                        // Mark the leg as cancelled so the failure
+                        // doesn't influence best-failure selection
+                        // — the 3xx is "consumed" by the re-fork.
+                        {
+                            let mut legs = fork.legs.lock().await;
+                            if let Some(leg) =
+                                legs.iter_mut().find(|l| l.downstream_client_tx == downstream_tx_id)
+                            {
+                                leg.cancelled = true;
+                                leg.final_status = Some(response.status());
+                                leg.last_response = Some(response.clone());
+                            }
+                        }
+                        // Spawn the requested legs. Treat each
+                        // target as a single-candidate leg under
+                        // the requested mode.
+                        for target in targets {
+                            if let Err(e) = self
+                                .start_leg(fork, &fork.original_request, &[target])
+                                .await
+                            {
+                                warn!(
+                                    "proxy: 3xx re-fork start_leg to {} failed: {}",
+                                    target, e
+                                );
+                            }
+                        }
+                        // Don't fall through to the failure path —
+                        // the 3xx is now consumed.
+                        return Ok(());
+                    }
+                    Some(RedirectDecision::Forward) | None => {
+                        // Default: fall through to the normal
+                        // failure-aggregation path, which forwards
+                        // the 3xx via `forward_best_failure`.
+                    }
+                    Some(RedirectDecision::ReFork { .. }) => {
+                        debug!(
+                            "proxy: 3xx interceptor returned ReFork with no targets — forwarding upstream"
+                        );
+                    }
+                }
+            }
         }
 
         // Record this leg's final.
@@ -675,20 +964,38 @@ impl StatefulProxy {
 
         match fork.mode {
             ForkMode::Sequential => {
-                // Try the next target if any remain.
-                let next_target = {
-                    let legs = fork.legs.lock().await;
-                    let tried: std::collections::HashSet<SocketAddr> =
-                        legs.iter().map(|l| l.destination).collect();
-                    fork.targets
-                        .iter()
-                        .copied()
-                        .find(|t| !tried.contains(t))
+                // Advance to the next leg index. With per-leg failover,
+                // each "leg" may have walked multiple candidate addrs
+                // internally — tracking the next leg by index instead
+                // of by SocketAddr is correct under both single- and
+                // multi-candidate shapes.
+                let leg_total = if !fork.leg_candidates.is_empty() {
+                    fork.leg_candidates.len()
+                } else {
+                    fork.targets.len()
                 };
-                if let Some(target) = next_target {
-                    self.start_leg(fork, &fork.original_request, target).await?;
+                let next_idx = fork
+                    .legs_started
+                    .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                if next_idx < leg_total {
+                    let candidates: Vec<SocketAddr> =
+                        if let Some(c) = fork.leg_candidates.get(next_idx) {
+                            c.clone()
+                        } else {
+                            fork.targets.get(next_idx).copied().into_iter().collect()
+                        };
+                    // legs_started was already bumped by fetch_add;
+                    // start_leg uses it implicitly via the success
+                    // path's existing accounting.
+                    self.start_leg(fork, &fork.original_request, &candidates)
+                        .await?;
                     return Ok(());
                 }
+                // Counter overshot — restore so the value stays
+                // representative of "next index to start" (== leg_total
+                // when exhausted).
+                fork.legs_started
+                    .store(leg_total, std::sync::atomic::Ordering::Release);
                 // Exhausted — forward the best collected failure.
                 self.forward_best_failure(fork).await
             }

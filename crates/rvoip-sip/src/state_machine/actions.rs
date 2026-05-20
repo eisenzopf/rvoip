@@ -2360,6 +2360,20 @@ pub(crate) async fn execute_action(
                 // path negotiates media identically.
                 let sdp_for_wire = snapshot.sdp.clone().or_else(|| session.local_sdp.clone());
 
+                // `with_topology_hiding(true)` is a no-op on the
+                // fresh-INVITE build path (Via stack is stamped
+                // from scratch, Contact is overridden, and
+                // `with_headers_from` already filters stack-managed
+                // headers out). The flag is plumbed so proxy-style
+                // forward paths (on top of `Transport::send_message_raw`)
+                // can honour the same opt-in.
+                if snapshot.topology_hiding {
+                    debug!(
+                        "topology_hiding requested for session {} — fresh INVITE path stamps a clean Via/Contact by construction (no-op)",
+                        session.session_id
+                    );
+                }
+
                 if suppress_global_proxy {
                     dialog_adapter
                         .send_invite_with_extra_headers_no_global_proxy(

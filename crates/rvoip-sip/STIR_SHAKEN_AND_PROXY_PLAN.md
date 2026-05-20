@@ -1,6 +1,6 @@
 # STIR/SHAKEN + Proxy/SBC + Transport Roadmap
 
-**Status:** Phases **1 (incl. STI-CA chain validation + SHAKEN profile polish), 2, 3, 4 (incl. WSS client polish), 5 (incl. §4.3 multi-candidate failover polish), 6, 7, 8, 8.5, 10 shipped** (latest update 2026-05-19); all roadmap phases complete.
+**Status:** Phases **1 (incl. STI-CA chain validation + SHAKEN profile polish), 2, 3, 4 (incl. WSS client + hostname SNI polish), 5 (incl. §4.3 multi-candidate failover polish — dialog primary INVITE, re-INVITE/BYE/REFER, auth retry, 422 retry), 6 (incl. operational polish: proxy TCP bind helper), 7 (incl. per-leg §4.3 failover and `RedirectInterceptor` 3xx re-fork polish), 8 (incl. `with_topology_hiding` builder option), 8.5, 10 (incl. configurable MTU threshold) shipped** (latest update 2026-05-19); all roadmap phases complete.
 **Predecessors:** `SIP_API_DESIGN_2.md`, `SIP_API_DESIGN_2_GAP_PLAN.md`, `SIP_API_DESIGN_2_REMAINING_WORK.md` (R1–R6 all closed 2026-05-14)
 
 ## Context
@@ -85,11 +85,11 @@ Default implementations using `jsonwebtoken`, `x509-parser`, `webpki`, and `reqw
 | 3 | RFC 3581 restamp + multi-homed source selection | `sip-transport`, `sip-dialog` | 1.5 | — | **DONE** (restamp); multi-homed source deferred |
 | 4 | WebSocket client + WSS accept | `sip-transport` | 1.5 | — | **DONE** (incl. WSS client polish) |
 | 5 | RFC 3263 NAPTR/SRV | `sip-transport`, `sip-dialog` | 2.0 | — | **DONE** (incl. §4.3 multi-candidate failover polish) |
-| 6 | Stateful proxy: server+client txn co-ownership + Timer C | **new** `rvoip-sip-proxy`, `rvoip-sip` (ProxyCoordinator) | 2.5 | — | **DONE** (single-target) |
-| 7 | Forking + 3xx redirect-set | `rvoip-sip-proxy` | 2.0 | 6 | **DONE** |
-| 8 | SBC topology hiding (Record-Route strip, Via strip) | `rvoip-sip` | 0.75 | — | **DONE** |
+| 6 | Stateful proxy: server+client txn co-ownership + Timer C | **new** `rvoip-sip-proxy`, `rvoip-sip` (ProxyCoordinator) | 2.5 | — | **DONE** (incl. TCP bind polish) |
+| 7 | Forking + 3xx redirect-set | `rvoip-sip-proxy` | 2.0 | 6 | **DONE** (incl. per-leg §4.3 failover + RedirectInterceptor polish) |
+| 8 | SBC topology hiding (Record-Route strip, Via strip) | `rvoip-sip` | 0.75 | — | **DONE** (incl. `with_topology_hiding` builder polish) |
 | 8.5 | Stateless proxy helpers (Via push/pop/loop-detect + raw forward) | `sip-core`, `sip-transport` | 0.75 | — | **DONE** |
-| 10 | MTU/message-size policy | `sip-transport`, `sip-dialog` | 0.5 | 2 | **DONE** |
+| 10 | MTU/message-size policy | `sip-transport`, `sip-dialog` | 0.5 | 2 | **DONE** (incl. configurable threshold polish) |
 
 **Total: ~13.5 engineer-weeks** (~8.5 calendar weeks with two engineers — similar velocity to `SIP_API_DESIGN_2`).
 
@@ -183,6 +183,11 @@ rvoip-sip (UnifiedCoordinator + new ProxyCoordinator)
 - `plain_ws_round_trip_delivers_register_to_server_event_bus` — UAS bind + UAC dial via `WebSocketTransport`, REGISTER round-trips to `TransportEvent::MessageReceived` with `TransportType::Ws`.
 - `wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol` (gated on `wss + dev-insecure-tls`) — `rcgen` self-signed cert; WSS bind; client runs rustls handshake (accept-self-signed verifier) and completes the WS upgrade with `Sec-WebSocket-Protocol: sips`.
 
+**Phase 4 polish — hostname-derived SNI for WSS (shipped 2026-05-19):**
+- `crates/rvoip-sip-transport/src/transport/tls/mod.rs::tls_server_name_for_message` promoted to `pub(crate)` so the WS module reuses the same URI-host → `ServerName` derivation as the TLS transport.
+- `crates/rvoip-sip-transport/src/transport/ws/mod.rs::WebSocketTransport::connect_to` gained an `Option<ServerName>` hint parameter. `Transport::send_message` derives the hint from the parsed message's next-hop URI host; `send_message_raw` (no parsed message) falls back to the IP-derived SNI from the prior polish. Loopback continues to map to `"localhost"`.
+- WSS dials against carrier deployments now resolve CA-validated handshakes (the cert's CN/SAN typically matches the hostname, not the IP). `dev-insecure-tls` round-trip test stays green; production deployments using system roots get the correct SNI without code changes.
+
 **Phase 4 polish — WSS client (shipped 2026-05-19):**
 - `crates/rvoip-sip-transport/src/transport/ws/mod.rs::WebSocketTransport::bind_with_client_tls(addr, secure, cert_path, key_path, channel_capacity, client_tls: Option<TlsClientConfig>)` — new entry point that wires a `tokio_rustls::TlsConnector` into the WS transport for outbound `wss://` dials. Existing `bind()` callers keep the prior `NotImplemented` WSS-client behaviour (gated opt-in to avoid surprising root-store policy for callers that only need server-side WSS).
 - `crates/rvoip-sip-transport/src/transport/tls/mod.rs::build_client_config` / `::ip_to_server_name` promoted to `pub(crate)` so the WS module reuses the exact same root-store ladder (`rustls-native-certs` → `webpki-roots` fallback → optional `extra_ca_path` → dev-only `insecure_skip_verify`) as the TLS transport. No new root-store policy surface.
@@ -234,9 +239,7 @@ The original 5 `rfc3263_resolution.rs` tests still pass — single-candidate API
 
 **Deferred (still on the polish list):**
 - **NAPTR algorithm unit tests with canned-DNS mock** — exercising every §4.1 branch currently relies on the `resolver_hickory_e2e.rs` real-DNS smoke. A `DnsBackend` abstraction inside `HickoryResolver` would let unit tests pin every lookup to a canned response; defer until a regression in the ladder ordering surfaces.
-- **Per-leg failover in `rvoip-sip-proxy`** — the dialog primitive demonstrates the pattern (resolve → loop → recreate-tx on transport error). The proxy's `RouteDecision::targets: Vec<SocketAddr>` is pre-resolved by the application, so adding §4.3 leg-level failover needs an API extension (e.g. `RouteDecision::targets_with_candidates: Vec<Vec<ResolvedTarget>>`). Small extension, gated on a deployment surfacing the need.
 - **Failover at remaining dialog call sites** — the four highest-value paths (initial INVITE, in-dialog requests, auth retry, 422 retry) are wired. A few smaller sites (`unified.rs::SUBSCRIBE` builder, `transaction_integration.rs::create_client_transaction_for_request` generic helper, `core.rs` ad-hoc resolvers) still use the single-addr `resolve_uri_to_socketaddr`. Extension is mechanical when an application surfaces a need.
-- **`wss://` client + DNS-aware connect** — see Phase 4 deferral notes; orthogonal to RFC 3263.
 
 ### Phase 6 — Stateful proxy single-target + Timer C (2.5 wk) — **DONE** (single-target)
 
@@ -263,7 +266,7 @@ The original 5 `rfc3263_resolution.rs` tests still pass — single-candidate API
 - ~~**Timer C per-1xx reset**~~ — **DONE** (polish round). `proxy.rs::reset_timer_c` aborts the current Timer C task and starts a fresh sleep on every forwarded 1xx; the cancel-on-first-1xx Phase 6 simplification is gone. Acceptance: `tests/proxy_polish.rs::timer_c_resets_on_1xx_and_does_not_fire_408` — 4 × 180 Ringing spaced 100 ms apart over a 200 ms Timer C produces zero 408s.
 - ~~**CANCEL fan-out**~~ — shipped in Phase 7 (`handle_upstream_cancel` calls `cancel_siblings` with a sentinel winner key, fanning CANCEL to every live downstream leg).
 - ~~**Loop detection via `Via::detect_loop`**~~ — **DONE** (polish round). `StatefulProxy::known_branches: DashMap<String, ()>` records every `z9hG4bK-proxy-…` branch the proxy stamps; `handle_inbound_request` scans the inbound Via stack via `find_known_branch_in_request` and replies 482 Loop Detected without forwarding. Acceptance: `tests/proxy_polish.rs::inbound_with_our_branch_in_via_stack_returns_482`.
-- **TCP/TLS/WS transport** — `ProxyCoordinator::new` accepts any `Arc<dyn Transport>`, so callers can already wire TCP. `ProxyCoordinator::bind` is UDP-only for the MVP; symmetric TCP / TLS / WS bind helpers land when a deployment needs them.
+- ~~**TCP transport bind helper**~~ — **DONE** (polish round). `crates/rvoip-sip/src/api/proxy_coordinator.rs::ProxyCoordinator::bind_tcp` and `bind_tcp_with_config` wrap `TcpTransport::bind` (with default pool config) and feed it through the existing `ProxyCoordinator::new` plumbing. Carriers fronting proxies with connection-oriented transport (large messages, NAT pinholes, mutual-auth) get a one-line setup symmetric to the existing UDP path. TLS/WS bind helpers still wait on `ProxyCoordinator::new(transport, ...)` for callers that want them.
 - **Mixed-mode (proxy + UA on one manager)** — would require a router that demuxes `TransactionEvent` to the correct subscriber based on routing policy. Out of scope until a use case surfaces.
 
 ### Phase 7 — Forking + 3xx (2.0 wk, depends on Phase 6) — **DONE**
@@ -287,8 +290,8 @@ All 5 single-target tests from Phase 6 still pass — the Pair→ForkContext ref
 
 **Deferred (follow-ups):**
 - ~~**Application-visible 3xx redirect-set**~~ — **DONE** (polish round). `ProxyEvent::RedirectReceived { upstream_tx, status, contacts: Vec<Uri> }` is emitted on a `tokio::sync::broadcast` channel whenever a downstream leg returns a 3xx. Subscribers obtain a `Receiver` via `StatefulProxy::subscribe_events()` or `ProxyCoordinator::subscribe_events()`. Today emission is **observability-only** — the proxy still forwards the 3xx upstream so the UAC can recurse — but the channel is the wire on which application-driven re-fork will land. Acceptance: `tests/proxy_polish.rs::redirect_3xx_emits_event_with_contact_uris`.
-- **Application-driven re-fork on 3xx** — extend the polish-round observability stream into an interception trait that lets an app return new targets in response to `RedirectReceived` and have the proxy spawn fresh legs without sending the 3xx upstream. Out of scope until a concrete user surfaces — observability is sufficient for most redirect-server scenarios since the UAC already handles 3xx.
-- **RFC 3263 multi-candidate failover at the leg level** — when the resolver returns multiple `ResolvedTarget`s for a single target, the proxy currently only tries the first. Pairing this with Phase 5's `ResolvedTarget` vec is a small extension.
+- ~~**Application-driven re-fork on 3xx**~~ — **DONE** (polish round). `crates/rvoip-sip-proxy/src/proxy.rs::RedirectInterceptor` trait + `RedirectInfo` / `RedirectDecision` types. `StatefulProxy::set_redirect_interceptor` installs an `Arc<dyn RedirectInterceptor>`; when present the proxy calls `on_redirect(info)` on every 3xx and honours `RedirectDecision::ReFork { mode, targets }` by marking the leg cancelled (so it doesn't contaminate best-failure selection) and spawning fresh legs against the supplied targets. `RedirectDecision::Forward` (or `None`) preserves the prior observability-only behaviour. Acceptance: `tests/proxy_polish.rs::redirect_interceptor_refork_swallows_3xx_and_spawns_new_leg`.
+- ~~**RFC 3263 multi-candidate failover at the leg level**~~ — **DONE** (polish round). `RouteDecision::parallel_with_failover(Vec<Vec<SocketAddr>>)` and `sequential_with_failover(Vec<Vec<SocketAddr>>)` constructors carry per-leg candidate lists alongside the existing single-addr API. `StatefulProxy::start_leg` walks the candidate list internally on transport failure (fresh proxy branch + new client transaction per attempt). Sequential fork advance switched from address-set to leg-index tracking (`ForkContext::legs_started: AtomicUsize`) so per-leg failover composes cleanly with sequential mode. Acceptance: `tests/proxy_per_leg_failover.rs` — `per_leg_failover_advances_on_send_failure_to_next_candidate` (primary fails → backup succeeds; both touched), `parallel_with_failover_fires_first_candidate_per_leg` (backups untouched when primaries succeed).
 - ~~**Timer C per-1xx reset**~~ — **DONE** (polish round, documented under Phase 6 deferrals).
 - ~~**Loop detection**~~ — **DONE** (polish round, documented under Phase 6 deferrals).
 
@@ -304,7 +307,10 @@ All 5 single-target tests from Phase 6 still pass — the Pair→ForkContext ref
 - Combined: positive (`sbc.example.com` survives) + negative (upstream proxy hosts and UAC internal IP do not leak).
 - Case-insensitive self-host matching: `sip:SBC.Example.Com` matches self-host `"sbc.example.com"`; original case preserved on the surviving entry.
 
-**Deferred:** `with_topology_hiding(bool)` builder option on the INVITE builder. Default behavior depends on the concrete SBC deployment posture (always-strip vs. opt-in), so it waits on a deployment user to define.
+**Phase 8 polish — `with_topology_hiding(bool)` builder option (shipped 2026-05-19):**
+- `crates/rvoip-sip/src/api/send/outbound_call.rs::OutboundCallBuilder::with_topology_hiding(bool)` — new builder method that plumbs the flag onto `OutboundCallOptionsSnapshot`.
+- State-machine action consumes the flag (debug-log only on the fresh-INVITE path, where the Via stack is stamped from scratch and `with_headers_from` already filters stack-managed headers — there's nothing to strip). Reserved for future proxy-style forwards on top of `Transport::send_message_raw` that DO carry inherited topology headers across.
+- API surface is stable; behaviour is opt-in and currently a no-op on the default outbound flow. Marker docstring tells callers when it matters.
 
 Note: the helpers cover the "forward existing Request" shape (proxy-style on top of `Transport::send_message_raw`). The codebase's default B2BUA pattern — `coord.invite(...)` + `with_headers_from(&call, ...)` + `send()` — builds a *fresh* outbound INVITE with the SBC's own Via stamped from scratch, so it never strips. Phase 8.5 stateless-proxy work will lean on these helpers.
 
@@ -341,9 +347,12 @@ Note: the helpers cover the "forward existing Request" shape (proxy-style on top
 - `small_udp_request_stays_on_udp` — bare INVITE (<1300 bytes) sends via UDP; TCP gets nothing.
 - `oversized_udp_with_no_tcp_registered_is_message_too_large` — registry holds only UDP; oversized INVITE returns `MessageTooLarge(size)` and UDP is never invoked.
 
+**Phase 10 polish — configurable MTU threshold (shipped 2026-05-19):**
+- `crates/rvoip-sip-transport/src/transport/udp/mod.rs::UdpTransport::bind_with_mtu(addr, channel_capacity, safe_max_bytes)` — new constructor for deployments with known path-MTU constraints (SIP over IPSec → smaller; controlled DC fabric → larger). `bind()` continues to use the RFC 3261 §18.1.1 `UDP_SAFE_MAX_BYTES = 1300` default.
+- `Transport::max_safe_message_size()` override now reads `inner.safe_max_bytes` instead of the const, so the per-instance threshold flows through the existing `MultiplexedTransport` UDP→TCP MTU failover at `transaction/transport/multiplexed.rs` without further plumbing. Unit tests confirm both default and override paths.
+
 **Deferred:**
 - Response-path MTU policy (RFC §18.2.2). Real-world response-size pressure is rare; defer until a deployment surfaces it.
-- Configurable threshold. Single hard-coded `UDP_SAFE_MAX_BYTES = 1300` for now.
 
 ## Crate placement
 
