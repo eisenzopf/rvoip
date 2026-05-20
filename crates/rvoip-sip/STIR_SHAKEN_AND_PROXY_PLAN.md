@@ -1,6 +1,6 @@
 # STIR/SHAKEN + Proxy/SBC + Transport Roadmap
 
-**Status:** In progress (2026-05-19). Phases **1, 2, 3, 4, 5, 8, 8.5, 10 shipped**; Phases 6, 7 outstanding.
+**Status:** In progress (2026-05-19). Phases **1, 2, 3, 4, 5, 6, 7, 8, 8.5, 10 shipped**; all roadmap phases complete.
 **Predecessors:** `SIP_API_DESIGN_2.md`, `SIP_API_DESIGN_2_GAP_PLAN.md`, `SIP_API_DESIGN_2_REMAINING_WORK.md` (R1–R6 all closed 2026-05-14)
 
 ## Context
@@ -85,8 +85,8 @@ Default implementations using `jsonwebtoken`, `x509-parser`, `webpki`, and `reqw
 | 3 | RFC 3581 restamp + multi-homed source selection | `sip-transport`, `sip-dialog` | 1.5 | — | **DONE** (restamp); multi-homed source deferred |
 | 4 | WebSocket client + WSS accept | `sip-transport` | 1.5 | — | **DONE** (WSS client deferred) |
 | 5 | RFC 3263 NAPTR/SRV | `sip-transport`, `sip-dialog` | 2.0 | — | **DONE** |
-| 6 | Stateful proxy: server+client txn co-ownership + Timer C | **new** `rvoip-sip-proxy`, `rvoip-sip` (ProxyCoordinator) | 2.5 | — | pending |
-| 7 | Forking + 3xx redirect-set | `rvoip-sip-proxy` | 2.0 | 6 | pending |
+| 6 | Stateful proxy: server+client txn co-ownership + Timer C | **new** `rvoip-sip-proxy`, `rvoip-sip` (ProxyCoordinator) | 2.5 | — | **DONE** (single-target) |
+| 7 | Forking + 3xx redirect-set | `rvoip-sip-proxy` | 2.0 | 6 | **DONE** |
 | 8 | SBC topology hiding (Record-Route strip, Via strip) | `rvoip-sip` | 0.75 | — | **DONE** |
 | 8.5 | Stateless proxy helpers (Via push/pop/loop-detect + raw forward) | `sip-core`, `sip-transport` | 0.75 | — | **DONE** |
 | 10 | MTU/message-size policy | `sip-transport`, `sip-dialog` | 0.5 | 2 | **DONE** |
@@ -191,26 +191,59 @@ rvoip-sip (UnifiedCoordinator + new ProxyCoordinator)
 - **Multi-candidate failover at the dialog layer** — the manager-aware `resolve_uri_to_socketaddr` projects to a single `SocketAddr` (`candidates.into_iter().next()`). RFC 3263 §4.3 says the caller should try the next candidate on transport failure; today the transport layer surfaces the error and the dialog layer aborts. A `try_send_with_failover(uri, candidates)` helper is the natural follow-up; defer until a deployment needs it.
 - **`wss://` client + DNS-aware connect** — see Phase 4 deferral notes; orthogonal to RFC 3263.
 
-### Phase 6 — Stateful proxy single-target + Timer C (2.5 wk)
+### Phase 6 — Stateful proxy single-target + Timer C (2.5 wk) — **DONE** (single-target)
 
-**Trade-off:** revisits the prior round's "stateful B2BUA covers SBC use cases" decision. Justified for carrier transit proxies and registrar deployments that should NOT terminate dialog state. Lives in a new sibling crate `rvoip-sip-proxy` rather than `rvoip-sip-dialog` — see Rec 3 below for rationale (matches reSIProcate `repro`/`dum`, pjsip core/`pjsua-lib`, Kamailio `tm`/`dialog` separation; avoids fighting `manager/core.rs:1006-1055` which assumes every inbound creates a dialog).
+**Trade-off:** revisits the prior round's "stateful B2BUA covers SBC use cases" decision. Justified for carrier transit proxies and registrar deployments that should NOT terminate dialog state. Lives in a new sibling crate `rvoip-sip-proxy` rather than `rvoip-sip-dialog` — matches reSIProcate `repro`/`dum`, pjsip core/`pjsua-lib`, Kamailio `tm`/`dialog` separation; avoids fighting `manager/core.rs:1006-1055` which assumes every inbound creates a dialog.
 
-**Files:**
-- **New crate** `crates/rvoip-sip-proxy/` — `ProxyTransaction::forward(modified: Request, dest) -> ForwardHandle`; `ProxyTransaction::forward_responses(handle) -> Stream<Response>`; `ProxyTransactionPair { server, clients, response_correlator }`. Depends on `rvoip-sip-dialog` for `TransactionManager` primitives only (not `DialogManager`).
-- `crates/rvoip-sip-dialog/src/transaction/manager/mod.rs` — expose any transaction-manager hooks `rvoip-sip-proxy` needs (e.g., a `subscribe_to_transport_event` shape that bypasses `handle_request`'s dialog-creation branch).
-- `crates/rvoip-sip-dialog/src/transaction/timer/factory.rs` — Timer C (default 3 min, app-overridable) added here since the timer factory is shared between dialog UAC and proxy.
-- **New file** `crates/rvoip-sip/src/api/proxy_coordinator.rs` — `ProxyCoordinator` public API parallel to `UnifiedCoordinator`, wrapping `rvoip-sip-proxy::ProxyTransaction`.
+**Shipped:**
+- **New crate** `crates/rvoip-sip-proxy/` — `StatefulProxy` actor (event-loop subscriber to `TransactionEvent`), `ProxyConfig { timer_c, enforce_max_forwards }`, `RouteFn = Arc<dyn Fn(&Request) -> Option<RouteDecision> + Send + Sync>`, `RouteDecision { destination: SocketAddr }`. Depends on `rvoip-sip-dialog` for `TransactionManager` primitives only (not `DialogManager`).
+- `crates/rvoip-sip-proxy/src/proxy.rs` — bidirectional pair maps (`pairs_by_upstream`, `pairs_by_downstream`) keyed on `TransactionKey`; pair stores the original inbound `Request` so Timer C / 483 / 404 can build upstream responses with the correct From/To/Call-ID/CSeq/Via stack via `SimpleResponseBuilder::response_from_request` (RFC 3261 §8.2.6.2). Forwarding pushes the proxy's Via as a **new** `TypedHeader::Via` (single ViaHeader entry) above the UAC's so the response-side typed-header pop is a clean wholesale removal — avoids leaving an empty Via behind that the validator rejects.
+- **Timer C implementation:** per-pair `tokio::task::JoinHandle` started on INVITE forward, aborted on the first 1xx/final response upstream. The plan originally targeted `crates/rvoip-sip-dialog/src/transaction/timer/factory.rs`, but Timer C is a **proxy-pair-level** concept (RFC 3261 §16.8), not a transaction-state-machine timer — wiring it into the per-transaction factory would have entangled proxy state with the dialog timer machinery. The inline `tokio::sleep` approach is simpler and equivalent. Default 3 min, app-overridable via `ProxyConfig::timer_c`.
+- `crates/rvoip-sip/src/api/proxy_coordinator.rs` — `ProxyCoordinator::bind(addr, route_fn)` and `bind_with_config(addr, route_fn, config)` one-line setup: binds UDP, builds `TransactionManager` consuming the transport's `TransportEvent` stream, spawns `StatefulProxy` reading the primary `TransactionEvent` stream. `ProxyCoordinator::new(transport, local_addr, transport_rx, route_fn, config)` for callers that want to share a pre-built transport. `shutdown()` aborts the proxy task and closes the transport.
+- **Subscription correctness:** the proxy consumes the **primary** `TransactionEvent` stream returned by `TransactionManager::new` rather than `TransactionManager::subscribe()`. Subscribe registers asynchronously (a spawned task takes the subscriber lock) and races with the first inbound — the primary stream is set up synchronously, so the proxy never drops the first event.
+- **Mixed-mode is out of scope.** A `ProxyCoordinator` owns the primary event stream of its `TransactionManager`; running both a proxy and a `DialogManager` on one manager would race on every inbound. Applications that need both should bind two transports.
+- `Cargo.toml` workspace registration + `rvoip-sip` direct dep on `rvoip-sip-transport` (was previously dev-only) so the coordinator can bind real transports.
 
-**Acceptance:** `crates/rvoip-sip-proxy/tests/stateful_proxy_single_target.rs` — UAC → proxy → UAS, response flows back. Timer C fires on stalled INVITE.
+**Acceptance (passing):** `crates/rvoip-sip-proxy/tests/stateful_proxy_single_target.rs` — 5 cases:
+- `uac_invite_is_forwarded_to_uas_with_proxy_via_pushed` — INVITE forwarded to the routed destination with `Max-Forwards: 70 → 69` and a fresh `z9hG4bK-proxy-…` Via above the UAC's.
+- `uas_200_ok_is_forwarded_upstream_with_proxy_via_popped` — 200 OK built via `response_from_request` is forwarded back to the UAC with the proxy's Via removed and the UAC's Via on top.
+- `timer_c_fires_408_upstream_on_stalled_invite` — with `timer_c = 150ms` the proxy sends a 408 Request Timeout upstream when the UAS never responds.
+- `max_forwards_zero_returns_483_too_many_hops` — inbound INVITE with `Max-Forwards: 0` produces 483 upstream without forwarding.
+- `route_fn_none_returns_404_upstream` — application routing decision `None` produces 404 upstream.
 
-### Phase 7 — Forking + 3xx (2.0 wk, depends on Phase 6)
+**Deferred (Phase 7 + follow-ups):**
+- ~~**Forking + 3xx redirect-set**~~ — shipped in **Phase 7** (`crates/rvoip-sip-proxy/src/proxy.rs` `ForkContext` + response aggregator + 3xx `ProxyEvent`).
+- ~~**Timer C per-1xx reset**~~ — **DONE** (polish round). `proxy.rs::reset_timer_c` aborts the current Timer C task and starts a fresh sleep on every forwarded 1xx; the cancel-on-first-1xx Phase 6 simplification is gone. Acceptance: `tests/proxy_polish.rs::timer_c_resets_on_1xx_and_does_not_fire_408` — 4 × 180 Ringing spaced 100 ms apart over a 200 ms Timer C produces zero 408s.
+- ~~**CANCEL fan-out**~~ — shipped in Phase 7 (`handle_upstream_cancel` calls `cancel_siblings` with a sentinel winner key, fanning CANCEL to every live downstream leg).
+- ~~**Loop detection via `Via::detect_loop`**~~ — **DONE** (polish round). `StatefulProxy::known_branches: DashMap<String, ()>` records every `z9hG4bK-proxy-…` branch the proxy stamps; `handle_inbound_request` scans the inbound Via stack via `find_known_branch_in_request` and replies 482 Loop Detected without forwarding. Acceptance: `tests/proxy_polish.rs::inbound_with_our_branch_in_via_stack_returns_482`.
+- **TCP/TLS/WS transport** — `ProxyCoordinator::new` accepts any `Arc<dyn Transport>`, so callers can already wire TCP. `ProxyCoordinator::bind` is UDP-only for the MVP; symmetric TCP / TLS / WS bind helpers land when a deployment needs them.
+- **Mixed-mode (proxy + UA on one manager)** — would require a router that demuxes `TransactionEvent` to the correct subscriber based on routing policy. Out of scope until a use case surfaces.
 
-**Files:**
-- `crates/rvoip-sip-proxy/src/lib.rs` — `ProxyTransaction::fork(targets, ForkMode::{Parallel, Sequential})`.
-- `crates/rvoip-sip-proxy/src/response_aggregator.rs` — **new**: aggregate across multiple client transactions (RFC 3261 §16.7 response context).
-- 3xx redirect-set: emit at the `ProxyCoordinator` event API in `rvoip-sip` (not the cross-crate bus, since proxy mode is not dialog-scoped).
+### Phase 7 — Forking + 3xx (2.0 wk, depends on Phase 6) — **DONE**
 
-**Acceptance:** `crates/rvoip-sip-proxy/tests/proxy_parallel_fork.rs` — 1 INVITE fans to 3 UAS; first 200 wins, CANCEL fans to other two.
+**Shipped:**
+- `crates/rvoip-sip-proxy/src/proxy.rs` — `RouteDecision { mode: ForkMode, targets: Vec<SocketAddr> }` with `ForkMode::{Parallel, Sequential}`. `RouteDecision::to(addr)` stays as the Phase 6 single-target convenience (treated as a 1-element fork). New `::parallel(vec)` and `::sequential(vec)` constructors.
+- `ForkContext` replaces Phase 6's `Pair`: per-fork state holding the upstream server transaction, mode, original request, target list, and a `Vec<Leg>` (one entry per started leg with `downstream_client_tx`, `destination`, `final_status`, `cancelled`, `last_response`). `forks_by_upstream` / `forks_by_downstream` `DashMap`s key into it from either side. `upstream_responded: AtomicBool` short-circuits late siblings after the first 2xx (or after Timer C / best-failure forwarding).
+- **Response aggregator** (`aggregate_response` + `aggregate_success` + `aggregate_failure` in `proxy.rs`) implements RFC 3261 §16.7: 1xx forwards upstream verbatim; first 2xx forwards upstream + CANCELs every still-pending sibling leg (via `TransactionManager::cancel_invite_transaction`); failure finals are recorded and either advance sequential mode or, in parallel mode, trigger best-response selection once every leg has a final. `forward_best_failure` implements §16.7 step 6: any 6xx wins (global failure); otherwise the lowest status code wins, ties broken by first-seen order.
+- **Sequential mode** spawns the first target only; on each failure final, `aggregate_failure` consults `fork.targets` against the set of already-tried destinations and `start_leg`s the next untried target. On exhaustion, falls into the parallel-style best-failure path.
+- **Upstream CANCEL fan-out**: `TransactionEvent::CancelReceived` now fires `handle_upstream_cancel`, which CANCELs every still-live downstream leg via `cancel_siblings` (sentinel winner key ensures no leg is exempted). Timer C also CANCELs siblings before sending 408 upstream.
+- **Per-leg unique branches**: every parallel leg gets its own `z9hG4bK-proxy-<uuid>` Via stamped via `push_proxy_via` before `create_client_transaction` runs. Confirmed in the acceptance test (3 distinct proxy branches across 3 legs).
+
+**Acceptance (passing):** `crates/rvoip-sip-proxy/tests/proxy_parallel_fork.rs` — 5 cases:
+- `parallel_fork_fans_out_to_every_target` — single inbound INVITE produces 3 outbound INVITEs (one per target), each with its own proxy branch.
+- `first_200_wins_and_cancels_siblings` — UAS B answers 200 OK; proxy forwards upstream to the UAC and sends CANCELs to UAS A and UAS C.
+- `sequential_fork_advances_on_failure_and_succeeds_on_later_target` — UAS A returns 404, proxy advances to UAS B which answers 200; UAS C is never tried.
+- `all_legs_fail_picks_lowest_status_upstream` — UAS A returns 503, UAS B returns 404; proxy forwards 404 upstream (§16.7 step 6 lowest-status rule).
+- `global_6xx_wins_over_lower_class_failures` — UAS A returns 404, UAS B returns 603 Decline; proxy forwards 603 upstream (§16.7 step 6 global-failure precedence).
+
+All 5 single-target tests from Phase 6 still pass — the Pair→ForkContext refactor is backward compatible (an N=1 `RouteDecision::to(addr)` collapses to the same code path).
+
+**Deferred (follow-ups):**
+- ~~**Application-visible 3xx redirect-set**~~ — **DONE** (polish round). `ProxyEvent::RedirectReceived { upstream_tx, status, contacts: Vec<Uri> }` is emitted on a `tokio::sync::broadcast` channel whenever a downstream leg returns a 3xx. Subscribers obtain a `Receiver` via `StatefulProxy::subscribe_events()` or `ProxyCoordinator::subscribe_events()`. Today emission is **observability-only** — the proxy still forwards the 3xx upstream so the UAC can recurse — but the channel is the wire on which application-driven re-fork will land. Acceptance: `tests/proxy_polish.rs::redirect_3xx_emits_event_with_contact_uris`.
+- **Application-driven re-fork on 3xx** — extend the polish-round observability stream into an interception trait that lets an app return new targets in response to `RedirectReceived` and have the proxy spawn fresh legs without sending the 3xx upstream. Out of scope until a concrete user surfaces — observability is sufficient for most redirect-server scenarios since the UAC already handles 3xx.
+- **RFC 3263 multi-candidate failover at the leg level** — when the resolver returns multiple `ResolvedTarget`s for a single target, the proxy currently only tries the first. Pairing this with Phase 5's `ResolvedTarget` vec is a small extension.
+- ~~**Timer C per-1xx reset**~~ — **DONE** (polish round, documented under Phase 6 deferrals).
+- ~~**Loop detection**~~ — **DONE** (polish round, documented under Phase 6 deferrals).
 
 ### Phase 8 — SBC topology hiding (0.75 wk) — **DONE**
 

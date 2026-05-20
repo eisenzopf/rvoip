@@ -9,6 +9,7 @@ members = [
     "crates/rvoip-sip-core",
     "crates/rvoip-sip-transport",
     "crates/rvoip-sip-dialog",
+    "crates/rvoip-sip-proxy",
     "crates/rvoip-sip-registrar",
     "crates/rtp-core",
     "crates/media-core",
@@ -135,6 +136,7 @@ collapsible_else_if = "allow"
 rvoip-sip-core = { path = "crates/rvoip-sip-core", version = "0.1.26" }
 rvoip-sip-transport = { path = "crates/rvoip-sip-transport", version = "0.1.26" }
 rvoip-sip-dialog = { path = "crates/rvoip-sip-dialog", version = "0.1.26" }
+rvoip-sip-proxy = { path = "crates/rvoip-sip-proxy", version = "0.1.0" }
 rvoip-sip-registrar = { path = "crates/rvoip-sip-registrar", version = "0.1.0" }
 # CARVE_PLAN step 12: rvoip-dialog-core / rvoip-registrar-core entries
 # removed — packages renamed to rvoip-sip-dialog / rvoip-sip-registrar above.
