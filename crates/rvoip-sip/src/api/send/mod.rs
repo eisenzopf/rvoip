@@ -13,6 +13,17 @@
 //! coord.refer(&sess, target).with_replaces(rep).send().await
 //! ```
 //!
+//! In-dialog builders (`bye`, `cancel`, `refer`, `notify`, `info`,
+//! `update`, `reinvite`) are also reachable directly on a
+//! [`SessionHandle`](crate::api::handle::SessionHandle) returned from
+//! `invite().send().await` / `accept().await`:
+//!
+//! ```text
+//! session.refer(target).with_replaces(rep).send().await
+//! session.bye().with_reason(reason).send().await
+//! session.info("application/dtmf-relay").with_body(dtmf).send().await
+//! ```
+//!
 //! Every `.send()` consumes the builder. Header staging goes through
 //! the shared `BuilderHeaderState` so header-policy enforcement
 //! behaves identically across builders.

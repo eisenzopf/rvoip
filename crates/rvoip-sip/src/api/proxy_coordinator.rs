@@ -69,8 +69,8 @@ impl ProxyCoordinator {
         Self::bind_with_config(bind_addr, route_fn, ProxyConfig::default()).await
     }
 
-    /// Like [`bind`] but with an explicit [`ProxyConfig`] (Timer C
-    /// duration, Max-Forwards policy).
+    /// Like [`bind`](Self::bind) but with an explicit [`ProxyConfig`]
+    /// (Timer C duration, Max-Forwards policy).
     pub async fn bind_with_config(
         bind_addr: SocketAddr,
         route_fn: RouteFn,

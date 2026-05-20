@@ -307,6 +307,28 @@ builders entered from their respective handles:
 per RFC 3261 §13.2.2.4 and RFC 3262. No public builder; no application
 header injection.
 
+**`SessionHandle` shorthand for in-dialog builders.** Once a call is
+established (post-`invite().send().await` or post-`accept().await`),
+the in-dialog builders — `reinvite`, `refer`, `bye`, `cancel`,
+`notify`, `info`, `update` — are also reachable directly on the
+returned `SessionHandle`:
+
+```rust
+session.bye().send().await?;
+session.refer("sip:bob@example").with_replaces(rep).send().await?;
+session.info("application/dtmf-relay").with_body(dtmf).send().await?;
+```
+
+Equivalent to `coord.bye(session.id()).send()` etc., but doesn't
+require reaching back through the coordinator. This is the canonical
+shape for application code that already holds a `SessionHandle`,
+which is the common case after a call is up. The coordinator-keyed
+entries (`coord.<verb>(&session_id, …)`) remain available for code
+that holds only a `CallId` / `SessionId`. The out-of-dialog
+builders (`subscribe`, `message`, `options`) and call-creation
+builders (`invite`, `register`) stay on the coordinator / surface
+types — they're not session-bound.
+
 Every builder consumes `self` per setter (chaining compiles to one
 struct literal after monomorphization). Every builder is `Send + Sync`
 (applications cross `.await` and may `tokio::spawn` per-leg work).
@@ -601,9 +623,17 @@ Per-surface entry-point shapes:
 | `StreamPeer` / `PeerControl` | `peer.invite(to)` | `from = peer.local_uri` |
 | `CallbackPeer` / `CallbackPeerControl` | `peer.invite(to)` | `from = peer.local_uri` |
 
-In-dialog builders (REFER, NOTIFY, INFO, BYE, CANCEL, UPDATE) on all
-surfaces take `&SessionHandle` (or `&SessionId` on coordinator) and
-need no `from`/`to` — dialog state provides them.
+In-dialog builders (REFER, NOTIFY, INFO, BYE, CANCEL, UPDATE,
+re-INVITE) are reached via `SessionHandle::<verb>(...)` directly —
+see the "`SessionHandle` shorthand" note in §3.3. Surface types
+(`Endpoint`/`StreamPeer`/`CallbackPeer`) expose only the
+call-creation and out-of-dialog entry points (`invite`, `register`,
+and where applicable `subscribe`, `message`, `options`) that need
+surface-level pre-fill of `from`/`local_uri`. In-dialog operations
+do not need surface forwarders because by the time they're sent the
+caller is already holding a `SessionHandle`, not the surface that
+produced it. The coordinator-keyed `coord.<verb>(&session_id, …)`
+entries remain available for code that holds only a `CallId`.
 
 ---
 
@@ -2087,6 +2117,45 @@ breaking the API.
 ---
 
 ## 16. Revision log
+
+### 2026-05-20 — `SessionHandle` in-dialog method ergonomics
+
+Added `SessionHandle::{bye, cancel, refer, notify, info, update,
+reinvite}` so application code reaches in-dialog requests directly
+from the session handle it already holds:
+
+```rust
+// Before
+coord.bye(session.id()).with_reason(reason).send().await?;
+// After
+session.bye().with_reason(reason).send().await?;
+```
+
+Matches the existing `SessionHandle::hangup()` / `transfer_blind()`
+shape — no setup args, pulls `call_id` from `&self`. The
+coordinator-keyed entries (`coord.bye(&session_id, …)`) remain
+available for code that holds only a `CallId`.
+
+**Inspector rename to free `info`.** The existing
+`SessionHandle::info() -> Result<SessionInfo>` (state inspector) was
+renamed to `session_info()` because the new SIP `info(content_type)`
+builder needed the slot. Single in-tree caller (a doc example)
+migrated; external callers see a one-name rename with the same
+return type.
+
+**Surface forwarders deliberately not added.** §4's earlier wording
+implied `Endpoint`/`StreamPeer`/`CallbackPeer` would project every
+in-dialog verb. Audit found callers don't typically hold the peer
+at the moment they want to send an in-dialog request — they hold
+the `SessionHandle` returned from `invite().send().await` or
+delivered to the inbound callback. §3.3 and §4 updated to make
+`SessionHandle::<verb>` the canonical in-dialog entry shape.
+
+**Gap D-1 closed.** `IncomingCall::accept` and
+`IncomingCall::accept_with_sdp` now route through
+`self.accept_builder().send()` instead of the legacy
+`coordinator.accept_call(...)` direct path. Completes the §11.4
+migration intent — one code path for INVITE acceptance.
 
 ### 2026-05-18 — Transport `raw_bytes` end-to-end
 

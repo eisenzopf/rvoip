@@ -271,6 +271,153 @@ impl SessionHandle {
         &self.call_id
     }
 
+    // ===== In-dialog request builders =====
+    //
+    // Canonical entry points for in-dialog SIP requests on this session.
+    // Each method returns the builder for the corresponding method,
+    // pre-bound to this session's `CallId`, so callers can stage extra
+    // headers via the `SipRequestOptions` trait and dispatch with
+    // `.send().await`. See `SIP_API_DESIGN_2.md` §3.3.
+
+    /// Begin building an outbound BYE for this session.
+    ///
+    /// Lower-level than [`hangup`](Self::hangup): returns a builder so
+    /// the caller can stage `Reason`, custom `X-*` headers, etc. before
+    /// sending. Prefer `hangup()` for fire-and-forget teardown.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// use rvoip_sip::SipReason;
+    /// call.bye()
+    ///     .with_sip_reason(SipReason::sip(200, "Normal call clearing"))
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bye(&self) -> crate::api::send::ByeBuilder {
+        self.coordinator.bye(&self.call_id)
+    }
+
+    /// Begin building an outbound CANCEL for this session.
+    ///
+    /// CANCEL applies to an early INVITE that has received a provisional
+    /// response. RFC 3261 §9 carries `Call-ID`, `From`, `To` (without
+    /// tag), `CSeq`, and `Route` from the INVITE automatically — the
+    /// builder lets you attach `Reason` or custom headers in addition.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// call.cancel().send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn cancel(&self) -> crate::api::send::CancelBuilder {
+        self.coordinator.cancel(&self.call_id)
+    }
+
+    /// Begin building an outbound REFER for this session.
+    ///
+    /// `refer_to` is the target URI (Refer-To header value). Use
+    /// `with_replaces` for attended transfer or `with_referred_by` for
+    /// RFC 3892 attribution.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// call.refer("sip:bob@example.com").send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn refer(&self, refer_to: impl Into<String>) -> crate::api::send::ReferBuilder {
+        self.coordinator.refer(&self.call_id, refer_to)
+    }
+
+    /// Begin building an outbound NOTIFY for this session.
+    ///
+    /// `event_package` populates the required RFC 6665 `Event:` header
+    /// (e.g. `"dialog"`, `"message-summary"`, `"refer"`). Attach the
+    /// `Subscription-State`, body, and any other headers via the builder.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// call.notify("message-summary")
+    ///     .with_subscription_state("active;expires=3600")
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn notify(&self, event_package: impl Into<String>) -> crate::api::send::NotifyBuilder {
+        self.coordinator.notify(&self.call_id, event_package)
+    }
+
+    /// Begin building an outbound INFO for this session.
+    ///
+    /// `content_type` becomes the `Content-Type` header value (e.g.
+    /// `"application/dtmf-relay"`). Attach the body via
+    /// [`InfoBuilder::with_body`](crate::api::send::InfoBuilder::with_body).
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// call.info("application/dtmf-relay")
+    ///     .with_body(bytes::Bytes::from_static(b"Signal=1\r\nDuration=100\r\n"))
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn info(&self, content_type: impl Into<String>) -> crate::api::send::InfoBuilder {
+        self.coordinator.info(&self.call_id, content_type)
+    }
+
+    /// Begin building an outbound UPDATE (RFC 3311) for this session.
+    ///
+    /// UPDATE renegotiates session parameters without a full re-INVITE
+    /// dance. Common uses: session-timer refresh (via
+    /// `as_session_timer_refresh`) and early-dialog SDP updates.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// call.update().as_session_timer_refresh().send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn update(&self) -> crate::api::send::UpdateBuilder {
+        self.coordinator.update(&self.call_id)
+    }
+
+    /// Begin building an outbound re-INVITE for this session.
+    ///
+    /// re-INVITE is the established-dialog renegotiation path (hold/
+    /// resume, SDP swap, session-timer refresh). For hold/resume use
+    /// the higher-level [`hold`](Self::hold)/[`resume`](Self::resume)
+    /// helpers instead; reach for `reinvite()` when finer control over
+    /// the SDP or extra headers is needed.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle, new_sdp: String) -> rvoip_sip::Result<()> {
+    /// call.reinvite().with_sdp(new_sdp).send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn reinvite(&self) -> crate::api::send::ReInviteBuilder {
+        self.coordinator.reinvite(&self.call_id)
+    }
+
     // ===== Call control =====
 
     /// Hang up the call.
@@ -380,11 +527,7 @@ impl SessionHandle {
         if let Some(cached) = terminal_reason(&self.lifecycle().await?) {
             return Ok(cached);
         }
-        self.coordinator
-            .bye(&self.call_id)
-            .with_sip_reason(reason)
-            .send()
-            .await?;
+        self.bye().with_sip_reason(reason).send().await?;
 
         let fut = async {
             loop {
@@ -504,7 +647,7 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn transfer_blind(&self, target: &str) -> Result<()> {
-        self.coordinator.refer(&self.call_id, target).send().await
+        self.refer(target).send().await
     }
 
     /// Initiate a blind transfer and wait for a raw terminal transfer event.
@@ -796,11 +939,7 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn transfer_attended(&self, target: &str, replaces: &str) -> Result<()> {
-        self.coordinator
-            .refer(&self.call_id, target)
-            .with_replaces(replaces)
-            .send()
-            .await
+        self.refer(target).with_replaces(replaces).send().await
     }
 
     /// SIP-level dialog identity for this session: `Call-ID`, local tag,
@@ -863,8 +1002,7 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn send_info(&self, content_type: &str, body: &[u8]) -> Result<()> {
-        self.coordinator
-            .info(&self.call_id, content_type)
+        self.info(content_type)
             .with_body(bytes::Bytes::copy_from_slice(body))
             .send()
             .await
@@ -905,7 +1043,7 @@ impl SessionHandle {
         body: Option<String>,
         subscription_state: Option<String>,
     ) -> Result<()> {
-        let mut b = self.coordinator.notify(&self.call_id, event_package);
+        let mut b = self.notify(event_package);
         if let Some(text) = body {
             b = b.with_body(bytes::Bytes::from(text.into_bytes()));
         }
@@ -986,16 +1124,21 @@ impl SessionHandle {
 
     /// Get detailed session information from the session store.
     ///
+    /// Renamed from `info()` in the 2026-05-20 SessionHandle ergonomic
+    /// pass to free the `info` slot for the SIP INFO request builder
+    /// ([`info`](Self::info)). The returned [`SessionInfo`] still
+    /// carries the same per-call inspection data.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
     /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
-    /// let info = call.info().await?;
+    /// let info = call.session_info().await?;
     /// println!("{} -> {}", info.from, info.to);
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn info(&self) -> Result<SessionInfo> {
+    pub async fn session_info(&self) -> Result<SessionInfo> {
         self.coordinator.get_session_info(&self.call_id).await
     }
 

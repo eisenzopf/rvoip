@@ -180,13 +180,8 @@ impl IncomingCall {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn accept(mut self) -> Result<SessionHandle> {
-        self.resolved = true;
-        self.coordinator.accept_call(&self.call_id).await?;
-        Ok(SessionHandle::new(
-            self.call_id.clone(),
-            self.coordinator.clone(),
-        ))
+    pub async fn accept(self) -> Result<SessionHandle> {
+        self.accept_builder().send().await
     }
 
     /// Accept the call with a custom SDP answer.
@@ -203,15 +198,8 @@ impl IncomingCall {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn accept_with_sdp(mut self, sdp: String) -> Result<SessionHandle> {
-        self.resolved = true;
-        self.coordinator
-            .accept_call_with_sdp(&self.call_id, sdp)
-            .await?;
-        Ok(SessionHandle::new(
-            self.call_id.clone(),
-            self.coordinator.clone(),
-        ))
+    pub async fn accept_with_sdp(self, sdp: String) -> Result<SessionHandle> {
+        self.accept_builder().with_sdp(sdp).send().await
     }
 
     /// Send a reliable 183 Session Progress with early-media SDP (RFC 3262).
