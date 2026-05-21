@@ -7,7 +7,152 @@ use crate::performance::pool::{AudioFramePool, PoolConfig, PooledAudioFrame};
 use crate::performance::zero_copy::ZeroCopyAudioFrame;
 use crate::types::AudioFrame;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+
+/// Cache-line-aligned `AtomicU64` wrapper for the per-frame metrics
+/// counters. Same MESI-thrash-avoidance pattern as
+/// `pool::PaddedCounter` — without `#[repr(align(64))]`, packing six
+/// hot-path counters into one struct caused 16 worker threads to
+/// invalidate each other's L1 on every update (the original cause
+/// of the C17 sampling regression). With per-field padding, 16
+/// threads can update independent counters without bouncing a
+/// shared cache line between cores.
+#[derive(Debug, Default)]
+#[repr(align(64))]
+struct PaddedAtomicU64(AtomicU64);
+
+impl PaddedAtomicU64 {
+    const fn new(v: u64) -> Self {
+        Self(AtomicU64::new(v))
+    }
+    #[inline]
+    fn fetch_add(&self, n: u64) {
+        self.0.fetch_add(n, Ordering::Relaxed);
+    }
+    #[inline]
+    fn fetch_min(&self, v: u64) {
+        self.0.fetch_min(v, Ordering::Relaxed);
+    }
+    #[inline]
+    fn fetch_max(&self, v: u64) {
+        self.0.fetch_max(v, Ordering::Relaxed);
+    }
+    #[inline]
+    fn load(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+    #[inline]
+    fn store(&self, v: u64) {
+        self.0.store(v, Ordering::Relaxed);
+    }
+}
+
+/// Concurrent, lock-free sibling to [`PerformanceMetrics`].
+///
+/// All six hot-path counters are cache-line-padded
+/// ([`PaddedAtomicU64`]) so concurrent writers update independent
+/// memory and don't trigger MESI line-bounce. Replaces the previous
+/// `Arc<tokio::RwLock<PerformanceMetrics>>` which serialised every
+/// per-frame call through one async lock — at /8 and /16 concurrent
+/// tasks that lock was the dominant bottleneck and removing the
+/// pool's `parking_lot::Mutex<PoolStats>` (C19) exposed how
+/// expensive it really was.
+///
+/// `snapshot()` materialises a [`PerformanceMetrics`] for external
+/// consumers (engine telemetry, tests) — the snapshot is _not_
+/// internally consistent across all fields (small skew between the
+/// counter reads is OK for telemetry purposes).
+#[derive(Debug, Default)]
+pub struct ConcurrentPerformanceMetrics {
+    total_time_ns: PaddedAtomicU64,
+    /// `u64::MAX` sentinel = "no sample yet"; `add_timing` uses
+    /// `fetch_min` to maintain the running minimum.
+    min_time_ns: PaddedAtomicU64,
+    max_time_ns: PaddedAtomicU64,
+    operation_count: PaddedAtomicU64,
+    allocation_count: PaddedAtomicU64,
+    memory_allocated: PaddedAtomicU64,
+}
+
+impl ConcurrentPerformanceMetrics {
+    pub fn new() -> Self {
+        Self {
+            total_time_ns: PaddedAtomicU64::new(0),
+            min_time_ns: PaddedAtomicU64::new(u64::MAX),
+            max_time_ns: PaddedAtomicU64::new(0),
+            operation_count: PaddedAtomicU64::new(0),
+            allocation_count: PaddedAtomicU64::new(0),
+            memory_allocated: PaddedAtomicU64::new(0),
+        }
+    }
+
+    /// Record one operation timing. All updates are relaxed atomic
+    /// fetch_add / fetch_min / fetch_max on independent
+    /// cache-line-padded counters; concurrent callers don't bounce
+    /// any shared memory.
+    #[inline]
+    pub fn add_timing(&self, duration: Duration) {
+        let ns = duration.as_nanos() as u64;
+        self.total_time_ns.fetch_add(ns);
+        self.operation_count.fetch_add(1);
+        self.min_time_ns.fetch_min(ns);
+        self.max_time_ns.fetch_max(ns);
+    }
+
+    #[inline]
+    pub fn add_allocation(&self, size_bytes: u64) {
+        self.allocation_count.fetch_add(1);
+        self.memory_allocated.fetch_add(size_bytes);
+    }
+
+    #[inline]
+    pub fn inc_operation(&self) {
+        self.operation_count.fetch_add(1);
+    }
+
+    pub fn reset(&self) {
+        self.total_time_ns.store(0);
+        self.min_time_ns.store(u64::MAX);
+        self.max_time_ns.store(0);
+        self.operation_count.store(0);
+        self.allocation_count.store(0);
+        self.memory_allocated.store(0);
+    }
+
+    /// Build a `PerformanceMetrics` snapshot from the current atomic
+    /// values. Fields are read with relaxed ordering, so the snapshot
+    /// may show slight inter-field skew under concurrent writers —
+    /// acceptable for telemetry; consumers should not assume
+    /// `total_time == avg_time * count` exactly.
+    pub fn snapshot(&self) -> PerformanceMetrics {
+        let total_ns = self.total_time_ns.load();
+        let count = self.operation_count.load();
+        let min_ns = self.min_time_ns.load();
+        let max_ns = self.max_time_ns.load();
+        let total_time = Duration::from_nanos(total_ns);
+        let avg_time = if count > 0 {
+            Duration::from_nanos(total_ns / count)
+        } else {
+            Duration::ZERO
+        };
+        let min_time = if min_ns == u64::MAX {
+            Duration::MAX
+        } else {
+            Duration::from_nanos(min_ns)
+        };
+        let max_time = Duration::from_nanos(max_ns);
+        PerformanceMetrics {
+            total_time,
+            avg_time,
+            min_time,
+            max_time,
+            operation_count: count,
+            allocation_count: self.allocation_count.load(),
+            memory_allocated: self.memory_allocated.load(),
+        }
+    }
+}
 
 /// Performance measurement results
 #[derive(Debug, Clone)]

@@ -14,6 +14,7 @@ use crate::types::conference::{
     ConferenceMixingStats, ConferenceResult, MixedAudioOutput, MixingQuality, ParticipantId,
 };
 use crate::types::{AudioFrame, SampleRate};
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -27,11 +28,15 @@ pub struct AudioMixer {
     /// Configuration for mixing behavior
     config: ConferenceMixingConfig,
 
-    /// Current mixing statistics
-    stats: Arc<Mutex<ConferenceMixingStats>>,
+    /// Current mixing statistics. `parking_lot::Mutex` because the
+    /// per-cycle update is CPU-only (a few counter increments) and
+    /// the tokio scheduler dip was pure overhead on every mix.
+    stats: Arc<parking_lot::Mutex<ConferenceMixingStats>>,
 
-    /// Mixed output cache (participant_id -> mixed_frame)
-    output_cache: Arc<Mutex<HashMap<ParticipantId, Arc<AudioFrame>>>>,
+    /// Mixed output cache (participant_id -> mixed_frame). `DashMap`
+    /// so per-participant insert/lookup is sharded and reads never
+    /// block the mix cycle's writes (and vice versa).
+    output_cache: Arc<DashMap<ParticipantId, Arc<AudioFrame>>>,
 
     /// Memory pool for audio frames to reduce allocations
     frame_pool: Arc<Mutex<Vec<AudioFrame>>>,
@@ -80,8 +85,8 @@ impl AudioMixer {
         Ok(Self {
             stream_manager,
             config,
-            stats: Arc::new(Mutex::new(ConferenceMixingStats::default())),
-            output_cache: Arc::new(Mutex::new(HashMap::new())),
+            stats: Arc::new(parking_lot::Mutex::new(ConferenceMixingStats::default())),
+            output_cache: Arc::new(DashMap::new()),
             frame_pool: Arc::new(Mutex::new(Vec::new())),
             format_converter,
             vad,
@@ -117,9 +122,11 @@ impl AudioMixer {
         // Add stream to manager
         self.stream_manager.add_stream(stream)?;
 
-        // Update statistics
-        let mut stats = self.stats.lock().await;
-        stats.active_participants = active_participants.len() + 1;
+        // Update statistics (parking_lot; never held across .await).
+        {
+            let mut stats = self.stats.lock();
+            stats.active_participants = active_participants.len() + 1;
+        }
 
         // Send event
         self.send_event(ConferenceMixingEvent::ParticipantAdded {
@@ -137,13 +144,14 @@ impl AudioMixer {
         self.stream_manager.remove_stream(id)?;
 
         // Clear cached output for this participant
-        let mut cache = self.output_cache.lock().await;
-        cache.remove(id);
+        self.output_cache.remove(id);
 
         // Update statistics
         let active_participants = self.stream_manager.get_active_participants()?;
-        let mut stats = self.stats.lock().await;
-        stats.active_participants = active_participants.len();
+        {
+            let mut stats = self.stats.lock();
+            stats.active_participants = active_participants.len();
+        }
 
         // Send event
         self.send_event(ConferenceMixingEvent::ParticipantRemoved {
@@ -169,12 +177,9 @@ impl AudioMixer {
         &self,
         participant_id: &ParticipantId,
     ) -> ConferenceResult<Option<AudioFrame>> {
-        // Check cache first
-        let cache = self.output_cache.lock().await;
-        {
-            if let Some(cached_frame) = cache.get(participant_id) {
-                return Ok(Some((**cached_frame).clone()));
-            }
+        // Check cache first (DashMap, sharded — no global lock).
+        if let Some(cached_frame) = self.output_cache.get(participant_id) {
+            return Ok(Some((**cached_frame.value()).clone()));
         }
 
         // No cached output, need to generate mix
@@ -211,12 +216,14 @@ impl AudioMixer {
         self.update_mixing_stats(start_time, participant_frames.len(), &mixed_outputs)
             .await?;
 
-        // Cache outputs (if any)
+        // Cache outputs (if any). DashMap — no global lock, sharded
+        // inserts. We clear before populating so stale entries from a
+        // previous mix cycle don't survive.
         if !mixed_outputs.is_empty() {
-            let mut cache = self.output_cache.lock().await;
-            cache.clear();
+            self.output_cache.clear();
             for (participant_id, frame) in &mixed_outputs {
-                cache.insert(participant_id.clone(), Arc::new(frame.clone()));
+                self.output_cache
+                    .insert(participant_id.clone(), Arc::new(frame.clone()));
             }
         }
 
@@ -262,8 +269,8 @@ impl AudioMixer {
         // Get actual active participant count (not just frame count)
         let actual_active_count = self.stream_manager.get_active_participants()?.len();
 
-        let mut stats = self.stats.lock().await;
         {
+            let mut stats = self.stats.lock();
             stats.total_mixes += 1;
             stats.active_participants = actual_active_count; // Use actual count, not frame count
             stats.avg_mixing_latency_us = (stats.avg_mixing_latency_us + mixing_latency) / 2;
@@ -296,8 +303,7 @@ impl AudioMixer {
 
     /// Get current mixing statistics
     pub async fn get_mixing_stats(&self) -> ConferenceResult<ConferenceMixingStats> {
-        let stats = self.stats.lock().await;
-        Ok(stats.clone())
+        Ok(self.stats.lock().clone())
     }
 
     /// Get list of active participants
@@ -309,16 +315,17 @@ impl AudioMixer {
     pub async fn cleanup_inactive_participants(&self) -> ConferenceResult<Vec<ParticipantId>> {
         let removed = self.stream_manager.cleanup_inactive_streams()?;
 
-        // Clear cache for removed participants
-        let mut cache = self.output_cache.lock().await;
+        // Clear cache for removed participants (DashMap)
         for participant_id in &removed {
-            cache.remove(participant_id);
+            self.output_cache.remove(participant_id);
         }
 
         // Update stats
         let active_count = self.stream_manager.get_active_participants()?.len();
-        let mut stats = self.stats.lock().await;
-        stats.active_participants = active_count;
+        {
+            let mut stats = self.stats.lock();
+            stats.active_participants = active_count;
+        }
 
         // Send events for removed participants
         for participant_id in &removed {

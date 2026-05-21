@@ -19,8 +19,12 @@ use crate::buffer::transmit::TransmitBuffer;
 
 /// Default implementation of MediaBuffer
 pub struct DefaultMediaBuffer {
-    /// Jitter buffer for incoming frames
-    jitter_buffer: RwLock<AdaptiveJitterBuffer>,
+    /// Jitter buffer for incoming frames. `parking_lot::Mutex`
+    /// because the `AdaptiveJitterBuffer::{add_packet, get_next_packet}`
+    /// bodies are sync (no `.await`), so the previous
+    /// `tokio::RwLock` was paying scheduler overhead with no benefit
+    /// — see C23b.
+    jitter_buffer: parking_lot::Mutex<AdaptiveJitterBuffer>,
 
     /// Transmit buffer for outgoing frames
     transmit_buffer: Option<Arc<TransmitBuffer>>,
@@ -67,7 +71,7 @@ impl DefaultMediaBuffer {
         };
 
         Ok(Arc::new(Self {
-            jitter_buffer: RwLock::new(jitter_buffer),
+            jitter_buffer: parking_lot::Mutex::new(jitter_buffer),
             transmit_buffer: None, // Initialize if needed
             config: RwLock::new(config),
             frame_queue: Mutex::new(VecDeque::with_capacity(100)),
@@ -78,11 +82,12 @@ impl DefaultMediaBuffer {
 
     /// Update statistics based on current state
     async fn update_stats(&self) {
-        let jitter = self.jitter_buffer.read().await;
+        // Snapshot jitter stats under the parking_lot guard, then
+        // drop the guard before awaiting the async stats RwLock.
+        let jitter_stats = self.jitter_buffer.lock().get_stats();
         let mut stats = self.stats.write().await;
 
         // Update current delay
-        let jitter_stats = jitter.get_stats();
         stats.current_delay_ms = jitter_stats.buffer_size_ms;
 
         // Update packet count
@@ -144,23 +149,15 @@ impl MediaBuffer for DefaultMediaBuffer {
         // Convert frame to packet for internal jitter buffer
         let packet = self.frame_to_packet(&frame);
 
-        // Put packet in jitter buffer
-        let mut jitter = self.jitter_buffer.write().await;
-        let added = jitter.add_packet(packet).await;
+        // Put packet in jitter buffer. parking_lot guard is `!Send`
+        // so we scope it tightly — added/dropped before any `.await`.
+        let added = self.jitter_buffer.lock().add_packet(packet);
+
         if added {
-            // Frame added successfully
-            drop(jitter); // Release the lock before notification
-
-            // Signal that a frame was added
             self.frame_signal.notify_one();
-
-            // Update stats
             self.update_stats().await;
-
             Ok(())
         } else {
-            // Failed to add packet (full buffer or other reason)
-            drop(jitter); // Release the lock before updating stats
             let mut stats = self.stats.write().await;
             stats.overflow_discard_count += 1;
             Err(BufferError::BufferFull)
@@ -188,9 +185,11 @@ impl MediaBuffer for DefaultMediaBuffer {
                 return Err(BufferError::BufferEmpty);
             }
 
-            // Try to get a packet from the jitter buffer
-            let mut jitter = self.jitter_buffer.write().await;
-            match jitter.get_next_packet().await {
+            // Try to get a packet from the jitter buffer. Scope the
+            // parking_lot guard inside this block so it can't be held
+            // across the await below.
+            let next = self.jitter_buffer.lock().get_next_packet();
+            match next {
                 Some(packet) => {
                     // Determine frame type based on payload type (simplified)
                     let frame_type = {
@@ -208,8 +207,6 @@ impl MediaBuffer for DefaultMediaBuffer {
                     return Ok(frame);
                 }
                 None => {
-                    // No packet available, release the lock and wait
-                    drop(jitter);
 
                     // Wait for notification or timeout
                     let remaining = timeout
@@ -245,7 +242,7 @@ impl MediaBuffer for DefaultMediaBuffer {
     async fn reset(&self) -> Result<(), BufferError> {
         // Reset jitter buffer
         {
-            let mut jitter = self.jitter_buffer.write().await;
+            let mut jitter = self.jitter_buffer.lock();
             jitter.reset();
         }
 
@@ -280,10 +277,10 @@ impl MediaBuffer for DefaultMediaBuffer {
 
         // Then drain the jitter buffer
         {
-            let mut jitter = self.jitter_buffer.write().await;
+            let mut jitter = self.jitter_buffer.lock();
 
             // Keep getting packets until empty
-            while let Some(packet) = jitter.get_next_packet().await {
+            while let Some(packet) = jitter.get_next_packet() {
                 // Determine frame type based on payload type (simplified)
                 let frame_type = {
                     if packet.header.payload_type >= 96 {
@@ -333,7 +330,7 @@ impl MediaBuffer for DefaultMediaBuffer {
 
         // Update jitter buffer configuration - recreate it with new config
         {
-            let mut jitter = self.jitter_buffer.write().await;
+            let mut jitter = self.jitter_buffer.lock();
             *jitter = AdaptiveJitterBuffer::new(jitter_config);
         }
 

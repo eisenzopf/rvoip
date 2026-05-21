@@ -2,9 +2,9 @@
 //!
 //! Generates a self-signed RSA cert via `rcgen`, binds a server-side
 //! `TlsTransport` on it, then has a client-only `TlsTransport` (with
-//! `insecure_skip_verify=true` to accept the self-signed cert) dial it
-//! without any local endpoint cert/key and exchange a real SIP REGISTER
-//! request. Asserts the server's `TransportEvent::MessageReceived`
+//! the same cert added as an extra CA so default validation accepts it)
+//! dial it without any local endpoint cert/key and exchange a real SIP
+//! REGISTER request. Asserts the server's `TransportEvent::MessageReceived`
 //! carries the original method.
 //!
 //! This is the regression check for **Step 1B** of the TLS roadmap
@@ -59,7 +59,14 @@ fn loopback_addr(port: u16) -> SocketAddr {
 async fn tls_client_connect_and_send_succeeds_against_self_signed_server() {
     let _ = tracing_subscriber::fmt::try_init();
 
-    let (_dir, cert_path, key_path) = write_self_signed_localhost_cert();
+    // Cert must cover both "localhost" (loopback SNI fallback) and the
+    // request URI's host — `tls_server_name_for_message` derives SNI
+    // from the URI when the host is a domain, so the cert needs the
+    // matching SAN.
+    let (_dir, cert_path, key_path) = write_self_signed_cert_for_names(vec![
+        "localhost".to_string(),
+        "registrar.example.com".to_string(),
+    ]);
 
     // Server side: bind on an ephemeral port with the self-signed cert,
     // strict server-side TLS verification (no client auth, default
@@ -76,15 +83,16 @@ async fn tls_client_connect_and_send_succeeds_against_self_signed_server() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Client side: client-only TLS, with no local endpoint cert/key.
-    // It accepts our self-signed server cert only because this dev test
-    // opts into insecure_skip_verify.
+    // It accepts our self-signed server cert by trusting the cert file
+    // as an extra CA — the loopback SNI path resolves to "localhost",
+    // which matches the cert's SAN.
     let client_addr = loopback_addr(0);
     let (client_transport, _client_rx) = TlsTransport::client_only(
         client_addr,
         None,
         TlsClientConfig {
-            extra_ca_path: None,
-            insecure_skip_verify: true,
+            extra_ca_path: Some(cert_path.clone()),
+            insecure_skip_verify: false,
             ..Default::default()
         },
     )

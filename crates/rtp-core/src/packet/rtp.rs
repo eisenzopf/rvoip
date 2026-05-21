@@ -39,7 +39,13 @@ impl RtpPacket {
         self.header.size() + self.payload.len()
     }
 
-    /// Parse an RTP packet from bytes
+    /// Parse an RTP packet from bytes.
+    ///
+    /// Allocates a fresh `Bytes` for the payload (one
+    /// `copy_from_slice`). For the UDP recv hot path prefer
+    /// [`Self::parse_from_bytes`] with a pooled recv buffer — that
+    /// path is zero-copy and reuses the underlying allocation
+    /// across packets.
     pub fn parse(data: &[u8]) -> Result<Self> {
         debug!("Parsing RTP packet from {} bytes", data.len());
 
@@ -58,19 +64,74 @@ impl RtpPacket {
         Ok(Self { header, payload })
     }
 
-    /// Serialize the packet to bytes
+    /// Parse an RTP packet from an owned `Bytes`, slicing the
+    /// payload as a refcounted view without copying.
+    ///
+    /// The recv hot path uses this with
+    /// [`crate::transport::recv_pool::RecvBufPool`] so the entire
+    /// recv → parse → deliver chain becomes alloc-free in steady
+    /// state.
+    pub fn parse_from_bytes(data: Bytes) -> Result<Self> {
+        debug!("Parsing RTP packet from {} bytes (zero-copy)", data.len());
+
+        let (header, header_size) = RtpHeader::parse_without_consuming(&data)?;
+        debug!("Parsed header of size {}", header_size);
+
+        // Zero-copy slice: `Bytes::slice` only bumps the underlying
+        // refcount, no allocation.
+        let payload = if data.len() > header_size {
+            data.slice(header_size..)
+        } else {
+            Bytes::new()
+        };
+        debug!("Sliced payload of size {}", payload.len());
+
+        Ok(Self { header, payload })
+    }
+
+    /// Serialize the packet to bytes.
+    ///
+    /// Allocates a fresh `BytesMut` per call and freezes it directly.
+    /// Hot paths that send many packets should prefer
+    /// [`Self::serialize_into`] with a per-task buffer to amortise the
+    /// allocation across calls.
     pub fn serialize(&self) -> Result<Bytes> {
-        // Create a buffer with enough size for the entire packet
         let total_size = self.size();
         let mut buf = BytesMut::with_capacity(total_size);
+        self.header.serialize(&mut buf)?;
+        buf.extend_from_slice(&self.payload);
+        Ok(buf.freeze())
+    }
+
+    /// Serialize the packet into the caller-supplied `BytesMut`.
+    ///
+    /// Returns a `Bytes` view over just the freshly written region by
+    /// splitting `buf`. The remaining capacity stays with `buf` and is
+    /// reusable on the next call — when nobody holds the returned
+    /// `Bytes` any more, `BytesMut` can reclaim the backing
+    /// allocation, so a per-task `BytesMut` amortises the allocation
+    /// across many packets. This is the zero-alloc-steady-state shape
+    /// we want on the UDP send hot path.
+    ///
+    /// The buffer is grown if it does not already have enough capacity
+    /// for the packet. For single-shot use, prefer the allocating
+    /// [`Self::serialize`] — `split` on an unshared `BytesMut`
+    /// performs an internal reallocation that only pays off when the
+    /// buffer is reused across repeated calls.
+    pub fn serialize_into(&self, buf: &mut BytesMut) -> Result<Bytes> {
+        let total_size = self.size();
+        buf.reserve(total_size);
 
         // Serialize the header
-        self.header.serialize(&mut buf)?;
+        self.header.serialize(buf)?;
 
         // Add the payload
         buf.extend_from_slice(&self.payload);
 
-        Ok(buf.freeze())
+        // Split off exactly the bytes we wrote and freeze them into an
+        // immutable Bytes view. `buf` retains any leftover capacity for
+        // the next packet.
+        Ok(buf.split().freeze())
     }
 }
 

@@ -100,9 +100,9 @@ impl StreamReceiver {
             packets_received += 1;
 
             // Add to jitter buffer
-            if self.jitter_buffer.add_packet(packet).await {
+            if self.jitter_buffer.add_packet(packet) {
                 // Try to get packets out of the jitter buffer
-                while let Some(packet) = self.jitter_buffer.get_next_packet().await {
+                while let Some(packet) = self.jitter_buffer.get_next_packet() {
                     packets_played += 1;
 
                     // Process the packet (in a real application)

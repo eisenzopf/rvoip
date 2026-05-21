@@ -39,6 +39,15 @@ parking_lot = "0.12.1"
 # RFC 4733 §2.5.1.3 retransmit dedup keyed on (peer_addr, ssrc, ts);
 # sharded for the receive hot path.
 dashmap = { workspace = true }
+# Lock-free atomic Arc swap used for set-once-then-read state on the
+# UDP transport hot path (remote addresses, SRTP contexts).
+arc-swap = "1.7"
+# Lock-free MPMC queue used as the backing store for the UDP recv
+# buffer pool (Phase C23c). Each recv pulls a buf, fills it via
+# recv_from, then hands it to Bytes::from_owner so the downstream
+# `RtpPacket::payload` is a refcounted slice with zero-copy parse.
+# When all Bytes clones drop, the owner returns the Vec to the pool.
+crossbeam-queue = "0.3"
 # Cryptographic dependencies for DTLS
 hmac = "0.12.1"
 sha1 = "0.10"
@@ -63,6 +72,7 @@ time = { version = "0.3", features = ["std"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+criterion = { workspace = true }
 
 [[example]]
 name = "dtls_test"
@@ -70,4 +80,26 @@ path = "examples/dtls_test.rs"
 
 [[example]]
 name = "media_api_usage"
-path = "examples/media_api_usage.rs" 
+path = "examples/media_api_usage.rs"
+
+# Performance benchmarks. Run with `cargo bench -p rvoip-rtp-core`. See
+# `crates/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
+[[bench]]
+name = "packet_parse_serialize"
+harness = false
+
+[[bench]]
+name = "srtp_protect_unprotect"
+harness = false
+
+[[bench]]
+name = "udp_loopback"
+harness = false
+
+[[bench]]
+name = "jitter_buffer"
+harness = false
+
+[[bench]]
+name = "session_demux"
+harness = false

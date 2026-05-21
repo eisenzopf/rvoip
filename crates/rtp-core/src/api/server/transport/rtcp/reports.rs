@@ -2,6 +2,7 @@
 //!
 //! This module handles RTCP sender and receiver reports.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,26 +18,24 @@ use crate::transport::UdpRtpTransport;
 
 /// Send RTCP receiver report to all clients
 pub async fn send_rtcp_receiver_report(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<(), MediaTransportError> {
-    // Get all clients
-    let clients_guard = clients.read().await;
+    let connected_ids: Vec<String> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| e.key().clone())
+        .collect();
 
-    // Return error if no clients
-    if clients_guard.is_empty() {
+    if clients.is_empty() {
         return Err(MediaTransportError::NoClients);
     }
 
-    // Send RTCP receiver report to all clients
-    for (client_id, client) in clients_guard.iter() {
-        if client.connected {
-            if let Err(e) = send_rtcp_receiver_report_to_client(client_id, clients).await {
-                warn!(
-                    "Failed to send RTCP receiver report to client {}: {}",
-                    client_id, e
-                );
-                // Continue with other clients even if one fails
-            }
+    for client_id in connected_ids {
+        if let Err(e) = send_rtcp_receiver_report_to_client(&client_id, clients).await {
+            warn!(
+                "Failed to send RTCP receiver report to client {}: {}",
+                client_id, e
+            );
         }
     }
 
@@ -45,26 +44,24 @@ pub async fn send_rtcp_receiver_report(
 
 /// Send RTCP sender report to all clients
 pub async fn send_rtcp_sender_report(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<(), MediaTransportError> {
-    // Get all clients
-    let clients_guard = clients.read().await;
+    let connected_ids: Vec<String> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| e.key().clone())
+        .collect();
 
-    // Return error if no clients
-    if clients_guard.is_empty() {
+    if clients.is_empty() {
         return Err(MediaTransportError::NoClients);
     }
 
-    // Send RTCP sender report to all clients
-    for (client_id, client) in clients_guard.iter() {
-        if client.connected {
-            if let Err(e) = send_rtcp_sender_report_to_client(client_id, clients).await {
-                warn!(
-                    "Failed to send RTCP sender report to client {}: {}",
-                    client_id, e
-                );
-                // Continue with other clients even if one fails
-            }
+    for client_id in connected_ids {
+        if let Err(e) = send_rtcp_sender_report_to_client(&client_id, clients).await {
+            warn!(
+                "Failed to send RTCP sender report to client {}: {}",
+                client_id, e
+            );
         }
     }
 
@@ -74,23 +71,21 @@ pub async fn send_rtcp_sender_report(
 /// Send RTCP receiver report to a specific client
 pub async fn send_rtcp_receiver_report_to_client(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<(), MediaTransportError> {
-    // Get the client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let session_arc = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        client.session.clone()
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Send RTCP receiver report
-    let mut session = client.session.lock().await;
+    let session = session_arc.lock().await;
     session.send_receiver_report().await.map_err(|e| {
         MediaTransportError::RtcpError(format!("Failed to send RTCP receiver report: {}", e))
     })
@@ -99,23 +94,21 @@ pub async fn send_rtcp_receiver_report_to_client(
 /// Send RTCP sender report to a specific client
 pub async fn send_rtcp_sender_report_to_client(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<(), MediaTransportError> {
-    // Get the client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let session_arc = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        client.session.clone()
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Send RTCP sender report
-    let mut session = client.session.lock().await;
+    let session = session_arc.lock().await;
     session.send_sender_report().await.map_err(|e| {
         MediaTransportError::RtcpError(format!("Failed to send RTCP sender report: {}", e))
     })
@@ -123,44 +116,41 @@ pub async fn send_rtcp_sender_report_to_client(
 
 /// Get RTCP statistics for all clients
 pub async fn get_rtcp_stats(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<RtcpStats, MediaTransportError> {
-    // Get all clients
-    let clients_guard = clients.read().await;
+    let connected_ids: Vec<String> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| e.key().clone())
+        .collect();
 
-    // Return error if no clients
-    if clients_guard.is_empty() {
+    if clients.is_empty() {
         return Err(MediaTransportError::NoClients);
     }
 
-    // Aggregate RTCP stats from all clients
     let mut aggregate_stats = RtcpStats::default();
     let mut client_count = 0;
 
-    for (client_id, client) in clients_guard.iter() {
-        if client.connected {
-            match get_client_rtcp_stats(client_id, clients).await {
-                Ok(stats) => {
-                    // Aggregate stats (simple averaging for now)
-                    aggregate_stats.jitter_ms += stats.jitter_ms;
-                    aggregate_stats.packet_loss_percent += stats.packet_loss_percent;
-                    if let Some(rtt) = stats.round_trip_time_ms {
-                        if let Some(existing_rtt) = aggregate_stats.round_trip_time_ms {
-                            aggregate_stats.round_trip_time_ms = Some(existing_rtt + rtt);
-                        } else {
-                            aggregate_stats.round_trip_time_ms = Some(rtt);
-                        }
+    for client_id in &connected_ids {
+        match get_client_rtcp_stats(client_id, clients).await {
+            Ok(stats) => {
+                aggregate_stats.jitter_ms += stats.jitter_ms;
+                aggregate_stats.packet_loss_percent += stats.packet_loss_percent;
+                if let Some(rtt) = stats.round_trip_time_ms {
+                    if let Some(existing_rtt) = aggregate_stats.round_trip_time_ms {
+                        aggregate_stats.round_trip_time_ms = Some(existing_rtt + rtt);
+                    } else {
+                        aggregate_stats.round_trip_time_ms = Some(rtt);
                     }
-                    aggregate_stats.rtcp_packets_sent += stats.rtcp_packets_sent;
-                    aggregate_stats.rtcp_packets_received += stats.rtcp_packets_received;
-                    aggregate_stats.cumulative_packets_lost += stats.cumulative_packets_lost;
+                }
+                aggregate_stats.rtcp_packets_sent += stats.rtcp_packets_sent;
+                aggregate_stats.rtcp_packets_received += stats.rtcp_packets_received;
+                aggregate_stats.cumulative_packets_lost += stats.cumulative_packets_lost;
 
-                    client_count += 1;
-                }
-                Err(e) => {
-                    warn!("Failed to get RTCP stats for client {}: {}", client_id, e);
-                    // Continue with other clients even if one fails
-                }
+                client_count += 1;
+            }
+            Err(e) => {
+                warn!("Failed to get RTCP stats for client {}: {}", client_id, e);
             }
         }
     }
@@ -180,23 +170,21 @@ pub async fn get_rtcp_stats(
 /// Get RTCP statistics for a specific client
 pub async fn get_client_rtcp_stats(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<RtcpStats, MediaTransportError> {
-    // Get the client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let session_arc = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        client.session.clone()
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Get session stats
-    let session = client.session.lock().await;
+    let session = session_arc.lock().await;
     let rtp_stats = session.get_stats();
 
     // Get stream stats if available
@@ -228,29 +216,26 @@ pub async fn get_client_rtcp_stats(
 
 /// Set RTCP interval for all clients
 pub async fn set_rtcp_interval(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     interval: Duration,
 ) -> Result<(), MediaTransportError> {
-    // Get all clients
-    let clients_guard = clients.read().await;
+    // Snapshot connected sessions; setting bandwidth then happens
+    // outside the DashMap iter guard.
+    let sessions: Vec<Arc<Mutex<RtpSession>>> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| e.value().session.clone())
+        .collect();
 
-    // Set RTCP interval for all clients
-    for (client_id, client) in clients_guard.iter() {
-        if client.connected {
-            let mut session = client.session.lock().await;
+    // The bandwidth calculation follows from RFC 3550 where RTCP
+    // bandwidth is typically 5% of session bandwidth. Assuming an
+    // average RTCP packet around 100 bytes:
+    let bytes_per_second = 100.0 / interval.as_secs_f64();
+    let bits_per_second = bytes_per_second * 8.0 / 0.05;
 
-            // The bandwidth calculation follows from RFC 3550 where RTCP bandwidth is typically
-            // 5% of session bandwidth. If we want a specific interval, we need to set the
-            // bandwidth accordingly: bandwidth = packet_size * 8 / interval_fraction
-            // where interval_fraction is 0.05 for 5%
-
-            // Assuming average RTCP packet is around 100 bytes, calculate bandwidth
-            let bytes_per_second = 100.0 / interval.as_secs_f64();
-            let bits_per_second = bytes_per_second * 8.0 / 0.05; // 5% of bandwidth for RTCP
-
-            // Set bandwidth on the session
-            session.set_bandwidth(bits_per_second as u32);
-        }
+    for session_arc in sessions {
+        let mut session = session_arc.lock().await;
+        session.set_bandwidth(bits_per_second as u32);
     }
 
     Ok(())

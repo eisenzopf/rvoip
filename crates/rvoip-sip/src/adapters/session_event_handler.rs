@@ -1391,7 +1391,7 @@ impl SessionCrossCrateEventHandler {
                     p_asserted_identity,
                 };
                 if let Err(e) = tx.send(call_info).await {
-                    error!("Failed to send incoming call notification: {}", e);
+                    debug!("Legacy incoming_call_tx receiver dropped — caller is using app_event_publisher path: {}", e);
                 }
             }
         }
@@ -1805,7 +1805,7 @@ impl SessionCrossCrateEventHandler {
                     p_asserted_identity,
                 };
                 if let Err(e) = tx.send(call_info).await {
-                    error!("Failed to send incoming call notification: {}", e);
+                    debug!("Legacy incoming_call_tx receiver dropped — caller is using app_event_publisher path: {}", e);
                 } else {
                     info!("Successfully sent incoming call notification");
                 }

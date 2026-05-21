@@ -3,6 +3,7 @@
 //! This module handles RTCP application-defined packets, BYE packets, and XR packets.
 
 use bytes::Bytes;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,30 +21,33 @@ use crate::transport::RtpTransport;
 
 /// Send RTCP APP packet to all clients
 pub async fn send_rtcp_app(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     name: &str,
     data: Vec<u8>,
 ) -> Result<(), MediaTransportError> {
-    // Get all connected clients
-    let clients_guard = clients.read().await;
+    // Snapshot connected client ids without holding any shard guard
+    // across `.await` (each send re-acquires its own shard guard
+    // via `send_rtcp_app_to_client`).
+    let connected_ids: Vec<String> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| e.key().clone())
+        .collect();
 
-    if clients_guard.is_empty() {
+    if connected_ids.is_empty() {
         debug!("No clients to send RTCP APP packet to");
         return Ok(());
     }
 
-    // Send to each client
-    for (client_id, client) in clients_guard.iter() {
-        if client.connected {
-            if let Err(e) =
-                send_rtcp_app_to_client(client_id, clients, main_socket, name, data.clone()).await
-            {
-                warn!(
-                    "Failed to send RTCP APP packet to client {}: {}",
-                    client_id, e
-                );
-            }
+    for client_id in connected_ids {
+        if let Err(e) =
+            send_rtcp_app_to_client(&client_id, clients, main_socket, name, data.clone()).await
+        {
+            warn!(
+                "Failed to send RTCP APP packet to client {}: {}",
+                client_id, e
+            );
         }
     }
 
@@ -53,7 +57,7 @@ pub async fn send_rtcp_app(
 /// Send RTCP APP packet to a specific client
 pub async fn send_rtcp_app_to_client(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     name: &str,
     data: Vec<u8>,
@@ -65,24 +69,19 @@ pub async fn send_rtcp_app_to_client(
         ));
     }
 
-    // Get client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let (client_addr, session_arc) = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        (client.address, client.session.clone())
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Get client address
-    let client_addr = client.address;
-
-    // Get the SSRC to use
-    let ssrc = client.session.lock().await.get_ssrc();
+    let ssrc = session_arc.lock().await.get_ssrc();
 
     // Create APP packet
     let mut app_packet = RtcpApplicationDefined::new_with_name(ssrc, name).map_err(|e| {
@@ -124,29 +123,31 @@ pub async fn send_rtcp_app_to_client(
 
 /// Send RTCP BYE packet to all clients
 pub async fn send_rtcp_bye(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     reason: Option<String>,
 ) -> Result<(), MediaTransportError> {
-    // Get all connected clients
-    let clients_guard = clients.read().await;
+    // Snapshot connected client ids without holding shard guards
+    // across `.await`.
+    let connected_ids: Vec<String> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| e.key().clone())
+        .collect();
 
-    if clients_guard.is_empty() {
+    if connected_ids.is_empty() {
         debug!("No clients to send RTCP BYE packet to");
         return Ok(());
     }
 
-    // Send to each client
-    for (client_id, client) in clients_guard.iter() {
-        if client.connected {
-            if let Err(e) =
-                send_rtcp_bye_to_client(client_id, clients, main_socket, reason.clone()).await
-            {
-                warn!(
-                    "Failed to send RTCP BYE packet to client {}: {}",
-                    client_id, e
-                );
-            }
+    for client_id in connected_ids {
+        if let Err(e) =
+            send_rtcp_bye_to_client(&client_id, clients, main_socket, reason.clone()).await
+        {
+            warn!(
+                "Failed to send RTCP BYE packet to client {}: {}",
+                client_id, e
+            );
         }
     }
 
@@ -156,28 +157,23 @@ pub async fn send_rtcp_bye(
 /// Send RTCP BYE packet to a specific client
 pub async fn send_rtcp_bye_to_client(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     reason: Option<String>,
 ) -> Result<(), MediaTransportError> {
-    // Get client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let (client_addr, session_arc) = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        (client.address, client.session.clone())
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Get client address
-    let client_addr = client.address;
-
-    // Get the SSRC to use
-    let ssrc = client.session.lock().await.get_ssrc();
+    let ssrc = session_arc.lock().await.get_ssrc();
 
     // Create BYE packet
     let reason_clone = reason.clone();
@@ -216,34 +212,30 @@ pub async fn send_rtcp_bye_to_client(
 
 /// Send RTCP XR VoIP metrics packet to all clients
 pub async fn send_rtcp_xr_voip_metrics(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     metrics: VoipMetrics,
 ) -> Result<(), MediaTransportError> {
-    // Get all connected clients
-    let clients_guard = clients.read().await;
+    let connected_ids: Vec<String> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| e.key().clone())
+        .collect();
 
-    if clients_guard.is_empty() {
+    if connected_ids.is_empty() {
         debug!("No clients to send RTCP XR packet to");
         return Ok(());
     }
 
-    // Send to each client
-    for (client_id, client) in clients_guard.iter() {
-        if client.connected {
-            if let Err(e) = send_rtcp_xr_voip_metrics_to_client(
-                client_id,
-                clients,
-                main_socket,
-                metrics.clone(),
-            )
-            .await
-            {
-                warn!(
-                    "Failed to send RTCP XR packet to client {}: {}",
-                    client_id, e
-                );
-            }
+    for client_id in connected_ids {
+        if let Err(e) =
+            send_rtcp_xr_voip_metrics_to_client(&client_id, clients, main_socket, metrics.clone())
+                .await
+        {
+            warn!(
+                "Failed to send RTCP XR packet to client {}: {}",
+                client_id, e
+            );
         }
     }
 
@@ -253,28 +245,23 @@ pub async fn send_rtcp_xr_voip_metrics(
 /// Send RTCP XR VoIP metrics packet to a specific client
 pub async fn send_rtcp_xr_voip_metrics_to_client(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
     metrics: VoipMetrics,
 ) -> Result<(), MediaTransportError> {
-    // Get client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let (client_addr, session_arc) = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        (client.address, client.session.clone())
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Get client address
-    let client_addr = client.address;
-
-    // Get the SSRC to use
-    let ssrc = client.session.lock().await.get_ssrc();
+    let ssrc = session_arc.lock().await.get_ssrc();
 
     // Create XR packet
     let mut xr_packet = RtcpExtendedReport::new(ssrc);

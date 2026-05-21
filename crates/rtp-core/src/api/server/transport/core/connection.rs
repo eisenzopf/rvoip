@@ -2,6 +2,7 @@
 //!
 //! This module handles client connection establishment, management, and disconnection.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -44,7 +45,7 @@ pub async fn handle_client(
     addr: SocketAddr,
     config: &ServerConfig,
     security_context: &Arc<RwLock<Option<Arc<dyn ServerSecurityContext + Send + Sync>>>>,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     frame_sender: &broadcast::Sender<(String, MediaFrame)>,
     client_connected_callbacks: &Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
 ) -> Result<String, crate::api::common::error::MediaTransportError> {
@@ -179,10 +180,8 @@ pub async fn handle_client(
         last_activity: Arc::new(Mutex::new(SystemTime::now())),
     };
 
-    // Add to clients
-    let mut clients_guard = clients.write().await;
-    clients_guard.insert(client_id.clone(), client);
-    drop(clients_guard);
+    // Add to clients (DashMap insert is sharded; no outer guard).
+    clients.insert(client_id.clone(), client);
 
     // Create client info
     let client_info = ClientInfo {
@@ -205,7 +204,7 @@ pub async fn handle_client(
 /// Static helper function to handle a new client connection
 pub async fn handle_client_static(
     addr: SocketAddr,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     frame_sender: &broadcast::Sender<(String, MediaFrame)>,
 ) -> Result<String, crate::api::common::error::MediaTransportError> {
     info!("Handling new client from {}", addr);
@@ -337,10 +336,9 @@ pub async fn handle_client_static(
     let mut client_with_task = client;
     client_with_task.task = Some(forward_task);
 
-    // Add to clients
+    // Add to clients (DashMap insert is sharded).
     debug!("Adding client {} to clients map", client_id);
-    let mut clients_write = clients.write().await;
-    clients_write.insert(client_id.clone(), client_with_task);
+    clients.insert(client_id.clone(), client_with_task);
 
     info!("Successfully added client {}", client_id);
     Ok(client_id)
@@ -349,88 +347,98 @@ pub async fn handle_client_static(
 /// Get client transport information (address and session)
 pub async fn get_client_transport_info(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<(SocketAddr, Arc<Mutex<RtpSession>>), MediaTransportError> {
-    // Get the client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
+    let client = clients
         .get(client_id)
         .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
-
-    // Check if client is connected
     if !client.connected {
         return Err(MediaTransportError::ClientNotConnected(
             client_id.to_string(),
         ));
     }
-
-    // Return client address and session
     Ok((client.address, client.session.clone()))
 }
 
 /// Disconnect a client
 pub async fn disconnect_client(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     client_disconnected_callbacks: &Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
 ) -> Result<(), MediaTransportError> {
-    // Remove client
-    let mut clients_guard = clients.write().await;
+    // Remove client from the shard. The returned `client` is owned —
+    // shard guard is released by the `remove` call returning, so all
+    // subsequent `.await` calls are safe.
+    let mut client = clients
+        .remove(client_id)
+        .map(|(_, c)| c)
+        .ok_or_else(|| {
+            MediaTransportError::Transport(format!("Client not found: {}", client_id))
+        })?;
 
-    if let Some(mut client) = clients_guard.remove(client_id) {
-        // Abort task
-        if let Some(task) = client.task.take() {
-            task.abort();
-        }
+    // Abort task
+    if let Some(task) = client.task.take() {
+        task.abort();
+    }
 
-        // Close session
+    // Close session
+    {
         let mut session = client.session.lock().await;
         if let Err(e) = session.close().await {
             warn!("Error closing client session {}: {}", client_id, e);
         }
-
-        // Close security context if it exists
-        if let Some(security_ctx) = &client.security {
-            if let Err(e) = security_ctx.close().await {
-                warn!("Error closing client security {}: {}", client_id, e);
-            }
-        }
-
-        // Notify callbacks
-        let callbacks_guard = client_disconnected_callbacks.read().await;
-        let client_info = ClientInfo {
-            id: client.id.clone(),
-            address: client.address,
-            secure: client.security.is_some(),
-            security_info: None,
-            connected: false,
-        };
-
-        for callback in &*callbacks_guard {
-            callback(client_info.clone());
-        }
-
-        Ok(())
-    } else {
-        Err(MediaTransportError::Transport(format!(
-            "Client not found: {}",
-            client_id
-        )))
     }
+
+    // Close security context if it exists
+    if let Some(security_ctx) = &client.security {
+        if let Err(e) = security_ctx.close().await {
+            warn!("Error closing client security {}: {}", client_id, e);
+        }
+    }
+
+    // Notify callbacks
+    let callbacks_guard = client_disconnected_callbacks.read().await;
+    let client_info = ClientInfo {
+        id: client.id.clone(),
+        address: client.address,
+        secure: client.security.is_some(),
+        security_info: None,
+        connected: false,
+    };
+
+    for callback in &*callbacks_guard {
+        callback(client_info.clone());
+    }
+
+    Ok(())
 }
 
 /// Get client information
 pub async fn get_clients_info(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     config: &ServerConfig,
 ) -> Result<Vec<ClientInfo>, MediaTransportError> {
-    let clients_guard = clients.read().await;
+    // Snapshot the per-client primitives (id, addr, connected,
+    // security) out of the DashMap before any `.await`. Holding a
+    // DashMap iter guard across `security_ctx.get_remote_fingerprint()
+    // .await` would taint the surrounding future (shard `Ref` is
+    // `!Send`).
+    let snapshot: Vec<(
+        String,
+        SocketAddr,
+        bool,
+        Option<Arc<dyn ClientSecurityContext + Send + Sync>>,
+    )> = clients
+        .iter()
+        .map(|e| {
+            let v = e.value();
+            (e.key().clone(), v.address, v.connected, v.security.clone())
+        })
+        .collect();
 
-    let mut result = Vec::new();
-    for client in clients_guard.values() {
-        // Get security info if available
-        let security_info = if let Some(security_ctx) = &client.security {
-            // We can directly access methods on the ClientSecurityContext trait
+    let mut result = Vec::with_capacity(snapshot.len());
+    for (id, address, connected, security) in snapshot {
+        let security_info = if let Some(security_ctx) = &security {
             let fingerprint = security_ctx.get_remote_fingerprint().await.ok().flatten();
 
             if let Some(fingerprint) = fingerprint {
@@ -442,7 +450,7 @@ pub async fn get_clients_info(
                     ),
                     crypto_suites: security_ctx.get_security_info().crypto_suites.clone(),
                     key_params: None,
-                    srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()), // Default profile
+                    srtp_profile: Some("AES_CM_128_HMAC_SHA1_80".to_string()),
                 })
             } else {
                 None
@@ -452,11 +460,11 @@ pub async fn get_clients_info(
         };
 
         result.push(ClientInfo {
-            id: client.id.clone(),
-            address: client.address,
-            secure: client.security.is_some(),
+            id,
+            address,
+            secure: security.is_some(),
             security_info,
-            connected: client.connected,
+            connected,
         });
     }
 

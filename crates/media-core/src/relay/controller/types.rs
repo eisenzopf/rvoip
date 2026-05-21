@@ -163,21 +163,31 @@ impl Default for AdvancedProcessorConfig {
     }
 }
 
-/// Advanced processor set for v2 processors per session
+/// Advanced processor set for v2 processors per session.
+///
+/// Each processor (`vad`/`agc`/`aec`) is wrapped in
+/// `parking_lot::RwLock` rather than `tokio::sync::RwLock` because
+/// the per-frame `process_frame` / `analyze_frame` critical sections
+/// are CPU-only DSP work (no `.await`), and on the advanced-media
+/// hot path the tokio scheduler dip costs more than the lock itself.
+/// `metrics` uses [`ConcurrentPerformanceMetrics`] for the same
+/// reason it does on the controller (lock-free padded atomics).
 #[derive(Debug)]
 pub struct AdvancedProcessorSet {
     /// Advanced voice activity detector (v2)
-    pub vad: Option<Arc<RwLock<AdvancedVoiceActivityDetector>>>,
+    pub vad: Option<Arc<parking_lot::RwLock<AdvancedVoiceActivityDetector>>>,
     /// Advanced automatic gain control (v2)
-    pub agc: Option<Arc<RwLock<AdvancedAutomaticGainControl>>>,
+    pub agc: Option<Arc<parking_lot::RwLock<AdvancedAutomaticGainControl>>>,
     /// Advanced acoustic echo canceller (v2)
-    pub aec: Option<Arc<RwLock<AdvancedAcousticEchoCanceller>>>,
+    pub aec: Option<Arc<parking_lot::RwLock<AdvancedAcousticEchoCanceller>>>,
     /// Session-specific frame pool (shared reference)
     pub frame_pool: Arc<AudioFramePool>,
     /// SIMD processor for this session
     pub simd_processor: SimdProcessor,
-    /// Performance metrics for this session
-    pub metrics: Arc<RwLock<PerformanceMetrics>>,
+    /// Performance metrics for this session — lock-free padded
+    /// atomics (see C20). External readers get a snapshot via
+    /// `metrics.snapshot()`.
+    pub metrics: Arc<crate::performance::metrics::ConcurrentPerformanceMetrics>,
     /// Configuration used to create these processors
     pub config: AdvancedProcessorConfig,
 }

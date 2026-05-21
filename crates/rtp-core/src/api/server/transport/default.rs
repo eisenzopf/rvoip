@@ -6,11 +6,13 @@
 use std::any::Any;
 use std::collections::HashMap;
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use dashmap::DashMap;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -66,8 +68,15 @@ pub struct DefaultMediaTransportServer {
     /// Security context for DTLS/SRTP
     security_context: Arc<RwLock<Option<Arc<dyn ServerSecurityContext + Send + Sync>>>>,
 
-    /// Client connections
-    clients: Arc<RwLock<HashMap<String, ClientConnection>>>,
+    /// Client connections. `DashMap` so per-frame egress / RTCP /
+    /// security helpers don't serialise behind a single async writer
+    /// lock — see Phase C22. Every consumer reaches into one shard
+    /// rather than blocking the whole map. The helper modules
+    /// (`frame.rs`, `connection.rs`, `ssrc/demux.rs`, `rtcp/*`,
+    /// `stats/*`) take this by reference and use `entry()` /
+    /// `get()` / `get_mut()` directly; no shard guard is held
+    /// across `.await`.
+    clients: Arc<DashMap<String, ClientConnection>>,
 
     /// Transport event callbacks
     event_callbacks: Arc<RwLock<Vec<MediaEventCallback>>>,
@@ -78,14 +87,19 @@ pub struct DefaultMediaTransportServer {
     /// Client disconnected callbacks
     client_disconnected_callbacks: Arc<RwLock<Vec<Box<dyn Fn(ClientInfo) + Send + Sync>>>>,
 
-    /// SSRC demultiplexing enabled flag
-    ssrc_demultiplexing_enabled: Arc<RwLock<bool>>,
+    /// SSRC demultiplexing enabled flag. AtomicBool because it's read
+    /// on every per-frame send (`send_frame_to`) and per-packet receive
+    /// dispatch (event loop in `start()`); the RwLock added a
+    /// scheduler dip per frame for a single boolean.
+    ssrc_demultiplexing_enabled: Arc<AtomicBool>,
 
-    /// CSRC management status
-    csrc_management_enabled: Arc<RwLock<bool>>,
+    /// CSRC management status. AtomicBool for the same reason as
+    /// [`Self::ssrc_demultiplexing_enabled`] — read on every per-frame
+    /// send + broadcast path.
+    csrc_management_enabled: Arc<AtomicBool>,
 
     /// CSRC manager
-    csrc_manager: Arc<RwLock<CsrcManager>>,
+    csrc_manager: Arc<parking_lot::RwLock<CsrcManager>>,
 
     /// Header extension format
     header_extension_format: Arc<RwLock<ExtensionFormat>>,
@@ -162,13 +176,13 @@ impl DefaultMediaTransportServer {
             client_sockets: Arc::new(RwLock::new(HashMap::new())),
             client_transports: Arc::new(RwLock::new(HashMap::new())),
             security_context: Arc::new(RwLock::new(None)),
-            clients: Arc::new(RwLock::new(HashMap::new())),
+            clients: Arc::new(DashMap::new()),
             event_callbacks: Arc::new(RwLock::new(Vec::new())),
             client_connected_callbacks: Arc::new(RwLock::new(Vec::new())),
             client_disconnected_callbacks: Arc::new(RwLock::new(Vec::new())),
-            ssrc_demultiplexing_enabled: Arc::new(RwLock::new(ssrc_demultiplexing_enabled)),
-            csrc_management_enabled: Arc::new(RwLock::new(csrc_management_enabled)),
-            csrc_manager: Arc::new(RwLock::new(CsrcManager::new())),
+            ssrc_demultiplexing_enabled: Arc::new(AtomicBool::new(ssrc_demultiplexing_enabled)),
+            csrc_management_enabled: Arc::new(AtomicBool::new(csrc_management_enabled)),
+            csrc_manager: Arc::new(parking_lot::RwLock::new(CsrcManager::new())),
             header_extension_format: Arc::new(RwLock::new(header_extension_format)),
             header_extensions_enabled: Arc::new(RwLock::new(header_extensions_enabled)),
             header_extension_mappings: Arc::new(RwLock::new(HashMap::new())),
@@ -451,27 +465,21 @@ impl MediaTransportServer for DefaultMediaTransportServer {
                         };
 
                         // Check if SSRC demultiplexing is enabled
-                        let ssrc_demux_enabled = *ssrc_demux_enabled_clone.read().await;
+                        let ssrc_demux_enabled = ssrc_demux_enabled_clone.load(Ordering::Relaxed);
                         debug!(
                             "SSRC demultiplexing enabled: {}, handling packet with SSRC={:08x}",
                             ssrc_demux_enabled, final_ssrc
                         );
 
-                        // Check if we already have a client for this address
-                        let clients = clients_clone.read().await;
-                        let client_exists = clients.values().any(|c| c.address == source);
-                        let client_id = if client_exists {
-                            // Find the client ID for this address
-                            clients
-                                .values()
-                                .find(|c| c.address == source)
-                                .map(|c| c.id.clone())
-                                .unwrap_or_else(|| format!("unknown-{}", source))
-                        } else {
-                            // No client ID yet
-                            format!("pending-{}", source)
-                        };
-                        drop(clients);
+                        // Check if we already have a client for this address.
+                        // DashMap iter scope ends with `.find()` returning.
+                        let existing_id = clients_clone
+                            .iter()
+                            .find(|e| e.value().address == source)
+                            .map(|e| e.value().id.clone());
+                        let client_exists = existing_id.is_some();
+                        let client_id =
+                            existing_id.unwrap_or_else(|| format!("pending-{}", source));
 
                         // Forward directly to broadcast channel
                         // This ensures frames are available immediately via the receive_frame method
@@ -585,11 +593,24 @@ impl MediaTransportServer for DefaultMediaTransportServer {
 
         debug!("Disconnecting all clients");
 
-        // Disconnect all clients
-        let mut clients = self.clients.write().await;
-        debug!("Disconnecting {} clients", clients.len());
+        // Drain the DashMap into an owned Vec so we can run the
+        // per-client async tear-down (`session.close().await`,
+        // `security.close().await`, callback dispatch) without
+        // holding any shard guard across `.await`. `iter()` /
+        // `get_mut()` on DashMap return shard locks that would
+        // serialise other shard work — draining avoids that
+        // entirely.
+        let drained: Vec<(String, ClientConnection)> = self
+            .clients
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|k| self.clients.remove(&k))
+            .collect();
+        debug!("Disconnecting {} clients", drained.len());
 
-        for (id, client) in clients.iter_mut() {
+        for (id, mut client) in drained {
             debug!("Disconnecting client {}", id);
 
             // Abort task
@@ -605,11 +626,12 @@ impl MediaTransportServer for DefaultMediaTransportServer {
 
             // Close session
             debug!("Closing session for client {}", id);
-            let mut session = client.session.lock().await;
-            if let Err(e) = session.close().await {
-                warn!("Error closing client session {}: {}", id, e);
+            {
+                let mut session = client.session.lock().await;
+                if let Err(e) = session.close().await {
+                    warn!("Error closing client session {}: {}", id, e);
+                }
             }
-            drop(session);
 
             // Close security context if present
             if let Some(security_ctx) = &client.security {
@@ -638,11 +660,7 @@ impl MediaTransportServer for DefaultMediaTransportServer {
             }
             drop(callbacks_guard);
         }
-
-        // Clear clients
-        debug!("Clearing client list");
-        clients.clear();
-        drop(clients);
+        debug!("Disconnect-all complete");
 
         // Close main socket if available
         debug!("Closing main socket");
@@ -871,18 +889,18 @@ impl MediaTransportServer for DefaultMediaTransportServer {
     }
 
     async fn is_csrc_management_enabled(&self) -> Result<bool, MediaTransportError> {
-        Ok(*self.csrc_management_enabled.read().await)
+        Ok(self.csrc_management_enabled.load(Ordering::Relaxed))
     }
 
     async fn enable_csrc_management(&self) -> Result<bool, MediaTransportError> {
-        // Check if already enabled
-        if *self.csrc_management_enabled.read().await {
+        // CAS so re-enable is a no-op observable via the return value.
+        if self
+            .csrc_management_enabled
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Ok(true);
         }
-
-        // Set enabled flag
-        *self.csrc_management_enabled.write().await = true;
-
         debug!("Enabled CSRC management on server");
         Ok(true)
     }

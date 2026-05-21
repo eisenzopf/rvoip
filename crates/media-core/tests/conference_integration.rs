@@ -33,7 +33,7 @@ async fn test_conference_setup_teardown() {
         overflow_protection: true,
     };
 
-    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
+    let controller = MediaSessionController::with_conference_mixing(40000, 45000, config)
         .await
         .expect("Failed to create controller with conference mixing");
 
@@ -54,7 +54,7 @@ async fn test_conference_setup_teardown() {
 #[serial]
 async fn test_participant_management() {
     let config = ConferenceMixingConfig::default();
-    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
+    let controller = MediaSessionController::with_conference_mixing(40000, 45000, config)
         .await
         .expect("Failed to create controller");
 
@@ -110,7 +110,7 @@ async fn test_conference_capacity_limits() {
         ..ConferenceMixingConfig::default()
     };
 
-    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
+    let controller = MediaSessionController::with_conference_mixing(40000, 45000, config)
         .await
         .expect("Failed to create controller");
 
@@ -167,7 +167,7 @@ async fn test_conference_audio_processing() {
         ..ConferenceMixingConfig::default()
     };
 
-    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
+    let controller = MediaSessionController::with_conference_mixing(40000, 45000, config)
         .await
         .expect("Failed to create controller");
 
@@ -236,7 +236,7 @@ async fn test_conference_audio_processing() {
 #[serial]
 async fn test_conference_events() {
     let config = ConferenceMixingConfig::default();
-    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
+    let controller = MediaSessionController::with_conference_mixing(40000, 45000, config)
         .await
         .expect("Failed to create controller");
 
@@ -315,7 +315,7 @@ async fn test_conference_events() {
 #[serial]
 async fn test_error_handling() {
     let config = ConferenceMixingConfig::default();
-    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
+    let controller = MediaSessionController::with_conference_mixing(40000, 45000, config)
         .await
         .expect("Failed to create controller");
 
@@ -352,7 +352,7 @@ async fn test_participant_cleanup() {
         ..ConferenceMixingConfig::default()
     };
 
-    let controller = MediaSessionController::with_conference_mixing(0, 0, config)
+    let controller = MediaSessionController::with_conference_mixing(40000, 45000, config)
         .await
         .expect("Failed to create controller");
 

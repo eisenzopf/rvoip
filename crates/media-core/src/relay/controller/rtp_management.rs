@@ -39,11 +39,30 @@ impl MediaSessionController {
         dialog_id: &DialogId,
         direction: MediaDirection,
     ) -> Result<()> {
-        {
-            let mut rtp_sessions = self.rtp_sessions.write().await;
-            let wrapper = rtp_sessions
+        // Extract the transmitter ref + session Arc + decide the new
+        // transmission state while holding the shard guard, then drop
+        // the guard before any `.await`. We can't hold `get_mut`
+        // across await because the DashMap shard would block other
+        // dialogs.
+        enum Action {
+            None,
+            StopExisting(AudioTransmitter),
+            StartReplacement {
+                existing: AudioTransmitter,
+                session: Arc<tokio::sync::Mutex<RtpSession>>,
+            },
+        }
+
+        // SAFETY: AudioTransmitter is not Clone. The take/restore pattern below
+        // momentarily removes it from the wrapper so we can call its async
+        // methods without holding the DashMap guard, then puts it back (or its
+        // replacement) once we re-acquire the guard.
+        let action = {
+            let mut entry = self
+                .rtp_sessions
                 .get_mut(dialog_id)
                 .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            let wrapper = entry.value_mut();
 
             wrapper.transmission_enabled = matches!(
                 direction,
@@ -51,16 +70,42 @@ impl MediaSessionController {
             );
 
             if !wrapper.transmission_enabled {
-                if let Some(transmitter) = &wrapper.audio_transmitter {
-                    transmitter.stop().await;
+                match wrapper.audio_transmitter.take() {
+                    Some(t) => Action::StopExisting(t),
+                    None => Action::None,
                 }
-            } else if let Some(transmitter) = &wrapper.audio_transmitter {
-                if !transmitter.is_active().await {
+            } else {
+                match wrapper.audio_transmitter.take() {
+                    Some(t) => Action::StartReplacement {
+                        existing: t,
+                        session: wrapper.session.clone(),
+                    },
+                    None => Action::None,
+                }
+            }
+        };
+
+        match action {
+            Action::None => {}
+            Action::StopExisting(transmitter) => {
+                transmitter.stop().await;
+                // Don't put it back — direction is now recv-only.
+            }
+            Action::StartReplacement { existing, session } => {
+                if existing.is_active().await {
+                    // Still running — put it back.
+                    if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+                        entry.value_mut().audio_transmitter = Some(existing);
+                    }
+                } else {
+                    // Replace with a freshly-started transmitter.
                     let config = AudioTransmitterConfig::default();
                     let mut replacement =
-                        AudioTransmitter::new_with_config(wrapper.session.clone(), config);
+                        AudioTransmitter::new_with_config(session, config);
                     replacement.start().await;
-                    wrapper.audio_transmitter = Some(replacement);
+                    if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+                        entry.value_mut().audio_transmitter = Some(replacement);
+                    }
                 }
             }
         }
@@ -73,18 +118,25 @@ impl MediaSessionController {
         Ok(())
     }
 
-    /// Get RTP session for a dialog (for packet transmission)
+    /// Get RTP session for a dialog (for packet transmission). Clones
+    /// the per-session Arc out of the DashMap shard; the shard guard
+    /// is dropped at the end of the `map` closure.
     pub async fn get_rtp_session(
         &self,
         dialog_id: &DialogId,
     ) -> Option<Arc<tokio::sync::Mutex<RtpSession>>> {
-        let rtp_sessions = self.rtp_sessions.read().await;
-        rtp_sessions
+        self.rtp_sessions
             .get(dialog_id)
             .map(|wrapper| wrapper.session.clone())
     }
 
-    /// Send RTP packet for a dialog
+    /// Send RTP packet for a dialog.
+    ///
+    /// Snapshots the session's lock-free `RtpSendHandle` under a brief
+    /// lock, drops the session guard, then sends through the handle —
+    /// keeps the outer `Mutex<RtpSession>` available for other
+    /// per-dialog work (RTCP scheduler, set_remote_addr, etc.) during
+    /// the await on the mpsc enqueue.
     pub async fn send_rtp_packet(
         &self,
         dialog_id: &DialogId,
@@ -96,12 +148,28 @@ impl MediaSessionController {
             .await
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
-        let mut session = rtp_session.lock().await;
         let payload_len = payload.len();
-        session
-            .send_packet(timestamp, Bytes::from(payload), false)
-            .await
-            .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
+        let send_handle = {
+            let session = rtp_session.lock().await;
+            session.send_handle()
+        };
+
+        let payload_bytes = Bytes::from(payload);
+        if let Some(handle) = send_handle {
+            handle
+                .send_packet(timestamp, payload_bytes, false)
+                .await
+                .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
+        } else {
+            // Fallback: session has no scheduler (shouldn't happen in
+            // production; see RtpSession::new). Lock and call send_packet
+            // through the legacy path.
+            let session = rtp_session.lock().await;
+            session
+                .send_packet(timestamp, payload_bytes, false)
+                .await
+                .map_err(|e| Error::config(format!("Failed to send RTP packet: {}", e)))?;
+        }
 
         info!(
             "📤 Sent RTP packet for dialog: {} (timestamp: {}, payload: {} bytes)",
@@ -166,12 +234,10 @@ impl MediaSessionController {
         let mut session = rtp_session.lock().await;
         session.set_remote_addr(remote_addr).await;
 
-        // Update wrapper info
-        {
-            let mut rtp_sessions = self.rtp_sessions.write().await;
-            if let Some(wrapper) = rtp_sessions.get_mut(dialog_id) {
-                wrapper.remote_addr = Some(remote_addr);
-            }
+        // Update wrapper info (DashMap shard guard is synchronous,
+        // no .await held).
+        if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+            entry.value_mut().remote_addr = Some(remote_addr);
         }
 
         info!(
@@ -210,14 +276,11 @@ impl MediaSessionController {
         self.stop_audio_transmission(dialog_id).await?;
 
         // Clean up advanced processors if they exist
-        {
-            let mut processors = self.advanced_processors.write().await;
-            if processors.remove(dialog_id).is_some() {
-                info!(
-                    "🧹 Cleaned up advanced processors for dialog: {}",
-                    dialog_id
-                );
-            }
+        if self.advanced_processors.remove(dialog_id).is_some() {
+            info!(
+                "🧹 Cleaned up advanced processors for dialog: {}",
+                dialog_id
+            );
         }
 
         info!("✅ Media flow terminated for dialog: {}", dialog_id);
@@ -252,22 +315,30 @@ impl MediaSessionController {
     ) -> Result<()> {
         info!("🎵 Starting audio transmission for dialog: {}", dialog_id);
 
-        let mut rtp_sessions = self.rtp_sessions.write().await;
-        let wrapper = rtp_sessions
-            .get_mut(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        // Snapshot the per-session Arc + check the already-started
+        // guard inside the shard guard, drop the guard, then build &
+        // start the transmitter outside the lock.
+        let session_arc = {
+            let entry = self
+                .rtp_sessions
+                .get(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            let wrapper = entry.value();
+            if wrapper.transmission_enabled && wrapper.audio_transmitter.is_some() {
+                return Ok(()); // Already started
+            }
+            wrapper.session.clone()
+        };
 
-        if wrapper.transmission_enabled {
-            return Ok(()); // Already started
-        }
-
-        // Create audio transmitter with custom configuration
-        let mut audio_transmitter =
-            AudioTransmitter::new_with_config(wrapper.session.clone(), config);
+        let mut audio_transmitter = AudioTransmitter::new_with_config(session_arc, config);
         audio_transmitter.start().await;
 
-        wrapper.audio_transmitter = Some(audio_transmitter);
-        wrapper.transmission_enabled = true;
+        // Re-acquire the shard guard to install the transmitter.
+        if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+            let wrapper = entry.value_mut();
+            wrapper.audio_transmitter = Some(audio_transmitter);
+            wrapper.transmission_enabled = true;
+        }
 
         info!("✅ Audio transmission started for dialog: {}", dialog_id);
         Ok(())
@@ -277,17 +348,22 @@ impl MediaSessionController {
     pub async fn stop_audio_transmission(&self, dialog_id: &DialogId) -> Result<()> {
         info!("🛑 Stopping audio transmission for dialog: {}", dialog_id);
 
-        let mut rtp_sessions = self.rtp_sessions.write().await;
-        let wrapper = rtp_sessions
-            .get_mut(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        // Take the transmitter out of the wrapper while we hold the
+        // shard guard; stop it outside the lock so the async stop
+        // doesn't serialise other dialogs.
+        let transmitter = {
+            let mut entry = self
+                .rtp_sessions
+                .get_mut(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            let wrapper = entry.value_mut();
+            wrapper.transmission_enabled = false;
+            wrapper.audio_transmitter.take()
+        };
 
-        if let Some(transmitter) = &wrapper.audio_transmitter {
+        if let Some(transmitter) = transmitter {
             transmitter.stop().await;
         }
-
-        wrapper.audio_transmitter = None;
-        wrapper.transmission_enabled = false;
 
         info!("✅ Audio transmission stopped for dialog: {}", dialog_id);
         Ok(())
@@ -328,29 +404,37 @@ impl MediaSessionController {
     pub async fn set_audio_muted(&self, dialog_id: &DialogId, muted: bool) -> Result<()> {
         info!("🔇 Setting audio muted={} for dialog: {}", muted, dialog_id);
 
-        let mut rtp_sessions = self.rtp_sessions.write().await;
-        let wrapper = rtp_sessions
+        let mut entry = self
+            .rtp_sessions
             .get_mut(dialog_id)
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-
-        wrapper.is_muted = muted;
+        entry.value_mut().is_muted = muted;
+        drop(entry);
 
         info!("✅ Audio muted={} set for dialog: {}", muted, dialog_id);
         Ok(())
     }
 
-    /// Check if audio transmission is active for a dialog
+    /// Check if audio transmission is active for a dialog. AudioTransmitter
+    /// is not Clone, so we can't extract it; instead we check
+    /// `transmission_enabled` (a cheap bool) while holding the shard
+    /// guard, then drop the guard before awaiting `is_active`. The
+    /// `is_active` query goes through the transmitter's own internal
+    /// atomic, so we approximate via the wrapper flag — which is the
+    /// authoritative session-level signal anyway.
     pub async fn is_audio_transmission_active(&self, dialog_id: &DialogId) -> bool {
-        let rtp_sessions = self.rtp_sessions.read().await;
-        if let Some(wrapper) = rtp_sessions.get(dialog_id) {
-            if let Some(transmitter) = &wrapper.audio_transmitter {
-                return transmitter.is_active().await;
-            }
-        }
-        false
+        self.rtp_sessions
+            .get(dialog_id)
+            .map(|r| {
+                let w = r.value();
+                w.transmission_enabled && w.audio_transmitter.is_some()
+            })
+            .unwrap_or(false)
     }
 
-    /// Set custom audio samples for transmission
+    /// Set custom audio samples for transmission. The transmitter is
+    /// not Clone; we take it out of the wrapper, drop the shard
+    /// guard, run the async setter, then put it back.
     pub async fn set_custom_audio(
         &self,
         dialog_id: &DialogId,
@@ -364,21 +448,27 @@ impl MediaSessionController {
             repeat
         );
 
-        let rtp_sessions = self.rtp_sessions.read().await;
-        let wrapper = rtp_sessions
-            .get(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let transmitter = {
+            let mut entry = self
+                .rtp_sessions
+                .get_mut(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            entry.value_mut().audio_transmitter.take()
+        };
 
-        if let Some(transmitter) = &wrapper.audio_transmitter {
-            transmitter.set_custom_audio(samples, repeat).await;
-            info!("✅ Custom audio set for dialog: {}", dialog_id);
-        } else {
-            return Err(Error::config(
+        match transmitter {
+            Some(t) => {
+                t.set_custom_audio(samples, repeat).await;
+                if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+                    entry.value_mut().audio_transmitter = Some(t);
+                }
+                info!("✅ Custom audio set for dialog: {}", dialog_id);
+                Ok(())
+            }
+            None => Err(Error::config(
                 "Audio transmission not active for dialog".to_string(),
-            ));
+            )),
         }
-
-        Ok(())
     }
 
     /// Set tone generation parameters for a dialog
@@ -393,21 +483,27 @@ impl MediaSessionController {
             dialog_id, frequency, amplitude
         );
 
-        let rtp_sessions = self.rtp_sessions.read().await;
-        let wrapper = rtp_sessions
-            .get(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let transmitter = {
+            let mut entry = self
+                .rtp_sessions
+                .get_mut(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            entry.value_mut().audio_transmitter.take()
+        };
 
-        if let Some(transmitter) = &wrapper.audio_transmitter {
-            transmitter.set_tone(frequency, amplitude).await;
-            info!("✅ Tone generation set for dialog: {}", dialog_id);
-        } else {
-            return Err(Error::config(
+        match transmitter {
+            Some(t) => {
+                t.set_tone(frequency, amplitude).await;
+                if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+                    entry.value_mut().audio_transmitter = Some(t);
+                }
+                info!("✅ Tone generation set for dialog: {}", dialog_id);
+                Ok(())
+            }
+            None => Err(Error::config(
                 "Audio transmission not active for dialog".to_string(),
-            ));
+            )),
         }
-
-        Ok(())
     }
 
     /// Set an arbitrary [`AudioSource`] on the running transmitter for this
@@ -422,20 +518,27 @@ impl MediaSessionController {
     pub async fn set_audio_source(&self, dialog_id: &DialogId, source: AudioSource) -> Result<()> {
         info!("🎵 Setting audio source for dialog: {}", dialog_id);
 
-        let rtp_sessions = self.rtp_sessions.read().await;
-        let wrapper = rtp_sessions
-            .get(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let transmitter = {
+            let mut entry = self
+                .rtp_sessions
+                .get_mut(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            entry.value_mut().audio_transmitter.take()
+        };
 
-        if let Some(transmitter) = &wrapper.audio_transmitter {
-            transmitter.set_audio_source(source).await;
-            debug!("✅ Audio source updated for dialog: {}", dialog_id);
-            Ok(())
-        } else {
-            Err(Error::config(format!(
+        match transmitter {
+            Some(t) => {
+                t.set_audio_source(source).await;
+                if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+                    entry.value_mut().audio_transmitter = Some(t);
+                }
+                debug!("✅ Audio source updated for dialog: {}", dialog_id);
+                Ok(())
+            }
+            None => Err(Error::config(format!(
                 "Audio transmission not active for dialog {} — call start_audio_transmission first",
                 dialog_id
-            )))
+            ))),
         }
     }
 
@@ -443,21 +546,27 @@ impl MediaSessionController {
     pub async fn set_pass_through_mode(&self, dialog_id: &DialogId) -> Result<()> {
         info!("🔄 Setting pass-through mode for dialog: {}", dialog_id);
 
-        let rtp_sessions = self.rtp_sessions.read().await;
-        let wrapper = rtp_sessions
-            .get(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let transmitter = {
+            let mut entry = self
+                .rtp_sessions
+                .get_mut(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            entry.value_mut().audio_transmitter.take()
+        };
 
-        if let Some(transmitter) = &wrapper.audio_transmitter {
-            transmitter.set_pass_through().await;
-            info!("✅ Pass-through mode enabled for dialog: {}", dialog_id);
-        } else {
-            return Err(Error::config(
+        match transmitter {
+            Some(t) => {
+                t.set_pass_through().await;
+                if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
+                    entry.value_mut().audio_transmitter = Some(t);
+                }
+                info!("✅ Pass-through mode enabled for dialog: {}", dialog_id);
+                Ok(())
+            }
+            None => Err(Error::config(
                 "Audio transmission not active for dialog".to_string(),
-            ));
+            )),
         }
-
-        Ok(())
     }
 
     /// Start audio transmission with custom audio samples
@@ -521,23 +630,27 @@ impl MediaSessionController {
             pcm_samples.len()
         );
 
-        // Check if transmission is enabled and if audio is muted
-        let (is_muted, is_enabled) = {
-            let rtp_sessions = self.rtp_sessions.read().await;
-            if let Some(wrapper) = rtp_sessions.get(dialog_id) {
+        // Check if transmission is enabled and if audio is muted.
+        // DashMap shard guard is held only for the synchronous bool
+        // reads + dropped via the `map` closure.
+        let (is_muted, is_enabled) = self
+            .rtp_sessions
+            .get(dialog_id)
+            .map(|r| {
+                let w = r.value();
                 info!(
                     "✅ Found RTP session for dialog: {}, muted={}, enabled={}",
-                    dialog_id, wrapper.is_muted, wrapper.transmission_enabled
+                    dialog_id, w.is_muted, w.transmission_enabled
                 );
-                (wrapper.is_muted, wrapper.transmission_enabled)
-            } else {
+                (w.is_muted, w.transmission_enabled)
+            })
+            .unwrap_or_else(|| {
                 warn!(
                     "⚠️ No RTP session found for dialog: {} - using defaults",
                     dialog_id
                 );
                 (false, true)
-            }
-        };
+            });
 
         if !is_enabled {
             // Transmission is disabled, don't send anything
@@ -572,13 +685,11 @@ impl MediaSessionController {
             let gate_arc = if let Some(existing) = self.cn_gate_state.get(dialog_id) {
                 existing.value().clone()
             } else {
-                let session_arc = {
-                    let rtp_sessions = self.rtp_sessions.read().await;
-                    rtp_sessions
-                        .get(dialog_id)
-                        .map(|w| w.session.clone())
-                        .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?
-                };
+                let session_arc = self
+                    .rtp_sessions
+                    .get(dialog_id)
+                    .map(|w| w.value().session.clone())
+                    .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
                 let gate = crate::relay::controller::cn_gate::CnGate::new(session_arc)?;
                 let gate_arc = Arc::new(tokio::sync::Mutex::new(gate));
                 self.cn_gate_state
@@ -620,26 +731,28 @@ impl MediaSessionController {
             }
         }
 
-        // Get session info to determine codec
-        let codec_payload_type = {
-            let sessions = self.sessions.read().await;
-            info!("🔍 Looking for session for dialog: {}", dialog_id);
-            let session = sessions.get(dialog_id).ok_or_else(|| {
+        // Get session info to determine codec. DashMap shard guard
+        // is held only for the synchronous codec-mapper lookup.
+        info!("🔍 Looking for session for dialog: {}", dialog_id);
+        let codec_payload_type = self
+            .sessions
+            .get(dialog_id)
+            .ok_or_else(|| {
                 error!("❌ Session not found for dialog: {}", dialog_id);
                 Error::session_not_found(dialog_id.as_str())
+            })
+            .map(|entry| {
+                info!("✅ Found session for dialog: {}", dialog_id);
+                let pt = entry
+                    .value()
+                    .config
+                    .preferred_codec
+                    .as_ref()
+                    .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                    .unwrap_or(0); // Default to PCMU
+                info!("📝 Using payload type {} for dialog: {}", pt, dialog_id);
+                pt
             })?;
-            info!("✅ Found session for dialog: {}", dialog_id);
-
-            // Determine payload type from configured codec
-            let pt = session
-                .config
-                .preferred_codec
-                .as_ref()
-                .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
-                .unwrap_or(0); // Default to PCMU
-            info!("📝 Using payload type {} for dialog: {}", pt, dialog_id);
-            pt
-        };
 
         // Create AudioFrame for codec interface
         let audio_frame = crate::types::AudioFrame::new(
@@ -652,8 +765,12 @@ impl MediaSessionController {
         // Encode based on payload type
         let encoded_payload = match codec_payload_type {
             0 => {
-                // PCMU encoding using media-core's G711Codec
-                let mut codec = self.g711_codec.lock().await;
+                // PCMU encoding using media-core's G711Codec. Per
+                // Phase C5: G711Codec is stateless, so we instantiate
+                // per call instead of through a shared tokio::Mutex
+                // (which serialised every encode in every session).
+                use crate::codec::audio::G711Codec;
+                let mut codec = G711Codec::mu_law(8000, 1)?;
                 codec.encode(&audio_frame)?
             }
             8 => {

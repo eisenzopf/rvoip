@@ -3,6 +3,7 @@
 //! This module provides the bridge between media-core and rtp-core for
 //! RTP packet handling and media transport.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -231,8 +232,12 @@ struct RtpSessionInfo {
 pub struct RtpBridge {
     /// Bridge configuration
     config: RtpBridgeConfig,
-    /// Active RTP sessions
-    sessions: Arc<RwLock<HashMap<MediaSessionId, RtpSessionInfo>>>,
+    /// Active RTP sessions. `DashMap` so per-session lookups and
+    /// inserts don't serialise through one async RwLock. Same
+    /// motivation + pattern as `MediaSessionController.sessions`
+    /// (Phase C7+). Every consumer reaches into one shard rather
+    /// than blocking on a global writer lock.
+    sessions: Arc<DashMap<MediaSessionId, RtpSessionInfo>>,
     /// Event channel for integration events
     event_tx: mpsc::UnboundedSender<IntegrationEvent>,
     /// Incoming packet channel (from rtp-core)
@@ -262,7 +267,7 @@ impl RtpBridge {
 
         Self {
             config,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            sessions: Arc::new(DashMap::new()),
             event_tx,
             incoming_packet_rx: Arc::new(RwLock::new(None)),
             outgoing_packet_tx: Arc::new(RwLock::new(None)),
@@ -328,10 +333,7 @@ impl RtpBridge {
             validation_state,
         };
 
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.insert(session_id.clone(), session_info);
-        }
+        self.sessions.insert(session_id.clone(), session_info);
 
         // Initialize codec detection for this session
         let dialog_id = DialogId::new(format!("rtp-{}", session_id));
@@ -360,19 +362,16 @@ impl RtpBridge {
 
     /// Unregister an RTP session
     pub async fn unregister_session(&self, session_id: &MediaSessionId) -> Result<()> {
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session_info) = sessions.remove(session_id) {
-                info!(
-                    "🧹 Cleaned up RTP session {}: {} packets validated, efficiency: {:.1}%",
-                    session_id,
-                    session_info
-                        .validation_state
-                        .validation_stats
-                        .packets_validated,
-                    session_info.validation_state.get_validation_efficiency() * 100.0
-                );
-            }
+        if let Some((_, session_info)) = self.sessions.remove(session_id) {
+            info!(
+                "🧹 Cleaned up RTP session {}: {} packets validated, efficiency: {:.1}%",
+                session_id,
+                session_info
+                    .validation_state
+                    .validation_stats
+                    .packets_validated,
+                session_info.validation_state.get_validation_efficiency() * 100.0
+            );
         }
 
         // Cleanup codec detection
@@ -403,13 +402,8 @@ impl RtpBridge {
         encoded_data: Vec<u8>,
         timestamp: u32,
     ) -> Result<()> {
-        // Check if session is registered
-        let is_registered = {
-            let sessions = self.sessions.read().await;
-            sessions.contains_key(session_id)
-        };
-
-        if !is_registered {
+        // Check if session is registered (DashMap contains_key is sharded)
+        if !self.sessions.contains_key(session_id) {
             return Err(IntegrationError::RtpCore {
                 details: format!("RTP session {} not registered", session_id),
             }
@@ -435,14 +429,13 @@ impl RtpBridge {
             }
         }
 
-        // Update statistics
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info.packets_sent += 1;
-                session_info.bytes_sent += encoded_data.len() as u64;
-                session_info.last_activity = std::time::Instant::now();
-            }
+        // Update statistics (DashMap get_mut returns a shard ref; no
+        // .await is held while the guard is alive).
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            let session_info = entry.value_mut();
+            session_info.packets_sent += 1;
+            session_info.bytes_sent += encoded_data.len() as u64;
+            session_info.last_activity = std::time::Instant::now();
         }
 
         // Send integration event
@@ -468,22 +461,22 @@ impl RtpBridge {
         session_id: &MediaSessionId,
         packet: MediaPacket,
     ) -> Result<()> {
-        // Get session info and check if we should validate this packet
-        let should_validate = {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info.packets_received += 1;
-                session_info.bytes_received += packet.payload.len() as u64;
-                session_info.last_activity = std::time::Instant::now();
+        // Get session info and check if we should validate this packet.
+        // Shard guard held only across synchronous counter updates;
+        // dropped before any `.await`.
+        let should_validate = if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            let session_info = entry.value_mut();
+            session_info.packets_received += 1;
+            session_info.bytes_received += packet.payload.len() as u64;
+            session_info.last_activity = std::time::Instant::now();
 
-                // Always call validation check to increment packet counter
-                session_info
-                    .validation_state
-                    .should_validate_packet(&self.config)
-            } else {
-                warn!("Received packet for unknown session: {}", session_id);
-                return Ok(());
-            }
+            // Always call validation check to increment packet counter
+            session_info
+                .validation_state
+                .should_validate_packet(&self.config)
+        } else {
+            warn!("Received packet for unknown session: {}", session_id);
+            return Ok(());
         };
 
         // Perform validation if sampling indicates we should
@@ -545,13 +538,12 @@ impl RtpBridge {
     ) -> Result<()> {
         let dialog_id = DialogId::new(format!("rtp-{}", session_id));
 
-        // Get expected payload type
-        let expected_payload_type = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .get(session_id)
-                .and_then(|s| s.validation_state.expected_payload_type)
-        };
+        // Get expected payload type. Shard guard dropped at end of
+        // the `map` closure.
+        let expected_payload_type = self
+            .sessions
+            .get(session_id)
+            .and_then(|s| s.value().validation_state.expected_payload_type);
 
         let expected_payload_type = match expected_payload_type {
             Some(pt) => pt,
@@ -567,13 +559,11 @@ impl RtpBridge {
         let is_expected = packet.payload_type == expected_payload_type;
 
         // Update validation statistics
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info
-                    .validation_state
-                    .update_validation_stats(packet.payload_type, is_expected);
-            }
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry
+                .value_mut()
+                .validation_state
+                .update_validation_stats(packet.payload_type, is_expected);
         }
 
         // Feed to codec detection system
@@ -623,13 +613,11 @@ impl RtpBridge {
             CodecDetectionResult::InsufficientData { .. } => 0.0,
         };
 
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info
-                    .validation_state
-                    .update_detection_confidence(confidence);
-            }
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry
+                .value_mut()
+                .validation_state
+                .update_detection_confidence(confidence);
         }
 
         match result {
@@ -653,13 +641,11 @@ impl RtpBridge {
                     .await?;
 
                 // Trigger intensive validation mode
-                {
-                    let mut sessions = self.sessions.write().await;
-                    if let Some(session_info) = sessions.get_mut(session_id) {
-                        session_info
-                            .validation_state
-                            .trigger_intensive_mode(&self.config);
-                    }
+                if let Some(mut entry) = self.sessions.get_mut(session_id) {
+                    entry
+                        .value_mut()
+                        .validation_state
+                        .trigger_intensive_mode(&self.config);
                 }
             }
             CodecDetectionResult::InsufficientData { packets_analyzed } => {
@@ -682,14 +668,12 @@ impl RtpBridge {
         detected_codec: Option<String>,
     ) -> Result<()> {
         // Update fallback statistics
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info
-                    .validation_state
-                    .validation_stats
-                    .fallback_activations += 1;
-            }
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            entry
+                .value_mut()
+                .validation_state
+                .validation_stats
+                .fallback_activations += 1;
         }
 
         // Initialize fallback if not already done
@@ -747,14 +731,12 @@ impl RtpBridge {
         );
 
         // Update expected payload type
-        {
-            let mut sessions = self.sessions.write().await;
-            if let Some(session_info) = sessions.get_mut(session_id) {
-                session_info.validation_state.expected_payload_type = Some(new_payload_type);
-                session_info
-                    .validation_state
-                    .trigger_intensive_mode(&self.config);
-            }
+        if let Some(mut entry) = self.sessions.get_mut(session_id) {
+            let session_info = entry.value_mut();
+            session_info.validation_state.expected_payload_type = Some(new_payload_type);
+            session_info
+                .validation_state
+                .trigger_intensive_mode(&self.config);
         }
 
         // Reinitialize codec detection
@@ -769,8 +751,7 @@ impl RtpBridge {
 
     /// Get session statistics
     pub async fn get_session_stats(&self, session_id: &MediaSessionId) -> Option<RtpSessionStats> {
-        let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(|info| RtpSessionStats {
+        self.sessions.get(session_id).map(|info| RtpSessionStats {
             packets_sent: info.packets_sent,
             packets_received: info.packets_received,
             bytes_sent: info.bytes_sent,
@@ -785,8 +766,7 @@ impl RtpBridge {
         &self,
         session_id: &MediaSessionId,
     ) -> Option<RtpValidationStats> {
-        let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(|info| {
+        self.sessions.get(session_id).map(|info| {
             let validation_state = &info.validation_state;
             RtpValidationStats {
                 packets_processed: validation_state.packets_processed,
@@ -804,8 +784,7 @@ impl RtpBridge {
 
     /// Get all active sessions
     pub async fn get_active_sessions(&self) -> Vec<MediaSessionId> {
-        let sessions = self.sessions.read().await;
-        sessions.keys().cloned().collect()
+        self.sessions.iter().map(|entry| entry.key().clone()).collect()
     }
 
     /// Clean up expired sessions
@@ -813,14 +792,12 @@ impl RtpBridge {
         let now = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(self.config.session_timeout_secs);
 
-        let expired_sessions: Vec<MediaSessionId> = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .iter()
-                .filter(|(_, info)| now.duration_since(info.last_activity) > timeout)
-                .map(|(id, _)| id.clone())
-                .collect()
-        };
+        let expired_sessions: Vec<MediaSessionId> = self
+            .sessions
+            .iter()
+            .filter(|entry| now.duration_since(entry.value().last_activity) > timeout)
+            .map(|entry| entry.key().clone())
+            .collect();
 
         for session_id in expired_sessions {
             warn!("Cleaning up expired RTP session: {}", session_id);

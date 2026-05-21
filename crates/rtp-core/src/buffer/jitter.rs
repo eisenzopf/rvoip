@@ -237,10 +237,13 @@ impl AdaptiveJitterBuffer {
         buffer
     }
 
-    /// Add a packet to the jitter buffer
+    /// Add a packet to the jitter buffer.
     ///
     /// Returns true if the packet was added, false if it was dropped.
-    pub async fn add_packet(&mut self, packet: RtpPacket) -> bool {
+    /// No internal `.await` — sync body — so callers may invoke this
+    /// while holding a `parking_lot::Mutex<Self>` without tainting
+    /// their surrounding `Send` future.
+    pub fn add_packet(&mut self, packet: RtpPacket) -> bool {
         let now = Instant::now();
         let seq = packet.header.sequence_number;
         let ts = packet.header.timestamp;
@@ -384,7 +387,9 @@ impl AdaptiveJitterBuffer {
     ///
     /// This follows the playout schedule and returns packets in the correct
     /// order, accounting for the configured jitter buffer delay.
-    pub async fn get_next_packet(&mut self) -> Option<RtpPacket> {
+    /// Pull the next playout-ready packet. Sync — see [`add_packet`]
+    /// for the parking_lot guard rationale.
+    pub fn get_next_packet(&mut self) -> Option<RtpPacket> {
         // If buffer is empty, wait for a packet
         if self.packets.is_empty() {
             return None;
@@ -652,12 +657,12 @@ mod tests {
         let mut jitter = AdaptiveJitterBuffer::new(config);
 
         // Add packets in order
-        assert!(jitter.add_packet(create_test_packet(1, 0)).await);
-        assert!(jitter.add_packet(create_test_packet(2, 160)).await);
-        assert!(jitter.add_packet(create_test_packet(3, 320)).await);
+        assert!(jitter.add_packet(create_test_packet(1, 0)));
+        assert!(jitter.add_packet(create_test_packet(2, 160)));
+        assert!(jitter.add_packet(create_test_packet(3, 320)));
 
         // Get packets
-        let p1 = jitter.get_next_packet().await;
+        let p1 = jitter.get_next_packet();
         assert!(p1.is_some(), "First packet should be available");
         assert_eq!(
             p1.unwrap().header.sequence_number,
@@ -665,7 +670,7 @@ mod tests {
             "First packet should have seq=1"
         );
 
-        let p2 = jitter.get_next_packet().await;
+        let p2 = jitter.get_next_packet();
         assert!(p2.is_some(), "Second packet should be available");
         assert_eq!(
             p2.unwrap().header.sequence_number,
@@ -673,7 +678,7 @@ mod tests {
             "Second packet should have seq=2"
         );
 
-        let p3 = jitter.get_next_packet().await;
+        let p3 = jitter.get_next_packet();
         assert!(p3.is_some(), "Third packet should be available");
         assert_eq!(
             p3.unwrap().header.sequence_number,
@@ -683,7 +688,7 @@ mod tests {
 
         // Buffer should be empty
         assert!(
-            jitter.get_next_packet().await.is_none(),
+            jitter.get_next_packet().is_none(),
             "Buffer should be empty after reading all packets"
         );
     }
@@ -699,23 +704,23 @@ mod tests {
         let mut jitter = AdaptiveJitterBuffer::new(config);
 
         // Add packets out of order - first add packet with seq 2
-        assert!(jitter.add_packet(create_test_packet(2, 160)).await);
+        assert!(jitter.add_packet(create_test_packet(2, 160)));
 
         // Next, add packet with seq 1
         assert!(
-            jitter.add_packet(create_test_packet(1, 0)).await,
+            jitter.add_packet(create_test_packet(1, 0)),
             "Jitter buffer should accept out of order packets"
         );
 
         // Finally, add packet with seq 3
-        assert!(jitter.add_packet(create_test_packet(3, 320)).await);
+        assert!(jitter.add_packet(create_test_packet(3, 320)));
 
         // Verify buffer state after adding
         let stats = jitter.get_stats();
         assert_eq!(stats.buffered_packets, 3, "Buffer should contain 3 packets");
 
         // Get first packet - should be seq 1 despite arriving after seq 2
-        let p1 = jitter.get_next_packet().await;
+        let p1 = jitter.get_next_packet();
         assert!(p1.is_some(), "First packet should be available");
         assert_eq!(
             p1.unwrap().header.sequence_number,
@@ -724,7 +729,7 @@ mod tests {
         );
 
         // Get second packet
-        let p2 = jitter.get_next_packet().await;
+        let p2 = jitter.get_next_packet();
         assert!(p2.is_some(), "Second packet should be available");
         assert_eq!(
             p2.unwrap().header.sequence_number,
@@ -733,7 +738,7 @@ mod tests {
         );
 
         // Get third packet
-        let p3 = jitter.get_next_packet().await;
+        let p3 = jitter.get_next_packet();
         assert!(p3.is_some(), "Third packet should be available");
         assert_eq!(
             p3.unwrap().header.sequence_number,
@@ -753,17 +758,17 @@ mod tests {
         let mut jitter = AdaptiveJitterBuffer::new(config);
 
         // Add packets with a gap
-        assert!(jitter.add_packet(create_test_packet(1, 0)).await);
-        assert!(jitter.add_packet(create_test_packet(2, 160)).await);
+        assert!(jitter.add_packet(create_test_packet(1, 0)));
+        assert!(jitter.add_packet(create_test_packet(2, 160)));
         // Packet 3 is lost
-        assert!(jitter.add_packet(create_test_packet(4, 480)).await);
+        assert!(jitter.add_packet(create_test_packet(4, 480)));
 
         // Verify buffer state
         let stats = jitter.get_stats();
         assert_eq!(stats.buffered_packets, 3, "Buffer should contain 3 packets");
 
         // Get packets
-        let p1 = jitter.get_next_packet().await;
+        let p1 = jitter.get_next_packet();
         assert!(p1.is_some(), "First packet should be available");
         assert_eq!(
             p1.unwrap().header.sequence_number,
@@ -771,7 +776,7 @@ mod tests {
             "First packet should have seq=1"
         );
 
-        let p2 = jitter.get_next_packet().await;
+        let p2 = jitter.get_next_packet();
         assert!(p2.is_some(), "Second packet should be available");
         assert_eq!(
             p2.unwrap().header.sequence_number,
@@ -779,7 +784,7 @@ mod tests {
             "Second packet should have seq=2"
         );
 
-        let p3 = jitter.get_next_packet().await;
+        let p3 = jitter.get_next_packet();
         assert!(p3.is_some(), "Third packet should be available");
         assert_eq!(
             p3.unwrap().header.sequence_number,
@@ -806,17 +811,17 @@ mod tests {
         let mut jitter = AdaptiveJitterBuffer::new(config);
 
         // Add packets around wraparound
-        assert!(jitter.add_packet(create_test_packet(65534, 10000)).await);
-        assert!(jitter.add_packet(create_test_packet(65535, 10160)).await);
-        assert!(jitter.add_packet(create_test_packet(0, 10320)).await);
-        assert!(jitter.add_packet(create_test_packet(1, 10480)).await);
+        assert!(jitter.add_packet(create_test_packet(65534, 10000)));
+        assert!(jitter.add_packet(create_test_packet(65535, 10160)));
+        assert!(jitter.add_packet(create_test_packet(0, 10320)));
+        assert!(jitter.add_packet(create_test_packet(1, 10480)));
 
         // Verify buffer state
         let stats = jitter.get_stats();
         assert_eq!(stats.buffered_packets, 4, "Buffer should contain 4 packets");
 
         // Get packets
-        let p1 = jitter.get_next_packet().await;
+        let p1 = jitter.get_next_packet();
         assert!(p1.is_some(), "First packet should be available");
         assert_eq!(
             p1.unwrap().header.sequence_number,
@@ -824,7 +829,7 @@ mod tests {
             "First packet should have seq=65534"
         );
 
-        let p2 = jitter.get_next_packet().await;
+        let p2 = jitter.get_next_packet();
         assert!(p2.is_some(), "Second packet should be available");
         assert_eq!(
             p2.unwrap().header.sequence_number,
@@ -832,7 +837,7 @@ mod tests {
             "Second packet should have seq=65535"
         );
 
-        let p3 = jitter.get_next_packet().await;
+        let p3 = jitter.get_next_packet();
         assert!(p3.is_some(), "Third packet should be available");
         assert_eq!(
             p3.unwrap().header.sequence_number,
@@ -840,7 +845,7 @@ mod tests {
             "Third packet should have seq=0"
         );
 
-        let p4 = jitter.get_next_packet().await;
+        let p4 = jitter.get_next_packet();
         assert!(p4.is_some(), "Fourth packet should be available");
         assert_eq!(
             p4.unwrap().header.sequence_number,

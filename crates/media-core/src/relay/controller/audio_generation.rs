@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use rvoip_rtp_core::RtpSession;
+use rvoip_rtp_core::{RtpSendHandle, RtpSession};
 
 /// Audio source types supported by the audio transmitter
 #[derive(Debug, Clone)]
@@ -200,10 +200,25 @@ impl Default for AudioTransmitterConfig {
     }
 }
 
-/// Audio transmission task for RTP sessions
+/// Audio transmission task for RTP sessions.
+///
+/// Phase C16: the per-frame send path no longer locks the session's
+/// outer `Mutex<RtpSession>`. At construction we snapshot a
+/// lock-free [`RtpSendHandle`] (shares the scheduler's sequence
+/// atomic), and the spawned TX loop uses that handle directly. This
+/// removes the per-20ms `session.lock().await` on the dominant audio
+/// path — relevant for multi-call setups where the RTCP scheduler,
+/// bridge forwarders, or controller methods contend for the same
+/// per-session mutex.
 pub struct AudioTransmitter {
-    /// RTP session for transmission
+    /// RTP session for transmission. Kept for fallback construction
+    /// of a fresh send handle if the cached one is invalidated;
+    /// **not** locked on the TX hot path.
     rtp_session: Arc<Mutex<RtpSession>>,
+    /// Lock-free send path snapshot. `None` only if the session had
+    /// no scheduler when we built the transmitter (current sessions
+    /// always do — see `RtpSession::new`).
+    send_handle: Option<RtpSendHandle>,
     /// Audio generator
     audio_generator: Arc<Mutex<AudioGenerator>>,
     /// Transmission configuration
@@ -241,8 +256,21 @@ impl AudioTransmitter {
         let audio_generator =
             AudioGenerator::new_with_source(config.sample_rate, config.source.clone());
 
+        // Build the lock-free send handle once. This briefly locks the
+        // session at construction time only; the TX hot path never
+        // re-locks.
+        let send_handle = rtp_session.try_lock().ok().and_then(|s| s.send_handle());
+        if send_handle.is_none() {
+            warn!(
+                "AudioTransmitter: could not snapshot send_handle at construction \
+                 (session may be missing scheduler or already locked). Will fall back \
+                 to per-frame session lock until refreshed."
+            );
+        }
+
         Self {
             rtp_session,
+            send_handle,
             audio_generator: Arc::new(Mutex::new(audio_generator)),
             config,
             timestamp: Arc::new(Mutex::new(0)),
@@ -252,6 +280,14 @@ impl AudioTransmitter {
 
     /// Start audio transmission
     pub async fn start(&mut self) {
+        // If we never managed to snapshot a send handle (e.g. the
+        // session was locked at construction), try again now — the
+        // construction-time lock contention is gone by definition.
+        if self.send_handle.is_none() {
+            let session = self.rtp_session.lock().await;
+            self.send_handle = session.send_handle();
+        }
+
         *self.is_active.write().await = true;
 
         let source_desc = match &self.config.source {
@@ -278,6 +314,7 @@ impl AudioTransmitter {
         );
 
         let rtp_session = self.rtp_session.clone();
+        let send_handle = self.send_handle.clone();
         let is_active = self.is_active.clone();
         let audio_generator = self.audio_generator.clone();
         let timestamp = self.timestamp.clone();
@@ -304,11 +341,23 @@ impl AudioTransmitter {
                         current
                     };
 
-                    let mut session = rtp_session.lock().await;
-                    if let Err(e) = session
-                        .send_packet(current_timestamp, Bytes::from(audio_samples), false)
-                        .await
-                    {
+                    // Fast path: send through the lock-free handle —
+                    // no `session.lock().await` per frame.
+                    let send_result = if let Some(handle) = &send_handle {
+                        handle
+                            .send_packet(current_timestamp, Bytes::from(audio_samples), false)
+                            .await
+                    } else {
+                        // Fallback: session lock per frame. Only reached
+                        // if the session was missing a scheduler when
+                        // we tried to build the handle.
+                        let session = rtp_session.lock().await;
+                        session
+                            .send_packet(current_timestamp, Bytes::from(audio_samples), false)
+                            .await
+                    };
+
+                    if let Err(e) = send_result {
                         error!("Failed to send RTP audio packet: {}", e);
                     } else {
                         debug!(

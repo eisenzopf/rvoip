@@ -19,6 +19,7 @@ async fn test_long_running_rtp_streaming() {
     // Initialize logging
     let _ = tracing_subscriber::fmt()
         .with_env_filter("rvoip=debug,long_running_rtp_test=info")
+        .with_test_writer()
         .try_init();
 
     info!("🚀 Starting long-running RTP test - targeting 1 minute duration");

@@ -4,9 +4,11 @@
 
 use std::any::Any;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -38,6 +40,7 @@ fn srtp_diagnostics_enabled() -> bool {
 }
 
 use super::allocator::{GlobalPortAllocator, PairingStrategy};
+use super::recv_pool::RecvBufPool;
 use super::validation::{PlatformSocketStrategy, RtpSocketValidator};
 use super::{RtpTransport, RtpTransportConfig};
 use crate::error::Error;
@@ -71,31 +74,41 @@ pub struct UdpRtpTransport {
     /// Transport configuration
     config: RtpTransportConfig,
 
-    /// Remote RTP address
-    remote_rtp_addr: Arc<Mutex<Option<SocketAddr>>>,
+    /// Remote RTP address. `ArcSwapOption` so per-packet `send_rtp_bytes`
+    /// can update the cached symmetric-RTP target with a single atomic
+    /// store instead of an awaited `Mutex` guard.
+    remote_rtp_addr: Arc<ArcSwapOption<SocketAddr>>,
 
-    /// Remote RTCP address
-    remote_rtcp_addr: Arc<Mutex<Option<SocketAddr>>>,
+    /// Remote RTCP address — same lock-free swap discipline as
+    /// [`Self::remote_rtp_addr`].
+    remote_rtcp_addr: Arc<ArcSwapOption<SocketAddr>>,
 
     /// Event broadcaster
     event_tx: broadcast::Sender<RtpEvent>,
 
-    /// Receiver task
+    /// Receiver task. Only touched on lifecycle (start/stop) so a
+    /// `tokio::Mutex` is fine — never on the per-packet path.
     receiver_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 
-    /// Whether the transport is active
-    active: Arc<Mutex<bool>>,
+    /// Whether the transport is active. Polled once per recv-loop
+    /// iteration, so an `AtomicBool` keeps that check off the
+    /// scheduler.
+    active: Arc<AtomicBool>,
 
     /// Outbound SRTP context (RFC 4568 / RFC 3711). When `Some`, every
     /// outbound RTP packet is wrapped with `SrtpContext::protect`
     /// before being sent on the wire. When `None`, plain RTP — keeps
-    /// the existing UDP path unchanged.
-    srtp_send: Arc<Mutex<Option<crate::srtp::SrtpContext>>>,
+    /// the existing UDP path unchanged. `parking_lot::Mutex` because
+    /// `protect()` is `&mut self` + CPU-only (AES/HMAC); the lock is
+    /// never held across `.await`, so the tokio scheduler overhead
+    /// would be pure tax.
+    srtp_send: Arc<parking_lot::Mutex<Option<crate::srtp::SrtpContext>>>,
 
     /// Inbound SRTP context. When `Some`, every received RTP datagram
     /// (non-RTCP) is fed through `SrtpContext::unprotect`; auth
-    /// failures are silently dropped per RFC 3711 §3.4.
-    srtp_recv: Arc<Mutex<Option<crate::srtp::SrtpContext>>>,
+    /// failures are silently dropped per RFC 3711 §3.4. Same
+    /// `parking_lot::Mutex` rationale as [`Self::srtp_send`].
+    srtp_recv: Arc<parking_lot::Mutex<Option<crate::srtp::SrtpContext>>>,
 
     /// RFC 4733 §2.5.1.3 retransmit dedup state, keyed on
     /// `(peer_addr, ssrc, rtp_timestamp)`. The first end-of-event
@@ -106,6 +119,22 @@ pub struct UdpRtpTransport {
     /// socket layer — two simultaneous DTMF streams from different
     /// peers must each fire independently.
     dtmf_seen: Arc<DashMap<(SocketAddr, u32, u32), Instant>>,
+
+    /// Phase C23c: lock-free pool of recv buffers used by the UDP
+    /// receive loop. Each iteration pulls a buffer (`RecvBufPool::get`),
+    /// fills it via `recv_from`, then either:
+    ///   * hands it to `Bytes::from_owner` (`PooledRecvBuf::into_bytes`)
+    ///     so downstream `RtpPacket::payload` is a zero-copy refcounted
+    ///     slice — when every clone of that `Bytes` drops, the buf
+    ///     returns to the pool; or
+    ///   * lets the RAII handle drop at end-of-iteration, returning the
+    ///     buf to the pool immediately (used on the SRTP path, where
+    ///     `unprotect` makes its own owned copy of the decrypted
+    ///     payload).
+    ///
+    /// Capacity sized to absorb a brief downstream stall without
+    /// forcing a fresh `Vec` alloc.
+    recv_pool: Arc<RecvBufPool>,
 }
 
 impl UdpRtpTransport {
@@ -225,14 +254,19 @@ impl UdpRtpTransport {
             rtp_socket: Arc::new(socket_rtp),
             rtcp_socket: socket_rtcp.map(Arc::new),
             config,
-            remote_rtp_addr: Arc::new(Mutex::new(None)),
-            remote_rtcp_addr: Arc::new(Mutex::new(None)),
+            remote_rtp_addr: Arc::new(ArcSwapOption::from(None)),
+            remote_rtcp_addr: Arc::new(ArcSwapOption::from(None)),
             event_tx,
             receiver_task: Arc::new(Mutex::new(None)),
-            active: Arc::new(Mutex::new(false)),
-            srtp_send: Arc::new(Mutex::new(None)),
-            srtp_recv: Arc::new(Mutex::new(None)),
+            active: Arc::new(AtomicBool::new(false)),
+            srtp_send: Arc::new(parking_lot::Mutex::new(None)),
+            srtp_recv: Arc::new(parking_lot::Mutex::new(None)),
             dtmf_seen: Arc::new(DashMap::new()),
+            // 64 buffers ≈ 8 ms of headroom at 8 kHz / 20 ms ptime
+            // per stream, plenty for the typical single-call workload
+            // while still bounding worst-case idle memory at
+            // 64 × DEFAULT_MAX_PACKET_SIZE.
+            recv_pool: RecvBufPool::new(64, DEFAULT_MAX_PACKET_SIZE),
         };
 
         // Start the receiver task
@@ -243,13 +277,16 @@ impl UdpRtpTransport {
 
     /// Start the packet receiver task
     async fn start_receiver(&self) -> Result<()> {
-        let mut active = self.active.lock().await;
-        if *active {
+        // Single CAS guards both the early-return and the activation —
+        // if another caller already set `active`, we return without
+        // spawning a second receiver pair.
+        if self
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Ok(());
         }
-
-        // Set active state
-        *active = true;
 
         // Start RTP receiver
         let rtp_socket = self.rtp_socket.clone();
@@ -259,36 +296,46 @@ impl UdpRtpTransport {
         let dtmf_seen = self.dtmf_seen.clone();
         let diagnostics = srtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
+        let recv_pool = self.recv_pool.clone();
 
         let rtp_receiver = tokio::spawn(async move {
-            let mut buffer = vec![0u8; DEFAULT_MAX_PACKET_SIZE];
             let mut first_inbound_rtp_logged = false;
             let mut srtp_unprotect_failures = 0_u64;
             debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
 
             loop {
                 // Check if we should continue running
-                if !*active_state.lock().await {
+                if !active_state.load(Ordering::Acquire) {
                     break;
                 }
 
+                // Pull a fresh recv buffer from the pool. Pool hits
+                // reuse a previously freed buf; misses allocate fresh.
+                // The RAII handle returns the buf to the pool on
+                // Drop, unless ownership is explicitly transferred
+                // downstream via `into_bytes`.
+                let mut buffer = recv_pool.get();
+
                 // Receive packet
-                match rtp_socket.recv_from(&mut buffer).await {
+                match rtp_socket.recv_from(buffer.as_mut_slice()).await {
                     Ok((size, addr)) => {
                         info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
 
                         // Check if it looks like an RTP or RTCP packet
                         if size < 8 {
-                            // Too small to be either RTP or RTCP
+                            // Too small to be either RTP or RTCP — buf
+                            // returns to pool via Drop when we loop.
                             warn!("Received packet too small: {} bytes", size);
                             continue;
                         }
 
                         // Check if it's RTCP according to RFC 5761
-                        if is_rtcp_packet(&buffer[..size]) {
-                            // This is an RTCP packet
-                            debug!("Received RTCP packet, type: {}", buffer[1] & 0x7F);
-                            let rtcp_data = Bytes::copy_from_slice(&buffer[0..size]);
+                        if is_rtcp_packet(&buffer.as_slice()[..size]) {
+                            // This is an RTCP packet. Hand the bytes
+                            // downstream as a pooled `Bytes` view —
+                            // zero copy, refcount-only.
+                            debug!("Received RTCP packet, type: {}", buffer.as_slice()[1] & 0x7F);
+                            let rtcp_data = buffer.into_bytes(size);
                             let event = RtpEvent::RtcpReceived {
                                 data: rtcp_data,
                                 source: addr,
@@ -310,7 +357,7 @@ impl UdpRtpTransport {
                             // event, no warn-level log — to avoid
                             // leaking timing or distinguishing failure
                             // modes to a network attacker.
-                            let mut srtp_guard = srtp_recv.lock().await;
+                            let mut srtp_guard = srtp_recv.lock();
                             if diagnostics && !first_inbound_rtp_logged {
                                 info!(
                                     "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
@@ -321,10 +368,29 @@ impl UdpRtpTransport {
                                 );
                                 first_inbound_rtp_logged = true;
                             }
+                            // SRTP path: `unprotect` allocates a fresh
+                            // `Bytes` for the decrypted payload, so we
+                            // don't need to feed it via the pool —
+                            // the pooled buf returns to the pool when
+                            // we drop the RAII handle at the end of
+                            // this iteration.
+                            // Non-SRTP path: zero-copy parse via
+                            // `parse_from_bytes` so the payload is a
+                            // refcounted slice of the pooled buf.
+                            //
+                            // `raw_for_fallback` carries a refcounted
+                            // clone of the original packet bytes
+                            // (non-SRTP only) so the parse-error
+                            // fallback below can synthesise a
+                            // MediaReceived event without a fresh
+                            // copy. The SRTP path doesn't reach the
+                            // fallback (auth failures `continue;`
+                            // immediately), so it stays `None`.
+                            let mut raw_for_fallback: Option<Bytes> = None;
                             let parse_result: Result<RtpPacket> = if let Some(ctx) =
                                 srtp_guard.as_mut()
                             {
-                                match ctx.unprotect(&buffer[0..size]) {
+                                match ctx.unprotect(&buffer.as_slice()[0..size]) {
                                     Ok(packet) => Ok(packet),
                                     Err(_) => {
                                         srtp_unprotect_failures += 1;
@@ -346,7 +412,14 @@ impl UdpRtpTransport {
                                     }
                                 }
                             } else {
-                                RtpPacket::parse(&buffer[0..size])
+                                // Zero-copy: hand the pooled buf to
+                                // Bytes via from_owner, then parse
+                                // from the Bytes. The payload is a
+                                // refcounted slice; no
+                                // copy_from_slice.
+                                let bytes = buffer.into_bytes(size);
+                                raw_for_fallback = Some(bytes.clone());
+                                RtpPacket::parse_from_bytes(bytes)
                             };
                             drop(srtp_guard);
                             match parse_result {
@@ -447,31 +520,41 @@ impl UdpRtpTransport {
                                     warn!("Failed to parse RTP packet: {}", e);
 
                                     // Even though parsing failed, we still need to generate a MediaReceived event
-                                    // This allows higher layers to handle non-standard or malformed packets
+                                    // This allows higher layers to handle non-standard or malformed packets.
+                                    //
+                                    // Only the non-SRTP path reaches this arm (SRTP auth
+                                    // failures `continue;` above), so `raw_for_fallback`
+                                    // is guaranteed Some — and the clone is refcount-only
+                                    // (the underlying pooled buf already lives inside the
+                                    // Bytes we produced via `into_bytes`).
+                                    let raw = raw_for_fallback
+                                        .expect("parse error implies non-SRTP path");
+                                    let raw_slice = raw.as_ref();
 
                                     // Use default/fallback values for required fields
                                     let fallback_payload_type =
-                                        if size > 1 { buffer[1] & 0x7F } else { 0 };
+                                        if size > 1 { raw_slice[1] & 0x7F } else { 0 };
                                     let fallback_timestamp = if size >= 8 {
                                         let mut ts = 0u32;
-                                        ts |= (buffer[4] as u32) << 24;
-                                        ts |= (buffer[5] as u32) << 16;
-                                        ts |= (buffer[6] as u32) << 8;
-                                        ts |= buffer[7] as u32;
+                                        ts |= (raw_slice[4] as u32) << 24;
+                                        ts |= (raw_slice[5] as u32) << 16;
+                                        ts |= (raw_slice[6] as u32) << 8;
+                                        ts |= raw_slice[7] as u32;
                                         ts
                                     } else {
                                         0
                                     };
 
                                     let fallback_marker = if size > 1 {
-                                        (buffer[1] & 0x80) != 0
+                                        (raw_slice[1] & 0x80) != 0
                                     } else {
                                         false
                                     };
 
-                                    // Create the payload from the entire packet
-                                    // This allows the application layer to implement its own parsing if needed
-                                    let raw_payload = Bytes::copy_from_slice(&buffer[0..size]);
+                                    // Refcount-only "copy" of the raw packet —
+                                    // the underlying allocation is the pooled buf,
+                                    // already wrapped in Bytes via `into_bytes`.
+                                    let raw_payload = raw.clone();
 
                                     debug!("Generating fallback MediaReceived event for non-RTP packet ({})", e);
 
@@ -532,7 +615,7 @@ impl UdpRtpTransport {
 
                 loop {
                     // Check if we should continue running
-                    if !*active_state.lock().await {
+                    if !active_state.load(Ordering::Acquire) {
                         break;
                     }
 
@@ -586,8 +669,7 @@ impl UdpRtpTransport {
     /// Stop the receiver task
     pub async fn stop_receiver(&self) -> Result<()> {
         // Set inactive state
-        let mut active = self.active.lock().await;
-        *active = false;
+        self.active.store(false, Ordering::Release);
 
         // Wait for receiver task to complete
         let mut receiver_task = self.receiver_task.lock().await;
@@ -600,26 +682,22 @@ impl UdpRtpTransport {
 
     /// Set the remote RTP address
     pub async fn set_remote_rtp_addr(&self, addr: SocketAddr) {
-        let mut remote_addr = self.remote_rtp_addr.lock().await;
-        *remote_addr = Some(addr);
+        self.remote_rtp_addr.store(Some(Arc::new(addr)));
     }
 
     /// Set the remote RTCP address
     pub async fn set_remote_rtcp_addr(&self, addr: SocketAddr) {
-        let mut remote_addr = self.remote_rtcp_addr.lock().await;
-        *remote_addr = Some(addr);
+        self.remote_rtcp_addr.store(Some(Arc::new(addr)));
     }
 
     /// Get the remote RTP address
     pub async fn remote_rtp_addr(&self) -> Option<SocketAddr> {
-        let remote_addr = self.remote_rtp_addr.lock().await;
-        *remote_addr
+        self.remote_rtp_addr.load().as_deref().copied()
     }
 
     /// Get the remote RTCP address
     pub async fn remote_rtcp_addr(&self) -> Option<SocketAddr> {
-        let remote_addr = self.remote_rtcp_addr.lock().await;
-        *remote_addr
+        self.remote_rtcp_addr.load().as_deref().copied()
     }
 
     /// Subscribe to transport events
@@ -650,8 +728,8 @@ impl UdpRtpTransport {
         send: crate::srtp::SrtpContext,
         recv: crate::srtp::SrtpContext,
     ) {
-        *self.srtp_send.lock().await = Some(send);
-        *self.srtp_recv.lock().await = Some(recv);
+        *self.srtp_send.lock() = Some(send);
+        *self.srtp_recv.lock() = Some(recv);
         if srtp_diagnostics_enabled() {
             info!(
                 "SRTP_DIAG contexts_installed local={:?}",
@@ -664,7 +742,7 @@ impl UdpRtpTransport {
     /// tests + diagnostic introspection; the send/receive paths
     /// branch internally on the same `Option`.
     pub async fn srtp_enabled(&self) -> bool {
-        self.srtp_send.lock().await.is_some() || self.srtp_recv.lock().await.is_some()
+        self.srtp_send.lock().is_some() || self.srtp_recv.lock().is_some()
     }
 }
 
@@ -687,14 +765,16 @@ impl RtpTransport for UdpRtpTransport {
         // Avoid per-packet `to_vec` by keeping both branches in
         // `bytes::Bytes` (which `&data` auto-derefs to `&[u8]` for
         // `send_rtp_bytes`).
-        let mut srtp_guard = self.srtp_send.lock().await;
-        let data: bytes::Bytes = if let Some(ctx) = srtp_guard.as_mut() {
-            let protected = ctx.protect(packet)?;
-            protected.serialize()?
-        } else {
-            packet.serialize()?
+        let data: bytes::Bytes = {
+            let mut srtp_guard = self.srtp_send.lock();
+            if let Some(ctx) = srtp_guard.as_mut() {
+                let protected = ctx.protect(packet)?;
+                protected.serialize()?
+            } else {
+                drop(srtp_guard);
+                packet.serialize()?
+            }
         };
-        drop(srtp_guard);
 
         // Send the bytes
         self.send_rtp_bytes(&data, dest).await
@@ -702,9 +782,9 @@ impl RtpTransport for UdpRtpTransport {
 
     async fn send_rtp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
         if self.config.symmetric_rtp {
-            // Update remote address if using symmetric RTP
-            let mut remote_addr = self.remote_rtp_addr.lock().await;
-            *remote_addr = Some(dest);
+            // Update remote address if using symmetric RTP (lock-free
+            // atomic swap; no .await).
+            self.remote_rtp_addr.store(Some(Arc::new(dest)));
         }
 
         // Send the data
@@ -729,8 +809,8 @@ impl RtpTransport for UdpRtpTransport {
     async fn send_rtcp_bytes(&self, bytes: &[u8], dest: SocketAddr) -> Result<()> {
         if self.config.symmetric_rtp {
             // Update remote RTCP address if using symmetric RTP
-            let mut remote_addr = self.remote_rtcp_addr.lock().await;
-            *remote_addr = Some(dest);
+            // (lock-free atomic swap; no .await).
+            self.remote_rtcp_addr.store(Some(Arc::new(dest)));
         }
 
         // Use the appropriate socket for sending RTCP

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -11,8 +12,13 @@ use crate::{Result, RtpSequenceNumber, RtpTimestamp};
 
 /// RTP packet scheduler for periodic sending of packets
 pub struct RtpScheduler {
-    /// Current sequence number for outgoing packets
-    sequence: RtpSequenceNumber,
+    /// Current sequence number for outgoing packets. `Arc<AtomicU16>`
+    /// so an `RtpSendHandle` (handed out by the owning `RtpSession`)
+    /// can share the same sequence cursor — every outbound packet
+    /// stays in one monotonically-increasing seq space regardless of
+    /// which path (scheduler queue, `send_packet`, audio TX handle)
+    /// created it.
+    sequence: Arc<AtomicU16>,
 
     /// Current timestamp
     timestamp: RtpTimestamp,
@@ -55,7 +61,7 @@ impl RtpScheduler {
     /// Create a new RTP scheduler
     pub fn new(clock_rate: u32, initial_seq: RtpSequenceNumber, initial_ts: RtpTimestamp) -> Self {
         Self {
-            sequence: initial_seq,
+            sequence: Arc::new(AtomicU16::new(initial_seq)),
             timestamp: initial_ts,
             clock_rate,
             timestamp_increment: 0,
@@ -91,14 +97,18 @@ impl RtpScheduler {
     }
 
     /// Bump the sequence cursor and return the value the next outbound
-    /// packet should carry. Used by callers that want to bypass the
-    /// scheduler's queueing + timestamp overwrite (e.g. RFC 4733 DTMF,
-    /// where every packet of a tone must share the start timestamp)
-    /// while still cooperating with the audio sequence-number space.
-    pub fn next_sequence(&mut self) -> RtpSequenceNumber {
-        let s = self.sequence;
-        self.sequence = self.sequence.wrapping_add(1);
-        s
+    /// packet should carry. Lock-free via the shared `AtomicU16`;
+    /// safe to call concurrently from `RtpSession::send_packet` and
+    /// any `RtpSendHandle` issued from the same session.
+    pub fn next_sequence(&self) -> RtpSequenceNumber {
+        self.sequence.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Return a shared handle to the scheduler's sequence atomic.
+    /// Consumed by `RtpSession::send_handle` so the lock-free send
+    /// path can issue sequence numbers without locking the session.
+    pub(crate) fn sequence_handle(&self) -> Arc<AtomicU16> {
+        self.sequence.clone()
     }
 
     /// Schedule a packet to be sent at the appropriate time
@@ -107,12 +117,11 @@ impl RtpScheduler {
             return Err(Error::SessionError("Scheduler not running".to_string()));
         }
 
-        // Update sequence number and timestamp
-        packet.header.sequence_number = self.sequence;
+        // Update sequence number atomically and the timestamp from the
+        // scheduler's per-packet cursor.
+        let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
+        packet.header.sequence_number = seq;
         packet.header.timestamp = self.timestamp;
-
-        // Advance sequence number (wraps around automatically due to u16)
-        self.sequence = self.sequence.wrapping_add(1);
 
         // Advance timestamp
         self.timestamp = self.timestamp.wrapping_add(self.timestamp_increment);
@@ -133,7 +142,7 @@ impl RtpScheduler {
             self.packets_scheduled += 1;
             debug!(
                 "Scheduled packet with seq={}, ts={} for {:?}",
-                self.sequence.wrapping_sub(1),
+                seq,
                 self.timestamp.wrapping_sub(self.timestamp_increment),
                 next_send_time
             );
@@ -234,7 +243,7 @@ impl RtpScheduler {
 
     /// Get the current sequence number (the next one to be used)
     pub fn get_sequence(&self) -> RtpSequenceNumber {
-        self.sequence
+        self.sequence.load(Ordering::Relaxed)
     }
 
     /// Get the current timestamp (the next one to be used)

@@ -89,7 +89,11 @@ impl Default for PortAllocatorConfig {
             pairing_strategy: PairingStrategy::Muxed, // Default to RTCP multiplexing
             prefer_port_reuse: true,
             default_ip: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            allocation_retries: 10,
+            // Each retry is one random pick + one probe bind. Bind-EADDRINUSE
+            // from peer allocators sharing the same range counts against this
+            // budget, so the value must absorb cross-allocator contention in
+            // multi-coord test processes — not just allocator-internal collisions.
+            allocation_retries: 50,
             validate_ports: true,
         }
     }

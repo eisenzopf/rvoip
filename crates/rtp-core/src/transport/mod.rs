@@ -102,6 +102,7 @@ pub enum PortPairingStrategy {
 
 // Re-export submodules
 mod allocator;
+pub mod recv_pool;
 pub mod security_transport;
 mod tcp;
 mod udp;

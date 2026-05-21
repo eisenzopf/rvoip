@@ -63,7 +63,44 @@ pub struct HeaderExtension {
     pub data: Vec<u8>,
 }
 
-/// Server implementation of the media transport interface
+/// Server-side media transport: one RTP endpoint accepting media
+/// streams from many connected clients.
+///
+/// # When to use this
+///
+/// This is the high-density RTP server interface — designed for
+/// deployments where one process terminates RTP from many concurrent
+/// clients on a small set of ports, demultiplexes them by SSRC /
+/// source address, and routes / mixes / transcodes / forwards.
+/// Concrete use cases:
+///
+/// - **MCU / SFU media servers** — one server endpoint accepts N
+///   client RTP streams, mixes (MCU) or selectively forwards (SFU).
+/// - **Media gateways** — terminating RTP on one side, transcoding,
+///   re-emitting on another network leg.
+/// - **Application servers** with shared-port RTP termination
+///   (recording bridges, IVR farms).
+///
+/// # Relationship to `RtpSession` / `MediaSessionController`
+///
+/// The standard rvoip media plane today uses a *per-dialog*
+/// [`RtpSession`](crate::session::RtpSession) — one UDP socket pair
+/// per call, managed by `media-core::MediaSessionController`. That's
+/// the right model for a typical softphone or B2BUA where each call
+/// gets its own RTP endpoint.
+///
+/// `MediaTransportServer` is the *one-to-many* alternative, kept
+/// available for the higher-density deployments above. It is wired
+/// internally inside rtp-core (`DefaultMediaTransportServer` etc.)
+/// but **not currently exercised by media-core or session-core in
+/// the default call flow** — those still drive `RtpSession`
+/// directly through [`UdpRtpTransport`](crate::transport::UdpRtpTransport).
+///
+/// As of Phase C22 the internal `clients` map is a `DashMap` (was
+/// `Arc<RwLock<HashMap>>`), so the per-frame egress / RTCP /
+/// security paths scale to N concurrent clients without an outer
+/// async writer lock — see `frame.rs`, `connection.rs`,
+/// `ssrc/demux.rs`, `rtcp/*`, `stats.rs` for the consumer sites.
 #[async_trait]
 pub trait MediaTransportServer: Send + Sync + Clone {
     /// Start the server

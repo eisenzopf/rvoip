@@ -2,6 +2,7 @@
 //!
 //! This module handles the estimation of media quality levels.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -151,7 +152,7 @@ fn calculate_stream_quality(stream: &StreamStats) -> QualityLevel {
 
 /// Get statistics for all clients
 pub async fn get_stats(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<MediaStats, MediaTransportError> {
     // Aggregate stats from all clients
     let clients_guard = clients.read().await;
@@ -221,7 +222,7 @@ pub async fn get_stats(
 /// Get statistics for a specific client
 pub async fn get_client_stats(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<MediaStats, MediaTransportError> {
     // Find client
     let clients_guard = clients.read().await;

@@ -53,9 +53,23 @@ use rvoip_sip_core::types::{CSeq, Method, Request, Uri};
 
 mod support;
 
+use rvoip_sip::api::unified::Config;
 use support::{receiver_config, wait_for_inbound_method};
 
 const PAIR_B2BUA: (u16, u16) = (16400, 16410);
+
+/// `receiver_config` with the media port range moved to 30000–31000 so
+/// per-coordinator RTP allocators don't probe-bind into the SIP port
+/// space these tests use (16400–16441). Without this, when one test's
+/// coordinators drop, their RTP sockets can linger long enough on macOS
+/// that the next test's SIP UDP bind on 16400/16410 fails — surfacing
+/// as `TransportManager has no default transport`.
+fn b2bua_receiver_config(name: &str, port: u16) -> Config {
+    let mut cfg = receiver_config(name, port);
+    cfg.media_port_start = 30000;
+    cfg.media_port_end = 31000;
+    cfg
+}
 
 // PAI values use alphanumeric users (no `+`) so the URI-percent-encoding
 // the parser applies to E.164-style `+` doesn't trip the wire string
@@ -141,16 +155,16 @@ fn build_synthetic_upstream_invite() -> UpstreamView {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn b2bua_carry_through_runs_strip_and_rewrite_end_to_end() {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
     let (alice_port, bob_port) = PAIR_B2BUA;
 
-    let bob = UnifiedCoordinator::new(receiver_config("bob", bob_port))
+    let bob = UnifiedCoordinator::new(b2bua_receiver_config("bob", bob_port))
         .await
         .expect("bob coordinator");
     let mut bob_events = bob.events().await.expect("bob events");
     tokio::time::sleep(Duration::from_millis(150)).await;
 
-    let alice = UnifiedCoordinator::new(receiver_config("alice", alice_port))
+    let alice = UnifiedCoordinator::new(b2bua_receiver_config("alice", alice_port))
         .await
         .expect("alice coordinator");
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -323,7 +337,6 @@ async fn b2bua_carry_through_runs_strip_and_rewrite_end_to_end() {
 // ─────────────────────────────────────────────────────────────────────
 
 use rvoip_sip::api::callback_peer::CallbackPeer;
-use rvoip_sip::api::unified::Config;
 
 use support::B2buaCarryThrough;
 
@@ -333,11 +346,11 @@ const PAIR_B2BUA_E2E_BOB_PORT: u16 = 16440;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn b2bua_carry_through_drives_real_incoming_call() {
-    let _ = tracing_subscriber::fmt::try_init();
+    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
 
     // bob (downstream UAS) — captures the outbound INVITE wire from
     // the b2bua middle.
-    let bob = UnifiedCoordinator::new(receiver_config("bob-e2e", PAIR_B2BUA_E2E_BOB_PORT))
+    let bob = UnifiedCoordinator::new(b2bua_receiver_config("bob-e2e", PAIR_B2BUA_E2E_BOB_PORT))
         .await
         .expect("bob coordinator");
     let mut bob_events = bob.events().await.expect("bob events");
@@ -349,7 +362,7 @@ async fn b2bua_carry_through_drives_real_incoming_call() {
     // §11.2 carry-through API only requires that the SipHeaderView
     // source and the outbound builder share the same process — not the
     // same coordinator. Using one coord keeps the test boot fast.
-    let middle_cfg = receiver_config("b2bua-e2e", PAIR_B2BUA_E2E_MIDDLE_PORT);
+    let middle_cfg = b2bua_receiver_config("b2bua-e2e", PAIR_B2BUA_E2E_MIDDLE_PORT);
     let outbound_coord = UnifiedCoordinator::new(middle_cfg.clone())
         .await
         .expect("middle outbound coord");
@@ -377,7 +390,9 @@ async fn b2bua_carry_through_drives_real_incoming_call() {
     // `outbound_coord` field on the handler is the SAME coord, so the
     // outbound INVITE goes out through the same UDP socket — this is
     // exactly the in-process B2BUA shape from §11.2.
-    let middle_peer_cfg = Config::local("b2bua-e2e-peer", PAIR_B2BUA_E2E_MIDDLE_PORT + 1);
+    let mut middle_peer_cfg = Config::local("b2bua-e2e-peer", PAIR_B2BUA_E2E_MIDDLE_PORT + 1);
+    middle_peer_cfg.media_port_start = 30000;
+    middle_peer_cfg.media_port_end = 31000;
     let middle_peer = CallbackPeer::new(handler, middle_peer_cfg)
         .await
         .expect("middle CallbackPeer");
@@ -390,7 +405,7 @@ async fn b2bua_carry_through_drives_real_incoming_call() {
     // alice (upstream UAC) — sends an INVITE to the b2bua's peer port
     // with the same application headers + Privacy + stack-managed names
     // the §11.2 example uses.
-    let alice = UnifiedCoordinator::new(receiver_config(
+    let alice = UnifiedCoordinator::new(b2bua_receiver_config(
         "alice-e2e",
         PAIR_B2BUA_E2E_ALICE_PORT,
     ))

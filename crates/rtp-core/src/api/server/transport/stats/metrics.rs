@@ -2,6 +2,7 @@
 //!
 //! This module handles server-specific media metrics.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,16 +64,14 @@ pub struct ServerMetrics {
 
 /// Get server metrics
 pub async fn get_server_metrics(
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
     media_stats: &MediaStats,
     server_start_time: Duration,
 ) -> Result<ServerMetrics, MediaTransportError> {
-    let clients_guard = clients.read().await;
-
     let mut metrics = ServerMetrics::default();
 
-    // Set active clients count
-    metrics.active_clients = clients_guard.values().filter(|c| c.connected).count();
+    // Set active clients count (DashMap iter shard guard is local).
+    metrics.active_clients = clients.iter().filter(|e| e.value().connected).count();
 
     // Calculate aggregates and averages
     let mut total_jitter = 0.0;

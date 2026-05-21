@@ -31,7 +31,7 @@ use crate::codec::mapping::CodecMapper;
 use crate::error::{Error, Result};
 use crate::integration::{IntegrationEvent, RtpBridge, RtpBridgeConfig, RtpEventCallback};
 use crate::performance::{
-    metrics::PerformanceMetrics,
+    metrics::{ConcurrentPerformanceMetrics, PerformanceMetrics},
     pool::{AudioFramePool, PoolConfig, PoolStats, PooledRtpBuffer, RtpBufferPool},
     simd::SimdProcessor,
     zero_copy::ZeroCopyAudioFrame,
@@ -108,10 +108,14 @@ pub struct DtmfNotification {
 
 /// Media Session Controller for managing media sessions and conference audio mixing
 pub struct MediaSessionController {
-    /// Active media sessions indexed by dialog ID
-    pub(super) sessions: RwLock<HashMap<DialogId, MediaSessionInfo>>,
-    /// Active RTP sessions indexed by dialog ID
-    pub(super) rtp_sessions: RwLock<HashMap<DialogId, RtpSessionWrapper>>,
+    /// Active media sessions indexed by dialog ID. `DashMap` so
+    /// per-dialog inserts/lookups don't serialise through one async
+    /// RwLock on every bridge forward, RTCP report, stats query, or
+    /// audio-frame callback dispatch.
+    pub(super) sessions: Arc<DashMap<DialogId, MediaSessionInfo>>,
+    /// Active RTP sessions indexed by dialog ID. Same `DashMap`
+    /// rationale as [`Self::sessions`].
+    pub(super) rtp_sessions: Arc<DashMap<DialogId, RtpSessionWrapper>>,
     /// Event channel for media session events
     pub(super) event_tx: mpsc::UnboundedSender<MediaSessionEvent>,
     /// Event receiver (taken by the user)
@@ -136,29 +140,40 @@ pub struct MediaSessionController {
     port_allocator: Option<Arc<PortAllocator>>,
 
     // Performance library integration fields
-    /// Global performance metrics for all sessions
-    pub(super) performance_metrics: Arc<RwLock<PerformanceMetrics>>,
+    /// Global performance metrics for all sessions. Lock-free
+    /// padded atomics — every per-frame `add_timing` /
+    /// `add_allocation` is a handful of relaxed `fetch_add` /
+    /// `fetch_min` / `fetch_max` calls on independent cache lines.
+    /// Snapshot via `.snapshot()` materialises a `PerformanceMetrics`
+    /// for external consumers.
+    pub(super) performance_metrics: Arc<ConcurrentPerformanceMetrics>,
     /// Global frame pool for efficient allocation (shared across sessions)
     pub(super) frame_pool: Arc<AudioFramePool>,
     /// RTP output buffer pool for zero-copy encoding
     pub(super) rtp_buffer_pool: Arc<RtpBufferPool>,
-    /// Advanced processors per dialog
-    pub(super) advanced_processors: RwLock<HashMap<DialogId, AdvancedProcessorSet>>,
+    /// Advanced processors per dialog. `DashMap` so the per-frame
+    /// AEC/AGC/VAD lookup doesn't take an outer async RwLock. The
+    /// value is `Arc<AdvancedProcessorSet>` so callers can clone the
+    /// Arc out of the shard guard and drop the guard before awaiting
+    /// — the shard guard is `!Send` and would otherwise infect every
+    /// task that holds one across `.await`.
+    pub(super) advanced_processors: Arc<DashMap<DialogId, Arc<AdvancedProcessorSet>>>,
     /// Default configuration for advanced processors
     pub(super) default_processor_config: AdvancedProcessorConfig,
-    /// G.711 codec for zero-copy audio processing
-    pub(super) g711_codec: Arc<tokio::sync::Mutex<crate::codec::audio::G711Codec>>,
     /// SIMD processor for audio operations
     pub(super) simd_processor: SimdProcessor,
 
-    /// Audio frame callbacks for sending decoded frames to session-core
-    pub(super) audio_frame_callbacks: Arc<RwLock<HashMap<DialogId, mpsc::Sender<AudioFrame>>>>,
+    /// Audio frame callbacks for sending decoded frames to session-core.
+    /// `DashMap` so per-frame dispatch (called from the recv hot
+    /// path) doesn't acquire an outer async RwLock just to find the
+    /// per-dialog sender.
+    pub(super) audio_frame_callbacks: Arc<DashMap<DialogId, mpsc::Sender<AudioFrame>>>,
 
     /// RFC 4733 DTMF callbacks for sending decoded digits to
     /// session-core. Fired once per digit (on the first observed
     /// end-of-event frame), deduping the two extra RFC 4733 §2.5.1.3
     /// retransmissions on the sender side.
-    pub(super) dtmf_callbacks: Arc<RwLock<HashMap<DialogId, mpsc::Sender<DtmfNotification>>>>,
+    pub(super) dtmf_callbacks: Arc<DashMap<DialogId, mpsc::Sender<DtmfNotification>>>,
 
     /// Codec mapper for payload type resolution
     pub(super) codec_mapper: Arc<CodecMapper>,
@@ -203,7 +218,7 @@ impl MediaSessionController {
         let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
 
         // Initialize performance components
-        let performance_metrics = Arc::new(RwLock::new(PerformanceMetrics::new()));
+        let performance_metrics = Arc::new(ConcurrentPerformanceMetrics::new());
 
         // Create global frame pool (shared across sessions)
         let pool_config = PoolConfig {
@@ -225,10 +240,11 @@ impl MediaSessionController {
         // Default advanced processor configuration
         let default_processor_config = AdvancedProcessorConfig::default();
 
-        // Create G.711 codec for zero-copy processing
-        let g711_codec = Arc::new(tokio::sync::Mutex::new(
-            G711Codec::mu_law(8000, 1).expect("Failed to create G.711 codec"),
-        ));
+        // G.711 µ-law / A-law codecs are stateless (just `variant` +
+        // `frame_size`), so we instantiate fresh per call instead of
+        // sharing one tokio::Mutex<G711Codec> across every session.
+        // That mutex was the single biggest serialisation point on the
+        // per-frame encode/decode hot path under load — see Phase C5.
 
         // Create SIMD processor
         let simd_processor = SimdProcessor::new();
@@ -252,8 +268,8 @@ impl MediaSessionController {
         ));
 
         Self {
-            sessions: RwLock::new(HashMap::new()),
-            rtp_sessions: RwLock::new(HashMap::new()),
+            sessions: Arc::new(DashMap::new()),
+            rtp_sessions: Arc::new(DashMap::new()),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
             event_hub: Arc::new(RwLock::new(None)),
@@ -269,12 +285,11 @@ impl MediaSessionController {
             performance_metrics,
             frame_pool,
             rtp_buffer_pool,
-            advanced_processors: RwLock::new(HashMap::new()),
+            advanced_processors: Arc::new(DashMap::new()),
             default_processor_config,
-            g711_codec,
             simd_processor,
-            audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
-            dtmf_callbacks: Arc::new(RwLock::new(HashMap::new())),
+            audio_frame_callbacks: Arc::new(DashMap::new()),
+            dtmf_callbacks: Arc::new(DashMap::new()),
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
@@ -386,7 +401,7 @@ impl MediaSessionController {
             .await;
 
         // Initialize performance components
-        let performance_metrics = Arc::new(RwLock::new(PerformanceMetrics::new()));
+        let performance_metrics = Arc::new(ConcurrentPerformanceMetrics::new());
 
         // Create global frame pool with larger capacity for conference mixing
         let pool_config = PoolConfig {
@@ -410,10 +425,11 @@ impl MediaSessionController {
         default_processor_config.frame_pool_size = 32; // Per-session pool size
         default_processor_config.enable_simd = conference_config.enable_simd_optimization;
 
-        // Create G.711 codec for zero-copy processing
-        let g711_codec = Arc::new(tokio::sync::Mutex::new(
-            G711Codec::mu_law(8000, 1).expect("Failed to create G.711 codec"),
-        ));
+        // G.711 µ-law / A-law codecs are stateless (just `variant` +
+        // `frame_size`); see Phase C5 comment on the matching block in
+        // `Self::new()`. Per-call instantiation avoids the shared
+        // tokio::Mutex<G711Codec> hot-path lock that previously
+        // serialised every encode/decode in every concurrent session.
 
         // Create SIMD processor
         let simd_processor = SimdProcessor::new();
@@ -443,8 +459,8 @@ impl MediaSessionController {
         let port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
 
         Ok(Self {
-            sessions: RwLock::new(HashMap::new()),
-            rtp_sessions: RwLock::new(HashMap::new()),
+            sessions: Arc::new(DashMap::new()),
+            rtp_sessions: Arc::new(DashMap::new()),
             event_tx,
             event_rx: RwLock::new(Some(event_rx)),
             event_hub: Arc::new(RwLock::new(None)),
@@ -460,12 +476,11 @@ impl MediaSessionController {
             performance_metrics,
             frame_pool,
             rtp_buffer_pool,
-            advanced_processors: RwLock::new(HashMap::new()),
+            advanced_processors: Arc::new(DashMap::new()),
             default_processor_config,
-            g711_codec,
             simd_processor,
-            audio_frame_callbacks: Arc::new(RwLock::new(HashMap::new())),
-            dtmf_callbacks: Arc::new(RwLock::new(HashMap::new())),
+            audio_frame_callbacks: Arc::new(DashMap::new()),
+            dtmf_callbacks: Arc::new(DashMap::new()),
             codec_mapper,
             rtp_bridge,
             bridge_partners: Arc::new(DashMap::new()),
@@ -480,14 +495,11 @@ impl MediaSessionController {
         info!("Starting media session for dialog: {}", dialog_id);
 
         // Check if media session already exists for this dialog
-        {
-            let sessions = self.sessions.read().await;
-            if sessions.contains_key(&dialog_id) {
-                return Err(Error::config(format!(
-                    "Media session already exists for dialog: {}",
-                    dialog_id
-                )));
-            }
+        if self.sessions.contains_key(&dialog_id) {
+            return Err(Error::config(format!(
+                "Media session already exists for dialog: {}",
+                dialog_id
+            )));
         }
 
         // Allocate RTP port using either our local allocator or the global one
@@ -565,16 +577,10 @@ impl MediaSessionController {
             created_at: std::time::Instant::now(),
         };
 
-        // Store session and RTP session
-        {
-            let mut sessions = self.sessions.write().await;
-            sessions.insert(dialog_id.clone(), session_info);
-        }
-
-        {
-            let mut rtp_sessions = self.rtp_sessions.write().await;
-            rtp_sessions.insert(dialog_id.clone(), rtp_wrapper);
-        }
+        // Store session and RTP session (DashMap inserts are sharded
+        // and don't take any outer guard).
+        self.sessions.insert(dialog_id.clone(), session_info);
+        self.rtp_sessions.insert(dialog_id.clone(), rtp_wrapper);
 
         // Send event
         let _ = self.event_tx.send(MediaSessionEvent::SessionCreated {
@@ -612,9 +618,14 @@ impl MediaSessionController {
         send_ctx: rvoip_rtp_core::srtp::SrtpContext,
         recv_ctx: rvoip_rtp_core::srtp::SrtpContext,
     ) -> Result<()> {
-        let rtp_sessions = self.rtp_sessions.read().await;
-        let wrapper = rtp_sessions
+        // Extract the session Arc from the DashMap shard, drop the
+        // shard guard before any `.await`, then lock the per-session
+        // mutex against just our caller — no cross-dialog
+        // serialisation.
+        let session_arc = self
+            .rtp_sessions
             .get(dialog_id)
+            .map(|r| r.value().session.clone())
             .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
         // RtpSession exposes its transport via a typed accessor; we
@@ -622,7 +633,7 @@ impl MediaSessionController {
         // `set_srtp_contexts`. Downcast once — the only transport
         // type media-core constructs is UDP, so this is the
         // architecturally-correct narrowing.
-        let session_guard = wrapper.session.lock().await;
+        let session_guard = session_arc.lock().await;
         let transport = session_guard.transport();
         let udp_transport = transport
             .as_any()
@@ -646,23 +657,20 @@ impl MediaSessionController {
         // session. Does nothing when no bridge is active.
         self.clear_bridge_partner(dialog_id);
 
-        // Remove session and get info for cleanup
-        let session_info = {
-            let mut sessions = self.sessions.write().await;
-            sessions
-                .remove(dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?
-        };
+        // Remove session and get info for cleanup. DashMap removes
+        // are sharded; no outer guard.
+        let (_, session_info) = self
+            .sessions
+            .remove(dialog_id)
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
-        // Stop and remove RTP session
-        {
-            let mut rtp_sessions = self.rtp_sessions.write().await;
-            if let Some(rtp_wrapper) = rtp_sessions.remove(dialog_id) {
-                // Close the RTP session
-                let mut rtp_session = rtp_wrapper.session.lock().await;
-                let _ = rtp_session.close().await;
-                info!("✅ Stopped RTP session for dialog: {}", dialog_id);
-            }
+        // Stop and remove RTP session. Extract the wrapper out of the
+        // shard, drop the guard, then close the underlying session
+        // outside the map's locking territory.
+        if let Some((_, rtp_wrapper)) = self.rtp_sessions.remove(dialog_id) {
+            let mut rtp_session = rtp_wrapper.session.lock().await;
+            let _ = rtp_session.close().await;
+            info!("✅ Stopped RTP session for dialog: {}", dialog_id);
         }
         self.media_directions.remove(dialog_id);
 
@@ -683,25 +691,19 @@ impl MediaSessionController {
         }
 
         // Clean up advanced processors if they exist
-        {
-            let mut processors = self.advanced_processors.write().await;
-            if processors.remove(dialog_id).is_some() {
-                info!(
-                    "🧹 Cleaned up advanced processors for dialog: {}",
-                    dialog_id
-                );
-            }
+        if self.advanced_processors.remove(dialog_id).is_some() {
+            info!(
+                "🧹 Cleaned up advanced processors for dialog: {}",
+                dialog_id
+            );
         }
 
         // Clean up audio frame callback if it exists
-        {
-            let mut callbacks = self.audio_frame_callbacks.write().await;
-            if callbacks.remove(dialog_id).is_some() {
-                info!(
-                    "🧹 Cleaned up audio frame callback for dialog: {}",
-                    dialog_id
-                );
-            }
+        if self.audio_frame_callbacks.remove(dialog_id).is_some() {
+            info!(
+                "🧹 Cleaned up audio frame callback for dialog: {}",
+                dialog_id
+            );
         }
 
         // Send event
@@ -713,139 +715,144 @@ impl MediaSessionController {
         Ok(())
     }
 
-    /// Update media configuration (e.g., when remote address becomes known or codec changes during re-INVITE)
+    /// Update media configuration (e.g., when remote address becomes known or codec changes during re-INVITE).
+    ///
+    /// Restructured for DashMap: each shard guard is acquired,
+    /// mutated synchronously, and dropped before any `.await`. The
+    /// actual RTP-session mutations happen on the per-session Arc
+    /// after the map guards are released.
     pub async fn update_media(&self, dialog_id: DialogId, config: MediaConfig) -> Result<()> {
         info!("Updating media session for dialog: {}", dialog_id);
 
-        let mut sessions = self.sessions.write().await;
-        let session_info = sessions
-            .get_mut(&dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        // Update the session config and snapshot the old values for
+        // change detection. The shard guard is dropped at the end of
+        // this block.
+        let (old_remote, old_codec) = {
+            let mut entry = self
+                .sessions
+                .get_mut(&dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            let session_info = entry.value_mut();
+            let old_remote = session_info.config.remote_addr;
+            let old_codec = session_info.config.preferred_codec.clone();
+            session_info.config = config.clone();
+            (old_remote, old_codec)
+        };
 
-        // Store old configuration for change detection
-        let old_remote = session_info.config.remote_addr;
-        let old_codec = session_info.config.preferred_codec.clone();
-
-        // Update configuration
-        session_info.config = config.clone();
-
-        let mut rtp_sessions = self.rtp_sessions.write().await;
-        if let Some(rtp_wrapper) = rtp_sessions.get_mut(&dialog_id) {
-            let mut updates_made = false;
-
-            // Handle remote address changes
-            if config.remote_addr != old_remote {
-                if let Some(remote_addr) = config.remote_addr {
-                    // Update the wrapper's remote address
-                    rtp_wrapper.remote_addr = Some(remote_addr);
-
-                    // Update the actual RTP session
-                    let mut rtp_session = rtp_wrapper.session.lock().await;
-                    rtp_session.set_remote_addr(remote_addr).await;
-
-                    info!(
-                        "✅ Updated RTP session remote address for dialog {}: {}",
-                        dialog_id, remote_addr
-                    );
-                    updates_made = true;
-
-                    // Emit remote address update event
-                    let _ = self.event_tx.send(MediaSessionEvent::RemoteAddressUpdated {
-                        dialog_id: dialog_id.clone(),
-                        remote_addr,
-                    });
-                }
-            }
-
-            // Handle codec changes
-            if config.preferred_codec != old_codec {
-                // Determine new payload type and clock rate from codec
-                let new_payload_type = config
-                    .preferred_codec
-                    .as_ref()
-                    .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
-                    .unwrap_or(0); // Default to PCMU
-
-                let new_clock_rate = config
-                    .preferred_codec
-                    .as_ref()
-                    .map(|codec| self.codec_mapper.get_clock_rate(codec))
-                    .unwrap_or(8000); // Default to 8kHz
-
-                // Update the RTP session with new codec parameters
-                {
-                    let mut rtp_session = rtp_wrapper.session.lock().await;
-
-                    // Update payload type (synchronous method available)
-                    rtp_session.set_payload_type(new_payload_type);
-
-                    // Note: Clock rate updates require more complex changes to the session
-                    // since they affect scheduler timing and jitter buffer calculations.
-                    // For now, we log the intended change. Full implementation would require
-                    // recreating the session or adding clock rate update methods to rtp-core.
-                    if rtp_session.get_payload_type() != new_payload_type {
-                        warn!("Failed to update payload type for dialog {}", dialog_id);
-                    } else {
-                        debug!(
-                            "Successfully updated payload type to {} for dialog {}",
-                            new_payload_type, dialog_id
-                        );
-                    }
-
-                    // TODO: Implement clock rate updates in rtp-core session
-                    // This would require updating the scheduler, jitter buffers, and timing calculations
-                    debug!("Clock rate change noted for dialog {} ({}Hz), but full update requires rtp-core enhancement",
-                           dialog_id, new_clock_rate);
-                }
-
-                updates_made = true;
-
-                // Log codec change with detailed information
-                let old_codec_name = old_codec.as_deref().unwrap_or("PCMU");
-                let new_codec_name = config.preferred_codec.as_deref().unwrap_or("PCMU");
-                let old_payload_type = old_codec
-                    .as_ref()
-                    .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
-                    .unwrap_or(0);
-                let old_clock_rate = old_codec
-                    .as_ref()
-                    .map(|codec| self.codec_mapper.get_clock_rate(codec))
-                    .unwrap_or(8000);
-
-                info!(
-                    "🔄 Codec changed for dialog {}: {} -> {} (PT: {} -> {}, Clock: {}Hz -> {}Hz)",
-                    dialog_id,
-                    old_codec_name,
-                    new_codec_name,
-                    old_payload_type,
-                    new_payload_type,
-                    old_clock_rate,
-                    new_clock_rate
-                );
-
-                // Emit codec change event
-                let _ = self.event_tx.send(MediaSessionEvent::CodecChanged {
-                    dialog_id: dialog_id.clone(),
-                    old_codec: old_codec.clone(),
-                    new_codec: config.preferred_codec.clone(),
-                    new_payload_type,
-                    new_clock_rate,
-                });
-            }
-
-            if updates_made {
-                info!(
-                    "✅ Media session successfully updated for dialog: {}",
+        // Extract the per-session Arc + update the wrapper's remote
+        // address in the same shard-guard scope. Drop the shard
+        // guard before we touch the RTP session itself.
+        let rtp_session_arc = {
+            let Some(mut entry) = self.rtp_sessions.get_mut(&dialog_id) else {
+                warn!(
+                    "No RTP session found for dialog {} during update",
                     dialog_id
                 );
-            } else {
-                debug!("No RTP session updates needed for dialog: {}", dialog_id);
+                return Ok(());
+            };
+            let wrapper = entry.value_mut();
+            if config.remote_addr != old_remote {
+                wrapper.remote_addr = config.remote_addr;
             }
-        } else {
-            warn!(
-                "No RTP session found for dialog {} during update",
+            wrapper.session.clone()
+        };
+
+        let mut updates_made = false;
+
+        // Apply remote-address change.
+        if config.remote_addr != old_remote {
+            if let Some(remote_addr) = config.remote_addr {
+                let mut rtp_session = rtp_session_arc.lock().await;
+                rtp_session.set_remote_addr(remote_addr).await;
+                drop(rtp_session);
+
+                info!(
+                    "✅ Updated RTP session remote address for dialog {}: {}",
+                    dialog_id, remote_addr
+                );
+                updates_made = true;
+
+                let _ = self.event_tx.send(MediaSessionEvent::RemoteAddressUpdated {
+                    dialog_id: dialog_id.clone(),
+                    remote_addr,
+                });
+            }
+        }
+
+        // Apply codec change.
+        if config.preferred_codec != old_codec {
+            let new_payload_type = config
+                .preferred_codec
+                .as_ref()
+                .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                .unwrap_or(0);
+            let new_clock_rate = config
+                .preferred_codec
+                .as_ref()
+                .map(|codec| self.codec_mapper.get_clock_rate(codec))
+                .unwrap_or(8000);
+
+            {
+                let mut rtp_session = rtp_session_arc.lock().await;
+                rtp_session.set_payload_type(new_payload_type);
+
+                if rtp_session.get_payload_type() != new_payload_type {
+                    warn!("Failed to update payload type for dialog {}", dialog_id);
+                } else {
+                    debug!(
+                        "Successfully updated payload type to {} for dialog {}",
+                        new_payload_type, dialog_id
+                    );
+                }
+
+                // TODO: Implement clock rate updates in rtp-core session
+                debug!(
+                    "Clock rate change noted for dialog {} ({}Hz), but full update requires rtp-core enhancement",
+                    dialog_id, new_clock_rate
+                );
+            }
+
+            updates_made = true;
+
+            // Log codec change with detailed information
+            let old_codec_name = old_codec.as_deref().unwrap_or("PCMU");
+            let new_codec_name = config.preferred_codec.as_deref().unwrap_or("PCMU");
+            let old_payload_type = old_codec
+                .as_ref()
+                .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                .unwrap_or(0);
+            let old_clock_rate = old_codec
+                .as_ref()
+                .map(|codec| self.codec_mapper.get_clock_rate(codec))
+                .unwrap_or(8000);
+
+            info!(
+                "🔄 Codec changed for dialog {}: {} -> {} (PT: {} -> {}, Clock: {}Hz -> {}Hz)",
+                dialog_id,
+                old_codec_name,
+                new_codec_name,
+                old_payload_type,
+                new_payload_type,
+                old_clock_rate,
+                new_clock_rate
+            );
+
+            let _ = self.event_tx.send(MediaSessionEvent::CodecChanged {
+                dialog_id: dialog_id.clone(),
+                old_codec: old_codec.clone(),
+                new_codec: config.preferred_codec.clone(),
+                new_payload_type,
+                new_clock_rate,
+            });
+        }
+
+        if updates_made {
+            info!(
+                "✅ Media session successfully updated for dialog: {}",
                 dialog_id
             );
+        } else {
+            debug!("No RTP session updates needed for dialog: {}", dialog_id);
         }
 
         Ok(())
@@ -853,20 +860,21 @@ impl MediaSessionController {
 
     /// Get information about a media session
     pub async fn get_session_info(&self, dialog_id: &DialogId) -> Option<MediaSessionInfo> {
-        let sessions = self.sessions.read().await;
-        let mut info = sessions.get(dialog_id).cloned()?;
-
-        // Add current RTP statistics
+        // Clone the MediaSessionInfo out of the shard, drop the
+        // guard, then enrich with stats (an async call that may
+        // re-touch other maps).
+        let mut info = self.sessions.get(dialog_id).map(|r| r.value().clone())?;
         info.rtp_stats = self.get_rtp_statistics(dialog_id).await;
         info.stats_updated_at = Some(Instant::now());
-
         Some(info)
     }
 
     /// Get all active sessions
     pub async fn get_all_sessions(&self) -> Vec<MediaSessionInfo> {
-        let sessions = self.sessions.read().await;
-        sessions.values().cloned().collect()
+        self.sessions
+            .iter()
+            .map(|r| r.value().clone())
+            .collect()
     }
 
     // REMOVED: Channel-based communication - use GlobalEventCoordinator instead
@@ -881,16 +889,14 @@ impl MediaSessionController {
         dialog_id: DialogId,
         sender: mpsc::Sender<AudioFrame>,
     ) -> Result<()> {
-        let mut callbacks = self.audio_frame_callbacks.write().await;
-        callbacks.insert(dialog_id.clone(), sender);
+        self.audio_frame_callbacks.insert(dialog_id.clone(), sender);
         info!("🔊 Set audio frame callback for dialog: {}", dialog_id);
         Ok(())
     }
 
     /// Remove audio frame callback for a dialog
     pub async fn remove_audio_frame_callback(&self, dialog_id: &DialogId) -> Result<()> {
-        let mut callbacks = self.audio_frame_callbacks.write().await;
-        if callbacks.remove(dialog_id).is_some() {
+        if self.audio_frame_callbacks.remove(dialog_id).is_some() {
             debug!("🔇 Removed audio frame callback for dialog: {}", dialog_id);
         }
         Ok(())
@@ -904,25 +910,29 @@ impl MediaSessionController {
         dialog_id: DialogId,
         sender: mpsc::Sender<DtmfNotification>,
     ) -> Result<()> {
-        let mut callbacks = self.dtmf_callbacks.write().await;
-        callbacks.insert(dialog_id.clone(), sender);
+        self.dtmf_callbacks.insert(dialog_id.clone(), sender);
         info!("☎️  Set DTMF callback for dialog: {}", dialog_id);
         Ok(())
     }
 
     /// Remove RFC 4733 DTMF callback for a dialog.
     pub async fn remove_dtmf_callback(&self, dialog_id: &DialogId) -> Result<()> {
-        let mut callbacks = self.dtmf_callbacks.write().await;
-        if callbacks.remove(dialog_id).is_some() {
+        if self.dtmf_callbacks.remove(dialog_id).is_some() {
             debug!("☎️  Removed DTMF callback for dialog: {}", dialog_id);
         }
         Ok(())
     }
 
-    /// Send audio frame to session-core for a dialog
+    /// Send audio frame to session-core for a dialog. Extract the
+    /// sender out of the DashMap shard and drop the guard before
+    /// awaiting the send — `mpsc::Sender::send` is async and we don't
+    /// want to hold a shard guard across it.
     pub async fn send_audio_frame(&self, dialog_id: &DialogId, frame: AudioFrame) -> Result<()> {
-        let callbacks = self.audio_frame_callbacks.read().await;
-        if let Some(sender) = callbacks.get(dialog_id) {
+        let sender = self
+            .audio_frame_callbacks
+            .get(dialog_id)
+            .map(|r| r.value().clone());
+        if let Some(sender) = sender {
             if let Err(e) = sender.send(frame).await {
                 warn!(
                     "Failed to send audio frame to session-core for dialog {}: {}",
@@ -1054,9 +1064,13 @@ impl MediaSessionController {
                                     continue;
                                 }
 
-                                // Check for callback each time (it might be registered later)
-                                let callbacks = audio_frame_callbacks.read().await;
-                                if let Some(sender) = callbacks.get(&dialog_id) {
+                                // Check for callback each time (it might be registered later).
+                                // DashMap shard guard is held only across the synchronous
+                                // try_send; we never await with a guard alive.
+                                let sender = audio_frame_callbacks
+                                    .get(&dialog_id)
+                                    .map(|r| r.value().clone());
+                                if let Some(sender) = sender {
                                     // Count frames for debugging
                                     static FRAME_COUNTERS: once_cell::sync::Lazy<
                                         std::sync::Mutex<std::collections::HashMap<String, u64>>,
@@ -1147,8 +1161,10 @@ impl MediaSessionController {
                                     duration_ms,
                                     ssrc: dtmf_ssrc,
                                 };
-                                let callbacks = dtmf_callbacks.read().await;
-                                if let Some(sender) = callbacks.get(&dialog_id) {
+                                let sender = dtmf_callbacks
+                                    .get(&dialog_id)
+                                    .map(|r| r.value().clone());
+                                if let Some(sender) = sender {
                                     match sender.try_send(notification) {
                                         Ok(_) => info!(
                                             "☎️  Delivered DTMF '{}' (duration={}ms) for dialog {}",

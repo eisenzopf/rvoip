@@ -157,14 +157,13 @@ impl MediaSessionController {
             dialog_id, interval_duration
         );
 
-        // Verify session exists and get codec information
-        let session_codec = {
-            let sessions = self.sessions.read().await;
-            let session_info = sessions
-                .get(&dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-            session_info.config.preferred_codec.clone()
-        };
+        // Verify session exists and get codec information. DashMap
+        // shard guard is held only across the synchronous clone.
+        let session_codec = self
+            .sessions
+            .get(&dialog_id)
+            .map(|r| r.value().config.preferred_codec.clone())
+            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
 
         let event_tx = self.event_tx.clone();
         let dialog_id_clone = dialog_id.clone();

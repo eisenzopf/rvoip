@@ -170,11 +170,24 @@ impl MediaSessionController {
 
         let cancel = Arc::new(AtomicBool::new(false));
 
+        // Pre-snapshot the lock-free send handles for both directions
+        // so the forwarder tasks never need to lock the destination
+        // session per packet — see Phase C16 + `RtpSession::send_handle`.
+        let a_send_handle = {
+            let guard = a_session_arc.lock().await;
+            guard.send_handle()
+        };
+        let b_send_handle = {
+            let guard = b_session_arc.lock().await;
+            guard.send_handle()
+        };
+
         let task_ab = tokio::spawn(forward_rtp(
             a.clone(),
             b.clone(),
             a_subscriber,
             b_session_arc.clone(),
+            b_send_handle,
             cancel.clone(),
         ));
         let task_ba = tokio::spawn(forward_rtp(
@@ -182,6 +195,7 @@ impl MediaSessionController {
             a.clone(),
             b_subscriber,
             a_session_arc.clone(),
+            a_send_handle,
             cancel.clone(),
         ));
 
@@ -225,26 +239,35 @@ impl MediaSessionController {
         &self,
         id: &DialogId,
     ) -> std::result::Result<(Arc<Mutex<RtpSession>>, u8), BridgeError> {
-        let rtp_sessions = self.rtp_sessions.read().await;
-        let wrapper = rtp_sessions
+        // Snapshot the session Arc + remote-addr check from the
+        // DashMap shard. The shard guard drops at the end of the
+        // closure — no await held while a shard is locked.
+        let session_arc = self
+            .rtp_sessions
             .get(id)
-            .ok_or_else(|| BridgeError::SessionNotFound(id.to_string()))?;
-        if wrapper.remote_addr.is_none() {
-            return Err(BridgeError::SessionNotActive(id.to_string()));
-        }
-        let session_arc = wrapper.session.clone();
-        drop(rtp_sessions);
+            .map(|r| {
+                let w = r.value();
+                if w.remote_addr.is_none() {
+                    Err(BridgeError::SessionNotActive(id.to_string()))
+                } else {
+                    Ok(w.session.clone())
+                }
+            })
+            .ok_or_else(|| BridgeError::SessionNotFound(id.to_string()))??;
 
-        let sessions = self.sessions.read().await;
-        let session_info = sessions
+        let pt = self
+            .sessions
             .get(id)
+            .map(|r| {
+                r.value()
+                    .config
+                    .preferred_codec
+                    .as_ref()
+                    .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
+                    .unwrap_or(0)
+            })
             .ok_or_else(|| BridgeError::SessionNotFound(id.to_string()))?;
-        let pt = session_info
-            .config
-            .preferred_codec
-            .as_ref()
-            .and_then(|codec| self.codec_mapper.codec_to_payload(codec))
-            .unwrap_or(0);
+
         Ok((session_arc, pt))
     }
 }
@@ -254,11 +277,17 @@ impl MediaSessionController {
 ///
 /// The destination RTP session assigns its own sequence number and SSRC —
 /// we only carry the timestamp, payload bytes, and marker bit.
+///
+/// If a lock-free `RtpSendHandle` was successfully snapshot at bridge
+/// setup, the per-packet send goes through it without locking
+/// `dst_session`. Otherwise we fall back to per-packet
+/// `dst_session.lock()`.
 async fn forward_rtp(
     src: DialogId,
     dst: DialogId,
     mut events: broadcast::Receiver<RtpSessionEvent>,
     dst_session: Arc<Mutex<RtpSession>>,
+    dst_send_handle: Option<rvoip_rtp_core::RtpSendHandle>,
     cancel: Arc<AtomicBool>,
 ) {
     debug!("🔗 bridge forwarder started: {} -> {}", src, dst);
@@ -274,8 +303,13 @@ async fn forward_rtp(
                 let payload = packet.payload.clone();
                 let ts = packet.header.timestamp;
                 let marker = packet.header.marker;
-                let mut dst_guard = dst_session.lock().await;
-                if let Err(e) = dst_guard.send_packet(ts, payload, marker).await {
+                let send_result = if let Some(handle) = &dst_send_handle {
+                    handle.send_packet(ts, payload, marker).await
+                } else {
+                    let dst_guard = dst_session.lock().await;
+                    dst_guard.send_packet(ts, payload, marker).await
+                };
+                if let Err(e) = send_result {
                     warn!("bridge forward {}->{} send_packet failed: {}", src, dst, e);
                 }
             }

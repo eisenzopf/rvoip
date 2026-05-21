@@ -2,34 +2,36 @@
 //!
 //! This module handles SSRC demultiplexing for multiple streams.
 
+use dashmap::DashMap;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 use crate::api::common::error::MediaTransportError;
 use crate::api::server::transport::core::connection::ClientConnection;
+use crate::session::RtpSession;
 use crate::RtpSsrc;
 
 /// Check if SSRC demultiplexing is enabled
 pub async fn is_ssrc_demultiplexing_enabled(
-    ssrc_demultiplexing_enabled: &Arc<RwLock<bool>>,
+    ssrc_demultiplexing_enabled: &Arc<AtomicBool>,
 ) -> Result<bool, MediaTransportError> {
-    Ok(*ssrc_demultiplexing_enabled.read().await)
+    Ok(ssrc_demultiplexing_enabled.load(Ordering::Relaxed))
 }
 
 /// Enable SSRC demultiplexing
 pub async fn enable_ssrc_demultiplexing(
-    ssrc_demultiplexing_enabled: &Arc<RwLock<bool>>,
+    ssrc_demultiplexing_enabled: &Arc<AtomicBool>,
 ) -> Result<bool, MediaTransportError> {
-    // Check if already enabled
-    if *ssrc_demultiplexing_enabled.read().await {
+    // CAS so re-enable is a no-op visible via the return value.
+    if ssrc_demultiplexing_enabled
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         return Ok(true);
     }
-
-    // Set enabled flag
-    *ssrc_demultiplexing_enabled.write().await = true;
-
     debug!("Enabled SSRC demultiplexing on server");
     Ok(true)
 }
@@ -41,31 +43,29 @@ pub async fn enable_ssrc_demultiplexing(
 pub async fn register_client_ssrc(
     client_id: &str,
     ssrc: RtpSsrc,
-    ssrc_demultiplexing_enabled: &Arc<RwLock<bool>>,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    ssrc_demultiplexing_enabled: &Arc<AtomicBool>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<bool, MediaTransportError> {
     // Check if SSRC demultiplexing is enabled
-    if !*ssrc_demultiplexing_enabled.read().await {
+    if !ssrc_demultiplexing_enabled.load(Ordering::Relaxed) {
         return Err(MediaTransportError::ConfigError(
             "SSRC demultiplexing is not enabled".to_string(),
         ));
     }
 
-    // Get the client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let session_arc = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        client.session.clone()
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Create stream for SSRC in the session
-    let mut session = client.session.lock().await;
+    let mut session = session_arc.lock().await;
     let created = session.create_stream_for_ssrc(ssrc).await;
 
     if created {
@@ -85,23 +85,21 @@ pub async fn register_client_ssrc(
 /// Returns all SSRCs that have been received or manually registered for the specified client.
 pub async fn get_client_ssrcs(
     client_id: &str,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<Vec<u32>, MediaTransportError> {
-    // Get the client
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    let session_arc = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        client.session.clone()
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    // Get all SSRCs for the client
-    let session = client.session.lock().await;
+    let session = session_arc.lock().await;
     let ssrcs = session.get_all_ssrcs().await;
 
     Ok(ssrcs)
@@ -112,25 +110,23 @@ pub async fn get_client_ssrcs(
 /// Returns a list of client IDs that have the given SSRC registered.
 pub async fn find_clients_by_ssrc(
     ssrc: RtpSsrc,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<Vec<String>, MediaTransportError> {
     let mut result = Vec::new();
 
-    // Search all clients
-    let clients_guard = clients.read().await;
+    // Snapshot (id, session) pairs without holding shard guards
+    // across the per-client async calls.
+    let candidates: Vec<(String, Arc<Mutex<RtpSession>>)> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| (e.key().clone(), e.value().session.clone()))
+        .collect();
 
-    for (client_id, client) in clients_guard.iter() {
-        if !client.connected {
-            continue;
-        }
-
-        // Get all SSRCs for the client
-        let session = client.session.lock().await;
+    for (client_id, session_arc) in candidates {
+        let session = session_arc.lock().await;
         let ssrcs = session.get_all_ssrcs().await;
-
-        // Check if this client has the target SSRC
         if ssrcs.contains(&ssrc) {
-            result.push(client_id.clone());
+            result.push(client_id);
         }
     }
 
@@ -142,7 +138,7 @@ pub async fn find_clients_by_ssrc(
 /// Returns the client ID for the given SSRC, or None if not found.
 pub async fn map_ssrc_to_client_id(
     ssrc: RtpSsrc,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
 ) -> Result<Option<String>, MediaTransportError> {
     // Find all clients with this SSRC
     let matches = find_clients_by_ssrc(ssrc, clients).await?;

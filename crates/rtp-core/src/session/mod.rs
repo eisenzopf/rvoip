@@ -10,10 +10,11 @@ pub use scheduling::{RtpScheduler, RtpSchedulerStats};
 pub use stream::{RtpStream, RtpStreamStats};
 
 use bytes::Bytes;
+use dashmap::DashMap;
 use rand::Rng;
-use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, mpsc};
@@ -102,6 +103,57 @@ impl Default for RtpSessionConfig {
             max_packet_age_ms: Some(200),
             enable_jitter_buffer: true,
         }
+    }
+}
+
+/// Lock-free handle for sending RTP packets through an existing
+/// [`RtpSession`] without touching the outer `Arc<Mutex<RtpSession>>`.
+///
+/// Cheap to clone (3 Arcs + 2 small scalars). Issued by
+/// [`RtpSession::send_handle`]; multiple handles for the same session
+/// stay in sync because they share the same sequence atomic.
+#[derive(Clone)]
+pub struct RtpSendHandle {
+    sender: mpsc::Sender<RtpPacket>,
+    ssrc: RtpSsrc,
+    sequence: Arc<AtomicU16>,
+    default_payload_type: u8,
+}
+
+impl RtpSendHandle {
+    /// Send an RTP packet with the session's default payload type.
+    pub async fn send_packet(
+        &self,
+        timestamp: RtpTimestamp,
+        payload: Bytes,
+        marker: bool,
+    ) -> Result<()> {
+        self.send_packet_with_pt(timestamp, payload, marker, self.default_payload_type)
+            .await
+    }
+
+    /// Send an RTP packet overriding the configured payload type
+    /// (e.g. RFC 4733 telephone-event PT 101).
+    pub async fn send_packet_with_pt(
+        &self,
+        timestamp: RtpTimestamp,
+        payload: Bytes,
+        marker: bool,
+        payload_type: u8,
+    ) -> Result<()> {
+        let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
+        header.marker = marker;
+        let packet = RtpPacket::new(header, payload);
+        self.sender
+            .send(packet)
+            .await
+            .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
+    }
+
+    /// Get the session's SSRC (immutable post-construction).
+    pub fn ssrc(&self) -> RtpSsrc {
+        self.ssrc
     }
 }
 
@@ -219,8 +271,11 @@ pub struct RtpSession {
     /// Transport for sending/receiving packets
     transport: Arc<dyn RtpTransport>,
 
-    /// Map of received streams by SSRC
-    streams: Arc<Mutex<HashMap<RtpSsrc, RtpStream>>>,
+    /// Map of received streams by SSRC. `DashMap` so the per-packet
+    /// demultiplex hot path (`session/mod.rs:620`+) doesn't serialise
+    /// every receive through a single mutex, and so `get_stream` /
+    /// `stream_count` readers don't block the demux task.
+    streams: Arc<DashMap<RtpSsrc, RtpStream>>,
 
     /// Packet scheduler for sending packets
     scheduler: Option<RtpScheduler>,
@@ -240,8 +295,11 @@ pub struct RtpSession {
     /// Sending task handle
     send_task: Option<JoinHandle<()>>,
 
-    /// Session statistics
-    stats: Arc<Mutex<RtpSessionStats>>,
+    /// Session statistics. `parking_lot::Mutex` because every guard is
+    /// CPU-only (counter updates, snapshot reads); the std variant
+    /// added avoidable lock-acquire overhead on the send/recv hot
+    /// paths and forced everything to unwrap poison.
+    stats: Arc<parking_lot::Mutex<RtpSessionStats>>,
 
     /// Media synchronization context
     media_sync: Option<Arc<std::sync::RwLock<crate::sync::MediaSync>>>,
@@ -309,14 +367,14 @@ impl RtpSession {
             config,
             ssrc,
             transport,
-            streams: Arc::new(Mutex::new(HashMap::new())),
+            streams: Arc::new(DashMap::new()),
             scheduler,
             receiver: receiver_rx,
             sender: sender_tx,
             event_tx,
             recv_task: None,
             send_task: None,
-            stats: Arc::new(Mutex::new(RtpSessionStats::default())),
+            stats: Arc::new(parking_lot::Mutex::new(RtpSessionStats::default())),
             media_sync: None,
             active: false,
             rtcp_generator: Some(rtcp_generator),
@@ -432,7 +490,8 @@ impl RtpSession {
                 debug!("Successfully sent RTP packet to {}", dest);
 
                 // Update stats
-                if let Ok(mut session_stats) = stats_send.lock() {
+                {
+                    let mut session_stats = stats_send.lock();
                     session_stats.packets_sent += 1;
                     session_stats.bytes_sent += packet.size() as u64;
                 }
@@ -476,20 +535,18 @@ impl RtpSession {
                                     debug!("Received RTCP SR from SSRC={:08x}", report_ssrc);
 
                                     // Update stream statistics if this stream exists
-                                    if let Ok(mut streams) = streams_map.lock() {
-                                        if let Some(stream) = streams.get_mut(&report_ssrc) {
-                                            // Update the stream's RTCP SR info
-                                            // This will be used for calculating round-trip time
-                                            stream.update_last_sr_info(
-                                                sr.ntp_timestamp.to_u32(),
-                                                std::time::Instant::now(),
-                                            );
+                                    if let Some(mut stream) = streams_map.get_mut(&report_ssrc) {
+                                        // Update the stream's RTCP SR info
+                                        // This will be used for calculating round-trip time
+                                        stream.update_last_sr_info(
+                                            sr.ntp_timestamp.to_u32(),
+                                            std::time::Instant::now(),
+                                        );
 
-                                            debug!(
-                                                "Updated RTCP SR info for stream SSRC={:08x}",
-                                                report_ssrc
-                                            );
-                                        }
+                                        debug!(
+                                            "Updated RTCP SR info for stream SSRC={:08x}",
+                                            report_ssrc
+                                        );
                                     }
 
                                     // If media sync is enabled, update it
@@ -533,7 +590,8 @@ impl RtpSession {
                                             );
 
                                             // Update session stats with packet loss info
-                                            if let Ok(mut stats) = stats_recv.lock() {
+                                            {
+                                                let mut stats = stats_recv.lock();
                                                 stats.packets_lost = block.cumulative_lost as u64;
 
                                                 // Calculate packet loss percentage
@@ -598,7 +656,8 @@ impl RtpSession {
                         };
 
                         // Update stats
-                        if let Ok(mut session_stats) = stats_recv.lock() {
+                        {
+                            let mut session_stats = stats_recv.lock();
                             session_stats.packets_received += 1;
                             session_stats.bytes_received += payload.len() as u64 + 12; // payload + header
                             session_stats.remote_addr = Some(source);
@@ -607,25 +666,27 @@ impl RtpSession {
                         // Use the SSRC from the event
                         let packet_ssrc = ssrc_from_event;
 
-                        // Get or create the stream for this SSRC
+                        // Get or create the stream for this SSRC. The
+                        // `entry` runs the closure exactly once per
+                        // first insert, so `created` flips iff this
+                        // packet's SSRC has never been seen — that's
+                        // also the signal for the `NewStreamDetected`
+                        // event downstream. The shard guard is dropped
+                        // before we forward the packet.
                         let (is_new_stream, output_packet) = {
-                            let mut streams = match streams_map.lock() {
-                                Ok(streams) => streams,
-                                Err(e) => {
-                                    error!("Failed to lock streams map: {}", e);
-                                    continue;
-                                }
-                            };
-
-                            let is_new = !streams.contains_key(&packet_ssrc);
-                            let stream = streams.entry(packet_ssrc).or_insert_with(|| {
-                                info!("New RTP stream detected with SSRC={:08x}", packet_ssrc);
-                                RtpStream::new(packet_ssrc, clock_rate)
-                            });
-
-                            // For simplified processing without full RTP header,
-                            // just forward the packet immediately
-                            (is_new, Some(packet.clone()))
+                            let mut created = false;
+                            {
+                                let _entry =
+                                    streams_map.entry(packet_ssrc).or_insert_with(|| {
+                                        created = true;
+                                        info!(
+                                            "New RTP stream detected with SSRC={:08x}",
+                                            packet_ssrc
+                                        );
+                                        RtpStream::new(packet_ssrc, clock_rate)
+                                    });
+                            }
+                            (created, Some(packet.clone()))
                         };
 
                         // If this is a new stream, emit the NewStreamDetected event
@@ -710,7 +771,8 @@ impl RtpSession {
                     }
 
                     // Update RTP statistics before sending the report
-                    if let Ok(session_stats) = stats.lock() {
+                    {
+                        let session_stats = stats.lock();
                         rtcp_generator.update_sent_stats(
                             session_stats.packets_sent as u32,
                             session_stats.bytes_sent as u32,
@@ -780,9 +842,14 @@ impl RtpSession {
         Ok(())
     }
 
-    /// Send an RTP packet with payload
+    /// Send an RTP packet with payload. Now `&self` — sequence
+    /// numbers are managed by an atomic shared with the scheduler,
+    /// and the `sender` mpsc clone is intrinsically `Send + Sync`,
+    /// so this no longer requires exclusive borrow. Lets concurrent
+    /// callers (audio TX, DTMF transmitter, bridge forwarder) send
+    /// without serialising on `Arc<Mutex<RtpSession>>`.
     pub async fn send_packet(
-        &mut self,
+        &self,
         timestamp: RtpTimestamp,
         payload: Bytes,
         marker: bool,
@@ -799,7 +866,7 @@ impl RtpSession {
     /// fields (SSRC, marker, timestamp) follow the same rules as
     /// [`send_packet`](Self::send_packet).
     pub async fn send_packet_with_pt(
-        &mut self,
+        &self,
         timestamp: RtpTimestamp,
         payload: Bytes,
         marker: bool,
@@ -816,7 +883,7 @@ impl RtpSession {
         // peer expects.
         let sequence = self
             .scheduler
-            .as_mut()
+            .as_ref()
             .map(|s| s.next_sequence())
             .unwrap_or(0);
         let mut header = RtpHeader::new(payload_type, sequence, timestamp, self.ssrc);
@@ -829,6 +896,24 @@ impl RtpSession {
             .map_err(|_| Error::SessionError("Failed to send packet".to_string()))
     }
 
+    /// Get a lock-free send handle for this session.
+    ///
+    /// `RtpSendHandle` is `Send + Sync + Clone` and bypasses the
+    /// outer `Arc<Mutex<RtpSession>>` that wraps this session in
+    /// media-core. It shares the same sequence atomic as the
+    /// scheduler, so the wire-side sees one monotonic seq number
+    /// space across both the audio TX path and any scheduler /
+    /// `send_packet` call.
+    pub fn send_handle(&self) -> Option<RtpSendHandle> {
+        let scheduler = self.scheduler.as_ref()?;
+        Some(RtpSendHandle {
+            sender: self.sender.clone(),
+            ssrc: self.ssrc,
+            sequence: scheduler.sequence_handle(),
+            default_payload_type: self.config.payload_type,
+        })
+    }
+
     /// Receive an RTP packet
     pub async fn receive_packet(&mut self) -> Result<RtpPacket> {
         self.receiver
@@ -839,11 +924,7 @@ impl RtpSession {
 
     /// Get the session statistics
     pub fn get_stats(&self) -> RtpSessionStats {
-        if let Ok(stats) = self.stats.lock() {
-            stats.clone()
-        } else {
-            RtpSessionStats::default()
-        }
+        self.stats.lock().clone()
     }
 
     /// Set the remote address
@@ -851,7 +932,8 @@ impl RtpSession {
         self.config.remote_addr = Some(addr);
 
         // Update stats with remote address
-        if let Ok(mut stats) = self.stats.lock() {
+        {
+            let mut stats = self.stats.lock();
             stats.remote_addr = Some(addr);
         }
 
@@ -1005,32 +1087,20 @@ impl RtpSession {
 
     /// Get a stream by SSRC, if it exists
     pub async fn get_stream(&self, ssrc: RtpSsrc) -> Option<RtpStreamStats> {
-        let streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(_) => return None,
-        };
-
-        streams.get(&ssrc).map(|stream| stream.get_stats())
+        self.streams.get(&ssrc).map(|stream| stream.get_stats())
     }
 
     /// Get a list of all current streams
     pub async fn get_all_streams(&self) -> Vec<RtpStreamStats> {
-        let streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(_) => return Vec::new(),
-        };
-
-        streams.values().map(|stream| stream.get_stats()).collect()
+        self.streams
+            .iter()
+            .map(|entry| entry.value().get_stats())
+            .collect()
     }
 
     /// Get the number of active streams
     pub async fn stream_count(&self) -> usize {
-        let streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(_) => return 0,
-        };
-
-        streams.len()
+        self.streams.len()
     }
 
     /// Get a list of all SSRCs known to this session
@@ -1038,11 +1108,7 @@ impl RtpSession {
     /// This returns all SSRCs that have been seen, even if their streams
     /// haven't released any packets from their jitter buffers yet.
     pub async fn get_all_ssrcs(&self) -> Vec<RtpSsrc> {
-        if let Ok(streams) = self.streams.lock() {
-            streams.keys().copied().collect()
-        } else {
-            Vec::new()
-        }
+        self.streams.iter().map(|entry| *entry.key()).collect()
     }
 
     /// Force creation of a stream for a specific SSRC
@@ -1050,16 +1116,11 @@ impl RtpSession {
     /// This is useful when we want to ensure a stream exists for an SSRC
     /// even if no packets have been received yet.
     pub async fn create_stream_for_ssrc(&mut self, ssrc: RtpSsrc) -> bool {
-        let mut streams = match self.streams.lock() {
-            Ok(streams) => streams,
-            Err(e) => {
-                error!("Failed to lock streams map: {}", e);
-                return false;
-            }
-        };
-
-        // Check if this SSRC already exists
-        if streams.contains_key(&ssrc) {
+        // Check if this SSRC already exists. The contains_key + insert
+        // pair has a benign race (two callers may both decide "new" and
+        // race the insert), but we only need a stable per-SSRC entry —
+        // DashMap's `entry()` arbitrates.
+        if self.streams.contains_key(&ssrc) {
             debug!("Stream for SSRC={:08x} already exists", ssrc);
             return false;
         }
@@ -1082,8 +1143,20 @@ impl RtpSession {
             RtpStream::new(ssrc, self.config.clock_rate)
         };
 
-        // Add the stream
-        streams.insert(ssrc, stream);
+        // The contains_key check above is racy w.r.t. the recv hot
+        // path also inserting on first packet; `entry()` arbitrates.
+        // The closure runs only on first insert, so `closure_ran`
+        // tells us whether *we* created the entry or lost the race.
+        let mut closure_ran = false;
+        {
+            let _entry = self.streams.entry(ssrc).or_insert_with(|| {
+                closure_ran = true;
+                stream
+            });
+        }
+        if !closure_ran {
+            return false;
+        }
 
         // Emit the new stream event
         debug!("Emitting NewStreamDetected event for SSRC={:08x}", ssrc);
@@ -1158,11 +1231,7 @@ impl RtpSession {
         };
 
         // Get session stats
-        let session_stats = if let Ok(stats) = self.stats.lock() {
-            stats.clone()
-        } else {
-            RtpSessionStats::default()
-        };
+        let session_stats = self.stats.lock().clone();
 
         // Create a new SR packet
         let mut sr = crate::packet::rtcp::RtcpSenderReport::new(self.ssrc);
@@ -1178,29 +1247,28 @@ impl RtpSession {
         sr.sender_octet_count = session_stats.bytes_sent as u32;
 
         // Add report blocks for active streams (remote SSRCs we're receiving from)
-        if let Ok(streams) = self.streams.lock() {
-            // Add report blocks for up to 31 streams (max allowed by RTCP)
-            for (ssrc, stream) in streams.iter().take(31) {
-                let stream_stats = stream.get_stats();
+        // Up to 31 streams per RTCP packet.
+        for entry in self.streams.iter().take(31) {
+            let ssrc = *entry.key();
+            let stream_stats = entry.value().get_stats();
 
-                // Create a report block for this source
-                let mut block = crate::packet::rtcp::RtcpReportBlock::new(*ssrc);
+            // Create a report block for this source
+            let mut block = crate::packet::rtcp::RtcpReportBlock::new(ssrc);
 
-                // Set statistics
-                let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
-                let (fraction_lost, cumulative_lost) =
-                    block.calculate_packet_loss(expected_packets, stream_stats.received);
+            // Set statistics
+            let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
+            let (fraction_lost, cumulative_lost) =
+                block.calculate_packet_loss(expected_packets, stream_stats.received);
 
-                block.fraction_lost = fraction_lost;
-                block.cumulative_lost = cumulative_lost as u32;
-                block.highest_seq = stream_stats.highest_seq;
-                block.jitter = stream_stats.jitter;
+            block.fraction_lost = fraction_lost;
+            block.cumulative_lost = cumulative_lost as u32;
+            block.highest_seq = stream_stats.highest_seq;
+            block.jitter = stream_stats.jitter;
 
-                // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
+            // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
 
-                // Add the block to the SR
-                sr.add_report_block(block);
-            }
+            // Add the block to the SR
+            sr.add_report_block(block);
         }
 
         // **FIX: Update our own MediaSync context with the SR data we're sending**
@@ -1253,29 +1321,28 @@ impl RtpSession {
         let mut rr = crate::packet::rtcp::RtcpReceiverReport::new(self.ssrc);
 
         // Add report blocks for active streams (remote SSRCs we're receiving from)
-        if let Ok(streams) = self.streams.lock() {
-            // Add report blocks for up to 31 streams (max allowed by RTCP)
-            for (ssrc, stream) in streams.iter().take(31) {
-                let stream_stats = stream.get_stats();
+        // Up to 31 streams per RTCP packet.
+        for entry in self.streams.iter().take(31) {
+            let ssrc = *entry.key();
+            let stream_stats = entry.value().get_stats();
 
-                // Create a report block for this source
-                let mut block = crate::packet::rtcp::RtcpReportBlock::new(*ssrc);
+            // Create a report block for this source
+            let mut block = crate::packet::rtcp::RtcpReportBlock::new(ssrc);
 
-                // Set statistics
-                let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
-                let (fraction_lost, cumulative_lost) =
-                    block.calculate_packet_loss(expected_packets, stream_stats.received);
+            // Set statistics
+            let expected_packets = stream_stats.highest_seq - stream_stats.first_seq + 1;
+            let (fraction_lost, cumulative_lost) =
+                block.calculate_packet_loss(expected_packets, stream_stats.received);
 
-                block.fraction_lost = fraction_lost;
-                block.cumulative_lost = cumulative_lost as u32;
-                block.highest_seq = stream_stats.highest_seq;
-                block.jitter = stream_stats.jitter;
+            block.fraction_lost = fraction_lost;
+            block.cumulative_lost = cumulative_lost as u32;
+            block.highest_seq = stream_stats.highest_seq;
+            block.jitter = stream_stats.jitter;
 
-                // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
+            // TODO: Set last_sr and delay_since_last_sr when we process incoming SRs
 
-                // Add the block to the RR
-                rr.add_report_block(block);
-            }
+            // Add the block to the RR
+            rr.add_report_block(block);
         }
 
         // Create RTCP packet

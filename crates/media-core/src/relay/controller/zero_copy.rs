@@ -7,6 +7,7 @@ use bytes::Bytes;
 use std::time::Instant;
 use tracing::debug;
 
+use crate::codec::audio::G711Codec;
 use crate::error::Result;
 use crate::performance::pool::PoolStats;
 use rvoip_rtp_core as rtp_core;
@@ -35,10 +36,13 @@ impl MediaSessionController {
             160,  // Frame size (20ms at 8kHz)
         );
 
-        // Step 2: Decode RTP payload directly into pooled frame buffer (zero-copy)
+        // Step 2: Decode RTP payload directly into pooled frame buffer
+        // (zero-copy). G711Codec is stateless (8 bytes of immutable
+        // config); per-call construction beats the per-frame
+        // `tokio::Mutex<G711Codec>` acquire it replaced (Phase C5).
         let payload_bytes: &[u8] = &packet.payload;
         {
-            let mut codec = self.g711_codec.lock().await;
+            let mut codec = G711Codec::mu_law(8000, 1)?;
             codec.decode_to_buffer(payload_bytes, pooled_frame.samples_mut())?;
         }
 
@@ -49,7 +53,7 @@ impl MediaSessionController {
         // Step 4: Encode from pooled buffer to pre-allocated output (zero-copy)
         let mut output_buffer = self.rtp_buffer_pool.get_buffer();
         let encoded_size = {
-            let mut codec = self.g711_codec.lock().await;
+            let mut codec = G711Codec::mu_law(8000, 1)?;
             codec.encode_to_buffer(pooled_frame.samples(), output_buffer.as_mut())?
         };
 
@@ -62,14 +66,12 @@ impl MediaSessionController {
             packet.header.ssrc,
         );
 
-        // Update performance metrics
+        // Update performance metrics — lock-free padded atomics
+        // (see `ConcurrentPerformanceMetrics`). Per-frame cost is a
+        // handful of relaxed `fetch_add`/`fetch_min`/`fetch_max`
+        // calls on independent cache lines; no `.await`, no lock.
         let processing_time = start_time.elapsed();
-        {
-            let mut metrics = self.performance_metrics.write().await;
-            metrics.add_timing(processing_time);
-            // Note: Zero allocations! We only track buffer reuse
-            metrics.operation_count += 1;
-        }
+        self.performance_metrics.add_timing(processing_time);
 
         debug!(
             "Zero-copy RTP processing completed in {:?}",
@@ -97,9 +99,11 @@ impl MediaSessionController {
         // Step 1: Extract payload → Vec<u8> (COPY)
         let payload_bytes = packet.payload.to_vec();
 
-        // Step 2: Decode → Vec<i16> (COPY + ALLOCATION)
+        // Step 2: Decode → Vec<i16> (COPY + ALLOCATION). Fresh
+        // codec per call after Phase C5; see the zero-copy path above
+        // for rationale.
         let decoded_samples = {
-            let mut codec = self.g711_codec.lock().await;
+            let mut codec = G711Codec::mu_law(8000, 1)?;
             let mut samples = vec![0i16; payload_bytes.len()];
             codec.decode_to_buffer(&payload_bytes, &mut samples)?;
             samples
@@ -117,7 +121,7 @@ impl MediaSessionController {
 
         // Step 5: Encode → Vec<u8> (COPY + ALLOCATION)
         let encoded_payload = {
-            let mut codec = self.g711_codec.lock().await;
+            let mut codec = G711Codec::mu_law(8000, 1)?;
             let mut output = vec![0u8; processed_samples.len()];
             let encoded_size = codec.encode_to_buffer(&processed_samples, &mut output)?;
             output.truncate(encoded_size);
@@ -133,17 +137,18 @@ impl MediaSessionController {
             packet.header.ssrc,
         );
 
-        // Update performance metrics
+        // Update performance metrics — lock-free padded atomics
+        // (see `ConcurrentPerformanceMetrics`).
         let processing_time = start_time.elapsed();
-        {
-            let mut metrics = self.performance_metrics.write().await;
-            metrics.add_timing(processing_time);
-            metrics.add_allocation(payload_bytes.len() as u64); // Allocation 1
-            metrics.add_allocation(decoded_len as u64 * 2); // Allocation 2 (i16) - use stored length
-            metrics.add_allocation(processed_samples.len() as u64 * 2); // Allocation 3 (i16)
-            metrics.add_allocation(new_payload.len() as u64); // Allocation 4
-            metrics.operation_count += 1;
-        }
+        self.performance_metrics.add_timing(processing_time);
+        self.performance_metrics
+            .add_allocation(payload_bytes.len() as u64); // Allocation 1
+        self.performance_metrics
+            .add_allocation(decoded_len as u64 * 2); // Allocation 2 (i16)
+        self.performance_metrics
+            .add_allocation(processed_samples.len() as u64 * 2); // Allocation 3 (i16)
+        self.performance_metrics
+            .add_allocation(new_payload.len() as u64); // Allocation 4
 
         debug!(
             "Traditional RTP processing completed in {:?}",

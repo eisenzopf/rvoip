@@ -3,8 +3,10 @@
 //! This module handles frame sending, receiving, and broadcasting functionality.
 
 use bytes::Bytes;
+use dashmap::DashMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, warn};
@@ -22,35 +24,35 @@ use crate::{CsrcManager, RtpCsrc, MAX_CSRC_COUNT};
 pub async fn send_frame_to(
     client_id: &str,
     frame: MediaFrame,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    ssrc_demultiplexing_enabled: &Arc<RwLock<bool>>,
-    csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
+    ssrc_demultiplexing_enabled: &Arc<AtomicBool>,
+    csrc_management_enabled: &Arc<AtomicBool>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
 ) -> Result<(), MediaTransportError> {
-    // Get client transport info
-    let clients_guard = clients.read().await;
-    let client = clients_guard
-        .get(client_id)
-        .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+    // Extract the addr + session Arc out of the clients map, then
+    // drop the shard guard. With DashMap the shard guard is even
+    // more important to drop quickly — it's `!Send` and would taint
+    // the surrounding future.
+    let (addr, session) = {
+        let client = clients
+            .get(client_id)
+            .ok_or_else(|| MediaTransportError::ClientNotFound(client_id.to_string()))?;
+        if !client.connected {
+            return Err(MediaTransportError::ClientNotConnected(
+                client_id.to_string(),
+            ));
+        }
+        (client.address, client.session.clone())
+    };
 
-    // Check if client is connected
-    if !client.connected {
-        return Err(MediaTransportError::ClientNotConnected(
-            client_id.to_string(),
-        ));
-    }
-
-    let addr = client.address;
-    let session = client.session.clone();
-    drop(clients_guard);
-
-    let mut session_guard = session.lock().await;
-
-    // Get SSRC to use
-    let ssrc = if *ssrc_demultiplexing_enabled.read().await && frame.ssrc != 0 {
+    // Resolve the egress SSRC. Skip the session lock entirely when
+    // SSRC demultiplexing supplies a per-frame SSRC.
+    let demux_enabled = ssrc_demultiplexing_enabled.load(Ordering::Relaxed);
+    let ssrc = if demux_enabled && frame.ssrc != 0 {
         frame.ssrc
     } else {
+        let session_guard = session.lock().await;
         session_guard.get_ssrc()
     };
 
@@ -64,25 +66,16 @@ pub async fn send_frame_to(
     }
 
     // Add CSRCs if CSRC management is enabled
-    if *csrc_management_enabled.read().await {
-        // For simplicity, we'll just use all known SSRCs as active sources
-        // In a real conference mixer, this would be based on audio activity
-        let clients_guard = clients.read().await;
-
-        // Get all SSRCs from all clients (simplified approach)
-        let mut active_ssrcs = Vec::new();
-        for client in clients_guard.values() {
-            if client.connected {
-                let client_session = client.session.lock().await;
-                active_ssrcs.push(client_session.get_ssrc());
-                // In a real implementation, we would also include all streams tracked by this client
-            }
-        }
-        drop(clients_guard);
+    if csrc_management_enabled.load(Ordering::Relaxed) {
+        // Snapshot the active SSRCs into an owned Vec while we hold
+        // the clients read guard, so we can drop it before locking the
+        // CSRC manager + sending the packet. Avoids holding any RwLock
+        // guard across `.await`.
+        let active_ssrcs = collect_active_ssrcs(clients).await;
 
         if !active_ssrcs.is_empty() {
             // Get CSRC values from the manager
-            let csrc_manager_guard = csrc_manager.read().await;
+            let csrc_manager_guard = csrc_manager.read();
             let csrcs = csrc_manager_guard.get_active_csrcs(&active_ssrcs);
 
             // Take only up to MAX_CSRC_COUNT
@@ -106,11 +99,15 @@ pub async fn send_frame_to(
     // Create RTP packet
     let packet = RtpPacket::new(header, Bytes::from(frame.data));
 
-    // Get main socket
-    let socket_guard = main_socket.read().await;
-    let socket = socket_guard
-        .as_ref()
-        .ok_or_else(|| MediaTransportError::Transport("Server is not running".to_string()))?;
+    // Snapshot the socket out from under main_socket's RwLock so we
+    // don't hold the guard across the outbound send.
+    let socket = {
+        let socket_guard = main_socket.read().await;
+        socket_guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| MediaTransportError::Transport("Server is not running".to_string()))?
+    };
 
     // Send packet
     socket
@@ -127,12 +124,35 @@ pub async fn send_frame_to(
     Ok(())
 }
 
+/// Snapshot active SSRCs from every connected client. Extracts session
+/// Arcs under the clients read guard, then drops the guard before
+/// locking individual sessions — keeps us out of the
+/// guard-held-across-session-lock pattern.
+async fn collect_active_ssrcs(
+    clients: &Arc<DashMap<String, ClientConnection>>,
+) -> Vec<crate::RtpSsrc> {
+    // Collect session Arcs by iterating the DashMap; shard guards
+    // are dropped at the end of `iter()`'s scope.
+    let sessions: Vec<Arc<Mutex<RtpSession>>> = clients
+        .iter()
+        .filter(|entry| entry.value().connected)
+        .map(|entry| entry.value().session.clone())
+        .collect();
+
+    let mut active_ssrcs = Vec::with_capacity(sessions.len());
+    for session in sessions {
+        let s = session.lock().await;
+        active_ssrcs.push(s.get_ssrc());
+    }
+    active_ssrcs
+}
+
 /// Broadcast a media frame to all connected clients
 pub async fn broadcast_frame(
     frame: MediaFrame,
-    clients: &Arc<RwLock<HashMap<String, ClientConnection>>>,
-    csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    clients: &Arc<DashMap<String, ClientConnection>>,
+    csrc_management_enabled: &Arc<AtomicBool>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     main_socket: &Arc<RwLock<Option<Arc<dyn RtpTransport>>>>,
 ) -> Result<(), MediaTransportError> {
     // Create a base header with frame info
@@ -149,24 +169,14 @@ pub async fn broadcast_frame(
     }
 
     // Add CSRCs if CSRC management is enabled
-    if *csrc_management_enabled.read().await {
-        // Get list of connected clients
-        let clients_guard = clients.read().await;
-
-        // Get all SSRCs from all clients (simplified approach)
-        let mut active_ssrcs = Vec::new();
-        for client in clients_guard.values() {
-            if client.connected {
-                let client_session = client.session.lock().await;
-                active_ssrcs.push(client_session.get_ssrc());
-                // In a real implementation, we would also include all streams tracked by this client
-            }
-        }
-        drop(clients_guard);
+    if csrc_management_enabled.load(Ordering::Relaxed) {
+        // Snapshot active SSRCs without holding the clients guard
+        // across per-session locks — see `collect_active_ssrcs`.
+        let active_ssrcs = collect_active_ssrcs(clients).await;
 
         if !active_ssrcs.is_empty() {
             // Get CSRC values from the manager
-            let csrc_manager_guard = csrc_manager.read().await;
+            let csrc_manager_guard = csrc_manager.read();
             let csrcs = csrc_manager_guard.get_active_csrcs(&active_ssrcs);
 
             // Take only up to MAX_CSRC_COUNT
@@ -193,25 +203,24 @@ pub async fn broadcast_frame(
         .as_ref()
         .ok_or_else(|| MediaTransportError::Transport("Server is not running".to_string()))?;
 
-    // Get list of connected clients
-    let clients_guard = clients.read().await;
+    // Snapshot (id, addr) for every connected client into an owned
+    // Vec so we don't hold DashMap shard guards across the per-task
+    // spawn or `.await` points.
+    let targets: Vec<(String, SocketAddr)> = clients
+        .iter()
+        .filter(|e| e.value().connected)
+        .map(|e| (e.key().clone(), e.value().address))
+        .collect();
 
     // Send to each client (in parallel)
-    let mut send_tasks = Vec::new();
+    let mut send_tasks = Vec::with_capacity(targets.len());
 
-    for (client_id, client) in clients_guard.iter() {
-        if !client.connected {
-            continue;
-        }
-
+    for (client_id_clone, addr) in targets {
         // Clone header for each client
         let header = base_header.clone();
 
         // Clone data reference
         let data = shared_data.clone();
-
-        // Get client address
-        let addr = client.address;
 
         // Create RTP packet
         let packet = crate::packet::RtpPacket::new(header, Bytes::clone(&data));
@@ -219,8 +228,6 @@ pub async fn broadcast_frame(
         // Clone socket reference
         let socket_clone = socket.clone();
 
-        // Update stats in client session
-        let client_id_clone = client_id.clone();
         let payload_type = frame.payload_type;
         let data_len = data.len();
 
@@ -244,7 +251,6 @@ pub async fn broadcast_frame(
 
         send_tasks.push(task);
     }
-    drop(clients_guard);
 
     // Wait for all sends to complete
     for task in send_tasks {

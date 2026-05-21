@@ -128,6 +128,52 @@ Backlog and duration: `RVOIP_PROFILE_BACKLOG=<n>` (default 250),
 
 ---
 
+## RTP / Media scenarios
+
+The four scenarios above stress signalling. The two below stress the
+per-packet / per-frame media plane in `rvoip-rtp-core` and
+`rvoip-media-core`. Both crates expose criterion benches under their
+own `benches/` directories.
+
+### 5. Per-packet forward storm
+
+Every received packet goes through SSRC demux → SRTP unprotect → header
+parse → broadcast dispatch (`rtp-core/src/transport/udp.rs:269`), then
+on the media side through a contended codec mutex
+(`media-core/src/relay/controller/mod.rs:150`). This is the load-bearing
+hot path for any active call. We measure it isolated (rtp-core) and at
+the per-session controller level (media-core).
+
+| Tool | Command | What to look for |
+|---|---|---|
+| Criterion (rtp-core) | `cargo bench -p rvoip-rtp-core --bench packet_parse_serialize` and `--bench srtp_protect_unprotect` and `--bench udp_loopback` | Bytes/sec at 80, 160, 200, 1200 B payloads. `udp_loopback`'s `srtp` vs `plain` delta tells you the SRTP Mutex tax above the actual crypto work measured by `srtp_protect_unprotect`. |
+| Criterion (rtp-core) | `cargo bench -p rvoip-rtp-core --bench session_demux` | `std_mutex` vs `dashmap` lines at threads {1, 4, 8, 16}. Anything where `std_mutex` >2× slower at 16 threads means the Phase C2 swap is a clear win. |
+| Criterion (media-core) | `cargo bench -p rvoip-media-core --bench audio_frame_pipeline` | `pipeline_concurrent/zero_copy` at tasks {1, 4, 8, 16}. If 16-task throughput is < 4× 1-task throughput, the shared `g711_codec` Mutex is the cap; Phase C5 (per-session codec) is the fix. |
+| Criterion (media-core) | `cargo bench -p rvoip-media-core --bench bridge_forward` | `tokio_rwlock` vs `dashmap` lines. The current `rtp_sessions: RwLock<HashMap>` serialises every bridged forward — the `dashmap` line is the post-C7 ceiling. |
+| samply | `cargo build --profile flamegraph -p rvoip-sip --example profiling_call_setup_loop` then `samply record …` | `tokio::sync::Mutex::lock` aggregate self-time on the inbound RTP path should drop sharply after Phases C1, C5, C7. SRTP `protect`/`unprotect` itself should stay flat (it's the actual crypto, not the lock). |
+
+### 6. Jitter-buffer steady-state
+
+Both `rtp-core` and `media-core` carry an adaptive jitter buffer. The
+media-core one currently takes ~7 `tokio::RwLock.write().await`
+acquisitions per inserted frame (`buffer/jitter.rs:152–189`); Phase C6
+collapses that to one `parking_lot::Mutex` + a few atomics.
+
+| Tool | Command | What to look for |
+|---|---|---|
+| Criterion (rtp-core) | `cargo bench -p rvoip-rtp-core --bench jitter_buffer` | `jitter_add_in_order` and `jitter_add_out_of_order` ns/op at depths {0, 10, 100, 1000}. Curve should grow as `log(depth)` — super-linear means BTreeMap insertion is sharing a cache line with stat updates. |
+| Criterion (media-core) | `cargo bench -p rvoip-media-core --bench jitter_buffer_frames` | Same shape; track `add_in_order` ns/op pre vs post C6. Target ≥3× improvement (collapsing 7 RwLock awaits to 1 + atomics). |
+| Criterion (media-core) | `cargo bench -p rvoip-media-core --bench mixer` | `mixer_mix_cycle` at participant counts {2, 4, 8, 16}. Throughput per participant should stay roughly constant; if it drops past N=8 the `output_cache` / `stats` Mutex chain is serialising the cycle (Phase C7). |
+| samply | `cargo build --profile flamegraph -p rvoip-media-core --example profiling_jitter_steady_state` (when added) | `RwLock::write` self-time inside `JitterBuffer::add_frame` should compress to a single `parking_lot::Mutex::lock` after Phase C6. |
+
+The four-scenario template (Criterion → samply → dhat) generalises: add
+a long-running profiling example under `crates/rvoip-sip/examples/`
+mirroring `profiling_call_setup_loop` whenever you need a sustained
+workload that's CPU- or heap-profilable. The `[profile.flamegraph]`
+inheritance keeps symbols intact.
+
+---
+
 ## Reading flamegraphs
 
 - **X-axis is sample count, not time.** A wide function used `self time`

@@ -4,8 +4,8 @@
 //! packet reordering, network jitter compensation, and smooth audio playback.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tracing::{debug, trace, warn};
 
 use crate::error::{BufferError, Result};
@@ -92,22 +92,50 @@ pub struct JitterBufferStats {
     pub underrun_count: u64,
 }
 
-/// Adaptive jitter buffer for smooth audio playback
+/// Adaptive jitter buffer for smooth audio playback.
+///
+/// Per Phase C6 the per-frame hot path collapses six separate
+/// `tokio::sync::RwLock.write().await` acquisitions (one each for
+/// buffer / stats / next_sequence / jitter_state / last_playout_time /
+/// target_depth) into a single `parking_lot::Mutex<Inner>` plus a
+/// handful of atomic stat counters. The mutex is never held across
+/// `.await`, so we drop the tokio scheduler dip entirely.
 pub struct JitterBuffer {
     /// Configuration
     config: JitterBufferConfig,
+    /// Tightly-coupled per-frame state: the BTreeMap, next-expected
+    /// sequence cursor, RFC 3550 jitter accumulator, and last-playout
+    /// timestamp. Lives behind one `parking_lot::Mutex` because every
+    /// mutation hits two or more of these fields together.
+    state: parking_lot::Mutex<JitterBufferInner>,
+    /// Current target buffer depth. Atomic so `get_target_depth` and
+    /// the playout-readiness check don't need to acquire the inner
+    /// lock.
+    target_depth: AtomicUsize,
+    /// Statistics counters. Atomic loads/stores so concurrent
+    /// `get_statistics()` snapshots never block the recv path. The
+    /// non-counter fields of `JitterBufferStats` (current_depth,
+    /// average_jitter_ms, max_jitter_ms) are synthesised at snapshot
+    /// time from the mutex-protected state and atomic counters.
+    frames_received: AtomicU64,
+    frames_played: AtomicU64,
+    frames_dropped_late: AtomicU64,
+    frames_dropped_overflow: AtomicU64,
+    underrun_count: AtomicU64,
+    adaptation_count: AtomicU64,
+}
+
+/// Tightly-coupled per-frame state held under the single `state`
+/// mutex.
+struct JitterBufferInner {
     /// Buffered frames (indexed by sequence number)
-    buffer: RwLock<BTreeMap<u16, BufferedFrame>>,
-    /// Current target buffer depth
-    target_depth: RwLock<usize>,
-    /// Statistics
-    stats: RwLock<JitterBufferStats>,
+    buffer: BTreeMap<u16, BufferedFrame>,
     /// Next expected sequence number
-    next_sequence: RwLock<Option<u16>>,
+    next_sequence: Option<u16>,
     /// Jitter calculation state
-    jitter_state: RwLock<JitterState>,
+    jitter_state: JitterState,
     /// Last playout timestamp
-    last_playout_time: RwLock<Option<Instant>>,
+    last_playout_time: Option<Instant>,
 }
 
 /// Jitter calculation state
@@ -119,6 +147,9 @@ struct JitterState {
     prev_timestamp: Option<u32>,
     /// Running jitter estimate (RFC 3550)
     jitter: f32,
+    /// Maximum jitter ever observed (ms), tracked here so `get_statistics`
+    /// can synthesise it without needing a separate atomic with f32 bits.
+    max_jitter_ms: f32,
 }
 
 impl JitterBuffer {
@@ -127,244 +158,213 @@ impl JitterBuffer {
         debug!("Creating JitterBuffer with config: {:?}", config);
 
         Self {
-            target_depth: RwLock::new(config.initial_depth),
+            target_depth: AtomicUsize::new(config.initial_depth),
+            state: parking_lot::Mutex::new(JitterBufferInner {
+                buffer: BTreeMap::new(),
+                next_sequence: None,
+                jitter_state: JitterState::default(),
+                last_playout_time: None,
+            }),
             config,
-            buffer: RwLock::new(BTreeMap::new()),
-            stats: RwLock::new(JitterBufferStats::default()),
-            next_sequence: RwLock::new(None),
-            jitter_state: RwLock::new(JitterState::default()),
-            last_playout_time: RwLock::new(None),
+            frames_received: AtomicU64::new(0),
+            frames_played: AtomicU64::new(0),
+            frames_dropped_late: AtomicU64::new(0),
+            frames_dropped_overflow: AtomicU64::new(0),
+            underrun_count: AtomicU64::new(0),
+            adaptation_count: AtomicU64::new(0),
         }
     }
 
-    /// Add a frame to the buffer
+    /// Add a frame to the buffer.
+    ///
+    /// Single mutex acquisition guards the jitter calc, lateness
+    /// check, buffer insert, and overflow eviction; the counter
+    /// updates are then a few relaxed atomic stores outside the
+    /// critical section.
     pub async fn add_frame(&self, packet: MediaPacket, frame: AudioFrame) -> Result<()> {
         let arrival_time = Instant::now();
+        let seq = packet.sequence_number;
 
-        // Update jitter calculation
-        self.update_jitter(packet.timestamp, arrival_time).await;
-
-        // Check if packet is too late
-        if self
-            .is_packet_too_late(packet.sequence_number, arrival_time)
-            .await?
-        {
-            let mut stats = self.stats.write().await;
-            stats.frames_dropped_late += 1;
-            trace!("Dropped late packet: seq={}", packet.sequence_number);
-            return Ok(());
+        // Snapshot the depth and `Outcome` we observed inside the
+        // single mutex section so we can update atomic counters and
+        // log outside the lock.
+        enum Outcome {
+            Inserted { depth: usize },
+            DroppedLate,
+            InsertedAfterOverflow { depth: usize, evicted_seq: u16 },
         }
 
-        // Create buffered frame
-        let buffered_frame = BufferedFrame {
-            frame,
-            arrival_time,
-            rtp_timestamp: packet.timestamp,
-            sequence_number: packet.sequence_number,
-        };
+        let max_late_ms = self.config.max_late_packet_age_ms as u128;
+        let max_depth = self.config.max_depth;
 
-        // Add to buffer
-        {
-            let mut buffer = self.buffer.write().await;
+        let outcome = {
+            let mut state = self.state.lock();
 
-            // Check for buffer overflow
-            if buffer.len() >= self.config.max_depth {
-                // Drop oldest frame
-                if let Some((oldest_seq, _)) = buffer.iter().next() {
-                    let oldest_seq = *oldest_seq;
-                    buffer.remove(&oldest_seq);
-                    let mut stats = self.stats.write().await;
-                    stats.frames_dropped_overflow += 1;
-                    warn!("Buffer overflow, dropped frame: seq={}", oldest_seq);
+            // Update jitter calculation (RFC 3550) using the prev
+            // arrival/timestamp snapshot in state.
+            if let (Some(prev_arrival), Some(prev_timestamp)) = (
+                state.jitter_state.prev_arrival,
+                state.jitter_state.prev_timestamp,
+            ) {
+                let arrival_diff = arrival_time.duration_since(prev_arrival).as_millis() as i32;
+                let timestamp_diff = packet.timestamp.wrapping_sub(prev_timestamp) as i32;
+                let d = (arrival_diff - timestamp_diff).abs() as f32;
+                state.jitter_state.jitter += (d - state.jitter_state.jitter) / 16.0;
+                if state.jitter_state.jitter > state.jitter_state.max_jitter_ms {
+                    state.jitter_state.max_jitter_ms = state.jitter_state.jitter;
                 }
             }
+            state.jitter_state.prev_arrival = Some(arrival_time);
+            state.jitter_state.prev_timestamp = Some(packet.timestamp);
 
-            buffer.insert(packet.sequence_number, buffered_frame);
+            // Lateness check: sequence-distance wrap-around + time-based.
+            let too_late = {
+                let seq_late = state
+                    .next_sequence
+                    .map(|expected| seq.wrapping_sub(expected) > 32768)
+                    .unwrap_or(false);
+                let time_late = state
+                    .last_playout_time
+                    .map(|last| arrival_time.duration_since(last).as_millis() > max_late_ms)
+                    .unwrap_or(false);
+                seq_late || time_late
+            };
+            if too_late {
+                Outcome::DroppedLate
+            } else {
+                let buffered_frame = BufferedFrame {
+                    frame,
+                    arrival_time,
+                    rtp_timestamp: packet.timestamp,
+                    sequence_number: seq,
+                };
+
+                let mut evicted = None;
+                if state.buffer.len() >= max_depth {
+                    if let Some((&oldest, _)) = state.buffer.iter().next() {
+                        state.buffer.remove(&oldest);
+                        evicted = Some(oldest);
+                    }
+                }
+                state.buffer.insert(seq, buffered_frame);
+                let depth = state.buffer.len();
+                match evicted {
+                    Some(evicted_seq) => Outcome::InsertedAfterOverflow { depth, evicted_seq },
+                    None => Outcome::Inserted { depth },
+                }
+            }
+        };
+
+        // Counters + tracing outside the lock.
+        match outcome {
+            Outcome::DroppedLate => {
+                self.frames_dropped_late.fetch_add(1, Ordering::Relaxed);
+                trace!("Dropped late packet: seq={}", seq);
+            }
+            Outcome::Inserted { depth } => {
+                self.frames_received.fetch_add(1, Ordering::Relaxed);
+                trace!("Added frame to jitter buffer: seq={}, buffer_depth={}", seq, depth);
+            }
+            Outcome::InsertedAfterOverflow { depth, evicted_seq } => {
+                self.frames_received.fetch_add(1, Ordering::Relaxed);
+                self.frames_dropped_overflow.fetch_add(1, Ordering::Relaxed);
+                warn!("Buffer overflow, dropped frame: seq={}", evicted_seq);
+                trace!("Added frame to jitter buffer: seq={}, buffer_depth={}", seq, depth);
+            }
         }
-
-        // Update statistics
-        {
-            let mut stats = self.stats.write().await;
-            stats.frames_received += 1;
-            stats.current_depth = self.buffer.read().await.len();
-        }
-
-        trace!(
-            "Added frame to jitter buffer: seq={}, buffer_depth={}",
-            packet.sequence_number,
-            self.get_current_depth().await
-        );
 
         Ok(())
     }
 
-    /// Get the next frame for playout
+    /// Get the next frame for playout.
+    ///
+    /// Single mutex acquisition covers the readiness check, gap
+    /// handling, frame removal, next-sequence cursor advance, and
+    /// last-playout-time update. Adaptation (target_depth recompute)
+    /// runs outside the lock against atomics.
     pub async fn get_next_frame(&self) -> Result<Option<AudioFrame>> {
-        let next_seq = {
-            let next_sequence = self.next_sequence.read().await;
-            *next_sequence
-        };
+        let target_depth = self.target_depth.load(Ordering::Relaxed);
 
-        // If we don't have a next sequence, start with the oldest in buffer
-        let target_seq = if let Some(seq) = next_seq {
-            seq
-        } else {
-            let buffer = self.buffer.read().await;
-            if let Some((&first_seq, _)) = buffer.iter().next() {
-                let mut next_sequence = self.next_sequence.write().await;
-                *next_sequence = Some(first_seq);
-                first_seq
+        enum Pulled {
+            Empty,
+            NotReady,
+            Frame(AudioFrame),
+            Underrun,
+        }
+
+        let pulled = {
+            let mut state = self.state.lock();
+
+            // Lazy init: first call adopts the oldest buffered seq as
+            // the playout cursor.
+            if state.next_sequence.is_none() {
+                if let Some((&first_seq, _)) = state.buffer.iter().next() {
+                    state.next_sequence = Some(first_seq);
+                } else {
+                    return Ok(None); // Buffer empty
+                }
+            }
+            let target_seq = state.next_sequence.expect("set above");
+
+            // Readiness gate: target_depth frames must be buffered.
+            if state.buffer.len() < target_depth {
+                Pulled::NotReady
+            } else if let Some(buffered_frame) = state.buffer.remove(&target_seq) {
+                state.next_sequence = Some(target_seq.wrapping_add(1));
+                state.last_playout_time = Some(Instant::now());
+                Pulled::Frame(buffered_frame.frame)
             } else {
-                return Ok(None); // Buffer empty
+                // Gap: try the next available frame, or report underrun.
+                let next_available = state
+                    .buffer
+                    .range(target_seq.wrapping_add(1)..)
+                    .next()
+                    .map(|(&s, f)| (s, f.clone()));
+                if let Some((next_seq, buffered_frame)) = next_available {
+                    state.buffer.remove(&next_seq);
+                    state.next_sequence = Some(target_seq.wrapping_add(1));
+                    state.last_playout_time = Some(Instant::now());
+                    warn!(
+                        "Missing frame seq={}, using seq={} instead",
+                        target_seq, next_seq
+                    );
+                    Pulled::Frame(buffered_frame.frame)
+                } else {
+                    state.next_sequence = Some(target_seq.wrapping_add(1));
+                    Pulled::Underrun
+                }
             }
         };
 
-        // Check if we're ready for playout
-        if !self.is_ready_for_playout().await {
-            return Ok(None); // Not enough frames buffered
-        }
-
-        // Try to get the next expected frame
-        let frame = {
-            let mut buffer = self.buffer.write().await;
-            if let Some(buffered_frame) = buffer.remove(&target_seq) {
-                Some(buffered_frame.frame)
-            } else {
-                // Frame missing, check for gaps
-                self.handle_missing_frame(target_seq, &mut buffer).await
+        let frame = match pulled {
+            Pulled::Empty => return Ok(None),
+            Pulled::NotReady => return Ok(None),
+            Pulled::Underrun => {
+                self.underrun_count.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            Pulled::Frame(f) => {
+                self.frames_played.fetch_add(1, Ordering::Relaxed);
+                Some(f)
             }
         };
 
-        // Update next sequence number
-        {
-            let mut next_sequence = self.next_sequence.write().await;
-            *next_sequence = Some(target_seq.wrapping_add(1));
-        }
-
-        // Update statistics and timestamps
-        if frame.is_some() {
-            let mut stats = self.stats.write().await;
-            stats.frames_played += 1;
-
-            let mut last_playout = self.last_playout_time.write().await;
-            *last_playout = Some(Instant::now());
-        }
-
-        // Adapt buffer if needed
-        self.adapt_buffer_depth().await?;
+        // Adapt buffer depth based on observed jitter. The mutex is
+        // acquired only to read the latest jitter value, then dropped
+        // before we CAS target_depth.
+        self.adapt_buffer_depth();
 
         Ok(frame)
     }
 
-    /// Check if buffer is ready for playout
-    async fn is_ready_for_playout(&self) -> bool {
-        let buffer = self.buffer.read().await;
-        let target_depth = *self.target_depth.read().await;
-
-        buffer.len() >= target_depth
-    }
-
-    /// Handle missing frame (gap in sequence)
-    async fn handle_missing_frame(
-        &self,
-        missing_seq: u16,
-        buffer: &mut BTreeMap<u16, BufferedFrame>,
-    ) -> Option<AudioFrame> {
-        // Look ahead for the next available frame
-        let next_available = buffer
-            .range(missing_seq.wrapping_add(1)..)
-            .next()
-            .map(|(&seq, frame)| (seq, frame.clone()));
-
-        if let Some((next_seq, buffered_frame)) = next_available {
-            // Use the next available frame and remove it
-            buffer.remove(&next_seq);
-
-            warn!(
-                "Missing frame seq={}, using seq={} instead",
-                missing_seq, next_seq
-            );
-
-            // Could implement packet loss concealment here
-            Some(buffered_frame.frame)
-        } else {
-            // No frames available, underrun
-            let mut stats = self.stats.write().await;
-            stats.underrun_count += 1;
-            warn!("Buffer underrun at seq={}", missing_seq);
-            None
-        }
-    }
-
-    /// Update jitter calculation (RFC 3550)
-    async fn update_jitter(&self, rtp_timestamp: u32, arrival_time: Instant) {
-        let mut jitter_state = self.jitter_state.write().await;
-
-        if let (Some(prev_arrival), Some(prev_timestamp)) =
-            (jitter_state.prev_arrival, jitter_state.prev_timestamp)
-        {
-            // Calculate arrival time difference (in RTP timestamp units)
-            let arrival_diff = arrival_time.duration_since(prev_arrival).as_millis() as i32;
-            let timestamp_diff = rtp_timestamp.wrapping_sub(prev_timestamp) as i32;
-
-            // RFC 3550 jitter calculation
-            let d = (arrival_diff - timestamp_diff).abs() as f32;
-            jitter_state.jitter += (d - jitter_state.jitter) / 16.0;
-
-            // Update statistics
-            {
-                let mut stats = self.stats.write().await;
-                stats.average_jitter_ms = jitter_state.jitter;
-                if jitter_state.jitter > stats.max_jitter_ms {
-                    stats.max_jitter_ms = jitter_state.jitter;
-                }
-            }
-        }
-
-        jitter_state.prev_arrival = Some(arrival_time);
-        jitter_state.prev_timestamp = Some(rtp_timestamp);
-    }
-
-    /// Check if packet is too late to be useful
-    async fn is_packet_too_late(
-        &self,
-        sequence_number: u16,
-        arrival_time: Instant,
-    ) -> Result<bool> {
-        let next_seq = self.next_sequence.read().await;
-
-        if let Some(expected_seq) = *next_seq {
-            // Check sequence number distance
-            let seq_distance = sequence_number.wrapping_sub(expected_seq);
-
-            // If sequence number is very old (wrapped around), it's too late
-            if seq_distance > 32768 {
-                return Ok(true);
-            }
-        }
-
-        // Check time-based lateness
-        if let Some(last_playout) = *self.last_playout_time.read().await {
-            let age = arrival_time.duration_since(last_playout);
-            if age.as_millis() > self.config.max_late_packet_age_ms as u128 {
-                return Ok(true);
-            }
-        }
-
-        Ok(false)
-    }
-
-    /// Adapt buffer depth based on network conditions
-    async fn adapt_buffer_depth(&self) -> Result<()> {
-        let jitter = {
-            let jitter_state = self.jitter_state.read().await;
-            jitter_state.jitter
-        };
-
-        let current_target = *self.target_depth.read().await;
+    /// Adapt buffer depth based on network conditions. Synchronous —
+    /// no `.await`. Takes a brief read on the inner mutex for the
+    /// current jitter, then uses a CAS-style store on the
+    /// `target_depth` atomic.
+    fn adapt_buffer_depth(&self) {
+        let jitter = self.state.lock().jitter_state.jitter;
+        let current_target = self.target_depth.load(Ordering::Relaxed);
         let frame_duration = self.config.frame_duration_ms as f32;
-
-        // Calculate desired depth based on jitter
         let jitter_frames = (jitter / frame_duration).ceil() as usize;
         let desired_depth = match self.config.adaptation_strategy {
             AdaptationStrategy::Conservative => {
@@ -375,70 +375,69 @@ impl JitterBuffer {
         }
         .min(self.config.max_depth);
 
-        // Only adapt if change is significant
         if desired_depth != current_target
             && (desired_depth as i32 - current_target as i32).abs() > 1
         {
-            let mut target_depth = self.target_depth.write().await;
-            *target_depth = desired_depth;
-
-            let mut stats = self.stats.write().await;
-            stats.adaptation_count += 1;
-
+            self.target_depth.store(desired_depth, Ordering::Relaxed);
+            self.adaptation_count.fetch_add(1, Ordering::Relaxed);
             debug!(
                 "Adapted jitter buffer depth: {} -> {} (jitter: {:.1}ms)",
                 current_target, desired_depth, jitter
             );
         }
-
-        Ok(())
     }
 
     /// Get current buffer depth
     pub async fn get_current_depth(&self) -> usize {
-        self.buffer.read().await.len()
+        self.state.lock().buffer.len()
     }
 
     /// Get target buffer depth
     pub async fn get_target_depth(&self) -> usize {
-        *self.target_depth.read().await
+        self.target_depth.load(Ordering::Relaxed)
     }
 
-    /// Get buffer statistics
+    /// Get buffer statistics. Aggregates atomic counters with a brief
+    /// inner-mutex snapshot for the jitter/depth fields.
     pub async fn get_statistics(&self) -> JitterBufferStats {
-        let mut stats = self.stats.read().await.clone();
-        stats.current_depth = self.get_current_depth().await;
-        stats
+        let (current_depth, average_jitter_ms, max_jitter_ms) = {
+            let state = self.state.lock();
+            (
+                state.buffer.len(),
+                state.jitter_state.jitter,
+                state.jitter_state.max_jitter_ms,
+            )
+        };
+        JitterBufferStats {
+            frames_received: self.frames_received.load(Ordering::Relaxed),
+            frames_played: self.frames_played.load(Ordering::Relaxed),
+            frames_dropped_late: self.frames_dropped_late.load(Ordering::Relaxed),
+            frames_dropped_overflow: self.frames_dropped_overflow.load(Ordering::Relaxed),
+            current_depth,
+            average_jitter_ms,
+            max_jitter_ms,
+            adaptation_count: self.adaptation_count.load(Ordering::Relaxed),
+            underrun_count: self.underrun_count.load(Ordering::Relaxed),
+        }
     }
 
     /// Reset the buffer
     pub async fn reset(&self) {
         {
-            let mut buffer = self.buffer.write().await;
-            buffer.clear();
+            let mut state = self.state.lock();
+            state.buffer.clear();
+            state.next_sequence = None;
+            state.jitter_state = JitterState::default();
+            state.last_playout_time = None;
         }
-
-        {
-            let mut next_sequence = self.next_sequence.write().await;
-            *next_sequence = None;
-        }
-
-        {
-            let mut target_depth = self.target_depth.write().await;
-            *target_depth = self.config.initial_depth;
-        }
-
-        {
-            let mut jitter_state = self.jitter_state.write().await;
-            *jitter_state = JitterState::default();
-        }
-
+        self.target_depth
+            .store(self.config.initial_depth, Ordering::Relaxed);
         debug!("Jitter buffer reset");
     }
 
     /// Check if buffer is empty
     pub async fn is_empty(&self) -> bool {
-        self.buffer.read().await.is_empty()
+        self.state.lock().buffer.is_empty()
     }
 }
 

@@ -35,7 +35,7 @@ pub async fn enable_csrc_management(
 /// Add a CSRC mapping for a source
 pub async fn add_csrc_mapping(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     mapping: CsrcMapping,
 ) -> Result<(), MediaTransportError> {
     // Check if CSRC management is enabled
@@ -44,7 +44,7 @@ pub async fn add_csrc_mapping(
     }
 
     // Add mapping to the manager
-    let mut csrc_manager_guard = csrc_manager.write().await;
+    let mut csrc_manager_guard = csrc_manager.write();
     let mapping_clone = mapping.clone(); // Clone before adding
     csrc_manager_guard.add_mapping(mapping);
 
@@ -55,7 +55,7 @@ pub async fn add_csrc_mapping(
 /// Add a simple SSRC to CSRC mapping
 pub async fn add_simple_csrc_mapping(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     original_ssrc: RtpSsrc,
     csrc: RtpCsrc,
 ) -> Result<(), MediaTransportError> {
@@ -65,7 +65,7 @@ pub async fn add_simple_csrc_mapping(
     }
 
     // Add simple mapping to the manager
-    let mut csrc_manager_guard = csrc_manager.write().await;
+    let mut csrc_manager_guard = csrc_manager.write();
     csrc_manager_guard.add_simple_mapping(original_ssrc, csrc);
 
     debug!("Added simple CSRC mapping: {:08x} -> {:08x}", original_ssrc, csrc);
@@ -75,7 +75,7 @@ pub async fn add_simple_csrc_mapping(
 /// Remove a CSRC mapping by SSRC
 pub async fn remove_csrc_mapping_by_ssrc(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     original_ssrc: RtpSsrc,
 ) -> Result<Option<CsrcMapping>, MediaTransportError> {
     // Check if CSRC management is enabled
@@ -84,7 +84,7 @@ pub async fn remove_csrc_mapping_by_ssrc(
     }
 
     // Remove mapping from the manager
-    let mut csrc_manager_guard = csrc_manager.write().await;
+    let mut csrc_manager_guard = csrc_manager.write();
     let removed = csrc_manager_guard.remove_by_ssrc(original_ssrc);
 
     if removed.is_some() {
@@ -97,7 +97,7 @@ pub async fn remove_csrc_mapping_by_ssrc(
 /// Get a CSRC mapping by SSRC
 pub async fn get_csrc_mapping_by_ssrc(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     original_ssrc: RtpSsrc,
 ) -> Result<Option<CsrcMapping>, MediaTransportError> {
     // Check if CSRC management is enabled
@@ -106,7 +106,7 @@ pub async fn get_csrc_mapping_by_ssrc(
     }
 
     // Get mapping from the manager
-    let csrc_manager_guard = csrc_manager.read().await;
+    let csrc_manager_guard = csrc_manager.read();
     let mapping = csrc_manager_guard.get_by_ssrc(original_ssrc).cloned();
 
     Ok(mapping)
@@ -115,7 +115,7 @@ pub async fn get_csrc_mapping_by_ssrc(
 /// Get a list of all CSRC mappings
 pub async fn get_all_csrc_mappings(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
 ) -> Result<Vec<CsrcMapping>, MediaTransportError> {
     // Check if CSRC management is enabled
     if !*csrc_management_enabled.read().await {
@@ -123,7 +123,7 @@ pub async fn get_all_csrc_mappings(
     }
 
     // Get all mappings from the manager
-    let csrc_manager_guard = csrc_manager.read().await;
+    let csrc_manager_guard = csrc_manager.read();
     let mappings = csrc_manager_guard.get_all_mappings().to_vec();
 
     Ok(mappings)
@@ -132,7 +132,7 @@ pub async fn get_all_csrc_mappings(
 /// Update the CNAME for a source
 pub async fn update_csrc_cname(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     original_ssrc: RtpSsrc,
     cname: String,
 ) -> Result<bool, MediaTransportError> {
@@ -142,7 +142,7 @@ pub async fn update_csrc_cname(
     }
 
     // Update CNAME in the manager
-    let mut csrc_manager = csrc_manager.write().await;
+    let mut csrc_manager = csrc_manager.write();
     let updated = csrc_manager.update_cname(original_ssrc, cname.clone());
 
     if updated {
@@ -155,7 +155,7 @@ pub async fn update_csrc_cname(
 /// Update the display name for a source
 pub async fn update_csrc_display_name(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     original_ssrc: RtpSsrc,
     name: String,
 ) -> Result<bool, MediaTransportError> {
@@ -165,7 +165,7 @@ pub async fn update_csrc_display_name(
     }
 
     // Update display name in the manager
-    let mut csrc_manager = csrc_manager.write().await;
+    let mut csrc_manager = csrc_manager.write();
     let updated = csrc_manager.update_display_name(original_ssrc, name.clone());
 
     if updated {
@@ -178,7 +178,7 @@ pub async fn update_csrc_display_name(
 /// Get CSRC values for active sources
 pub async fn get_active_csrcs(
     csrc_management_enabled: &Arc<RwLock<bool>>,
-    csrc_manager: &Arc<RwLock<CsrcManager>>,
+    csrc_manager: &Arc<parking_lot::RwLock<CsrcManager>>,
     active_ssrcs: &[RtpSsrc],
 ) -> Result<Vec<RtpCsrc>, MediaTransportError> {
     // Check if CSRC management is enabled
@@ -187,7 +187,7 @@ pub async fn get_active_csrcs(
     }
 
     // Get active CSRCs from the manager
-    let csrc_manager_guard = csrc_manager.read().await;
+    let csrc_manager_guard = csrc_manager.read();
     let csrcs = csrc_manager_guard.get_active_csrcs(active_ssrcs);
 
     debug!("Got {} active CSRCs for {} active SSRCs", csrcs.len(), active_ssrcs.len());

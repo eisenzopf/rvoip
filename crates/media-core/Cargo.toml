@@ -32,6 +32,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # State management
 dashmap = "5.5"
+# Lock-free / lighter mutexes for the hot media-plane paths
+# (jitter buffer, mixer cache, codec). `parking_lot` is faster than
+# `std::sync::Mutex` and never blocks on `.await`.
+parking_lot = "0.12"
+# Lock-free MPMC queue used as the backing store for AudioFramePool
+# and RtpBufferPool — replaces a Mutex<VecDeque> with a wait-free
+# pop/push so 16 concurrent per-frame tasks no longer serialise
+# through one std::Mutex per pool hit.
+crossbeam-queue = "0.3"
 
 # Async support
 async-trait = "0.1"
@@ -86,4 +95,28 @@ all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dep
 tokio-test = "0.4"
 serial_test = "3.0"
 tempfile = "3.8"
-reqwest = { version = "0.11", features = ["blocking"] } 
+reqwest = { version = "0.11", features = ["blocking"] }
+criterion = { workspace = true }
+futures = "0.3"
+
+# Performance benchmarks. Run with `cargo bench -p rvoip-media-core`. See
+# `crates/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
+[[bench]]
+name = "audio_frame_pipeline"
+harness = false
+
+[[bench]]
+name = "bridge_forward"
+harness = false
+
+[[bench]]
+name = "jitter_buffer_frames"
+harness = false
+
+[[bench]]
+name = "mixer"
+harness = false
+
+[[bench]]
+name = "bridge_e2e"
+harness = false
