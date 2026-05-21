@@ -46,27 +46,19 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<Option<Request>>` - The original request, or None if not available
     pub async fn original_request(&self, tx_id: &TransactionKey) -> Result<Option<Request>> {
-        // Try client transactions first
-        {
-            let client_txs = self.client_transactions.lock().await;
-            if let Some(tx) = client_txs.get(tx_id) {
-                if let Some(client_tx) = tx.as_client_transaction() {
-                    return Ok(client_tx.original_request().await);
-                }
+        // Extract Arc out of each shard before awaiting on per-tx state.
+        let client_arc = self.client_transactions.get(tx_id).map(|r| r.value().clone());
+        if let Some(tx) = client_arc {
+            if let Some(client_tx) = tx.as_client_transaction() {
+                return Ok(client_tx.original_request().await);
             }
         }
-
-        // Try server transactions
-        {
-            let server_txs = self.server_transactions.lock().await;
-            if let Some(tx) = server_txs.get(tx_id) {
-                if let Some(server_tx) = tx.as_server_transaction() {
-                    return Ok(server_tx.original_request().await);
-                }
+        let server_arc = self.server_transactions.get(tx_id).map(|r| r.value().clone());
+        if let Some(tx) = server_arc {
+            if let Some(server_tx) = tx.as_server_transaction() {
+                return Ok(server_tx.original_request().await);
             }
         }
-
-        // Transaction not found
         Err(Error::transaction_not_found(
             tx_id.clone(),
             "original_request - transaction not found",
@@ -94,28 +86,18 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<Option<Response>>` - The last response, or None if not available
     pub async fn last_response(&self, tx_id: &TransactionKey) -> Result<Option<Response>> {
-        // Try client transactions first
-        {
-            let client_txs = self.client_transactions.lock().await;
-            if let Some(tx) = client_txs.get(tx_id) {
-                if let Some(client_tx) = tx.as_client_transaction() {
-                    return Ok(client_tx.last_response().await);
-                }
+        let client_arc = self.client_transactions.get(tx_id).map(|r| r.value().clone());
+        if let Some(tx) = client_arc {
+            if let Some(client_tx) = tx.as_client_transaction() {
+                return Ok(client_tx.last_response().await);
             }
         }
-
-        // Try server transactions
-        {
-            let server_txs = self.server_transactions.lock().await;
-            if let Some(tx) = server_txs.get(tx_id) {
-                if let Some(server_tx) = tx.as_server_transaction() {
-                    // Use the ServerTransaction trait explicitly to avoid ambiguity
-                    return Ok(ServerTransaction::last_response(server_tx));
-                }
+        let server_arc = self.server_transactions.get(tx_id).map(|r| r.value().clone());
+        if let Some(tx) = server_arc {
+            if let Some(server_tx) = tx.as_server_transaction() {
+                return Ok(ServerTransaction::last_response(&*server_tx));
             }
         }
-
-        // Transaction not found
         Err(Error::transaction_not_found(
             tx_id.clone(),
             "last_response - transaction not found",
@@ -144,23 +126,12 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<SocketAddr>` - The remote address
     pub async fn remote_addr(&self, tx_id: &TransactionKey) -> Result<SocketAddr> {
-        // Try client transactions first
-        {
-            let client_txs = self.client_transactions.lock().await;
-            if let Some(tx) = client_txs.get(tx_id) {
-                return Ok(tx.remote_addr());
-            }
+        if let Some(entry) = self.client_transactions.get(tx_id) {
+            return Ok(entry.value().remote_addr());
         }
-
-        // Try server transactions
-        {
-            let server_txs = self.server_transactions.lock().await;
-            if let Some(tx) = server_txs.get(tx_id) {
-                return Ok(tx.remote_addr());
-            }
+        if let Some(entry) = self.server_transactions.get(tx_id) {
+            return Ok(entry.value().remote_addr());
         }
-
-        // Transaction not found
         Err(Error::transaction_not_found(
             tx_id.clone(),
             "remote_addr - transaction not found",
@@ -459,8 +430,8 @@ impl TransactionManager {
     /// # Returns
     /// * `usize` - The number of active transactions
     pub async fn transaction_count(&self) -> usize {
-        let client_count = self.client_transactions.lock().await.len();
-        let server_count = self.server_transactions.lock().await.len();
+        let client_count = self.client_transactions.len();
+        let server_count = self.server_transactions.len();
         client_count + server_count
     }
 
@@ -490,48 +461,27 @@ impl TransactionManager {
     pub async fn terminate_transaction(&self, tx_id: &TransactionKey) -> Result<()> {
         let mut terminated = false;
 
-        // Try client transactions first
-        {
-            let mut client_txs = self.client_transactions.lock().await;
-            if let Some(tx) = client_txs.remove(tx_id) {
-                terminated = true;
-            }
+        if self.client_transactions.remove(tx_id).is_some() {
+            terminated = true;
         }
-
-        // If not found in client transactions, try server transactions
-        if !terminated {
-            let mut server_txs = self.server_transactions.lock().await;
-            if let Some(tx) = server_txs.remove(tx_id) {
-                terminated = true;
-            }
+        if !terminated && self.server_transactions.remove(tx_id).is_some() {
+            terminated = true;
         }
-
-        // Also remove from destinations map if it's there
-        {
-            let mut dest_map = self.transaction_destinations.lock().await;
-            dest_map.remove(tx_id);
-        }
+        self.transaction_destinations.remove(tx_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
-        {
-            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
-            if let Some(subscriber_ids) = tx_to_subs.remove(tx_id) {
-                debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
-
-                // Also clean up reverse mappings
-                drop(tx_to_subs); // Release lock before acquiring another
-                let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-
-                for subscriber_id in subscriber_ids {
-                    if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
-                        tx_list.retain(|id| id != tx_id);
-
-                        // If subscriber has no more transactions, remove it entirely
-                        if tx_list.is_empty() {
-                            sub_to_txs.remove(&subscriber_id);
-                            debug!(%tx_id, subscriber_id, "Removed empty subscriber mapping");
-                        }
-                    }
+        if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
+            debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
+            for subscriber_id in subscriber_ids {
+                let mut empty = false;
+                if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id) {
+                    let tx_list = entry.value_mut();
+                    tx_list.retain(|id| id != tx_id);
+                    empty = tx_list.is_empty();
+                }
+                if empty {
+                    self.subscriber_to_transactions.remove(&subscriber_id);
+                    debug!(%tx_id, subscriber_id, "Removed empty subscriber mapping");
                 }
             }
         }
@@ -590,101 +540,95 @@ impl TransactionManager {
         let mut terminated_transaction_ids = Vec::new();
 
         // Cleanup client transactions
-        {
-            let mut client_txs = self.client_transactions.lock().await;
-            let terminated_keys: Vec<TransactionKey> = client_txs
-                .iter()
-                .filter(|(_, tx)| tx.state() == TransactionState::Terminated)
-                .map(|(k, _)| k.clone())
-                .collect();
-
-            debug!(
-                "Found {} terminated client transactions",
-                terminated_keys.len()
-            );
-            for key in terminated_keys {
-                debug!(%key, "Removing terminated client transaction");
-                client_txs.remove(&key);
-                terminated_transaction_ids.push(key);
-                cleaned_count += 1;
-            }
+        let terminated_client_keys: Vec<TransactionKey> = self
+            .client_transactions
+            .iter()
+            .filter(|r| r.value().state() == TransactionState::Terminated)
+            .map(|r| r.key().clone())
+            .collect();
+        debug!(
+            "Found {} terminated client transactions",
+            terminated_client_keys.len()
+        );
+        for key in terminated_client_keys {
+            debug!(%key, "Removing terminated client transaction");
+            self.client_transactions.remove(&key);
+            terminated_transaction_ids.push(key);
+            cleaned_count += 1;
         }
 
         // Cleanup server transactions
-        {
-            let mut server_txs = self.server_transactions.lock().await;
-            let terminated_keys: Vec<TransactionKey> = server_txs
-                .iter()
-                .filter(|(_, tx)| tx.state() == TransactionState::Terminated)
-                .map(|(k, _)| k.clone())
-                .collect();
-
-            debug!(
-                "Found {} terminated server transactions",
-                terminated_keys.len()
-            );
-            for key in terminated_keys {
-                debug!(%key, "Removing terminated server transaction");
-                server_txs.remove(&key);
-                terminated_transaction_ids.push(key);
-                cleaned_count += 1;
-            }
+        let terminated_server_keys: Vec<TransactionKey> = self
+            .server_transactions
+            .iter()
+            .filter(|r| r.value().state() == TransactionState::Terminated)
+            .map(|r| r.key().clone())
+            .collect();
+        debug!(
+            "Found {} terminated server transactions",
+            terminated_server_keys.len()
+        );
+        for key in terminated_server_keys {
+            debug!(%key, "Removing terminated server transaction");
+            self.server_transactions.remove(&key);
+            terminated_transaction_ids.push(key);
+            cleaned_count += 1;
         }
 
         // Cleanup orphaned entries in the transaction_destinations map
         {
-            let mut dest_map = self.transaction_destinations.lock().await;
-            let client_txs = self.client_transactions.lock().await;
-            let server_txs = self.server_transactions.lock().await;
-
-            let orphaned_keys: Vec<TransactionKey> = dest_map
-                .keys()
-                .filter(|k| !client_txs.contains_key(k) && !server_txs.contains_key(k))
-                .cloned()
+            let orphaned_keys: Vec<TransactionKey> = self
+                .transaction_destinations
+                .iter()
+                .filter(|entry| {
+                    let k = entry.key();
+                    !self.client_transactions.contains_key(k)
+                        && !self.server_transactions.contains_key(k)
+                })
+                .map(|entry| entry.key().clone())
                 .collect();
-
             debug!("Found {} orphaned destination entries", orphaned_keys.len());
             for key in orphaned_keys {
                 debug!(%key, "Removing orphaned destination entry");
-                dest_map.remove(&key);
+                self.transaction_destinations.remove(&key);
             }
         }
 
         // **CRITICAL FIX**: Clean up subscriber mappings for all terminated transactions
         {
-            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
             let mut subscriber_ids_to_clean = Vec::new();
-
             for tx_id in &terminated_transaction_ids {
-                if let Some(subscriber_ids) = tx_to_subs.remove(tx_id) {
+                if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
                     debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
                     subscriber_ids_to_clean.extend(subscriber_ids);
                 }
             }
 
-            drop(tx_to_subs); // Release lock before acquiring another
-
-            // Clean up reverse mappings
             if !subscriber_ids_to_clean.is_empty() {
-                let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-
                 for subscriber_id in subscriber_ids_to_clean {
-                    if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
-                        let original_len = tx_list.len();
+                    let mut empty = false;
+                    let mut changed = false;
+                    let mut new_count = 0;
+                    let mut old_count = 0;
+                    if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id)
+                    {
+                        let tx_list = entry.value_mut();
+                        old_count = tx_list.len();
                         tx_list.retain(|tx_id| !terminated_transaction_ids.contains(tx_id));
-
-                        // If subscriber has no more transactions, remove it entirely
-                        if tx_list.is_empty() {
-                            sub_to_txs.remove(&subscriber_id);
-                            debug!(subscriber_id, "Removed empty subscriber mapping");
-                        } else if tx_list.len() != original_len {
-                            debug!(
-                                subscriber_id,
-                                old_count = original_len,
-                                new_count = tx_list.len(),
-                                "Cleaned up subscriber transaction list"
-                            );
-                        }
+                        new_count = tx_list.len();
+                        empty = tx_list.is_empty();
+                        changed = old_count != new_count;
+                    }
+                    if empty {
+                        self.subscriber_to_transactions.remove(&subscriber_id);
+                        debug!(subscriber_id, "Removed empty subscriber mapping");
+                    } else if changed {
+                        debug!(
+                            subscriber_id,
+                            old_count,
+                            new_count,
+                            "Cleaned up subscriber transaction list"
+                        );
                     }
                 }
             }
@@ -698,25 +642,15 @@ impl TransactionManager {
 
         // Also manually check for client transactions that look terminated but don't have the state set
         {
-            let mut client_txs = self.client_transactions.lock().await;
-            // Look for transactions whose event_loop_handle is None or completed
-            let potentially_terminated: Vec<TransactionKey> = client_txs
+            let potentially_terminated: Vec<TransactionKey> = self
+                .client_transactions
                 .iter()
-                .filter_map(|(k, tx)| {
-                    // If we can downcast to ClientTransactionExt
-                    if let Some(client_tx) = tx.as_client_transaction() {
-                        // Check if handle is None or completed
-                        let is_terminated = if tx.state() == TransactionState::Terminated {
-                            true
-                        } else {
-                            // Also check event loop handle completion
-                            false
-                        };
-                        if is_terminated {
-                            Some(k.clone())
-                        } else {
-                            None
-                        }
+                .filter_map(|r| {
+                    let tx = r.value();
+                    if tx.as_client_transaction().is_some()
+                        && tx.state() == TransactionState::Terminated
+                    {
+                        Some(r.key().clone())
                     } else {
                         None
                     }
@@ -725,7 +659,7 @@ impl TransactionManager {
 
             for key in potentially_terminated {
                 debug!(%key, "Removing potentially terminated client transaction");
-                client_txs.remove(&key);
+                self.client_transactions.remove(&key);
                 cleaned_count += 1;
             }
         }
@@ -769,14 +703,12 @@ impl TransactionManager {
 
         // For INVITE transactions, look for related CANCEL transactions
         if request.method() == Method::Invite {
-            // Check client transactions for related CANCEL
-            let client_txs = self.client_transactions.lock().await;
-            let cancel_matches: Vec<TransactionKey> = client_txs
+            let cancel_matches: Vec<TransactionKey> = self
+                .client_transactions
                 .iter()
-                .filter(|(k, _)| k.method() == &Method::Cancel && !k.is_server)
-                .map(|(k, _)| k.clone())
+                .filter(|r| r.key().method() == &Method::Cancel && !r.key().is_server)
+                .map(|r| r.key().clone())
                 .collect();
-            drop(client_txs);
 
             for cancel_key in cancel_matches {
                 if let Ok(Some(cancel_req)) = self.original_request(&cancel_key).await {
@@ -823,30 +755,23 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or an error if retry isn't possible
     pub async fn retry_request(&self, tx_id: &TransactionKey) -> Result<()> {
-        // Only client transactions can retry a request
         if tx_id.is_server() {
             return Err(Error::Other(
                 "Cannot retry a server transaction".to_string(),
             ));
         }
 
-        // Get the client transaction
-        let client_txs = self.client_transactions.lock().await;
-        let tx = client_txs.get(tx_id).ok_or_else(|| {
+        // Extract Arc out of shard before awaiting on original_request.
+        let tx = self.client_transactions.get(tx_id).map(|r| r.value().clone());
+        let tx = tx.ok_or_else(|| {
             Error::transaction_not_found(tx_id.clone(), "retry_request - transaction not found")
         })?;
 
-        // Get a ClientTransaction reference
         if let Some(client_tx) = tx.as_client_transaction() {
-            // Get the original request
             let request = client_tx.original_request().await.ok_or_else(|| {
                 Error::Other("No original request available for retry".to_string())
             })?;
-
-            // Get the destination
             let destination = client_tx.remote_addr();
-
-            // Send the request directly via the transport
             let transport = self.transport.clone();
             transport
                 .send_message(Message::Request(request), destination)
@@ -881,24 +806,24 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<()>` - Success or an error if the transaction doesn't exist or processing fails
     pub async fn process_request(&self, tx_id: &TransactionKey, request: Request) -> Result<()> {
-        // Only server transactions can process requests
         if !tx_id.is_server() {
             return Err(Error::Other(
                 "Cannot process request for client transaction".to_string(),
             ));
         }
 
-        // Get the server transaction
-        let server_txs = self.server_transactions.lock().await;
-        let tx = server_txs.get(tx_id).ok_or_else(|| {
-            Error::transaction_not_found(tx_id.clone(), "process_request - transaction not found")
-        })?;
+        // Extract Arc out of the shard before awaiting `process_request()`.
+        let tx = self
+            .server_transactions
+            .get(tx_id)
+            .map(|r| r.value().clone())
+            .ok_or_else(|| {
+                Error::transaction_not_found(
+                    tx_id.clone(),
+                    "process_request - transaction not found",
+                )
+            })?;
 
-        // Clone it so we can drop the lock before the async call
-        let tx_clone = tx.clone();
-        drop(server_txs);
-
-        // Process the request using the transaction's implementation
-        tx_clone.process_request(request).await
+        tx.process_request(request).await
     }
 }

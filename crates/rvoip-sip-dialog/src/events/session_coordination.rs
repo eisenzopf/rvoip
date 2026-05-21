@@ -247,7 +247,7 @@ pub enum SessionCoordinationEvent {
         /// `IncomingRequest` view (header-level access for
         /// `Target-Dialog`, custom X-* headers, etc.). `None` for
         /// synthesized/test publish paths.
-        raw_request: Option<std::sync::Arc<bytes::Bytes>>,
+        raw_request: Option<bytes::Bytes>,
     },
 
     /// RFC 5626 outbound flow has failed — the keep-alive ping either

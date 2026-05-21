@@ -289,9 +289,9 @@ impl DialogEventHub {
                     .transaction_manager()
                     .take_inbound_bytes(&transaction_id)
                     .or_else(|| {
-                        Some(std::sync::Arc::new(bytes::Bytes::from(
+                        Some(bytes::Bytes::from(
                             rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
-                        )))
+                        ))
                     });
 
                 Some(RvoipCrossCrateEvent::DialogToSession(
@@ -429,9 +429,9 @@ impl DialogEventHub {
                         .transaction_manager()
                         .take_inbound_bytes(&transaction_id)
                         .or_else(|| {
-                            Some(std::sync::Arc::new(bytes::Bytes::from(
+                            Some(bytes::Bytes::from(
                                 response.to_string().into_bytes(),
-                            )))
+                            ))
                         });
                     // Handle specific response codes
                     match response.status_code() {
@@ -854,9 +854,9 @@ impl DialogEventHub {
                     .transaction_manager()
                     .take_inbound_bytes(&transaction_id)
                     .or_else(|| {
-                        Some(std::sync::Arc::new(bytes::Bytes::from(
+                        Some(bytes::Bytes::from(
                             request.to_string().into_bytes(),
-                        )))
+                        ))
                     });
                 let session_id = match self.dialog_manager.get_session_id(&dialog_id) {
                     Some(s) => s,
@@ -925,9 +925,9 @@ impl DialogEventHub {
                     .transaction_manager()
                     .take_inbound_bytes(&transaction_id)
                     .or_else(|| {
-                        Some(std::sync::Arc::new(bytes::Bytes::from(
+                        Some(bytes::Bytes::from(
                             request.to_string().into_bytes(),
-                        )))
+                        ))
                     });
                 // CapabilityQuery in today's dialog-core does not carry
                 // a dialog id; OPTIONS therefore surfaces as

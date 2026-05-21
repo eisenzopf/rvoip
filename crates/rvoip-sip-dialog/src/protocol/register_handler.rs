@@ -102,9 +102,9 @@ impl RegisterHandler for DialogManager {
                 .transaction_manager
                 .take_inbound_bytes(&transaction_id)
                 .or_else(|| {
-                    Some(std::sync::Arc::new(bytes::Bytes::from(
+                    Some(bytes::Bytes::from(
                         request.to_string().into_bytes(),
-                    )))
+                    ))
                 });
             let event =
                 RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingRegister {

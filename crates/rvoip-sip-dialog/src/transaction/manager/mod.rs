@@ -397,10 +397,7 @@ impl TransactionManager {
     /// this when constructing `IncomingCall` / `IncomingRegister` /
     /// response-side variants so STIR/SHAKEN consumers see the
     /// upstream byte form. See `SIP_API_DESIGN_2.md` §7.5.
-    pub fn take_inbound_bytes(
-        &self,
-        key: &TransactionKey,
-    ) -> Option<Arc<bytes::Bytes>> {
+    pub fn take_inbound_bytes(&self, key: &TransactionKey) -> Option<bytes::Bytes> {
         self.pending_inbound_bytes.remove(key).map(|(_, v)| v)
     }
 
@@ -408,13 +405,9 @@ impl TransactionManager {
     /// removing the cache entry. Useful when multiple bridge sites
     /// derive views from the same inbound message (e.g., NOTIFY routes
     /// that emit both a transaction event and a SubscriptionUpdate).
-    pub fn peek_inbound_bytes(
-        &self,
-        key: &TransactionKey,
-    ) -> Option<Arc<bytes::Bytes>> {
-        self.pending_inbound_bytes
-            .get(key)
-            .map(|v| Arc::clone(v.value()))
+    pub fn peek_inbound_bytes(&self, key: &TransactionKey) -> Option<bytes::Bytes> {
+        // `Bytes::clone` is a refcount bump — no heap alloc.
+        self.pending_inbound_bytes.get(key).map(|r| r.value().clone())
     }
 
     /// Install a forwarder for transport-side events (pong received,

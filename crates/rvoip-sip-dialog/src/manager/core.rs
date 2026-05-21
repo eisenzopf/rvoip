@@ -487,7 +487,7 @@ impl DialogManager {
     pub async fn run_identity_verification(
         &self,
         event: &crate::events::SessionCoordinationEvent,
-        raw_request: &Option<std::sync::Arc<bytes::Bytes>>,
+        raw_request: &Option<bytes::Bytes>,
     ) -> IdentityVerificationDecision {
         // No verifier installed → annotate as `None`, never reject.
         let verifier = match self.identity_verifier() {
@@ -514,9 +514,9 @@ impl DialogManager {
         // re-serialising the parsed Request only when the transport
         // cache missed (synthetic / mock transport paths).
         let raw_bytes = raw_request.clone().unwrap_or_else(|| {
-            std::sync::Arc::new(bytes::Bytes::from(
+            bytes::Bytes::from(
                 rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
-            ))
+            )
         });
 
         let outcome = match identity_opt {

@@ -334,9 +334,9 @@ impl DialogEventAdapter {
                             .and_then(|m| m.transaction_manager().take_inbound_bytes(transaction_id))
                     })
                     .unwrap_or_else(|| {
-                        std::sync::Arc::new(bytes::Bytes::from(
+                        bytes::Bytes::from(
                             rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
-                        ))
+                        )
                     });
                 Some(RvoipCrossCrateEvent::DialogToSession(
                     DialogToSessionEvent::IncomingCall {

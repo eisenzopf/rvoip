@@ -80,10 +80,10 @@ use super::TransactionManager;
 pub async fn handle_transport_message(
     event: TransportEvent,
     transport: &Arc<dyn Transport>,
-    client_transactions: &Arc<Mutex<HashMap<TransactionKey, Box<dyn ClientTransaction + Send>>>>,
-    server_transactions: &Arc<Mutex<HashMap<TransactionKey, Arc<dyn ServerTransaction>>>>,
+    client_transactions: &Arc<dashmap::DashMap<TransactionKey, crate::transaction::manager::ArcClientTransaction>>,
+    server_transactions: &Arc<dashmap::DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
     events_tx: &mpsc::Sender<TransactionEvent>,
-    event_subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
+    event_subscribers: &Arc<arc_swap::ArcSwap<Vec<mpsc::Sender<TransactionEvent>>>>,
     manager: &TransactionManager,
 ) -> Result<()> {
     match event {
@@ -108,37 +108,39 @@ pub async fn handle_transport_message(
 
                     // Handle ACK specially
                     if request.method() == Method::Ack {
-                        // Clone the request before we start working with it
                         let ack_request = request.clone();
 
-                        // Get a lock on server transactions
-                        let server_txs = server_transactions.lock().await;
-
-                        // Check if we have a direct matching transaction
-                        let tx_opt = if server_txs.contains_key(&tx_id) {
-                            Some(server_txs[&tx_id].clone())
+                        // DashMap path — either direct key hit or a
+                        // dialog-identifier scan via .iter(). Neither
+                        // holds across `.await`.
+                        let tx_opt = if let Some(entry) = server_transactions.get(&tx_id) {
+                            Some(entry.value().clone())
                         } else {
-                            // If not directly matched, try to find a matching INVITE transaction
-                            // based on dialog identifiers (Call-ID, From tag, To tag)
-                            let matching_tx = server_txs.iter()
-                                .filter(|(key, tx)| {
-                                    // Only look at INVITE server transactions
-                                    key.method() == &Method::Invite && key.is_server()
+                            server_transactions
+                                .iter()
+                                .filter(|r| {
+                                    r.key().method() == &Method::Invite && r.key().is_server()
                                 })
-                                .find_map(|(key, tx)| {
-                                    // Try to match based on dialog identifiers
-                                    if let (Some(req_call_id), Some(ack_call_id)) = (tx.original_request_call_id(), ack_request.call_id()) {
+                                .find_map(|r| {
+                                    let tx = r.value();
+                                    if let (Some(req_call_id), Some(ack_call_id)) =
+                                        (tx.original_request_call_id(), ack_request.call_id())
+                                    {
                                         if req_call_id == ack_call_id.value() {
-                                            // Found potential match by Call-ID, now check From/To tags
-                                            if let (Some(req_from), Some(ack_from)) = (tx.original_request_from_tag(), ack_request.from_tag()) {
+                                            if let (Some(req_from), Some(ack_from)) = (
+                                                tx.original_request_from_tag(),
+                                                ack_request.from_tag(),
+                                            ) {
                                                 if req_from == ack_from {
-                                                    // If To tag exists in both, it should match
-                                                    let to_matches = match (tx.original_request_to_tag(), ack_request.to_tag()) {
-                                                        (Some(req_to), Some(ack_to)) => req_to == ack_to,
-                                                        // In early dialogs, original request might not have To tag
-                                                        _ => true
+                                                    let to_matches = match (
+                                                        tx.original_request_to_tag(),
+                                                        ack_request.to_tag(),
+                                                    ) {
+                                                        (Some(req_to), Some(ack_to)) => {
+                                                            req_to == ack_to
+                                                        }
+                                                        _ => true,
                                                     };
-
                                                     if to_matches {
                                                         debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
                                                         return Some(tx.clone());
@@ -148,9 +150,7 @@ pub async fn handle_transport_message(
                                         }
                                     }
                                     None
-                                });
-
-                            matching_tx
+                                })
                         };
 
                         // If we found a transaction, process the ACK
@@ -161,11 +161,7 @@ pub async fn handle_transport_message(
                             if tx_kind == TransactionKind::InviteServer {
                                 debug!(%tx_id, "Processing ACK for server INVITE transaction");
 
-                                // Clone what we need so we can release the lock
                                 let tx_clone = tx.clone();
-
-                                // Drop the lock before async operations
-                                drop(server_txs);
 
                                 // Use a timeout to avoid blocking indefinitely if the transaction is shutting down
                                 match tokio::time::timeout(
@@ -208,16 +204,10 @@ pub async fn handle_transport_message(
                                         // Fall through to stray ACK handling
                                     }
                                 }
-                            } else {
-                                // Transaction is not an INVITE server transaction
-                                drop(server_txs);
-                                // Fall through to stray ACK handling
                             }
-                        } else {
-                            // No matching transaction found
-                            drop(server_txs);
-                            // Fall through to stray ACK handling
+                            // else: not an INVITE server transaction → fall through
                         }
+                        // else: no matching transaction → fall through
 
                         // Handle as stray ACK if we reached this point
                         debug!("Received ACK that doesn't match any server transaction");
@@ -284,22 +274,19 @@ pub async fn handle_transport_message(
 
                         debug!("Looking for INVITE transaction with key: {}", invite_tx_id);
 
-                        // Check if we have a matching INVITE transaction with the same branch
-                        let tx_clone_opt = {
-                            let server_txs = server_transactions.lock().await;
-                            if server_txs.contains_key(&invite_tx_id) {
-                                let tx = server_txs.get(&invite_tx_id).unwrap();
+                        // Check if we have a matching INVITE transaction with the same branch.
+                        // Clone the Arc out of the DashMap shard so the shard
+                        // guard drops before any subsequent `.await`.
+                        let tx_clone_opt = server_transactions
+                            .get(&invite_tx_id)
+                            .and_then(|r| {
+                                let tx = r.value();
                                 if tx.kind() == TransactionKind::InviteServer {
-                                    // Clone the transaction while we have the lock
                                     Some((tx.clone(), invite_tx_id.clone()))
                                 } else {
                                     None
                                 }
-                            } else {
-                                None
-                            }
-                            // Lock is released at the end of this block
-                        };
+                            });
 
                         if let Some((tx, tx_id_clone)) = tx_clone_opt {
                             // Now proceed with the transaction outside the lock
@@ -418,36 +405,24 @@ pub async fn handle_transport_message(
                         return Ok(());
                     }
 
-                    // Handle regular request retransmission and new requests
-                    let mut server_txs = server_transactions.lock().await;
+                    // Handle regular request retransmission and new requests.
+                    // Clone the Arc out of the DashMap shard before any `.await`.
+                    let existing_tx = server_transactions
+                        .get(&tx_id)
+                        .map(|r| r.value().clone());
 
-                    // Check if we have a matching transaction
-                    if server_txs.contains_key(&tx_id) {
+                    if let Some(tx) = existing_tx {
                         debug!(%tx_id, "Processing retransmission of existing request");
 
-                        // Check transaction lifecycle before processing
-                        let lifecycle = server_txs[&tx_id].data().get_lifecycle();
+                        let lifecycle = tx.data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
                             debug!(%tx_id, ?lifecycle, "Skipping request processing for non-active transaction");
-                            drop(server_txs);
                             return Ok(());
                         }
 
-                        // Process the request while still holding the lock
-                        // The implementation of process_request will handle async operations properly
-                        let result = server_txs[&tx_id].process_request(request.clone()).await;
-
-                        // Now we can drop the lock
-                        drop(server_txs);
-
-                        // Check for errors
-                        result?;
-
+                        tx.process_request(request.clone()).await?;
                         return Ok(());
                     }
-
-                    // Drop the lock
-                    drop(server_txs);
 
                     // If we get here, this is a new request
                     debug!(%tx_id, method = ?request.method(), "Received new request, delegate to proper handler");
@@ -472,32 +447,24 @@ pub async fn handle_transport_message(
                             }
                         };
 
-                    // Look up the client transaction using the same pattern
-                    let mut client_txs = client_transactions.lock().await;
+                    // Look up the client transaction — clone Arc out of shard.
+                    let client_tx_arc = client_transactions
+                        .get(&tx_id)
+                        .map(|r| r.value().clone());
 
-                    // Check if we have a matching transaction
-                    if client_txs.contains_key(&tx_id) {
-                        let tx_kind = client_txs[&tx_id].kind();
-                        let remote_addr = client_txs[&tx_id].remote_addr();
+                    if let Some(tx) = client_tx_arc {
+                        let tx_kind = tx.kind();
+                        let remote_addr = tx.remote_addr();
 
                         debug!(%tx_id, status = ?response.status(), "Routing response to client transaction");
 
-                        // Check transaction lifecycle before processing
-                        let lifecycle = client_txs[&tx_id].data().get_lifecycle();
+                        let lifecycle = tx.data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
                             debug!(%tx_id, ?lifecycle, "Skipping response processing for non-active transaction");
-                            drop(client_txs);
                             return Ok(());
                         }
 
-                        // Process the response while still holding the lock
-                        let result = client_txs[&tx_id].process_response(response.clone()).await;
-
-                        // Now we can drop the lock
-                        drop(client_txs);
-
-                        // Check for errors
-                        result?;
+                        tx.process_response(response.clone()).await?;
 
                         // Automatic ACK for non-2xx responses to INVITE
                         if !response.status().is_success()
@@ -535,9 +502,6 @@ pub async fn handle_transport_message(
 
                         return Ok(());
                     }
-
-                    // Drop the lock
-                    drop(client_txs);
 
                     // If we get here, this is a stray response
                     debug!(status=%response.status(), "Received stray response that doesn't match any client transaction");
@@ -804,8 +768,8 @@ impl TransactionManager {
                     if let Some(key) = crate::transaction::utils::transaction_key_from_message(
                         &message,
                     ) {
-                        self.pending_inbound_bytes
-                            .insert(key, std::sync::Arc::clone(bytes));
+                        // `Bytes::clone` is a refcount bump — no heap alloc.
+                        self.pending_inbound_bytes.insert(key, bytes.clone());
                     }
                 }
                 self.handle_message(message, source, destination).await
@@ -892,24 +856,18 @@ impl TransactionManager {
         if let Some(key) = crate::transaction::utils::transaction_key_from_message(
             &Message::Request(request.clone()),
         ) {
-            // Check for existing server transaction
-            let server_txs = self.server_transactions.lock().await;
-            if let Some(transaction) = server_txs.get(&key) {
-                // Check transaction lifecycle before processing
+            // Check for existing server transaction. Clone the Arc
+            // out of the DashMap shard so we don't hold the shard
+            // guard across `process_request().await`.
+            let existing = self.server_transactions.get(&key).map(|r| r.value().clone());
+            if let Some(transaction) = existing {
                 let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
                     debug!(%key, ?lifecycle, "Skipping request processing for non-active transaction");
-                    drop(server_txs);
                     return Ok(());
                 }
-
-                let tx = transaction.clone();
-                drop(server_txs);
-
-                // Process the request in the existing transaction
-                return tx.process_request(request).await;
+                return transaction.process_request(request).await;
             }
-            drop(server_txs);
         }
 
         // No existing transaction found, create a new one
@@ -984,67 +942,56 @@ impl TransactionManager {
         ) {
             debug!(id=%key, "🔍 RESPONSE HANDLER: Generated transaction key from response");
 
-            // Debug the current client transactions
-            let client_txs_guard = self.client_transactions.lock().await;
-            let client_keys: Vec<String> = client_txs_guard.keys().map(|k| k.to_string()).collect();
-            debug!(
-                "🔍 RESPONSE HANDLER: Current client transactions: {:?}",
-                client_keys
-            );
-            drop(client_txs_guard);
+            // Debug the current client transactions (gated on debug level)
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let client_keys: Vec<String> = self
+                    .client_transactions
+                    .iter()
+                    .map(|r| r.key().to_string())
+                    .collect();
+                debug!(
+                    "🔍 RESPONSE HANDLER: Current client transactions: {:?}",
+                    client_keys
+                );
+            }
 
             debug!(id=%key, "Found matching transaction for response");
 
-            // Check that the key is for a client transaction (not is_server)
             if key.is_server() {
-                // This is a response but the transaction key is for a server - this is a mismatch
                 return Err(Error::Other(format!(
                     "Received response but matching transaction key {} is for a server transaction",
                     key
                 )));
             }
 
-            // First try to send directly to the transaction via events_tx
-            // Use the original approach but with larger channel capacity to prevent errors
-            let mut client_txs_guard = self.client_transactions.lock().await;
+            // Clone the Arc<dyn ClientTransaction> out of the DashMap
+            // shard. No outer guard is held across `process_response`.
+            // The transaction stays in the map; we just hold an Arc.
+            let tx_arc = self.client_transactions.get(&key).map(|r| r.value().clone());
             let mut processed = false;
 
-            if client_txs_guard.contains_key(&key) {
+            if let Some(transaction) = tx_arc {
                 debug!(
                     "🔍 RESPONSE HANDLER: Found matching client transaction, processing response"
                 );
 
-                // Check transaction lifecycle before processing
-                let lifecycle = client_txs_guard[&key].data().get_lifecycle();
+                let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
                     debug!(%key, ?lifecycle, "Skipping response processing for non-active transaction");
-                    drop(client_txs_guard);
                     return Ok(());
                 }
 
-                let transaction = client_txs_guard.remove(&key).unwrap();
-
-                // Drop the lock so we can do async operations
-                drop(client_txs_guard);
-
-                // Process the response - should succeed now with larger channel capacity
                 if let Err(e) = transaction.process_response(response.clone()).await {
-                    warn!(id=%key, error=%e, "Error processing response - this should be rare now");
+                    warn!(id=%key, error=%e, "Error processing response");
                 } else {
                     debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
                     processed = true;
                 }
-
-                // Put the transaction back (if it's not terminated)
-                let mut client_txs_guard = self.client_transactions.lock().await;
-                client_txs_guard.insert(key.clone(), transaction);
-                drop(client_txs_guard);
             } else {
                 debug!(
                     "🔍 RESPONSE HANDLER: No matching client transaction found for key {}",
                     key
                 );
-                drop(client_txs_guard);
             }
 
             // If not processed via transaction, still send the event
@@ -1143,54 +1090,50 @@ impl TransactionManager {
         ) {
             let invite_key = key.with_method(Method::Invite);
 
-            let server_txs = self.server_transactions.lock().await;
-            if let Some(transaction) = server_txs.get(&invite_key) {
+            let invite_tx = self
+                .server_transactions
+                .get(&invite_key)
+                .map(|r| r.value().clone());
+            if let Some(transaction) = invite_tx {
                 if transaction.state() != TransactionState::Confirmed {
-                    // Check transaction lifecycle before processing
                     let lifecycle = transaction.data().get_lifecycle();
                     if !matches!(lifecycle, TransactionLifecycle::Active) {
                         debug!(%invite_key, ?lifecycle, "Skipping ACK processing for non-active transaction");
-                        drop(server_txs);
                         return Ok(());
                     }
-
-                    // This is an ACK for a non-2xx response, process it in the transaction
-                    let tx = transaction.clone();
-                    drop(server_txs);
-
                     debug!(
                         "Processing ACK for non-2xx response in transaction {}",
                         invite_key
                     );
-                    return tx.process_request(request).await;
+                    return transaction.process_request(request).await;
                 }
             }
-            drop(server_txs);
         }
 
         // RFC 3261 Section 17.1.1.3: For 2xx responses, ACK has different branch
-        // Use dialog-based matching (Call-ID, From tag, To tag)
-        let server_txs = self.server_transactions.lock().await;
-
-        let matching_tx = server_txs.iter()
-            .filter(|(key, _tx)| {
-                // Only look at INVITE server transactions
-                key.method() == &Method::Invite && key.is_server()
-            })
-            .find_map(|(key, tx)| {
-                // Try to match based on dialog identifiers
-                if let (Some(req_call_id), Some(ack_call_id)) = (tx.original_request_call_id(), request.call_id()) {
+        // Use dialog-based matching (Call-ID, From tag, To tag).
+        // DashMap iter — no `.await` inside, safe.
+        let matching_tx = self
+            .server_transactions
+            .iter()
+            .filter(|r| r.key().method() == &Method::Invite && r.key().is_server())
+            .find_map(|r| {
+                let tx = r.value();
+                if let (Some(req_call_id), Some(ack_call_id)) =
+                    (tx.original_request_call_id(), request.call_id())
+                {
                     if req_call_id == ack_call_id.value() {
-                        // Found potential match by Call-ID, now check From/To tags
-                        if let (Some(req_from), Some(ack_from)) = (tx.original_request_from_tag(), request.from_tag()) {
+                        if let (Some(req_from), Some(ack_from)) =
+                            (tx.original_request_from_tag(), request.from_tag())
+                        {
                             if req_from == ack_from {
-                                // If To tag exists in both, it should match
-                                let to_matches = match (tx.original_request_to_tag(), request.to_tag()) {
+                                let to_matches = match (
+                                    tx.original_request_to_tag(),
+                                    request.to_tag(),
+                                ) {
                                     (Some(req_to), Some(ack_to)) => req_to == ack_to,
-                                    // In early dialogs, original request might not have To tag
-                                    _ => true
+                                    _ => true,
                                 };
-
                                 if to_matches {
                                     debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
                                     return Some(tx.clone());
@@ -1204,7 +1147,6 @@ impl TransactionManager {
 
         if let Some(tx) = matching_tx {
             let tx_id = tx.id().clone();
-            drop(server_txs);
 
             debug!(
                 "Found ACK for 2xx response using dialog-based matching: {}",
@@ -1223,8 +1165,6 @@ impl TransactionManager {
 
             debug!("Emitted AckReceived event for dialog-core to handle 2xx ACK");
             return Ok(());
-        } else {
-            drop(server_txs);
         }
 
         // No matching INVITE transaction found, this is a stray ACK

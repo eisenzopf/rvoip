@@ -281,12 +281,13 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
 /// # Returns
 /// * `Result<Request>` - The original request or an error
 pub async fn get_transaction_request(
-    transactions: &Mutex<HashMap<TransactionKey, Box<dyn ClientTransaction + Send>>>,
+    transactions: &dashmap::DashMap<TransactionKey, crate::transaction::manager::ArcClientTransaction>,
     tx_id: &TransactionKey,
 ) -> Result<Request> {
-    let transactions_lock = transactions.lock().await;
-
-    if let Some(tx) = transactions_lock.get(tx_id) {
+    // Extract the Arc<dyn ClientTransaction> out of the shard so the
+    // shard guard releases before we await on per-tx state.
+    let tx_arc = transactions.get(tx_id).map(|r| r.value().clone());
+    if let Some(tx) = tx_arc {
         if let Some(client_tx) = tx.as_client_transaction() {
             if let Some(request) = client_tx.original_request().await {
                 return Ok(request);
