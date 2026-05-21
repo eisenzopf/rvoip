@@ -699,18 +699,13 @@ mod tests {
             None,
         )?;
 
-        // Create a HashMap to store the transaction
-        let mut transactions = HashMap::new();
+        // DashMap matches the new ArcClientTransaction-keyed
+        // TransactionManager storage.
+        let transactions: dashmap::DashMap<TransactionKey, std::sync::Arc<dyn ClientTransaction>> =
+            dashmap::DashMap::new();
         let tx_id = transaction.id().clone();
-        transactions.insert(
-            tx_id.clone(),
-            Box::new(transaction) as Box<dyn ClientTransaction + Send>,
-        );
+        transactions.insert(tx_id.clone(), std::sync::Arc::new(transaction));
 
-        // Wrap in a Mutex
-        let transactions = Mutex::new(transactions);
-
-        // Test getting the request
         let retrieved_request = get_transaction_request(&transactions, &tx_id).await?;
 
         // Verify it's the same request
@@ -1240,9 +1235,15 @@ mod tests {
             // Create a subscription directly
             let (hook_tx, mut hook_rx) = mpsc::channel(20);
 
-            // Register our subscription manually for more control
+            // Register our subscription manually for more control.
+            // ArcSwap RCU (was a Mutex<Vec<Sender>> before the perf pass).
             let subscribers = manager.event_subscribers.clone();
-            subscribers.lock().await.push(hook_tx);
+            subscribers.rcu(|current| {
+                let mut next = Vec::with_capacity(current.len() + 1);
+                next.extend(current.iter().cloned());
+                next.push(hook_tx.clone());
+                next
+            });
 
             // Create a background task to forward events
             tokio::spawn(async move {
