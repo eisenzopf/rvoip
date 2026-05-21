@@ -72,8 +72,14 @@ pub struct ClientTransactionData {
     /// Transaction lifecycle state for robust shutdown coordination
     pub lifecycle: Arc<std::sync::atomic::AtomicU8>, // Using AtomicU8 for TransactionLifecycle
 
-    /// Original request that initiated this transaction
-    pub request: Arc<Mutex<Request>>,
+    /// Original request that initiated this transaction.
+    ///
+    /// `Arc<Request>` not `Arc<Mutex<Request>>` — the original request
+    /// is immutable after construction (RFC 3261 retransmissions send
+    /// the same request bytes). Every previous `data.request.lock().await`
+    /// was a pointless mutex acquire on read-only data, hit per timer
+    /// fire, per retransmit, per state action.
+    pub request: Arc<Request>,
 
     /// Last response received for this transaction
     pub last_response: Arc<Mutex<Option<Response>>>,

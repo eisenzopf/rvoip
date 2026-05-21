@@ -281,7 +281,7 @@ impl ServerNonInviteTransaction {
             id: id.clone(),
             state: Arc::new(AtomicTransactionState::new(TransactionState::Trying)),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
-            request: Arc::new(Mutex::new(request.clone())),
+            request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
             transport,
@@ -400,7 +400,7 @@ impl TransactionAsync for ServerNonInviteTransaction {
     fn original_request<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>> {
-        Box::pin(async move { Some(self.data.request.lock().await.clone()) })
+        Box::pin(async move { Some((*self.data.request).clone()) })
     }
 
     fn last_response<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>> {
@@ -513,9 +513,8 @@ impl ServerTransaction for ServerNonInviteTransaction {
 
     // Implement the synchronous original request accessor
     fn original_request_sync(&self) -> Option<Request> {
-        // Try to get the original request from the data structure's request field
-        // We use try_lock() to avoid blocking if the lock is held
-        self.data.request.try_lock().ok().map(|req| req.clone())
+        // `Arc<Request>` — no lock needed.
+        Some((*self.data.request).clone())
     }
 }
 
@@ -664,7 +663,7 @@ mod tests {
         let mut setup = setup_test_environment(Method::Register, "sip:registrar.example.com").await;
 
         // Create a provisional response
-        let original_request = setup.transaction.data.request.lock().await.clone();
+        let original_request = (*setup.transaction.data.request).clone();
         let prov_response = build_simple_response(StatusCode::Trying, &original_request);
 
         // Send the response
@@ -716,7 +715,7 @@ mod tests {
         let mut setup = setup_test_environment(Method::Register, "sip:registrar.example.com").await;
 
         // Create a final response
-        let original_request = setup.transaction.data.request.lock().await.clone();
+        let original_request = (*setup.transaction.data.request).clone();
         let final_response = build_simple_response(StatusCode::Ok, &original_request);
 
         // Send the response
@@ -772,7 +771,7 @@ mod tests {
         let mut setup = setup_test_environment(Method::Register, "sip:registrar.example.com").await;
 
         // Create and send final response
-        let original_request = setup.transaction.data.request.lock().await.clone();
+        let original_request = (*setup.transaction.data.request).clone();
         let final_response = build_simple_response(StatusCode::Ok, &original_request);
         setup
             .transaction

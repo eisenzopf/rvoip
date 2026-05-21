@@ -72,8 +72,9 @@ pub struct ServerTransactionData {
     /// Transaction lifecycle state for robust shutdown coordination
     pub lifecycle: Arc<std::sync::atomic::AtomicU8>, // Using AtomicU8 for TransactionLifecycle
 
-    /// Original request that initiated this transaction
-    pub request: Arc<Mutex<Request>>,
+    /// Original request that initiated this transaction.
+    /// `Arc<Request>` — see `client/data.rs` for rationale.
+    pub request: Arc<Request>,
 
     /// Last response sent by this transaction
     pub last_response: Arc<Mutex<Option<Response>>>,

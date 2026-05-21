@@ -273,7 +273,7 @@ impl ClientNonInviteLogic {
 
         // Send the initial request
         debug!(id=%tx_id, "ClientNonInviteLogic: Sending initial request in Trying state");
-        let request_guard = data.request.lock().await;
+        let request_guard: &Request = &data.request;
         if let Err(e) = data
             .transport
             .send_message(Message::Request(request_guard.clone()), data.remote_addr)
@@ -319,7 +319,7 @@ impl ClientNonInviteLogic {
                 debug!(id=%tx_id, "Timer E triggered, retransmitting request");
 
                 // Retransmit the request
-                let request_guard = data.request.lock().await;
+                let request_guard: &Request = &data.request;
                 if let Err(e) = data
                     .transport
                     .send_message(Message::Request(request_guard.clone()), data.remote_addr)
@@ -441,7 +441,7 @@ impl ClientNonInviteLogic {
         debug!(id=%tx_id, status=%response.status(), state=?current_state, "🔍 DEBUG: process_response called");
 
         // Get the original method from the request to validate the response
-        let request_guard = data.request.lock().await;
+        let request_guard: &Request = &data.request;
         let original_method = validators::get_method_from_request(&request_guard);
         drop(request_guard);
 
@@ -697,7 +697,7 @@ impl ClientNonInviteTransaction {
             id: id.clone(),
             state: Arc::new(AtomicTransactionState::new(TransactionState::Initial)),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
-            request: Arc::new(Mutex::new(request.clone())),
+            request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
             transport,
@@ -813,11 +813,9 @@ impl ClientTransaction for ClientNonInviteTransaction {
 
     // Implement the missing original_request method
     fn original_request(&self) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + '_>> {
+        // `Arc<Request>` — no mutex acquire needed.
         let request_arc = self.data.request.clone();
-        Box::pin(async move {
-            let req = request_arc.lock().await;
-            Some(req.clone()) // Clone the request out of the Mutex guard
-        })
+        Box::pin(async move { Some((*request_arc).clone()) })
     }
 
     // Add the required last_response implementation for ClientTransaction
@@ -975,8 +973,8 @@ impl TransactionAsync for ClientNonInviteTransaction {
     fn original_request<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>> {
-        let request_mutex = self.data.request.clone();
-        Box::pin(async move { Some(request_mutex.lock().await.clone()) })
+        let request_arc = self.data.request.clone();
+        Box::pin(async move { Some((*request_arc).clone()) })
     }
 
     fn last_response<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>> {
@@ -1233,7 +1231,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(setup.transaction.state(), TransactionState::Trying);
 
-        let original_request_clone = setup.transaction.data.request.lock().await.clone();
+        let original_request_clone = (*setup.transaction.data.request).clone();
         let prov_response = build_simple_response(StatusCode::Ringing, &original_request_clone);
 
         setup
@@ -1302,7 +1300,7 @@ mod tests {
             _ => panic!("Expected StateChanged event"),
         }
 
-        let original_request_clone = setup.transaction.data.request.lock().await.clone();
+        let original_request_clone = (*setup.transaction.data.request).clone();
         let success_response = build_simple_response(StatusCode::Ok, &original_request_clone);
 
         setup

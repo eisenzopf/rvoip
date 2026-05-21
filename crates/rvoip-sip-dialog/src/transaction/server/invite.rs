@@ -218,7 +218,7 @@ impl ServerInviteLogic {
 
                 if should_send_100 {
                     // Create 100 Trying response
-                    let original_request = data.request.lock().await;
+                    let original_request: &Request = &data.request;
                     let request = &*original_request;
                     let mut trying_response =
                         rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
@@ -836,7 +836,7 @@ impl ServerInviteTransaction {
             id: id.clone(),
             state: Arc::new(AtomicTransactionState::new(TransactionState::Proceeding)),
             lifecycle: Arc::new(std::sync::atomic::AtomicU8::new(0)), // TransactionLifecycle::Active
-            request: Arc::new(Mutex::new(request.clone())),
+            request: Arc::new(request.clone()),
             last_response: Arc::new(Mutex::new(None)),
             remote_addr,
             transport,
@@ -971,7 +971,7 @@ impl TransactionAsync for ServerInviteTransaction {
     fn original_request<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Option<Request>> + Send + 'a>> {
-        Box::pin(async move { Some(self.data.request.lock().await.clone()) })
+        Box::pin(async move { Some((*self.data.request).clone()) })
     }
 
     fn last_response<'a>(&'a self) -> Pin<Box<dyn Future<Output = Option<Response>> + Send + 'a>> {
@@ -1097,9 +1097,8 @@ impl ServerTransaction for ServerInviteTransaction {
 
     // Implement the synchronous original request accessor
     fn original_request_sync(&self) -> Option<Request> {
-        // Try to get the original request from the data structure's request field
-        // We use try_lock() to avoid blocking if the lock is held
-        self.data.request.try_lock().ok().map(|req| req.clone())
+        // `Arc<Request>` — no lock needed.
+        Some((*self.data.request).clone())
     }
 }
 
@@ -1249,7 +1248,7 @@ mod tests {
         let mut setup = setup_test_environment().await;
 
         // Create a provisional response
-        let original_request = setup.transaction.data.request.lock().await.clone();
+        let original_request = (*setup.transaction.data.request).clone();
         let prov_response = build_simple_response(StatusCode::Ringing, &original_request);
 
         // Send the response
@@ -1286,7 +1285,7 @@ mod tests {
         let mut setup = setup_test_environment().await;
 
         // Create a final response
-        let original_request = setup.transaction.data.request.lock().await.clone();
+        let original_request = (*setup.transaction.data.request).clone();
         let final_response = build_simple_response(StatusCode::NotFound, &original_request);
 
         // Send the response
@@ -1350,7 +1349,7 @@ mod tests {
         let mut setup = setup_test_environment().await;
 
         // Create a 2xx response
-        let original_request = setup.transaction.data.request.lock().await.clone();
+        let original_request = (*setup.transaction.data.request).clone();
         let success_response = build_simple_response(StatusCode::Ok, &original_request);
 
         // Send the response
@@ -1379,7 +1378,7 @@ mod tests {
         let mut setup = setup_test_environment().await;
 
         // Create and send a final error response
-        let original_request = setup.transaction.data.request.lock().await.clone();
+        let original_request = (*setup.transaction.data.request).clone();
         let final_response = build_simple_response(StatusCode::NotFound, &original_request);
         setup
             .transaction

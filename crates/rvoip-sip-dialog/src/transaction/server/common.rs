@@ -111,7 +111,7 @@ pub trait CommonServerTransaction {
         let data = self.data().clone();
 
         Box::pin(async move {
-            let request_guard = data.request.lock().await;
+            let request_guard: &Request = &data.request;
             request_guard.clone()
         })
     }
