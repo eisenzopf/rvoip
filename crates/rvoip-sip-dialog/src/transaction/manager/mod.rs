@@ -174,10 +174,13 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
+use dashmap::DashMap;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::sleep;
 use tracing::{debug, error, info, trace, warn};
@@ -217,7 +220,14 @@ use crate::transaction::{
 // Type aliases without Sync requirement
 type BoxedTransaction = Box<dyn Transaction + Send>;
 /// Type alias for a boxed client transaction
-type BoxedClientTransaction = Box<dyn ClientTransaction + Send>;
+/// Per-transaction handle stored in `client_transactions`.
+///
+/// `Arc<dyn ClientTransaction>` so high-traffic call sites can clone
+/// the handle out of the map and drop the outer shard guard before any
+/// `.await` — eliminates the hold-across-await pattern that pinned the
+/// whole map while one transaction was doing transport I/O. Cheap to
+/// clone (atomic refcount bump).
+pub(crate) type ArcClientTransaction = Arc<dyn ClientTransaction>;
 /// Type alias for an Arc wrapped server transaction
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
@@ -290,26 +300,39 @@ fn sip_diagnostics_enabled() -> bool {
 pub struct TransactionManager {
     /// Transport to use for messages
     transport: Arc<dyn Transport>,
-    /// Active client transactions
-    client_transactions: Arc<Mutex<HashMap<TransactionKey, BoxedClientTransaction>>>,
-    /// Active server transactions
-    server_transactions: Arc<Mutex<HashMap<TransactionKey, Arc<dyn ServerTransaction>>>>,
-    /// Transaction destinations - maps transaction IDs to their destinations
-    transaction_destinations: Arc<Mutex<HashMap<TransactionKey, SocketAddr>>>,
+    /// Active client transactions. DashMap for sharded lock-free reads
+    /// across cores; per-transaction state is owned by the
+    /// `Arc<dyn ClientTransaction>` itself (its impls hold their own
+    /// internal `Arc<Mutex<...>>` over data + timers + state machine).
+    /// Hot-path call sites clone the Arc out, drop the shard guard,
+    /// then await — no map-wide serialization on transport I/O.
+    client_transactions: Arc<DashMap<TransactionKey, ArcClientTransaction>>,
+    /// Active server transactions. Same pattern as `client_transactions`.
+    server_transactions: Arc<DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
+    /// Transaction destinations — `transaction_id → SocketAddr`.
+    /// DashMap for sharded lock-free reads.
+    transaction_destinations: Arc<DashMap<TransactionKey, SocketAddr>>,
     /// Event sender
     events_tx: mpsc::Sender<TransactionEvent>,
-    /// Additional event subscribers
-    event_subscribers: Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
-    /// Maps subscribers to transactions they're interested in
-    subscriber_to_transactions: Arc<Mutex<HashMap<usize, Vec<TransactionKey>>>>,
-    /// Maps transactions to subscribers interested in them
-    transaction_to_subscribers: Arc<Mutex<HashMap<TransactionKey, Vec<usize>>>>,
-    /// Subscriber counter for assigning unique IDs
-    next_subscriber_id: Arc<Mutex<usize>>,
+    /// Additional event subscribers. ArcSwap so the broadcast hot path
+    /// (every transaction state change, every retransmit) reads via a
+    /// single atomic load instead of acquiring an async mutex. Writes
+    /// (subscribe/unsubscribe) use copy-on-write RCU.
+    event_subscribers: Arc<ArcSwap<Vec<mpsc::Sender<TransactionEvent>>>>,
+    /// Maps subscribers to transactions they're interested in.
+    /// DashMap — guards never held across `.await`.
+    subscriber_to_transactions: Arc<DashMap<usize, Vec<TransactionKey>>>,
+    /// Maps transactions to subscribers interested in them.
+    /// DashMap — guards never held across `.await`.
+    transaction_to_subscribers: Arc<DashMap<TransactionKey, Vec<usize>>>,
+    /// Subscriber counter for assigning unique IDs. `AtomicUsize` —
+    /// the previous `Mutex<usize>` only ever did fetch-and-increment.
+    next_subscriber_id: Arc<AtomicUsize>,
     /// Transport message channel
     transport_rx: Arc<Mutex<mpsc::Receiver<TransportEvent>>>,
-    /// Running flag
-    running: Arc<Mutex<bool>>,
+    /// Running flag. `AtomicBool` — the previous `Mutex<bool>` was
+    /// locked per-iteration of the message loop.
+    running: Arc<AtomicBool>,
     /// Timer configuration
     timer_settings: TimerSettings,
     /// Centralized timer manager
@@ -338,7 +361,7 @@ pub struct TransactionManager {
     /// form without an intermediate `Message::to_bytes()` round-trip.
     /// See `SIP_API_DESIGN_2.md` §7.5.
     pub(crate) pending_inbound_bytes:
-        Arc<dashmap::DashMap<TransactionKey, Arc<bytes::Bytes>>>,
+        Arc<DashMap<TransactionKey, bytes::Bytes>>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -461,15 +484,15 @@ impl TransactionManager {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
 
-        let client_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let server_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
-        let event_subscribers = Arc::new(Mutex::new(Vec::new()));
-        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
-        let next_subscriber_id = Arc::new(Mutex::new(0));
+        let client_transactions = Arc::new(DashMap::new());
+        let server_transactions = Arc::new(DashMap::new());
+        let transaction_destinations = Arc::new(DashMap::new());
+        let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
-        let running = Arc::new(Mutex::new(false));
+        let running = Arc::new(AtomicBool::new(false));
 
         let timer_settings = build_timer_settings();
 
@@ -570,15 +593,15 @@ impl TransactionManager {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
 
-        let client_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let server_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
-        let event_subscribers = Arc::new(Mutex::new(Vec::new()));
-        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
-        let next_subscriber_id = Arc::new(Mutex::new(0));
+        let client_transactions = Arc::new(DashMap::new());
+        let server_transactions = Arc::new(DashMap::new());
+        let transaction_destinations = Arc::new(DashMap::new());
+        let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
-        let running = Arc::new(Mutex::new(false));
+        let running = Arc::new(AtomicBool::new(false));
 
         // Create timer settings
         let timer_settings = timer_settings.unwrap_or_default();
@@ -712,15 +735,15 @@ impl TransactionManager {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
 
-        let client_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let server_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
-        let event_subscribers = Arc::new(Mutex::new(Vec::new()));
-        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
-        let next_subscriber_id = Arc::new(Mutex::new(0));
+        let client_transactions = Arc::new(DashMap::new());
+        let server_transactions = Arc::new(DashMap::new());
+        let transaction_destinations = Arc::new(DashMap::new());
+        let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
-        let running = Arc::new(Mutex::new(false));
+        let running = Arc::new(AtomicBool::new(false));
 
         let timer_settings = build_timer_settings();
 
@@ -799,16 +822,16 @@ impl TransactionManager {
         timer_settings_opt: Option<TimerSettings>,
     ) -> Self {
         let (events_tx, _) = mpsc::channel(100); // Dummy receiver, will be ignored
-        let client_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let server_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
-        let event_subscribers = Arc::new(Mutex::new(Vec::new()));
-        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
-        let next_subscriber_id = Arc::new(Mutex::new(0));
+        let client_transactions = Arc::new(DashMap::new());
+        let server_transactions = Arc::new(DashMap::new());
+        let transaction_destinations = Arc::new(DashMap::new());
+        let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let (_, transport_rx) = mpsc::channel(100); // Dummy channel
         let transport_rx = Arc::new(Mutex::new(transport_rx));
-        let running = Arc::new(Mutex::new(false));
+        let running = Arc::new(AtomicBool::new(false));
 
         // Create timer settings
         let timer_settings = timer_settings_opt.unwrap_or_default();
@@ -856,11 +879,11 @@ impl TransactionManager {
     ) -> Self {
         // Setup basic channels
         let (events_tx, _) = mpsc::channel(10);
-        let event_subscribers = Arc::new(Mutex::new(Vec::new()));
+        let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
 
         // Transaction registries
-        let client_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let server_transactions = Arc::new(Mutex::new(HashMap::new()));
+        let client_transactions = Arc::new(DashMap::new());
+        let server_transactions = Arc::new(DashMap::new());
 
         // Setup timer manager
         let timer_settings = build_timer_settings();
@@ -868,15 +891,15 @@ impl TransactionManager {
         let timer_factory = TimerFactory::new(Some(timer_settings.clone()), timer_manager.clone());
 
         // Initialize running state
-        let running = Arc::new(Mutex::new(false));
+        let running = Arc::new(AtomicBool::new(false));
 
         // Track destinations
-        let transaction_destinations = Arc::new(Mutex::new(HashMap::new()));
+        let transaction_destinations = Arc::new(DashMap::new());
 
         // Initialize subscriber-related fields
-        let subscriber_to_transactions = Arc::new(Mutex::new(HashMap::new()));
-        let transaction_to_subscribers = Arc::new(Mutex::new(HashMap::new()));
-        let next_subscriber_id = Arc::new(Mutex::new(0));
+        let subscriber_to_transactions = Arc::new(DashMap::new());
+        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let next_subscriber_id = Arc::new(AtomicUsize::new(0));
 
         Self {
             transport,
@@ -944,25 +967,25 @@ impl TransactionManager {
     pub async fn send_request(&self, transaction_id: &TransactionKey) -> Result<()> {
         debug!(%transaction_id, "TransactionManager::send_request - sending request");
 
-        // We need to get the transaction and clone only when needed
-        let mut locked_txs = self.client_transactions.lock().await;
-
-        // Check if transaction exists
-        if !locked_txs.contains_key(transaction_id) {
+        // Clone the Arc<dyn ClientTransaction> out of the shard so we
+        // don't hold the DashMap guard across `initiate().await` —
+        // previously a global mutex pinned the whole client_transactions
+        // map for the duration of one in-flight send.
+        let tx_arc = self
+            .client_transactions
+            .get(transaction_id)
+            .map(|r| r.value().clone());
+        let Some(tx) = tx_arc else {
             debug!(%transaction_id, "TransactionManager::send_request - transaction not found");
             return Err(Error::transaction_not_found(
                 transaction_id.clone(),
                 "send_request - transaction not found",
             ));
-        }
-
-        // Get a reference to the transaction to determine its type
-        let tx = locked_txs.get_mut(transaction_id).unwrap();
+        };
         debug!(%transaction_id, kind=?tx.kind(), state=?tx.state(), "TransactionManager::send_request - found transaction");
 
-        // Remember initial state to detect quick state transitions
-        let initial_state = tx.state();
         let tx_kind = tx.kind();
+        let _initial_state = tx.state();
 
         // First subscribe to events BEFORE initiating the transaction
         // so we don't miss any events that happen during initiation
@@ -974,20 +997,18 @@ impl TransactionManager {
         if let Some(client_tx) = tx.as_client_transaction() {
             debug!(%transaction_id, "TransactionManager::send_request - initiating client transaction");
 
-            // Issue the initiate command
+            // We're holding a per-tx Arc; the DashMap shard guard
+            // released when `.get()` returned above.
             let result = client_tx.initiate().await;
             debug!(%transaction_id, success=?result.is_ok(), "TransactionManager::send_request - initiate result");
 
-            // If initiate() returned an error, return it immediately
             if let Err(e) = result {
                 debug!(%transaction_id, error=%e, "TransactionManager::send_request - initiate failed immediately");
                 return Err(e);
             }
 
-            // Check transaction state immediately after initiate
             let current_state = tx.state();
             if current_state == TransactionState::Terminated {
-                // Transaction terminated immediately - likely due to transport error
                 debug!(%transaction_id, "Transaction terminated immediately during initiate - likely transport error");
                 return Err(Error::transport_error(
                     rvoip_sip_transport::Error::ProtocolError(
@@ -996,9 +1017,6 @@ impl TransactionManager {
                     "Failed to send request - transaction terminated immediately",
                 ));
             }
-
-            // Release lock to allow transaction processing
-            drop(locked_txs);
 
             // Now wait for a short time to catch any asynchronous errors
             // We'll use a timeout to avoid hanging if no events are received
@@ -1049,10 +1067,9 @@ impl TransactionManager {
                     }
                 }
 
-                // Check final transaction state
-                let locked_txs = self.client_transactions.lock().await;
-                if let Some(tx) = locked_txs.get(transaction_id) {
-                    let final_state = tx.state();
+                // Check final transaction state via the DashMap.
+                if let Some(entry) = self.client_transactions.get(transaction_id) {
+                    let final_state = entry.value().state();
                     if final_state == TransactionState::Terminated {
                         debug!(%transaction_id, "Transaction is terminated after events processed");
                         return Err(Error::transport_error(
@@ -1061,7 +1078,6 @@ impl TransactionManager {
                         ));
                     }
                 } else {
-                    // Transaction was removed
                     debug!(%transaction_id, "Transaction was removed - likely due to termination");
                     return Err(Error::transport_error(
                         rvoip_sip_transport::Error::ProtocolError("Transaction was removed".into()),
@@ -1073,9 +1089,8 @@ impl TransactionManager {
             }).await {
                 // Timeout occurred — recv loop drained or 100 ms elapsed.
                 Err(_) => {
-                    let locked_txs = self.client_transactions.lock().await;
-                    if let Some(tx) = locked_txs.get(transaction_id) {
-                        let final_state = tx.state();
+                    if let Some(entry) = self.client_transactions.get(transaction_id) {
+                        let final_state = entry.value().state();
                         if final_state == TransactionState::Terminated {
                             // For INVITE, Calling → Terminated is the 2xx path
                             // (RFC 3261 §17.1.1.2). For non-INVITE, normal flow
@@ -1177,23 +1192,20 @@ impl TransactionManager {
     ) -> Result<()> {
         rvoip_sip_core::validation::validate_wire_response(&response)?;
 
-        // We need to get the transaction and clone only when needed
-        let mut locked_txs = self.server_transactions.lock().await;
-
-        // Check if transaction exists
-        if !locked_txs.contains_key(transaction_id) {
+        // Same pattern as send_request: extract the Arc<dyn ServerTransaction>
+        // from the DashMap shard before awaiting `send_response()`.
+        let tx_arc = self
+            .server_transactions
+            .get(transaction_id)
+            .map(|r| r.value().clone());
+        let Some(tx) = tx_arc else {
             return Err(Error::transaction_not_found(
                 transaction_id.clone(),
                 "send_response - transaction not found",
             ));
-        }
+        };
 
-        // Get a reference to the transaction to determine its type
-        let tx = locked_txs.get_mut(transaction_id).unwrap();
-
-        // Use the TransactionExt trait to safely downcast
         use crate::transaction::server::TransactionExt;
-
         if let Some(server_tx) = tx.as_server_transaction() {
             server_tx.send_response(response).await
         } else {
@@ -1228,21 +1240,8 @@ impl TransactionManager {
     /// # }
     /// ```
     pub async fn transaction_exists(&self, transaction_id: &TransactionKey) -> bool {
-        let client_exists = {
-            let client_txs = self.client_transactions.lock().await;
-            client_txs.contains_key(transaction_id)
-        };
-
-        if client_exists {
-            return true;
-        }
-
-        let server_exists = {
-            let server_txs = self.server_transactions.lock().await;
-            server_txs.contains_key(transaction_id)
-        };
-
-        server_exists
+        self.client_transactions.contains_key(transaction_id)
+            || self.server_transactions.contains_key(transaction_id)
     }
 
     /// Gets the current state of a transaction.
@@ -1293,23 +1292,12 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Result<TransactionState> {
-        // Try client transactions first
-        {
-            let client_txs = self.client_transactions.lock().await;
-            if let Some(tx) = client_txs.get(transaction_id) {
-                return Ok(tx.state());
-            }
+        if let Some(entry) = self.client_transactions.get(transaction_id) {
+            return Ok(entry.value().state());
         }
-
-        // Try server transactions
-        {
-            let server_txs = self.server_transactions.lock().await;
-            if let Some(tx) = server_txs.get(transaction_id) {
-                return Ok(tx.state());
-            }
+        if let Some(entry) = self.server_transactions.get(transaction_id) {
+            return Ok(entry.value().state());
         }
-
-        // Transaction not found
         Err(Error::transaction_not_found(
             transaction_id.clone(),
             "transaction_state - transaction not found",
@@ -1358,16 +1346,12 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Result<TransactionKind> {
-        let client_txs = self.client_transactions.lock().await;
-        if let Some(tx) = client_txs.get(transaction_id) {
-            return Ok(tx.kind());
+        if let Some(entry) = self.client_transactions.get(transaction_id) {
+            return Ok(entry.value().kind());
         }
-
-        let server_txs = self.server_transactions.lock().await;
-        if let Some(tx) = server_txs.get(transaction_id) {
-            return Ok(tx.kind());
+        if let Some(entry) = self.server_transactions.get(transaction_id) {
+            return Ok(entry.value().kind());
         }
-
         Err(Error::transaction_not_found(
             transaction_id.clone(),
             "transaction kind lookup failed",
@@ -1398,12 +1382,9 @@ impl TransactionManager {
     /// # }
     /// ```
     pub async fn active_transactions(&self) -> (Vec<TransactionKey>, Vec<TransactionKey>) {
-        let client_txs = self.client_transactions.lock().await;
-        let server_txs = self.server_transactions.lock().await;
-
         (
-            client_txs.keys().cloned().collect(),
-            server_txs.keys().cloned().collect(),
+            self.client_transactions.iter().map(|r| r.key().clone()).collect(),
+            self.server_transactions.iter().map(|r| r.key().clone()).collect(),
         )
     }
 
@@ -1427,8 +1408,9 @@ impl TransactionManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<SocketAddr> {
-        let dest_map = self.transaction_destinations.lock().await;
-        dest_map.get(transaction_id).copied()
+        self.transaction_destinations
+            .get(transaction_id)
+            .map(|r| *r.value())
     }
 
     /// Subscribe to events from all transactions.
@@ -1447,13 +1429,15 @@ impl TransactionManager {
             let next_subscriber_id = self.next_subscriber_id.clone();
 
             async move {
-                let mut subscriber_id = next_subscriber_id.lock().await;
-                let id = *subscriber_id;
-                *subscriber_id += 1;
+                let id = next_subscriber_id.fetch_add(1, Ordering::Relaxed);
 
-                // Add to global subscribers list
-                let mut subs = subscribers.lock().await;
-                subs.push(tx);
+                // ArcSwap RCU.
+                subscribers.rcu(|current| {
+                    let mut next = Vec::with_capacity(current.len() + 1);
+                    next.extend(current.iter().cloned());
+                    next.push(tx.clone());
+                    next
+                });
 
                 debug!("Added global subscriber with ID {}", id);
             }
@@ -1487,43 +1471,25 @@ impl TransactionManager {
 
         let (tx, rx) = mpsc::channel(100);
 
-        // Register the subscription
-        let subscriber_id = {
-            let mut next_id = self.next_subscriber_id.lock().await;
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+        let subscriber_id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
 
-        // Add to global subscribers list
-        {
-            let mut subs = self.event_subscribers.lock().await;
-            subs.push(tx);
-        }
+        // Add to global subscribers list — ArcSwap RCU.
+        self.event_subscribers.rcu(|current| {
+            let mut next = Vec::with_capacity(current.len() + 1);
+            next.extend(current.iter().cloned());
+            next.push(tx.clone());
+            next
+        });
 
-        // Add to transaction-specific mapping
-        {
-            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
+        self.transaction_to_subscribers
+            .entry(transaction_id.clone())
+            .or_insert_with(Vec::new)
+            .push(subscriber_id);
 
-            // Create entry if it doesn't exist
-            let subscriber_list = tx_to_subs
-                .entry(transaction_id.clone())
-                .or_insert_with(Vec::new);
-
-            // Add this subscriber
-            subscriber_list.push(subscriber_id);
-        }
-
-        // Add to subscriber-to-transactions mapping
-        {
-            let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-
-            // Create entry if it doesn't exist
-            let transaction_list = sub_to_txs.entry(subscriber_id).or_insert_with(Vec::new);
-
-            // Add this transaction
-            transaction_list.push(transaction_id.clone());
-        }
+        self.subscriber_to_transactions
+            .entry(subscriber_id)
+            .or_insert_with(Vec::new)
+            .push(transaction_id.clone());
 
         debug!(%transaction_id, subscriber_id, "Added transaction-specific subscriber");
 
@@ -1556,43 +1522,30 @@ impl TransactionManager {
 
         let (tx, rx) = mpsc::channel(100);
 
-        // Register the subscription
-        let subscriber_id = {
-            let mut next_id = self.next_subscriber_id.lock().await;
-            let id = *next_id;
-            *next_id += 1;
-            id
-        };
+        let subscriber_id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
 
-        // Add to global subscribers list
-        {
-            let mut subs = self.event_subscribers.lock().await;
-            subs.push(tx);
+        // Add to global subscribers list — ArcSwap RCU.
+        self.event_subscribers.rcu(|current| {
+            let mut next = Vec::with_capacity(current.len() + 1);
+            next.extend(current.iter().cloned());
+            next.push(tx.clone());
+            next
+        });
+
+        for tx_id in transaction_ids {
+            self.transaction_to_subscribers
+                .entry(tx_id.clone())
+                .or_insert_with(Vec::new)
+                .push(subscriber_id);
         }
 
-        // Add to transaction-specific mapping
         {
-            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
-
+            let mut entry = self
+                .subscriber_to_transactions
+                .entry(subscriber_id)
+                .or_insert_with(Vec::new);
             for tx_id in transaction_ids {
-                // Create entry if it doesn't exist
-                let subscriber_list = tx_to_subs.entry(tx_id.clone()).or_insert_with(Vec::new);
-
-                // Add this subscriber
-                subscriber_list.push(subscriber_id);
-            }
-        }
-
-        // Add to subscriber-to-transactions mapping
-        {
-            let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-
-            // Create entry if it doesn't exist
-            let transaction_list = sub_to_txs.entry(subscriber_id).or_insert_with(Vec::new);
-
-            // Add these transactions
-            for tx_id in transaction_ids {
-                transaction_list.push(tx_id.clone());
+                entry.push(tx_id.clone());
             }
         }
 
@@ -1616,12 +1569,9 @@ impl TransactionManager {
     pub async fn shutdown(&self) {
         info!("TransactionManager shutting down gracefully");
 
-        // Step 1: Stop the message processing loop FIRST
-        // This prevents new messages from being processed
-        {
-            let mut running = self.running.lock().await;
-            *running = false;
-        }
+        // Step 1: Stop the message processing loop FIRST.
+        // AtomicBool — was an async Mutex<bool> before the perf pass.
+        self.running.store(false, Ordering::Relaxed);
         debug!("Message processing loop signaled to stop");
 
         // Step 2: Transport should already be closed by this point via events
@@ -1634,8 +1584,8 @@ impl TransactionManager {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Step 4: Wait for all transactions to reach Destroyed lifecycle state
-        let client_count = self.client_transactions.lock().await.len();
-        let server_count = self.server_transactions.lock().await.len();
+        let client_count = self.client_transactions.len();
+        let server_count = self.server_transactions.len();
         if client_count > 0 || server_count > 0 {
             debug!(
                 "Waiting for {} client and {} server transactions to reach Destroyed state",
@@ -1648,20 +1598,16 @@ impl TransactionManager {
                 // Check if all transactions have reached Destroyed state
                 let mut all_destroyed = true;
 
-                {
-                    let client_txs = self.client_transactions.lock().await;
-                    for tx in client_txs.values() {
-                        if tx.data().get_lifecycle() != TransactionLifecycle::Destroyed {
-                            all_destroyed = false;
-                            break;
-                        }
+                for entry in self.client_transactions.iter() {
+                    if entry.value().data().get_lifecycle() != TransactionLifecycle::Destroyed {
+                        all_destroyed = false;
+                        break;
                     }
                 }
 
                 if all_destroyed {
-                    let server_txs = self.server_transactions.lock().await;
-                    for tx in server_txs.values() {
-                        if tx.data().get_lifecycle() != TransactionLifecycle::Destroyed {
+                    for entry in self.server_transactions.iter() {
+                        if entry.value().data().get_lifecycle() != TransactionLifecycle::Destroyed {
                             all_destroyed = false;
                             break;
                         }
@@ -1685,9 +1631,9 @@ impl TransactionManager {
         }
 
         // Now clear the transaction maps
-        self.client_transactions.lock().await.clear();
-        self.server_transactions.lock().await.clear();
-        self.transaction_destinations.lock().await.clear();
+        self.client_transactions.clear();
+        self.server_transactions.clear();
+        self.transaction_destinations.clear();
 
         // Step 5: Emit TransactionEvent::ShutdownComplete
         // Broadcast to all event subscribers
@@ -1701,9 +1647,9 @@ impl TransactionManager {
         .await;
 
         // Step 5: Clear event subscribers
-        self.event_subscribers.lock().await.clear();
-        self.subscriber_to_transactions.lock().await.clear();
-        self.transaction_to_subscribers.lock().await.clear();
+        self.event_subscribers.store(Arc::new(Vec::new()));
+        self.subscriber_to_transactions.clear();
+        self.transaction_to_subscribers.clear();
 
         info!("TransactionManager shutdown complete - BOTTOM-UP");
     }
@@ -1723,8 +1669,8 @@ impl TransactionManager {
     async fn broadcast_event(
         event: TransactionEvent,
         primary_tx: &mpsc::Sender<TransactionEvent>,
-        subscribers: &Arc<Mutex<Vec<mpsc::Sender<TransactionEvent>>>>,
-        transaction_to_subscribers: Option<&Arc<Mutex<HashMap<TransactionKey, Vec<usize>>>>>,
+        subscribers: &Arc<ArcSwap<Vec<mpsc::Sender<TransactionEvent>>>>,
+        transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
         manager: Option<TransactionManager>,
     ) {
         // Extract transaction ID from the event for filtering
@@ -1754,8 +1700,10 @@ impl TransactionManager {
         let interested_subscribers = if let (Some(tx_id), Some(tx_to_subs_map)) =
             (transaction_id, transaction_to_subscribers)
         {
-            let tx_to_subs = tx_to_subs_map.lock().await;
-            tx_to_subs.get(tx_id).cloned().unwrap_or_default()
+            tx_to_subs_map
+                .get(tx_id)
+                .map(|r| r.value().clone())
+                .unwrap_or_default()
         } else {
             Vec::new() // No specific subscribers for this transaction or global event
         };
@@ -1770,8 +1718,10 @@ impl TransactionManager {
             }
         }
 
-        // Send to interested subscribers only
-        let mut subs = subscribers.lock().await;
+        // Send to interested subscribers only. ArcSwap::load is a
+        // single atomic load — no mutex acquire on the hot path.
+        let subs_snapshot = subscribers.load();
+        let subs: &Vec<mpsc::Sender<TransactionEvent>> = &subs_snapshot;
 
         // If we have transaction-specific subscribers, filter events
         if let Some(tx_to_subs_map) = transaction_to_subscribers {
@@ -1850,19 +1800,16 @@ impl TransactionManager {
             loop {
                 // Check if transaction is ready for cleanup
                 let should_cleanup = {
-                    // Try both client and server transactions
-                    let client_txs = manager.client_transactions.lock().await;
-                    let server_txs = manager.server_transactions.lock().await;
-
-                    let client_ready = client_txs
+                    let client_ready = manager
+                        .client_transactions
                         .get(&tx_id)
-                        .map(|tx| tx.data().get_lifecycle() == TransactionLifecycle::Destroyed)
+                        .map(|r| r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed)
                         .unwrap_or(false);
-                    let server_ready = server_txs
+                    let server_ready = manager
+                        .server_transactions
                         .get(&tx_id)
-                        .map(|tx| tx.data().get_lifecycle() == TransactionLifecycle::Destroyed)
+                        .map(|r| r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed)
                         .unwrap_or(false);
-
                     client_ready || server_ready
                 };
 
@@ -1892,53 +1839,35 @@ impl TransactionManager {
 
         let mut terminated = false;
 
-        // Try to remove from client transactions
-        {
-            let mut client_txs = self.client_transactions.lock().await;
-            if let Some(tx) = client_txs.remove(transaction_id) {
-                debug!(%transaction_id, "Removed terminated client transaction");
-                terminated = true;
-            }
+        if self.client_transactions.remove(transaction_id).is_some() {
+            debug!(%transaction_id, "Removed terminated client transaction");
+            terminated = true;
         }
 
-        // Try to remove from server transactions regardless of whether it was found in client transactions
-        // This is a defensive approach in case the transaction was somehow duplicated
-        {
-            let mut server_txs = self.server_transactions.lock().await;
-            if let Some(tx) = server_txs.remove(transaction_id) {
-                debug!(%transaction_id, "Removed terminated server transaction");
-                terminated = true;
-            }
+        // Defensive: also remove from server in case of duplication.
+        if self.server_transactions.remove(transaction_id).is_some() {
+            debug!(%transaction_id, "Removed terminated server transaction");
+            terminated = true;
         }
 
-        // Always remove from destinations map if present
-        {
-            let mut destinations = self.transaction_destinations.lock().await;
-            if destinations.remove(transaction_id).is_some() {
-                debug!(%transaction_id, "Removed transaction from destinations map");
-            }
+        if self.transaction_destinations.remove(transaction_id).is_some() {
+            debug!(%transaction_id, "Removed transaction from destinations map");
         }
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
-        {
-            let mut tx_to_subs = self.transaction_to_subscribers.lock().await;
-            if let Some(subscriber_ids) = tx_to_subs.remove(transaction_id) {
-                debug!(%transaction_id, subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
+        if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(transaction_id) {
+            debug!(%transaction_id, subscriber_count = subscriber_ids.len(), "Removed transaction from subscriber mappings");
 
-                // Also clean up reverse mappings
-                drop(tx_to_subs); // Release lock before acquiring another
-                let mut sub_to_txs = self.subscriber_to_transactions.lock().await;
-
-                for subscriber_id in subscriber_ids {
-                    if let Some(tx_list) = sub_to_txs.get_mut(&subscriber_id) {
-                        tx_list.retain(|tx_id| tx_id != transaction_id);
-
-                        // If subscriber has no more transactions, remove it entirely
-                        if tx_list.is_empty() {
-                            sub_to_txs.remove(&subscriber_id);
-                            debug!(%transaction_id, subscriber_id, "Removed empty subscriber mapping");
-                        }
-                    }
+            for subscriber_id in subscriber_ids {
+                let mut empty = false;
+                if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id) {
+                    let tx_list = entry.value_mut();
+                    tx_list.retain(|tx_id| tx_id != transaction_id);
+                    empty = tx_list.is_empty();
+                }
+                if empty {
+                    self.subscriber_to_transactions.remove(&subscriber_id);
+                    debug!(%transaction_id, subscriber_id, "Removed empty subscriber mapping");
                 }
             }
         }
@@ -1992,22 +1921,18 @@ impl TransactionManager {
             // Create a separate channel to receive events from transactions
             let (internal_tx, mut internal_rx) = mpsc::channel(100);
 
-            // Set running flag
-            let mut running_guard = running.lock().await;
-            *running_guard = true;
-            drop(running_guard);
+            // Set running flag (AtomicBool — single store instruction)
+            running.store(true, Ordering::Relaxed);
 
             // Get the transport receiver
             let mut receiver = transport_rx.lock().await;
 
             // Run the message processing loop
             loop {
-                // Check if we should continue running
-                let running_guard = running.lock().await;
-                let is_running = *running_guard;
-                drop(running_guard);
-
-                if !is_running {
+                // Check if we should continue running. AtomicBool load
+                // is one instruction; the previous async-mutex acquire
+                // was per-iteration.
+                if !running.load(Ordering::Relaxed) {
                     debug!("Transaction manager stopping message loop");
                     break;
                 }
@@ -2016,7 +1941,7 @@ impl TransactionManager {
                 tokio::select! {
                     Some(message_event) = receiver.recv() => {
                         // Check if we're still running before processing
-                        let still_running = *manager_arc.running.lock().await;
+                        let still_running = manager_arc.running.load(Ordering::Relaxed);
                         if still_running {
                             if let Err(e) = manager_arc.handle_transport_event(message_event).await {
                                 error!("Error handling transport message: {}", e);
@@ -2148,8 +2073,10 @@ impl TransactionManager {
 
         rvoip_sip_core::validation::validate_wire_request(&modified_request)?;
 
-        // Create the appropriate transaction based on the request method
-        let transaction: Box<dyn ClientTransaction + Send> = match modified_request.method() {
+        // Create the appropriate transaction. Returns Arc<dyn ClientTransaction>
+        // so the map can shard (DashMap) and call sites can clone the
+        // Arc out before any `.await`.
+        let transaction: ArcClientTransaction = match modified_request.method() {
             Method::Invite => {
                 tracing::trace!("Creating ClientInviteTransaction: {}", key);
                 let tx = ClientInviteTransaction::new(
@@ -2161,14 +2088,12 @@ impl TransactionManager {
                     self.timer_settings_for_request(&modified_request),
                 )?;
                 tracing::trace!("Created ClientInviteTransaction: {}", key);
-                Box::new(tx)
+                Arc::new(tx)
             }
             Method::Cancel => {
-                // Validate the CANCEL request
                 if let Err(e) = cancel::validate_cancel_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
-
                 let tx = ClientNonInviteTransaction::new(
                     key.clone(),
                     modified_request.clone(),
@@ -2177,14 +2102,12 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
                 )?;
-                Box::new(tx)
+                Arc::new(tx)
             }
             Method::Update => {
-                // Validate the UPDATE request
                 if let Err(e) = update::validate_update_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
                 }
-
                 let tx = ClientNonInviteTransaction::new(
                     key.clone(),
                     modified_request.clone(),
@@ -2193,7 +2116,7 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
                 )?;
-                Box::new(tx)
+                Arc::new(tx)
             }
             _ => {
                 let tx = ClientNonInviteTransaction::new(
@@ -2204,21 +2127,13 @@ impl TransactionManager {
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
                 )?;
-                Box::new(tx)
+                Arc::new(tx)
             }
         };
 
-        // Store the transaction
-        {
-            let mut client_txs = self.client_transactions.lock().await;
-            client_txs.insert(key.clone(), transaction);
-        }
-
-        // Store the destination
-        {
-            let mut dest_map = self.transaction_destinations.lock().await;
-            dest_map.insert(key.clone(), destination);
-        }
+        // Store the transaction + destination
+        self.client_transactions.insert(key.clone(), transaction);
+        self.transaction_destinations.insert(key.clone(), destination);
 
         debug!(id=%key, "Created client transaction");
 
@@ -2263,10 +2178,8 @@ impl TransactionManager {
         let destination = if let Some(dest) = destination.or(contact_destination) {
             dest
         } else {
-            // Fall back to the original destination
-            let dest_map = self.transaction_destinations.lock().await;
-            match dest_map.get(invite_tx_id) {
-                Some(addr) => *addr,
+            match self.transaction_destinations.get(invite_tx_id) {
+                Some(entry) => *entry.value(),
                 None => {
                     return Err(Error::Other(format!(
                         "Destination for transaction {:?} not found",
@@ -2302,22 +2215,18 @@ impl TransactionManager {
         message: &Message,
     ) -> Result<Option<TransactionKey>> {
         match message {
-            Message::Request(req) => {
-                // For requests, look for server transactions
-                let server_txs = self.server_transactions.lock().await;
-                for (tx_id, tx) in server_txs.iter() {
-                    if tx.matches(message) {
-                        return Ok(Some(tx_id.clone()));
+            Message::Request(_req) => {
+                for entry in self.server_transactions.iter() {
+                    if entry.value().matches(message) {
+                        return Ok(Some(entry.key().clone()));
                     }
                 }
                 Ok(None)
             }
-            Message::Response(resp) => {
-                // For responses, look for client transactions
-                let client_txs = self.client_transactions.lock().await;
-                for (tx_id, tx) in client_txs.iter() {
-                    if tx.matches(message) {
-                        return Ok(Some(tx_id.clone()));
+            Message::Response(_resp) => {
+                for entry in self.client_transactions.iter() {
+                    if entry.value().matches(message) {
+                        return Ok(Some(entry.key().clone()));
                     }
                 }
                 Ok(None)
@@ -2342,14 +2251,12 @@ impl TransactionManager {
             return Err(Error::Other("Not a CANCEL request".to_string()));
         }
 
-        // Get all client transactions
-        let client_txs = self.client_transactions.lock().await;
-        let invite_tx_keys: Vec<TransactionKey> = client_txs
-            .keys()
-            .filter(|k| *k.method() == Method::Invite && !k.is_server)
-            .cloned()
+        let invite_tx_keys: Vec<TransactionKey> = self
+            .client_transactions
+            .iter()
+            .filter(|r| *r.key().method() == Method::Invite && !r.key().is_server)
+            .map(|r| r.key().clone())
             .collect();
-        drop(client_txs);
 
         // Use the utility to find the matching INVITE transaction
         let tx_id = crate::transaction::method::cancel::find_invite_transaction_for_cancel(
@@ -2374,13 +2281,12 @@ impl TransactionManager {
             return Err(Error::Other("Not a CANCEL request".to_string()));
         }
 
-        let server_txs = self.server_transactions.lock().await;
-        let invite_tx_keys: Vec<TransactionKey> = server_txs
-            .keys()
-            .filter(|k| *k.method() == Method::Invite && k.is_server)
-            .cloned()
+        let invite_tx_keys: Vec<TransactionKey> = self
+            .server_transactions
+            .iter()
+            .filter(|r| *r.key().method() == Method::Invite && r.key().is_server)
+            .map(|r| r.key().clone())
             .collect();
-        drop(server_txs);
 
         let tx_id = crate::transaction::method::cancel::find_invite_transaction_for_cancel(
             cancel_request,
@@ -2396,8 +2302,8 @@ impl TransactionManager {
     /// Needed so the CANCEL handler can generate a 487 response based on
     /// the pending INVITE.
     pub async fn get_server_transaction_request(&self, tx_id: &TransactionKey) -> Result<Request> {
-        let server_txs = self.server_transactions.lock().await;
-        if let Some(tx) = server_txs.get(tx_id) {
+        let tx_arc = self.server_transactions.get(tx_id).map(|r| r.value().clone());
+        if let Some(tx) = tx_arc {
             if let Some(req) = tx.original_request().await {
                 return Ok(req);
             }
@@ -2482,20 +2388,13 @@ impl TransactionManager {
         // Create the transaction key directly with is_server: true
         let key = TransactionKey::new(branch, request.method().clone(), true);
 
-        // Check if this is a retransmission of an existing transaction
-        {
-            let server_txs = self.server_transactions.lock().await;
-            if server_txs.contains_key(&key) {
-                // This is a retransmission, get the existing transaction
-                let transaction = server_txs.get(&key).unwrap().clone();
-                drop(server_txs); // Release lock
-
-                // Process the request in the existing transaction
-                transaction.process_request(request.clone()).await?;
-
-                debug!(id=%key, method=%request.method(), "Processed retransmitted request in existing transaction");
-                return Ok(transaction);
-            }
+        // Check if this is a retransmission of an existing transaction.
+        // Extract the Arc out of the shard before awaiting `process_request`.
+        let existing = self.server_transactions.get(&key).map(|r| r.value().clone());
+        if let Some(transaction) = existing {
+            transaction.process_request(request.clone()).await?;
+            debug!(id=%key, method=%request.method(), "Processed retransmitted request in existing transaction");
+            return Ok(transaction);
         }
 
         // Create a new transaction based on the request method
@@ -2528,22 +2427,18 @@ impl TransactionManager {
                 // meant UAS-side CANCELs never notified the TU.
                 let mut target_invite_tx_id = None;
 
-                let mut invite_tx_keys: Vec<TransactionKey> = {
-                    let client_txs = self.client_transactions.lock().await;
-                    client_txs
-                        .keys()
-                        .filter(|k| k.method() == &Method::Invite && !k.is_server)
-                        .cloned()
-                        .collect()
-                };
-                let server_invite_keys: Vec<TransactionKey> = {
-                    let server_txs = self.server_transactions.lock().await;
-                    server_txs
-                        .keys()
-                        .filter(|k| k.method() == &Method::Invite && k.is_server)
-                        .cloned()
-                        .collect()
-                };
+                let mut invite_tx_keys: Vec<TransactionKey> = self
+                    .client_transactions
+                    .iter()
+                    .filter(|r| r.key().method() == &Method::Invite && !r.key().is_server)
+                    .map(|r| r.key().clone())
+                    .collect();
+                let server_invite_keys: Vec<TransactionKey> = self
+                    .server_transactions
+                    .iter()
+                    .filter(|r| r.key().method() == &Method::Invite && r.key().is_server)
+                    .map(|r| r.key().clone())
+                    .collect();
                 invite_tx_keys.extend(server_invite_keys);
 
                 if let Some(invite_tx_id) =
@@ -2617,10 +2512,8 @@ impl TransactionManager {
         };
 
         // Store the transaction
-        {
-            let mut server_txs = self.server_transactions.lock().await;
-            server_txs.insert(transaction.id().clone(), transaction.clone());
-        }
+        self.server_transactions
+            .insert(transaction.id().clone(), transaction.clone());
 
         // Start the transaction in Trying state (for non-INVITE) or Proceeding (for INVITE)
         let initial_state = match transaction.kind() {
@@ -2699,16 +2592,13 @@ impl TransactionManager {
         }
 
         // Get the destination for the CANCEL request (same as the INVITE)
-        let destination = {
-            let dest_map = self.transaction_destinations.lock().await;
-            match dest_map.get(invite_tx_id) {
-                Some(addr) => *addr,
-                None => {
-                    return Err(Error::Other(format!(
-                        "No destination found for transaction {}",
-                        invite_tx_id
-                    )))
-                }
+        let destination = match self.transaction_destinations.get(invite_tx_id) {
+            Some(entry) => *entry.value(),
+            None => {
+                return Err(Error::Other(format!(
+                    "No destination found for transaction {}",
+                    invite_tx_id
+                )))
             }
         };
 

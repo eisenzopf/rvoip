@@ -48,6 +48,9 @@ rand.workspace = true
 
 # Crate-specific dependencies not in workspace
 http = "0.2"
+# arc-swap — lock-free atomic Arc swap used for `event_subscribers`
+# (the broadcast hot path needs lock-free reads).
+arc-swap = "1.7"
 
 [dev-dependencies]
 # Testing
@@ -55,6 +58,17 @@ tokio-test = "0.4"
 
 # Logging for examples
 tracing-subscriber = "0.3"
+
+# Benchmarks
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+rvoip-sip-core = { workspace = true }
+dashmap = { workspace = true }
+
+# Performance benchmarks. See `crates/rvoip-sip/docs/PROFILING.md`.
+[[bench]]
+name = "transaction_manager"
+harness = false
 
 [features]
 default = ["recovery", "events"]
