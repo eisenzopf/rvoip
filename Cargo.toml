@@ -206,12 +206,16 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # 🔧 Optimization Profiles for Binary Size Reduction
 
 [profile.release]
-# Standard release with size optimizations
-opt-level = "s"           # Optimize for size instead of speed
-lto = true               # Link-time optimization for dead code elimination
-codegen-units = 1        # Better optimization (slower compile, smaller binary)
-panic = "abort"          # Remove panic handling code (smaller binary)
-strip = true             # Remove debug symbols from binary
+# Speed-optimized release for a perf-sensitive networking library.
+# Was previously `opt-level = "s"` (size) — switched to 3 after
+# benchmarks showed `to_bytes()` and parser hot paths were leaving
+# substantial throughput on the floor under size optimization. Size-
+# constrained deployments can use `[profile.release-small]` below.
+opt-level = 3            # Full speed optimization
+lto = true               # Link-time optimization across crates
+codegen-units = 1        # Single CGU for best inlining (slower compile)
+panic = "abort"          # No unwind tables; criterion catches panics at the harness layer
+strip = true             # Remove debug symbols from production binaries
 
 [profile.release-small]
 # Aggressive size optimization (smallest possible binary)

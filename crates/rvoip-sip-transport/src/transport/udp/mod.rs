@@ -168,7 +168,11 @@ impl UdpTransport {
                                             source: src,
                                             destination: local_addr,
                                             transport_type: TransportType::Udp,
-                                            raw_bytes: Some(std::sync::Arc::new(packet.clone())),
+                                            // Move `packet` straight in — `Bytes` is
+                                            // already Arc-managed internally; the
+                                            // previous `Arc::new(packet.clone())`
+                                            // double-wrapped it for no reason.
+                                            raw_bytes: Some(packet),
                                         };
 
                                         if let Err(e) = inner.events_tx.send(event).await {

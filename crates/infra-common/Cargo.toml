@@ -41,10 +41,17 @@ tokio-util = "0.7.16"
 # crates remain SIP-agnostic.
 bytes = { workspace = true }
 
+[features]
+# Disable the mimalloc `#[global_allocator]` in `lib.rs`. Required by
+# profiling consumers (e.g. `rvoip-sip`'s `dhat` feature) that swap in
+# their own allocator and can't coexist with mimalloc. Off by default
+# so production binaries keep mimalloc's perf win.
+no-global-allocator = []
+
 [dev-dependencies]
 criterion.workspace = true
 chrono.workspace = true
 
 [[bench]]
 name = "api_bench"
-harness = false 
+harness = false

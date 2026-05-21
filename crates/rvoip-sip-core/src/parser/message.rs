@@ -66,13 +66,23 @@ pub fn trim_bytes(bytes: &[u8]) -> &[u8] {
 /// Uses the `message_header` parser for each line.
 /// Returns a Vec of raw Headers.
 fn parse_header_block(input: &[u8]) -> ParseResult<Vec<Header>> {
-    // many_till parses 0 or more headers until the terminating CRLF
-    let (remaining_input, (headers, _terminator)) = many_till(
-        message_header,
-        crlf, // The CRLF that ends the header section
-    )(input)?;
-
-    Ok((remaining_input, headers))
+    // Hand-rolled equivalent of `many_till(message_header, crlf)` that
+    // pre-sizes the Vec. The previous `many_till` started from
+    // `Vec::with_capacity(0)` and grew via doubling — a typical 8–12
+    // header message paid for 3–4 reallocations of the headers Vec
+    // alone. 16 covers the vast majority of real SIP messages without
+    // wasting memory on the small ones.
+    let mut headers = Vec::with_capacity(16);
+    let mut rest = input;
+    loop {
+        // Empty header line ⇒ end of the headers block.
+        if let Ok((after_crlf, _)) = crlf(rest) {
+            return Ok((after_crlf, headers));
+        }
+        let (after_header, header) = message_header(rest)?;
+        headers.push(header);
+        rest = after_header;
+    }
 }
 
 /// Parse a header value with support for line folding according to RFC 3261 Section 7.3.1.
@@ -148,37 +158,44 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
     // 3. Convert Raw Headers to Typed Headers - with error tolerance
     let mut typed_headers: Vec<TypedHeader> = Vec::with_capacity(raw_headers.len());
 
-    // Collect all Content-Length headers (to use the last one per RFC 3261)
-    let mut content_length_values = Vec::new();
+    // RFC 3261 §20.14 says when multiple Content-Length headers are
+    // present, the last value wins. Track that with a single `Option`
+    // — the previous `Vec::new()` always heap-allocated even though the
+    // overwhelmingly common case is exactly one Content-Length header.
+    let mut content_length_last: Option<usize> = None;
 
     for header in raw_headers {
-        // Track Content-Length headers separately
+        // Track Content-Length: always-rewrite-last means the latest
+        // numerically-valid value wins, matching the prior `*values.last()`.
         if header.name == HeaderName::ContentLength {
             if let HeaderValue::Raw(bytes) = &header.value {
                 if let Ok(s) = str::from_utf8(bytes) {
                     if let Ok(cl) = s.trim().parse::<usize>() {
-                        content_length_values.push(cl);
+                        content_length_last = Some(cl);
                     }
                 }
             }
         }
 
-        match TypedHeader::try_from(header.clone()) {
+        // Borrow into `try_from` so we keep ownership for the error
+        // fallback. The previous `header.clone()` allocated a fresh
+        // `HeaderName` + `HeaderValue` per header even on the success
+        // path — measurable in dhat as a per-header allocation pair
+        // that scales linearly with header count.
+        match TypedHeader::try_from(&header) {
             Ok(typed) => typed_headers.push(typed),
             Err(e) => {
-                eprintln!("Warning: Header parsing error (skipping): {}", e);
-                // Add a fallback for unparseable headers
+                tracing::debug!("header parse error (keeping as Other): {}", e);
                 typed_headers.push(TypedHeader::Other(header.name, header.value));
             }
         }
     }
 
-    // 4. Get Content-Length - use the last one per RFC 3261 section 20.14
-    // "If there are multiple Content-Length headers, use the last value"
-    let content_length = if !content_length_values.is_empty() {
-        *content_length_values.last().unwrap()
-    } else {
-        // Fallback to typed header if no raw Content-Length found
+    // 4. Get Content-Length — RFC 3261 §20.14 "last header wins" already
+    // honoured by the `content_length_last` tracking above.
+    let content_length = content_length_last.unwrap_or_else(|| {
+        // Fallback to typed header if no raw Content-Length was found
+        // (e.g. it arrived pre-parsed via `HeaderValue::ContentLength`).
         typed_headers
             .iter()
             .find_map(|h| {
@@ -189,7 +206,7 @@ fn full_message_parser(input: &[u8], mode: ParseMode) -> IResult<&[u8], Message>
                 }
             })
             .unwrap_or(0)
-    };
+    });
 
     // 5. Parse Body based on Content-Length
     if rest.len() < content_length {
@@ -306,29 +323,27 @@ pub fn parse_message_with_mode(input: &[u8], mode: ParseMode) -> Result<Message>
     };
 
     match parser_result {
-        Ok((_, message)) => {
-            /*eprintln!("=== PARSE SUCCESS ===");
-            eprintln!("Successfully parsed message");
-            eprintln!("=====================");*/
-            Ok(message)
-        }
+        Ok((_, message)) => Ok(message),
         Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
             let offset = input.len() - e.input.len();
-            eprintln!("=== PARSE ERROR ===");
-            eprintln!("Error at offset: {}", offset);
-            eprintln!("Error code: {:?}", e.code);
-            eprintln!("Remaining input: {:?}", String::from_utf8_lossy(e.input));
-            eprintln!("Remaining input as hex: {:02x?}", e.input);
-            eprintln!("==================");
+            // Drop to tracing so the diagnostic only allocates when the
+            // user actually subscribed at debug. Previously `eprintln!`
+            // unconditionally allocated 6 Strings per parse failure and
+            // hit a syscall — fine in tests, awful in a registrar
+            // pinned by malformed packets.
+            tracing::debug!(
+                offset,
+                code = ?e.code,
+                remaining = %String::from_utf8_lossy(e.input),
+                "SIP parse failed"
+            );
             Err(Error::ParseError(format!(
                 "Failed to parse message near offset {}: {:?}",
                 offset, e.code
             )))
         }
         Err(nom::Err::Incomplete(_)) => {
-            eprintln!("=== PARSE INCOMPLETE ===");
-            eprintln!("Incomplete message");
-            eprintln!("========================");
+            tracing::debug!("SIP parse incomplete");
             Err(Error::ParseError("Incomplete message".to_string()))
         }
     }

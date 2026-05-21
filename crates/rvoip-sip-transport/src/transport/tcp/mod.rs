@@ -173,7 +173,7 @@ impl TcpTransport {
                             source: peer_addr,
                             destination: local_addr,
                             transport_type: TransportType::Tcp,
-                            raw_bytes: Some(std::sync::Arc::new(raw_bytes)),
+                            raw_bytes: Some(raw_bytes),
                         };
 
                         if let Err(e) = events_tx.send(event).await {

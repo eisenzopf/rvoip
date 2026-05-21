@@ -1212,7 +1212,7 @@ impl SessionCrossCrateEventHandler {
         headers: &std::collections::HashMap<String, String>,
         _transaction_id: &str,
         _source_addr: &str,
-        raw_request: Option<Arc<bytes::Bytes>>,
+        raw_request: Option<bytes::Bytes>,
     ) -> Result<()> {
         let dialog_id_str = headers
             .get("X-Dialog-Id")
@@ -1403,7 +1403,7 @@ impl SessionCrossCrateEventHandler {
         &self,
         session_id: SessionId,
         sdp_answer: Option<String>,
-        raw_response: Option<std::sync::Arc<bytes::Bytes>>,
+        raw_response: Option<bytes::Bytes>,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
@@ -2047,7 +2047,7 @@ impl SessionCrossCrateEventHandler {
         session_id: SessionId,
         status: u16,
         reason: String,
-        raw_response: Option<std::sync::Arc<bytes::Bytes>>,
+        raw_response: Option<bytes::Bytes>,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
@@ -2809,7 +2809,7 @@ impl SessionCrossCrateEventHandler {
         status_code: u16,
         reason: String,
         sdp: Option<String>,
-        raw_response: Option<std::sync::Arc<bytes::Bytes>>,
+        raw_response: Option<bytes::Bytes>,
     ) -> Result<()> {
         if !self.is_our_session(&sid).await {
             debug!(
@@ -3355,7 +3355,7 @@ impl SessionCrossCrateEventHandler {
         transaction_id: String,
         referred_by: Option<String>,
         replaces: Option<String>,
-        raw_request: Option<std::sync::Arc<bytes::Bytes>>,
+        raw_request: Option<bytes::Bytes>,
     ) -> Result<()> {
         // Skip if this session isn't ours
         if self
@@ -3878,7 +3878,7 @@ impl SessionCrossCrateEventHandler {
         subscription_state: Option<String>,
         content_type: Option<String>,
         body: Option<String>,
-        raw_request: Option<std::sync::Arc<bytes::Bytes>>,
+        raw_request: Option<bytes::Bytes>,
     ) -> Result<()> {
         if !self.is_our_session(&session_id).await {
             debug!(
@@ -4119,7 +4119,7 @@ fn publish_api_event(publisher: &SessionEventPublisher, api_event: crate::api::e
 /// delivery.
 fn build_incoming_request_from_bytes(
     call_id: SessionId,
-    raw_request: Option<std::sync::Arc<bytes::Bytes>>,
+    raw_request: Option<bytes::Bytes>,
 ) -> Option<crate::api::incoming::IncomingRequest> {
     let bytes = raw_request?;
     match rvoip_sip_core::parse_message(bytes.as_ref()) {
@@ -4151,7 +4151,7 @@ fn build_incoming_response_from_bytes(
     status_code: u16,
     reason_phrase: String,
     sdp: Option<String>,
-    raw_response: Option<std::sync::Arc<bytes::Bytes>>,
+    raw_response: Option<bytes::Bytes>,
 ) -> crate::api::incoming::IncomingResponse {
     use crate::api::handle::CallId;
     let call_id_view: CallId = call_id;

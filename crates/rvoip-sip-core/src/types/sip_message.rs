@@ -474,48 +474,52 @@ impl Message {
     /// assert!(String::from_utf8_lossy(&bytes).contains("SIP/2.0 200 OK"));
     /// ```
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::new();
+        // Write directly into the output Vec via `write!`. Each
+        // `format!(...).as_bytes()` previously allocated a fresh String
+        // per header (10+ allocations for a typical INVITE); the
+        // `Write` impl for `Vec<u8>` reuses the single output buffer.
+        // Pre-size for ~64 B/header + body so the early growth steps
+        // get skipped on common messages.
+        use std::io::Write as _;
+
+        let (headers, body): (&[crate::types::TypedHeader], &[u8]) = match self {
+            Message::Request(r) => (&r.headers, &r.body),
+            Message::Response(r) => (&r.headers, &r.body),
+        };
+        let estimated = 64 + headers.len() * 64 + body.len();
+        let mut bytes = Vec::with_capacity(estimated);
 
         match self {
             Message::Request(request) => {
-                // Add request line: METHOD URI SIP/2.0\r\n
-                bytes.extend_from_slice(
-                    format!("{} {} {}\r\n", request.method, request.uri, request.version)
-                        .as_bytes(),
+                // Request line: METHOD URI SIP/2.0\r\n
+                let _ = write!(
+                    &mut bytes,
+                    "{} {} {}\r\n",
+                    request.method, request.uri, request.version
                 );
 
-                // Add headers
                 for header in &request.headers {
-                    bytes.extend_from_slice(format!("{}\r\n", header).as_bytes());
+                    let _ = write!(&mut bytes, "{}\r\n", header);
                 }
 
-                // Add empty line to separate headers from body
                 bytes.extend_from_slice(b"\r\n");
-
-                // Add body if any
                 bytes.extend_from_slice(&request.body);
             }
             Message::Response(response) => {
-                // Add status line: SIP/2.0 CODE REASON\r\n
-                bytes.extend_from_slice(
-                    format!(
-                        "{} {} {}\r\n",
-                        response.version,
-                        response.status.as_u16(),
-                        response.reason_phrase()
-                    )
-                    .as_bytes(),
+                // Status line: SIP/2.0 CODE REASON\r\n
+                let _ = write!(
+                    &mut bytes,
+                    "{} {} {}\r\n",
+                    response.version,
+                    response.status.as_u16(),
+                    response.reason_phrase()
                 );
 
-                // Add headers
                 for header in &response.headers {
-                    bytes.extend_from_slice(format!("{}\r\n", header).as_bytes());
+                    let _ = write!(&mut bytes, "{}\r\n", header);
                 }
 
-                // Add empty line to separate headers from body
                 bytes.extend_from_slice(b"\r\n");
-
-                // Add body if any
                 bytes.extend_from_slice(&response.body);
             }
         }

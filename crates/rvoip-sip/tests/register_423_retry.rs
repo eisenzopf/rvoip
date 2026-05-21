@@ -206,7 +206,7 @@ async fn register_423_retry_bumps_expires_and_succeeds() {
     config.media_port_start = 40000;
     config.media_port_end = 40100;
 
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", REGISTRAR_PORT),
@@ -392,7 +392,7 @@ async fn register_401_retry_reuses_call_id_and_increments_cseq() {
     config.media_port_start = 40110;
     config.media_port_end = 40120;
 
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", AUTH_REGISTRAR_PORT),
@@ -531,7 +531,7 @@ async fn registration_info_tracks_success_refresh_shape_and_unregister_wait() {
     config.media_port_start = 40130;
     config.media_port_end = 40140;
 
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", INFO_REGISTRAR_PORT),
@@ -669,7 +669,7 @@ async fn registration_info_tracks_auth_failure_metadata() {
     config.media_port_start = 40150;
     config.media_port_end = 40160;
 
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", FAIL_REGISTRAR_PORT),
@@ -780,7 +780,7 @@ async fn registration_info_uses_contact_expires_and_exposes_route_and_gruu() {
     config.media_port_end = 40180;
     config.registration_refresh_jitter_percent = 0;
 
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
@@ -876,7 +876,7 @@ async fn registration_accepted_expiry_falls_back_to_header_then_request() {
         config.media_port_start = 40190;
         config.media_port_end = 40200;
         config.registration_auto_refresh = false;
-        let mut peer = StreamPeer::with_config(config).await.expect("peer");
+        let peer = StreamPeer::with_config(config).await.expect("peer");
         let handle = peer
             .register(
                     format!("sip:127.0.0.1:{}", registrar_port),
@@ -965,7 +965,7 @@ async fn automatic_registration_refresh_reuses_call_id_and_increments_cseq() {
     config.media_port_start = 40210;
     config.media_port_end = 40220;
     config.registration_refresh_jitter_percent = 0;
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
@@ -1041,7 +1041,7 @@ async fn unregister_aborts_pending_automatic_refresh() {
     config.media_port_start = 40230;
     config.media_port_end = 40240;
     config.registration_refresh_jitter_percent = 0;
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
@@ -1123,7 +1123,7 @@ async fn stream_peer_shutdown_gracefully_unregisters_active_registration() {
     config.media_port_start = 40250;
     config.media_port_end = 40260;
     config.registration_refresh_jitter_percent = 0;
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(
                 format!("sip:127.0.0.1:{}", registrar_port),
@@ -1197,7 +1197,7 @@ async fn register_uses_outbound_proxy_as_destination_and_route_header() {
     config.media_port_end = 40280;
     config.registration_auto_refresh = false;
     config.outbound_proxy_uri = Some(outbound_proxy_uri.clone());
-    let mut peer = StreamPeer::with_config(config).await.expect("peer");
+    let peer = StreamPeer::with_config(config).await.expect("peer");
     let handle = peer
         .register(registrar_uri, "alice", "password")
                 .with_contact_uri("sip:alice@127.0.0.1:40270")

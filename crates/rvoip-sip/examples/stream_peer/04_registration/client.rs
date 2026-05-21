@@ -16,7 +16,7 @@ async fn main() -> rvoip_sip::Result<()> {
         )
         .init();
 
-    let mut peer = StreamPeer::with_config(Config::local("alice", 5061)).await?;
+    let peer = StreamPeer::with_config(Config::local("alice", 5061)).await?;
     println!("[alice] registering with sip:127.0.0.1:5060");
 
     let handle = peer

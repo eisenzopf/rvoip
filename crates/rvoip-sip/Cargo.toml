@@ -105,6 +105,41 @@ path = "examples/callback_peer/06_trait_handler/client.rs"
 name = "sip_b2bua"
 path = "examples/sip_b2bua.rs"
 
+# Profiling example binaries — long-running workloads suitable for
+# `samply record`, `cargo flamegraph`, or `dhat`. The dhat variants
+# require `--features dhat`; the tokio-console hook in
+# `profiling_registration_storm` / `profiling_dialog_steady_state`
+# requires `--features tokio-console` plus
+# `RUSTFLAGS="--cfg tokio_unstable"`. See `docs/PROFILING.md`.
+[[example]]
+name = "profiling_parser_loop"
+path = "examples/profiling/parser_loop.rs"
+[[example]]
+name = "profiling_call_setup_loop"
+path = "examples/profiling/call_setup_loop.rs"
+[[example]]
+name = "profiling_registration_storm"
+path = "examples/profiling/registration_storm.rs"
+[[example]]
+name = "profiling_dialog_steady_state"
+path = "examples/profiling/dialog_steady_state.rs"
+[[example]]
+name = "profiling_dhat_parse"
+path = "examples/profiling/dhat_parse.rs"
+required-features = ["dhat"]
+[[example]]
+name = "profiling_dhat_b2bua"
+path = "examples/profiling/dhat_b2bua.rs"
+required-features = ["dhat"]
+[[example]]
+name = "profiling_dhat_dialog"
+path = "examples/profiling/dhat_dialog.rs"
+required-features = ["dhat"]
+[[example]]
+name = "profiling_dhat_udp"
+path = "examples/profiling/dhat_udp.rs"
+required-features = ["dhat"]
+
 # SIP_API_DESIGN_2 §11 use-case walkthroughs — runnable end-to-end
 # demonstrations of the four target patterns (endpoint, gateway,
 # call-center agent, SBC). Each example boots multiple coordinators
@@ -289,6 +324,19 @@ cpal = "0.15"
 crossterm = "0.27"
 ratatui = "0.26"
 toml = "0.8"
+criterion = { workspace = true }
+futures = { workspace = true }
+
+# End-to-end benchmarks. See `crates/rvoip-sip/docs/PROFILING.md`.
+[[bench]]
+name = "call_setup"
+harness = false
+[[bench]]
+name = "registration_storm"
+harness = false
+[[bench]]
+name = "dialog_steady_state"
+harness = false
 
 [features]
 default = []
@@ -305,6 +353,17 @@ generated-validation = [
 # session-core only depends on sip-transport as a dev-dependency, and
 # feature chains via dev-deps don't participate in regular builds.
 dev-insecure-tls = ["rvoip-sip-dialog/dev-insecure-tls"]
+# Heap profiling for `examples/profiling/dhat_*.rs`. Pulls in the dhat
+# global allocator and turns the gated examples into compilable
+# binaries. Off by default so `cargo build` / `cargo test` never see
+# the allocator swap. The forwarded `rvoip-infra-common/no-global-allocator`
+# suppresses mimalloc so the two `#[global_allocator]`s don't conflict.
+# See `crates/rvoip-sip/docs/PROFILING.md`.
+dhat = ["dep:dhat", "rvoip-infra-common/no-global-allocator"]
+# `console-subscriber` integration for the long-running profiling
+# examples (`profiling_registration_storm`, `profiling_dialog_steady_state`).
+# Requires `RUSTFLAGS="--cfg tokio_unstable"` at build time.
+tokio-console = ["dep:console-subscriber"]
 
 [[test]]
 name = "generated_sip_compliance"
@@ -315,3 +374,13 @@ required-features = ["generated-validation"]
 version = "0.7"
 optional = true
 features = ["sqlite", "runtime-tokio"]
+
+# Profiling-only optional deps. Off by default; enabled via the `dhat`
+# and `tokio-console` features. See `crates/rvoip-sip/docs/PROFILING.md`.
+[dependencies.dhat]
+version = "0.3"
+optional = true
+
+[dependencies.console-subscriber]
+version = "0.4"
+optional = true

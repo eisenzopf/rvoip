@@ -11,18 +11,20 @@
 //! 2. Agent runs as a `CallbackPeer` so inbound calls are routed
 //!    through its `on_incoming` hook.
 //! 3. On `on_incoming`, the agent accepts the customer's INVITE and
-//!    immediately blind-transfers via
-//!    `coord.refer(&session, "sip:colleague@..").send()`.
+//!    immediately blind-transfers via `session.refer(target).send()`
+//!    — the SessionHandle is captured from `call.accept().await?`.
 //! 4. The customer's UA follows the REFER and ends up talking to the
 //!    colleague.
 //!
 //! Wired in-process: mock registrar (raw UDP) + customer
-//! (`UnifiedCoordinator`) + agent (`CallbackPeerBuilder` so the
-//! handler can close over the agent's own coord) + colleague
-//! (`CallbackPeer<AutoAccept>`).
+//! (`UnifiedCoordinator`) + agent (`CallbackPeerBuilder`) + colleague
+//! (`CallbackPeer<AutoAccept>`). The handler closure no longer needs
+//! to close over the agent's coordinator — the `SessionHandle`
+//! returned by `accept()` carries everything the closure needs to
+//! drive the in-dialog REFER.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder};
@@ -108,10 +110,12 @@ async fn main() -> rvoip_sip::Result<()> {
     tokio::time::sleep(Duration::from_millis(150)).await;
     println!("[col ] colleague on 127.0.0.1:{COLLEAGUE_PORT}");
 
-    // ── Agent (CallbackPeerBuilder lets the handler close over the
-    //         peer's own coord via a OnceLock) ──────────────────────
-    let coord_slot: Arc<OnceLock<Arc<UnifiedCoordinator>>> = Arc::new(OnceLock::new());
-    let coord_slot_for_handler = coord_slot.clone();
+    // ── Agent (CallbackPeerBuilder) ────────────────────────────────
+    //
+    // The handler captures only the colleague URI and a done-flag.
+    // The SessionHandle returned by `call.accept().await?` carries
+    // everything else the closure needs to drive the in-dialog REFER
+    // — no need to back-pipe the coordinator into the closure.
     let done = Arc::new(AtomicBool::new(false));
     let done_for_handler = done.clone();
     let colleague_uri = format!("sip:colleague@127.0.0.1:{COLLEAGUE_PORT}");
@@ -119,48 +123,51 @@ async fn main() -> rvoip_sip::Result<()> {
 
     let agent_peer = CallbackPeerBuilder::new(Config::local("agent", AGENT_PORT))
         .on_incoming(move |call| {
-            let coord = coord_slot_for_handler.get().cloned();
             let done = done_for_handler.clone();
             let target = colleague_uri_for_handler.clone();
             async move {
                 if done.swap(true, Ordering::SeqCst) {
                     return CallHandlerDecision::Accept;
                 }
-                let call_id = call.call_id.clone();
-                println!("[agent] accepting customer call {}", call_id.0);
-                let _ = call.accept().await;
+                let call_id_display = call.call_id.0.clone();
+                println!("[agent] accepting customer call {}", call_id_display);
+                let session = match call.accept().await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[agent] accept failed: {e:?}");
+                        return CallHandlerDecision::Accept;
+                    }
+                };
 
-                if let Some(coord) = coord {
-                    tokio::spawn(async move {
-                        let deadline =
-                            tokio::time::Instant::now() + Duration::from_secs(5);
-                        loop {
-                            if let Ok(state) = coord.get_state(&call_id).await {
-                                if state == CallState::Active {
-                                    break;
-                                }
+                tokio::spawn(async move {
+                    let deadline =
+                        tokio::time::Instant::now() + Duration::from_secs(5);
+                    loop {
+                        if let Ok(state) = session.state().await {
+                            if state == CallState::Active {
+                                break;
                             }
-                            if tokio::time::Instant::now() >= deadline {
-                                eprintln!(
-                                    "[agent] call never reached Active; abandoning REFER"
-                                );
-                                return;
-                            }
-                            tokio::time::sleep(Duration::from_millis(40)).await;
                         }
-                        println!("[agent] blind-transferring to {}", target);
-                        if let Err(e) = coord.refer(&call_id, target).send().await {
-                            eprintln!("[agent] REFER failed: {e:?}");
+                        if tokio::time::Instant::now() >= deadline {
+                            eprintln!(
+                                "[agent] call never reached Active; abandoning REFER"
+                            );
+                            return;
                         }
-                    });
-                }
+                        tokio::time::sleep(Duration::from_millis(40)).await;
+                    }
+                    println!("[agent] blind-transferring to {}", target);
+                    // NEW ergonomic — REFER straight off the SessionHandle.
+                    if let Err(e) = session.refer(target).send().await {
+                        eprintln!("[agent] REFER failed: {e:?}");
+                    }
+                });
                 CallHandlerDecision::Accept
             }
         })
         .build()
         .await?;
     let agent_coord = agent_peer.coordinator().clone();
-    let _ = coord_slot.set(agent_coord.clone());
 
     println!("[agent] registering with sip:127.0.0.1:{REGISTRAR_PORT}");
     let _reg_handle = agent_coord

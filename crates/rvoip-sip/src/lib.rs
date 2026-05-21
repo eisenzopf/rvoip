@@ -321,7 +321,7 @@
 //!   builder shape. Every builder (`coord.invite(..).send()`,
 //!   `coord.refer(..).send()`, `coord.accept(..).send()`, …)
 //!   implements it. In-dialog builders are also reachable directly
-//!   on [`SessionHandle`](api::handle::SessionHandle) —
+//!   on [`api::handle::SessionHandle`] —
 //!   `session.bye().send()`, `session.refer(target).send()`, etc. —
 //!   so application code that already holds a session doesn't need
 //!   to reach back through the coordinator.

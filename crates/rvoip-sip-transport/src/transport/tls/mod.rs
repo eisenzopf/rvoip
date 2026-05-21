@@ -401,7 +401,7 @@ impl TlsTransport {
                                         source: remote_addr,
                                         destination: local_addr,
                                         transport_type: TransportType::Tls,
-                                        raw_bytes: Some(std::sync::Arc::new(raw_bytes)),
+                                        raw_bytes: Some(raw_bytes),
                                     })
                                     .await;
                             }

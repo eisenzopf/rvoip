@@ -269,7 +269,7 @@ async fn generated_sip_compliance_register_423_retry_is_generated_valid() {
         }
     });
 
-    let mut peer = StreamPeer::with_config(config("alice", client_port))
+    let peer = StreamPeer::with_config(config("alice", client_port))
         .await
         .expect("peer");
     let handle = peer

@@ -1,4 +1,4 @@
-use bytes::BytesMut;
+use bytes::Bytes;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -14,6 +14,11 @@ const UDP_BUFFER_SIZE: usize = 8192;
 /// UDP listener for receiving SIP messages
 pub struct UdpListener {
     socket: Arc<UdpSocket>,
+    /// Bound local address, captured once at `bind` time. Reading it
+    /// from the kernel via `socket.local_addr()` was previously a
+    /// syscall on every `receive()` even though the value is fixed
+    /// for the listener's lifetime.
+    local_addr: SocketAddr,
 }
 
 impl UdpListener {
@@ -24,8 +29,11 @@ impl UdpListener {
             .await
             .map_err(|e| Error::BindFailed(addr, e))?;
 
+        let local_addr = socket.local_addr().map_err(Error::LocalAddrFailed)?;
+
         Ok(Self {
             socket: Arc::new(socket),
+            local_addr,
         })
     }
 
@@ -41,35 +49,30 @@ impl UdpListener {
 
     /// Returns the local address this listener is bound to
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.socket.local_addr().map_err(Error::from)
+        Ok(self.local_addr)
     }
 
     /// Receives a packet from the UDP socket
-    pub async fn receive(&self) -> Result<(bytes::Bytes, SocketAddr, SocketAddr)> {
-        let mut buffer = BytesMut::with_capacity(UDP_BUFFER_SIZE);
-        buffer.resize(UDP_BUFFER_SIZE, 0);
+    pub async fn receive(&self) -> Result<(Bytes, SocketAddr, SocketAddr)> {
+        // Stack-allocated receive buffer. Previously we allocated a
+        // fresh 8 KiB `BytesMut` per packet and zero-filled it with
+        // `resize(_, 0)` — ~480 MB/s of heap churn at 60K req/s. The
+        // stack buffer is reused for every call (tokio stores it in
+        // the receive task's stack frame across awaits) and the
+        // `Bytes::copy_from_slice` below only allocates the exact
+        // packet length, which is ~500 B for typical SIP messages.
+        let mut buf = [0u8; UDP_BUFFER_SIZE];
 
-        // Receive a packet
         let (len, src) = self
             .socket
-            .recv_from(&mut buffer)
+            .recv_from(&mut buf)
             .await
-            .map_err(|e| Error::ReceiveFailed(e))?;
+            .map_err(Error::ReceiveFailed)?;
 
-        // Get the local address
-        let local_addr = self
-            .socket
-            .local_addr()
-            .map_err(|e| Error::LocalAddrFailed(e))?;
-
-        // Truncate buffer to the actual received length
-        buffer.truncate(len);
-
-        // Convert to Bytes
-        let packet = buffer.freeze();
+        let packet = Bytes::copy_from_slice(&buf[..len]);
         trace!("Received {} bytes from {}", len, src);
 
-        Ok((packet, src, local_addr))
+        Ok((packet, src, self.local_addr))
     }
 
     /// Creates a default dummy listener (used for testing)
@@ -101,8 +104,12 @@ impl UdpListener {
             }
         };
 
+        let local_addr = socket
+            .local_addr()
+            .unwrap_or_else(|_| "127.0.0.1:0".parse().unwrap());
         Self {
             socket: Arc::new(socket),
+            local_addr,
         }
     }
 }

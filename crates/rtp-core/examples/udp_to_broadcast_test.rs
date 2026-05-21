@@ -90,6 +90,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rvoip_rtp_core::traits::RtpEvent::Error(e) => {
                     println!("Transport error: {}", e);
                 }
+                rvoip_rtp_core::traits::RtpEvent::DtmfEvent {
+                    source,
+                    event,
+                    volume,
+                    duration,
+                    ..
+                } => {
+                    println!(
+                        "Received DTMF (RFC 4733) from {}: event {}, volume -{}dBm0, duration {} ts-units",
+                        source, event, volume, duration
+                    );
+                }
             }
         }
 

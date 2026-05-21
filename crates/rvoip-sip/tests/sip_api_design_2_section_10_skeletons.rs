@@ -65,9 +65,9 @@ fn in_dialog_notify_smoke() {}
 fn in_dialog_info_smoke() {}
 
 /// §10 #8 — in-dialog UPDATE smoke. Drives `coord.update(&session)`
-/// against an established call (via the shared `tests/support/`
-/// harness) and asserts the staged `X-Test: smoke` header reaches
-/// the wire.
+/// (equivalently `session.update()`) against an established call
+/// (via the shared `tests/support/` harness) and asserts the staged
+/// `X-Test: smoke` header reaches the wire.
 #[path = "support/mod.rs"]
 mod support_for_section_10;
 
@@ -109,8 +109,9 @@ async fn in_dialog_update_smoke() {
 }
 
 /// §10 #9 — re-INVITE with extras. Drives `coord.reinvite(&session)`
-/// against an established call and asserts the staged `X-Test: smoke`
-/// header reaches the wire on the mid-dialog INVITE.
+/// (equivalently `session.reinvite()`) against an established call
+/// and asserts the staged `X-Test: smoke` header reaches the wire on
+/// the mid-dialog INVITE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn in_dialog_reinvite_smoke() {
     use std::time::Duration;
@@ -690,10 +691,10 @@ async fn bye_stash_wins_over_auto_emit() {
 /// passing).
 ///
 /// This session-core-side test exercises the contract at the
-/// `coord.notify()` builder layer: NOTIFY built with
-/// `.for_subscription(id)` stamps the matching `id=` parameter on the
-/// outbound `Event:` header, which is the wire-level prerequisite for
-/// the dialog-core routing to work.
+/// `coord.notify()` / `session.notify()` builder layer: NOTIFY built
+/// with `.for_subscription(id)` stamps the matching `id=` parameter
+/// on the outbound `Event:` header, which is the wire-level
+/// prerequisite for the dialog-core routing to work.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn notify_subscription_id_routing() {
     use std::time::Duration;

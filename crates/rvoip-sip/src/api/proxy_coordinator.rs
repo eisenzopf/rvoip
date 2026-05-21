@@ -1,8 +1,8 @@
 //! `ProxyCoordinator` — public stateful-proxy entry point.
 //!
-//! Parallel to [`UnifiedCoordinator`](crate::api::unified::UnifiedCoordinator)
-//! but **dialog-agnostic**: a `ProxyCoordinator` runs a
-//! [`StatefulProxy`](rvoip_sip_proxy::StatefulProxy) on top of a
+//! Parallel to [`crate::api::unified::UnifiedCoordinator`] but
+//! **dialog-agnostic**: a `ProxyCoordinator` runs a
+//! [`rvoip_sip_proxy::StatefulProxy`] on top of a
 //! [`TransactionManager`], wiring the transport bind and the proxy
 //! event loop together so applications get a one-line setup:
 //!

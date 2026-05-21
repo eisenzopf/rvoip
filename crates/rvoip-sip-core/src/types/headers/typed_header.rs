@@ -672,11 +672,25 @@ impl From<&TypedHeader> for HeaderName {
     }
 }
 
-// Add TryFrom<Header> implementation for TypedHeader
+// Owned variant — kept as a thin delegate so existing callers that
+// move a `Header` in (e.g. `builder::headers::*`) don't need to change.
+// The real work lives in the `TryFrom<&Header>` impl below; that one
+// is the hot path called per-header from `parser::message::full_message_parser`,
+// where the caller wants to keep ownership of the original Header so it
+// can fall back to `TypedHeader::Other(name, value)` on parse failure
+// without paying an upfront clone.
 impl TryFrom<Header> for TypedHeader {
     type Error = Error;
 
     fn try_from(header: Header) -> Result<Self> {
+        Self::try_from(&header)
+    }
+}
+
+impl TryFrom<&Header> for TypedHeader {
+    type Error = Error;
+
+    fn try_from(header: &Header) -> Result<Self> {
         // Special case for pre-parsed HeaderValue variants
         match &header.value {
             HeaderValue::Authorization(auth) => {

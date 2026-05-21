@@ -50,6 +50,7 @@ proptest.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 async-trait.workspace = true
+criterion.workspace = true
 
 # Integration tests configuration
 [[test]]
@@ -65,3 +66,17 @@ path = "tests/parser_tests.rs"
 name = "generated_message_compliance"
 path = "tests/generated_message_compliance.rs"
 required-features = ["generated-validation"]
+
+# Performance benchmarks. Run with `cargo bench -p rvoip-sip-core`. See
+# `crates/rvoip-sip/docs/PROFILING.md` for the broader profiling workflow.
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "serialize"
+harness = false
+
+[[bench]]
+name = "headers"
+harness = false

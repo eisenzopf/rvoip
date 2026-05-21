@@ -81,6 +81,7 @@ dns = ["dep:hickory-resolver", "dep:fastrand"]
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber = { workspace = true }
+criterion = { workspace = true }
 # Generate self-signed certs in TLS handshake tests.
 rcgen = "0.12"
 tempfile = "3"
@@ -93,6 +94,11 @@ fastrand = { workspace = true }
 name = "resolver_hickory_e2e"
 path = "tests/resolver_hickory_e2e.rs"
 required-features = ["dns"]
+
+# Performance benchmarks. See `crates/rvoip-sip/docs/PROFILING.md`.
+[[bench]]
+name = "udp_loopback"
+harness = false
 
 [package.metadata.docs.rs]
 all-features = true

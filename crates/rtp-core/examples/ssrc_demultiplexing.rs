@@ -154,6 +154,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(RtpSessionEvent::RtcpReceiverReport { ssrc, .. }) => {
                             debug!("Received RTCP RR from SSRC={:08x}", ssrc);
                         },
+                        Ok(RtpSessionEvent::DtmfReceived { ssrc, event, .. }) => {
+                            debug!(
+                                "Received RFC 4733 DTMF (event {}) from SSRC={:08x}",
+                                event, ssrc
+                            );
+                        },
                         Err(e) => {
                             info!("Event channel error: {}", e);
                             break;

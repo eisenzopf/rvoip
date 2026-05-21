@@ -515,6 +515,20 @@ impl SessionHandle {
 
     /// Hang up the call with an RFC 3326 `Reason` header and wait for the
     /// terminal event.
+    ///
+    /// Internally `call.bye().with_sip_reason(reason).send()` plus event
+    /// observation — when you don't need the wait, reach for
+    /// [`bye`](Self::bye) directly:
+    ///
+    /// ```rust,no_run
+    /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
+    /// use rvoip_sip::SipReason;
+    /// call.bye()
+    ///     .with_sip_reason(SipReason::sip(200, "Normal call clearing"))
+    ///     .send().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn hangup_with_reason(
         &self,
         reason: SipReason,
@@ -638,11 +652,17 @@ impl SessionHandle {
     /// [`transfer_blind_and_wait_for_outcome`](Self::transfer_blind_and_wait_for_outcome)
     /// when the caller needs to wait for typed transfer success/failure.
     ///
+    /// Equivalent to `call.refer(target).send().await` — reach for that
+    /// shape directly via [`refer`](Self::refer) when you need to stage
+    /// `Referred-By`, `Replaces`, or custom headers on the REFER.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
     /// # async fn example(call: rvoip_sip::SessionHandle) -> rvoip_sip::Result<()> {
     /// call.transfer_blind("sip:charlie@example.com").await?;
+    /// // Equivalent — and gives access to with_referred_by / extras:
+    /// // call.refer("sip:charlie@example.com").send().await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -926,6 +946,11 @@ impl SessionHandle {
     /// orchestration concerns for a higher layer (application code or a
     /// dedicated multi-session coordinator).
     ///
+    /// Equivalent to
+    /// `call.refer(target).with_replaces(replaces).send().await` — reach
+    /// for [`refer`](Self::refer) directly when you need to stage
+    /// `Referred-By` or other headers alongside the `Replaces`.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -933,6 +958,11 @@ impl SessionHandle {
     /// if let Some(identity) = consultation.dialog_identity().await? {
     ///     if let Some(replaces) = identity.to_replaces_value() {
     ///         original.transfer_attended("sip:charlie@example.com", &replaces).await?;
+    ///         // Equivalent — and exposes the rest of ReferBuilder's setters:
+    ///         // original.refer("sip:charlie@example.com")
+    ///         //     .with_replaces(&replaces)
+    ///         //     .with_referred_by("sip:alice@example.com")
+    ///         //     .send().await?;
     ///     }
     /// }
     /// # Ok(())
@@ -990,6 +1020,11 @@ impl SessionHandle {
     /// fax (T.38) flow control, or `application/media_control+xml` for
     /// video FIR/PLI requests. The body is sent verbatim.
     ///
+    /// Equivalent to
+    /// `call.info(content_type).with_body(body).send().await` — reach
+    /// for [`info`](Self::info) directly when you need to stage extra
+    /// headers (`X-*`, custom routing hints) alongside the INFO.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -998,6 +1033,10 @@ impl SessionHandle {
     ///     "application/dtmf-relay",
     ///     b"Signal=1\r\nDuration=100\r\n",
     /// ).await?;
+    /// // Equivalent — and exposes the rest of InfoBuilder's setters:
+    /// // call.info("application/dtmf-relay")
+    /// //     .with_body(bytes::Bytes::from_static(b"Signal=1\r\nDuration=100\r\n"))
+    /// //     .send().await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1025,6 +1064,11 @@ impl SessionHandle {
     /// [`UnifiedCoordinator::make_transfer_leg`], so apps do not need to
     /// call this helper for transfer progress.
     ///
+    /// Equivalent to building via [`notify`](Self::notify): reach for
+    /// that shape directly when you need to stage additional headers
+    /// (`Retry-After`, custom `X-*`) or target a specific multiplexed
+    /// subscription via `for_subscription`.
+    ///
     /// # Examples
     ///
     /// ```rust,no_run
@@ -1034,6 +1078,11 @@ impl SessionHandle {
     ///     Some("Messages-Waiting: no\r\n".to_string()),
     ///     Some("active;expires=3600".to_string()),
     /// ).await?;
+    /// // Equivalent — and exposes the rest of NotifyBuilder's setters:
+    /// // call.notify("message-summary")
+    /// //     .with_subscription_state("active;expires=3600")
+    /// //     .with_body(bytes::Bytes::from_static(b"Messages-Waiting: no\r\n"))
+    /// //     .send().await?;
     /// # Ok(())
     /// # }
     /// ```

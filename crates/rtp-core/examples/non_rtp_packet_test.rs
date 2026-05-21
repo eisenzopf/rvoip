@@ -76,6 +76,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     RtpEvent::Error(e) => {
                         println!("Transport error: {}", e);
                     }
+                    RtpEvent::DtmfEvent { source, event, .. } => {
+                        event_count += 1;
+                        println!(
+                            "DtmfEvent #{} - digit code {} from {}",
+                            event_count, event, source
+                        );
+                    }
                 },
                 Ok(Err(e)) => {
                     println!("Error receiving event: {}", e);

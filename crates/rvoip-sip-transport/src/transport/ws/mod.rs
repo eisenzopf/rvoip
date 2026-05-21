@@ -350,7 +350,7 @@ impl WebSocketTransport {
                             } else {
                                 TransportType::Ws
                             },
-                            raw_bytes: Some(std::sync::Arc::new(raw_bytes)),
+                            raw_bytes: Some(raw_bytes),
                         };
 
                         if let Err(e) = inner.events_tx.send(event).await {

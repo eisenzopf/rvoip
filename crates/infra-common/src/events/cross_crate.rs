@@ -589,7 +589,7 @@ pub enum DialogToSessionEvent {
         /// `None` for legacy publish sites that haven't been migrated
         /// yet.
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
         /// STIR/SHAKEN Phase 1: outcome of `PASSporTVerifier::verify`
         /// on the inbound INVITE. `None` when no verifier is
         /// installed (the default), so existing callers see no
@@ -624,7 +624,7 @@ pub enum DialogToSessionEvent {
         /// (`Allow` / `Supported` / `Server` carry-through to the
         /// downstream 183).
         #[serde(skip)]
-        raw_response: Option<Arc<Bytes>>,
+        raw_response: Option<Bytes>,
     },
 
     /// Call successfully established
@@ -634,7 +634,7 @@ pub enum DialogToSessionEvent {
         /// SIP_API_DESIGN_2 Phase A: original inbound 200 OK bytes
         /// for downstream carry-through.
         #[serde(skip)]
-        raw_response: Option<Arc<Bytes>>,
+        raw_response: Option<Bytes>,
     },
 
     /// Call terminated notification
@@ -654,7 +654,7 @@ pub enum DialogToSessionEvent {
         /// bytes so applications can inspect `Retry-After`, `Warning`,
         /// `Reason`, and friends via `IncomingResponse::raw_response()`.
         #[serde(skip)]
-        raw_response: Option<Arc<Bytes>>,
+        raw_response: Option<Bytes>,
     },
 
     /// Caller cancelled before the call was answered (RFC 3261 §15.1.2 —
@@ -767,7 +767,7 @@ pub enum DialogToSessionEvent {
         /// bytes so applications can build an `IncomingRequest` view
         /// for B2BUA carry-through to the downstream leg.
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
     },
 
     /// Transfer requested
@@ -785,7 +785,7 @@ pub enum DialogToSessionEvent {
         /// applications can inspect History-Info / Diversion / custom
         /// headers via the `IncomingRequest` view.
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
     },
 
     /// ACK received (for UAS state transitions)
@@ -834,7 +834,7 @@ pub enum DialogToSessionEvent {
         /// SIP_API_DESIGN_2 Phase E: original inbound NOTIFY bytes
         /// for `IncomingRequest`-style typed inspection.
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
     },
 
     /// SIP_API_DESIGN_2 Phase E — in-dialog INFO (RFC 6086) received.
@@ -847,7 +847,7 @@ pub enum DialogToSessionEvent {
         /// Raw inbound INFO bytes; subscribers reconstruct an
         /// `Arc<Request>` via `parse_message`.
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
     },
 
     /// SIP_API_DESIGN_2 Phase E — in-dialog MESSAGE (RFC 3428)
@@ -855,7 +855,7 @@ pub enum DialogToSessionEvent {
     MessageReceived {
         session_id: String,
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
     },
 
     /// SIP_API_DESIGN_2 Phase E — OPTIONS received. May arrive
@@ -865,7 +865,7 @@ pub enum DialogToSessionEvent {
     OptionsReceived {
         session_id: String,
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
     },
 
     /// MESSAGE delivered
@@ -891,7 +891,7 @@ pub enum DialogToSessionEvent {
         /// `IncomingRegister::raw_request()` view. `None` for legacy
         /// publish sites until migration.
         #[serde(skip)]
-        raw_request: Option<Arc<Bytes>>,
+        raw_request: Option<Bytes>,
     },
 
     /// RFC 5626 outbound flow has failed — the keep-alive ping either

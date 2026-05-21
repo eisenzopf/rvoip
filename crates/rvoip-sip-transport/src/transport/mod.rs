@@ -60,7 +60,11 @@ pub enum TransportEvent {
         /// re-serializing the parsed `Message`. `None` for synthetic
         /// events that have no real wire bytes (mock transports,
         /// internally-fabricated messages).
-        raw_bytes: Option<Arc<Bytes>>,
+        ///
+        /// Plain `Bytes` (not `Arc<Bytes>`) — `Bytes` is already
+        /// internally Arc-managed; the outer `Arc` was a per-packet
+        /// heap allocation with no functional benefit.
+        raw_bytes: Option<Bytes>,
     },
 
     /// Error occurred in the transport

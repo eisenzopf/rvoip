@@ -124,3 +124,17 @@ flake.lock
 /default.nix
 
 # Before adding new lines, see the comment at the top.crates/codec-core/src/codecs/g729a-new/target/
+
+## Profiling artifacts (see crates/rvoip-sip/docs/PROFILING.md)
+# `target/criterion/` and `target/flamegraphs/` are already covered by
+# `/target` above; listed explicitly so the convention is discoverable
+# from `.gitignore` alone.
+target/criterion/
+target/flamegraphs/
+dhat-heap.json
+dhat-heap-*.json
+# samply / cargo-flamegraph output. `!` lines preserve the committed
+# brand SVGs at the workspace root.
+*.svg
+!rvoip-banner.svg
+!rvoip-square.svg

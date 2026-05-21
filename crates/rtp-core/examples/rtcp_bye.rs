@@ -129,6 +129,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } => {
                     debug!("Receiver got RTCP RR from SSRC={:08x}", ssrc);
                 }
+                RtpSessionEvent::DtmfReceived { ssrc, event, .. } => {
+                    debug!(
+                        "Receiver got RFC 4733 DTMF (event {}) from SSRC={:08x}",
+                        event, ssrc
+                    );
+                }
             }
         }
 
@@ -213,6 +219,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     report_blocks,
                 } => {
                     debug!("Sender got RTCP RR from SSRC={:08x}", ssrc);
+                }
+                RtpSessionEvent::DtmfReceived { ssrc, event, .. } => {
+                    debug!(
+                        "Sender got RFC 4733 DTMF (event {}) from SSRC={:08x}",
+                        event, ssrc
+                    );
                 }
             }
         }
