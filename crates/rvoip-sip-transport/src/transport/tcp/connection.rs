@@ -266,10 +266,7 @@ impl TcpConnection {
     /// bytes that the parser consumed. The Bytes copy lets downstream
     /// code preserve the upstream byte form (STIR/SHAKEN, SBC
     /// pass-through) without re-serializing.
-    fn try_parse_message(
-        &self,
-        buffer: &mut BytesMut,
-    ) -> Result<Option<(Message, bytes::Bytes)>> {
+    fn try_parse_message(&self, buffer: &mut BytesMut) -> Result<Option<(Message, bytes::Bytes)>> {
         if buffer.is_empty() {
             return Ok(None);
         }

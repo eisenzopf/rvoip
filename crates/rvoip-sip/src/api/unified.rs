@@ -538,6 +538,41 @@ pub struct Config {
     /// Default: `vec![0, 8, 101]`.
     pub offered_codecs: Vec<u8>,
 
+    /// Capacity for the legacy incoming-call compatibility channel.
+    ///
+    /// Modern [`CallbackPeer`](crate::api::callback_peer::CallbackPeer) and
+    /// [`StreamPeer`](crate::api::stream_peer::StreamPeer) consumers receive
+    /// incoming calls through the app event publisher. The compatibility
+    /// receiver exposed by [`UnifiedCoordinator::next_incoming_call`] is still
+    /// kept for lower-level callers, so the buffer must be large enough for
+    /// bursts without becoming a hidden backpressure point in the dialog event
+    /// handler. Default: `1000`.
+    pub incoming_call_channel_capacity: usize,
+
+    /// Capacity for the internal state-machine event channel.
+    ///
+    /// State transitions publish lightweight internal events that the session
+    /// event handler consumes and maps onto public API events where needed.
+    /// This buffer must absorb short bursts so SIP request processing does not
+    /// block behind event fan-out during load tests. Default: `1000`.
+    pub state_event_channel_capacity: usize,
+
+    /// Capacity for SIP transport event channels.
+    ///
+    /// This controls the per-transport receive queue (UDP/TCP/WS) and the
+    /// combined transport-manager queue feeding the transaction layer. It is
+    /// intentionally larger than the app-facing queues because one call setup
+    /// produces multiple SIP messages and retransmission bursts can otherwise
+    /// backpressure the UDP receive loop. Default: `10000`.
+    pub sip_transport_channel_capacity: usize,
+
+    /// Capacity for the transaction-manager event channel consumed by dialog
+    /// core.
+    ///
+    /// A small transaction event queue can block transaction processing while
+    /// dialog/session cleanup catches up. Default: `10000`.
+    pub transaction_event_channel_capacity: usize,
+
     /// SIP_API_DESIGN_2 §7.4 — application-supplied headers stamped
     /// on every outbound message the state machine emits
     /// **automatically** (session-timer auto-BYE, dialog-terminated-
@@ -619,6 +654,10 @@ impl Config {
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
+            incoming_call_channel_capacity: 1000,
+            state_event_channel_capacity: 1000,
+            sip_transport_channel_capacity: 10_000,
+            transaction_event_channel_capacity: 10_000,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -681,6 +720,10 @@ impl Config {
             comfort_noise_enabled: false,
             strict_codec_matching: true,
             offered_codecs: vec![0, 8, 101],
+            incoming_call_channel_capacity: 1000,
+            state_event_channel_capacity: 1000,
+            sip_transport_channel_capacity: 10_000,
+            transaction_event_channel_capacity: 10_000,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -894,6 +937,59 @@ impl Config {
         self
     }
 
+    /// Set the legacy incoming-call compatibility channel capacity.
+    ///
+    /// The default is `1000`, which is enough for normal bursty call-arrival
+    /// workloads while still bounding memory. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_incoming_call_channel_capacity(mut self, capacity: usize) -> Self {
+        self.incoming_call_channel_capacity = capacity;
+        self
+    }
+
+    /// Set SIP signaling channel capacities from one expected-concurrency knob.
+    ///
+    /// `capacity` is the expected number of concurrent or burst-arriving calls.
+    /// Per-call queues use that value directly; lower-level transport and
+    /// transaction event queues use `capacity * 10` because a single call
+    /// generates multiple SIP messages and transaction lifecycle events.
+    /// Values below `1` are rejected by [`Config::validate`].
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        let event_capacity = capacity.saturating_mul(10);
+        self.incoming_call_channel_capacity = capacity;
+        self.state_event_channel_capacity = capacity;
+        self.sip_transport_channel_capacity = event_capacity;
+        self.transaction_event_channel_capacity = event_capacity;
+        self
+    }
+
+    /// Set the internal state-machine event channel capacity.
+    ///
+    /// The default is `1000`. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_state_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.state_event_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the SIP transport event channel capacity.
+    ///
+    /// The default is `10000`. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_sip_transport_channel_capacity(mut self, capacity: usize) -> Self {
+        self.sip_transport_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the transaction-manager event channel capacity.
+    ///
+    /// The default is `10000`. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_transaction_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.transaction_event_channel_capacity = capacity;
+        self
+    }
+
     /// Configure SIP TLS as a directly reachable Contact listener.
     ///
     /// The UA will both dial outbound TLS and listen on `tls_bind_addr` for
@@ -993,6 +1089,26 @@ impl Config {
         if self.registration_refresh_jitter_percent > 50 {
             return Err(SessionError::ConfigError(
                 "registration_refresh_jitter_percent must be <= 50".to_string(),
+            ));
+        }
+        if self.incoming_call_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "incoming_call_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.state_event_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "state_event_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.sip_transport_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "sip_transport_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.transaction_event_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "transaction_event_channel_capacity must be at least 1".to_string(),
             ));
         }
         if matches!(
@@ -1576,8 +1692,9 @@ impl UnifiedCoordinator {
             config.state_table_path.as_deref(),
         ));
 
-        let (state_event_tx, state_event_rx) =
-            mpsc::channel::<crate::state_machine::executor::SessionEvent>(100);
+        let (state_event_tx, state_event_rx) = mpsc::channel::<
+            crate::state_machine::executor::SessionEvent,
+        >(config.state_event_channel_capacity);
 
         let state_machine = Arc::new(StateMachine::new_with_custom_table(
             state_table,
@@ -1597,7 +1714,7 @@ impl UnifiedCoordinator {
         let helpers = Arc::new(StateMachineHelpers::new(state_machine.clone()));
 
         // Create incoming call channel
-        let (incoming_tx, incoming_rx) = mpsc::channel(100);
+        let (incoming_tx, incoming_rx) = mpsc::channel(config.incoming_call_channel_capacity);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let lifecycle = LifecycleIndex::new();
         let app_event_publisher =
@@ -2917,6 +3034,7 @@ impl UnifiedCoordinator {
                 .tls_extra_ca_path
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
+            default_channel_capacity: config.sip_transport_channel_capacity,
             // Default build: `Config::tls_insecure_skip_verify` is not
             // compiled, so we always pass `false`. Only the
             // `dev-insecure-tls` build surfaces the field.
@@ -2983,7 +3101,7 @@ impl UnifiedCoordinator {
         let (transaction_manager, event_rx) = TransactionManager::with_transport_manager(
             transport_manager,
             transport_event_rx,
-            None, // No max transactions limit
+            Some(config.transaction_event_channel_capacity),
         )
         .await
         .map_err(|e| {
@@ -3500,7 +3618,7 @@ impl UnifiedCoordinator {
                     Some(crate::api::events::Event::UnregistrationSuccess { registrar: r })
                         if registrar.is_empty() || r == registrar =>
                     {
-                        return Ok(())
+                        return Ok(());
                     }
                     Some(crate::api::events::Event::UnregistrationFailed {
                         registrar: r,
@@ -3509,13 +3627,13 @@ impl UnifiedCoordinator {
                         return Err(SessionError::Other(format!(
                             "Unregistration failed for {}: {}",
                             r, reason
-                        )))
+                        )));
                     }
                     Some(_) => {}
                     None => {
                         return Err(SessionError::Other(
                             "Event channel closed while waiting for unregister".to_string(),
-                        ))
+                        ));
                     }
                 }
             }

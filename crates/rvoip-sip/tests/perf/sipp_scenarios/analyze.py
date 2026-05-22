@@ -19,6 +19,9 @@ import sys
 from pathlib import Path
 
 
+RESPONSE_BUCKETS_MS = [10, 25, 50, 75, 100, 150, 200, 300, 500, 1000, 2000]
+
+
 def parse_elapsed(elapsed: str) -> float:
     """Convert HH:MM:SS or HH:MM:SS:uuuuuu into seconds."""
     parts = elapsed.split(":")
@@ -29,6 +32,30 @@ def parse_elapsed(elapsed: str) -> float:
         h, m, s, us = parts
         return int(h) * 3600 + int(m) * 60 + int(s) + int(us) / 1_000_000
     return float(elapsed)
+
+
+def parse_int(value) -> int:
+    return int(value or 0)
+
+
+def percentile_upper_bound_ms(by_name: dict[str, str], prefix: str, quantile: float) -> str:
+    buckets: list[tuple[str, int]] = [
+        (f"<{upper}", parse_int(by_name.get(f"{prefix}_<{upper}")))
+        for upper in RESPONSE_BUCKETS_MS
+    ]
+    buckets.append((f">={RESPONSE_BUCKETS_MS[-1]}", parse_int(by_name.get(f"{prefix}_>=2000"))))
+
+    sample_count = sum(count for _, count in buckets)
+    if sample_count == 0:
+        return "n/a"
+
+    target = max(1, int(sample_count * quantile + 0.999999))
+    seen = 0
+    for label, count in buckets:
+        seen += count
+        if seen >= target:
+            return label
+    return buckets[-1][0]
 
 
 def parse_csv(path: Path) -> dict:
@@ -42,17 +69,20 @@ def parse_csv(path: Path) -> dict:
     by_name = dict(zip(header, last))
 
     elapsed_s = parse_elapsed(by_name.get("ElapsedTime(C)", "0"))
-    total = int(by_name.get("TotalCallCreated", 0) or 0)
-    success = int(by_name.get("SuccessfulCall(C)", 0) or 0)
-    failed = int(by_name.get("FailedCall(C)", 0) or 0)
-    current = int(by_name.get("CurrentCall", 0) or 0)
-    retrans = int(by_name.get("Retransmissions(C)", 0) or 0)
+    total = parse_int(by_name.get("TotalCallCreated"))
+    success = parse_int(by_name.get("SuccessfulCall(C)"))
+    failed = parse_int(by_name.get("FailedCall(C)"))
+    current = parse_int(by_name.get("CurrentCall"))
+    retrans = parse_int(by_name.get("Retransmissions(C)"))
     target_rate = float(by_name.get("TargetRate", 0) or 0)
 
     # ResponseTime1 is INVITE → 200 OK; HH:MM:SS:uuuuuu.
     rt_ms = parse_elapsed(by_name.get("ResponseTime1(C)", "0")) * 1000.0
     rt_stddev_ms = parse_elapsed(by_name.get("ResponseTime1StDev(C)", "0")) * 1000.0
     call_len_ms = parse_elapsed(by_name.get("CallLength(C)", "0")) * 1000.0
+    rt_p95 = percentile_upper_bound_ms(by_name, "ResponseTimeRepartition1", 0.95)
+    rt_p99 = percentile_upper_bound_ms(by_name, "ResponseTimeRepartition1", 0.99)
+    rt_p99_9 = percentile_upper_bound_ms(by_name, "ResponseTimeRepartition1", 0.999)
 
     achieved_cps = (success / elapsed_s) if elapsed_s > 0 else 0.0
     success_rate = (success / total * 100.0) if total > 0 else 0.0
@@ -69,6 +99,9 @@ def parse_csv(path: Path) -> dict:
         "success_rate": success_rate,
         "rt_ms": rt_ms,
         "rt_stddev_ms": rt_stddev_ms,
+        "rt_p95": rt_p95,
+        "rt_p99": rt_p99,
+        "rt_p99_9": rt_p99_9,
         "call_len_ms": call_len_ms,
     }
 
@@ -100,8 +133,18 @@ def render(data: dict) -> str:
     lines.append("")
     lines.append("## Summary table")
     lines.append("")
-    header = ["Target", "Target CPS", "Total calls", "Success",
-              "Success %", "Achieved CPS", "Avg RTT (ms)", "Retrans"]
+    header = [
+        "Target",
+        "Target CPS",
+        "Total calls",
+        "Success",
+        "Success %",
+        "Achieved CPS",
+        "Avg RTT (ms)",
+        "P95 RTT (ms)",
+        "P99 RTT (ms)",
+        "Retrans",
+    ]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
     for tag in tags:
@@ -112,7 +155,7 @@ def render(data: dict) -> str:
             lines.append(
                 f"| {tag} | {cps} | {d['total']} | {d['success']} | "
                 f"{d['success_rate']:.1f}% | {d['achieved_cps']:.1f} | "
-                f"{d['rt_ms']:.1f} | {d['retrans']} |"
+                f"{d['rt_ms']:.1f} | {d['rt_p95']} | {d['rt_p99']} | {d['retrans']} |"
             )
     lines.append("")
 
@@ -134,7 +177,9 @@ def render(data: dict) -> str:
             lines.append(f"- Achieved CPS: **{d['achieved_cps']:.1f}** (target {cps})")
             lines.append(
                 f"- INVITE→200 OK latency: avg **{d['rt_ms']:.1f} ms** "
-                f"(σ {d['rt_stddev_ms']:.1f} ms)"
+                f"(σ {d['rt_stddev_ms']:.1f} ms), "
+                f"p95 **{d['rt_p95']} ms**, p99 **{d['rt_p99']} ms**, "
+                f"p99.9 **{d['rt_p99_9']} ms**"
             )
             lines.append(f"- Call length: {d['call_len_ms']:.1f} ms")
             lines.append(f"- Retransmissions: {d['retrans']}")

@@ -47,13 +47,19 @@ impl TransactionManager {
     /// * `Result<Option<Request>>` - The original request, or None if not available
     pub async fn original_request(&self, tx_id: &TransactionKey) -> Result<Option<Request>> {
         // Extract Arc out of each shard before awaiting on per-tx state.
-        let client_arc = self.client_transactions.get(tx_id).map(|r| r.value().clone());
+        let client_arc = self
+            .client_transactions
+            .get(tx_id)
+            .map(|r| r.value().clone());
         if let Some(tx) = client_arc {
             if let Some(client_tx) = tx.as_client_transaction() {
                 return Ok(client_tx.original_request().await);
             }
         }
-        let server_arc = self.server_transactions.get(tx_id).map(|r| r.value().clone());
+        let server_arc = self
+            .server_transactions
+            .get(tx_id)
+            .map(|r| r.value().clone());
         if let Some(tx) = server_arc {
             if let Some(server_tx) = tx.as_server_transaction() {
                 return Ok(server_tx.original_request().await);
@@ -86,13 +92,19 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<Option<Response>>` - The last response, or None if not available
     pub async fn last_response(&self, tx_id: &TransactionKey) -> Result<Option<Response>> {
-        let client_arc = self.client_transactions.get(tx_id).map(|r| r.value().clone());
+        let client_arc = self
+            .client_transactions
+            .get(tx_id)
+            .map(|r| r.value().clone());
         if let Some(tx) = client_arc {
             if let Some(client_tx) = tx.as_client_transaction() {
                 return Ok(client_tx.last_response().await);
             }
         }
-        let server_arc = self.server_transactions.get(tx_id).map(|r| r.value().clone());
+        let server_arc = self
+            .server_transactions
+            .get(tx_id)
+            .map(|r| r.value().clone());
         if let Some(tx) = server_arc {
             if let Some(server_tx) = tx.as_server_transaction() {
                 return Ok(ServerTransaction::last_response(&*server_tx));
@@ -625,9 +637,7 @@ impl TransactionManager {
                     } else if changed {
                         debug!(
                             subscriber_id,
-                            old_count,
-                            new_count,
-                            "Cleaned up subscriber transaction list"
+                            old_count, new_count, "Cleaned up subscriber transaction list"
                         );
                     }
                 }
@@ -762,7 +772,10 @@ impl TransactionManager {
         }
 
         // Extract Arc out of shard before awaiting on original_request.
-        let tx = self.client_transactions.get(tx_id).map(|r| r.value().clone());
+        let tx = self
+            .client_transactions
+            .get(tx_id)
+            .map(|r| r.value().clone());
         let tx = tx.ok_or_else(|| {
             Error::transaction_not_found(tx_id.clone(), "retry_request - transaction not found")
         })?;

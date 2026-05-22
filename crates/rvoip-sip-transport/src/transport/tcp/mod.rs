@@ -20,7 +20,7 @@ use crate::transport::{Transport, TransportEvent, TransportType};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
-const DEFAULT_CHANNEL_CAPACITY: usize = 100;
+const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
 // Default connection idle timeout in seconds
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
@@ -289,11 +289,7 @@ impl Transport for TcpTransport {
         connection.send_message(&message).await
     }
 
-    async fn send_message_raw(
-        &self,
-        bytes: Bytes,
-        destination: SocketAddr,
-    ) -> Result<()> {
+    async fn send_message_raw(&self, bytes: Bytes, destination: SocketAddr) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }

@@ -34,7 +34,7 @@ use std::env;
 /// abstract traits rather than concrete implementations, allowing new transaction types
 /// to be added without modifying the runner itself.
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
@@ -185,24 +185,25 @@ pub async fn run_transaction_loop<D, TH, L>(
                 // Only send event if transaction should emit events (not in draining states)
                 let should_send_event = data.should_emit_events();
                 if should_send_event {
-                    // Try to send event with timeout to prevent blocking on full channel
+                    // StateChanged is diagnostic at the TU boundary. Do not
+                    // let lifecycle chatter block request processing under
+                    // load; if the shared event queue is full, higher-value
+                    // request/response events need the capacity.
                     let sender = data.get_tu_event_sender();
-                    let send_future = sender.send(TransactionEvent::StateChanged {
+                    let event = TransactionEvent::StateChanged {
                         transaction_id: tx_id_clone.clone(),
                         previous_state,
                         new_state: requested_new_state,
-                    });
+                    };
 
-                    let result =
-                        tokio::time::timeout(std::time::Duration::from_millis(100), send_future)
-                            .await;
-
-                    match result {
-                        Ok(Ok(())) => {
+                    match sender.try_send(event) {
+                        Ok(()) => {
                             tracing::trace!("Sent StateChanged event result: Success");
                         }
-                        Ok(Err(e)) => {
-                            // Channel is closed
+                        Err(TrySendError::Full(_)) => {
+                            debug!(id=%tx_id_clone, "Dropped StateChanged event because TU event channel is full");
+                        }
+                        Err(TrySendError::Closed(_)) => {
                             error!(id=%tx_id_clone, "Failed to send StateChanged event: channel closed");
 
                             // In test mode, don't terminate transactions when event channels close
@@ -218,14 +219,6 @@ pub async fn run_transaction_loop<D, TH, L>(
                                 data.as_ref_state().set(TransactionState::Terminated);
                                 break;
                             }
-                        }
-                        Err(_) => {
-                            // Timeout - channel is likely full, log but continue
-                            warn!(id=%tx_id_clone, "Timeout sending StateChanged event - channel may be congested");
-                            tracing::trace!(
-                                "Sent StateChanged event result: Timeout (channel congested)"
-                            );
-                            // Don't terminate on timeout - just continue processing
                         }
                     }
                 } else {
@@ -451,14 +444,12 @@ pub async fn run_transaction_loop<D, TH, L>(
     debug!(id = %data.as_ref_key().branch, final_state=?final_state, "Generic transaction loop ended.");
 
     if final_state == TransactionState::Terminated {
-        // Try to send termination event with timeout (best effort)
+        // Best effort only: teardown bookkeeping must not block transaction
+        // runner shutdown when the shared TU event queue is congested.
         let sender = data.get_tu_event_sender();
-        let send_future = sender.send(TransactionEvent::TransactionTerminated {
+        let _ = sender.try_send(TransactionEvent::TransactionTerminated {
             transaction_id: data.as_ref_key().clone(),
         });
-
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(50), send_future).await;
-        // Don't log errors here as it's expected during shutdown
     }
 }
 

@@ -100,7 +100,7 @@ pub struct TransportFactoryConfig {
 impl Default for TransportFactoryConfig {
     fn default() -> Self {
         Self {
-            channel_capacity: 100,
+            channel_capacity: 1000,
             pool_config: PoolConfig::default(),
             tls_cert_path: None,
             tls_key_path: None,

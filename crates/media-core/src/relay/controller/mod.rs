@@ -214,7 +214,7 @@ pub struct MediaSessionController {
 impl MediaSessionController {
     /// Create a new media session controller
     pub fn new() -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
 
         // Initialize performance components
@@ -271,7 +271,7 @@ impl MediaSessionController {
             sessions: Arc::new(DashMap::new()),
             rtp_sessions: Arc::new(DashMap::new()),
             event_tx,
-            event_rx: RwLock::new(Some(event_rx)),
+            event_rx: RwLock::new(None),
             event_hub: Arc::new(RwLock::new(None)),
             session_to_media: Arc::new(DashMap::new()),
             media_to_session: Arc::new(DashMap::new()),
@@ -388,7 +388,7 @@ impl MediaSessionController {
         max_port: u16,
         conference_config: ConferenceMixingConfig,
     ) -> Result<Self> {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
 
         // Create audio mixer with the provided configuration
@@ -462,7 +462,7 @@ impl MediaSessionController {
             sessions: Arc::new(DashMap::new()),
             rtp_sessions: Arc::new(DashMap::new()),
             event_tx,
-            event_rx: RwLock::new(Some(event_rx)),
+            event_rx: RwLock::new(None),
             event_hub: Arc::new(RwLock::new(None)),
             session_to_media: Arc::new(DashMap::new()),
             media_to_session: Arc::new(DashMap::new()),
@@ -667,7 +667,10 @@ impl MediaSessionController {
         // Stop and remove RTP session. Extract the wrapper out of the
         // shard, drop the guard, then close the underlying session
         // outside the map's locking territory.
-        if let Some((_, rtp_wrapper)) = self.rtp_sessions.remove(dialog_id) {
+        if let Some((_, mut rtp_wrapper)) = self.rtp_sessions.remove(dialog_id) {
+            if let Some(transmitter) = rtp_wrapper.audio_transmitter.take() {
+                transmitter.stop().await;
+            }
             let mut rtp_session = rtp_wrapper.session.lock().await;
             let _ = rtp_session.close().await;
             info!("✅ Stopped RTP session for dialog: {}", dialog_id);
@@ -871,10 +874,7 @@ impl MediaSessionController {
 
     /// Get all active sessions
     pub async fn get_all_sessions(&self) -> Vec<MediaSessionInfo> {
-        self.sessions
-            .iter()
-            .map(|r| r.value().clone())
-            .collect()
+        self.sessions.iter().map(|r| r.value().clone()).collect()
     }
 
     // REMOVED: Channel-based communication - use GlobalEventCoordinator instead
@@ -1093,14 +1093,23 @@ impl MediaSessionController {
                                                 || frame_count == 100
                                                 || frame_count == 101
                                             {
-                                                info!("✅ Sent decoded audio frame #{} to callback for dialog {}", frame_count, dialog_id);
+                                                info!(
+                                                    "✅ Sent decoded audio frame #{} to callback for dialog {}",
+                                                    frame_count, dialog_id
+                                                );
                                             }
                                         }
                                         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                                            warn!("Audio frame buffer full for dialog {} at frame #{}, dropping frame", dialog_id, frame_count);
+                                            warn!(
+                                                "Audio frame buffer full for dialog {} at frame #{}, dropping frame",
+                                                dialog_id, frame_count
+                                            );
                                         }
                                         Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                                            error!("❌ Audio frame channel closed for dialog {} at frame #{} - THIS IS THE 100-FRAME BUG!", dialog_id, frame_count);
+                                            error!(
+                                                "❌ Audio frame channel closed for dialog {} at frame #{} - THIS IS THE 100-FRAME BUG!",
+                                                dialog_id, frame_count
+                                            );
                                             break;
                                         }
                                     }
@@ -1114,7 +1123,10 @@ impl MediaSessionController {
 
                                     let mut logged = LOGGED_MISSING.lock().unwrap();
                                     if !logged.contains(dialog_id.as_str()) {
-                                        info!("⚠️ No audio frame callback registered yet for dialog {}", dialog_id);
+                                        info!(
+                                            "⚠️ No audio frame callback registered yet for dialog {}",
+                                            dialog_id
+                                        );
                                         logged.insert(dialog_id.to_string());
                                     }
                                 }
@@ -1161,9 +1173,8 @@ impl MediaSessionController {
                                     duration_ms,
                                     ssrc: dtmf_ssrc,
                                 };
-                                let sender = dtmf_callbacks
-                                    .get(&dialog_id)
-                                    .map(|r| r.value().clone());
+                                let sender =
+                                    dtmf_callbacks.get(&dialog_id).map(|r| r.value().clone());
                                 if let Some(sender) = sender {
                                     match sender.try_send(notification) {
                                         Ok(_) => info!(

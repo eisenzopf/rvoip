@@ -80,7 +80,9 @@ use super::TransactionManager;
 pub async fn handle_transport_message(
     event: TransportEvent,
     transport: &Arc<dyn Transport>,
-    client_transactions: &Arc<dashmap::DashMap<TransactionKey, crate::transaction::manager::ArcClientTransaction>>,
+    client_transactions: &Arc<
+        dashmap::DashMap<TransactionKey, crate::transaction::manager::ArcClientTransaction>,
+    >,
     server_transactions: &Arc<dashmap::DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
     events_tx: &mpsc::Sender<TransactionEvent>,
     event_subscribers: &Arc<arc_swap::ArcSwap<Vec<mpsc::Sender<TransactionEvent>>>>,
@@ -277,16 +279,14 @@ pub async fn handle_transport_message(
                         // Check if we have a matching INVITE transaction with the same branch.
                         // Clone the Arc out of the DashMap shard so the shard
                         // guard drops before any subsequent `.await`.
-                        let tx_clone_opt = server_transactions
-                            .get(&invite_tx_id)
-                            .and_then(|r| {
-                                let tx = r.value();
-                                if tx.kind() == TransactionKind::InviteServer {
-                                    Some((tx.clone(), invite_tx_id.clone()))
-                                } else {
-                                    None
-                                }
-                            });
+                        let tx_clone_opt = server_transactions.get(&invite_tx_id).and_then(|r| {
+                            let tx = r.value();
+                            if tx.kind() == TransactionKind::InviteServer {
+                                Some((tx.clone(), invite_tx_id.clone()))
+                            } else {
+                                None
+                            }
+                        });
 
                         if let Some((tx, tx_id_clone)) = tx_clone_opt {
                             // Now proceed with the transaction outside the lock
@@ -407,9 +407,7 @@ pub async fn handle_transport_message(
 
                     // Handle regular request retransmission and new requests.
                     // Clone the Arc out of the DashMap shard before any `.await`.
-                    let existing_tx = server_transactions
-                        .get(&tx_id)
-                        .map(|r| r.value().clone());
+                    let existing_tx = server_transactions.get(&tx_id).map(|r| r.value().clone());
 
                     if let Some(tx) = existing_tx {
                         debug!(%tx_id, "Processing retransmission of existing request");
@@ -448,9 +446,7 @@ pub async fn handle_transport_message(
                         };
 
                     // Look up the client transaction — clone Arc out of shard.
-                    let client_tx_arc = client_transactions
-                        .get(&tx_id)
-                        .map(|r| r.value().clone());
+                    let client_tx_arc = client_transactions.get(&tx_id).map(|r| r.value().clone());
 
                     if let Some(tx) = client_tx_arc {
                         let tx_kind = tx.kind();
@@ -765,9 +761,9 @@ impl TransactionManager {
                 self.publish_inbound_sip_trace(&message, source, destination, transport_type)
                     .await;
                 if let Some(bytes) = raw_bytes.as_ref() {
-                    if let Some(key) = crate::transaction::utils::transaction_key_from_message(
-                        &message,
-                    ) {
+                    if let Some(key) =
+                        crate::transaction::utils::transaction_key_from_message(&message)
+                    {
                         // `Bytes::clone` is a refcount bump — no heap alloc.
                         self.pending_inbound_bytes.insert(key, bytes.clone());
                     }
@@ -859,7 +855,10 @@ impl TransactionManager {
             // Check for existing server transaction. Clone the Arc
             // out of the DashMap shard so we don't hold the shard
             // guard across `process_request().await`.
-            let existing = self.server_transactions.get(&key).map(|r| r.value().clone());
+            let existing = self
+                .server_transactions
+                .get(&key)
+                .map(|r| r.value().clone());
             if let Some(transaction) = existing {
                 let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
@@ -967,7 +966,10 @@ impl TransactionManager {
             // Clone the Arc<dyn ClientTransaction> out of the DashMap
             // shard. No outer guard is held across `process_response`.
             // The transaction stays in the map; we just hold an Arc.
-            let tx_arc = self.client_transactions.get(&key).map(|r| r.value().clone());
+            let tx_arc = self
+                .client_transactions
+                .get(&key)
+                .map(|r| r.value().clone());
             let mut processed = false;
 
             if let Some(transaction) = tx_arc {

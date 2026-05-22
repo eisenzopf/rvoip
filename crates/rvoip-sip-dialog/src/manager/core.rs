@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::transaction::transport::multiplexed::select_transport_for_uri;
-use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
+use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager, TransactionState};
 use rvoip_sip_core::{Method, Request, Response, Uri};
 use rvoip_sip_transport::transport::TransportType;
 
@@ -203,22 +203,19 @@ pub struct DialogManager {
     /// cross-crate `IncomingCall` event is published. Reference impl
     /// lives in `rvoip-stir-shaken`. Application sets this via
     /// [`DialogManager::set_identity_verifier`].
-    pub(crate) identity_verifier:
-        Arc<std::sync::RwLock<Option<crate::manager::SharedVerifier>>>,
+    pub(crate) identity_verifier: Arc<std::sync::RwLock<Option<crate::manager::SharedVerifier>>>,
 
     /// Pluggable RFC 8224 STIR/SHAKEN PASSporT signer. When `Some`,
     /// the outbound request lifecycle attaches an `Identity:` header
     /// to dialog-creating requests before they hit the wire.
     /// Reference impl lives in `rvoip-stir-shaken`.
-    pub(crate) identity_signer:
-        Arc<std::sync::RwLock<Option<crate::manager::SharedSigner>>>,
+    pub(crate) identity_signer: Arc<std::sync::RwLock<Option<crate::manager::SharedSigner>>>,
 
     /// Policy for what to do when verification fails or `Identity:` is
     /// absent. Defaults to [`VerificationPolicy::Annotate`] (forward
     /// outcome to session-core without rejecting). See
     /// [`VerificationPolicy`] for the full semantics.
-    pub(crate) verification_policy:
-        Arc<std::sync::RwLock<crate::manager::VerificationPolicy>>,
+    pub(crate) verification_policy: Arc<std::sync::RwLock<crate::manager::VerificationPolicy>>,
 
     /// Pluggable RFC 3263 URI → next-hop resolver. When `Some`, the
     /// manager consults this resolver to translate destination URIs into
@@ -226,9 +223,8 @@ pub struct DialogManager {
     /// When `None` (default), resolution falls back to the process-wide
     /// system `HickoryResolver`, preserving pre-Phase-5 behaviour.
     /// Application sets this via [`DialogManager::set_resolver`].
-    pub(crate) resolver: Arc<
-        std::sync::RwLock<Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>>,
-    >,
+    pub(crate) resolver:
+        Arc<std::sync::RwLock<Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>>>,
 }
 
 impl std::fmt::Debug for DialogManager {
@@ -416,10 +412,7 @@ impl DialogManager {
     /// destination URIs into `SocketAddr`s before passing them to the
     /// transaction layer. Pass `None` to revert to the process-wide
     /// default (system `HickoryResolver`).
-    pub fn set_resolver(
-        &self,
-        resolver: Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>,
-    ) {
+    pub fn set_resolver(&self, resolver: Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>) {
         if let Ok(mut guard) = self.resolver.write() {
             *guard = resolver;
         }
@@ -514,9 +507,7 @@ impl DialogManager {
         // re-serialising the parsed Request only when the transport
         // cache missed (synthetic / mock transport paths).
         let raw_bytes = raw_request.clone().unwrap_or_else(|| {
-            bytes::Bytes::from(
-                rvoip_sip_core::Message::Request(request.clone()).to_bytes(),
-            )
+            bytes::Bytes::from(rvoip_sip_core::Message::Request(request.clone()).to_bytes())
         });
 
         let outcome = match identity_opt {
@@ -530,18 +521,13 @@ impl DialogManager {
             // server transaction. Identical to the adapter's reject
             // helper; lives here so both publish paths share one
             // implementation.
-            self.reject_inbound_identity_internal(event, &outcome)
-                .await;
+            self.reject_inbound_identity_internal(event, &outcome).await;
             return IdentityVerificationDecision::Drop;
         }
 
         let cc_status = match &outcome {
-            crate::manager::VerificationOutcome::Valid { .. } => {
-                IdentityVerificationStatus::Valid
-            }
-            crate::manager::VerificationOutcome::Stale { .. } => {
-                IdentityVerificationStatus::Stale
-            }
+            crate::manager::VerificationOutcome::Valid { .. } => IdentityVerificationStatus::Valid,
+            crate::manager::VerificationOutcome::Stale { .. } => IdentityVerificationStatus::Stale,
             crate::manager::VerificationOutcome::BadSignature => {
                 IdentityVerificationStatus::BadSignature
             }
@@ -875,6 +861,14 @@ impl DialogManager {
                 event = events.recv() => {
                     match event {
                         Some(event) => {
+                            if matches!(
+                                &event,
+                                TransactionEvent::StateChanged { new_state, .. }
+                                    if *new_state != TransactionState::Terminated
+                            ) {
+                                continue;
+                            }
+
                             // Extract transaction ID from the event
                             let transaction_id = self.extract_transaction_id(&event);
 
@@ -1980,11 +1974,12 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = self.resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .unwrap_or(fallback_destination);
+            let destination = self
+                .resolve_uri_to_socketaddr(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+                )
+                .await
+                .unwrap_or(fallback_destination);
 
             (destination, request)
         };
@@ -2081,11 +2076,12 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = self.resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .unwrap_or(fallback_destination);
+            let destination = self
+                .resolve_uri_to_socketaddr(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+                )
+                .await
+                .unwrap_or(fallback_destination);
 
             (destination, request)
         };

@@ -277,9 +277,8 @@ impl MultiplexedTransport {
                 }
             }
         }
-        Err(last_err.unwrap_or_else(|| {
-            TransportError::InvalidAddress("all candidates failed".into())
-        }))
+        Err(last_err
+            .unwrap_or_else(|| TransportError::InvalidAddress("all candidates failed".into())))
     }
 }
 
@@ -289,7 +288,11 @@ impl Transport for MultiplexedTransport {
         Ok(self.local_addr)
     }
 
-    async fn send_message(&self, mut message: Message, destination: SocketAddr) -> TransportResult<()> {
+    async fn send_message(
+        &self,
+        mut message: Message,
+        destination: SocketAddr,
+    ) -> TransportResult<()> {
         let (mut transport_type, mut transport) = self.pick_transport(&message, destination)?;
 
         // RFC 3261 §18.1.1 — if the URI selected UDP but the request

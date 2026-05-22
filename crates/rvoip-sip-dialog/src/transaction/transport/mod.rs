@@ -123,7 +123,10 @@ impl TransportManager {
         let (event_tx, event_rx) = mpsc::channel(config.default_channel_capacity);
 
         let transports = Arc::new(Mutex::new(HashMap::new()));
-        let transport_factory = Arc::new(TransportFactory::with_defaults());
+        let transport_factory = Arc::new(TransportFactory::new(TransportFactoryConfig {
+            channel_capacity: config.default_channel_capacity,
+            ..Default::default()
+        }));
 
         let manager = Self {
             config,
@@ -339,12 +342,15 @@ impl TransportManager {
 
     /// Adds a UDP transport to the manager
     pub async fn add_udp_transport(&self, bind_addr: SocketAddr) -> Result<Arc<dyn Transport>> {
-        let (transport, rx) = UdpTransport::bind(bind_addr, None).await.map_err(|e| {
-            Error::Transport(format!(
-                "Failed to bind UDP transport to {}: {}",
-                bind_addr, e
-            ))
-        })?;
+        let (transport, rx) =
+            UdpTransport::bind(bind_addr, Some(self.config.default_channel_capacity))
+                .await
+                .map_err(|e| {
+                    Error::Transport(format!(
+                        "Failed to bind UDP transport to {}: {}",
+                        bind_addr, e
+                    ))
+                })?;
 
         let transport_arc = Arc::new(transport);
 
@@ -441,14 +447,15 @@ impl TransportManager {
             let arc: Arc<dyn Transport> = Arc::new(transport);
             (arc, format!("tls:{}", actual))
         } else {
-            let (transport, rx) = TcpTransport::bind(bind_addr, None, None)
-                .await
-                .map_err(|e| {
-                    Error::Transport(format!(
-                        "Failed to bind TCP transport to {}: {}",
-                        bind_addr, e
-                    ))
-                })?;
+            let (transport, rx) =
+                TcpTransport::bind(bind_addr, Some(self.config.default_channel_capacity), None)
+                    .await
+                    .map_err(|e| {
+                        Error::Transport(format!(
+                            "Failed to bind TCP transport to {}: {}",
+                            bind_addr, e
+                        ))
+                    })?;
             let arc: Arc<dyn Transport> = Arc::new(transport);
             // TCP path retains its own event channel; bridge it into
             // the manager's combined channel.
@@ -489,7 +496,14 @@ impl TransportManager {
         };
 
         #[cfg(feature = "ws")]
-        let result = WebSocketTransport::bind(bind_addr, secure, cert_path, key_path, None).await;
+        let result = WebSocketTransport::bind(
+            bind_addr,
+            secure,
+            cert_path,
+            key_path,
+            Some(self.config.default_channel_capacity),
+        )
+        .await;
 
         #[cfg(not(feature = "ws"))]
         let result: Result<(WebSocketTransport, mpsc::Receiver<TransportEvent>)> =

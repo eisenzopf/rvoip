@@ -17,7 +17,7 @@ use crate::transport::{Transport, TransportEvent, TransportType};
 use rvoip_sip_core::Message;
 
 // Default channel capacity
-const DEFAULT_CHANNEL_CAPACITY: usize = 100;
+const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
 
 /// RFC 3261 §18.1.1 — outbound SIP requests larger than this MUST be
 /// shipped over a congestion-controlled transport (TCP) rather than UDP
@@ -239,11 +239,7 @@ impl Transport for UdpTransport {
         self.inner.sender.send(&bytes, destination).await
     }
 
-    async fn send_message_raw(
-        &self,
-        bytes: bytes::Bytes,
-        destination: SocketAddr,
-    ) -> Result<()> {
+    async fn send_message_raw(&self, bytes: bytes::Bytes, destination: SocketAddr) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
@@ -323,13 +319,10 @@ mod tests {
 
     #[tokio::test]
     async fn bind_with_mtu_honours_explicit_override() {
-        let (transport, _rx) = UdpTransport::bind_with_mtu(
-            "127.0.0.1:0".parse().unwrap(),
-            None,
-            900,
-        )
-        .await
-        .expect("bind_with_mtu");
+        let (transport, _rx) =
+            UdpTransport::bind_with_mtu("127.0.0.1:0".parse().unwrap(), None, 900)
+                .await
+                .expect("bind_with_mtu");
         assert_eq!(transport.max_safe_message_size(), 900);
         transport.close().await.ok();
     }

@@ -122,8 +122,11 @@ pub struct PortAllocator {
     /// Recently released ports that can be reused
     released_ports: Arc<Mutex<Vec<ReleasedPort>>>,
 
-    /// Maps session IDs to their allocated ports
-    session_ports: Arc<Mutex<HashMap<String, Vec<u16>>>>,
+    /// Last time the released-port list was compacted.
+    last_released_cleanup: Arc<Mutex<Instant>>,
+
+    /// Maps session IDs to their allocated `(ip, port)` pairs
+    session_ports: Arc<Mutex<HashMap<String, Vec<(IpAddr, u16)>>>>,
 
     /// Last allocated port (for incremental strategy)
     last_port: Arc<Mutex<u16>>,
@@ -146,6 +149,7 @@ impl PortAllocator {
             config: config.clone(),
             allocated_ports: Arc::new(Mutex::new(HashSet::new())),
             released_ports: Arc::new(Mutex::new(Vec::new())),
+            last_released_cleanup: Arc::new(Mutex::new(Instant::now())),
             session_ports: Arc::new(Mutex::new(HashMap::new())),
             last_port: Arc::new(Mutex::new(config.port_range_start)),
             socket_strategy,
@@ -183,7 +187,7 @@ impl PortAllocator {
                 let socket_addr = SocketAddr::new(ip, port);
 
                 // Track this allocation
-                self.track_allocation(session_id, port).await?;
+                self.track_allocation(session_id, ip, port).await?;
 
                 Ok((socket_addr, None))
             }
@@ -225,8 +229,8 @@ impl PortAllocator {
                         drop(allocated);
 
                         // Track this allocation
-                        self.track_allocation(session_id, rtp_port).await?;
-                        self.track_allocation(session_id, rtcp_port).await?;
+                        self.track_allocation(session_id, ip, rtp_port).await?;
+                        self.track_allocation(session_id, ip, rtcp_port).await?;
 
                         let rtp_addr = SocketAddr::new(ip, rtp_port);
                         let rtcp_addr = SocketAddr::new(ip, rtcp_port);
@@ -254,8 +258,8 @@ impl PortAllocator {
                 let rtcp_addr = SocketAddr::new(ip, rtcp_port);
 
                 // Track this allocation
-                self.track_allocation(session_id, rtp_port).await?;
-                self.track_allocation(session_id, rtcp_port).await?;
+                self.track_allocation(session_id, ip, rtp_port).await?;
+                self.track_allocation(session_id, ip, rtcp_port).await?;
 
                 Ok((rtp_addr, Some(rtcp_addr)))
             }
@@ -301,11 +305,8 @@ impl PortAllocator {
         let mut sessions = self.session_ports.lock().await;
 
         if let Some(ports) = sessions.remove(session_id) {
-            // Get the IP to use for releasing
-            let ip = self.config.default_ip;
-
-            // Release each port
-            for port in ports {
+            // Release each port on the same IP it was allocated for.
+            for (ip, port) in ports {
                 self.release_port(ip, port).await;
             }
 
@@ -414,7 +415,7 @@ impl PortAllocator {
 
         // If found, remove and return it
         if let Some(idx) = index {
-            let port = released.remove(idx).port;
+            let port = released.swap_remove(idx).port;
             Some(port)
         } else {
             None
@@ -553,21 +554,29 @@ impl PortAllocator {
     }
 
     /// Track a port allocation for a session
-    async fn track_allocation(&self, session_id: &str, port: u16) -> Result<()> {
+    async fn track_allocation(&self, session_id: &str, ip: IpAddr, port: u16) -> Result<()> {
         let mut sessions = self.session_ports.lock().await;
         let session_ports = sessions
             .entry(session_id.to_string())
             .or_insert_with(Vec::new);
-        session_ports.push(port);
+        session_ports.push((ip, port));
         Ok(())
     }
 
     /// Clean up ports that were released long ago
     async fn cleanup_released_ports(&self) {
+        let now = Instant::now();
+        {
+            let mut last_cleanup = self.last_released_cleanup.lock().await;
+            if now.duration_since(*last_cleanup) < Duration::from_secs(1) {
+                return;
+            }
+            *last_cleanup = now;
+        }
+
         let mut released = self.released_ports.lock().await;
 
         // Calculate the cutoff time for cleanup
-        let now = Instant::now();
         let reuse_delay = Duration::from_millis(PORT_REUSE_DELAY_MS * 10); // Much longer than reuse delay
 
         // Remove old entries

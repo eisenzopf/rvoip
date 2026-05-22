@@ -32,7 +32,7 @@ pub(crate) const SIP_WS_SUBPROTOCOL: &str = "sip";
 pub(crate) const SIP_WSS_SUBPROTOCOL: &str = "sips";
 
 // Default channel capacity
-const DEFAULT_CHANNEL_CAPACITY: usize = 100;
+const DEFAULT_CHANNEL_CAPACITY: usize = 1000;
 
 /// WebSocket transport for SIP messages
 #[derive(Clone)]
@@ -466,41 +466,44 @@ impl WebSocketTransport {
         // the TCP stream BEFORE the WS upgrade (RFC 7118 §3 — wss is
         // WS-over-TLS). The connector was built once at bind time
         // from the supplied `TlsClientConfig`.
-        let (stream, subprotocol_advertised, url_scheme): (SipWsStream, &'static str, &'static str) =
-            if self.inner.secure {
-                #[cfg(feature = "wss")]
-                {
-                    let connector = self
-                        .inner
-                        .tls_connector
-                        .as_ref()
-                        .expect("pre-flight guarantees tls_connector is Some when secure");
-                    let server_name = server_name_hint
-                        .unwrap_or_else(|| crate::transport::tls::ip_to_server_name(addr));
-                    let tls_stream = connector
-                        .connect(server_name, tcp_stream)
-                        .await
-                        .map_err(|e| {
-                            Error::TlsHandshakeFailed(format!(
-                                "WSS client handshake with {}: {}",
-                                addr, e
-                            ))
-                        })?;
-                    (
-                        SipWsStream::ClientTls(tls_stream),
-                        SIP_WSS_SUBPROTOCOL,
-                        "wss",
-                    )
-                }
-                #[cfg(not(feature = "wss"))]
-                {
-                    return Err(Error::NotImplemented(
-                        "WSS client requires the `wss` cargo feature (rustls plumbing)".into(),
-                    ));
-                }
-            } else {
-                (SipWsStream::Plain(tcp_stream), SIP_WS_SUBPROTOCOL, "ws")
-            };
+        let (stream, subprotocol_advertised, url_scheme): (
+            SipWsStream,
+            &'static str,
+            &'static str,
+        ) = if self.inner.secure {
+            #[cfg(feature = "wss")]
+            {
+                let connector = self
+                    .inner
+                    .tls_connector
+                    .as_ref()
+                    .expect("pre-flight guarantees tls_connector is Some when secure");
+                let server_name = server_name_hint
+                    .unwrap_or_else(|| crate::transport::tls::ip_to_server_name(addr));
+                let tls_stream = connector
+                    .connect(server_name, tcp_stream)
+                    .await
+                    .map_err(|e| {
+                        Error::TlsHandshakeFailed(format!(
+                            "WSS client handshake with {}: {}",
+                            addr, e
+                        ))
+                    })?;
+                (
+                    SipWsStream::ClientTls(tls_stream),
+                    SIP_WSS_SUBPROTOCOL,
+                    "wss",
+                )
+            }
+            #[cfg(not(feature = "wss"))]
+            {
+                return Err(Error::NotImplemented(
+                    "WSS client requires the `wss` cargo feature (rustls plumbing)".into(),
+                ));
+            }
+        } else {
+            (SipWsStream::Plain(tcp_stream), SIP_WS_SUBPROTOCOL, "ws")
+        };
 
         // Step 3 — build the WS handshake URL + subprotocol header.
         // Per RFC 7118 §4.5 the client advertises `sip` for ws:// and
@@ -612,11 +615,7 @@ impl Transport for WebSocketTransport {
         ))
     }
 
-    async fn send_message_raw(
-        &self,
-        bytes: bytes::Bytes,
-        destination: SocketAddr,
-    ) -> Result<()> {
+    async fn send_message_raw(&self, bytes: bytes::Bytes, destination: SocketAddr) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }

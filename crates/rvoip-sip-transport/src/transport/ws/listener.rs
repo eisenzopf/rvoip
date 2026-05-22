@@ -82,9 +82,7 @@ impl WebSocketListener {
                 .with_safe_defaults()
                 .with_no_client_auth()
                 .with_single_cert(certs, key)
-                .map_err(|e| {
-                    Error::TlsHandshakeFailed(format!("WSS server config: {}", e))
-                })?;
+                .map_err(|e| Error::TlsHandshakeFailed(format!("WSS server config: {}", e)))?;
             Some(TlsAcceptor::from(Arc::new(server_config)))
         } else {
             None

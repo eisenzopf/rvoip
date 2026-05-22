@@ -422,7 +422,11 @@ impl RtpSession {
             }
         }
 
-        // Start the scheduler if available
+        // Prepare the scheduler's sequence state, but do not start its
+        // millisecond polling task. The current send paths route directly to
+        // `sender_tx` and only need the shared sequence atomic; no production
+        // code uses the scheduler queue. Starting one 1 ms timer per call was
+        // measurable CPU load under SIPp fan-out.
         if let Some(scheduler) = &mut self.scheduler {
             let sender_tx = self.sender.clone();
             scheduler.set_sender(sender_tx);
@@ -431,8 +435,6 @@ impl RtpSession {
             let interval_ms = 20; // Default 20ms packet interval
             let samples_per_packet = (clock_rate as f64 * (interval_ms as f64 / 1000.0)) as u32;
             scheduler.set_interval(interval_ms, samples_per_packet);
-
-            scheduler.start()?;
         }
 
         // Start sending task
@@ -676,15 +678,11 @@ impl RtpSession {
                         let (is_new_stream, output_packet) = {
                             let mut created = false;
                             {
-                                let _entry =
-                                    streams_map.entry(packet_ssrc).or_insert_with(|| {
-                                        created = true;
-                                        info!(
-                                            "New RTP stream detected with SSRC={:08x}",
-                                            packet_ssrc
-                                        );
-                                        RtpStream::new(packet_ssrc, clock_rate)
-                                    });
+                                let _entry = streams_map.entry(packet_ssrc).or_insert_with(|| {
+                                    created = true;
+                                    info!("New RTP stream detected with SSRC={:08x}", packet_ssrc);
+                                    RtpStream::new(packet_ssrc, clock_rate)
+                                });
                             }
                             (created, Some(packet.clone()))
                         };

@@ -22,7 +22,7 @@ use tracing::{debug, info};
 use crate::dialog::DialogId;
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
-use crate::manager::{DialogManager, SessionCoordinator, SourceExtractor};
+use crate::manager::{DialogManager, SourceExtractor};
 use crate::transaction::{utils::response_builders, TransactionKey};
 use rvoip_sip_core::{Request, StatusCode};
 
@@ -110,13 +110,21 @@ impl DialogManager {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
             })?;
 
-        // Send a method-specific session coordination event. Dialog-core has
-        // already sent the 200 OK, so session-core must only run cleanup.
+        // Dialog-core has already sent the 200 OK, so keep the wire response
+        // path independent from session-core cleanup fan-out under load.
         let event = SessionCoordinationEvent::ByeReceived {
             dialog_id: dialog_id.clone(),
         };
+        let manager = self.clone();
+        let cleanup_dialog_id = dialog_id.clone();
+        tokio::spawn(async move {
+            manager.emit_session_coordination_event(event).await;
+            debug!(
+                "BYE cleanup event published for dialog {}",
+                cleanup_dialog_id
+            );
+        });
 
-        self.notify_session_layer(event).await?;
         info!("BYE processed for dialog {}", dialog_id);
         Ok(())
     }

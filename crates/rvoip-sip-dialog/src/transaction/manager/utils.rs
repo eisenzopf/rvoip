@@ -281,7 +281,10 @@ pub async fn determine_ack_destination(response: &Response) -> Option<SocketAddr
 /// # Returns
 /// * `Result<Request>` - The original request or an error
 pub async fn get_transaction_request(
-    transactions: &dashmap::DashMap<TransactionKey, crate::transaction::manager::ArcClientTransaction>,
+    transactions: &dashmap::DashMap<
+        TransactionKey,
+        crate::transaction::manager::ArcClientTransaction,
+    >,
     tx_id: &TransactionKey,
 ) -> Result<Request> {
     // Extract the Arc<dyn ClientTransaction> out of the shard so the

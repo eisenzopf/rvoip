@@ -182,7 +182,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::sleep;
+use tokio::time::{sleep, MissedTickBehavior};
 use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
@@ -360,8 +360,7 @@ pub struct TransactionManager {
     /// signatures and other byte-exact consumers see the upstream
     /// form without an intermediate `Message::to_bytes()` round-trip.
     /// See `SIP_API_DESIGN_2.md` §7.5.
-    pub(crate) pending_inbound_bytes:
-        Arc<DashMap<TransactionKey, bytes::Bytes>>,
+    pub(crate) pending_inbound_bytes: Arc<DashMap<TransactionKey, bytes::Bytes>>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -407,7 +406,9 @@ impl TransactionManager {
     /// that emit both a transaction event and a SubscriptionUpdate).
     pub fn peek_inbound_bytes(&self, key: &TransactionKey) -> Option<bytes::Bytes> {
         // `Bytes::clone` is a refcount bump — no heap alloc.
-        self.pending_inbound_bytes.get(key).map(|r| r.value().clone())
+        self.pending_inbound_bytes
+            .get(key)
+            .map(|r| r.value().clone())
     }
 
     /// Install a forwarder for transport-side events (pong received,
@@ -1376,8 +1377,14 @@ impl TransactionManager {
     /// ```
     pub async fn active_transactions(&self) -> (Vec<TransactionKey>, Vec<TransactionKey>) {
         (
-            self.client_transactions.iter().map(|r| r.key().clone()).collect(),
-            self.server_transactions.iter().map(|r| r.key().clone()).collect(),
+            self.client_transactions
+                .iter()
+                .map(|r| r.key().clone())
+                .collect(),
+            self.server_transactions
+                .iter()
+                .map(|r| r.key().clone())
+                .collect(),
         )
     }
 
@@ -1796,12 +1803,16 @@ impl TransactionManager {
                     let client_ready = manager
                         .client_transactions
                         .get(&tx_id)
-                        .map(|r| r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed)
+                        .map(|r| {
+                            r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed
+                        })
                         .unwrap_or(false);
                     let server_ready = manager
                         .server_transactions
                         .get(&tx_id)
-                        .map(|r| r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed)
+                        .map(|r| {
+                            r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed
+                        })
                         .unwrap_or(false);
                     client_ready || server_ready
                 };
@@ -1843,7 +1854,11 @@ impl TransactionManager {
             terminated = true;
         }
 
-        if self.transaction_destinations.remove(transaction_id).is_some() {
+        if self
+            .transaction_destinations
+            .remove(transaction_id)
+            .is_some()
+        {
             debug!(%transaction_id, "Removed transaction from destinations map");
         }
 
@@ -1919,6 +1934,9 @@ impl TransactionManager {
 
             // Get the transport receiver
             let mut receiver = transport_rx.lock().await;
+            let mut cleanup_interval = tokio::time::interval(Duration::from_secs(1));
+            cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let cleanup_running = Arc::new(AtomicBool::new(false));
 
             // Run the message processing loop
             loop {
@@ -1952,6 +1970,27 @@ impl TransactionManager {
                             Some(&manager_arc.transaction_to_subscribers),
                             Some(manager_arc.clone()),
                         ).await;
+                    }
+                    _ = cleanup_interval.tick() => {
+                        if cleanup_running
+                            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            let manager_clone = manager_arc.clone();
+                            let cleanup_running = cleanup_running.clone();
+                            tokio::spawn(async move {
+                                match manager_clone.cleanup_terminated_transactions().await {
+                                    Ok(count) if count > 0 => {
+                                        debug!("Periodic cleanup removed {} terminated transactions", count);
+                                    }
+                                    Err(e) => {
+                                        error!("Periodic transaction cleanup failed: {}", e);
+                                    }
+                                    _ => {}
+                                }
+                                cleanup_running.store(false, Ordering::Release);
+                            });
+                        }
                     }
                     else => {
                         // Both channels have been closed; exit loop
@@ -2126,7 +2165,8 @@ impl TransactionManager {
 
         // Store the transaction + destination
         self.client_transactions.insert(key.clone(), transaction);
-        self.transaction_destinations.insert(key.clone(), destination);
+        self.transaction_destinations
+            .insert(key.clone(), destination);
 
         debug!(id=%key, "Created client transaction");
 
@@ -2295,7 +2335,10 @@ impl TransactionManager {
     /// Needed so the CANCEL handler can generate a 487 response based on
     /// the pending INVITE.
     pub async fn get_server_transaction_request(&self, tx_id: &TransactionKey) -> Result<Request> {
-        let tx_arc = self.server_transactions.get(tx_id).map(|r| r.value().clone());
+        let tx_arc = self
+            .server_transactions
+            .get(tx_id)
+            .map(|r| r.value().clone());
         if let Some(tx) = tx_arc {
             if let Some(req) = tx.original_request().await {
                 return Ok(req);
@@ -2383,7 +2426,10 @@ impl TransactionManager {
 
         // Check if this is a retransmission of an existing transaction.
         // Extract the Arc out of the shard before awaiting `process_request`.
-        let existing = self.server_transactions.get(&key).map(|r| r.value().clone());
+        let existing = self
+            .server_transactions
+            .get(&key)
+            .map(|r| r.value().clone());
         if let Some(transaction) = existing {
             transaction.process_request(request.clone()).await?;
             debug!(id=%key, method=%request.method(), "Processed retransmitted request in existing transaction");

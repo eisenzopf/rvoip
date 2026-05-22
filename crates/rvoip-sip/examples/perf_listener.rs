@@ -6,10 +6,17 @@
 //! Run via:
 //! ```text
 //! cargo run -p rvoip-sip --release --example perf_listener -- 5060
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 host.docker.internal
 //! ```
+//!
+//! The optional second argument, or `RVOIP_PERF_ADVERTISED_ADDR`, sets
+//! the SIP Contact/Via fallback address and SDP `o=`/`c=` public media
+//! address. Use it for Docker-sidecar SIPp runs so the 200 OK does not
+//! advertise `127.0.0.1` back to the container.
 //!
 //! The process runs forever; SIGINT to terminate.
 
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,10 +33,37 @@ struct CountingAccept {
 
 #[async_trait::async_trait]
 impl CallHandler for CountingAccept {
-    async fn on_incoming_call(&self, call: IncomingCall) -> CallHandlerDecision {
-        let _ = call.accept().await;
+    async fn on_incoming_call(&self, _call: IncomingCall) -> CallHandlerDecision {
         self.accepted.fetch_add(1, Ordering::Relaxed);
         CallHandlerDecision::Accept
+    }
+}
+
+fn resolve_advertised_addr(raw: &str, default_port: u16) -> SocketAddr {
+    if let Ok(addr) = raw.parse::<SocketAddr>() {
+        return addr;
+    }
+    if let Ok(ip) = raw.parse::<IpAddr>() {
+        return SocketAddr::new(ip, default_port);
+    }
+    if let Ok(mut addrs) = raw.to_socket_addrs() {
+        if let Some(addr) = addrs.next() {
+            return addr;
+        }
+    }
+
+    let candidate = format!("{raw}:{default_port}");
+    candidate
+        .to_socket_addrs()
+        .unwrap_or_else(|e| panic!("failed to resolve advertised address '{raw}': {e}"))
+        .next()
+        .unwrap_or_else(|| panic!("advertised address '{raw}' resolved to no socket addresses"))
+}
+
+fn sip_uri_host(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(ip) => ip.to_string(),
+        IpAddr::V6(ip) => format!("[{ip}]"),
     }
 }
 
@@ -49,16 +83,36 @@ async fn main() {
         .with_target(false)
         .try_init();
 
-    let port: u16 = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(5060);
+    let mut args = std::env::args().skip(1);
+    let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5060);
+    let advertised_arg = args
+        .next()
+        .or_else(|| std::env::var("RVOIP_PERF_ADVERTISED_ADDR").ok());
 
     let accepted = Arc::new(AtomicU64::new(0));
     let handler = CountingAccept {
         accepted: Arc::clone(&accepted),
     };
-    let peer = CallbackPeer::new(handler, Config::local("rvoip-perf-listener", port))
+
+    let config = if let Some(raw) = advertised_arg {
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
+        let advertised = resolve_advertised_addr(&raw, port);
+        let mut config = Config::lan_pbx("rvoip-perf-listener", bind, advertised);
+        config.contact_uri = Some(format!(
+            "sip:rvoip-perf-listener@{}:{}",
+            sip_uri_host(advertised.ip()),
+            advertised.port()
+        ));
+        println!(
+            "rvoip-sip perf_listener: advertising SIP/SDP as {} (from '{}')",
+            advertised, raw
+        );
+        config
+    } else {
+        Config::local("rvoip-perf-listener", port)
+    };
+
+    let peer = CallbackPeer::new(handler, config)
         .await
         .expect("CallbackPeer::new");
 

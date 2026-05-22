@@ -35,6 +35,40 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the legacy incoming-call compatibility channel capacity.
+    pub fn with_incoming_call_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config.incoming_call_channel_capacity = capacity;
+        self
+    }
+
+    /// Set SIP signaling channel capacities from one expected-concurrency knob.
+    ///
+    /// Per-call queues use `capacity`; lower-level transport and transaction
+    /// queues use `capacity * 10` because each call generates several SIP
+    /// messages and transaction events.
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_channel_capacity(capacity);
+        self
+    }
+
+    /// Set the internal state-machine event channel capacity.
+    pub fn with_state_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config.state_event_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the SIP transport event channel capacity.
+    pub fn with_sip_transport_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_transport_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the transaction-manager event channel capacity.
+    pub fn with_transaction_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config.transaction_event_channel_capacity = capacity;
+        self
+    }
+
     /// Set the local IP address
     pub fn with_local_ip(mut self, ip: IpAddr) -> Self {
         self.config.local_ip = ip;
@@ -77,5 +111,15 @@ mod tests {
         assert_eq!(builder.config.media_port_start, 20000);
         assert_eq!(builder.config.media_port_end, 30000);
         assert_eq!(builder.config.local_ip.to_string(), "192.168.1.100");
+    }
+
+    #[test]
+    fn test_builder_channel_capacity_profile() {
+        let builder = SessionBuilder::new().with_channel_capacity(256);
+
+        assert_eq!(builder.config.incoming_call_channel_capacity, 256);
+        assert_eq!(builder.config.state_event_channel_capacity, 256);
+        assert_eq!(builder.config.sip_transport_channel_capacity, 2560);
+        assert_eq!(builder.config.transaction_event_channel_capacity, 2560);
     }
 }

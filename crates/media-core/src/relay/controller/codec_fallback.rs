@@ -261,8 +261,10 @@ impl FallbackHandler {
                         to_payload_type: self.expected_payload_type,
                     },
                     Err(e) => {
-                        warn!("Failed to setup transcoding for dialog {}: {}, falling back to passthrough",
-                              self.dialog_id, e);
+                        warn!(
+                            "Failed to setup transcoding for dialog {}: {}, falling back to passthrough",
+                            self.dialog_id, e
+                        );
                         FallbackMode::Passthrough {
                             detected_codec,
                             detected_payload_type,

@@ -23,7 +23,7 @@ use rvoip_infra_common::events::cross_crate::{
 use rvoip_infra_common::planes::routing::RoutableEvent;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 /// Window within which repeated RFC 5626 flow-failure events for the
@@ -1186,7 +1186,10 @@ impl SessionCrossCrateEventHandler {
                     .await
                     .is_err()
                 {
-                    debug!("DialogCreated event arrived before session {} was fully created, will be handled by state machine later", session_id);
+                    debug!(
+                        "DialogCreated event arrived before session {} was fully created, will be handled by state machine later",
+                        session_id
+                    );
                     return Ok(());
                 }
 
@@ -1390,8 +1393,11 @@ impl SessionCrossCrateEventHandler {
                     dialog_id: DialogId(dialog_uuid),
                     p_asserted_identity,
                 };
-                if let Err(e) = tx.send(call_info).await {
-                    debug!("Legacy incoming_call_tx receiver dropped — caller is using app_event_publisher path: {}", e);
+                if let Err(e) = tx.try_send(call_info) {
+                    debug!(
+                        "Legacy incoming_call_tx not ready — caller is using app_event_publisher path: {}",
+                        e
+                    );
                 }
             }
         }
@@ -1556,7 +1562,10 @@ impl SessionCrossCrateEventHandler {
                     .await
                     .is_err()
                 {
-                    debug!("DialogCreated event arrived before session {} was fully created, will be handled by state machine later", session_id);
+                    debug!(
+                        "DialogCreated event arrived before session {} was fully created, will be handled by state machine later",
+                        session_id
+                    );
                     return Ok(());
                 }
 
@@ -1804,8 +1813,11 @@ impl SessionCrossCrateEventHandler {
                     dialog_id: DialogId(dialog_uuid),
                     p_asserted_identity,
                 };
-                if let Err(e) = tx.send(call_info).await {
-                    debug!("Legacy incoming_call_tx receiver dropped — caller is using app_event_publisher path: {}", e);
+                if let Err(e) = tx.try_send(call_info) {
+                    debug!(
+                        "Legacy incoming_call_tx not ready — caller is using app_event_publisher path: {}",
+                        e
+                    );
                 } else {
                     info!("Successfully sent incoming call notification");
                 }
@@ -2491,7 +2503,10 @@ impl SessionCrossCrateEventHandler {
         if can_retry {
             info!(
                 "⏱️  [422 Session Interval Too Small] session={} requires Min-SE={}s — retrying (attempt {}/{})",
-                session_id, min_se_secs, current_retries + 1, CAP
+                session_id,
+                min_se_secs,
+                current_retries + 1,
+                CAP
             );
             if let Err(e) = self
                 .state_machine
@@ -2920,7 +2935,9 @@ impl SessionCrossCrateEventHandler {
             self.handle_call_terminated_parts(SessionId(session_id_str), reason)
                 .await?;
         } else {
-            warn!("⚠️ [handle_call_terminated] Failed to extract session_id, cannot forward CallEnded event");
+            warn!(
+                "⚠️ [handle_call_terminated] Failed to extract session_id, cannot forward CallEnded event"
+            );
         }
 
         info!("🏁 [handle_call_terminated] Completed");
@@ -2947,8 +2964,10 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
-        info!("🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}",
-                  session_id, reason);
+        info!(
+            "🎯 [handle_call_terminated] Processing DialogTerminated for session {} with reason: {}",
+            session_id, reason
+        );
 
         // Process DialogTerminated to complete Terminating → Terminated, or
         // Cancelling → Cancelled for the late-200/ACK/BYE cleanup path.
@@ -3505,7 +3524,10 @@ impl SessionCrossCrateEventHandler {
                 let session_id = entry.value().clone();
                 drop(entry);
 
-                info!("ACK was sent by dialog-core for dialog {}, triggering DialogACK event for session {}", dialog_id_str, session_id);
+                info!(
+                    "ACK was sent by dialog-core for dialog {}, triggering DialogACK event for session {}",
+                    dialog_id_str, session_id
+                );
 
                 // Trigger DialogACK event in state machine
                 // This allows UAS to transition from "Answering" -> "Active"

@@ -100,8 +100,7 @@ impl MediaSessionController {
                 } else {
                     // Replace with a freshly-started transmitter.
                     let config = AudioTransmitterConfig::default();
-                    let mut replacement =
-                        AudioTransmitter::new_with_config(session, config);
+                    let mut replacement = AudioTransmitter::new_with_config(session, config);
                     replacement.start().await;
                     if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
                         entry.value_mut().audio_transmitter = Some(replacement);
