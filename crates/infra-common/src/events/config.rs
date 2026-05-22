@@ -13,6 +13,8 @@ pub struct EventCoordinatorConfig {
     pub deployment: DeploymentConfig,
     /// Name of this service (e.g., "session-core", "media-core")
     pub service_name: String,
+    /// Capacity for global event broadcast and subscription bridge channels.
+    pub channel_capacity: usize,
 }
 
 impl Default for EventCoordinatorConfig {
@@ -20,6 +22,7 @@ impl Default for EventCoordinatorConfig {
         Self {
             deployment: DeploymentConfig::Monolithic,
             service_name: "rvoip-monolithic".to_string(),
+            channel_capacity: 10_000,
         }
     }
 }
@@ -126,7 +129,14 @@ impl EventCoordinatorConfig {
                 discovery: ServiceDiscoveryConfig::Static { endpoints },
             },
             service_name: service_name.into(),
+            channel_capacity: 10_000,
         }
+    }
+
+    /// Override the event channel capacity for monolithic deployments.
+    pub fn with_channel_capacity(mut self, capacity: usize) -> Self {
+        self.channel_capacity = capacity.max(1);
+        self
     }
 
     /// Load configuration from environment variables
@@ -139,8 +149,14 @@ impl EventCoordinatorConfig {
             ));
         }
 
-        // Default to monolithic
-        Ok(Self::monolithic())
+        let mut config = Self::monolithic();
+        if let Some(capacity) = env_usize("RVOIP_EVENT_BUS_CHANNEL_CAPACITY")
+            .or_else(|| env_usize("RVOIP_GLOBAL_EVENT_BUS_CAPACITY"))
+        {
+            config.channel_capacity = capacity.max(1);
+        }
+
+        Ok(config)
     }
 
     /// Load configuration from a file
@@ -157,6 +173,10 @@ impl EventCoordinatorConfig {
             ))
         }
     }
+}
+
+fn env_usize(name: &str) -> Option<usize> {
+    std::env::var(name).ok().and_then(|s| s.parse().ok())
 }
 
 /// Configuration errors
@@ -181,6 +201,7 @@ mod tests {
         let config = EventCoordinatorConfig::default();
         assert!(matches!(config.deployment, DeploymentConfig::Monolithic));
         assert_eq!(config.service_name, "rvoip-monolithic");
+        assert_eq!(config.channel_capacity, 10_000);
     }
 
     #[test]

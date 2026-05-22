@@ -471,10 +471,7 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn hangup_and_wait(&self, timeout: Option<Duration>) -> Result<String> {
-        if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
-            return Ok(reason);
-        }
-        let mut events = self.events().await?;
+        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
         if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
             return Ok(reason);
         }
@@ -489,28 +486,10 @@ impl SessionHandle {
             Err(e) => return Err(e),
         }
 
-        let fut = async {
-            loop {
-                match events.next().await {
-                    Some(Event::CallEnded { reason, .. }) => return Ok(reason),
-                    Some(Event::CallFailed { reason, .. }) => return Ok(reason),
-                    Some(Event::CallCancelled { .. }) => return Ok("Cancelled".to_string()),
-                    Some(_) => {}
-                    None => {
-                        return Err(SessionError::Other(
-                            "Event channel closed while waiting for hangup".to_string(),
-                        ))
-                    }
-                }
-            }
-        };
-
-        match timeout {
-            Some(duration) => tokio::time::timeout(duration, fut)
-                .await
-                .map_err(|_| SessionError::Timeout("hangup_and_wait timed out".to_string()))?,
-            None => fut.await,
-        }
+        wait_for_lifecycle(self, rx, timeout, "hangup_and_wait timed out", |snapshot| {
+            Ok(terminal_reason(snapshot))
+        })
+        .await
     }
 
     /// Hang up the call with an RFC 3326 `Reason` header and wait for the
@@ -534,37 +513,20 @@ impl SessionHandle {
         reason: SipReason,
         timeout: Option<Duration>,
     ) -> Result<String> {
-        if let Some(cached) = terminal_reason(&self.lifecycle().await?) {
-            return Ok(cached);
-        }
-        let mut events = self.events().await?;
+        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
         if let Some(cached) = terminal_reason(&self.lifecycle().await?) {
             return Ok(cached);
         }
         self.bye().with_sip_reason(reason).send().await?;
 
-        let fut = async {
-            loop {
-                match events.next().await {
-                    Some(Event::CallEnded { reason, .. }) => return Ok(reason),
-                    Some(Event::CallFailed { reason, .. }) => return Ok(reason),
-                    Some(Event::CallCancelled { .. }) => return Ok("Cancelled".to_string()),
-                    Some(_) => {}
-                    None => {
-                        return Err(SessionError::Other(
-                            "Event channel closed while waiting for hangup".to_string(),
-                        ))
-                    }
-                }
-            }
-        };
-
-        match timeout {
-            Some(duration) => tokio::time::timeout(duration, fut)
-                .await
-                .map_err(|_| SessionError::Timeout("hangup_with_reason timed out".to_string()))?,
-            None => fut.await,
-        }
+        wait_for_lifecycle(
+            self,
+            rx,
+            timeout,
+            "hangup_with_reason timed out",
+            |snapshot| Ok(terminal_reason(snapshot)),
+        )
+        .await
     }
 
     /// Put the call on hold with a target-refresh re-INVITE.
@@ -1229,55 +1191,23 @@ impl SessionHandle {
         &self,
         timeout: Option<Duration>,
     ) -> Result<MediaSecurityState> {
-        let snapshot = self.lifecycle().await?;
-        if let Some(security) = snapshot.media_security {
-            return Ok(security);
-        }
-        if let Some(err) = terminal_error(&snapshot, "media security was negotiated") {
-            return Err(err);
-        }
-
-        let mut rx = self.events().await?;
-
-        let snapshot = self.lifecycle().await?;
-        if let Some(security) = snapshot.media_security {
-            return Ok(security);
-        }
-        if let Some(err) = terminal_error(&snapshot, "media security was negotiated") {
-            return Err(err);
-        }
-
-        let fut = async {
-            loop {
-                match rx.next().await {
-                    Some(event @ Event::MediaSecurityNegotiated { .. }) => {
-                        if let Some(state) = media_security_state_from_event(event) {
-                            return Ok(state);
-                        }
-                    }
-                    Some(Event::CallFailed { reason, .. }) => {
-                        return Err(SessionError::Other(reason))
-                    }
-                    Some(Event::CallCancelled { .. }) => {
-                        return Err(SessionError::Other(
-                            "call cancelled before media security was negotiated".to_string(),
-                        ))
-                    }
-                    Some(Event::CallEnded { reason, .. }) => {
-                        return Err(SessionError::Other(reason))
-                    }
-                    Some(_) => {}
-                    None => return Err(SessionError::Other("Event channel closed".to_string())),
+        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        wait_for_lifecycle(
+            self,
+            rx,
+            timeout,
+            "wait_for_media_security timed out",
+            |snapshot| {
+                if let Some(security) = snapshot.media_security.clone() {
+                    return Ok(Some(security));
                 }
-            }
-        };
-
-        match timeout {
-            Some(d) => tokio::time::timeout(d, fut).await.map_err(|_| {
-                SessionError::Timeout("wait_for_media_security timed out".to_string())
-            })?,
-            None => fut.await,
-        }
+                if let Some(err) = terminal_error(snapshot, "media security was negotiated") {
+                    return Err(err);
+                }
+                Ok(None)
+            },
+        )
+        .await
     }
 
     // ===== State predicates =====
@@ -1371,72 +1301,31 @@ impl SessionHandle {
     where
         F: Fn(&Event) -> bool,
     {
-        let snapshot = self.lifecycle().await?;
-        for progress in &snapshot.progress {
-            let event = progress.to_event();
-            if predicate(&event) {
-                return Ok(event);
-            }
-        }
-        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
-            return Err(SessionError::Other(
-                "call answered before matching provisional progress".to_string(),
-            ));
-        }
-        if let Some(err) = terminal_error(&snapshot, "matching provisional progress") {
-            return Err(err);
-        }
-
-        let mut rx = self.events().await?;
-        let snapshot = self.lifecycle().await?;
-        for progress in &snapshot.progress {
-            let event = progress.to_event();
-            if predicate(&event) {
-                return Ok(event);
-            }
-        }
-        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
-            return Err(SessionError::Other(
-                "call answered before matching provisional progress".to_string(),
-            ));
-        }
-        if let Some(err) = terminal_error(&snapshot, "matching provisional progress") {
-            return Err(err);
-        }
-
-        let fut = async {
-            loop {
-                match rx.next().await {
-                    Some(event @ Event::CallProgress { .. }) if predicate(&event) => {
-                        return Ok(event)
+        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        wait_for_lifecycle(
+            self,
+            rx,
+            timeout,
+            "wait_for_progress timed out",
+            |snapshot| {
+                for progress in &snapshot.progress {
+                    let event = progress.to_event();
+                    if predicate(&event) {
+                        return Ok(Some(event));
                     }
-                    Some(Event::CallAnswered { .. }) => {
-                        return Err(SessionError::Other(
-                            "call answered before matching provisional progress".to_string(),
-                        ))
-                    }
-                    Some(Event::CallFailed { reason, .. }) => {
-                        return Err(SessionError::Other(reason))
-                    }
-                    Some(Event::CallCancelled { .. }) => {
-                        return Err(SessionError::Other(
-                            "call cancelled before matching provisional progress".to_string(),
-                        ))
-                    }
-                    Some(Event::CallEnded { reason, .. }) => {
-                        return Err(SessionError::Other(reason))
-                    }
-                    Some(_) => {}
-                    None => return Err(SessionError::Other("Event channel closed".to_string())),
                 }
-            }
-        };
-        match timeout {
-            Some(d) => tokio::time::timeout(d, fut)
-                .await
-                .map_err(|_| SessionError::Timeout("wait_for_progress timed out".to_string()))?,
-            None => fut.await,
-        }
+                if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
+                    return Err(SessionError::Other(
+                        "call answered before matching provisional progress".to_string(),
+                    ));
+                }
+                if let Some(err) = terminal_error(snapshot, "matching provisional progress") {
+                    return Err(err);
+                }
+                Ok(None)
+            },
+        )
+        .await
     }
 
     /// Wait for this call to be answered and return a handle to the same call.
@@ -1447,73 +1336,28 @@ impl SessionHandle {
     /// established, otherwise it waits for [`Event::CallAnswered`]. The
     /// timeout only cancels this wait.
     pub async fn wait_for_answered(&self, timeout: Option<Duration>) -> Result<SessionHandle> {
-        let snapshot = self.lifecycle().await?;
-        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
-            return Ok(self.clone());
-        }
-        if let Some(err) = terminal_error(&snapshot, "answer") {
-            return Err(err);
-        }
-        if snapshot.state.is_some_and(|state| state.is_final()) {
-            return Err(SessionError::Other(
-                "call reached terminal state before answer".to_string(),
-            ));
-        }
-
-        let mut rx = self.events().await?;
-
-        let snapshot = self.lifecycle().await?;
-        if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
-            return Ok(self.clone());
-        }
-        if let Some(err) = terminal_error(&snapshot, "answer") {
-            return Err(err);
-        }
-        if snapshot.state.is_some_and(|state| state.is_final()) {
-            return Err(SessionError::Other(
-                "call reached terminal state before answer".to_string(),
-            ));
-        }
-
-        let fut = async {
-            loop {
-                match rx.next().await {
-                    Some(Event::CallAnswered { call_id, .. }) => {
-                        return Ok(SessionHandle::new(call_id, self.coordinator.clone()))
-                    }
-                    Some(Event::CallFailed {
-                        status_code,
-                        reason,
-                        ..
-                    }) => {
-                        return Err(SessionError::Other(format!(
-                            "call failed before answer: {} {}",
-                            status_code, reason
-                        )))
-                    }
-                    Some(Event::CallCancelled { .. }) => {
-                        return Err(SessionError::Other(
-                            "call cancelled before answer".to_string(),
-                        ))
-                    }
-                    Some(Event::CallEnded { reason, .. }) => {
-                        return Err(SessionError::Other(format!(
-                            "call ended before answer: {}",
-                            reason
-                        )))
-                    }
-                    Some(_) => {}
-                    None => return Err(SessionError::Other("Event channel closed".to_string())),
+        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        wait_for_lifecycle(
+            self,
+            rx,
+            timeout,
+            "wait_for_answered timed out",
+            |snapshot| {
+                if snapshot.answered.is_some() || snapshot.state.is_some_and(is_answered_state) {
+                    return Ok(Some(self.clone()));
                 }
-            }
-        };
-
-        match timeout {
-            Some(d) => tokio::time::timeout(d, fut)
-                .await
-                .map_err(|_| SessionError::Timeout("wait_for_answered timed out".to_string()))?,
-            None => fut.await,
-        }
+                if let Some(err) = terminal_error(snapshot, "answer") {
+                    return Err(err);
+                }
+                if snapshot.state.is_some_and(|state| state.is_final()) {
+                    return Err(SessionError::Other(
+                        "call reached terminal state before answer".to_string(),
+                    ));
+                }
+                Ok(None)
+            },
+        )
+        .await
     }
 
     /// Wait for this specific call to end, with optional timeout.
@@ -1531,30 +1375,11 @@ impl SessionHandle {
     /// # }
     /// ```
     pub async fn wait_for_end(&self, timeout: Option<Duration>) -> Result<String> {
-        if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
-            return Ok(reason);
-        }
-        let mut rx = self.events().await?;
-        if let Some(reason) = terminal_reason(&self.lifecycle().await?) {
-            return Ok(reason);
-        }
-        let fut = async {
-            loop {
-                match rx.next().await {
-                    Some(Event::CallEnded { reason, .. }) => return Ok(reason),
-                    Some(Event::CallFailed { reason, .. }) => return Ok(reason),
-                    Some(Event::CallCancelled { .. }) => return Ok("Cancelled".to_string()),
-                    None => return Err(SessionError::Other("Event channel closed".to_string())),
-                    _ => {}
-                }
-            }
-        };
-        match timeout {
-            Some(d) => tokio::time::timeout(d, fut)
-                .await
-                .map_err(|_| SessionError::Timeout("wait_for_end timed out".to_string()))?,
-            None => fut.await,
-        }
+        let rx = self.coordinator.lifecycle_watcher(&self.call_id);
+        wait_for_lifecycle(self, rx, timeout, "wait_for_end timed out", |snapshot| {
+            Ok(terminal_reason(snapshot))
+        })
+        .await
     }
 }
 
@@ -1735,28 +1560,46 @@ fn terminal_error(snapshot: &CallLifecycleSnapshot, context: &str) -> Option<Ses
     }
 }
 
-fn media_security_state_from_event(event: Event) -> Option<MediaSecurityState> {
-    match event {
-        Event::MediaSecurityNegotiated {
-            keying,
-            suite,
-            profile,
-            contexts_installed,
-            ..
-        } => Some(MediaSecurityState {
-            keying,
-            suite,
-            profile,
-            contexts_installed,
-        }),
-        _ => None,
+async fn wait_for_lifecycle<T, F>(
+    handle: &SessionHandle,
+    mut rx: tokio::sync::watch::Receiver<u64>,
+    timeout: Option<Duration>,
+    timeout_message: &'static str,
+    mut evaluate: F,
+) -> Result<T>
+where
+    F: FnMut(&CallLifecycleSnapshot) -> Result<Option<T>>,
+{
+    let fut = async {
+        loop {
+            let snapshot = handle.lifecycle().await?;
+            if let Some(value) = evaluate(&snapshot)? {
+                return Ok(value);
+            }
+
+            if rx.changed().await.is_err() {
+                let snapshot = handle.lifecycle().await?;
+                if let Some(value) = evaluate(&snapshot)? {
+                    return Ok(value);
+                }
+                return Err(SessionError::Other(
+                    "Lifecycle waiter closed before matching event".to_string(),
+                ));
+            }
+        }
+    };
+
+    match timeout {
+        Some(duration) => tokio::time::timeout(duration, fut)
+            .await
+            .map_err(|_| SessionError::Timeout(timeout_message.to_string()))?,
+        None => fut.await,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::SessionApiCrossCrateEvent;
     use crate::api::events::{MediaSecurityKeying, MediaSecurityProfile};
     use crate::api::unified::Config;
     use rvoip_sip_core::types::sdp::CryptoSuite;
@@ -1768,13 +1611,9 @@ mod tests {
         config
     }
 
-    async fn publish_synthetic(event: Event) {
-        let wrapped = SessionApiCrossCrateEvent::new(event);
-        let coord = rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone();
-        coord
-            .publish(wrapped)
+    async fn publish_synthetic(coordinator: &UnifiedCoordinator, event: Event) {
+        coordinator
+            .publish_app_event_for_test(event)
             .await
             .expect("publish synthetic event");
     }
@@ -1791,10 +1630,13 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        publish_synthetic(Event::CallAnswered {
-            call_id: call_id.clone(),
-            sdp: None,
-        })
+        publish_synthetic(
+            &coordinator,
+            Event::CallAnswered {
+                call_id: call_id.clone(),
+                sdp: None,
+            },
+        )
         .await;
 
         let answered = waiter.await.unwrap().unwrap();
@@ -1818,13 +1660,16 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        publish_synthetic(Event::MediaSecurityNegotiated {
-            call_id,
-            keying: MediaSecurityKeying::Sdes,
-            suite: CryptoSuite::AesCm128HmacSha1_80,
-            profile: MediaSecurityProfile::RtpSavp,
-            contexts_installed: true,
-        })
+        publish_synthetic(
+            &coordinator,
+            Event::MediaSecurityNegotiated {
+                call_id,
+                keying: MediaSecurityKeying::Sdes,
+                suite: CryptoSuite::AesCm128HmacSha1_80,
+                profile: MediaSecurityProfile::RtpSavp,
+                contexts_installed: true,
+            },
+        )
         .await;
 
         let security = waiter.await.unwrap().unwrap();

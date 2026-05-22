@@ -573,6 +573,23 @@ pub struct Config {
     /// dialog/session cleanup catches up. Default: `10000`.
     pub transaction_event_channel_capacity: usize,
 
+    /// Number of async workers used to publish app-level session events onto
+    /// the global infra-common event bus.
+    ///
+    /// Internal per-call waits use the lifecycle index directly, but public
+    /// event subscribers still receive events through the global bus. This
+    /// worker pool avoids spawning one task per non-terminal event under
+    /// server load. Default: logical CPU count capped at 16.
+    pub session_event_dispatcher_workers: usize,
+
+    /// Per-worker queue capacity for app-level session event publication.
+    ///
+    /// This queue sits in front of the global event coordinator only for
+    /// non-terminal fire-and-forget publishes. Terminal publishes still use
+    /// the synchronous `publish_now` path so session cleanup happens after
+    /// the terminal event is visible. Default: `10000`.
+    pub session_event_dispatcher_channel_capacity: usize,
+
     /// SIP_API_DESIGN_2 §7.4 — application-supplied headers stamped
     /// on every outbound message the state machine emits
     /// **automatically** (session-timer auto-BYE, dialog-terminated-
@@ -658,6 +675,8 @@ impl Config {
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
             transaction_event_channel_capacity: 10_000,
+            session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
+            session_event_dispatcher_channel_capacity: 10_000,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -724,6 +743,8 @@ impl Config {
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
             transaction_event_channel_capacity: 10_000,
+            session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
+            session_event_dispatcher_channel_capacity: 10_000,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -960,6 +981,7 @@ impl Config {
         self.state_event_channel_capacity = capacity;
         self.sip_transport_channel_capacity = event_capacity;
         self.transaction_event_channel_capacity = event_capacity;
+        self.session_event_dispatcher_channel_capacity = event_capacity;
         self
     }
 
@@ -987,6 +1009,22 @@ impl Config {
     /// [`Config::validate`].
     pub fn with_transaction_event_channel_capacity(mut self, capacity: usize) -> Self {
         self.transaction_event_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the app-session event dispatcher worker count.
+    ///
+    /// Values below `1` are rejected by [`Config::validate`].
+    pub fn with_session_event_dispatcher_workers(mut self, workers: usize) -> Self {
+        self.session_event_dispatcher_workers = workers;
+        self
+    }
+
+    /// Set the per-worker app-session event dispatcher queue capacity.
+    ///
+    /// Values below `1` are rejected by [`Config::validate`].
+    pub fn with_session_event_dispatcher_channel_capacity(mut self, capacity: usize) -> Self {
+        self.session_event_dispatcher_channel_capacity = capacity;
         self
     }
 
@@ -1111,6 +1149,16 @@ impl Config {
                 "transaction_event_channel_capacity must be at least 1".to_string(),
             ));
         }
+        if self.session_event_dispatcher_workers == 0 {
+            return Err(SessionError::ConfigError(
+                "session_event_dispatcher_workers must be at least 1".to_string(),
+            ));
+        }
+        if self.session_event_dispatcher_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "session_event_dispatcher_channel_capacity must be at least 1".to_string(),
+            ));
+        }
         if matches!(
             effective_tls_mode,
             SipTlsMode::ServerOnly | SipTlsMode::ClientAndServer
@@ -1221,6 +1269,13 @@ impl Default for Config {
     fn default() -> Self {
         Config::local("user", 5060)
     }
+}
+
+fn default_session_event_dispatcher_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 16)
 }
 
 /// Lower-level coordinator for SIP sessions, registrations, media, and events.
@@ -1717,8 +1772,12 @@ impl UnifiedCoordinator {
         let (incoming_tx, incoming_rx) = mpsc::channel(config.incoming_call_channel_capacity);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let lifecycle = LifecycleIndex::new();
-        let app_event_publisher =
-            SessionEventPublisher::new(global_coordinator.clone(), lifecycle.clone());
+        let app_event_publisher = SessionEventPublisher::with_dispatcher(
+            global_coordinator.clone(),
+            lifecycle.clone(),
+            config.session_event_dispatcher_workers,
+            config.session_event_dispatcher_channel_capacity,
+        );
         media_adapter
             .set_app_event_publisher(app_event_publisher.clone())
             .await;
@@ -2075,6 +2134,18 @@ impl UnifiedCoordinator {
             snapshot.media_security = media_security;
         }
         snapshot
+    }
+
+    pub(crate) fn lifecycle_watcher(&self, id: &SessionId) -> tokio::sync::watch::Receiver<u64> {
+        self.lifecycle.watcher(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn publish_app_event_for_test(
+        &self,
+        event: crate::api::events::Event,
+    ) -> Result<()> {
+        self.app_event_publisher.publish_now(event).await
     }
 
     // ===== Simple Call Operations =====

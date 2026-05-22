@@ -14,6 +14,11 @@
 //! address. Use it for Docker-sidecar SIPp runs so the 200 OK does not
 //! advertise `127.0.0.1` back to the container.
 //!
+//! Perf sizing knobs:
+//! - `RVOIP_PERF_CHANNEL_CAPACITY` (default 20000)
+//! - `RVOIP_PERF_SESSION_EVENT_WORKERS`
+//! - `RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY`
+//!
 //! The process runs forever; SIGINT to terminate.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
@@ -111,6 +116,7 @@ async fn main() {
     } else {
         Config::local("rvoip-perf-listener", port)
     };
+    let config = apply_perf_config(config);
 
     let peer = CallbackPeer::new(handler, config)
         .await
@@ -182,4 +188,24 @@ async fn main() {
     shutdown.shutdown();
     reporter.abort();
     let _ = tokio::time::timeout(Duration::from_secs(3), run_task).await;
+}
+
+fn apply_perf_config(config: Config) -> Config {
+    let channel_capacity = env_usize("RVOIP_PERF_CHANNEL_CAPACITY", 20_000).max(1);
+    let mut config = config.with_channel_capacity(channel_capacity);
+    if let Some(workers) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_WORKERS") {
+        config = config.with_session_event_dispatcher_workers(workers);
+    }
+    if let Some(capacity) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY") {
+        config = config.with_session_event_dispatcher_channel_capacity(capacity);
+    }
+    config
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    env_usize_opt(name).unwrap_or(default)
+}
+
+fn env_usize_opt(name: &str) -> Option<usize> {
+    std::env::var(name).ok().and_then(|s| s.parse().ok())
 }

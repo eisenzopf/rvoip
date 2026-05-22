@@ -10,7 +10,7 @@
 use serde::Serialize;
 use std::future::Future;
 use std::time::{Duration, Instant};
-use tokio::time::sleep_until;
+use tokio::time::{sleep_until, Instant as TokioInstant};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct LoadProfile {
@@ -52,47 +52,68 @@ impl LoadProfile {
         (ramp + steady).round() as u64
     }
 
-    /// Run `dispatch` once per pacer tick across ramp + steady. The
-    /// closure receives a 0-indexed sequence number; its return value
-    /// is not awaited (callers are responsible for tracking spawned
-    /// task handles). Returns the wall-clock duration of the active
-    /// phase (excluding cooldown — the caller drives cooldown after
-    /// awaiting outstanding handles).
+    /// Run `dispatch` across ramp + steady using an absolute-time pacer.
+    ///
+    /// Instead of sleeping `1 / cps` after each dispatch, the scheduler wakes
+    /// at a fixed tick and computes how many calls should have been offered by
+    /// that wall-clock instant. If the runtime wakes late, it emits the backlog
+    /// in one batch. This keeps high-CPS pressure honest and prevents sleep
+    /// drift from silently lowering the offered load.
     pub async fn run<F>(&self, mut dispatch: F) -> Duration
     where
         F: FnMut(u64),
     {
         let start = Instant::now();
-        let ramp = Duration::from_secs(self.ramp_secs);
-        let steady = Duration::from_secs(self.steady_secs);
-        let active = ramp + steady;
+        let active = Duration::from_secs(self.ramp_secs + self.steady_secs);
         let active_deadline = start + active;
+        let tick = Duration::from_millis(env_u64("RVOIP_PERF_SCHED_TICK_MS", 1).max(1));
+        let total_calls = self.total_calls();
         let mut seq: u64 = 0;
+        let mut next_tick = start;
 
         loop {
             let now = Instant::now();
+            let elapsed = now.saturating_duration_since(start).min(active);
+            let desired = self.expected_calls_at(elapsed).min(total_calls);
+
+            while seq < desired {
+                dispatch(seq);
+                seq += 1;
+            }
+
             if now >= active_deadline {
                 break;
             }
-            // Effective CPS at `now`: linearly ramped from 0 → target
-            // during the ramp window, then pinned at target.
-            let elapsed = now - start;
-            let cps = if elapsed < ramp {
-                self.target_cps * (elapsed.as_secs_f64() / self.ramp_secs as f64)
-            } else {
-                self.target_cps
-            }
-            .max(1.0); // avoid div-by-zero at t=0
-            let tick = Duration::from_secs_f64(1.0 / cps);
 
+            next_tick += tick;
+            while next_tick <= now {
+                next_tick += tick;
+            }
+            sleep_until(TokioInstant::from_std(next_tick)).await;
+        }
+
+        while seq < total_calls {
             dispatch(seq);
             seq += 1;
-
-            let next = tokio::time::Instant::now() + tick;
-            sleep_until(next).await;
         }
 
         start.elapsed()
+    }
+
+    fn expected_calls_at(&self, elapsed: Duration) -> u64 {
+        let elapsed_s = elapsed.as_secs_f64();
+        let ramp_s = self.ramp_secs as f64;
+        let steady_start_s = ramp_s;
+
+        let ramp_calls = if ramp_s > 0.0 {
+            let ramp_elapsed_s = elapsed_s.min(ramp_s);
+            0.5 * self.target_cps * ramp_elapsed_s * ramp_elapsed_s / ramp_s
+        } else {
+            0.0
+        };
+        let steady_calls = self.target_cps * (elapsed_s - steady_start_s).max(0.0);
+
+        (ramp_calls + steady_calls).floor() as u64
     }
 
     /// Convenience: spawn `count` calls back-to-back without pacing.

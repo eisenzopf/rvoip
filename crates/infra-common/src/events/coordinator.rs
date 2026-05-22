@@ -169,7 +169,7 @@ impl EventBusAdapter for MonolithicEventBus {
         let mut broadcast_rx = sender.subscribe();
 
         // Create mpsc channel for API compatibility
-        let (mpsc_tx, mpsc_rx) = mpsc::channel(1000);
+        let (mpsc_tx, mpsc_rx) = mpsc::channel(self.channel_capacity);
 
         // Spawn a task to bridge broadcast to mpsc
         // This maintains API compatibility while using broadcast internally
@@ -252,14 +252,14 @@ impl GlobalEventCoordinator {
 
     /// Create a monolithic coordinator
     async fn new_monolithic(config: EventCoordinatorConfig) -> Result<Self> {
-        let event_bus = Arc::new(EventSystem::new_static_fast_path(10000));
+        let event_bus = Arc::new(EventSystem::new_static_fast_path(config.channel_capacity));
         let task_manager = Arc::new(LayerTaskManager::new("global"));
 
         let monolithic_adapter = Arc::new(MonolithicEventBus {
             event_bus,
             task_manager: task_manager.clone(),
             broadcasters: Arc::new(DashMap::new()),
-            channel_capacity: 10000,
+            channel_capacity: config.channel_capacity,
         });
 
         Ok(Self {

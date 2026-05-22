@@ -69,6 +69,18 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the app-session event dispatcher worker count.
+    pub fn with_session_event_dispatcher_workers(mut self, workers: usize) -> Self {
+        self.config.session_event_dispatcher_workers = workers;
+        self
+    }
+
+    /// Set the app-session event dispatcher per-worker queue capacity.
+    pub fn with_session_event_dispatcher_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config.session_event_dispatcher_channel_capacity = capacity;
+        self
+    }
+
     /// Set the local IP address
     pub fn with_local_ip(mut self, ip: IpAddr) -> Self {
         self.config.local_ip = ip;
@@ -121,5 +133,9 @@ mod tests {
         assert_eq!(builder.config.state_event_channel_capacity, 256);
         assert_eq!(builder.config.sip_transport_channel_capacity, 2560);
         assert_eq!(builder.config.transaction_event_channel_capacity, 2560);
+        assert_eq!(
+            builder.config.session_event_dispatcher_channel_capacity,
+            2560
+        );
     }
 }

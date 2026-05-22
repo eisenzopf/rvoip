@@ -16,10 +16,14 @@ import csv
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 
 RESPONSE_BUCKETS_MS = [10, 25, 50, 75, 100, 150, 200, 300, 500, 1000, 2000]
+RESPONSE_BUCKET_LABELS = [f"<{upper}" for upper in RESPONSE_BUCKETS_MS] + [
+    f">={RESPONSE_BUCKETS_MS[-1]}"
+]
 
 
 def parse_elapsed(elapsed: str) -> float:
@@ -38,24 +42,30 @@ def parse_int(value) -> int:
     return int(value or 0)
 
 
-def percentile_upper_bound_ms(by_name: dict[str, str], prefix: str, quantile: float) -> str:
-    buckets: list[tuple[str, int]] = [
-        (f"<{upper}", parse_int(by_name.get(f"{prefix}_<{upper}")))
+def response_buckets(by_name: dict[str, str], prefix: str) -> dict[str, int]:
+    buckets = {
+        f"<{upper}": parse_int(by_name.get(f"{prefix}_<{upper}"))
         for upper in RESPONSE_BUCKETS_MS
-    ]
-    buckets.append((f">={RESPONSE_BUCKETS_MS[-1]}", parse_int(by_name.get(f"{prefix}_>=2000"))))
+    }
+    buckets[f">={RESPONSE_BUCKETS_MS[-1]}"] = parse_int(
+        by_name.get(f"{prefix}_>={RESPONSE_BUCKETS_MS[-1]}")
+    )
+    return buckets
 
-    sample_count = sum(count for _, count in buckets)
+
+def percentile_from_buckets(buckets: dict[str, int], quantile: float) -> str:
+    ordered = [(label, buckets.get(label, 0)) for label in RESPONSE_BUCKET_LABELS]
+    sample_count = sum(count for _, count in ordered)
     if sample_count == 0:
         return "n/a"
 
     target = max(1, int(sample_count * quantile + 0.999999))
     seen = 0
-    for label, count in buckets:
+    for label, count in ordered:
         seen += count
         if seen >= target:
             return label
-    return buckets[-1][0]
+    return ordered[-1][0]
 
 
 def parse_csv(path: Path) -> dict:
@@ -80,14 +90,17 @@ def parse_csv(path: Path) -> dict:
     rt_ms = parse_elapsed(by_name.get("ResponseTime1(C)", "0")) * 1000.0
     rt_stddev_ms = parse_elapsed(by_name.get("ResponseTime1StDev(C)", "0")) * 1000.0
     call_len_ms = parse_elapsed(by_name.get("CallLength(C)", "0")) * 1000.0
-    rt_p95 = percentile_upper_bound_ms(by_name, "ResponseTimeRepartition1", 0.95)
-    rt_p99 = percentile_upper_bound_ms(by_name, "ResponseTimeRepartition1", 0.99)
-    rt_p99_9 = percentile_upper_bound_ms(by_name, "ResponseTimeRepartition1", 0.999)
+    rt_buckets = response_buckets(by_name, "ResponseTimeRepartition1")
+    rt_p95 = percentile_from_buckets(rt_buckets, 0.95)
+    rt_p99 = percentile_from_buckets(rt_buckets, 0.99)
+    rt_p99_9 = percentile_from_buckets(rt_buckets, 0.999)
+    sample_count = sum(rt_buckets.values()) or success or total
 
     achieved_cps = (success / elapsed_s) if elapsed_s > 0 else 0.0
     success_rate = (success / total * 100.0) if total > 0 else 0.0
 
     return {
+        "shards": 1,
         "elapsed_s": elapsed_s,
         "total": total,
         "success": success,
@@ -102,20 +115,75 @@ def parse_csv(path: Path) -> dict:
         "rt_p95": rt_p95,
         "rt_p99": rt_p99,
         "rt_p99_9": rt_p99_9,
+        "rt_buckets": rt_buckets,
+        "sample_count": sample_count,
         "call_len_ms": call_len_ms,
     }
 
 
+def weighted_avg(runs: list[dict], key: str) -> float:
+    total_weight = sum(run.get("sample_count", 0) for run in runs)
+    if total_weight <= 0:
+        return 0.0
+    return sum(run.get(key, 0.0) * run.get("sample_count", 0) for run in runs) / total_weight
+
+
+def aggregate_runs(runs: list[dict]) -> dict:
+    if len(runs) == 1:
+        return runs[0]
+
+    elapsed_s = max(run["elapsed_s"] for run in runs)
+    total = sum(run["total"] for run in runs)
+    success = sum(run["success"] for run in runs)
+    failed = sum(run["failed"] for run in runs)
+    current = sum(run["current"] for run in runs)
+    retrans = sum(run["retrans"] for run in runs)
+    target_rate = sum(run["target_rate"] for run in runs)
+    buckets = Counter()
+    for run in runs:
+        buckets.update(run.get("rt_buckets", {}))
+
+    achieved_cps = (success / elapsed_s) if elapsed_s > 0 else 0.0
+    success_rate = (success / total * 100.0) if total > 0 else 0.0
+
+    return {
+        "shards": len(runs),
+        "elapsed_s": elapsed_s,
+        "total": total,
+        "success": success,
+        "failed": failed,
+        "current": current,
+        "retrans": retrans,
+        "target_rate": target_rate,
+        "achieved_cps": achieved_cps,
+        "success_rate": success_rate,
+        "rt_ms": weighted_avg(runs, "rt_ms"),
+        "rt_stddev_ms": weighted_avg(runs, "rt_stddev_ms"),
+        "rt_p95": percentile_from_buckets(dict(buckets), 0.95),
+        "rt_p99": percentile_from_buckets(dict(buckets), 0.99),
+        "rt_p99_9": percentile_from_buckets(dict(buckets), 0.999),
+        "rt_buckets": dict(buckets),
+        "sample_count": sum(run.get("sample_count", 0) for run in runs),
+        "call_len_ms": weighted_avg(runs, "call_len_ms"),
+    }
+
+
 def collect(results_dir: Path) -> dict:
-    pattern = re.compile(r"^(?P<tag>[a-z_]+)_(?P<cps>\d+)cps$")
-    out: dict[str, dict[int, dict]] = {}
+    pattern = re.compile(r"^(?P<tag>.+)_(?P<cps>\d+)cps(?:_s(?P<shard>\d+))?$")
+    runs: dict[str, dict[int, list[dict]]] = {}
     for p in sorted(results_dir.iterdir()):
         m = pattern.match(p.name)
         if not m:
             continue
         tag = m.group("tag")
         cps = int(m.group("cps"))
-        out.setdefault(tag, {})[cps] = parse_csv(p)
+        parsed = parse_csv(p)
+        if parsed:
+            runs.setdefault(tag, {}).setdefault(cps, []).append(parsed)
+    out: dict[str, dict[int, dict]] = {}
+    for tag, by_cps in runs.items():
+        for cps, cps_runs in by_cps.items():
+            out.setdefault(tag, {})[cps] = aggregate_runs(cps_runs)
     return out
 
 
@@ -127,8 +195,8 @@ def render(data: dict) -> str:
     lines.append(
         "Driver: SIPp 3.7.3 from a sidecar Alpine container on the asterisk "
         "docker bridge. Each scenario drives `uac_perf.xml` (INVITE → 200 → "
-        "ACK → 100 ms pause → BYE → 200) at the target CPS for "
-        "15 s of steady load (`15 × CPS` total calls)."
+        "ACK → 100 ms pause → BYE → 200). High-CPS points may be split across "
+        "parallel SIPp shards and aggregated by target."
     )
     lines.append("")
     lines.append("## Summary table")
@@ -136,6 +204,7 @@ def render(data: dict) -> str:
     header = [
         "Target",
         "Target CPS",
+        "Shards",
         "Total calls",
         "Success",
         "Success %",
@@ -153,7 +222,7 @@ def render(data: dict) -> str:
             if not d:
                 continue
             lines.append(
-                f"| {tag} | {cps} | {d['total']} | {d['success']} | "
+                f"| {tag} | {cps} | {d['shards']} | {d['total']} | {d['success']} | "
                 f"{d['success_rate']:.1f}% | {d['achieved_cps']:.1f} | "
                 f"{d['rt_ms']:.1f} | {d['rt_p95']} | {d['rt_p99']} | {d['retrans']} |"
             )
@@ -182,10 +251,11 @@ def render(data: dict) -> str:
                 f"p99.9 **{d['rt_p99_9']} ms**"
             )
             lines.append(f"- Call length: {d['call_len_ms']:.1f} ms")
+            lines.append(f"- SIPp shards: {d['shards']}")
             lines.append(f"- Retransmissions: {d['retrans']}")
             if d["current"] > 0:
                 lines.append(
-                    f"- ⚠️ {d['current']} calls still in-flight at sweep end "
+                    f"- WARNING: {d['current']} calls still in-flight at sweep end "
                     f"(SUT stalled mid-run)"
                 )
             lines.append("")

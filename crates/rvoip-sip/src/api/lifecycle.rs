@@ -14,8 +14,11 @@ use crate::types::CallState;
 use dashmap::DashMap;
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, watch};
 
 const TERMINAL_EVENT_TTL: Duration = Duration::from_secs(60);
 const MAX_PROGRESS_EVENTS: usize = 8;
@@ -182,6 +185,7 @@ impl Default for LifecycleEntry {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LifecycleIndex {
     entries: Arc<DashMap<SessionId, LifecycleEntry>>,
+    waiters: Arc<DashMap<SessionId, watch::Sender<u64>>>,
 }
 
 impl LifecycleIndex {
@@ -227,8 +231,34 @@ impl LifecycleIndex {
             entry.latest_transfer_outcome = Some(outcome);
         }
 
-        if let Some((_, terminal)) = CallTerminalInfo::from_event(event) {
+        let is_terminal = if let Some((_, terminal)) = CallTerminalInfo::from_event(event) {
             entry.terminal = Some((terminal, Instant::now()));
+            true
+        } else {
+            false
+        };
+
+        self.notify_waiters(&call_id, is_terminal);
+    }
+
+    pub(crate) fn watcher(&self, call_id: &SessionId) -> watch::Receiver<u64> {
+        self.waiters
+            .entry(call_id.clone())
+            .or_insert_with(|| {
+                let (tx, _) = watch::channel(0);
+                tx
+            })
+            .subscribe()
+    }
+
+    fn notify_waiters(&self, call_id: &SessionId, terminal: bool) {
+        if let Some(sender) = self.waiters.get(call_id) {
+            let current = *sender.borrow();
+            let _ = sender.send(current.wrapping_add(1));
+        }
+
+        if terminal {
+            self.waiters.remove(call_id);
         }
     }
 
@@ -270,9 +300,78 @@ impl LifecycleIndex {
 
         if terminal_expired {
             self.entries.remove(call_id);
+            self.waiters.remove(call_id);
         }
 
         snapshot
+    }
+}
+
+#[derive(Clone)]
+struct SessionEventDispatcher {
+    workers: Arc<Vec<mpsc::Sender<Arc<SessionApiCrossCrateEvent>>>>,
+    next_worker: Arc<AtomicUsize>,
+}
+
+impl SessionEventDispatcher {
+    fn new(
+        coordinator: Arc<GlobalEventCoordinator>,
+        worker_count: usize,
+        channel_capacity: usize,
+    ) -> Self {
+        let worker_count = worker_count.max(1);
+        let channel_capacity = channel_capacity.max(1);
+        let mut workers = Vec::with_capacity(worker_count);
+
+        for _ in 0..worker_count {
+            let (tx, mut rx) = mpsc::channel::<Arc<SessionApiCrossCrateEvent>>(channel_capacity);
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    if let Err(e) = coordinator.publish(event).await {
+                        tracing::warn!("Failed to publish app-level event: {}", e);
+                    }
+                }
+            });
+            workers.push(tx);
+        }
+
+        Self {
+            workers: Arc::new(workers),
+            next_worker: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn publish(&self, event: Arc<SessionApiCrossCrateEvent>) {
+        let idx = self.worker_index(&event.event);
+        let tx = self.workers[idx].clone();
+        match tx.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                tokio::spawn(async move {
+                    if tx.send(event).await.is_err() {
+                        tracing::warn!("Session event dispatcher closed while publishing event");
+                    }
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!("Session event dispatcher closed while publishing event");
+            }
+        }
+    }
+
+    fn worker_index(&self, event: &Event) -> usize {
+        if self.workers.len() == 1 {
+            return 0;
+        }
+
+        if let Some(call_id) = event.call_id() {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            call_id.hash(&mut hasher);
+            return (hasher.finish() as usize) % self.workers.len();
+        }
+
+        self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len()
     }
 }
 
@@ -281,25 +380,41 @@ impl LifecycleIndex {
 pub(crate) struct SessionEventPublisher {
     coordinator: Arc<GlobalEventCoordinator>,
     lifecycle: LifecycleIndex,
+    dispatcher: SessionEventDispatcher,
 }
 
 impl SessionEventPublisher {
     pub(crate) fn new(coordinator: Arc<GlobalEventCoordinator>, lifecycle: LifecycleIndex) -> Self {
+        let worker_count = std::env::var("RVOIP_SESSION_EVENT_DISPATCHER_WORKERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(default_dispatcher_workers);
+        let channel_capacity = std::env::var("RVOIP_SESSION_EVENT_DISPATCHER_CHANNEL_CAPACITY")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000);
+        Self::with_dispatcher(coordinator, lifecycle, worker_count, channel_capacity)
+    }
+
+    pub(crate) fn with_dispatcher(
+        coordinator: Arc<GlobalEventCoordinator>,
+        lifecycle: LifecycleIndex,
+        worker_count: usize,
+        channel_capacity: usize,
+    ) -> Self {
+        let dispatcher =
+            SessionEventDispatcher::new(coordinator.clone(), worker_count, channel_capacity);
         Self {
             coordinator,
             lifecycle,
+            dispatcher,
         }
     }
 
     pub(crate) fn publish(&self, event: Event) {
         self.lifecycle.record_event(&event);
         let wrapped = SessionApiCrossCrateEvent::new(event);
-        let coordinator = self.coordinator.clone();
-        tokio::spawn(async move {
-            if let Err(e) = coordinator.publish(wrapped).await {
-                tracing::warn!("Failed to publish app-level event: {}", e);
-            }
-        });
+        self.dispatcher.publish(wrapped);
     }
 
     pub(crate) async fn publish_now(&self, event: Event) -> Result<()> {
@@ -310,6 +425,13 @@ impl SessionEventPublisher {
             .await
             .map_err(|e| SessionError::Other(format!("Failed to publish app-level event: {}", e)))
     }
+}
+
+fn default_dispatcher_workers() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 16)
 }
 
 #[cfg(test)]
@@ -356,5 +478,68 @@ mod tests {
 
         let snapshot = index.snapshot(&call_id, None);
         assert!(snapshot.media_security.is_some());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_watcher_wakes_only_matching_session() {
+        let index = LifecycleIndex::new();
+        let call_id = SessionId::new();
+        let other_call_id = SessionId::new();
+        let mut watcher = index.watcher(&call_id);
+
+        index.record_event(&Event::CallAnswered {
+            call_id: other_call_id,
+            sdp: None,
+        });
+        assert!(watcher.has_changed().is_ok_and(|changed| !changed));
+
+        index.record_event(&Event::CallAnswered {
+            call_id: call_id.clone(),
+            sdp: None,
+        });
+        watcher.changed().await.unwrap();
+
+        let snapshot = index.snapshot(&call_id, Some(CallState::Active));
+        assert!(snapshot.answered.is_some());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_watcher_resolves_from_late_snapshot() {
+        let index = LifecycleIndex::new();
+        let call_id = SessionId::new();
+
+        index.record_event(&Event::CallEnded {
+            call_id: call_id.clone(),
+            reason: "Normal".to_string(),
+        });
+
+        let snapshot = index.snapshot(&call_id, Some(CallState::Terminated));
+        assert_eq!(
+            snapshot.terminal.as_ref().map(CallTerminalInfo::reason),
+            Some("Normal".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_watcher_handles_many_concurrent_waiters() {
+        let index = LifecycleIndex::new();
+        let call_id = SessionId::new();
+        let mut waiters = Vec::new();
+
+        for _ in 0..256 {
+            waiters.push(index.watcher(&call_id));
+        }
+
+        index.record_event(&Event::CallAnswered {
+            call_id: call_id.clone(),
+            sdp: None,
+        });
+
+        for waiter in &mut waiters {
+            waiter.changed().await.unwrap();
+        }
+
+        let snapshot = index.snapshot(&call_id, Some(CallState::Active));
+        assert!(snapshot.answered.is_some());
     }
 }
