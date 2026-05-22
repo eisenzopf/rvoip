@@ -1545,12 +1545,7 @@ pub(crate) async fn execute_action(
                         .map(|a| (**a).clone())
                         .unwrap_or_default();
                     dialog_adapter
-                        .send_bye_with_auth(
-                            &session.session_id,
-                            opts,
-                            header_name,
-                            header_value,
-                        )
+                        .send_bye_with_auth(&session.session_id, opts, header_name, header_value)
                         .await?;
                 }
                 "REFER" => {
@@ -1565,12 +1560,7 @@ pub(crate) async fn execute_action(
                             )
                         })?;
                     dialog_adapter
-                        .send_refer_with_auth(
-                            &session.session_id,
-                            opts,
-                            header_name,
-                            header_value,
-                        )
+                        .send_refer_with_auth(&session.session_id, opts, header_name, header_value)
                         .await?;
                 }
                 "NOTIFY" => {
@@ -1585,12 +1575,7 @@ pub(crate) async fn execute_action(
                             )
                         })?;
                     dialog_adapter
-                        .send_notify_with_auth(
-                            &session.session_id,
-                            opts,
-                            header_name,
-                            header_value,
-                        )
+                        .send_notify_with_auth(&session.session_id, opts, header_name, header_value)
                         .await?;
                 }
                 "INFO" => {
@@ -1605,12 +1590,7 @@ pub(crate) async fn execute_action(
                             )
                         })?;
                     dialog_adapter
-                        .send_info_with_auth(
-                            &session.session_id,
-                            opts,
-                            header_name,
-                            header_value,
-                        )
+                        .send_info_with_auth(&session.session_id, opts, header_name, header_value)
                         .await?;
                 }
                 "UPDATE" => {
@@ -1625,12 +1605,7 @@ pub(crate) async fn execute_action(
                             )
                         })?;
                     dialog_adapter
-                        .send_update_with_auth(
-                            &session.session_id,
-                            opts,
-                            header_name,
-                            header_value,
-                        )
+                        .send_update_with_auth(&session.session_id, opts, header_name, header_value)
                         .await?;
                 }
                 "MESSAGE" => {
@@ -2223,7 +2198,7 @@ pub(crate) async fn execute_action(
             }
         }
         Action::SendREGISTERWithOptions => {
-            if let Some(opts) = session.pending_register_options.take() {
+            if let Some(opts) = session.pending_register_options.clone() {
                 // SIP_API_DESIGN_2 §7.1 — REGISTER dispatch through the
                 // unified options surface, routed through the
                 // DialogAdapter mirror so HeaderPolicy::validate_outbound
@@ -2235,8 +2210,13 @@ pub(crate) async fn execute_action(
                 // semantics in dialog-core.
                 let opts = (*opts).clone();
                 let refresh_flag = opts.refresh;
+                let registrar_uri = opts.registrar_uri.clone();
+                let from_uri = opts.aor_uri.clone();
+                let contact_uri = opts.contact_uri.clone();
+                let requested_expires = opts.expires;
+                let session_id = session.session_id.clone();
                 let response = dialog_adapter
-                    .send_register_with_options(opts)
+                    .send_register_with_options(opts.clone())
                     .await
                     .map_err(|e| {
                         Box::<dyn std::error::Error + Send + Sync>::from(format!(
@@ -2247,9 +2227,140 @@ pub(crate) async fn execute_action(
                 debug!(
                     "SendREGISTERWithOptions (refresh={}) on session {}: status={}",
                     refresh_flag,
-                    session.session_id,
+                    session_id,
                     response.status_code()
                 );
+
+                match DialogAdapter::register_attempt_outcome_from_response(
+                    &response,
+                    &contact_uri,
+                    requested_expires,
+                ) {
+                    RegisterAttemptOutcome::Registered {
+                        accepted_expires,
+                        metadata,
+                    } => {
+                        dialog_adapter
+                            .apply_registration_success(
+                                &session_id,
+                                &registrar_uri,
+                                &from_uri,
+                                &contact_uri,
+                                accepted_expires,
+                                metadata,
+                            )
+                            .await?;
+                        *session = session_store.get_session(&session_id).await?;
+                        session.pending_register_options = None;
+                        session_store.update_session(session.clone()).await?;
+                        return Ok(ActionOutcome::with_event(EventType::Registration200OK));
+                    }
+                    RegisterAttemptOutcome::Unregistered => {
+                        dialog_adapter
+                            .apply_unregistration_success(&session_id, &registrar_uri)
+                            .await?;
+                        *session = session_store.get_session(&session_id).await?;
+                        session.pending_register_options = None;
+                        session_store.update_session(session.clone()).await?;
+                        return Ok(ActionOutcome::with_event(EventType::Unregistration200OK));
+                    }
+                    RegisterAttemptOutcome::AuthChallenge {
+                        status_code,
+                        challenge,
+                    } => {
+                        let retry_count = session_store
+                            .get_session(&session_id)
+                            .await?
+                            .registration_retry_count;
+                        if retry_count >= 1 {
+                            dialog_adapter
+                                .apply_registration_failure(
+                                    &session_id,
+                                    &registrar_uri,
+                                    status_code,
+                                    "REGISTER authentication failed",
+                                )
+                                .await?;
+                            *session = session_store.get_session(&session_id).await?;
+                            session.pending_register_options = None;
+                            session_store.update_session(session.clone()).await?;
+                            return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                                status_code,
+                            )));
+                        }
+
+                        let mut latest = session_store.get_session(&session_id).await?;
+                        latest.registration_retry_count += 1;
+                        session_store.update_session(latest.clone()).await?;
+                        *session = latest;
+                        return Ok(ActionOutcome::with_event(EventType::AuthRequired {
+                            status_code,
+                            challenge,
+                            method: "REGISTER".to_string(),
+                        }));
+                    }
+                    RegisterAttemptOutcome::IntervalTooBrief { min_expires } => {
+                        let mut latest = session_store.get_session(&session_id).await?;
+                        if latest.registration_retry_count >= 2 {
+                            dialog_adapter
+                                .apply_registration_failure(
+                                    &session_id,
+                                    &registrar_uri,
+                                    423,
+                                    "Registration failed with repeated 423 Interval Too Brief responses",
+                                )
+                                .await?;
+                            *session = session_store.get_session(&session_id).await?;
+                            session.pending_register_options = None;
+                            session_store.update_session(session.clone()).await?;
+                            return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                                423,
+                            )));
+                        }
+
+                        latest.registration_expires = Some(min_expires);
+                        latest.registration_retry_count += 1;
+                        let mut retry_opts = opts;
+                        retry_opts.expires = min_expires;
+                        latest.pending_register_options = Some(Arc::new(retry_opts));
+                        session_store.update_session(latest.clone()).await?;
+                        *session = latest;
+                        return Ok(ActionOutcome::with_event(EventType::SendOutboundRegister));
+                    }
+                    RegisterAttemptOutcome::Failure {
+                        status_code,
+                        reason,
+                    } => {
+                        if requested_expires == 0 {
+                            dialog_adapter
+                                .apply_unregistration_failure(
+                                    &session_id,
+                                    &registrar_uri,
+                                    format!("{} (status {})", reason, status_code),
+                                )
+                                .await?;
+                            *session = session_store.get_session(&session_id).await?;
+                            session.pending_register_options = None;
+                            session_store.update_session(session.clone()).await?;
+                            return Ok(ActionOutcome::with_event(EventType::UnregistrationFailed));
+                        }
+
+                        dialog_adapter
+                            .apply_registration_failure(
+                                &session_id,
+                                &registrar_uri,
+                                status_code,
+                                reason,
+                            )
+                            .await?;
+                        *session = session_store.get_session(&session_id).await?;
+                        session.pending_register_options = None;
+                        session_store.update_session(session.clone()).await?;
+                        return Ok(ActionOutcome::with_event(EventType::RegistrationFailed(
+                            status_code,
+                        )));
+                    }
+                }
             }
         }
         Action::SendINVITEWithOptions => {
@@ -2284,9 +2395,7 @@ pub(crate) async fn execute_action(
                         Ok(uri) => {
                             extras.insert(
                                 0,
-                                TypedHeader::PAssertedIdentity(
-                                    PAssertedIdentity::with_uri(uri),
-                                ),
+                                TypedHeader::PAssertedIdentity(PAssertedIdentity::with_uri(uri)),
                             );
                         }
                         Err(e) => {
@@ -2321,8 +2430,7 @@ pub(crate) async fn execute_action(
                     use std::str::FromStr;
                     match Uri::from_str(&uri_str) {
                         Ok(uri) => {
-                            extras
-                                .insert(0, TypedHeader::Route(Route::with_uri(uri)));
+                            extras.insert(0, TypedHeader::Route(Route::with_uri(uri)));
                         }
                         Err(e) => {
                             return Err(format!(
@@ -2347,17 +2455,13 @@ pub(crate) async fn execute_action(
                 // ahead of application extras, deterministic on the wire.
                 if let Some(contact_uri) = snapshot.contact_uri.as_ref() {
                     use rvoip_sip_core::types::address::Address;
-                    use rvoip_sip_core::types::contact::{
-                        Contact, ContactParamInfo,
-                    };
+                    use rvoip_sip_core::types::contact::{Contact, ContactParamInfo};
                     use rvoip_sip_core::types::{uri::Uri, TypedHeader};
                     use std::str::FromStr;
                     match Uri::from_str(contact_uri) {
                         Ok(uri) => {
                             let address = Address::new(uri);
-                            let contact = Contact::new_params(vec![
-                                ContactParamInfo { address },
-                            ]);
+                            let contact = Contact::new_params(vec![ContactParamInfo { address }]);
                             extras.insert(0, TypedHeader::Contact(contact));
                         }
                         Err(e) => {

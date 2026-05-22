@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod types;
+pub mod wiring_manifest;
 pub mod yaml_loader;
 
 pub use builder::StateTableBuilder;

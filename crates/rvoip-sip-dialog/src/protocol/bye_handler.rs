@@ -110,10 +110,10 @@ impl DialogManager {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
             })?;
 
-        // Send session coordination event (Phase 1 - terminating)
-        let event = SessionCoordinationEvent::CallTerminating {
+        // Send a method-specific session coordination event. Dialog-core has
+        // already sent the 200 OK, so session-core must only run cleanup.
+        let event = SessionCoordinationEvent::ByeReceived {
             dialog_id: dialog_id.clone(),
-            reason: "BYE received".to_string(),
         };
 
         self.notify_session_layer(event).await?;

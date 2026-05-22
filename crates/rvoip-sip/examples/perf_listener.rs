@@ -44,9 +44,7 @@ async fn main() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| {
-                    "warn,rvoip_sip::state_machine::actions=info".into()
-                }),
+                .unwrap_or_else(|_| "warn,rvoip_sip::state_machine::actions=info".into()),
         )
         .with_target(false)
         .try_init();

@@ -66,6 +66,13 @@ pub enum SessionCoordinationEvent {
         reason: String,
     },
 
+    /// Inbound BYE received inside an established dialog. Dialog-core has
+    /// already sent the 200 OK; session-core only needs to run BYE cleanup.
+    ByeReceived {
+        /// Dialog ID for the BYE
+        dialog_id: DialogId,
+    },
+
     /// Call has been terminated (Phase 2 - cleanup complete)
     CallTerminated {
         /// Dialog ID for the terminated call

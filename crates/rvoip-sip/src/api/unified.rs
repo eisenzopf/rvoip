@@ -73,8 +73,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, RwLock};
 
-pub use rvoip_sip_dialog::api::RelUsage;
 pub use rvoip_media_core::relay::controller::{AudioSource, BridgeError, BridgeHandle};
+pub use rvoip_sip_dialog::api::RelUsage;
 
 /// SIP TLS operating mode for signalling transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2878,12 +2878,8 @@ impl UnifiedCoordinator {
             SipTlsMode::Disabled => {
                 rvoip_sip_dialog::transaction::transport::TlsRole::ClientAndServer
             }
-            SipTlsMode::ClientOnly => {
-                rvoip_sip_dialog::transaction::transport::TlsRole::ClientOnly
-            }
-            SipTlsMode::ServerOnly => {
-                rvoip_sip_dialog::transaction::transport::TlsRole::ServerOnly
-            }
+            SipTlsMode::ClientOnly => rvoip_sip_dialog::transaction::transport::TlsRole::ClientOnly,
+            SipTlsMode::ServerOnly => rvoip_sip_dialog::transaction::transport::TlsRole::ServerOnly,
             SipTlsMode::ClientAndServer => {
                 rvoip_sip_dialog::transaction::transport::TlsRole::ClientAndServer
             }
@@ -2957,19 +2953,18 @@ impl UnifiedCoordinator {
             // line and delegates per-header decisions to the redactor.
             // The transform runs at the trace boundary in
             // SipTraceRuntime::publish; the wire form is unaffected.
-            let redactor_fn: Option<
-                rvoip_sip_dialog::transaction::transport::TraceRedactorFn,
-            > = config.trace_redaction.as_ref().map(|redactor| {
-                let redactor = redactor.clone();
-                let f: rvoip_sip_dialog::transaction::transport::TraceRedactorFn =
-                    Arc::new(move |raw: &str| -> String {
-                        crate::api::trace_redactor::apply_message_redactor(
-                            redactor.as_ref(),
-                            raw,
-                        )
-                    });
-                f
-            });
+            let redactor_fn: Option<rvoip_sip_dialog::transaction::transport::TraceRedactorFn> =
+                config.trace_redaction.as_ref().map(|redactor| {
+                    let redactor = redactor.clone();
+                    let f: rvoip_sip_dialog::transaction::transport::TraceRedactorFn =
+                        Arc::new(move |raw: &str| -> String {
+                            crate::api::trace_redactor::apply_message_redactor(
+                                redactor.as_ref(),
+                                raw,
+                            )
+                        });
+                    f
+                });
 
             transport_manager.enable_sip_trace_with_redactor(
                 owner_id,
@@ -3109,9 +3104,7 @@ impl UnifiedCoordinator {
             .state_machine
             .process_event(session_id, event)
             .await
-            .map_err(|e| {
-                SessionError::InternalError(format!("dispatch_outbound: {}", e))
-            })
+            .map_err(|e| SessionError::InternalError(format!("dispatch_outbound: {}", e)))
     }
 
     /// Crate-internal accessor: read the current `SessionState` snapshot for

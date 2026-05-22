@@ -174,6 +174,10 @@ impl SessionCrossCrateEventHandler {
                 )
                 .await
             }
+            DialogToSessionEvent::ByeReceived { session_id } => {
+                self.handle_bye_received_parts(SessionId(session_id.clone()))
+                    .await
+            }
             DialogToSessionEvent::CallTerminated { session_id, reason } => {
                 self.handle_call_terminated_parts(
                     SessionId(session_id.clone()),
@@ -286,10 +290,9 @@ impl SessionCrossCrateEventHandler {
                 // string-matching on `method`. INVITE keeps the
                 // legacy hold/resume state-machine path.
                 if method.eq_ignore_ascii_case("UPDATE") {
-                    if let Some(incoming) = build_incoming_request_from_bytes(
-                        sid.clone(),
-                        raw_request.clone(),
-                    ) {
+                    if let Some(incoming) =
+                        build_incoming_request_from_bytes(sid.clone(), raw_request.clone())
+                    {
                         publish_api_event(
                             &self.app_event_publisher,
                             crate::api::events::Event::UpdateReceived {
@@ -418,10 +421,7 @@ impl SessionCrossCrateEventHandler {
                 // wire bytes, re-parse them once into an `Arc<Request>`
                 // for typed-header inspection; otherwise fall through to
                 // the synthesized view (legacy publish path).
-                let coordinator = self
-                    .coordinator
-                    .get()
-                    .and_then(|w| w.upgrade());
+                let coordinator = self.coordinator.get().and_then(|w| w.upgrade());
                 let parsed_request: Option<Arc<rvoip_sip_core::Request>> =
                     raw_request.as_ref().and_then(|bytes| {
                         match rvoip_sip_core::parse_message(bytes.as_ref()) {
@@ -2855,13 +2855,8 @@ impl SessionCrossCrateEventHandler {
         // carrying the parsed inbound response, so B2BUA / SBC code can
         // mirror Allow/Supported/Server/100rel markers to the
         // downstream 1xx without subscribing to a separate stream.
-        let detailed = build_incoming_response_from_bytes(
-            sid,
-            status_code,
-            reason,
-            sdp,
-            raw_response,
-        );
+        let detailed =
+            build_incoming_response_from_bytes(sid, status_code, reason, sdp, raw_response);
         publish_api_event(
             &self.app_event_publisher,
             crate::api::events::Event::CallProgressDetailed(detailed),
@@ -2890,7 +2885,7 @@ impl SessionCrossCrateEventHandler {
                     .await;
             }
             rvoip_infra_common::events::cross_crate::CallState::Terminated => {
-                Some(EventType::DialogBYE)
+                Some(EventType::DialogTerminated)
             }
             _ => None,
         };
@@ -3009,6 +3004,42 @@ impl SessionCrossCrateEventHandler {
             };
             self.publish_and_release_session(api_event, session_id.clone())
                 .await;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_bye_received_parts(&self, session_id: SessionId) -> Result<()> {
+        if self
+            .state_machine
+            .store
+            .get_session(&session_id)
+            .await
+            .is_err()
+        {
+            debug!(
+                "Ignoring ByeReceived for session {} - not in our store",
+                session_id
+            );
+            return Ok(());
+        }
+
+        match self
+            .state_machine
+            .process_event(&session_id, EventType::DialogBYE)
+            .await
+        {
+            Ok(_) => {
+                let api_event = crate::api::events::Event::CallEnded {
+                    call_id: session_id.clone(),
+                    reason: "BYE received".to_string(),
+                };
+                self.publish_and_release_session(api_event, session_id)
+                    .await;
+            }
+            Err(e) => {
+                error!("Failed to process DialogBYE for {}: {}", session_id, e);
+            }
         }
 
         Ok(())

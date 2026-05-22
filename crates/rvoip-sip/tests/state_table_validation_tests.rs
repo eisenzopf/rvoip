@@ -222,7 +222,7 @@ fn test_registration_transitions() {
 
     // Check registration start
     let register_key = StateKey {
-        role: Role::Both,
+        role: Role::UAC,
         state: CallState::Idle,
         event: EventType::StartRegistration,
     };
@@ -232,7 +232,7 @@ fn test_registration_transitions() {
 
     // Check registration success
     let register_ok_key = StateKey {
-        role: Role::Both,
+        role: Role::UAC,
         state: CallState::Registering,
         event: EventType::Registration200OK,
     };
@@ -271,25 +271,26 @@ fn test_registration_transitions() {
 fn test_subscription_transitions() {
     let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
-    // Check subscription start
     let subscribe_key = StateKey {
-        role: Role::Both,
+        role: Role::UAC,
         state: CallState::Idle,
-        event: EventType::StartSubscription,
+        event: EventType::SendOutboundSubscribe,
     };
 
-    let has_subscribe = table.has_transition(&subscribe_key);
-    assert!(has_subscribe, "Missing subscription transition from Idle");
-
-    // Check notification handling
     let notify_key = StateKey {
         role: Role::Both,
         state: CallState::Subscribed,
         event: EventType::ReceiveNOTIFY,
     };
 
-    let has_notify = table.has_transition(&notify_key);
-    assert!(has_notify, "Missing NOTIFY handling in Subscribed state");
+    assert!(
+        !table.has_transition(&subscribe_key),
+        "SUBSCRIBE should be direct-wired, not state-table dispatched"
+    );
+    assert!(
+        !table.has_transition(&notify_key),
+        "NOTIFY should be dialog/session event-wired, not state-table dispatched"
+    );
 }
 
 #[test]
@@ -318,23 +319,24 @@ fn test_transfer_transitions() {
 fn test_message_handling() {
     let table = load_state_table("default.yaml").expect("Failed to load default.yaml");
 
-    // Check MESSAGE sending
     let send_message_key = StateKey {
         role: Role::Both,
         state: CallState::Idle,
         event: EventType::SendMessage,
     };
 
-    let has_send_message = table.has_transition(&send_message_key);
-    assert!(has_send_message, "Missing MESSAGE sending transition");
-
-    // Check MESSAGE receiving
     let receive_message_key = StateKey {
         role: Role::Both,
         state: CallState::Idle,
         event: EventType::ReceiveMESSAGE,
     };
 
-    let has_receive_message = table.has_transition(&receive_message_key);
-    assert!(has_receive_message, "Missing MESSAGE receiving transition");
+    assert!(
+        !table.has_transition(&send_message_key),
+        "OOB MESSAGE should be direct-wired, not state-table dispatched"
+    );
+    assert!(
+        !table.has_transition(&receive_message_key),
+        "Inbound MESSAGE should be event-wired, not state-table dispatched"
+    );
 }

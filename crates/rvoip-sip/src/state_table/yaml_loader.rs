@@ -4,7 +4,7 @@
 //! between dialog-core and media-core layers without duplicating their logic.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use tracing::{debug, info};
@@ -237,6 +237,8 @@ impl YamlTableLoader {
 
     /// Load state table from a string
     pub fn load_from_string(&mut self, yaml_content: &str) -> Result<()> {
+        Self::validate_raw_yaml_content(yaml_content)?;
+
         let yaml_data: YamlStateTable = serde_yaml::from_str(yaml_content)
             .map_err(|e| SessionError::InternalError(format!("Failed to parse YAML: {}", e)))?;
 
@@ -270,6 +272,8 @@ impl YamlTableLoader {
 
     /// Merge YAML content into the current table
     pub fn merge_string(&mut self, yaml_content: &str) -> Result<()> {
+        Self::validate_raw_yaml_content(yaml_content)?;
+
         let merge_data: YamlStateTable = serde_yaml::from_str(yaml_content).map_err(|e| {
             SessionError::InternalError(format!("Failed to parse YAML for merge: {}", e))
         })?;
@@ -312,6 +316,8 @@ impl YamlTableLoader {
             .take()
             .ok_or_else(|| SessionError::InternalError("No YAML data loaded".to_string()))?;
 
+        self.validate_yaml_data(&yaml_data)?;
+
         // Process each transition
         for yaml_transition in yaml_data.transitions {
             match self.convert_transition(yaml_transition) {
@@ -348,6 +354,143 @@ impl YamlTableLoader {
         }
 
         Ok(self.builder.build())
+    }
+
+    fn validation_error(errors: Vec<String>) -> SessionError {
+        SessionError::InternalError(format!(
+            "State table YAML validation failed:\n- {}",
+            errors.join("\n- ")
+        ))
+    }
+
+    fn validate_raw_yaml_content(yaml_content: &str) -> Result<()> {
+        let raw: serde_yaml::Value = serde_yaml::from_str(yaml_content)
+            .map_err(|e| SessionError::InternalError(format!("Failed to parse YAML: {}", e)))?;
+
+        let mut errors = Vec::new();
+        let allowed_condition_updates: HashSet<&str> = [
+            "dialog_established",
+            "media_session_ready",
+            "sdp_negotiated",
+        ]
+        .into_iter()
+        .collect();
+
+        let transitions = raw.get("transitions").and_then(|value| value.as_sequence());
+
+        if let Some(transitions) = transitions {
+            for (index, transition) in transitions.iter().enumerate() {
+                let Some(mapping) = transition.as_mapping() else {
+                    errors.push(format!("transition #{} is not a mapping", index + 1));
+                    continue;
+                };
+
+                let Some(conditions) = mapping
+                    .get(&serde_yaml::Value::String("conditions".to_string()))
+                    .and_then(|value| value.as_mapping())
+                else {
+                    continue;
+                };
+
+                for key in conditions.keys() {
+                    let Some(key) = key.as_str() else {
+                        errors.push(format!(
+                            "transition #{} has a non-string condition update key",
+                            index + 1
+                        ));
+                        continue;
+                    };
+
+                    if !allowed_condition_updates.contains(key) {
+                        errors.push(format!(
+                            "transition #{} uses unsupported condition update '{}'",
+                            index + 1,
+                            key
+                        ));
+                    }
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::validation_error(errors))
+        }
+    }
+
+    fn validate_yaml_data(&self, yaml_data: &YamlStateTable) -> Result<()> {
+        let mut errors = Vec::new();
+        let mut seen_transitions: HashMap<(Role, String, String), usize> = HashMap::new();
+
+        let declared_states: HashSet<String> = yaml_data
+            .states
+            .iter()
+            .map(|state| state.name.clone())
+            .collect();
+        let should_validate_declared_states = !declared_states.is_empty();
+
+        for (index, transition) in yaml_data.transitions.iter().enumerate() {
+            let line_hint = format!("transition #{}", index + 1);
+            let role = match transition.role.to_lowercase().as_str() {
+                "uac" => Role::UAC,
+                "uas" | "server" => Role::UAS,
+                "both" => Role::Both,
+                _ => {
+                    errors.push(format!(
+                        "{} has invalid role '{}'",
+                        line_hint, transition.role
+                    ));
+                    continue;
+                }
+            };
+
+            if should_validate_declared_states {
+                for (field, state) in [
+                    ("state", Some(transition.state.as_str())),
+                    ("next_state", transition.next_state.as_deref()),
+                ] {
+                    let Some(state) = state else { continue };
+                    if state == "Any" || state == "*" {
+                        continue;
+                    }
+                    if !declared_states.contains(state) {
+                        errors.push(format!(
+                            "{} references undeclared {} '{}'",
+                            line_hint, field, state
+                        ));
+                    }
+                }
+            }
+
+            let event = match self.parse_event(transition.event.clone()) {
+                Ok(event) => event.normalize(),
+                Err(err) => {
+                    errors.push(format!("{} has invalid event: {}", line_hint, err));
+                    continue;
+                }
+            };
+            let event_key = format!("{:?}", event);
+            let key = (role, transition.state.clone(), event_key.clone());
+            if let Some(previous) = seen_transitions.insert(key, index + 1) {
+                errors.push(format!(
+                    "{} duplicates transition #{} for role={:?}, state={}, event={}",
+                    line_hint, previous, role, transition.state, event_key
+                ));
+            }
+
+            for action in &transition.actions {
+                if let Err(err) = self.parse_action(action.clone()) {
+                    errors.push(format!("{} has invalid action: {}", line_hint, err));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(Self::validation_error(errors))
+        }
     }
 
     /// Convert a YAML transition to internal format
@@ -667,6 +810,7 @@ impl YamlTableLoader {
             // (shared event with INVITE auth). Do not re-add the legacy
             // binding here; the alias intentionally takes priority.
             "RetryRegistration" => Ok(EventType::RetryRegistration),
+            "RefreshRegistration" => Ok(EventType::RefreshRegistration),
             "RegistrationFailed" => Ok(EventType::RegistrationFailed(0)),
             "StartUnregistration" => Ok(EventType::StartUnregistration),
             "Unregistration200OK" => Ok(EventType::Unregistration200OK),
@@ -705,8 +849,12 @@ impl YamlTableLoader {
             "SendOutboundSubscribe" => Ok(EventType::SendOutboundSubscribe),
             "SendOutboundRegister" => Ok(EventType::SendOutboundRegister),
 
-            // Default: treat as media event
-            _ => Ok(EventType::MediaEvent(name.to_string())),
+            _ => Err(SessionError::InternalError(format!(
+                "Unknown YAML event '{}': add a matching arm in \
+                 state_table/yaml_loader.rs::parse_event_by_name or remove \
+                 the YAML reference.",
+                name
+            ))),
         }
     }
 
@@ -864,20 +1012,10 @@ impl YamlTableLoader {
             "SendMESSAGE" => Ok(Action::SendMESSAGE),
             "ProcessMESSAGE" => Ok(Action::ProcessMESSAGE),
 
-            // RFC 3903 PUBLISH — YAML transition is wired at
-            // `StartPublish → Publishing`, but no Rust caller dispatches
-            // `StartPublish` today and the send site is unimplemented.
-            // Intentionally state-machine-shaped per
-            // `docs/ARCHITECTURE_OVERVIEW.md#media-plane-side-effects`;
-            // promote from Custom to a real `Action::SendPUBLISH` variant
-            // when presence publishing lands.
-            "SendPUBLISH" => Ok(Action::Custom("SendPUBLISH".to_string())),
-
-            // Bridge/Conference
-            "CreateMediaBridge" => Ok(Action::Custom("CreateMediaBridge".to_string())),
-            "DestroyMediaBridge" => Ok(Action::Custom("DestroyMediaBridge".to_string())),
-            "LinkSessions" => Ok(Action::Custom("LinkSessions".to_string())),
-            "UnlinkSessions" => Ok(Action::Custom("UnlinkSessions".to_string())),
+            // Bridge/Conference helpers that are still real state-machine
+            // actions. Media bridging itself is direct-wired through the
+            // coordinator/media adapter and must not appear in YAML as a
+            // Custom no-op.
             "HoldOriginalCall" | "HoldCurrentCall" => Ok(Action::HoldCurrentCall),
             "ResumeOriginalCall" => Ok(Action::RestoreMediaFlow),
 
@@ -931,8 +1069,7 @@ impl YamlTableLoader {
             // at long-removed action variants. Now a hard error so additions
             // and deletions stay synchronized between the YAML and the Rust
             // `Action` enum. Intentional custom hooks (e.g. "SuspendMedia",
-            // "ResumeMedia", "CreateMediaBridge", "LinkSessions",
-            // "CheckReadiness") must be listed explicitly above.
+            // "ResumeMedia", "CheckReadiness") must be listed explicitly above.
             _ => Err(SessionError::InternalError(format!(
                 "Unknown YAML action '{}': add a matching arm in \
                  state_table/yaml_loader.rs::parse_action_by_name or remove \

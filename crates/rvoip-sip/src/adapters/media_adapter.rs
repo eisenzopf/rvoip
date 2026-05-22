@@ -204,14 +204,7 @@ pub(crate) fn build_port_zero_rejection_sdp(
 ) -> Result<String> {
     let version_str = origin_version.to_string();
     let session = SdpBuilder::new("Session")
-        .origin(
-            "-",
-            origin_session_id,
-            &version_str,
-            "IN",
-            "IP4",
-            local_ip,
-        )
+        .origin("-", origin_session_id, &version_str, "IN", "IP4", local_ip)
         .connection("IN", "IP4", local_ip)
         .time("0", "0")
         .media_audio(0, offered_transport)
@@ -765,50 +758,49 @@ impl MediaAdapter {
         let offered_transport = audio_transport(&parsed_offer)
             .unwrap_or("RTP/AVP")
             .to_string();
-        let (answer_attr, srtp_pair, reject_with_port_zero) = if !offered_crypto.is_empty()
-            && self.offer_srtp
-        {
-            // Both sides want SRTP — negotiate.
-            let answerer = SrtpNegotiator::new_answerer();
-            let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
-            self.negotiated_srtp.insert(session_id.clone(), pair);
-            tracing::info!(
-                "SDES offer accepted for session {}: tag {} suite {:?}",
-                session_id.0,
-                chosen.tag,
-                chosen.suite
-            );
-            if diagnostics {
-                emit_srtp_diag(format!(
-                    "sdes_offer_accepted session={} suite={:?}",
-                    session_id.0, chosen.suite
+        let (answer_attr, srtp_pair, reject_with_port_zero) =
+            if !offered_crypto.is_empty() && self.offer_srtp {
+                // Both sides want SRTP — negotiate.
+                let answerer = SrtpNegotiator::new_answerer();
+                let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
+                self.negotiated_srtp.insert(session_id.clone(), pair);
+                tracing::info!(
+                    "SDES offer accepted for session {}: tag {} suite {:?}",
+                    session_id.0,
+                    chosen.tag,
+                    chosen.suite
+                );
+                if diagnostics {
+                    emit_srtp_diag(format!(
+                        "sdes_offer_accepted session={} suite={:?}",
+                        session_id.0, chosen.suite
+                    ));
+                }
+                (Some(chosen), true, false)
+            } else if offered_crypto.is_empty() && self.srtp_required {
+                return Err(SessionError::SDPNegotiationFailed(
+                    "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
                 ));
-            }
-            (Some(chosen), true, false)
-        } else if offered_crypto.is_empty() && self.srtp_required {
-            return Err(SessionError::SDPNegotiationFailed(
-                "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
-            ));
-        } else if !offered_crypto.is_empty() && !self.offer_srtp {
-            // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
-            // policy is plaintext. Reject the m-line by setting port=0
-            // in the answer, preserving the offered proto so the peer
-            // can distinguish a rejection from a parse error.
-            tracing::info!(
-                "Session {} received SRTP offer but local policy is offer_srtp=false; \
+            } else if !offered_crypto.is_empty() && !self.offer_srtp {
+                // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
+                // policy is plaintext. Reject the m-line by setting port=0
+                // in the answer, preserving the offered proto so the peer
+                // can distinguish a rejection from a parse error.
+                tracing::info!(
+                    "Session {} received SRTP offer but local policy is offer_srtp=false; \
                  rejecting m-line with port=0 per RFC 3264 §6",
-                session_id.0
-            );
-            if diagnostics {
-                emit_srtp_diag(format!(
-                    "sdes_offer_rejected session={} reason=local_policy",
                     session_id.0
-                ));
-            }
-            (None, false, true)
-        } else {
-            (None, false, false)
-        };
+                );
+                if diagnostics {
+                    emit_srtp_diag(format!(
+                        "sdes_offer_rejected session={} reason=local_policy",
+                        session_id.0
+                    ));
+                }
+                (None, false, true)
+            } else {
+                (None, false, false)
+            };
         let _ = srtp_pair; // suppress unused warning — value retained via DashMap insert
 
         // Port-zero rejection short-circuit: build a minimal RFC 3264

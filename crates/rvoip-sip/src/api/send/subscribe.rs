@@ -25,6 +25,15 @@ pub struct SubscriptionHandle {
     pub(crate) coord: Option<Arc<UnifiedCoordinator>>,
     /// Cached event package; refresh reuses the same package.
     pub(crate) event_package: String,
+    /// Original request target used for direct refresh/unsubscribe sends.
+    pub(crate) target: String,
+    /// Original From URI; direct refreshes reuse it because there is no
+    /// session-state record for out-of-dialog subscriptions.
+    pub(crate) from_uri: String,
+    /// Original Contact URI if supplied by the caller.
+    pub(crate) contact_uri: Option<String>,
+    /// Original Accept header if supplied by the caller.
+    pub(crate) accept: Option<String>,
 }
 
 impl SubscriptionHandle {
@@ -100,9 +109,7 @@ impl SubscribeBuilder {
     ) -> Result<crate::api::dialog_subscription::DialogSubscriptionHandle> {
         let target = self.target.clone();
         let handle = self.send().await?;
-        crate::api::dialog_subscription::DialogSubscriptionHandle::from_subscription(
-            handle, target,
-        )
+        crate::api::dialog_subscription::DialogSubscriptionHandle::from_subscription(handle, target)
     }
 
     pub async fn send(mut self) -> Result<SubscriptionHandle> {
@@ -118,21 +125,18 @@ impl SubscribeBuilder {
         let opts = rvoip_sip_dialog::api::unified::SubscribeRequestOptions {
             event: self.event_package.clone(),
             expires: self.expires,
-            accept: self.accept,
-            from_uri: Some(from_uri),
-            contact_uri: self.contact_uri,
+            accept: self.accept.clone(),
+            from_uri: Some(from_uri.clone()),
+            contact_uri: self.contact_uri.clone(),
             authorization,
             refresh: false,
             extra_headers,
         };
-        // Initial SUBSCRIBE is out-of-dialog with a synchronous response
-        // (200 / 4xx) — the call to dialog-core awaits the final
-        // response inline. The state-machine dispatch path is only
-        // appropriate once a dialog is established, so for the initial
-        // send we keep the direct adapter call. The refresh path
-        // (SubscribeRefreshBuilder) operates inside the dialog and
-        // routes through `stage_outbound_options` + the
-        // `SendOutboundSubscribe` event.
+        // SUBSCRIBE is intentionally direct-wired. Earlier code sent the
+        // initial request directly but attempted refresh through the session
+        // state machine, even though no session record was created for the
+        // returned handle. Keep the whole public SUBSCRIBE builder path on
+        // the direct adapter route so it cannot dead-end on SessionNotFound.
         let response = self
             .coord
             .dialog_adapter()
@@ -148,6 +152,10 @@ impl SubscribeBuilder {
             session_id: Some(session_id),
             coord: Some(self.coord.clone()),
             event_package: self.event_package,
+            target: self.target,
+            from_uri,
+            contact_uri: self.contact_uri,
+            accept: self.accept,
         })
     }
 }
@@ -199,40 +207,26 @@ impl SubscribeRefreshBuilder {
                     .to_string(),
             )
         })?;
-        let session_id = self.handle.session_id.clone().ok_or_else(|| {
-            crate::errors::SessionError::InternalError(
-                "SubscribeRefreshBuilder.send(): subscription handle has no session id"
-                    .to_string(),
-            )
-        })?;
         let authorization = self
             .credentials
             .as_ref()
             .map(|c| format!("Digest username=\"{}\"", c.username));
         let extra_headers = take_staged(&mut self.state);
-        let opts = Arc::new(rvoip_sip_dialog::api::unified::SubscribeRequestOptions {
+        let opts = rvoip_sip_dialog::api::unified::SubscribeRequestOptions {
             event: self.handle.event_package.clone(),
             // Spec §7.1: refresh reuses the original interval unless the
             // caller overrides; default to 3600 if neither is provided.
             expires: self.expires.unwrap_or(3600),
-            accept: None,
-            from_uri: None,
-            contact_uri: None,
+            accept: self.handle.accept.clone(),
+            from_uri: Some(self.handle.from_uri.clone()),
+            contact_uri: self.handle.contact_uri.clone(),
             authorization,
             refresh: true,
             extra_headers,
-        });
+        };
         coord
-            .stage_outbound_options(
-                &session_id,
-                crate::state_machine::executor::PendingOptionsSlot::Subscribe(opts),
-            )
-            .await?;
-        coord
-            .dispatch_outbound(
-                &session_id,
-                crate::state_table::EventType::SendOutboundSubscribe,
-            )
+            .dialog_adapter()
+            .send_subscribe_oob_with_options(&self.handle.target, opts)
             .await?;
         Ok(())
     }

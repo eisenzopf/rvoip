@@ -26,6 +26,11 @@ use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 use crate::state_table::types::{DialogId, SessionId};
 use dashmap::DashMap;
+use rvoip_infra_common::events::{
+    coordinator::GlobalEventCoordinator,
+    cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent},
+};
+use rvoip_sip_core::{Response, StatusCode};
 use rvoip_sip_dialog::{
     api::unified::{
         ByeRequestOptions, CancelRequestOptions, InfoRequestOptions, MessageRequestOptions,
@@ -35,11 +40,6 @@ use rvoip_sip_dialog::{
     transaction::TransactionKey,
     DialogId as RvoipDialogId,
 };
-use rvoip_infra_common::events::{
-    coordinator::GlobalEventCoordinator,
-    cross_crate::{RvoipCrossCrateEvent, SessionToDialogEvent},
-};
-use rvoip_sip_core::{Response, StatusCode};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -407,7 +407,7 @@ impl DialogAdapter {
         .await
     }
 
-    fn accepted_registration_expires(
+    pub(crate) fn accepted_registration_expires(
         response: &Response,
         requested_contact_uri: &str,
         fallback_expires: u32,
@@ -447,7 +447,9 @@ impl DialogAdapter {
             .unwrap_or(fallback_expires)
     }
 
-    fn response_registration_metadata(response: &Response) -> RegistrationResponseMetadata {
+    pub(crate) fn response_registration_metadata(
+        response: &Response,
+    ) -> RegistrationResponseMetadata {
         use rvoip_sip_core::types::outbound::read_gruu_contact_params;
         use rvoip_sip_core::types::TypedHeader;
 
@@ -490,6 +492,75 @@ impl DialogAdapter {
             service_route,
             pub_gruu,
             temp_gruu,
+        }
+    }
+
+    pub(crate) fn register_attempt_outcome_from_response(
+        response: &Response,
+        contact_uri: &str,
+        expires: u32,
+    ) -> RegisterAttemptOutcome {
+        match response.status_code() {
+            200..=299 => {
+                if expires == 0 {
+                    RegisterAttemptOutcome::Unregistered
+                } else {
+                    RegisterAttemptOutcome::Registered {
+                        accepted_expires: Self::accepted_registration_expires(
+                            response,
+                            contact_uri,
+                            expires,
+                        ),
+                        metadata: Self::response_registration_metadata(response),
+                    }
+                }
+            }
+            401 | 407 => {
+                use rvoip_sip_core::types::headers::HeaderAccess;
+                let header_name = if response.status_code() == 407 {
+                    rvoip_sip_core::types::header::HeaderName::ProxyAuthenticate
+                } else {
+                    rvoip_sip_core::types::header::HeaderName::WwwAuthenticate
+                };
+                if let Some(challenge) = response.raw_header_value(&header_name) {
+                    RegisterAttemptOutcome::AuthChallenge {
+                        status_code: response.status_code(),
+                        challenge,
+                    }
+                } else {
+                    RegisterAttemptOutcome::Failure {
+                        status_code: response.status_code(),
+                        reason: "REGISTER challenge response did not include challenge header"
+                            .to_string(),
+                    }
+                }
+            }
+            423 => {
+                use rvoip_sip_core::types::headers::HeaderAccess;
+                match response
+                    .raw_header_value(&rvoip_sip_core::types::header::HeaderName::MinExpires)
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                {
+                    Some(min_expires) if min_expires > 0 && min_expires <= 7200 => {
+                        RegisterAttemptOutcome::IntervalTooBrief { min_expires }
+                    }
+                    Some(min_expires) => RegisterAttemptOutcome::Failure {
+                        status_code: response.status_code(),
+                        reason: format!(
+                            "423 Interval Too Brief included invalid Min-Expires={}",
+                            min_expires
+                        ),
+                    },
+                    None => RegisterAttemptOutcome::Failure {
+                        status_code: response.status_code(),
+                        reason: "423 Interval Too Brief without Min-Expires header".to_string(),
+                    },
+                }
+            }
+            _ => RegisterAttemptOutcome::Failure {
+                status_code: response.status_code(),
+                reason: response.reason_phrase().to_string(),
+            },
         }
     }
 
@@ -1005,10 +1076,8 @@ impl DialogAdapter {
         sdp: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> Result<()> {
-        self.send_invite_with_extra_headers_inner(
-            session_id, from, to, sdp, extra_headers, false,
-        )
-        .await
+        self.send_invite_with_extra_headers_inner(session_id, from, to, sdp, extra_headers, false)
+            .await
     }
 
     async fn send_invite_with_extra_headers_inner(

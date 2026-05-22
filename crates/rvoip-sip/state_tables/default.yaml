@@ -29,6 +29,8 @@ states:
     description: "Early media received"
   - name: "Active"
     description: "Call established with media flowing"
+  - name: "HoldPending"
+    description: "Hold re-INVITE sent, waiting for final response"
   - name: "OnHold"
     description: "Call on hold"
   - name: "Resuming"
@@ -393,18 +395,14 @@ transitions:
   # response itself (`bye_handler.rs::handle_bye` → transaction layer
   # emits the final response, then the transaction goes Completed →
   # Terminated). It then publishes `SessionCoordinationEvent::Call-
-  # Terminating`, which the `event_hub` bridges to the cross-crate
-  # `DialogToSessionEvent::CallTerminated`. Session-core's
-  # `handle_call_terminated_parts` dispatches
-  # `EventType::DialogTerminated` into the state machine.
+  # ByeReceived`, which the `event_hub` bridges to the cross-crate
+  # `DialogToSessionEvent::ByeReceived`. Session-core dispatches
+  # `EventType::DialogBYE` into the state machine. The older
+  # `DialogTerminated` rows remain as compatibility for generic dialog
+  # teardown and local-BYE completion.
   #
-  # So the state machine MUST drive media/dialog cleanup from the
-  # `DialogTerminated` event in every active-call state, NOT from a
-  # `DialogBYE` event (which is never actually dispatched on the
-  # inbound-BYE path — the rows that referenced it were dead code).
-  # And the actions MUST NOT include `SendSIPResponse(200)` because
-  # dialog-core has already sent it; doing it twice corrupts the
-  # transaction.
+  # BYE cleanup actions MUST NOT include `SendSIPResponse(200)` because
+  # dialog-core has already sent it; doing it twice corrupts the transaction.
 
   - role: "Both"
     state: "Answering"
@@ -572,6 +570,119 @@ transitions:
       - "CallTerminated"
     description: "Remote BYE during early media — cleanup and finalize"
 
+  # Method-specific inbound BYE path. Dialog-core has already sent the
+  # 200 OK, so these rows only finalize local resources. The older
+  # DialogTerminated rows above remain as compatibility for generic dialog
+  # teardown events and local BYE completion.
+
+  - role: "Both"
+    state: "Answering"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE before ACK — cleanup and finalize"
+
+  - role: "Both"
+    state: "AnsweringHangupPending"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE while local hangup waited for ACK — cleanup and finalize"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE from Active — cleanup and finalize"
+
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE while OnHold — cleanup and finalize"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE during pending hold — cleanup and finalize"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE during resume — cleanup and finalize"
+
+  - role: "Both"
+    state: "Muted"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE while Muted — cleanup and finalize"
+
+  - role: "Both"
+    state: "Bridged"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE while Bridged — cleanup and finalize"
+
+  - role: "Both"
+    state: "EarlyMedia"
+    event:
+      type: "DialogBYE"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Inbound BYE during early media — cleanup and finalize"
+
   # Cleanup after our own local hangup ran. This is the local-initiated
   # path: HangupCall took us Active → Terminating (sending BYE +
   # CleanupMedia along the way); peer's 200 OK then drives the dialog
@@ -715,32 +826,6 @@ transitions:
       - type: "ClearPendingReinvite"
     description: "Resume re-INVITE Timer B expired — stay held (RFC 3261 §14.1)"
 
-  # Bridge two calls
-  - role: "Both"
-    state: "Active"
-    event:
-      type: "BridgeSessions"
-    next_state: "Bridged"
-    actions:
-      - type: "CreateMediaBridge"
-      - type: "LinkSessions"
-    publish:
-      - "SessionsBridged"
-    description: "Bridge to another call"
-
-  # Unbridge calls
-  - role: "Both"
-    state: "Bridged"
-    event:
-      type: "UnbridgeSessions"
-    next_state: "Active"
-    actions:
-      - type: "DestroyMediaBridge"
-      - type: "UnlinkSessions"
-    publish:
-      - "SessionsUnbridged"
-    description: "Unbridge calls"
-
   # Handle REFER requests via events
   - role: "Both"
     state: "Active"
@@ -755,135 +840,6 @@ transitions:
       - type: "SendRefer100Trying"
       - type: "SendReferAccepted"
     description: "Handle REFER - always accept (SimplePeer gets event via SessionCrossCrateEventHandler)"
-
-  # Registration transitions
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "StartRegistration"
-    next_state: "Registering"
-    actions:
-      - type: "SendREGISTER"
-    publish:
-      - "RegistrationStarted"
-    description: "Start registration"
-
-  - role: "Both"
-    state: "Registering"
-    event:
-      type: "Registration200OK"
-    next_state: "Registered"
-    conditions:
-      IsRegistered: true
-    publish:
-      - "RegistrationSucceeded"
-    description: "Registration successful"
-
-  - role: "Both"
-    state: "Registered"
-    event:
-      type: "StartUnregistration"
-    next_state: "Unregistering"
-    actions:
-      - type: "SendREGISTERWithExpires0"
-    description: "Start unregistration"
-
-  - role: "Both"
-    state: "Unregistering"
-    event:
-      type: "Registration200OK"
-    next_state: "Idle"
-    conditions:
-      IsRegistered: false
-    publish:
-      - "UnregistrationSucceeded"
-    description: "Unregistration successful"
-
-  # Subscription/Presence transitions
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "StartSubscription"
-    next_state: "Subscribing"
-    actions:
-      - type: "SendSUBSCRIBE"
-    publish:
-      - "SubscriptionStarted"
-    description: "Start subscription"
-
-  - role: "Both"
-    state: "Subscribing"
-    event:
-      type: "Subscription200OK"
-    next_state: "Subscribed"
-    publish:
-      - "SubscriptionActive"
-    description: "Subscription active"
-
-  - role: "Both"
-    state: "Subscribed"
-    event:
-      type: "ReceiveNOTIFY"
-    actions:
-      - type: "ProcessNOTIFY"
-      - type: "SendSIPResponse"
-        code: 200
-        reason: "OK"
-    publish:
-      - "NotificationReceived"
-    description: "Process notification"
-
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "StartPublish"
-    next_state: "Publishing"
-    actions:
-      - type: "SendPUBLISH"
-    publish:
-      - "PublishStarted"
-    description: "Start publishing presence"
-
-  - role: "Both"
-    state: "Publishing"
-    event:
-      type: "Publish200OK"
-    next_state: "Idle"
-    publish:
-      - "PublishSucceeded"
-    description: "Publish successful"
-
-  # MESSAGE handling
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "SendMessage"
-    next_state: "Messaging"
-    actions:
-      - type: "SendMESSAGE"
-    description: "Send SIP MESSAGE"
-
-  - role: "Both"
-    state: "Messaging"
-    event:
-      type: "Message200OK"
-    next_state: "Idle"
-    publish:
-      - "MessageSent"
-    description: "Message sent successfully"
-
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "ReceiveMESSAGE"
-    actions:
-      - type: "ProcessMESSAGE"
-      - type: "SendSIPResponse"
-        code: 200
-        reason: "OK"
-    publish:
-      - "MessageReceived"
-    description: "Receive SIP MESSAGE"
 
   # --------------------------------------------------------------------
   # UAS-side re-INVITE / UPDATE (RFC 3261 §14, RFC 3311, RFC 4028 §9)
@@ -1145,6 +1101,130 @@ transitions:
   - role: "Both"
     state: "Initiating"
     event:
+      type: "Dialog6xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "Call failed with 6xx global failure"
+
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "Dialog4xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "Call failed with 4xx after ringing"
+
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "Dialog5xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "Call failed with 5xx after ringing"
+
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "Dialog6xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "Call failed with 6xx after ringing"
+
+  - role: "UAC"
+    state: "Ringing"
+    event:
+      type: "DialogTimeout"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "INVITE timed out after ringing"
+
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "Dialog4xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "Call failed with 4xx after early media"
+
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "Dialog5xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "Call failed with 5xx after early media"
+
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "Dialog6xxFailure"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "SendTransferNotifyFailure"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "Call failed with 6xx after early media"
+
+  - role: "UAC"
+    state: "EarlyMedia"
+    event:
+      type: "DialogTimeout"
+    next_state: "Failed"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+      - type: "ClearPendingINVITEOptions"
+    publish:
+      - "CallFailed"
+    description: "INVITE timed out after early media"
+
+  - role: "Both"
+    state: "Initiating"
+    event:
       type: "DialogTimeout"
     next_state: "Failed"
     actions:
@@ -1363,196 +1443,6 @@ transitions:
       - "CallCancelled"
     description: "Incoming call cancelled"
 
-  # ==========================================
-  # Registration Transitions
-  # ==========================================
-
-  # Start registration from Idle
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "StartRegistration"
-    next_state: "Registering"
-    actions:
-      - type: "CreateDialog"
-      - type: "SendREGISTER"
-    publish:
-      - "RegistrationStarted"
-    description: "Start registration process"
-
-  # Registration successful
-  - role: "Both"
-    state: "Registering"
-    event:
-      type: "Registration200OK"
-    next_state: "Registered"
-    conditions:
-      is_registered: true
-    publish:
-      - "RegistrationSuccess"
-    description: "Registration successful"
-
-  # Registration failed
-  - role: "Both"
-    state: "Registering"
-    event:
-      type: "RegistrationFailed"
-    next_state: "Idle"
-    actions:
-      - type: "CleanupDialog"
-    publish:
-      - "RegistrationFailed"
-    description: "Registration failed"
-
-  # Unregister request
-  - role: "Both"
-    state: "Registered"
-    event:
-      type: "UnregisterRequest"
-    next_state: "Unregistering"
-    actions:
-      - type: "SendREGISTER"
-    publish:
-      - "UnregistrationStarted"
-    description: "Start unregistration"
-
-  # Unregistration complete
-  - role: "Both"
-    state: "Unregistering"
-    event:
-      type: "Dialog200OK"
-    next_state: "Idle"
-    actions:
-      - type: "CleanupDialog"
-    conditions:
-      is_registered: false
-    publish:
-      - "UnregistrationComplete"
-    description: "Unregistration complete"
-
-  # ==========================================
-  # Subscription/NOTIFY Transitions
-  # ==========================================
-
-  # Start subscription from Idle
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "StartSubscription"
-    next_state: "Subscribing"
-    actions:
-      - type: "CreateDialog"
-      - type: "SendSUBSCRIBE"
-    publish:
-      - "SubscriptionStarted"
-    description: "Start subscription"
-
-  # Subscription accepted
-  - role: "Both"
-    state: "Subscribing"
-    event:
-      type: "SubscriptionAccepted"
-    next_state: "Subscribed"
-    publish:
-      - "SubscriptionActive"
-    description: "Subscription accepted"
-
-  # Receive NOTIFY in subscribed state
-  - role: "Both"
-    state: "Subscribed"
-    event:
-      type: "ReceiveNOTIFY"
-    next_state: "Subscribed"
-    actions:
-      - type: "ProcessNOTIFY"
-      - type: "SendSIPResponse"
-        code: 200
-        reason: "OK"
-    publish:
-      - "NotifyReceived"
-    description: "Process NOTIFY message"
-
-  # Subscription failed
-  - role: "Both"
-    state: "Subscribing"
-    event:
-      type: "SubscriptionFailed"
-    next_state: "Idle"
-    actions:
-      - type: "CleanupDialog"
-    publish:
-      - "SubscriptionFailed"
-    description: "Subscription failed"
-
-  # Unsubscribe
-  - role: "Both"
-    state: "Subscribed"
-    event:
-      type: "UnsubscribeRequest"
-    next_state: "Idle"
-    actions:
-      - type: "SendSUBSCRIBE"
-      - type: "CleanupDialog"
-    publish:
-      - "UnsubscribeComplete"
-    description: "Unsubscribe"
-
-  # ==========================================
-  # MESSAGE Handling Transitions
-  # ==========================================
-
-  # Send MESSAGE from Idle
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "SendMessage"
-    next_state: "Messaging"
-    actions:
-      - type: "CreateDialog"
-      - type: "SendMESSAGE"
-    publish:
-      - "MessageSent"
-    description: "Send SIP MESSAGE"
-
-  # MESSAGE sent successfully
-  - role: "Both"
-    state: "Messaging"
-    event:
-      type: "MessageDelivered"
-    next_state: "Idle"
-    actions:
-      - type: "CleanupDialog"
-    publish:
-      - "MessageDelivered"
-    description: "MESSAGE delivered"
-
-  # MESSAGE sending failed
-  - role: "Both"
-    state: "Messaging"
-    event:
-      type: "MessageFailed"
-    next_state: "Idle"
-    actions:
-      - type: "CleanupDialog"
-    publish:
-      - "MessageDeliveryFailed"
-    description: "MESSAGE delivery failed"
-
-  # Receive MESSAGE in Idle
-  - role: "Both"
-    state: "Idle"
-    event:
-      type: "ReceiveMESSAGE"
-    next_state: "Idle"
-    actions:
-      - type: "ProcessMESSAGE"
-      - type: "SendSIPResponse"
-        code: 200
-        reason: "OK"
-    publish:
-      - "MessageReceived"
-    description: "Receive SIP MESSAGE"
-
   # ========================================
   # Registration Flow (UAC)
   # ========================================
@@ -1573,8 +1463,6 @@ transitions:
     event:
       type: "Registration200OK"
     next_state: "Registered"
-    conditions:
-      IsRegistered: true
     publish:
       - "RegistrationSuccess"
     description: "Registration completed successfully"
@@ -1626,41 +1514,15 @@ transitions:
       - type: "SendRequestWithAuth"
     description: "Out-of-dialog request auth retry (SUBSCRIBE/MESSAGE/OPTIONS)"
 
-  # Authentication successful
-  - role: "UAC"
-    state: "Authenticating"
-    event:
-      type: "Registration200OK"
-    next_state: "Registered"
-    conditions:
-      IsRegistered: true
-    publish:
-      - "RegistrationSuccess"
-    description: "Registration with authentication successful"
-
   # Registration failed (403, 404, etc.)
   - role: "UAC"
     state: "Registering"
     event:
       type: "RegistrationFailed"
     next_state: "Idle"
-    conditions:
-      IsRegistered: false
     publish:
       - "RegistrationFailed"
     description: "Registration failed"
-
-  # Authentication failed
-  - role: "UAC"
-    state: "Authenticating"
-    event:
-      type: "RegistrationFailed"
-    next_state: "Idle"
-    conditions:
-      IsRegistered: false
-    publish:
-      - "RegistrationFailed"
-    description: "Authentication failed"
 
   # Refresh registration (from Registered state)
   - role: "UAC"
@@ -1688,8 +1550,6 @@ transitions:
     event:
       type: "Unregistration200OK"
     next_state: "Idle"
-    conditions:
-      IsRegistered: false
     publish:
       - "UnregistrationSuccess"
     description: "Unregistration completed"
@@ -1700,8 +1560,6 @@ transitions:
     event:
       type: "UnregistrationFailed"
     next_state: "Idle"
-    conditions:
-      IsRegistered: false
     publish:
       - "UnregistrationFailed"
     description: "Unregistration failed but cleared local state"
@@ -1718,8 +1576,10 @@ transitions:
   # only request-emitting.
   #
   # In-dialog requests (BYE, REFER, NOTIFY, INFO, UPDATE, re-INVITE) fire
-  # from `Active`. Out-of-dialog requests (INVITE, REGISTER, SUBSCRIBE,
-  # MESSAGE, OPTIONS) fire from `Idle`. CANCEL fires from `Initiating`.
+  # from `Active`. INVITE and REGISTER are the state-machine-backed
+  # out-of-dialog sends. MESSAGE, OPTIONS, and SUBSCRIBE are direct-wired
+  # through dialog-core and documented in the wiring manifest. CANCEL fires
+  # from `Initiating`.
   # ─────────────────────────────────────────────────────────────────────
 
   - role: "UAC"
@@ -1839,38 +1699,6 @@ transitions:
     actions:
       - type: "SendUPDATEWithOptions"
     description: "Builder-staged UPDATE dispatch (UAS)"
-
-  - role: "UAC"
-    state: "Idle"
-    event:
-      type: "SendOutboundMessage"
-    actions:
-      - type: "SendMESSAGEWithOptions"
-    description: "Builder-staged MESSAGE dispatch (OOB)"
-
-  - role: "UAC"
-    state: "Idle"
-    event:
-      type: "SendOutboundOptions"
-    actions:
-      - type: "SendOPTIONSWithOptions"
-    description: "Builder-staged OPTIONS dispatch (OOB)"
-
-  - role: "UAC"
-    state: "Idle"
-    event:
-      type: "SendOutboundSubscribe"
-    actions:
-      - type: "SendSUBSCRIBEWithOptions"
-    description: "Builder-staged SUBSCRIBE dispatch"
-
-  - role: "UAC"
-    state: "Active"
-    event:
-      type: "SendOutboundSubscribe"
-    actions:
-      - type: "SendSUBSCRIBEWithOptions"
-    description: "Builder-staged SUBSCRIBE refresh dispatch (in-dialog)"
 
   - role: "UAC"
     state: "Idle"

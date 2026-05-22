@@ -179,6 +179,7 @@ impl RoutableEvent for RvoipCrossCrateEvent {
                 DialogToSessionEvent::CallStateChanged { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallProgress { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallEstablished { session_id, .. } => Some(session_id),
+                DialogToSessionEvent::ByeReceived { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallTerminated { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallFailed { session_id, .. } => Some(session_id),
                 DialogToSessionEvent::CallCancelled { session_id, .. } => Some(session_id),
@@ -642,6 +643,10 @@ pub enum DialogToSessionEvent {
         session_id: String,
         reason: TerminationReason,
     },
+
+    /// Inbound BYE received. The dialog layer has already sent the SIP 200 OK;
+    /// session-core uses this method-specific event to run BYE cleanup.
+    ByeReceived { session_id: String },
 
     /// Final failure response received for an outgoing request
     /// (3xx redirect, 4xx client error, 5xx server error, 6xx global failure).

@@ -433,9 +433,16 @@ impl DialogEventHub {
                                 response.to_string().into_bytes(),
                             ))
                         });
+                    let response_method = response.cseq().map(|cseq| cseq.method.clone());
+                    let is_invite_response =
+                        matches!(response_method, Some(rvoip_sip_core::Method::Invite));
+                    let is_reinvite_or_update_response = matches!(
+                        response_method,
+                        Some(rvoip_sip_core::Method::Invite | rvoip_sip_core::Method::Update)
+                    );
                     // Handle specific response codes
                     match response.status_code() {
-                        200 => {
+                        200 if is_invite_response => {
                             // 200 OK - call established
                             let sdp_answer = if !response.body().is_empty() {
                                 String::from_utf8(response.body().to_vec()).ok()
@@ -451,7 +458,7 @@ impl DialogEventHub {
                                 },
                             ))
                         }
-                        100..=199 => {
+                        100..=199 if is_invite_response => {
                             // Preserve the actual provisional response. Session-core
                             // decides how to map it onto call state while apps can
                             // observe the response code, reason, and early-media SDP.
@@ -488,7 +495,7 @@ impl DialogEventHub {
                             // run.
                             None
                         }
-                        491 => {
+                        491 if is_reinvite_or_update_response => {
                             // RFC 3261 §14.1 — 491 Request Pending on a re-INVITE
                             // or UPDATE. Session layer should wait a random
                             // backoff and retry. 491 on the initial INVITE is
@@ -498,7 +505,7 @@ impl DialogEventHub {
                                 DialogToSessionEvent::ReinviteGlare { session_id },
                             ))
                         }
-                        422 => {
+                        422 if is_invite_response => {
                             // RFC 4028 §6 — Session Interval Too Small. The UAS's
                             // Min-SE: header carries the required floor. Pass
                             // that value up so session-core can bump
@@ -563,7 +570,7 @@ impl DialogEventHub {
                                 ))
                             }
                         }
-                        code if (300..400).contains(&code) => {
+                        code if is_invite_response && (300..400).contains(&code) => {
                             // RFC 3261 §8.1.3.4 / §21.3 — redirect. Extract Contact
                             // URIs with q-values so the UAC can retry. Any 3xx
                             // response carries one or more Contact: headers per
@@ -649,7 +656,7 @@ impl DialogEventHub {
                                 ))
                             }
                         }
-                        code if (400..700).contains(&code) => {
+                        code if is_invite_response && (400..700).contains(&code) => {
                             // RFC 3261 §8.1.3 — any other final 3xx/4xx/5xx/6xx
                             // response ends the UAC's INVITE transaction. Propagate
                             // to the session layer so it can emit CallFailed and
@@ -663,7 +670,7 @@ impl DialogEventHub {
                                 },
                             ))
                         }
-                        _ => None, // Other 1xx provisional responses stay unmapped
+                        _ => None, // Non-INVITE responses stay method-specific/no-op here.
                     }
                 } else {
                     warn!("No session ID found for dialog {:?}", dialog_id);
@@ -778,6 +785,24 @@ impl DialogEventHub {
                 } else {
                     warn!(
                         "No session ID found for dialog {:?} in CallTerminating",
+                        dialog_id
+                    );
+                    None
+                }
+            }
+
+            SessionCoordinationEvent::ByeReceived { dialog_id } => {
+                if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    info!(
+                        "Converting inbound BYE to cross-crate event for session {}",
+                        session_id
+                    );
+                    Some(RvoipCrossCrateEvent::DialogToSession(
+                        DialogToSessionEvent::ByeReceived { session_id },
+                    ))
+                } else {
+                    warn!(
+                        "No session ID found for dialog {:?} in ByeReceived",
                         dialog_id
                     );
                     None
