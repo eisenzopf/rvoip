@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="ISO-8859-1" ?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+
+<!--
+  rvoip vs Asterisk performance comparison — UAC scenario.
+
+  Drives one INVITE → wait 200 OK → ACK → short pause → BYE → wait 200 OK
+  cycle. Mirrors sipp's built-in `-sn uac` but with timings tuned for
+  perf benchmarking:
+
+  - `pause distribution="fixed" value="100"` — 100 ms held call (vs
+    sipp's built-in 1 s) to keep dialog count bounded at high CPS.
+  - `retrans="500"` on INVITE — 500 ms before first retransmit so a
+    momentary stall on the UAS doesn't get amplified into a
+    retransmit storm in the test output.
+  - `rtd="invite_to_200ok"` on the 200 OK recv — sipp records the
+    INVITE → 200 OK PDD into the stat CSV automatically.
+
+  Run:
+    sipp -sf uac_perf.xml -r <CPS> -m <COUNT> -p <local-port> \
+         -trace_stat -stf <csv-prefix> -nostdin <target-ip>:<port>
+-->
+
+<scenario name="rvoip_perf_uac">
+  <!-- ============================================================
+       INVITE
+       ============================================================ -->
+  <send retrans="500">
+    <![CDATA[
+
+      INVITE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>
+      Call-ID: [call_id]
+      CSeq: 1 INVITE
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: rvoip-perf
+      Content-Type: application/sdp
+      Content-Length: [len]
+
+      v=0
+      o=user1 53655765 2353687637 IN IP[local_ip_type] [local_ip]
+      s=-
+      c=IN IP[local_ip_type] [local_ip]
+      t=0 0
+      m=audio [media_port] RTP/AVP 0
+      a=rtpmap:0 PCMU/8000
+
+    ]]>
+  </send>
+
+  <!-- Trying / Ringing / Session Progress are optional; record but
+       don't gate. -->
+  <recv response="100" optional="true"/>
+  <recv response="180" optional="true"/>
+  <recv response="183" optional="true"/>
+
+  <!-- The 200 OK. `rtd` stamps the INVITE→200OK round-trip into the
+       stat CSV under the `ResponseTime1` column. -->
+  <recv response="200" rtd="true"/>
+
+  <!-- ACK -->
+  <send>
+    <![CDATA[
+
+      ACK sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 1 ACK
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: rvoip-perf
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <!-- Hold the call briefly — 100 ms keeps dialog count under control
+       at high CPS, still enough that BYE doesn't race the 200 OK ACK
+       on the UAS. -->
+  <pause distribution="fixed" value="100"/>
+
+  <!-- BYE -->
+  <send retrans="500">
+    <![CDATA[
+
+      BYE sip:[service]@[remote_ip]:[remote_port] SIP/2.0
+      Via: SIP/2.0/[transport] [local_ip]:[local_port];branch=[branch]
+      From: sipp <sip:sipp@[local_ip]:[local_port]>;tag=[pid]SIPpTag00[call_number]
+      To: sut <sip:[service]@[remote_ip]:[remote_port]>[peer_tag_param]
+      Call-ID: [call_id]
+      CSeq: 2 BYE
+      Contact: sip:sipp@[local_ip]:[local_port]
+      Max-Forwards: 70
+      Subject: rvoip-perf
+      Content-Length: 0
+
+    ]]>
+  </send>
+
+  <recv response="200" crlf="true"/>
+
+  <!-- Per-call response time histogram -->
+  <ResponseTimeRepartition value="10, 25, 50, 75, 100, 150, 200, 300, 500, 1000, 2000"/>
+  <CallLengthRepartition value="50, 100, 250, 500, 1000, 5000"/>
+</scenario>

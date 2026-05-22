@@ -5,6 +5,7 @@ pub mod registration_adapter;
 pub mod session_api_event;
 pub mod session_event_handler;
 pub mod srtp_negotiator;
+pub mod dtls_negotiator;
 
 // Re-export adapters
 pub use dialog_adapter::{strip_record_route_below_self, strip_via_below_top, DialogAdapter};

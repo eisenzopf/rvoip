@@ -1815,8 +1815,14 @@ pub(crate) async fn execute_action(
             }
         }
         Action::CleanupMedia => {
-            debug!(
-                "Cleaning up media for session {} (media_session_id={:?})",
+            // NEXT_STEPS B.1 diag — promoted from debug! to info! so the
+            // perf_listener log shows whether this action fires at all.
+            // If the listener prints `cleaned_total=0` but this line is
+            // present in the log we know the action ran but
+            // cleanup_session bailed; if both are absent the BYE event
+            // never matched the {Active, DialogBYE} row.
+            info!(
+                "Action::CleanupMedia firing for session {} (media_session_id={:?})",
                 session.session_id, session.media_session_id
             );
             // Always call cleanup_session — the adapter is idempotent and
@@ -2167,6 +2173,18 @@ pub(crate) async fn execute_action(
         Action::SendReINVITEWithOptions => {
             if let Some(opts) = session.pending_reinvite_options.as_ref() {
                 let snapshot = (**opts).clone();
+                // RFC 3261 §14.1 — track the in-flight builder-API
+                // re-INVITE so `HasPendingReinvite` fires the UAS-side
+                // glare path if the peer's re-INVITE arrives before our
+                // final response. Hold/Resume set this in their own
+                // action handlers; the builder API needs the same
+                // treatment. Cleared on terminal response by the
+                // Active+Dialog{200OK,4xx,5xx,6xx,Timeout}+HasPendingReinvite
+                // YAML rows.
+                let sdp_snapshot = snapshot.sdp.clone().unwrap_or_default();
+                session.pending_reinvite = Some(
+                    crate::session_store::state::PendingReinvite::SdpUpdate(sdp_snapshot),
+                );
                 dialog_adapter
                     .send_reinvite_with_options(&session.session_id, snapshot)
                     .await?;

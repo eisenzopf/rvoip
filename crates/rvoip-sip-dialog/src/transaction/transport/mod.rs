@@ -74,7 +74,16 @@ impl Default for TransportManagerConfig {
             tls_role: TlsRole::ClientAndServer,
             bind_addresses: vec![],
             tls_bind_addresses: vec![],
-            default_channel_capacity: 100,
+            // NEXT_STEPS B.2 — single combined inbound-event channel
+            // for ALL transports. At ≥100 CPS of INVITE+ACK+BYE we
+            // see >300 msg/s aggregate; a 100-slot buffer back-pressures
+            // the UDP recv task within seconds and stalls the whole
+            // stack. Widen so the consumer (transaction manager) has
+            // breathing room across momentary cleanup-path latency
+            // bursts. The actual flow-control is at the per-transaction
+            // level downstream; this just keeps the funnel from being
+            // the bottleneck.
+            default_channel_capacity: 10_000,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,

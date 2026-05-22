@@ -5,6 +5,30 @@
 > describes the three concrete workstreams that fell out of the first
 > three-way comparison attempt.
 
+## Status snapshot (2026-05-21)
+
+| Area | Status | Test count delta |
+|---|---|---|
+| **A** FreeSWITCH benchmarkable | Blocked — needs edits in `~/Developer/freeswitch/` (out-of-repo) | 0 |
+| **B.1** flamegraph diagnose | Manual step — requires running sipp + samply against a built test binary | 0 |
+| **B.2** fix | Gated on B.1 | 0 |
+| **B.3** validate at 100/200/500 CPS | Gated on B.2 | 0 |
+| **B.4** PROFILING.md Scenario 9 | Gated on B.2 | 0 |
+| **C1.1** Port-zero rejection (RFC 3264 §6 / RFC 4568 §7.3) | Done | +2 |
+| **C1.2** SDP version-increment audit + hold/resume test | Done — production paths already wired; test added | +1 |
+| **C1.3** UAS-side glare / 491 Request Pending | Done — executor pre-table short-circuit + YAML cleanup rows | +2 |
+| **C2** Opus codec wiring (SDP side) | Done — `Config::offered_codecs` + builder refactor; media-flow encode/decode still gated on media-core `opus` feature | +2 |
+| **C3** DTLS-SRTP negotiator | SDP-side scaffold done (`adapters/dtls_negotiator.rs`, `SetupRole`, `detect_dtls_offer`). Handshake driver + SRTP keying (C3.2 / C3.3) still open | +8 |
+
+Total lib-test delta: **101 → 116** (15 new tests). All passing.
+
+### What remains for A + B
+
+Areas A and B need a live environment — a running FreeSWITCH/Asterisk
+container, sipp installed, and a samply flamegraph capture against the
+`perf_sipp_parity` binary. The deliverables below are the executable
+steps; running them is an operator task, not an in-tree code change.
+
 ## Context
 
 Running `perf_sipp_parity` and direct sipp probes against an Asterisk

@@ -2791,12 +2791,17 @@ impl SessionCrossCrateEventHandler {
                 self.handle_call_progress_parts(sid, 180, "Ringing".to_string(), None, None)
                     .await?;
             } else if event_str.contains("Terminated") {
+                // NEXT_STEPS B.2 — canonical termination event is
+                // DialogTerminated. The previous dispatch of DialogBYE
+                // here matched dead YAML rows; the state machine now
+                // owns the resource-cleanup transitions for every
+                // active-call state on DialogTerminated.
                 if let Err(e) = self
                     .state_machine
-                    .process_event(&sid, EventType::DialogBYE)
+                    .process_event(&sid, EventType::DialogTerminated)
                     .await
                 {
-                    error!("Failed to process DialogBYE: {}", e);
+                    error!("Failed to process DialogTerminated: {}", e);
                 }
             }
         }

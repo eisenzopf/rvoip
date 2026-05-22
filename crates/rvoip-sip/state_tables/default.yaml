@@ -387,32 +387,48 @@ transitions:
       - "CallFailed"
     description: "UAS pending hangup failed because ACK never arrived"
 
-  # UAS receives BYE before ACK (peer changed their mind)
-  - role: "UAS"
+  # NEXT_STEPS B.2 — remote BYE handling.
+  #
+  # dialog-core handles the inbound BYE wire-side: it sends the 200 OK
+  # response itself (`bye_handler.rs::handle_bye` → transaction layer
+  # emits the final response, then the transaction goes Completed →
+  # Terminated). It then publishes `SessionCoordinationEvent::Call-
+  # Terminating`, which the `event_hub` bridges to the cross-crate
+  # `DialogToSessionEvent::CallTerminated`. Session-core's
+  # `handle_call_terminated_parts` dispatches
+  # `EventType::DialogTerminated` into the state machine.
+  #
+  # So the state machine MUST drive media/dialog cleanup from the
+  # `DialogTerminated` event in every active-call state, NOT from a
+  # `DialogBYE` event (which is never actually dispatched on the
+  # inbound-BYE path — the rows that referenced it were dead code).
+  # And the actions MUST NOT include `SendSIPResponse(200)` because
+  # dialog-core has already sent it; doing it twice corrupts the
+  # transaction.
+
+  - role: "Both"
     state: "Answering"
     event:
-      type: "DialogBYE"
+      type: "DialogTerminated"
     next_state: "Terminated"
     actions:
-      - type: "SendSIPResponse"
-        code: 200
-        reason: "OK"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-    description: "Remote party sent BYE before ACK"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE before ACK — cleanup and finalize"
 
-  - role: "UAS"
+  - role: "Both"
     state: "AnsweringHangupPending"
     event:
-      type: "DialogBYE"
+      type: "DialogTerminated"
     next_state: "Terminated"
     actions:
-      - type: "SendSIPResponse"
-        code: 200
-        reason: "OK"
       - type: "CleanupDialog"
       - type: "CleanupMedia"
-    description: "Remote party sent BYE while local hangup was waiting for ACK"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE while local hangup waited for ACK — cleanup and finalize"
 
   # UAS rejects call — status/reason come from the RejectCall event
   - role: "UAS"
@@ -467,20 +483,99 @@ transitions:
       - type: "CleanupMedia"
     description: "Hangup active call"
 
-  # Both sides receive BYE
+  # Remote BYE arrives while we're in any active-call state. dialog-
+  # core has already sent 200 OK on the wire; the state machine just
+  # finalises resource cleanup. See the long comment above the
+  # Answering+DialogTerminated row for the full path explanation.
+
   - role: "Both"
     state: "Active"
     event:
-      type: "DialogBYE"
-    next_state: "Terminating"
+      type: "DialogTerminated"
+    next_state: "Terminated"
     actions:
-      - type: "SendSIPResponse"
-        code: 200
-        reason: "OK"
+      - type: "CleanupDialog"
       - type: "CleanupMedia"
-    description: "Remote hangup"
+    publish:
+      - "CallTerminated"
+    description: "Remote hangup (BYE) from Active — cleanup and finalize"
 
-  # Cleanup after terminating
+  - role: "Both"
+    state: "OnHold"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE while OnHold — cleanup and finalize"
+
+  - role: "Both"
+    state: "HoldPending"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE during our pending hold — cleanup and finalize"
+
+  - role: "Both"
+    state: "Resuming"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE during our resume — cleanup and finalize"
+
+  - role: "Both"
+    state: "Muted"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE while Muted — cleanup and finalize"
+
+  - role: "Both"
+    state: "Bridged"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE while Bridged — cleanup and finalize"
+
+  - role: "Both"
+    state: "EarlyMedia"
+    event:
+      type: "DialogTerminated"
+    next_state: "Terminated"
+    actions:
+      - type: "CleanupDialog"
+      - type: "CleanupMedia"
+    publish:
+      - "CallTerminated"
+    description: "Remote BYE during early media — cleanup and finalize"
+
+  # Cleanup after our own local hangup ran. This is the local-initiated
+  # path: HangupCall took us Active → Terminating (sending BYE +
+  # CleanupMedia along the way); peer's 200 OK then drives the dialog
+  # transaction Completed, which surfaces as DialogTerminated here.
   - role: "Both"
     state: "Terminating"
     event:
@@ -491,7 +586,7 @@ transitions:
       - type: "CleanupMedia"
     publish:
       - "CallTerminated"
-    description: "Call cleanup"
+    description: "Local hangup confirmed (peer's 200 OK arrived)"
 
   # RFC 3261 §14.1 — Hold is a re-INVITE. Session parameters MUST NOT
   # change until a 2xx response arrives. We enter an intermediate
@@ -793,26 +888,15 @@ transitions:
   # --------------------------------------------------------------------
   # UAS-side re-INVITE / UPDATE (RFC 3261 §14, RFC 3311, RFC 4028 §9)
   # --------------------------------------------------------------------
-  # Ordering note: the glare (491) transitions use a HasPendingReinvite
-  # guard and MUST appear before the unguarded 200 OK transitions for
-  # the same (state, event) pair — the state table is scanned top-down
-  # and the first matching transition wins.
-
-  # RFC 3261 §14.1 — UAS-side glare. Peer sent us a re-INVITE while our
-  # own re-INVITE is in flight. Reply 491 Request Pending so the peer
-  # backs off; we keep the state unchanged and wait for our response.
-  - role: "Both"
-    state: "Active"
-    event:
-      type: "ReinviteReceived"
-    guards:
-      - "HasPendingReinvite"
-    next_state: "Active"
-    actions:
-      - type: "SendSIPResponse"
-        code: 491
-        reason: "Request Pending"
-    description: "UAS-side glare: 491 Request Pending while our re-INVITE is in flight (Active)"
+  # UAS-side glare while state is `Active` (builder-API re-INVITE in
+  # flight) is handled in `state_machine/executor.rs::process_event`
+  # as a pre-table short-circuit guarded on `pending_reinvite.is_some()`.
+  # That mechanism replaced an `Active + ReinviteReceived +
+  # HasPendingReinvite → 491` YAML row that was dead under the
+  # HashMap-backed state table (last-write-wins for the
+  # `{role, state, event}` key collided with the unguarded 200 OK row
+  # below). The state-based glare rules for `HoldPending` / `Resuming`
+  # below are independent and stay in YAML.
 
   # Being in Resuming implies we have a re-INVITE in flight (the resume
   # one). Any inbound re-INVITE is by definition glare — no guard needed.
@@ -878,6 +962,69 @@ transitions:
         code: 200
         reason: "OK"
     description: "UAS answers re-INVITE while on hold (peer-initiated resume)"
+
+  # RFC 3261 §14.1 — terminal response on a builder-API re-INVITE we
+  # sent while staying in `Active`. `SendReINVITEWithOptions` set
+  # `pending_reinvite` to enable the UAS-side glare guard above; here
+  # we clear it once the peer responds so a *legitimate* later inbound
+  # re-INVITE doesn't get a stale 491. These rows are gated on
+  # `HasPendingReinvite` so they only match builder-API re-INVITE
+  # responses, leaving initial-INVITE 200/4xx/5xx/6xx and other Active
+  # transitions untouched.
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "Dialog200OK"
+    next_state: "Active"
+    guards:
+      - "HasPendingReinvite"
+    actions:
+      - type: "ClearPendingReinvite"
+    description: "Clear in-flight builder-API re-INVITE tracker on 2xx (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "Dialog4xxFailure"
+    next_state: "Active"
+    guards:
+      - "HasPendingReinvite"
+    actions:
+      - type: "ClearPendingReinvite"
+    description: "Clear in-flight builder-API re-INVITE tracker on 4xx (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "Dialog5xxFailure"
+    next_state: "Active"
+    guards:
+      - "HasPendingReinvite"
+    actions:
+      - type: "ClearPendingReinvite"
+    description: "Clear in-flight builder-API re-INVITE tracker on 5xx (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "Dialog6xxFailure"
+    next_state: "Active"
+    guards:
+      - "HasPendingReinvite"
+    actions:
+      - type: "ClearPendingReinvite"
+    description: "Clear in-flight builder-API re-INVITE tracker on 6xx (RFC 3261 §14.1)"
+
+  - role: "Both"
+    state: "Active"
+    event:
+      type: "DialogTimeout"
+    next_state: "Active"
+    guards:
+      - "HasPendingReinvite"
+    actions:
+      - type: "ClearPendingReinvite"
+    description: "Clear in-flight builder-API re-INVITE tracker on Timer B (RFC 3261 §14.1)"
 
   # RFC 3311 / RFC 4028 §9 — UPDATE for session-timer refresh carries no
   # SDP, so we skip NegotiateSDPAsUAS. If a future UPDATE body is

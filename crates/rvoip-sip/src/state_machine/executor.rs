@@ -400,6 +400,42 @@ impl StateMachine {
             }
             // StartAttendedTransfer event removed
             EventType::ReinviteReceived { sdp } => {
+                // RFC 3261 §14.1 UAS-side glare — if we have an
+                // outbound builder-API re-INVITE in flight (state stays
+                // `Active`, so the state-based detection covering
+                // HoldPending/Resuming does not fire), respond 491
+                // Request Pending and short-circuit the table lookup.
+                // The peer is expected to back off and retry. The state
+                // machine's HoldPending/Resuming rows handle the
+                // hold/resume flavours via state alone.
+                if session.call_state == crate::types::CallState::Active
+                    && session.pending_reinvite.is_some()
+                {
+                    info!(
+                        "RFC 3261 §14.1 UAS-side glare: peer re-INVITE arrived while \
+                         our builder-API re-INVITE is in flight on session {} — \
+                         responding 491 Request Pending",
+                        session.session_id
+                    );
+                    if let Err(e) = self
+                        .dialog_adapter
+                        .send_response(&session.session_id, 491, None)
+                        .await
+                    {
+                        tracing::warn!(
+                            "Failed to send 491 Request Pending for session {}: {}",
+                            session.session_id,
+                            e
+                        );
+                    }
+                    return Ok(ProcessEventResult {
+                        old_state,
+                        next_state: None,
+                        transition: None,
+                        actions_executed: vec![],
+                        events_published: vec![],
+                    });
+                }
                 // Stash the peer's new SDP offer so NegotiateSDPAsUAS
                 // picks it up when it fires later in this transition.
                 // Force renegotiation — the peer's offer supersedes any

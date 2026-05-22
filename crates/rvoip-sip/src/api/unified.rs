@@ -521,6 +521,23 @@ pub struct Config {
     /// Default: `true`.
     pub strict_codec_matching: bool,
 
+    /// NEXT_STEPS C2 — RTP payload types this UA advertises in
+    /// outgoing offers and accepts in answers. Default `[0, 8, 101]`
+    /// (PCMU + PCMA + telephone-event) preserves the pre-C2 wire
+    /// shape. Add `111` to advertise Opus (`opus/48000/2`); `9` for
+    /// G.722; `18` for G.729. CN (PT 13) is folded in automatically
+    /// when `comfort_noise_enabled = true`.
+    ///
+    /// Note: the rvoip-sip SDP builder will advertise any PT listed
+    /// here, but actually encoding/decoding the codec requires
+    /// media-core to be built with the matching feature flag
+    /// (e.g. `--features opus`). Advertising a codec that media-core
+    /// can't process surfaces as a negotiated session that drops
+    /// audio rather than a build-time error.
+    ///
+    /// Default: `vec![0, 8, 101]`.
+    pub offered_codecs: Vec<u8>,
+
     /// SIP_API_DESIGN_2 §7.4 — application-supplied headers stamped
     /// on every outbound message the state machine emits
     /// **automatically** (session-timer auto-BYE, dialog-terminated-
@@ -557,8 +574,13 @@ impl Config {
         Self {
             local_ip: ip,
             sip_port: port,
-            media_port_start: 16000,
-            media_port_end: 17000,
+            // NEXT_STEPS B.2 — widened from 16000–17000 (1 000 ports
+            // → ~500 concurrent calls) to the rtp-core default range
+            // so a single load test or production deployment can't
+            // exhaust the pool. Apps that need a tighter range still
+            // override these via Config.
+            media_port_start: 16384,
+            media_port_end: 32767,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -596,6 +618,7 @@ impl Config {
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
+            offered_codecs: vec![0, 8, 101],
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -613,8 +636,13 @@ impl Config {
         Self {
             local_ip: ip,
             sip_port: port,
-            media_port_start: 16000,
-            media_port_end: 17000,
+            // NEXT_STEPS B.2 — widened from 16000–17000 (1 000 ports
+            // → ~500 concurrent calls) to the rtp-core default range
+            // so a single load test or production deployment can't
+            // exhaust the pool. Apps that need a tighter range still
+            // override these via Config.
+            media_port_start: 16384,
+            media_port_end: 32767,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -652,6 +680,7 @@ impl Config {
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
+            offered_codecs: vec![0, 8, 101],
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -1499,6 +1528,8 @@ impl UnifiedCoordinator {
         media_adapter_inner.set_comfort_noise(config.comfort_noise_enabled);
         // Sprint 3.5 — propagate strict codec matching policy.
         media_adapter_inner.set_strict_codec_matching(config.strict_codec_matching);
+        // NEXT_STEPS C2 — propagate the configured offered codec list.
+        media_adapter_inner.set_offered_codecs(config.offered_codecs.clone());
         let media_adapter = Arc::new(media_adapter_inner);
 
         // Sprint 3 A6 — resolve the public RTP address. Static

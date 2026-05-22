@@ -25,6 +25,34 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// NEXT_STEPS B.1 diag — process-global cleanup counter so external
+/// observers (the `perf_listener` example, integration tests) can read
+/// how many sessions have been fully cleaned up without subscribing to
+/// the full tracing log. This is wire-light: an `AtomicU64` per
+/// process, incremented once per `cleanup_session` exit. The pair to
+/// `perf_listener`'s `accepted_total` lets us see at a glance whether
+/// the cleanup path is keeping pace with the accept path.
+///
+/// The instrumentation is unconditional (no env-gate) because the cost
+/// is one atomic add per call hangup. Strip the public getter after
+/// the 100-CPS knee is resolved if it turns out to be only diagnostic.
+pub mod cleanup_session_diag {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static CLEANED: AtomicU64 = AtomicU64::new(0);
+
+    /// Increment the cleanup counter. Called from
+    /// [`super::MediaAdapter::cleanup_session`].
+    pub fn record_cleanup() {
+        CLEANED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read the cumulative count of completed cleanups.
+    pub fn cleaned_total() -> u64 {
+        CLEANED.load(Ordering::Relaxed)
+    }
+}
+
 fn sdp_origin_session_id(raw_id: &str) -> String {
     let candidate = raw_id
         .strip_prefix("media-session-")
@@ -130,6 +158,73 @@ fn audio_transport(session: &SdpSession) -> Option<&str> {
         .iter()
         .find(|m| m.media == "audio")
         .map(|m| m.protocol.as_str())
+}
+
+/// NEXT_STEPS C2 — lookup helper from RTP payload type to the
+/// `a=rtpmap:` value (without the PT prefix). Returns `None` for
+/// payload types we don't know how to advertise; callers should
+/// skip emitting an rtpmap for those (legal per RFC 4566 for
+/// static PTs 0/8 etc., but a builder convention here is to emit
+/// rtpmap for every PT for explicitness).
+pub(crate) fn rtpmap_for_pt(pt: u8) -> Option<&'static str> {
+    match pt {
+        0 => Some("PCMU/8000"),
+        8 => Some("PCMA/8000"),
+        9 => Some("G722/8000"),
+        13 => Some("CN/8000"),
+        18 => Some("G729/8000"),
+        101 => Some("telephone-event/8000"),
+        111 => Some("opus/48000/2"),
+        _ => None,
+    }
+}
+
+/// NEXT_STEPS C2 — `a=fmtp:` value for payload types that require
+/// one. Returns `None` for codecs that work fine without an fmtp.
+pub(crate) fn fmtp_for_pt(pt: u8) -> Option<&'static str> {
+    match pt {
+        101 => Some("0-15"),
+        // Opus (PT 111) defaults are fine for VoIP without fmtp; a
+        // production deployment may want `useinbandfec=1; minptime=10`.
+        _ => None,
+    }
+}
+
+/// Build the SDP answer that declines an offered audio m-line per
+/// RFC 3264 §6 / RFC 4568 §7.3. Port=0 signals refusal; the proto is
+/// echoed from the offer so the peer can distinguish a policy
+/// rejection from a parse error. A single dummy `0` format is
+/// included because some peers (and some validators) reject m-lines
+/// with an empty `<fmt>` list, even though RFC 3264 allows it.
+pub(crate) fn build_port_zero_rejection_sdp(
+    origin_session_id: &str,
+    origin_version: u64,
+    local_ip: &str,
+    offered_transport: &str,
+) -> Result<String> {
+    let version_str = origin_version.to_string();
+    let session = SdpBuilder::new("Session")
+        .origin(
+            "-",
+            origin_session_id,
+            &version_str,
+            "IN",
+            "IP4",
+            local_ip,
+        )
+        .connection("IN", "IP4", local_ip)
+        .time("0", "0")
+        .media_audio(0, offered_transport)
+        .formats(&["0"])
+        .done()
+        .build()
+        .map_err(|e| {
+            SessionError::SDPNegotiationFailed(format!(
+                "SdpBuilder failed to build port-zero rejection answer: {}",
+                e
+            ))
+        })?;
+    Ok(session.to_string())
 }
 
 /// Audio format for recording
@@ -284,6 +379,16 @@ pub struct MediaAdapter {
     /// supported set (legacy pre-Sprint-3.5 behaviour). Set at
     /// coordinator boot from `Config::strict_codec_matching`.
     strict_codec_matching: bool,
+
+    /// NEXT_STEPS C2 — RTP payload types to advertise in outgoing
+    /// offers and to accept on inbound matching. Default
+    /// `[0, 8, 101]` (PCMU + PCMA + telephone-event) preserves the
+    /// pre-C2 wire shape. Add `111` to advertise Opus (`opus/48000/2`,
+    /// PT 111 by convention); add `9` for G.722; add `18` for G.729.
+    /// Comfort Noise (PT 13) is independently controlled by
+    /// `comfort_noise_enabled` for back-compat with existing callers,
+    /// and is inserted into the list automatically when enabled.
+    offered_codecs: Vec<u8>,
 }
 
 impl MediaAdapter {
@@ -320,6 +425,7 @@ impl MediaAdapter {
             public_rtp_addr: std::sync::RwLock::new(None),
             comfort_noise_enabled: false,
             strict_codec_matching: true,
+            offered_codecs: vec![0, 8, 101],
         }
     }
 
@@ -344,6 +450,41 @@ impl MediaAdapter {
     /// coordinator boot.
     pub fn set_strict_codec_matching(&mut self, strict: bool) {
         self.strict_codec_matching = strict;
+    }
+
+    /// NEXT_STEPS C2 — set the list of RTP payload types this UA
+    /// advertises in offers and accepts in answers. The list MUST
+    /// contain at least one audio codec (PCMU/PCMA/Opus/G.722/G.729);
+    /// DTMF (PT 101) is recommended for any voice-AI workload. The
+    /// adapter does not validate that media-core actually implements
+    /// every advertised codec — emitting `a=rtpmap:111 opus/48000/2`
+    /// without media-core's `opus` feature enabled produces an answer
+    /// that negotiates Opus but cannot encode it. Wired from
+    /// `Config::offered_codecs` at coordinator boot.
+    pub fn set_offered_codecs(&mut self, codecs: Vec<u8>) {
+        self.offered_codecs = codecs;
+    }
+
+    /// Compose the effective offer-format list: configured
+    /// `offered_codecs` with comfort-noise (PT 13) inserted in front
+    /// of DTMF (PT 101) when enabled, preserving the legacy ordering
+    /// the byte-fixture tests pin.
+    fn effective_offered_formats(&self) -> Vec<u8> {
+        if !self.comfort_noise_enabled {
+            return self.offered_codecs.clone();
+        }
+        let mut out = Vec::with_capacity(self.offered_codecs.len() + 1);
+        for pt in &self.offered_codecs {
+            if *pt == 101 {
+                out.push(13);
+            }
+            out.push(*pt);
+        }
+        if !out.contains(&13) {
+            // No DTMF in the list — append CN at the end.
+            out.push(13);
+        }
+        out
     }
 
     /// Set the public RTP address advertised in SDP. Called at
@@ -621,7 +762,12 @@ impl MediaAdapter {
         // `SDPNegotiationFailed` into a `488 Not Acceptable Here`
         // (decision D10).
         let offered_crypto = Self::extract_audio_crypto(&parsed_offer);
-        let (answer_attr, srtp_pair) = if !offered_crypto.is_empty() && self.offer_srtp {
+        let offered_transport = audio_transport(&parsed_offer)
+            .unwrap_or("RTP/AVP")
+            .to_string();
+        let (answer_attr, srtp_pair, reject_with_port_zero) = if !offered_crypto.is_empty()
+            && self.offer_srtp
+        {
             // Both sides want SRTP — negotiate.
             let answerer = SrtpNegotiator::new_answerer();
             let (chosen, pair) = answerer.process_offer(&offered_crypto)?;
@@ -638,28 +784,59 @@ impl MediaAdapter {
                     session_id.0, chosen.suite
                 ));
             }
-            (Some(chosen), true)
+            (Some(chosen), true, false)
         } else if offered_crypto.is_empty() && self.srtp_required {
             return Err(SessionError::SDPNegotiationFailed(
                 "srtp_required is set but the SDP offer carries no a=crypto: line".into(),
             ));
         } else if !offered_crypto.is_empty() && !self.offer_srtp {
-            // Peer offered SRTP but our policy is plain. Per RFC 4568
-            // §7.3 the right answer here is `m=audio 0 RTP/SAVP …`
-            // (port=0) signalling refusal. For now we keep the
-            // simpler "answer plaintext on the same port" behavior;
-            // expose the proper port=0 path when a real carrier
-            // demands it.
-            tracing::warn!(
+            // RFC 3264 §6 + RFC 4568 §7.3: peer offered SRTP but our
+            // policy is plaintext. Reject the m-line by setting port=0
+            // in the answer, preserving the offered proto so the peer
+            // can distinguish a rejection from a parse error.
+            tracing::info!(
                 "Session {} received SRTP offer but local policy is offer_srtp=false; \
-                 answering plaintext",
+                 rejecting m-line with port=0 per RFC 3264 §6",
                 session_id.0
             );
-            (None, false)
+            if diagnostics {
+                emit_srtp_diag(format!(
+                    "sdes_offer_rejected session={} reason=local_policy",
+                    session_id.0
+                ));
+            }
+            (None, false, true)
         } else {
-            (None, false)
+            (None, false, false)
         };
         let _ = srtp_pair; // suppress unused warning — value retained via DashMap insert
+
+        // Port-zero rejection short-circuit: build a minimal RFC 3264
+        // §6 declined m-line answer and return without setting up any
+        // media flow. The peer is responsible for either re-offering
+        // (with plaintext) or terminating the dialog.
+        if reject_with_port_zero {
+            let (origin_session_id, origin_version) = self.next_sdp_origin(session_id).await?;
+            let advertised_ip = self
+                .public_rtp_addr()
+                .map(|sa| sa.ip())
+                .unwrap_or(self.local_ip);
+            let sdp_answer = build_port_zero_rejection_sdp(
+                &origin_session_id,
+                origin_version,
+                &advertised_ip.to_string(),
+                offered_transport.as_str(),
+            )?;
+            let config = NegotiatedConfig {
+                local_addr: SocketAddr::new(advertised_ip, 0),
+                remote_addr: SocketAddr::new(remote_ip, remote_port),
+                codec: "PCMU".to_string(),
+                payload_type: 0,
+                local_direction: crate::types::MediaDirection::Inactive,
+                remote_direction: crate::types::MediaDirection::Inactive,
+            };
+            return Ok((sdp_answer, config));
+        }
 
         // Get our local port
         let local_port = self.get_local_port(session_id)?;
@@ -748,7 +925,7 @@ impl MediaAdapter {
 
         let formats = compute_answer_formats(
             &parsed_offer,
-            self.comfort_noise_enabled,
+            &self.effective_offered_formats(),
             self.strict_codec_matching,
             self.offer_srtp,
             self.srtp_required,
@@ -784,23 +961,17 @@ impl MediaAdapter {
         // Emit rtpmap/fmtp ONLY for the formats we kept. In the
         // permissive branch this is the full set; in the strict
         // branch the matcher's intersection has already filtered.
+        // NEXT_STEPS C2 — routed through `rtpmap_for_pt` so adding a
+        // new codec only requires extending the helper.
         for fmt in &formats {
-            match fmt.as_str() {
-                "0" => {
-                    media_builder = media_builder.rtpmap("0", "PCMU/8000");
-                }
-                "8" => {
-                    media_builder = media_builder.rtpmap("8", "PCMA/8000");
-                }
-                "13" => {
-                    media_builder = media_builder.rtpmap("13", "CN/8000");
-                }
-                "101" => {
-                    media_builder = media_builder
-                        .rtpmap("101", "telephone-event/8000")
-                        .fmtp("101", "0-15");
-                }
-                _ => {}
+            let Ok(pt) = fmt.parse::<u8>() else {
+                continue;
+            };
+            if let Some(rtpmap) = rtpmap_for_pt(pt) {
+                media_builder = media_builder.rtpmap(fmt.as_str(), rtpmap);
+            }
+            if let Some(fmtp) = fmtp_for_pt(pt) {
+                media_builder = media_builder.fmtp(fmt.as_str(), fmtp);
             }
         }
         if let Some(attr) = answer_attr {
@@ -1331,17 +1502,17 @@ impl MediaAdapter {
             ));
         }
 
-        // Build the m-section. Always offer PCMU (0) + PCMA (8) +
-        // telephone-event (101). Sprint 3 C1: append `13` + an
-        // `a=rtpmap:13 CN/8000` line when comfort noise is enabled.
+        // NEXT_STEPS C2 — iterate the configured `offered_codecs` and
+        // emit one rtpmap (+ fmtp where required) per PT, instead of
+        // hard-coding PCMU/PCMA/DTMF. Comfort Noise (PT 13) is folded
+        // in by `effective_offered_formats` so existing callers that
+        // only flip the `comfort_noise_enabled` switch keep working.
         // Crypto attrs follow rtpmap/fmtp so ordering matches what
         // carriers expect; sendrecv goes last so the byte-fixture
         // tests stay stable.
-        let formats: &[&str] = if self.comfort_noise_enabled {
-            &["0", "8", "13", "101"]
-        } else {
-            &["0", "8", "101"]
-        };
+        let format_pts = self.effective_offered_formats();
+        let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
+        let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
         let mut media_builder = SdpBuilder::new("Session")
             .origin(
                 "-",
@@ -1354,15 +1525,15 @@ impl MediaAdapter {
             .connection("IN", "IP4", &local_ip_str)
             .time("0", "0")
             .media_audio(port, transport)
-            .formats(formats)
-            .rtpmap("0", "PCMU/8000")
-            .rtpmap("8", "PCMA/8000");
-        if self.comfort_noise_enabled {
-            media_builder = media_builder.rtpmap("13", "CN/8000");
+            .formats(&formats_ref);
+        for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {
+            if let Some(rtpmap) = rtpmap_for_pt(*pt) {
+                media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
+            }
+            if let Some(fmtp) = fmtp_for_pt(*pt) {
+                media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
+            }
         }
-        media_builder = media_builder
-            .rtpmap("101", "telephone-event/8000")
-            .fmtp("101", "0-15");
         for attr in crypto_attrs {
             media_builder = media_builder.crypto_attribute(attr);
         }
@@ -1815,6 +1986,12 @@ impl MediaAdapter {
         // Drop our own clone of the tx as well (the other lived in media-core).
         self.audio_receivers.remove(session_id);
 
+        // NEXT_STEPS B diag — bump a process-global counter so the
+        // perf_listener example can poll cleanup throughput without
+        // grepping logs at 100+ msg/sec. Cleared & checked in the
+        // dockerized sipp comparison harness.
+        cleanup_session_diag::record_cleanup();
+
         tracing::debug!(
             "Cleaned up media adapter resources for session {}",
             session_id.0
@@ -2095,6 +2272,7 @@ impl Clone for MediaAdapter {
             public_rtp_addr: std::sync::RwLock::new(self.public_rtp_addr()),
             comfort_noise_enabled: self.comfort_noise_enabled,
             strict_codec_matching: self.strict_codec_matching,
+            offered_codecs: self.offered_codecs.clone(),
         }
     }
 }
@@ -2115,16 +2293,12 @@ impl Clone for MediaAdapter {
 ///   set + offer is plain RTP/AVP).
 pub(crate) fn compute_answer_formats(
     offer: &SdpSession,
-    comfort_noise_enabled: bool,
+    offered_codecs: &[u8],
     strict: bool,
     offer_srtp: bool,
     srtp_required: bool,
 ) -> Result<Vec<String>> {
-    let mut supported = vec!["0".to_string(), "8".to_string()];
-    if comfort_noise_enabled {
-        supported.push("13".to_string());
-    }
-    supported.push("101".to_string());
+    let supported: Vec<String> = offered_codecs.iter().map(|pt| pt.to_string()).collect();
 
     if !strict {
         // Permissive — answer with our full set regardless. Matches
@@ -2674,8 +2848,11 @@ mod sdp_format_tests {
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let formats = compute_answer_formats(
-            &offer, /*comfort_noise_enabled*/ false, /*strict*/ true,
-            /*offer_srtp*/ false, /*srtp_required*/ false,
+            &offer,
+            &[0, 8, 101], /*strict*/
+            true,         /*offer_srtp*/
+            false,        /*srtp_required*/
+            false,
         )
         .expect("strict-mode match succeeds");
         assert_eq!(
@@ -2706,8 +2883,11 @@ mod sdp_format_tests {
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let formats = compute_answer_formats(
-            &offer, /*comfort_noise_enabled*/ false, /*strict*/ false,
-            /*offer_srtp*/ false, /*srtp_required*/ false,
+            &offer,
+            &[0, 8, 101], /*strict*/
+            false,        /*offer_srtp*/
+            false,        /*srtp_required*/
+            false,
         )
         .expect("permissive mode never errors on overlap");
         assert_eq!(
@@ -2739,8 +2919,11 @@ mod sdp_format_tests {
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let err = compute_answer_formats(
-            &offer, /*comfort_noise_enabled*/ false, /*strict*/ true,
-            /*offer_srtp*/ false, /*srtp_required*/ false,
+            &offer,
+            &[0, 8, 101], /*strict*/
+            true,         /*offer_srtp*/
+            false,        /*srtp_required*/
+            false,
         )
         .unwrap_err();
         assert!(
@@ -2773,8 +2956,11 @@ mod sdp_format_tests {
         let offer = SdpSession::from_str(&offer_sdp).expect("offer parses");
 
         let formats = compute_answer_formats(
-            &offer, /*comfort_noise_enabled*/ true, /*strict*/ true,
-            /*offer_srtp*/ false, /*srtp_required*/ false,
+            &offer,
+            &[0, 8, 13, 101], /*strict*/
+            true,             /*offer_srtp*/
+            false,            /*srtp_required*/
+            false,
         )
         .expect("CN-on-both-sides match succeeds");
         assert_eq!(
@@ -2796,6 +2982,218 @@ mod sdp_format_tests {
         assert!(
             !sdp.contains("CN/8000"),
             "default offer must not advertise CN: \n{}",
+            sdp
+        );
+    }
+
+    #[tokio::test]
+    async fn opus_offered_codec_appears_in_generated_offer() {
+        // NEXT_STEPS C2 — when Opus (PT 111) is in the configured
+        // offered_codecs, the generated SDP offer MUST carry
+        // `a=rtpmap:111 opus/48000/2` and list `111` in the m-line
+        // format set. The legacy PCMU/PCMA/DTMF still go out alongside
+        // when included in the list.
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("opus-offer-test".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create session");
+
+        let mut adapter = MediaAdapter::new(
+            controller,
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+        adapter.set_offered_codecs(vec![0, 8, 111, 101]);
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let sdp = adapter
+            .generate_local_sdp_offer(&session_id, crate::types::MediaDirection::SendRecv)
+            .await
+            .expect("offer builds");
+
+        assert!(
+            sdp.contains("a=rtpmap:111 opus/48000/2"),
+            "Opus rtpmap must appear in the offer when 111 is in offered_codecs:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("a=rtpmap:0 PCMU/8000"),
+            "legacy PCMU rtpmap must still appear:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains(" 111 ") || sdp.contains(" 111\r\n"),
+            "m-line format list must include PT 111:\n{}",
+            sdp
+        );
+    }
+
+    #[tokio::test]
+    async fn default_offered_codecs_omit_opus() {
+        // Regression guard: the C2 default (PCMU + PCMA + DTMF) must
+        // not silently start advertising Opus. Adding Opus support
+        // when media-core has no `opus` feature would negotiate a
+        // codec the encoder can't produce.
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("default-codecs-test".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create session");
+
+        let adapter = MediaAdapter::new(
+            controller,
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start session");
+
+        let sdp = adapter
+            .generate_local_sdp_offer(&session_id, crate::types::MediaDirection::SendRecv)
+            .await
+            .expect("offer builds");
+
+        assert!(
+            !sdp.contains("opus"),
+            "default offer must not advertise Opus:\n{}",
+            sdp
+        );
+    }
+
+    #[tokio::test]
+    async fn next_sdp_origin_increments_version_across_calls() {
+        // RFC 3264 §8 — every fresh local SDP body on a session must
+        // carry a strictly greater `o=` version. The adapter centralises
+        // this through `next_sdp_origin`; the unit test below proves
+        // the increment, the audit (NEXT_STEPS.md Area C1.2) proves all
+        // production builder paths route through this helper.
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("test-version-bump".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAC, false)
+            .await
+            .expect("create session");
+
+        let adapter = MediaAdapter::new(
+            controller,
+            store.clone(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+
+        let (sess1, v_initial) = adapter
+            .next_sdp_origin(&session_id)
+            .await
+            .expect("initial offer");
+        let (sess2, v_hold) = adapter
+            .next_sdp_origin(&session_id)
+            .await
+            .expect("hold re-INVITE");
+        let (sess3, v_resume) = adapter
+            .next_sdp_origin(&session_id)
+            .await
+            .expect("resume re-INVITE");
+
+        // o= session-id must stay stable across re-INVITEs on the same
+        // dialog (RFC 3264 §6 + §8) — only the version advances.
+        assert_eq!(
+            sess1, sess2,
+            "session-id must not change between offer and hold re-INVITE"
+        );
+        assert_eq!(
+            sess1, sess3,
+            "session-id must not change between offer and resume re-INVITE"
+        );
+
+        // Strict version monotonicity, RFC 3264 §8.
+        assert!(
+            v_hold > v_initial,
+            "hold re-INVITE version ({}) must exceed initial offer ({})",
+            v_hold,
+            v_initial
+        );
+        assert!(
+            v_resume > v_hold,
+            "resume re-INVITE version ({}) must exceed hold ({})",
+            v_resume,
+            v_hold
+        );
+    }
+
+    #[test]
+    fn port_zero_rejection_emits_m_audio_zero_with_offered_proto() {
+        // RFC 3264 §6 / RFC 4568 §7.3: when we decline an offered
+        // m-line (here: peer offered SRTP, our policy is plaintext),
+        // the answer's m-line port must be 0 and the proto must echo
+        // the offer's proto so the peer distinguishes a policy
+        // rejection from a parse error.
+        let sdp = build_port_zero_rejection_sdp("1234", 7, "192.0.2.10", "RTP/SAVP")
+            .expect("rejection SDP builds");
+
+        assert!(
+            sdp.contains("m=audio 0 RTP/SAVP"),
+            "rejection answer must carry port=0 and the offered proto:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("o=- 1234 7 IN IP4 192.0.2.10"),
+            "rejection answer must carry the supplied origin line:\n{}",
+            sdp
+        );
+        assert!(
+            sdp.contains("c=IN IP4 192.0.2.10"),
+            "rejection answer must include a c= line:\n{}",
+            sdp
+        );
+        assert!(
+            !sdp.contains("a=crypto"),
+            "rejection answer must not advertise any crypto attributes:\n{}",
+            sdp
+        );
+    }
+
+    #[test]
+    fn port_zero_rejection_echoes_avp_proto_when_offered() {
+        // If peer ever offers plaintext but we still want to decline
+        // (e.g. require_srtp branch wired through this helper later),
+        // the proto echoed must be `RTP/AVP`, not the SAVP default.
+        let sdp = build_port_zero_rejection_sdp("1", 0, "10.0.0.1", "RTP/AVP")
+            .expect("rejection SDP builds");
+
+        assert!(
+            sdp.contains("m=audio 0 RTP/AVP"),
+            "rejection must echo the offered proto verbatim:\n{}",
             sdp
         );
     }
