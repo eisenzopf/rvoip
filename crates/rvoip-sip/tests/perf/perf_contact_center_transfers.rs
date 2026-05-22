@@ -25,7 +25,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -172,7 +174,11 @@ async fn run_one_point(
             let _ = h.await;
         }
     };
-    let _ = tokio::time::timeout(call_timeout + Duration::from_secs(load.cooldown_secs), drain).await;
+    let _ = tokio::time::timeout(
+        call_timeout + Duration::from_secs(load.cooldown_secs),
+        drain,
+    )
+    .await;
 
     let resources = sampler.stop().await;
     let ok = transfers_ok.load(Ordering::Relaxed);
@@ -191,7 +197,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_contact_center_transfers", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let dialogs_per_core = if cores > 0.0 { active as f64 / cores } else { 0.0 };
+    let dialogs_per_core = if cores > 0.0 {
+        active as f64 / cores
+    } else {
+        0.0
+    };
     report
         .result("target_agents", n_agents)
         .result("achieved_agents", active)

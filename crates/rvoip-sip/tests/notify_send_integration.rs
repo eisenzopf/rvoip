@@ -35,14 +35,7 @@ fn cargo_bin() -> String {
 
 fn spawn_example(name: &str, envs: &[(&str, String)]) -> ChildGuard {
     let mut cmd = Command::new(cargo_bin());
-    cmd.args([
-        "run",
-        "--quiet",
-        "-p",
-        "rvoip-sip",
-        "--example",
-        name,
-    ]);
+    cmd.args(["run", "--quiet", "-p", "rvoip-sip", "--example", name]);
     for (k, v) in envs {
         cmd.env(k, v);
     }

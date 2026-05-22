@@ -28,7 +28,10 @@ use bytes::Bytes;
 /// `("application/sdp".to_string(), bytes)`.
 pub fn sdp(s: impl Into<String>) -> (String, Bytes) {
     let body: String = s.into();
-    ("application/sdp".to_string(), Bytes::from(body.into_bytes()))
+    (
+        "application/sdp".to_string(),
+        Bytes::from(body.into_bytes()),
+    )
 }
 
 /// `application/dtmf-relay` body (RFC 2833 / draft-choudhuri-sip-info-digit).
@@ -165,8 +168,8 @@ mod tests {
 
     #[test]
     fn pidf_xml_escapes_entity_and_note() {
-        let presence = Presence::new("sip:alice@example.com", "open")
-            .with_note("In a <meeting> & away");
+        let presence =
+            Presence::new("sip:alice@example.com", "open").with_note("In a <meeting> & away");
         let (ct, body) = pidf_xml(&presence);
         assert_eq!(ct, "application/pidf+xml");
         let rendered = std::str::from_utf8(&body).unwrap();
@@ -176,8 +179,7 @@ mod tests {
 
     #[test]
     fn simple_message_summary_emits_required_headers() {
-        let (ct, body) =
-            simple_message_summary("sip:vm@example.com", true, 3, 5);
+        let (ct, body) = simple_message_summary("sip:vm@example.com", true, 3, 5);
         assert_eq!(ct, "application/simple-message-summary");
         let rendered = std::str::from_utf8(&body).unwrap();
         assert!(rendered.contains("Messages-Waiting: yes"));

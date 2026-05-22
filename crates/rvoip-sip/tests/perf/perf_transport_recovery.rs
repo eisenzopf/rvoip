@@ -32,7 +32,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -253,8 +255,10 @@ async fn perf_transport_recovery() {
     .await;
 
     let resources = sampler.stop().await;
-    let recovery_first_success_after_secs =
-        post_first.lock().await.map(|t| t.duration_since(bob_back_at).as_secs_f64());
+    let recovery_first_success_after_secs = post_first
+        .lock()
+        .await
+        .map(|t| t.duration_since(bob_back_at).as_secs_f64());
 
     let load = LoadProfile {
         target_cps: cps,

@@ -61,12 +61,8 @@ pub enum ViolationReason {
 impl fmt::Display for ViolationReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ViolationReason::StackManaged => {
-                f.write_str("owned by the dialog/transaction layer")
-            }
-            ViolationReason::WrongMethod => {
-                f.write_str("not allowed on this SIP method")
-            }
+            ViolationReason::StackManaged => f.write_str("owned by the dialog/transaction layer"),
+            ViolationReason::WrongMethod => f.write_str("not allowed on this SIP method"),
             ViolationReason::UseDedicatedSetter(s) => {
                 write!(f, "use the dedicated `{s}` setter instead")
             }
@@ -159,10 +155,7 @@ pub trait SipRequestOptions: Sized + Send + Sync {
     }
 
     /// Batch form of [`SipRequestOptions::with_header`]. Fails fast on the first violation.
-    fn with_headers(
-        self,
-        headers: Vec<TypedHeader>,
-    ) -> Result<Self, HeaderPolicyViolation> {
+    fn with_headers(self, headers: Vec<TypedHeader>) -> Result<Self, HeaderPolicyViolation> {
         let mut me = self;
         for h in headers {
             me = me.with_header(h)?;
@@ -223,10 +216,9 @@ pub trait SipRequestOptions: Sized + Send + Sync {
                             .push((name.clone(), ViolationReason::StackManaged));
                     }
                     HeaderRole::MethodShaped { setter } => {
-                        report.skipped.push((
-                            name.clone(),
-                            ViolationReason::UseDedicatedSetter(setter),
-                        ));
+                        report
+                            .skipped
+                            .push((name.clone(), ViolationReason::UseDedicatedSetter(setter)));
                     }
                     HeaderRole::ApplicationControlled => {
                         self.header_state_mut().headers.push(hdr.clone());

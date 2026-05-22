@@ -207,7 +207,6 @@ impl MediaBuffer for DefaultMediaBuffer {
                     return Ok(frame);
                 }
                 None => {
-
                     // Wait for notification or timeout
                     let remaining = timeout
                         .checked_sub(start_time.elapsed())

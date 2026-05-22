@@ -52,10 +52,11 @@
   </send>
 
   <!-- Trying / Ringing / Session Progress are optional; record but
-       don't gate. -->
-  <recv response="100" optional="true"/>
-  <recv response="180" optional="true"/>
-  <recv response="183" optional="true"/>
+       don't gate. `optional="global"` lets SIPp accept valid delayed
+       provisionals while it is already waiting for the 200 OK. -->
+  <recv response="100" optional="global"/>
+  <recv response="180" optional="global"/>
+  <recv response="183" optional="global"/>
 
   <!-- The 200 OK. `rtd` stamps the INVITE→200OK round-trip into the
        stat CSV under the `ResponseTime1` column. -->

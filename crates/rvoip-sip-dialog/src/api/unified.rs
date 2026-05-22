@@ -149,8 +149,8 @@ use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
 use rvoip_sip_core::{Method, Request, Response, StatusCode};
 
 use super::{
-    common::{CallHandle, DialogHandle},
     ApiError, ApiResult, DialogStats,
+    common::{CallHandle, DialogHandle},
 };
 use crate::config::DialogManagerConfig;
 use crate::dialog::{Dialog, DialogId, DialogState};
@@ -204,10 +204,10 @@ pub struct UnifiedDialogApi {
 
 fn add_contact_header(response: &mut Response, contact_uri: &str) -> ApiResult<()> {
     use rvoip_sip_core::types::{
+        TypedHeader,
         address::Address,
         contact::{Contact, ContactParamInfo},
         uri::Uri,
-        TypedHeader,
     };
     use std::str::FromStr;
 
@@ -386,10 +386,10 @@ pub(crate) fn build_outbound_contact(
     outbound_params: &rvoip_sip_core::types::outbound::OutboundContactParams,
 ) -> Result<rvoip_sip_core::types::contact::Contact, rvoip_sip_core::error::Error> {
     use rvoip_sip_core::types::{
+        Address,
         contact::{Contact, ContactParamInfo},
         outbound::{mark_uri_as_outbound, set_outbound_contact_params},
         uri::Uri,
-        Address,
     };
     use std::str::FromStr;
     let uri = Uri::from_str(contact_uri)?;
@@ -985,10 +985,10 @@ impl UnifiedDialogApi {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<()> {
         use rvoip_sip_core::types::{
+            TypedHeader,
             address::Address,
             contact::{Contact, ContactParamInfo},
             uri::Uri,
-            TypedHeader,
         };
         use std::str::FromStr;
 
@@ -1096,7 +1096,8 @@ impl UnifiedDialogApi {
         body: Option<String>,
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<()> {
-        self.send_response_for_session_inner(session_id, status_code, body, extra_headers).await
+        self.send_response_for_session_inner(session_id, status_code, body, extra_headers)
+            .await
     }
 
     pub async fn send_response_for_session(
@@ -1105,7 +1106,8 @@ impl UnifiedDialogApi {
         status_code: u16,
         body: Option<String>,
     ) -> ApiResult<()> {
-        self.send_response_for_session_inner(session_id, status_code, body, Vec::new()).await
+        self.send_response_for_session_inner(session_id, status_code, body, Vec::new())
+            .await
     }
 
     /// Internal implementation backing both the legacy
@@ -1156,14 +1158,35 @@ impl UnifiedDialogApi {
         // prefer a non-INVITE tx when available so an in-dialog UPDATE/
         // re-INVITE response doesn't get misrouted to the original INVITE.
         let tx_mgr = self.manager.core().transaction_manager();
-        let candidates: Vec<crate::transaction::TransactionKey> = self
+        let indexed_candidate = self
             .manager
             .core()
-            .transaction_to_dialog
-            .iter()
-            .filter(|entry| entry.value() == &dialog_id && entry.key().is_server())
-            .map(|entry| entry.key().clone())
-            .collect();
+            .pending_response_transaction_for_dialog(&dialog_id);
+        let candidates: Vec<crate::transaction::TransactionKey> =
+            if let Some(key) = indexed_candidate {
+                if tx_mgr.transaction_state(&key).await.ok().is_some() {
+                    vec![key]
+                } else {
+                    self.manager
+                        .core()
+                        .clear_pending_response_transaction(&dialog_id, &key);
+                    self.manager
+                        .core()
+                        .transaction_to_dialog
+                        .iter()
+                        .filter(|entry| entry.value() == &dialog_id && entry.key().is_server())
+                        .map(|entry| entry.key().clone())
+                        .collect()
+                }
+            } else {
+                self.manager
+                    .core()
+                    .transaction_to_dialog
+                    .iter()
+                    .filter(|entry| entry.value() == &dialog_id && entry.key().is_server())
+                    .map(|entry| entry.key().clone())
+                    .collect()
+            };
 
         let mut pending_non_invite: Option<crate::transaction::TransactionKey> = None;
         let mut pending_invite: Option<crate::transaction::TransactionKey> = None;
@@ -1201,6 +1224,9 @@ impl UnifiedDialogApi {
                     message: format!("No transaction found for dialog {}", dialog_id),
                 }
             })?;
+        self.manager
+            .core()
+            .clear_pending_response_transaction(&dialog_id, &transaction_id);
 
         debug!(
             "Found transaction {} for dialog {}",
@@ -1289,7 +1315,10 @@ impl UnifiedDialogApi {
 
         info!(
             "Sending {} response for session {} via transaction {} ({} staged extras)",
-            status_code, session_id, transaction_id, extra_headers.len()
+            status_code,
+            session_id,
+            transaction_id,
+            extra_headers.len()
         );
 
         // Call pre-send lifecycle hook for dialog state management
@@ -1460,8 +1489,8 @@ impl UnifiedDialogApi {
         options: RegisterRequestOptions,
     ) -> ApiResult<Response> {
         use crate::transaction::client::builders::RegisterBuilder;
-        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
 
         // SIP_API_DESIGN_2 §7.1 — `options.refresh` distinguishes the
         // initial REGISTER from an in-dialog refresh per RFC 3261
@@ -1527,7 +1556,7 @@ impl UnifiedDialogApi {
         }
 
         if let Some(proxy_uri) = &options.outbound_proxy_uri {
-            use rvoip_sip_core::types::{route::Route, TypedHeader};
+            use rvoip_sip_core::types::{TypedHeader, route::Route};
             builder = builder.header(TypedHeader::Route(Route::with_uri(proxy_uri.clone())));
         }
 
@@ -1678,7 +1707,11 @@ impl UnifiedDialogApi {
         request: rvoip_sip_core::Request,
     ) -> ApiResult<TransactionKey> {
         let fallback_destination = {
-            let dialog = self.manager.inner_manager().get_dialog(dialog_id).map_err(ApiError::from)?;
+            let dialog = self
+                .manager
+                .inner_manager()
+                .get_dialog(dialog_id)
+                .map_err(ApiError::from)?;
             dialog
                 .get_remote_target_address()
                 .await
@@ -1713,7 +1746,7 @@ impl UnifiedDialogApi {
         Ok(transaction_id)
     }
 
-/// Send NOTIFY for REFER implicit subscription (RFC 3515)
+    /// Send NOTIFY for REFER implicit subscription (RFC 3515)
     pub async fn send_refer_notify(
         &self,
         dialog_id: &DialogId,
@@ -1725,7 +1758,7 @@ impl UnifiedDialogApi {
             .await
     }
 
-/// Send PRACK for a reliable provisional response (RFC 3262).
+    /// Send PRACK for a reliable provisional response (RFC 3262).
     pub async fn send_prack(&self, dialog_id: &DialogId, rseq: u32) -> ApiResult<TransactionKey> {
         self.manager.send_prack(dialog_id, rseq).await
     }
@@ -1741,8 +1774,8 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ReferRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
 
         // The body must remain single-line `Refer-To: <uri>\r\n`. The
         // downstream NOTIFY/REFER request builder extracts `target_uri`
@@ -1890,7 +1923,10 @@ impl UnifiedDialogApi {
             _ => opts.event.clone(),
         };
 
-        let body_string = opts.body.as_ref().map(|b| String::from_utf8_lossy(b).into_owned());
+        let body_string = opts
+            .body
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).into_owned());
         let extras_opt = if opts.extra_headers.is_empty() {
             None
         } else {
@@ -1995,7 +2031,8 @@ impl UnifiedDialogApi {
         .map_err(|e| ApiError::protocol(format!("Failed to build INFO request: {}", e)))?;
         drop(dialog);
 
-        self.send_in_dialog_built_request(dialog_id, Method::Info, request).await
+        self.send_in_dialog_built_request(dialog_id, Method::Info, request)
+            .await
     }
 
     /// BYE with full options.
@@ -2007,8 +2044,8 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ByeRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::reason::Reason;
         use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::reason::Reason;
 
         let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
         if let Some(reason_text) = opts.reason {
@@ -2036,8 +2073,8 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: CancelRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::reason::Reason;
         use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::reason::Reason;
 
         let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
         if let Some(reason_text) = opts.reason {
@@ -2056,10 +2093,10 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: UpdateRequestOptions,
     ) -> ApiResult<TransactionKey> {
+        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::min_se::MinSE;
         use rvoip_sip_core::types::session_expires::SessionExpires;
         use rvoip_sip_core::types::supported::Supported;
-        use rvoip_sip_core::types::TypedHeader;
 
         let body = opts.sdp.map(bytes::Bytes::from);
         let mut extras = opts.extra_headers;
@@ -2089,11 +2126,11 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ReInviteRequestOptions,
     ) -> ApiResult<TransactionKey> {
+        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::min_se::MinSE;
         use rvoip_sip_core::types::session_expires::SessionExpires;
         use rvoip_sip_core::types::supported::Supported;
-        use rvoip_sip_core::types::TypedHeader;
 
         // Precomputed Authorization rides as a typed extra alongside
         // application headers — the in-dialog request builder will
@@ -2212,7 +2249,10 @@ impl UnifiedDialogApi {
         let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(&dest_uri)
             .await
             .ok_or_else(|| {
-                ApiError::protocol(format!("Failed to resolve OPTIONS target URI: {}", opts.to_uri))
+                ApiError::protocol(format!(
+                    "Failed to resolve OPTIONS target URI: {}",
+                    opts.to_uri
+                ))
             })?;
 
         let timeout = opts.timeout.unwrap_or_else(|| Duration::from_secs(8));
@@ -2415,8 +2455,8 @@ impl UnifiedDialogApi {
     /// ```
     pub async fn create(config: DialogManagerConfig) -> ApiResult<Self> {
         use crate::transaction::{
-            transport::{TransportManager, TransportManagerConfig},
             TransactionManager,
+            transport::{TransportManager, TransportManagerConfig},
         };
 
         info!(

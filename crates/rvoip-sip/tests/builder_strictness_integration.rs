@@ -10,9 +10,7 @@
 
 use std::time::Duration;
 
-use rvoip_sip::api::headers::options::{
-    BuilderStrictness, SipRequestOptions, ViolationReason,
-};
+use rvoip_sip::api::headers::options::{BuilderStrictness, SipRequestOptions, ViolationReason};
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip_core::types::call_id::CallId as CallIdHdr;
 use rvoip_sip_core::types::header::HeaderName;
@@ -66,9 +64,7 @@ async fn lenient_mode_drops_method_shaped_authorization_on_register() {
     // The dropped header must not appear in the staged set.
     let staged = builder.staged_headers();
     assert!(
-        staged
-            .iter()
-            .all(|h| h.name() != HeaderName::Authorization),
+        staged.iter().all(|h| h.name() != HeaderName::Authorization),
         "Lenient drop must not stage the header; staged = {:?}",
         staged.iter().map(|h| h.name()).collect::<Vec<_>>()
     );

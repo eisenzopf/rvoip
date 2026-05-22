@@ -27,7 +27,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, CallbackPeerBuilder,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::{CallState, Config, UnifiedCoordinator};
 
@@ -85,7 +87,9 @@ async fn spawn_mock_registrar(port: u16) -> tokio::task::JoinHandle<()> {
                 HeaderName::Expires,
                 HeaderValue::Raw(b"3600".to_vec()),
             ));
-            let _ = sock.send_to(&Message::Response(resp).to_bytes(), from).await;
+            let _ = sock
+                .send_to(&Message::Response(resp).to_bytes(), from)
+                .await;
         }
     })
 }
@@ -140,8 +144,7 @@ async fn main() -> rvoip_sip::Result<()> {
                 };
 
                 tokio::spawn(async move {
-                    let deadline =
-                        tokio::time::Instant::now() + Duration::from_secs(5);
+                    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
                     loop {
                         if let Ok(state) = session.state().await {
                             if state == CallState::Active {
@@ -149,9 +152,7 @@ async fn main() -> rvoip_sip::Result<()> {
                             }
                         }
                         if tokio::time::Instant::now() >= deadline {
-                            eprintln!(
-                                "[agent] call never reached Active; abandoning REFER"
-                            );
+                            eprintln!("[agent] call never reached Active; abandoning REFER");
                             return;
                         }
                         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -171,11 +172,7 @@ async fn main() -> rvoip_sip::Result<()> {
 
     println!("[agent] registering with sip:127.0.0.1:{REGISTRAR_PORT}");
     let _reg_handle = agent_coord
-        .register(
-            format!("sip:127.0.0.1:{REGISTRAR_PORT}"),
-            "agent",
-            "secret",
-        )
+        .register(format!("sip:127.0.0.1:{REGISTRAR_PORT}"), "agent", "secret")
         .with_expires(3600)
         .send()
         .await?;
@@ -187,8 +184,7 @@ async fn main() -> rvoip_sip::Result<()> {
     println!("[agent] callback peer on 127.0.0.1:{AGENT_PORT}");
 
     // ── Customer (UAC) ─────────────────────────────────────────────
-    let customer =
-        UnifiedCoordinator::new(Config::local("customer", CUSTOMER_PORT)).await?;
+    let customer = UnifiedCoordinator::new(Config::local("customer", CUSTOMER_PORT)).await?;
     tokio::time::sleep(Duration::from_millis(150)).await;
 
     println!("[cust] INVITE to sip:agent@127.0.0.1:{AGENT_PORT}");

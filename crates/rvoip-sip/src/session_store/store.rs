@@ -1,3 +1,4 @@
+use crate::cleanup_diag::{self, CleanupStage};
 use crate::state_table::{CallId, DialogId, MediaSessionId, SessionId};
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -134,6 +135,7 @@ impl SessionStore {
         &self,
         session_id: &SessionId,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let guard = cleanup_diag::stage_guard(CleanupStage::SessionStoreRemoval, &session_id.0);
         // DashMap: Lock-free remove
         if let Some((_, session)) = self.sessions.remove(session_id) {
             // Clean up indexes
@@ -148,6 +150,7 @@ impl SessionStore {
             }
 
             info!("Removed session {}", session_id);
+            guard.finish_success();
             Ok(())
         } else {
             Err(format!("Session {} not found", session_id).into())

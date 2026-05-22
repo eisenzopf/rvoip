@@ -177,7 +177,10 @@ impl RegisterRefreshBuilder {
 
         let registrar_uri = session.registrar_uri.clone().unwrap_or_default();
         let contact_uri = session.registration_contact.clone().unwrap_or_default();
-        let aor_uri = session.local_uri.clone().unwrap_or_else(|| contact_uri.clone());
+        let aor_uri = session
+            .local_uri
+            .clone()
+            .unwrap_or_else(|| contact_uri.clone());
         let expires = self
             .expires
             .or(session.registration_expires)

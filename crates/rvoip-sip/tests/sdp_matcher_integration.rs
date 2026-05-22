@@ -10,10 +10,10 @@
 
 use std::str::FromStr;
 
-use rvoip_sip_dialog::sdp::{match_offer, AnswerCapabilities, MatchError};
 use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{ParsedAttribute, SdpSession};
 use rvoip_sip_core::MediaDirection;
+use rvoip_sip_dialog::sdp::{match_offer, AnswerCapabilities, MatchError};
 
 /// Helper: build a one-`m=`-line audio offer with the supplied
 /// formats (and one rtpmap entry per format).

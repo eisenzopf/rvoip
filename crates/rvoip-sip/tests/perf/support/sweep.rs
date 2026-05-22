@@ -224,8 +224,7 @@ impl SweepRunner {
             // Single-point: keep the legacy flat layout.
             let path = dir_base.join(format!("{}.json", self.scenario));
             if let Some(rec) = self.records.first() {
-                let pretty = serde_json::to_string_pretty(&rec.report_json)
-                    .expect("serialize");
+                let pretty = serde_json::to_string_pretty(&rec.report_json).expect("serialize");
                 fs::write(&path, pretty).expect("write perf JSON");
                 written.push(path);
             }
@@ -239,8 +238,7 @@ impl SweepRunner {
         for rec in &self.records {
             let fname = format!("{}.json", point_to_filename(rec.point));
             let path = scenario_dir.join(fname);
-            let pretty = serde_json::to_string_pretty(&rec.report_json)
-                .expect("serialize");
+            let pretty = serde_json::to_string_pretty(&rec.report_json).expect("serialize");
             fs::write(&path, pretty).expect("write per-point JSON");
             written.push(path);
         }
@@ -306,7 +304,11 @@ impl SweepRunner {
                     .map(|r| r.point)
                     .fold(f64::NEG_INFINITY, f64::max)
             }
-            None => self.records.iter().map(|r| r.point).fold(f64::NEG_INFINITY, f64::max),
+            None => self
+                .records
+                .iter()
+                .map(|r| r.point)
+                .fold(f64::NEG_INFINITY, f64::max),
         };
         if !target_point.is_finite() {
             return Value::Null;
@@ -390,10 +392,7 @@ impl SweepRunner {
         let mut out = String::new();
         let host_line = match &self.environment {
             Some(env) => {
-                let cpu_model = env
-                    .get("cpu_model")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let cpu_model = env.get("cpu_model").and_then(|v| v.as_str()).unwrap_or("?");
                 let phys = env
                     .get("cpu_count_physical")
                     .and_then(|v| v.as_u64())
@@ -455,17 +454,29 @@ impl SweepRunner {
             out.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {}{} |\n",
                 fmt_point(rec.point),
-                rec.achieved.map(|v| format!("{v:.1}")).unwrap_or_else(|| "n/a".to_string()),
+                rec.achieved
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
                 per_core,
-                rec.ratio.map(|v| format!("{v:.4}")).unwrap_or_else(|| "n/a".to_string()),
+                rec.ratio
+                    .map(|v| format!("{v:.4}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
                 p50_lat,
                 p95_lat,
                 p99_lat,
                 p99_full,
-                rec.rss_delta_mb.map(|v| format!("{v:.1}")).unwrap_or_else(|| "n/a".to_string()),
-                rss_growth.map(|v| format!("{v:+.1}")).unwrap_or_else(|| "n/a".to_string()),
-                cpu_pct.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "n/a".to_string()),
-                rec.errors_total.map(|v| v.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                rec.rss_delta_mb
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                rss_growth
+                    .map(|v| format!("{v:+.1}"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                cpu_pct
+                    .map(|v| format!("{v:.0}%"))
+                    .unwrap_or_else(|| "n/a".to_string()),
+                rec.errors_total
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "n/a".to_string()),
                 knee_marker,
             ));
         }
@@ -502,9 +513,7 @@ impl SweepRunner {
                 .get("total_ram_gb")
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
-            println!(
-                " host    : {cpu_model}  ({phys}P / {logi}L cores, {ram_gb:.1} GB RAM)",
-            );
+            println!(" host    : {cpu_model}  ({phys}P / {logi}L cores, {ram_gb:.1} GB RAM)",);
         }
         println!(" points  : {} sweep points", self.records.len());
         match self.knee {
@@ -596,9 +605,18 @@ fn first_latency_percentiles(report: &Value) -> (String, String, String) {
             .or_else(|| m.get("register_latency"))
             .or_else(|| m.values().next())
     });
-    let p50 = obj.and_then(|v| v.get("p50")).and_then(|v| v.as_u64()).map(fmt_ns);
-    let p95 = obj.and_then(|v| v.get("p95")).and_then(|v| v.as_u64()).map(fmt_ns);
-    let p99 = obj.and_then(|v| v.get("p99")).and_then(|v| v.as_u64()).map(fmt_ns);
+    let p50 = obj
+        .and_then(|v| v.get("p50"))
+        .and_then(|v| v.as_u64())
+        .map(fmt_ns);
+    let p95 = obj
+        .and_then(|v| v.get("p95"))
+        .and_then(|v| v.as_u64())
+        .map(fmt_ns);
+    let p99 = obj
+        .and_then(|v| v.get("p99"))
+        .and_then(|v| v.as_u64())
+        .map(fmt_ns);
     (
         p50.unwrap_or_else(|| "n/a".to_string()),
         p95.unwrap_or_else(|| "n/a".to_string()),
@@ -664,8 +682,7 @@ pub fn parse_sweep_env(name: &str) -> Option<Vec<f64>> {
 
 fn target_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR set under cargo"),
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set under cargo"),
     );
     manifest_dir
         .parent()

@@ -267,7 +267,12 @@ impl OutboundCallBuilder {
         let session_id = crate::state_table::SessionId::new();
         self.coord
             .helpers
-            .create_session(session_id.clone(), from.clone(), to.clone(), crate::state_table::Role::UAC)
+            .create_session(
+                session_id.clone(),
+                from.clone(),
+                to.clone(),
+                crate::state_table::Role::UAC,
+            )
             .await?;
 
         if snapshot.credentials.is_some()
@@ -304,7 +309,10 @@ impl OutboundCallBuilder {
             )
             .await?;
         self.coord
-            .dispatch_outbound(&session_id, crate::state_table::EventType::SendOutboundInvite)
+            .dispatch_outbound(
+                &session_id,
+                crate::state_table::EventType::SendOutboundInvite,
+            )
             .await?;
         Ok(session_id)
     }

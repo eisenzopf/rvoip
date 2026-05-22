@@ -369,12 +369,9 @@ pub async fn disconnect_client(
     // Remove client from the shard. The returned `client` is owned —
     // shard guard is released by the `remove` call returning, so all
     // subsequent `.await` calls are safe.
-    let mut client = clients
-        .remove(client_id)
-        .map(|(_, c)| c)
-        .ok_or_else(|| {
-            MediaTransportError::Transport(format!("Client not found: {}", client_id))
-        })?;
+    let mut client = clients.remove(client_id).map(|(_, c)| c).ok_or_else(|| {
+        MediaTransportError::Transport(format!("Client not found: {}", client_id))
+    })?;
 
     // Abort task
     if let Some(task) = client.task.take() {

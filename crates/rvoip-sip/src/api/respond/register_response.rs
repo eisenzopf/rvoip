@@ -218,9 +218,7 @@ impl RegisterResponseBuilder {
     /// Build the cross-crate `SendRegisterResponse` event payload
     /// fields without sending. Useful for tests and for the registrar
     /// crate's migration path.
-    pub fn build_event_fields(
-        mut self,
-    ) -> Result<RegisterResponseEventFields> {
+    pub fn build_event_fields(mut self) -> Result<RegisterResponseEventFields> {
         let extras = take_staged(&mut self.state);
         let extra_headers_wire = extras
             .into_iter()
@@ -241,7 +239,11 @@ impl RegisterResponseBuilder {
                     .map(Ok)
                     .unwrap_or_else(|| self.render_digest_challenge())?;
                 if proxy {
-                    (407u16, "Proxy Authentication Required".to_string(), Some(rendered))
+                    (
+                        407u16,
+                        "Proxy Authentication Required".to_string(),
+                        Some(rendered),
+                    )
                 } else {
                     (401u16, "Unauthorized".to_string(), Some(rendered))
                 }
@@ -254,7 +256,11 @@ impl RegisterResponseBuilder {
                 })?;
                 let rendered = format!("Bearer realm=\"{}\"", realm);
                 if proxy {
-                    (407u16, "Proxy Authentication Required".to_string(), Some(rendered))
+                    (
+                        407u16,
+                        "Proxy Authentication Required".to_string(),
+                        Some(rendered),
+                    )
                 } else {
                     (401u16, "Unauthorized".to_string(), Some(rendered))
                 }

@@ -19,7 +19,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_media_core::types::AudioFrame;
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::{json, Value};
@@ -73,9 +75,12 @@ fn make_srtp_config(name: &str, port: u16) -> Config {
 }
 
 async fn boot_bob(port: u16, received_frames: Arc<AtomicU64>) -> BobReceiver {
-    let bob = CallbackPeer::new(CountingAccept { received_frames }, make_srtp_config("perf-bob", port))
-        .await
-        .expect("perf bob: CallbackPeer::new (SRTP)");
+    let bob = CallbackPeer::new(
+        CountingAccept { received_frames },
+        make_srtp_config("perf-bob", port),
+    )
+    .await
+    .expect("perf bob: CallbackPeer::new (SRTP)");
     let shutdown = bob.shutdown_handle();
     let task = tokio::spawn(async move {
         let _ = bob.run().await;
@@ -192,7 +197,11 @@ async fn run_one_point(
             let _ = h.await;
         }
     };
-    let _ = tokio::time::timeout(call_timeout + Duration::from_secs(load.cooldown_secs), drain).await;
+    let _ = tokio::time::timeout(
+        call_timeout + Duration::from_secs(load.cooldown_secs),
+        drain,
+    )
+    .await;
 
     let resources = sampler.stop().await;
     let sent = sent_frames.load(Ordering::Relaxed);
@@ -202,11 +211,19 @@ async fn run_one_point(
     } else {
         0.0
     };
-    let asr = if target > 0 { active as f64 / target as f64 } else { 0.0 };
+    let asr = if target > 0 {
+        active as f64 / target as f64
+    } else {
+        0.0
+    };
 
     let mut report = ScenarioReport::new("perf_srtp_overhead", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let streams_per_core = if cores > 0.0 { active as f64 / cores } else { 0.0 };
+    let streams_per_core = if cores > 0.0 {
+        active as f64 / cores
+    } else {
+        0.0
+    };
     let pps = active * PPS_PER_STREAM;
     let packets_per_core_per_sec = if cores > 0.0 { pps as f64 / cores } else { 0.0 };
     let delta = read_plain_rtp_baseline_delta(target as f64, active, frame_loss_pct, &send_hist);
@@ -353,9 +370,7 @@ async fn perf_srtp_overhead() {
 }
 
 fn perf_target_dir() -> PathBuf {
-    let manifest = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
-    );
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
         .and_then(|p| p.parent())

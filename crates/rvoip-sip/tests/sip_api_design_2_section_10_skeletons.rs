@@ -193,7 +193,9 @@ async fn cancel_safety_integration() {
     // future has been polled at least once before we drop it because
     // we `await` the first yield). We use `tokio::time::timeout` with
     // an extremely short budget so the future drops mid-flight.
-    let fut = coord.invite(Some("sip:alice@127.0.0.1".to_string()), target.clone()).send();
+    let fut = coord
+        .invite(Some("sip:alice@127.0.0.1".to_string()), target.clone())
+        .send();
     let _ = tokio::time::timeout(Duration::from_millis(50), fut).await;
     // Future dropped at this point.
 
@@ -204,11 +206,12 @@ async fn cancel_safety_integration() {
     // fresh INVITE on a NEW session and confirm it gets a clean
     // `pending_invite_options` slot — which is the load-bearing
     // invariant for application-visible behaviour.
-    let fut2 = coord.invite(
-        Some("sip:alice@127.0.0.1".to_string()),
-        "sip:other@127.0.0.1:18002".to_string(),
-    )
-    .send();
+    let fut2 = coord
+        .invite(
+            Some("sip:alice@127.0.0.1".to_string()),
+            "sip:other@127.0.0.1:18002".to_string(),
+        )
+        .send();
     // A second drop is fine — the assertion is that nothing panicked
     // and no `SessionError::Conflict` fires (which would happen if the
     // dropped future left a poisoned stash bound to a session id we
@@ -436,10 +439,7 @@ async fn auto_emit_cancel_carries_headers() {
 
     // Wait for a CANCEL on the UAS.
     let captured = uas
-        .wait_for(
-            |r| r.method == "CANCEL",
-            Duration::from_secs(5),
-        )
+        .wait_for(|r| r.method == "CANCEL", Duration::from_secs(5))
         .await
         .expect("UAS never saw inbound CANCEL");
 
@@ -699,9 +699,7 @@ async fn bye_stash_wins_over_auto_emit() {
 async fn notify_subscription_id_routing() {
     use std::time::Duration;
 
-    use support_for_section_10::{
-        establish_call, wait_for_inbound_method,
-    };
+    use support_for_section_10::{establish_call, wait_for_inbound_method};
 
     let _ = tracing_subscriber::fmt::try_init();
     let mut call = establish_call(16800, 16810).await;
@@ -758,8 +756,7 @@ async fn register_refresh_vs_initial() {
 
     let _ = tracing_subscriber::fmt::try_init();
 
-    let registrar =
-        boot_mock_registrar(REGISTRAR_PORT, |_idx| RegistrarReply::ok_hour()).await;
+    let registrar = boot_mock_registrar(REGISTRAR_PORT, |_idx| RegistrarReply::ok_hour()).await;
 
     let coord = UnifiedCoordinator::new(Config::local("alice-refresh", CLIENT_PORT))
         .await
@@ -775,9 +772,7 @@ async fn register_refresh_vs_initial() {
         .expect("initial register.send()");
 
     // Wait for the initial REGISTER to be captured + responded.
-    let captured = registrar
-        .wait_for_n(1, Duration::from_secs(5))
-        .await;
+    let captured = registrar.wait_for_n(1, Duration::from_secs(5)).await;
     assert_eq!(captured.len(), 1, "expected one captured REGISTER");
     let initial_call_id = captured[0].call_id.clone();
     let initial_cseq = captured[0].cseq;
@@ -790,9 +785,7 @@ async fn register_refresh_vs_initial() {
         .await
         .expect("refresh register send");
 
-    let captured = registrar
-        .wait_for_n(2, Duration::from_secs(5))
-        .await;
+    let captured = registrar.wait_for_n(2, Duration::from_secs(5)).await;
     assert_eq!(captured.len(), 2, "expected two captured REGISTERs");
     let refresh_call_id = captured[1].call_id.clone();
     let refresh_cseq = captured[1].cseq;
@@ -947,9 +940,7 @@ fn registrar_response_builder() {}
 /// reduces to this once the call harness lands.
 #[test]
 fn multipart_body_integration() {
-    use rvoip_sip::api::headers::convenience::{
-        multipart_mixed, multipart_parse, MultipartPart,
-    };
+    use rvoip_sip::api::headers::convenience::{multipart_mixed, multipart_parse, MultipartPart};
 
     let parts = vec![
         MultipartPart::new(

@@ -185,7 +185,10 @@ async fn stash_slots_are_independent_across_methods() {
         }
     }
 
-    assert!(saw_info, "INFO with its smoke value did not arrive on the wire");
+    assert!(
+        saw_info,
+        "INFO with its smoke value did not arrive on the wire"
+    );
     assert!(
         saw_notify,
         "NOTIFY with its smoke value did not arrive on the wire"

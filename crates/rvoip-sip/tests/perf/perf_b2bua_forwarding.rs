@@ -24,7 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -190,7 +192,16 @@ async fn run_one_point(
             let from = from.clone();
             let target = target.clone();
             let h = tokio::spawn(async move {
-                run_one_call(alice, from, target, setup_hist, full_hist, counters, call_timeout).await;
+                run_one_call(
+                    alice,
+                    from,
+                    target,
+                    setup_hist,
+                    full_hist,
+                    counters,
+                    call_timeout,
+                )
+                .await;
             });
             let handles_for_record = Arc::clone(&handles);
             tokio::spawn(async move {
@@ -228,7 +239,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_b2bua_forwarding", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let cps_per_core = if cores > 0.0 { achieved_cps / cores } else { 0.0 };
+    let cps_per_core = if cores > 0.0 {
+        achieved_cps / cores
+    } else {
+        0.0
+    };
     report
         .result("achieved_cps", round2(achieved_cps))
         .result("cps_per_core", round2(cps_per_core))

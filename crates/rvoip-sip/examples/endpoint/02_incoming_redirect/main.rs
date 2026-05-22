@@ -31,7 +31,10 @@ async fn main() -> Result<()> {
         .build()
         .await?;
 
-    let call_id = caller.invite("sip:frontdesk@127.0.0.1:5088")?.send().await?;
+    let call_id = caller
+        .invite("sip:frontdesk@127.0.0.1:5088")?
+        .send()
+        .await?;
     let call = caller.wrap_call(call_id);
     frontdesk_task
         .await

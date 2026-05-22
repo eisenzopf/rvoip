@@ -70,7 +70,6 @@ async fn third_party_register_rewrites_from_contact_and_pai_on_wire() {
             };
             count_task.fetch_add(1, Ordering::SeqCst);
 
-
             let from_value = request
                 .from()
                 .map(|f| f.uri.to_string())

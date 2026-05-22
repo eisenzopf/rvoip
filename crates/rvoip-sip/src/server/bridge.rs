@@ -41,11 +41,7 @@ impl SipBridgeStrategy {
         Self { coordinator }
     }
 
-    pub async fn bridge(
-        &self,
-        a: &SessionId,
-        b: &SessionId,
-    ) -> Result<BridgeHandle, BridgeError> {
+    pub async fn bridge(&self, a: &SessionId, b: &SessionId) -> Result<BridgeHandle, BridgeError> {
         sip_bridge(&self.coordinator, a, b).await
     }
 }

@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::timeout;
 use tracing::{debug, error, trace, warn};
 
@@ -477,9 +477,11 @@ impl TransactionManager {
             terminated = true;
         }
         if !terminated && self.server_transactions.remove(tx_id).is_some() {
+            self.remove_server_invite_dialog_index_for(tx_id);
             terminated = true;
         }
         self.transaction_destinations.remove(tx_id);
+        self.pending_inbound_bytes.remove(tx_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
         if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
@@ -565,6 +567,7 @@ impl TransactionManager {
         for key in terminated_client_keys {
             debug!(%key, "Removing terminated client transaction");
             self.client_transactions.remove(&key);
+            self.pending_inbound_bytes.remove(&key);
             terminated_transaction_ids.push(key);
             cleaned_count += 1;
         }
@@ -583,6 +586,8 @@ impl TransactionManager {
         for key in terminated_server_keys {
             debug!(%key, "Removing terminated server transaction");
             self.server_transactions.remove(&key);
+            self.remove_server_invite_dialog_index_for(&key);
+            self.pending_inbound_bytes.remove(&key);
             terminated_transaction_ids.push(key);
             cleaned_count += 1;
         }

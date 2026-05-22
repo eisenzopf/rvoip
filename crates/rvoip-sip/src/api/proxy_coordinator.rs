@@ -33,9 +33,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::info;
 
-pub use rvoip_sip_proxy::{
-    ForkMode, ProxyError, ProxyEvent, ProxyResult, RouteDecision,
-};
+pub use rvoip_sip_proxy::{ForkMode, ProxyError, ProxyEvent, ProxyResult, RouteDecision};
 
 /// High-level handle for a running stateful proxy.
 ///
@@ -163,11 +161,7 @@ impl ProxyCoordinator {
     pub async fn shutdown(self: &Arc<Self>) -> ProxyResult<()> {
         // tokio::task::JoinHandle::abort is fine here — the event loop
         // is purely an mpsc consumer, no critical-section work to drain.
-        if let Some(task) = self
-            .proxy_task
-            .as_ref()
-            .map(|t| t.abort_handle())
-        {
+        if let Some(task) = self.proxy_task.as_ref().map(|t| t.abort_handle()) {
             task.abort();
         }
         self.transport.close().await.ok();

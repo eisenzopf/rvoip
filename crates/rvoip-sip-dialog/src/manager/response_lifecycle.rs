@@ -181,6 +181,11 @@ impl DialogManager {
 
             // Register in dialog lookup table now that we have both tags
             if let Some(tuple) = dialog.dialog_id_tuple() {
+                if let Some(remote_tag) = dialog.remote_tag.as_ref() {
+                    let early_key =
+                        DialogUtils::create_early_lookup_key(&dialog.call_id, remote_tag);
+                    self.early_dialog_lookup.remove(&early_key);
+                }
                 let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
                 debug!(
                     "Registering UAS dialog in lookup table: call-id={}, local={}, remote={}",

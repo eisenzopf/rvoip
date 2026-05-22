@@ -1474,7 +1474,7 @@ impl EndpointBuilder {
                 let end = media.port_end.unwrap_or(start);
                 builder = builder.media_ports(start, end);
             } else if let Some(end) = media.port_end {
-                builder = builder.media_ports(10_000, end);
+                builder = builder.media_ports(Config::DEFAULT_MEDIA_PORT_START, end);
             }
             if let Some(srtp) = media.srtp {
                 builder = builder.srtp(srtp);
@@ -1689,12 +1689,9 @@ impl EndpointBuilder {
             config.credentials = Some(Credentials::new(auth_username, password));
         }
 
-        if let Some(start) = self.media_port_start {
-            config.media_port_start = start;
-        }
-        if let Some(end) = self.media_port_end {
-            config.media_port_end = end;
-        }
+        let media_port_start = self.media_port_start.unwrap_or(config.media_port_start);
+        let media_port_end = self.media_port_end.unwrap_or(config.media_port_end);
+        config = config.with_media_ports(media_port_start, media_port_end);
         if let Some(addr) = self.media_public_addr {
             config.media_public_addr = Some(addr);
         }

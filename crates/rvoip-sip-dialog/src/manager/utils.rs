@@ -156,6 +156,12 @@ impl DialogUtils {
         format!("{}:{}:{}", call_id, local_tag, remote_tag)
     }
 
+    /// Generate a lookup key for early UAS dialogs that only have the
+    /// remote From tag.
+    pub fn create_early_lookup_key(call_id: &str, remote_tag: &str) -> String {
+        format!("{}:{}", call_id, remote_tag)
+    }
+
     /// Generate multiple lookup keys for bidirectional dialog matching
     ///
     /// Creates both UAC and UAS perspective keys for robust dialog matching.

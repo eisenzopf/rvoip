@@ -331,9 +331,8 @@ pub use unified::{
 pub use dialog_package::{DialogInfo, DialogInfoDocument, DialogPackageEvent, DialogPackageState};
 pub use dialog_subscription::DialogSubscriptionHandle;
 pub use events::{
-    CallId, Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState,
-    SipTrace, SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind,
-    TransferTargetEvidence,
+    CallId, Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState, SipTrace,
+    SipTraceConfig, SipTraceDirection, SubscriptionState, TransferKind, TransferTargetEvidence,
 };
 
 // Re-export builder
@@ -374,15 +373,15 @@ pub use headers::{
 pub use send::{
     ByeBuilder, CancelBuilder, InfoBuilder, MessageBuilder, NotifyBuilder, OptionsBuilder,
     OutboundCallBuilder, ReInviteBuilder, ReferBuilder, RegisterBuilder, RegisterRefreshBuilder,
-    Surface, SurfaceBuilder, SubscribeBuilder, SubscribeRefreshBuilder, UpdateBuilder,
+    SubscribeBuilder, SubscribeRefreshBuilder, Surface, SurfaceBuilder, UpdateBuilder,
 };
 
 // Response builders (SIP_API_DESIGN_2 Phase D)
+pub use lifecycle::{CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo};
 pub use respond::{
     AcceptBuilder, AuthChallengeBuilder, AuthScheme, GenericResponseBuilder, ProvisionalBuilder,
     RedirectBuilder, RegisterResponseBuilder, RejectBuilder,
 };
-pub use lifecycle::{CallAnsweredInfo, CallLifecycleSnapshot, CallProgressInfo, CallTerminalInfo};
 
 // StreamPeer
 pub use stream_peer::{EventReceiver, PeerControl, StreamPeer};

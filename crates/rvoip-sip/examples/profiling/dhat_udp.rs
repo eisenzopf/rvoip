@@ -54,8 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Pass 2: full UdpTransport pipeline (parse + event)
     {
-        let (transport, mut events) =
-            UdpTransport::bind(LOOPBACK.parse()?, Some(1024)).await?;
+        let (transport, mut events) = UdpTransport::bind(LOOPBACK.parse()?, Some(1024)).await?;
         let transport_addr = transport.local_addr()?;
         let sender = UdpSocket::bind(LOOPBACK).await?;
         println!(

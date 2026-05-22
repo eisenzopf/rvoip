@@ -80,7 +80,9 @@ async fn spawn_mock_registrar(port: u16) -> tokio::task::JoinHandle<()> {
                 HeaderName::Expires,
                 HeaderValue::Raw(b"3600".to_vec()),
             ));
-            let _ = sock.send_to(&Message::Response(resp).to_bytes(), from).await;
+            let _ = sock
+                .send_to(&Message::Response(resp).to_bytes(), from)
+                .await;
         }
     })
 }

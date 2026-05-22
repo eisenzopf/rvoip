@@ -71,9 +71,7 @@ fn build_inbound_with_topology() -> Request {
     // involved; the policy classifies them by name, not value).
     req.headers.push(TypedHeader::Other(
         HeaderName::Via,
-        HeaderValue::Raw(
-            b"SIP/2.0/UDP upstream.example:5060;branch=z9hG4bK-upstream".to_vec(),
-        ),
+        HeaderValue::Raw(b"SIP/2.0/UDP upstream.example:5060;branch=z9hG4bK-upstream".to_vec()),
     ));
     req.headers.push(TypedHeader::Other(
         HeaderName::RecordRoute,
@@ -160,8 +158,7 @@ async fn topology_headers_are_filtered_into_skipped_report() {
 
     // Staged headers must contain only the legitimate carry-through —
     // no topology bleed.
-    let staged_names: Vec<HeaderName> =
-        builder.staged_headers().iter().map(|h| h.name()).collect();
+    let staged_names: Vec<HeaderName> = builder.staged_headers().iter().map(|h| h.name()).collect();
     for must_not_stage in [
         HeaderName::Via,
         HeaderName::RecordRoute,

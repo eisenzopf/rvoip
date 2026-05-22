@@ -1,31 +1,31 @@
 #[cfg(test)]
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
-    use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
-    use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
-    use crate::transaction::error::{Error, Result};
-    use crate::transaction::manager::ClientTransaction;
     use crate::transaction::Transaction;
     use crate::transaction::TransactionEvent;
     use crate::transaction::TransactionKey;
     use crate::transaction::TransactionManager;
     use crate::transaction::TransactionState;
+    use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
+    use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
+    use crate::transaction::error::{Error, Result};
+    use crate::transaction::manager::ClientTransaction;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::prelude::*;
-    use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_core::types::Address;
     use rvoip_sip_core::types::Contact;
     use rvoip_sip_core::types::ContactParamInfo;
+    use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_transport::Transport;
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;
     use std::net::SocketAddr;
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use tokio::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Mutex;
+    use tokio::sync::mpsc;
     use tracing::{debug, info};
 
     /// Create a mock transport for testing
@@ -207,9 +207,11 @@ mod tests {
 
         assert_eq!(sent_request.first_via_transport(), Some("TLS"));
         assert_eq!(top_via_port(&sent_request), Some(5071));
-        assert!(top_via_branch(&sent_request)
-            .as_deref()
-            .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE)));
+        assert!(
+            top_via_branch(&sent_request)
+                .as_deref()
+                .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE))
+        );
         assert!(top_via_has_rport(&sent_request));
         Ok(())
     }
@@ -297,9 +299,11 @@ mod tests {
 
         assert_eq!(sent_request.first_via_transport(), Some("TLS"));
         assert_eq!(top_via_port(&sent_request), Some(5071));
-        assert!(top_via_branch(&sent_request)
-            .as_deref()
-            .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE)));
+        assert!(
+            top_via_branch(&sent_request)
+                .as_deref()
+                .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE))
+        );
         assert!(top_via_has_rport(&sent_request));
         Ok(())
     }
@@ -1002,7 +1006,9 @@ mod tests {
 
         // If the transaction didn't reach Terminated state normally, try forcing it to terminate
         if !success {
-            println!("Transaction did not transition to Terminated state naturally, forcing termination.");
+            println!(
+                "Transaction did not transition to Terminated state naturally, forcing termination."
+            );
             manager.terminate_transaction(&tx_id).await?;
         }
 

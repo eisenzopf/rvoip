@@ -111,10 +111,7 @@ impl ResourceSampler {
         let samples = std::mem::take(&mut *self.samples.lock().expect("sampler lock"));
 
         let baseline_rss_mb = samples.first().map(|s| s.rss_mb).unwrap_or(0.0);
-        let peak_rss_mb = samples
-            .iter()
-            .map(|s| s.rss_mb)
-            .fold(0.0f64, f64::max);
+        let peak_rss_mb = samples.iter().map(|s| s.rss_mb).fold(0.0f64, f64::max);
 
         // Linear-regression slope of RSS over time, normalised to MB/min.
         let rss_growth_mb_per_min = linear_slope_mb_per_sec(&samples) * 60.0;

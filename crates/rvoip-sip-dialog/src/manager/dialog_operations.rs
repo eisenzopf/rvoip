@@ -13,8 +13,8 @@ use crate::dialog::dialog_utils::extract_uri_from_contact;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
-use rvoip_sip_core::types::TypedHeader;
 use rvoip_sip_core::HeaderName;
+use rvoip_sip_core::types::TypedHeader;
 use rvoip_sip_core::{Request, Uri};
 
 /// Trait for dialog storage operations
@@ -234,6 +234,12 @@ impl DialogStore for DialogManager {
             let key = DialogUtils::create_lookup_key(&tuple.0, &tuple.1, &tuple.2);
             self.dialog_lookup.insert(key, dialog_id.clone());
             debug!("Stored confirmed dialog lookup for {}", dialog_id);
+        } else if dialog.state == DialogState::Early {
+            if let Some(remote_tag) = dialog.remote_tag.as_ref() {
+                let key = DialogUtils::create_early_lookup_key(&dialog.call_id, remote_tag);
+                self.early_dialog_lookup.insert(key, dialog_id.clone());
+                debug!("Stored early dialog lookup for {}", dialog_id);
+            }
         }
 
         debug!("Stored dialog {} (state: {:?})", dialog_id, dialog.state);
@@ -277,6 +283,10 @@ impl DialogStore for DialogManager {
         // Get the dialog and terminate it
         if let Some(mut dialog_entry) = self.dialogs.get_mut(dialog_id) {
             let dialog = dialog_entry.value_mut();
+            if let Some(remote_tag) = dialog.remote_tag.as_ref() {
+                let key = DialogUtils::create_early_lookup_key(&dialog.call_id, remote_tag);
+                self.early_dialog_lookup.remove(&key);
+            }
 
             // Only terminate if not already terminated
             if dialog.state != DialogState::Terminated {
@@ -464,13 +474,14 @@ impl DialogLookup for DialogManager {
             debug!("Trying lookup key1 (UAC perspective): {}", key1);
             debug!("Trying lookup key2 (UAS perspective): {}", key2);
 
-            // DEBUG: Show all keys in lookup table
-            debug!(
-                "Dialog lookup table has {} entries:",
-                self.dialog_lookup.len()
-            );
-            for entry in self.dialog_lookup.iter().take(10) {
-                debug!("  Lookup key: {} -> dialog: {}", entry.key(), entry.value());
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                debug!(
+                    "Dialog lookup table has {} entries:",
+                    self.dialog_lookup.len()
+                );
+                for entry in self.dialog_lookup.iter().take(10) {
+                    debug!("  Lookup key: {} -> dialog: {}", entry.key(), entry.value());
+                }
             }
 
             // Scenario 1: Local is From, Remote is To (UAC perspective)
@@ -501,18 +512,22 @@ impl DialogLookup for DialogManager {
             call_id, from_tag
         );
 
-        // Search through all dialogs for matching call-id and remote-tag (early dialogs)
-        for dialog_entry in self.dialogs.iter() {
-            let dialog = dialog_entry.value();
-
-            // Check if this is an early dialog matching our request
-            if dialog.call_id == call_id
-                && dialog.state == crate::dialog::DialogState::Early
-                && dialog.remote_tag.as_ref() == Some(&from_tag)
-            {
-                debug!("Found early dialog {} for initial INVITE", dialog.id);
-                return Some(dialog.id.clone());
+        let early_key = DialogUtils::create_early_lookup_key(&call_id, &from_tag);
+        if let Some(dialog_id) = self
+            .early_dialog_lookup
+            .get(&early_key)
+            .map(|entry| entry.value().clone())
+        {
+            if let Some(dialog) = self.dialogs.get(&dialog_id) {
+                if dialog.call_id == call_id
+                    && dialog.state == crate::dialog::DialogState::Early
+                    && dialog.remote_tag.as_ref() == Some(&from_tag)
+                {
+                    debug!("Found early dialog {} for initial INVITE", dialog.id);
+                    return Some(dialog.id.clone());
+                }
             }
+            self.early_dialog_lookup.remove(&early_key);
         }
 
         debug!("No matching dialog found for request");

@@ -94,9 +94,7 @@ async fn bye_extras_survive_401_driven_auth_retry() {
                     // Echo a Contact so ACK / BYE route back to us.
                     resp.headers.push(TypedHeader::Other(
                         HeaderName::Contact,
-                        HeaderValue::Raw(
-                            format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes(),
-                        ),
+                        HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes()),
                     ));
                     let bytes = Message::Response(resp).to_bytes();
                     let _ = sock_task.send_to(&bytes, from).await;
@@ -106,8 +104,8 @@ async fn bye_extras_survive_401_driven_auth_retry() {
                 }
                 Method::Bye => {
                     let count = count_task.fetch_add(1, Ordering::SeqCst);
-                    let x_trace_val = request
-                        .raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string()));
+                    let x_trace_val =
+                        request.raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string()));
                     let has_x_trace = x_trace_val.is_some();
                     let has_authorization = request
                         .raw_header_value(&HeaderName::Authorization)
@@ -139,7 +137,9 @@ async fn bye_extras_survive_401_driven_auth_retry() {
                 _ => {
                     // Other methods (CANCEL, etc.) — generic 200 OK.
                     let resp = create_response(&request, StatusCode::Ok);
-                    let _ = sock_task.send_to(&Message::Response(resp).to_bytes(), from).await;
+                    let _ = sock_task
+                        .send_to(&Message::Response(resp).to_bytes(), from)
+                        .await;
                 }
             }
         }

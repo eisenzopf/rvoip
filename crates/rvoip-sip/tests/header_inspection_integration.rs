@@ -56,10 +56,7 @@ impl CallHandler for AutoAccept {
     }
 }
 
-async fn wait_for_inbound_invite(
-    events: &mut EventReceiver,
-    timeout: Duration,
-) -> Option<String> {
+async fn wait_for_inbound_invite(events: &mut EventReceiver, timeout: Duration) -> Option<String> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

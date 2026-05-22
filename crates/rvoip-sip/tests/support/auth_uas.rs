@@ -33,15 +33,9 @@ use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 /// What to respond with on the Nth captured request (0-indexed).
 pub enum ChallengeReply {
     /// 401 Unauthorized with a WWW-Authenticate digest challenge.
-    Challenge401 {
-        realm: String,
-        nonce: String,
-    },
+    Challenge401 { realm: String, nonce: String },
     /// 407 Proxy Authentication Required with Proxy-Authenticate digest.
-    Challenge407 {
-        realm: String,
-        nonce: String,
-    },
+    Challenge407 { realm: String, nonce: String },
     /// 200 OK.
     Ok,
 }
@@ -66,11 +60,7 @@ impl AuthUas {
         self.task.abort();
     }
 
-    pub async fn wait_for_n(
-        &self,
-        n: usize,
-        deadline: Duration,
-    ) -> Vec<CapturedAuthRequest> {
+    pub async fn wait_for_n(&self, n: usize, deadline: Duration) -> Vec<CapturedAuthRequest> {
         let waited = timeout(deadline, async {
             loop {
                 if self.count.load(Ordering::SeqCst) as usize >= n {
@@ -99,11 +89,7 @@ where
     F: Fn(u32) -> ChallengeReply + Send + Sync + 'static,
 {
     let addr = format!("127.0.0.1:{port}");
-    let sock = Arc::new(
-        UdpSocket::bind(&addr)
-            .await
-            .expect("auth UAS bind"),
-    );
+    let sock = Arc::new(UdpSocket::bind(&addr).await.expect("auth UAS bind"));
     let captured = Arc::new(Mutex::new(Vec::new()));
     let count = Arc::new(AtomicU32::new(0));
 

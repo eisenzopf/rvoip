@@ -53,10 +53,7 @@ impl ReferBuilder {
     /// the supplied request's dialog identifiers. Local- and remote-tag
     /// parameters are emitted only when present on the underlying
     /// request — RFC 4538 §3 permits omission for early dialogs.
-    pub fn with_target_dialog(
-        mut self,
-        request: &crate::api::incoming::IncomingRequest,
-    ) -> Self {
+    pub fn with_target_dialog(mut self, request: &crate::api::incoming::IncomingRequest) -> Self {
         if let Some(req) = request.raw_request() {
             if let Some(cid) = req.call_id() {
                 let mut value = cid.to_string();
@@ -90,7 +87,10 @@ impl ReferBuilder {
             )
             .await?;
         self.coord
-            .dispatch_outbound(&self.session_id, crate::state_table::EventType::SendOutboundRefer)
+            .dispatch_outbound(
+                &self.session_id,
+                crate::state_table::EventType::SendOutboundRefer,
+            )
             .await?;
         Ok(())
     }

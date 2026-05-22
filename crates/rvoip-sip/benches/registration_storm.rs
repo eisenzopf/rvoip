@@ -99,15 +99,11 @@ fn bench_register_storm(c: &mut Criterion) {
                                         // unregister can race the 200 OK
                                         // and surface a transient error.
                                         for _ in 0..20 {
-                                            if client
-                                                .is_registered(&handle)
-                                                .await
-                                                .unwrap_or(false)
+                                            if client.is_registered(&handle).await.unwrap_or(false)
                                             {
                                                 break;
                                             }
-                                            tokio::time::sleep(Duration::from_millis(5))
-                                                .await;
+                                            tokio::time::sleep(Duration::from_millis(5)).await;
                                         }
                                         client.unregister(&handle).await.ok();
                                         black_box(&handle);

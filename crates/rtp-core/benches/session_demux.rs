@@ -83,9 +83,8 @@ fn bench_contended_lookup(c: &mut Criterion) {
             |b, &threads| {
                 b.iter_custom(|iters| {
                     rt.block_on(async move {
-                        let map = Arc::new(StdMutex::new(populated_hashmap(
-                            CONTENDED_STREAM_COUNT,
-                        )));
+                        let map =
+                            Arc::new(StdMutex::new(populated_hashmap(CONTENDED_STREAM_COUNT)));
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
@@ -94,8 +93,7 @@ fn bench_contended_lookup(c: &mut Criterion) {
                                 let map = Arc::clone(&map);
                                 handles.push(tokio::spawn(async move {
                                     for op in 0..CONTENDED_OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_STREAM_COUNT;
+                                        let idx = (t * 7919 + op * 17) % CONTENDED_STREAM_COUNT;
                                         let key = ssrc(idx);
                                         let guard = map.lock().expect("poisoned");
                                         let v = guard.get(&key).map(|s| s.ssrc);
@@ -139,8 +137,7 @@ fn bench_contended_lookup(c: &mut Criterion) {
                                 let map = Arc::clone(&map);
                                 handles.push(tokio::spawn(async move {
                                     for op in 0..CONTENDED_OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_STREAM_COUNT;
+                                        let idx = (t * 7919 + op * 17) % CONTENDED_STREAM_COUNT;
                                         let key = ssrc(idx);
                                         let v = map.get(&key).map(|r| r.value().ssrc);
                                         black_box(v);

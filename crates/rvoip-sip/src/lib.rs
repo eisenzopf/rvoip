@@ -437,6 +437,8 @@ pub mod adapters;
 #[doc(hidden)]
 pub mod auth;
 #[doc(hidden)]
+pub mod cleanup_diag;
+#[doc(hidden)]
 pub mod session_registry;
 #[doc(hidden)]
 pub mod session_store;
@@ -477,13 +479,13 @@ pub use api::handle::{
     CallId, SessionHandle, SipReason, TransferDialogMatcher, TransferLifecycleOptions,
     TransferOutcome, TransferWaitMode,
 };
-pub use api::incoming::{
-    IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
-};
-pub use api::headers::view::SipHeaderView;
 pub use api::headers::options::{
     BuilderHeaderState, BuilderStrictness, HeaderCarryThroughReport, HeaderPolicyViolation,
     SipRequestOptions, ViolationReason,
+};
+pub use api::headers::view::SipHeaderView;
+pub use api::incoming::{
+    IncomingCall, IncomingCallGuard, IncomingRegister, IncomingRequest, IncomingResponse,
 };
 pub use api::trace_redactor::{PassthroughRedactor, RedactionDecision, TraceRedactor};
 

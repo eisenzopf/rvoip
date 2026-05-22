@@ -151,10 +151,7 @@ impl SessionRegistry {
     /// `IncomingCall::raw_request()` can surface it. The companion
     /// take/peek accessors are used by the four API surfaces when
     /// constructing the user-facing `IncomingCall`.
-    pub async fn store_pending_incoming_request(
-        &self,
-        request: Arc<rvoip_sip_core::Request>,
-    ) {
+    pub async fn store_pending_incoming_request(&self, request: Arc<rvoip_sip_core::Request>) {
         self.pending_incoming_request.store(Some(request));
     }
 
@@ -162,18 +159,14 @@ impl SessionRegistry {
     /// when multiple surfaces (StreamPeer, CallbackPeer event stream,
     /// Endpoint) may build their own `IncomingCall` view of the same
     /// inbound call.
-    pub async fn peek_pending_incoming_request(
-        &self,
-    ) -> Option<Arc<rvoip_sip_core::Request>> {
+    pub async fn peek_pending_incoming_request(&self) -> Option<Arc<rvoip_sip_core::Request>> {
         self.pending_incoming_request.load_full()
     }
 
     /// Consume the parsed inbound INVITE once an
     /// `IncomingCall::accept()` / `reject()` / `defer()` resolves the
     /// call. Idempotent — repeated calls return `None`.
-    pub async fn take_pending_incoming_request(
-        &self,
-    ) -> Option<Arc<rvoip_sip_core::Request>> {
+    pub async fn take_pending_incoming_request(&self) -> Option<Arc<rvoip_sip_core::Request>> {
         self.pending_incoming_request.swap(None)
     }
 }

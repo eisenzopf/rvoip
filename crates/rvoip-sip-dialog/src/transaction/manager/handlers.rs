@@ -25,7 +25,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, info, warn};
 
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
@@ -51,8 +51,8 @@ use crate::transaction::{
     TransactionKind, TransactionState,
 };
 
-use super::types::*;
 use super::TransactionManager;
+use super::types::*;
 
 /// Handle transport message events and route them to appropriate transactions.
 ///
@@ -113,46 +113,12 @@ pub async fn handle_transport_message(
                         let ack_request = request.clone();
 
                         // DashMap path — either direct key hit or a
-                        // dialog-identifier scan via .iter(). Neither
-                        // holds across `.await`.
+                        // dialog-identifier lookup via the manager's ACK
+                        // index. Neither holds across `.await`.
                         let tx_opt = if let Some(entry) = server_transactions.get(&tx_id) {
                             Some(entry.value().clone())
                         } else {
-                            server_transactions
-                                .iter()
-                                .filter(|r| {
-                                    r.key().method() == &Method::Invite && r.key().is_server()
-                                })
-                                .find_map(|r| {
-                                    let tx = r.value();
-                                    if let (Some(req_call_id), Some(ack_call_id)) =
-                                        (tx.original_request_call_id(), ack_request.call_id())
-                                    {
-                                        if req_call_id == ack_call_id.value() {
-                                            if let (Some(req_from), Some(ack_from)) = (
-                                                tx.original_request_from_tag(),
-                                                ack_request.from_tag(),
-                                            ) {
-                                                if req_from == ack_from {
-                                                    let to_matches = match (
-                                                        tx.original_request_to_tag(),
-                                                        ack_request.to_tag(),
-                                                    ) {
-                                                        (Some(req_to), Some(ack_to)) => {
-                                                            req_to == ack_to
-                                                        }
-                                                        _ => true,
-                                                    };
-                                                    if to_matches {
-                                                        debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
-                                                        return Some(tx.clone());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    None
-                                })
+                            manager.find_server_invite_for_ack(&ack_request)
                         };
 
                         // If we found a transaction, process the ACK
@@ -235,7 +201,9 @@ pub async fn handle_transport_message(
                             Some(via) => match via.branch() {
                                 Some(branch) => branch.to_string(),
                                 None => {
-                                    debug!("CANCEL request has no branch parameter, can't find matching INVITE");
+                                    debug!(
+                                        "CANCEL request has no branch parameter, can't find matching INVITE"
+                                    );
                                     // Fall through to stray CANCEL handling
                                     handle_stray_cancel(request.clone(), source, transport).await?;
 
@@ -647,8 +615,8 @@ pub fn create_via_header_for_transport(
     branch: &str,
     transport: &str,
 ) -> Result<TypedHeader> {
-    use rvoip_sip_core::types::via::Via;
     use rvoip_sip_core::types::Param;
+    use rvoip_sip_core::types::via::Via;
 
     let via_params = vec![Param::branch(branch.to_string()), Param::Rport(None)];
 
@@ -761,11 +729,19 @@ impl TransactionManager {
                 self.publish_inbound_sip_trace(&message, source, destination, transport_type)
                     .await;
                 if let Some(bytes) = raw_bytes.as_ref() {
-                    if let Some(key) =
-                        crate::transaction::utils::transaction_key_from_message(&message)
-                    {
-                        // `Bytes::clone` is a refcount bump — no heap alloc.
-                        self.pending_inbound_bytes.insert(key, bytes.clone());
+                    let cache_raw_bytes = match &message {
+                        Message::Request(request) => {
+                            !matches!(request.method(), Method::Ack | Method::Bye)
+                        }
+                        Message::Response(_) => true,
+                    };
+                    if cache_raw_bytes {
+                        if let Some(key) =
+                            crate::transaction::utils::transaction_key_from_message(&message)
+                        {
+                            // `Bytes::clone` is a refcount bump — no heap alloc.
+                            self.pending_inbound_bytes.insert(key, bytes.clone());
+                        }
                     }
                 }
                 self.handle_message(message, source, destination).await
@@ -1112,40 +1088,11 @@ impl TransactionManager {
             }
         }
 
-        // RFC 3261 Section 17.1.1.3: For 2xx responses, ACK has different branch
-        // Use dialog-based matching (Call-ID, From tag, To tag).
-        // DashMap iter — no `.await` inside, safe.
-        let matching_tx = self
-            .server_transactions
-            .iter()
-            .filter(|r| r.key().method() == &Method::Invite && r.key().is_server())
-            .find_map(|r| {
-                let tx = r.value();
-                if let (Some(req_call_id), Some(ack_call_id)) =
-                    (tx.original_request_call_id(), request.call_id())
-                {
-                    if req_call_id == ack_call_id.value() {
-                        if let (Some(req_from), Some(ack_from)) =
-                            (tx.original_request_from_tag(), request.from_tag())
-                        {
-                            if req_from == ack_from {
-                                let to_matches = match (
-                                    tx.original_request_to_tag(),
-                                    request.to_tag(),
-                                ) {
-                                    (Some(req_to), Some(ack_to)) => req_to == ack_to,
-                                    _ => true,
-                                };
-                                if to_matches {
-                                    debug!(call_id=%req_call_id, "Found matching INVITE server transaction for ACK by dialog identifiers");
-                                    return Some(tx.clone());
-                                }
-                            }
-                        }
-                    }
-                }
-                None
-            });
+        // RFC 3261 Section 17.1.1.3: For 2xx responses, ACK has different branch.
+        // Use dialog-based matching (Call-ID, From tag, To tag), with an O(1)
+        // index in the common case and a scan only for stale/missing index
+        // entries.
+        let matching_tx = self.find_server_invite_for_ack(&request);
 
         if let Some(tx) = matching_tx {
             let tx_id = tx.id().clone();
@@ -1179,6 +1126,63 @@ impl TransactionManager {
             .ok();
 
         Ok(())
+    }
+
+    pub(crate) fn find_server_invite_for_ack(
+        &self,
+        request: &Request,
+    ) -> Option<Arc<dyn ServerTransaction>> {
+        let (exact_key, fallback_key) = ServerInviteDialogKey::ack_lookup_keys(request)?;
+
+        if let Some(tx) = self.lookup_server_invite_by_dialog_key(&exact_key) {
+            debug!(call_id=%exact_key.call_id, "Found matching INVITE server transaction for ACK by dialog index");
+            return Some(tx);
+        }
+
+        if let Some(fallback_key) = fallback_key.as_ref() {
+            if let Some(tx) = self.lookup_server_invite_by_dialog_key(fallback_key) {
+                debug!(call_id=%fallback_key.call_id, "Found matching INVITE server transaction for ACK by dialog index fallback");
+                return Some(tx);
+            }
+        }
+
+        self.server_transactions
+            .iter()
+            .filter(|r| r.key().method() == &Method::Invite && r.key().is_server())
+            .find_map(|r| {
+                let tx = r.value();
+                if tx.original_request_matches_dialog(
+                    &exact_key.call_id,
+                    &exact_key.from_tag,
+                    exact_key.to_tag.as_deref(),
+                ) {
+                    debug!(call_id=%exact_key.call_id, "Found matching INVITE server transaction for ACK by dialog scan");
+                    Some(tx.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
+    fn lookup_server_invite_by_dialog_key(
+        &self,
+        dialog_key: &ServerInviteDialogKey,
+    ) -> Option<Arc<dyn ServerTransaction>> {
+        let transaction_id = self
+            .server_invite_dialog_index
+            .get(dialog_key)
+            .map(|entry| entry.value().clone())?;
+
+        if let Some(transaction) = self
+            .server_transactions
+            .get(&transaction_id)
+            .map(|entry| entry.value().clone())
+        {
+            Some(transaction)
+        } else {
+            self.server_invite_dialog_index.remove(dialog_key);
+            None
+        }
     }
 }
 

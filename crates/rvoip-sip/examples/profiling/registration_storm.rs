@@ -12,8 +12,8 @@
 use rvoip_sip::{Config, StreamPeer, UnifiedCoordinator};
 use std::collections::HashMap;
 use std::env;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const DEFAULT_DURATION_SECS: u64 = 30;
@@ -47,9 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         UnifiedCoordinator::new(Config::local("profiling-registrar", REGISTRAR_PORT)).await?;
     let mut users = HashMap::new();
     users.insert(USER.to_string(), PASS.to_string());
-    let _registrar = coordinator
-        .start_registration_server(REALM, users)
-        .await?;
+    let _registrar = coordinator.start_registration_server(REALM, users).await?;
 
     let target = Arc::new(format!("sip:127.0.0.1:{}", REGISTRAR_PORT));
     let completed = Arc::new(AtomicU64::new(0));

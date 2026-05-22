@@ -70,8 +70,7 @@ async fn inbound_provisional_fires_call_progress_detailed_with_response() {
             Ok(Some(_)) | Ok(None) | Err(_) => continue,
         }
     }
-    let detailed =
-        detailed.expect("Event::CallProgressDetailed must fire on the first 1xx");
+    let detailed = detailed.expect("Event::CallProgressDetailed must fire on the first 1xx");
 
     // The carried IncomingResponse must surface a status code in the
     // 1xx range. The exact value (100, 180, 183) is implementation-

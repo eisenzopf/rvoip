@@ -111,6 +111,7 @@ mod validation;
 // Re-export transport implementations
 pub use allocator::{
     AllocationStrategy, GlobalPortAllocator, PairingStrategy, PortAllocator, PortAllocatorConfig,
+    DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
 };
 pub use security_transport::SecurityRtpTransport;
 pub use tcp::TcpRtpTransport;

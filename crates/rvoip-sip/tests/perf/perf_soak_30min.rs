@@ -34,7 +34,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_media_core::types::AudioFrame;
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -90,9 +92,7 @@ async fn boot_bob(port: u16, received_frames: Arc<AtomicU64>) -> BobReceiver {
 
 async fn boot_alice(port: u16) -> Arc<UnifiedCoordinator> {
     let cfg = Config::local("perf-soak-alice", port);
-    let coord = UnifiedCoordinator::new(cfg)
-        .await
-        .expect("perf-soak alice");
+    let coord = UnifiedCoordinator::new(cfg).await.expect("perf-soak alice");
     tokio::time::sleep(Duration::from_millis(200)).await;
     coord
 }
@@ -226,7 +226,9 @@ async fn perf_soak_30min() {
             let ns = t_send.elapsed().as_nanos() as u64;
             setup_hist.record_nanos(ns);
             // Place into first or last minute snapshot bucket.
-            let secs = dispatch_at.duration_since(started_minute_anchor()).as_secs_f64();
+            let secs = dispatch_at
+                .duration_since(started_minute_anchor())
+                .as_secs_f64();
             // We use a global anchor (set just once via OnceLock).
             // Cheaper: classify by `dispatch_at - started` using a
             // captured `started` clone — but we can't move it cheaply
@@ -235,7 +237,11 @@ async fn perf_soak_30min() {
             if dispatch_at.duration_since(started_global()).as_secs() < 60 {
                 first_minute_hist.record_nanos(ns);
             }
-            if total.saturating_sub(dispatch_at.duration_since(started_global())).as_secs() <= 60 {
+            if total
+                .saturating_sub(dispatch_at.duration_since(started_global()))
+                .as_secs()
+                <= 60
+            {
                 last_minute_hist.record_nanos(ns);
             }
             let _ = handle.hangup_and_wait(Some(call_timeout)).await;
@@ -294,7 +300,11 @@ async fn perf_soak_30min() {
     };
     let mut report = ScenarioReport::new("perf_soak_30min", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let cps_per_core = if cores > 0.0 { (succeeded as f64 / duration_secs as f64) / cores } else { 0.0 };
+    let cps_per_core = if cores > 0.0 {
+        (succeeded as f64 / duration_secs as f64) / cores
+    } else {
+        0.0
+    };
     report
         .result("duration_secs", duration_secs)
         .result("soak_cps", soak_cps)
@@ -318,8 +328,7 @@ async fn perf_soak_30min() {
         .latency(&first_minute_hist)
         .latency(&last_minute_hist)
         .with_resources(resources);
-    let json_path = report
-        .write_resources_first_then_write_json_if_supported();
+    let json_path = report.write_resources_first_then_write_json_if_supported();
     report.print_summary(&json_path);
 
     bob.shutdown.shutdown();

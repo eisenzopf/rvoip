@@ -118,7 +118,8 @@ impl SipHeaderView for UpstreamView {
 fn build_synthetic_upstream_invite() -> UpstreamView {
     let uri: Uri = "sip:bob@b2bua.example".parse().expect("uri parse");
     let mut req = Request::new(Method::Invite, uri);
-    req.headers.push(TypedHeader::CallId(CallIdHdr::new(UPSTREAM_CALL_ID)));
+    req.headers
+        .push(TypedHeader::CallId(CallIdHdr::new(UPSTREAM_CALL_ID)));
     req.headers
         .push(TypedHeader::CSeq(CSeq::new(101, Method::Invite)));
     req.headers
@@ -416,22 +417,13 @@ async fn b2bua_carry_through_drives_real_incoming_call() {
 
     // Stage the upstream headers on alice's INVITE — these are the
     // application headers the b2bua will carry through.
-    let target = format!(
-        "sip:bob@127.0.0.1:{}",
-        PAIR_B2BUA_E2E_MIDDLE_PORT + 1
-    );
+    let target = format!("sip:bob@127.0.0.1:{}", PAIR_B2BUA_E2E_MIDDLE_PORT + 1);
     let call_id = alice
         .invite(
-            Some(format!(
-                "sip:alice@127.0.0.1:{}",
-                PAIR_B2BUA_E2E_ALICE_PORT
-            )),
+            Some(format!("sip:alice@127.0.0.1:{}", PAIR_B2BUA_E2E_ALICE_PORT)),
             target.clone(),
         )
-        .with_raw_header(
-            HeaderName::Other("History-Info".to_string()),
-            HISTORY_INFO,
-        )
+        .with_raw_header(HeaderName::Other("History-Info".to_string()), HISTORY_INFO)
         .expect("History-Info raw header")
         .with_raw_header(HeaderName::Other("Diversion".to_string()), DIVERSION)
         .expect("Diversion raw header")

@@ -51,7 +51,10 @@ impl UpdateBuilder {
             )
             .await?;
         self.coord
-            .dispatch_outbound(&self.session_id, crate::state_table::EventType::SendOutboundUpdate)
+            .dispatch_outbound(
+                &self.session_id,
+                crate::state_table::EventType::SendOutboundUpdate,
+            )
             .await?;
         Ok(())
     }

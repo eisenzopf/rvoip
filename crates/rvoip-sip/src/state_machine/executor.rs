@@ -4,6 +4,7 @@ use tracing::{debug, error, info};
 
 use crate::{
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
+    cleanup_diag::{self, CleanupStage},
     session_store::{SessionState, SessionStore},
     state_table::{Action, EventTemplate, EventType, StateKey, Transition, MASTER_TABLE},
     types::CallState,
@@ -88,6 +89,32 @@ impl PendingOptionsSlot {
             Self::Message(_) => Method::Message,
             Self::Options(_) => Method::Options,
         }
+    }
+}
+
+fn state_machine_stage_for_event(event: &EventType) -> CleanupStage {
+    match event {
+        EventType::IncomingCall { .. } => CleanupStage::StateMachineIncomingCall,
+        EventType::AcceptCall => CleanupStage::StateMachineAcceptCall,
+        EventType::DialogBYE | EventType::DialogTerminated | EventType::DialogCANCEL => {
+            CleanupStage::StateMachineTerminalEvent
+        }
+        _ => CleanupStage::StateMachineOtherEvent,
+    }
+}
+
+fn state_machine_event_name(event: &EventType) -> &'static str {
+    match event {
+        EventType::IncomingCall { .. } => "IncomingCall",
+        EventType::AcceptCall => "AcceptCall",
+        EventType::DialogBYE => "DialogBYE",
+        EventType::DialogTerminated => "DialogTerminated",
+        EventType::InternalCheckReady => "InternalCheckReady",
+        EventType::DialogCreated { .. } => "DialogCreated",
+        EventType::Dialog200OK => "Dialog200OK",
+        EventType::DialogACK => "DialogACK",
+        EventType::DialogCANCEL => "DialogCANCEL",
+        _ => "Other",
     }
 }
 
@@ -253,6 +280,23 @@ impl StateMachine {
 
     /// Process an event for a session
     pub async fn process_event(
+        &self,
+        session_id: &SessionId,
+        event: EventType,
+    ) -> Result<ProcessEventResult, Box<dyn std::error::Error + Send + Sync>> {
+        let guard = cleanup_diag::stage_guard(
+            state_machine_stage_for_event(&event),
+            format!("{}:{}", session_id, state_machine_event_name(&event)),
+        );
+        let result = self.process_event_inner(session_id, event).await;
+        match &result {
+            Ok(_) => guard.finish_success(),
+            Err(_) => guard.finish_failure(),
+        }
+        result
+    }
+
+    async fn process_event_inner(
         &self,
         session_id: &SessionId,
         event: EventType,
@@ -713,8 +757,16 @@ impl StateMachine {
                 let event = self
                     .instantiate_event(event_template, &session, old_state)
                     .await;
-                if let Err(e) = event_tx.send(event).await {
-                    error!("Failed to publish event: {}", e);
+                let guard = cleanup_diag::stage_guard(
+                    CleanupStage::StateMachineEventPublish,
+                    &session.session_id.0,
+                );
+                match event_tx.send(event).await {
+                    Ok(()) => guard.finish_success(),
+                    Err(e) => {
+                        guard.finish_failure();
+                        error!("Failed to publish event: {}", e);
+                    }
                 }
             }
         }

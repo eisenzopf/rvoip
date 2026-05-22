@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use rvoip_sip::api::headers::options::{ViolationReason, SipRequestOptions};
+use rvoip_sip::api::headers::options::{SipRequestOptions, ViolationReason};
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip_core::types::header::HeaderName;
 use rvoip_sip_core::types::headers::TypedHeader;
@@ -28,9 +28,7 @@ async fn with_header_rejects_stack_managed_cseq_on_invite() {
     let coord = boot("guard-invite", 17050).await;
 
     let cseq = TypedHeader::CSeq(CSeq::new(1, Method::Invite));
-    let result = coord
-        .invite(None, "sip:bob@127.0.0.1:1")
-        .with_header(cseq);
+    let result = coord.invite(None, "sip:bob@127.0.0.1:1").with_header(cseq);
     let err = match result {
         Ok(_) => panic!("CSeq must be rejected on INVITE"),
         Err(e) => e,
@@ -74,9 +72,7 @@ async fn with_header_rejects_authorization_with_dedicated_setter_hint_on_registe
                 "expected setter hint to mention 'credentials'; got `{setter}`"
             );
         }
-        other => panic!(
-            "expected UseDedicatedSetter for Authorization on REGISTER; got {other:?}"
-        ),
+        other => panic!("expected UseDedicatedSetter for Authorization on REGISTER; got {other:?}"),
     }
 }
 
@@ -104,8 +100,7 @@ async fn with_headers_from_skips_stack_managed_names_in_audit_report() {
         .with_headers_from(&view, &names)
         .expect("carry-through must succeed");
 
-    let skipped_names: Vec<HeaderName> =
-        report.skipped.iter().map(|(n, _)| n.clone()).collect();
+    let skipped_names: Vec<HeaderName> = report.skipped.iter().map(|(n, _)| n.clone()).collect();
     for must_skip in [
         HeaderName::Via,
         HeaderName::CSeq,
@@ -165,7 +160,8 @@ fn build_request_with_topology_headers() -> Request {
         .push(TypedHeader::CallId(CallIdHdr::new("topology-call-id")));
     req.headers
         .push(TypedHeader::CSeq(CSeq::new(42, Method::Invite)));
-    req.headers.push(TypedHeader::MaxForwards(MaxForwards::new(70)));
+    req.headers
+        .push(TypedHeader::MaxForwards(MaxForwards::new(70)));
     req.headers.push(TypedHeader::Other(
         HeaderName::Subject,
         rvoip_sip_core::types::headers::HeaderValue::Raw(b"hello".to_vec()),

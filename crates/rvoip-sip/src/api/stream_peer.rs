@@ -680,9 +680,7 @@ impl StreamPeer {
                     let coord = self.control.coordinator.clone();
                     let parsed = coord.session_registry.peek_pending_incoming_request().await;
                     let incoming = match parsed {
-                        Some(req) => IncomingCall::with_request(
-                            call_id, from, to, sdp, coord, req,
-                        ),
+                        Some(req) => IncomingCall::with_request(call_id, from, to, sdp, coord, req),
                         None => IncomingCall::new(call_id, from, to, sdp, coord),
                     };
                     return Ok(incoming);
@@ -1097,8 +1095,7 @@ impl StreamPeerBuilder {
     /// # }
     /// ```
     pub fn media_ports(mut self, start: u16, end: u16) -> Self {
-        self.config.media_port_start = start;
-        self.config.media_port_end = end;
+        self.config = self.config.with_media_ports(start, end);
         self
     }
 

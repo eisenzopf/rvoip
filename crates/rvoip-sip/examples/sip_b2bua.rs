@@ -22,9 +22,7 @@
 use rvoip_sip::api::events::Event;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::server::b2bua::SipB2bua;
-use rvoip_sip::server::contact_resolver::{
-    ContactRequest, ContactResolver, StaticContactResolver,
-};
+use rvoip_sip::server::contact_resolver::{ContactRequest, ContactResolver, StaticContactResolver};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -47,9 +45,7 @@ impl Args {
                 "--upstream" => upstream_aor = iter.next().unwrap(),
                 "--from" => from_uri = iter.next().unwrap(),
                 "--help" | "-h" => {
-                    eprintln!(
-                        "usage: sip_b2bua [--bind ADDR] [--upstream URI] [--from URI]"
-                    );
+                    eprintln!("usage: sip_b2bua [--bind ADDR] [--upstream URI] [--from URI]");
                     std::process::exit(0);
                 }
                 other => {
@@ -80,12 +76,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         args.bind, args.upstream_aor, args.from_uri
     );
 
-    let coordinator = UnifiedCoordinator::new(Config::on(
-        "sip-b2bua",
-        args.bind.ip(),
-        args.bind.port(),
-    ))
-    .await?;
+    let coordinator =
+        UnifiedCoordinator::new(Config::on("sip-b2bua", args.bind.ip(), args.bind.port())).await?;
 
     // Resolve the upstream URI once at startup. In a real deployment a
     // RegistrarContactResolver would be wired here so the upstream contact

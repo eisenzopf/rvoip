@@ -16,8 +16,15 @@
 //!
 //! Perf sizing knobs:
 //! - `RVOIP_PERF_CHANNEL_CAPACITY` (default 20000)
+//! - `RVOIP_PERF_RTP_PORT_CAPACITY` / `RVOIP_PERF_MEDIA_PORT_CAPACITY`
+//!   (default follows `RVOIP_PERF_CHANNEL_CAPACITY`)
+//! - `RVOIP_PERF_RTP_PORT_START` / `RVOIP_PERF_MEDIA_PORT_START`
+//! - `RVOIP_PERF_RTP_PORT_END` / `RVOIP_PERF_MEDIA_PORT_END`
 //! - `RVOIP_PERF_SESSION_EVENT_WORKERS`
 //! - `RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY`
+//! - `RVOIP_PERF_CLEANUP_DIAG=1` (periodic cleanup-stage summary)
+//! - `RVOIP_PERF_CLEANUP_DIAG_EVENTS=1` (per-operation cleanup timestamps)
+//! - `RVOIP_PERF_NO_MEDIA=1` (SIP+SDP only; skip RTP/media-core allocation)
 //!
 //! The process runs forever; SIGINT to terminate.
 
@@ -30,6 +37,7 @@ use rvoip_sip::adapters::media_adapter::cleanup_session_diag;
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::Config;
+use rvoip_sip::cleanup_diag;
 
 #[derive(Clone)]
 struct CountingAccept {
@@ -82,8 +90,14 @@ async fn main() {
     // `RUST_LOG=debug` away.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,rvoip_sip::state_machine::actions=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                if cleanup_diag::enabled() {
+                    "warn,rvoip_sip::state_machine::actions=info,rvoip_sip::cleanup_diag=info"
+                        .into()
+                } else {
+                    "warn,rvoip_sip::state_machine::actions=info".into()
+                }
+            }),
         )
         .with_target(false)
         .try_init();
@@ -166,6 +180,10 @@ async fn main() {
                     now_cln - last_cln,
                     now_acc.saturating_sub(now_cln),
                 );
+                if cleanup_diag::enabled() {
+                    let snapshot = cleanup_diag::snapshot();
+                    println!("{}", cleanup_diag::format_summary(&snapshot));
+                }
                 last_acc = now_acc;
                 last_cln = now_cln;
                 last_t = now_t;
@@ -185,6 +203,10 @@ async fn main() {
         accepted.load(Ordering::Relaxed),
         cleanup_session_diag::cleaned_total(),
     );
+    if cleanup_diag::enabled() {
+        let snapshot = cleanup_diag::snapshot();
+        println!("{}", cleanup_diag::format_summary(&snapshot));
+    }
     shutdown.shutdown();
     reporter.abort();
     let _ = tokio::time::timeout(Duration::from_secs(3), run_task).await;
@@ -193,6 +215,7 @@ async fn main() {
 fn apply_perf_config(config: Config) -> Config {
     let channel_capacity = env_usize("RVOIP_PERF_CHANNEL_CAPACITY", 20_000).max(1);
     let mut config = config.with_channel_capacity(channel_capacity);
+    config = apply_perf_media_ports(config, channel_capacity);
     if let Some(workers) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_WORKERS") {
         config = config.with_session_event_dispatcher_workers(workers);
     }
@@ -202,10 +225,83 @@ fn apply_perf_config(config: Config) -> Config {
     config
 }
 
+fn apply_perf_media_ports(config: Config, channel_capacity: usize) -> Config {
+    let media_port_start =
+        env_u16_any(&["RVOIP_PERF_RTP_PORT_START", "RVOIP_PERF_MEDIA_PORT_START"])
+            .unwrap_or(config.media_port_start);
+    let explicit_end = env_u16_any(&["RVOIP_PERF_RTP_PORT_END", "RVOIP_PERF_MEDIA_PORT_END"]);
+    let media_port_capacity = env_usize_any(&[
+        "RVOIP_PERF_RTP_PORT_CAPACITY",
+        "RVOIP_PERF_MEDIA_PORT_CAPACITY",
+    ])
+    .unwrap_or(channel_capacity)
+    .max(1);
+
+    let capacity_end = port_range_end_for_capacity(media_port_start, media_port_capacity);
+    let media_port_end = explicit_end.unwrap_or(config.media_port_end.max(capacity_end));
+    if media_port_start > media_port_end {
+        panic!(
+            "invalid RTP media port range: start {} is greater than end {}",
+            media_port_start, media_port_end
+        );
+    }
+
+    let available_ports = media_port_end as usize - media_port_start as usize + 1;
+    if available_ports < media_port_capacity {
+        eprintln!(
+            "rvoip-sip perf_listener: RTP media port range {}-{} provides {} ports, below requested capacity {}",
+            media_port_start, media_port_end, available_ports, media_port_capacity
+        );
+    } else {
+        println!(
+            "rvoip-sip perf_listener: RTP media port range {}-{} ({} ports, requested capacity {})",
+            media_port_start, media_port_end, available_ports, media_port_capacity
+        );
+    }
+
+    config.with_media_ports(media_port_start, media_port_end)
+}
+
+fn port_range_end_for_capacity(start: u16, capacity: usize) -> u16 {
+    let end = start as usize + capacity.saturating_sub(1);
+    end.min(u16::MAX as usize) as u16
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     env_usize_opt(name).unwrap_or(default)
 }
 
 fn env_usize_opt(name: &str) -> Option<usize> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
+}
+
+fn env_usize_any(names: &[&str]) -> Option<usize> {
+    names.iter().find_map(|name| env_usize_opt(name))
+}
+
+fn env_u16_opt(name: &str) -> Option<u16> {
+    std::env::var(name).ok().and_then(|s| s.parse().ok())
+}
+
+fn env_u16_any(names: &[&str]) -> Option<u16> {
+    names.iter().find_map(|name| env_u16_opt(name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn perf_media_capacity_expands_default_port_range() {
+        let start = Config::DEFAULT_MEDIA_PORT_START;
+        assert_eq!(
+            port_range_end_for_capacity(start, 20_000),
+            start.saturating_add(19_999)
+        );
+    }
+
+    #[test]
+    fn perf_media_capacity_caps_at_u16_max() {
+        assert_eq!(port_range_end_for_capacity(60_000, 20_000), u16::MAX);
+    }
 }

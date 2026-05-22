@@ -34,7 +34,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rvoip_media_core::types::AudioFrame;
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -90,11 +92,9 @@ impl CallHandler for AsrAccept {
                                 | ((frame.samples[2] as u16 as u64) << 16)
                                 | (frame.samples[3] as u16 as u64);
                             if micros > 0 {
-                                let now_micros =
-                                    started_at.elapsed().as_micros() as u64;
+                                let now_micros = started_at.elapsed().as_micros() as u64;
                                 if now_micros > micros {
-                                    let elapsed_ns =
-                                        (now_micros - micros).saturating_mul(1000);
+                                    let elapsed_ns = (now_micros - micros).saturating_mul(1000);
                                     hist.record_nanos(elapsed_ns);
                                 }
                             }
@@ -245,7 +245,11 @@ async fn run_one_point(
             let _ = h.await;
         }
     };
-    let _ = tokio::time::timeout(call_timeout + Duration::from_secs(load.cooldown_secs), drain).await;
+    let _ = tokio::time::timeout(
+        call_timeout + Duration::from_secs(load.cooldown_secs),
+        drain,
+    )
+    .await;
 
     let resources = sampler.stop().await;
     let sent = sent_frames.load(Ordering::Relaxed);
@@ -255,11 +259,19 @@ async fn run_one_point(
     } else {
         0.0
     };
-    let asr = if target > 0 { active as f64 / target as f64 } else { 0.0 };
+    let asr = if target > 0 {
+        active as f64 / target as f64
+    } else {
+        0.0
+    };
 
     let mut report = ScenarioReport::new("perf_ai_agent_load", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let streams_per_core = if cores > 0.0 { active as f64 / cores } else { 0.0 };
+    let streams_per_core = if cores > 0.0 {
+        active as f64 / cores
+    } else {
+        0.0
+    };
     report
         .result("target_agents", target)
         .result("achieved_agents", active)

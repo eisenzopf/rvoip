@@ -50,13 +50,20 @@ async fn main() -> Result<()> {
                 return Err(SessionError::Other(format!("call failed: {reason}")));
             }
             Some(_) => {}
-            None => return Err(SessionError::Other("filtered event stream closed".to_string())),
+            None => {
+                return Err(SessionError::Other(
+                    "filtered event stream closed".to_string(),
+                ))
+            }
         }
     }
 
     alice.hangup(&call_id).await?;
-    alice.shutdown_gracefully(Some(Duration::from_secs(2))).await?;
-    bob.shutdown_gracefully(Some(Duration::from_secs(2))).await?;
+    alice
+        .shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await?;
+    bob.shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await?;
     bob_task
         .await
         .map_err(|err| SessionError::Other(err.to_string()))??;

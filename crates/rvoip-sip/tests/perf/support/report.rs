@@ -148,7 +148,14 @@ impl ScenarioReport {
         // Schema invariant: every emitted JSON file must contain the
         // canonical top-level keys, otherwise downstream tooling
         // (regression dashboards, comparison scripts) silently breaks.
-        for key in ["scenario", "environment", "load", "results", "latency_ns", "resources"] {
+        for key in [
+            "scenario",
+            "environment",
+            "load",
+            "results",
+            "latency_ns",
+            "resources",
+        ] {
             assert!(
                 value.get(key).is_some(),
                 "ScenarioReport::to_json missing canonical key `{key}`"
@@ -191,7 +198,10 @@ impl ScenarioReport {
         );
         println!(
             " load    : target_cps={}  ramp={}s  steady={}s  cooldown={}s",
-            self.load.target_cps, self.load.ramp_secs, self.load.steady_secs, self.load.cooldown_secs,
+            self.load.target_cps,
+            self.load.ramp_secs,
+            self.load.steady_secs,
+            self.load.cooldown_secs,
         );
         println!("────────────────────────────────────────────────────────────────────────");
         println!(" results:");
@@ -207,7 +217,12 @@ impl ScenarioReport {
         }
         if let Some(base) = self.baseline_rss_mb {
             if let Some(peak) = self.peak_rss_mb {
-                println!(" RSS Δ       : {:.1} MB  (baseline {:.1} → peak {:.1})", peak - base, base, peak);
+                println!(
+                    " RSS Δ       : {:.1} MB  (baseline {:.1} → peak {:.1})",
+                    peak - base,
+                    base,
+                    peak
+                );
             }
         }
         if let Some(growth) = self.rss_growth_mb_per_min {

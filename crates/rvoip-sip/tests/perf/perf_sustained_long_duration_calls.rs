@@ -29,7 +29,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -207,8 +209,7 @@ async fn run_one_point(
 
     // Cooldown: wait long enough for the longest-lived call to finish
     // (call_duration + 10% jitter + a margin).
-    let cooldown_budget =
-        Duration::from_secs(load.cooldown_secs) + call_duration + call_timeout;
+    let cooldown_budget = Duration::from_secs(load.cooldown_secs) + call_duration + call_timeout;
     let collected = {
         let mut g = handles.lock().await;
         std::mem::take(&mut *g)
@@ -253,7 +254,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_sustained_long_duration_calls", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let cps_per_core = if cores > 0.0 { achieved_cps / cores } else { 0.0 };
+    let cps_per_core = if cores > 0.0 {
+        achieved_cps / cores
+    } else {
+        0.0
+    };
     report
         .result("achieved_cps", round2(achieved_cps))
         .result("cps_per_core", round2(cps_per_core))

@@ -30,7 +30,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::Config;
 use serde_json::json;
@@ -134,9 +136,7 @@ async fn perf_sipp_parity() {
         format!("{}.sipp_screen.log", "perf_sipp_parity"),
         format!("127.0.0.1:{bob_port}"),
     ];
-    let status = Command::new(&sipp_bin)
-        .args(&sipp_args)
-        .status();
+    let status = Command::new(&sipp_bin).args(&sipp_args).status();
 
     let elapsed = bench_start.elapsed();
     let resources = sampler.stop().await;

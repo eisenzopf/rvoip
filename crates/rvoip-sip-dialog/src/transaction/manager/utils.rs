@@ -17,8 +17,8 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use rvoip_sip_core::prelude::*;

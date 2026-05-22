@@ -150,9 +150,7 @@ fn initiating_timeout_does_not_send_cancel() {
 
     assert_eq!(
         t.next_state,
-        Some(CallState::Failed(
-            rvoip_sip::types::FailureReason::Other
-        ))
+        Some(CallState::Failed(rvoip_sip::types::FailureReason::Other))
     );
     assert!(
         !t.actions.contains(&Action::SendCANCELWithOptions),
@@ -206,9 +204,7 @@ fn uas_answering_ack_timeout_fails_without_bye() {
         let t = transition(&table, Role::UAS, state, EventType::DialogTimeout);
         assert_eq!(
             t.next_state,
-            Some(CallState::Failed(
-                rvoip_sip::types::FailureReason::Other
-            ))
+            Some(CallState::Failed(rvoip_sip::types::FailureReason::Other))
         );
         assert!(!t.actions.contains(&Action::SendBYE));
         assert!(t.publish_events.contains(&EventTemplate::CallFailed));

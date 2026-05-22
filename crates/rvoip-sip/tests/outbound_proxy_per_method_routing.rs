@@ -96,37 +96,35 @@ async fn outbound_proxy_per_method_routing() {
                 }
 
                 let response = match method {
-                    Method::Invite => match create_ok_response_with_contact_uri(
-                        &request,
-                        PROXY_CONTACT_URI,
-                    ) {
-                        Ok(mut r) => {
-                            let sdp = b"v=0\r\n\
+                    Method::Invite => {
+                        match create_ok_response_with_contact_uri(&request, PROXY_CONTACT_URI) {
+                            Ok(mut r) => {
+                                let sdp = b"v=0\r\n\
                                        o=- 0 0 IN IP4 127.0.0.1\r\n\
                                        s=-\r\n\
                                        c=IN IP4 127.0.0.1\r\n\
                                        t=0 0\r\n\
                                        m=audio 35299 RTP/AVP 0\r\n";
-                            r.body = bytes::Bytes::from(sdp.to_vec());
-                            r.headers.push(TypedHeader::ContentType(
+                                r.body = bytes::Bytes::from(sdp.to_vec());
+                                r.headers.push(TypedHeader::ContentType(
                                 rvoip_sip_core::types::content_type::ContentType::from_type_subtype(
                                     "application", "sdp",
                                 ),
                             ));
-                            // ContentLength gets stamped at serialize time; replace the
-                            // default 0 added by create_response.
-                            r.headers
-                                .retain(|h| !matches!(h, TypedHeader::ContentLength(_)));
-                            r.headers
-                                .push(TypedHeader::ContentLength(
+                                // ContentLength gets stamped at serialize time; replace the
+                                // default 0 added by create_response.
+                                r.headers
+                                    .retain(|h| !matches!(h, TypedHeader::ContentLength(_)));
+                                r.headers.push(TypedHeader::ContentLength(
                                     rvoip_sip_core::types::content_length::ContentLength::new(
                                         sdp.len() as u32,
                                     ),
                                 ));
-                            r
+                                r
+                            }
+                            Err(_) => continue,
                         }
-                        Err(_) => continue,
-                    },
+                    }
                     Method::Register => create_ok_response_for_register(&request, 3600),
                     Method::Options => create_ok_response_for_options(
                         &request,

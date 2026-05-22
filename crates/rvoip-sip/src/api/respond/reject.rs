@@ -55,8 +55,7 @@ impl RejectBuilder {
     pub fn with_warning(mut self, code: u16, agent: &str, text: &str) -> Self {
         // Escape inner quotes so the warn-text token stays well-formed.
         let escaped = text.replace('"', r#"\""#);
-        self.warnings
-            .push(format!("{code} {agent} \"{escaped}\""));
+        self.warnings.push(format!("{code} {agent} \"{escaped}\""));
         self
     }
 
@@ -92,13 +91,9 @@ impl RejectBuilder {
             // overwrote the first on the wire and dropped the staged
             // extras. The stash-then-dispatch pattern guarantees one
             // wire response with the right extras.
-            let session = self
-                .coord
-                .session_state(&self.call_id)
-                .await
-                .map_err(|_| {
-                    crate::errors::SessionError::SessionNotFound(self.call_id.to_string())
-                })?;
+            let session = self.coord.session_state(&self.call_id).await.map_err(|_| {
+                crate::errors::SessionError::SessionNotFound(self.call_id.to_string())
+            })?;
             let mut session = session;
             session.reject_response_extras = Some(extras);
             self.coord.update_session_state(session).await?;

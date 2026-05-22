@@ -111,9 +111,7 @@ pub enum SessionError {
     /// complete (or drop cleanly) before starting another of the
     /// same method.
     #[error("another {method} is already in flight on this session")]
-    Conflict {
-        method: rvoip_sip_core::Method,
-    },
+    Conflict { method: rvoip_sip_core::Method },
 }
 
 impl From<crate::api::headers::HeaderPolicyViolation> for SessionError {

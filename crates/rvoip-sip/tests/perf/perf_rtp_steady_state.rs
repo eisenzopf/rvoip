@@ -34,7 +34,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_media_core::types::AudioFrame;
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -239,7 +241,11 @@ async fn run_one_point(
             let _ = h.await;
         }
     };
-    let _ = tokio::time::timeout(call_timeout + Duration::from_secs(load.cooldown_secs), drain).await;
+    let _ = tokio::time::timeout(
+        call_timeout + Duration::from_secs(load.cooldown_secs),
+        drain,
+    )
+    .await;
 
     let resources = sampler.stop().await;
     let sent = sent_frames.load(Ordering::Relaxed);
@@ -257,7 +263,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_rtp_steady_state", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let streams_per_core = if cores > 0.0 { active as f64 / cores } else { 0.0 };
+    let streams_per_core = if cores > 0.0 {
+        active as f64 / cores
+    } else {
+        0.0
+    };
     let pps = active * PPS_PER_STREAM;
     let packets_per_core_per_sec = if cores > 0.0 { pps as f64 / cores } else { 0.0 };
     report

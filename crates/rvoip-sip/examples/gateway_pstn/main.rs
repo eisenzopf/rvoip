@@ -80,22 +80,15 @@ async fn main() -> rvoip_sip::Result<()> {
     println!("[ip ] callee running on 127.0.0.1:{IP_CALLEE_PORT}");
 
     // ── Gateway IP side (originator of outbound to callee) ─────────
-    let gateway_ip = UnifiedCoordinator::new(Config::local(
-        "gateway-ip",
-        GATEWAY_IP_PORT,
-    ))
-    .await?;
+    let gateway_ip = UnifiedCoordinator::new(Config::local("gateway-ip", GATEWAY_IP_PORT)).await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // ── Gateway trunk side (terminator of inbound from trunk) ──────
     // Uses the events stream to detect IncomingCall — same shape as
     // `examples/unified/04_b2bua_bridge/bridge_peer.rs`. Mid-call we
     // originate outbound from `gateway_ip` and bridge the legs.
-    let gateway_trunk = UnifiedCoordinator::new(Config::local(
-        "gateway-trunk",
-        GATEWAY_TRUNK_PORT,
-    ))
-    .await?;
+    let gateway_trunk =
+        UnifiedCoordinator::new(Config::local("gateway-trunk", GATEWAY_TRUNK_PORT)).await?;
     let mut gateway_events = gateway_trunk.events().await?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     println!("[gw  ] trunk side listening on 127.0.0.1:{GATEWAY_TRUNK_PORT}");
@@ -123,9 +116,11 @@ async fn main() -> rvoip_sip::Result<()> {
                 break call_id;
             }
             Some(_) => continue,
-            None => return Err(rvoip_sip::SessionError::Other(
-                "gateway event stream closed before incoming".into(),
-            )),
+            None => {
+                return Err(rvoip_sip::SessionError::Other(
+                    "gateway event stream closed before incoming".into(),
+                ))
+            }
         }
     };
 
@@ -166,8 +161,20 @@ async fn main() -> rvoip_sip::Result<()> {
 
     // Both legs must reach Active before we bridge — RTP forwarders
     // refuse to start until each session has a remote address.
-    if !wait_state(&gateway_trunk, &inbound_id, CallState::Active, Duration::from_secs(5)).await
-        || !wait_state(&gateway_ip, &outbound_id, CallState::Active, Duration::from_secs(5)).await
+    if !wait_state(
+        &gateway_trunk,
+        &inbound_id,
+        CallState::Active,
+        Duration::from_secs(5),
+    )
+    .await
+        || !wait_state(
+            &gateway_ip,
+            &outbound_id,
+            CallState::Active,
+            Duration::from_secs(5),
+        )
+        .await
     {
         eprintln!("[gw  ] legs never both reached Active");
         return Ok(());

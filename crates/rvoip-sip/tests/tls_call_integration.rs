@@ -134,7 +134,10 @@ async fn sips_call_establishes_through_tls_transport() {
     let target = format!("sips:bob@127.0.0.1:{}", bob_tls_port);
     let _alice_session = alice
         .invite(
-            Some(format!("sips:alice@127.0.0.1:{};transport=tls", alice_tls_port)),
+            Some(format!(
+                "sips:alice@127.0.0.1:{};transport=tls",
+                alice_tls_port
+            )),
             &target,
         )
         .send()

@@ -9,6 +9,7 @@
 
 use crate::adapters::{DialogAdapter, MediaAdapter};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
+use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result as SessionResult, SessionError};
 use crate::session_registry::SessionRegistry;
 use crate::state_machine::StateMachine as StateMachineExecutor;
@@ -23,7 +24,7 @@ use rvoip_infra_common::events::cross_crate::{
 use rvoip_infra_common::planes::routing::RoutableEvent;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 /// Window within which repeated RFC 5626 flow-failure events for the
@@ -814,6 +815,8 @@ impl SessionCrossCrateEventHandler {
         let store = self.state_machine.store.clone();
         let registry = self.registry.clone();
         tokio::spawn(async move {
+            let release_guard =
+                cleanup_diag::stage_guard(CleanupStage::TerminalRelease, &session_id.0);
             if let Err(e) = publisher.publish_now(api_event).await {
                 tracing::warn!(
                     "Failed to publish terminal event to global coordinator: {}",
@@ -830,6 +833,7 @@ impl SessionCrossCrateEventHandler {
                 );
             }
             registry.remove_session(&session_id).await;
+            release_guard.finish_success();
         });
     }
 
@@ -1254,6 +1258,7 @@ impl SessionCrossCrateEventHandler {
         }
 
         let session_id = SessionId(session_id_str);
+        let setup_guard = cleanup_diag::stage_guard(CleanupStage::IncomingCallSetup, &session_id.0);
 
         self.state_machine
             .store
@@ -1402,6 +1407,7 @@ impl SessionCrossCrateEventHandler {
             }
         }
 
+        setup_guard.finish_success();
         Ok(())
     }
 
@@ -3043,6 +3049,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        let bye_guard = cleanup_diag::stage_guard(CleanupStage::ByeReceivedHandling, &session_id.0);
         match self
             .state_machine
             .process_event(&session_id, EventType::DialogBYE)
@@ -3058,8 +3065,11 @@ impl SessionCrossCrateEventHandler {
             }
             Err(e) => {
                 error!("Failed to process DialogBYE for {}: {}", session_id, e);
+                bye_guard.finish_failure();
+                return Ok(());
             }
         }
+        bye_guard.finish_success();
 
         Ok(())
     }

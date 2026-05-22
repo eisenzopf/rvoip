@@ -7,9 +7,7 @@
 //! `tests/invite_auth_integration.rs` when a challenging UAS fixture is
 //! available.
 
-use rvoip_sip::state_table::{
-    Action, EventType, Role, StateKey, StateTable, YamlTableLoader,
-};
+use rvoip_sip::state_table::{Action, EventType, Role, StateKey, StateTable, YamlTableLoader};
 use rvoip_sip::types::CallState;
 
 fn load() -> StateTable {

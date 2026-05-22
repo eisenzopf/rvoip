@@ -42,11 +42,7 @@ impl ByeBuilder {
     /// is a shorthand that always renders as `SIP ;cause=200 ;text="…"`.
     pub fn with_sip_reason(mut self, reason: crate::api::handle::SipReason) -> Self {
         let typed = rvoip_sip_core::types::headers::TypedHeader::Reason(
-            rvoip_sip_core::types::reason::Reason::new(
-                reason.protocol,
-                reason.cause,
-                reason.text,
-            ),
+            rvoip_sip_core::types::reason::Reason::new(reason.protocol, reason.cause, reason.text),
         );
         self.state.headers.push(typed);
         self
@@ -68,7 +64,10 @@ impl ByeBuilder {
             )
             .await?;
         self.coord
-            .dispatch_outbound(&self.session_id, crate::state_table::EventType::SendOutboundBye)
+            .dispatch_outbound(
+                &self.session_id,
+                crate::state_table::EventType::SendOutboundBye,
+            )
             .await?;
         Ok(())
     }

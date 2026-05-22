@@ -7,17 +7,17 @@
 //! organizational home.
 
 pub mod accept;
-pub mod reject;
-pub mod redirect;
-pub mod provisional;
 pub mod challenge;
 pub mod generic;
+pub mod provisional;
+pub mod redirect;
 pub mod register_response;
+pub mod reject;
 
 pub use accept::AcceptBuilder;
-pub use reject::RejectBuilder;
-pub use redirect::RedirectBuilder;
-pub use provisional::ProvisionalBuilder;
 pub use challenge::{AuthChallengeBuilder, AuthScheme};
 pub use generic::GenericResponseBuilder;
+pub use provisional::ProvisionalBuilder;
+pub use redirect::RedirectBuilder;
 pub use register_response::RegisterResponseBuilder;
+pub use reject::RejectBuilder;

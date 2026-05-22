@@ -64,6 +64,7 @@ use crate::api::events::{
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::unified::{Config, RegistrationHandle, UnifiedCoordinator};
+use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 
 // ===== ShutdownHandle =====
@@ -400,10 +401,7 @@ impl CallbackPeerBuilder {
     /// `Err`) to send `603 Decline`.
     pub fn on_refer_received<F, Fut>(mut self, f: F) -> Self
     where
-        F: Fn(SessionHandle, crate::api::incoming::IncomingRequest) -> Fut
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(SessionHandle, crate::api::incoming::IncomingRequest) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<bool>> + Send + 'static,
     {
         self.refer_received = Some(Arc::new(move |handle, req| Box::pin(f(handle, req))));
@@ -718,7 +716,10 @@ impl CallHandler for CallbackBuilderHandler {
             handle.reject_refer(603, "Decline").await
         };
         if let Err(err) = result {
-            tracing::warn!("[CallbackPeerBuilder] applying REFER decision failed: {}", err);
+            tracing::warn!(
+                "[CallbackPeerBuilder] applying REFER decision failed: {}",
+                err
+            );
         }
     }
 
@@ -1581,6 +1582,10 @@ impl<H: CallHandler> CallbackPeer<H> {
         let deferred_calls = self.deferred_calls.clone();
 
         handlers.spawn(async move {
+            let dispatch_guard = cleanup_diag::stage_guard(
+                callback_stage_for_event(&event),
+                callback_label_for_event(&event),
+            );
             handler.on_event(event.clone()).await;
 
             match event {
@@ -1624,8 +1629,13 @@ impl<H: CallHandler> CallbackPeer<H> {
                     // out of Ringing and the call becomes a no-op error we ignore.
                     match decision {
                         CallHandlerDecision::Accept => {
+                            let accept_guard = cleanup_diag::stage_guard(
+                                CleanupStage::CallbackAcceptCall,
+                                call_id.to_string(),
+                            );
                             match coordinator.accept_call(&call_id).await {
                                 Ok(()) => {
+                                    accept_guard.finish_success();
                                     let should_notify = {
                                         let mut callbacks = established_callbacks.lock().await;
                                         callbacks.insert(call_id.clone())
@@ -1642,12 +1652,18 @@ impl<H: CallHandler> CallbackPeer<H> {
                                         call_id,
                                         e
                                     );
+                                    accept_guard.finish_failure();
                                 }
                             }
                         }
                         CallHandlerDecision::AcceptWithSdp(sdp) => {
+                            let accept_guard = cleanup_diag::stage_guard(
+                                CleanupStage::CallbackAcceptCall,
+                                call_id.to_string(),
+                            );
                             match coordinator.accept_call_with_sdp(&call_id, sdp).await {
                                 Ok(()) => {
+                                    accept_guard.finish_success();
                                     let should_notify = {
                                         let mut callbacks = established_callbacks.lock().await;
                                         callbacks.insert(call_id.clone())
@@ -1664,6 +1680,7 @@ impl<H: CallHandler> CallbackPeer<H> {
                                         call_id,
                                         e
                                     );
+                                    accept_guard.finish_failure();
                                 }
                             }
                         }
@@ -2024,8 +2041,23 @@ impl<H: CallHandler> CallbackPeer<H> {
                     handler.on_register_received(register).await;
                 }
             }
+            dispatch_guard.finish_success();
         });
     }
+}
+
+fn callback_stage_for_event(event: &Event) -> CleanupStage {
+    match event {
+        Event::IncomingCall { .. } => CleanupStage::CallbackIncomingDispatch,
+        _ => CleanupStage::CallbackEventDispatch,
+    }
+}
+
+fn callback_label_for_event(event: &Event) -> String {
+    event
+        .call_id()
+        .map(|call_id| call_id.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 // ===== Convenience constructors using built-in handlers =====
@@ -2603,12 +2635,7 @@ mod tests {
         drain(handlers).await;
 
         let seen = seen.lock().unwrap().clone();
-        for expected in [
-            "incoming",
-            "established",
-            "dtmf:7",
-            "ended",
-        ] {
+        for expected in ["incoming", "established", "dtmf:7", "ended"] {
             assert!(
                 seen.iter().any(|value| value == expected),
                 "missing {expected}; saw {seen:?}"

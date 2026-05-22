@@ -130,8 +130,12 @@ impl std::fmt::Display for MultipartParseError {
         match self {
             Self::MissingBoundary => write!(f, "multipart Content-Type missing boundary parameter"),
             Self::EmptyBoundary => write!(f, "multipart boundary parameter is empty"),
-            Self::UnterminatedBody => write!(f, "multipart body missing closing --<boundary>-- marker"),
-            Self::MalformedPartHeaders => write!(f, "multipart part headers missing CRLF CRLF terminator"),
+            Self::UnterminatedBody => {
+                write!(f, "multipart body missing closing --<boundary>-- marker")
+            }
+            Self::MalformedPartHeaders => {
+                write!(f, "multipart part headers missing CRLF CRLF terminator")
+            }
         }
     }
 }
@@ -202,10 +206,7 @@ pub fn multipart_parse(
     }
 
     let mut parts = Vec::new();
-    let trimmed = body_str
-        .split(&close)
-        .next()
-        .unwrap_or("");
+    let trimmed = body_str.split(&close).next().unwrap_or("");
     let segments: Vec<&str> = trimmed.split(&marker).collect();
     for seg in segments.iter().skip(1) {
         // Each segment begins with `\r\n` (after the marker) and
@@ -268,8 +269,7 @@ mod multipart_tests {
 
     #[test]
     fn unterminated_body_returns_err() {
-        let err = multipart_parse("multipart/mixed; boundary=x", b"--x\r\nfoo\r\n")
-            .unwrap_err();
+        let err = multipart_parse("multipart/mixed; boundary=x", b"--x\r\nfoo\r\n").unwrap_err();
         assert_eq!(err, MultipartParseError::UnterminatedBody);
     }
 }

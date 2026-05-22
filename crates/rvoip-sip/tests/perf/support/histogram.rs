@@ -22,8 +22,7 @@ impl LatencyHistogram {
     /// `label` shows up in the JSON output and stdout summary
     /// (e.g. `"post_dial_delay"`, `"full_cycle"`).
     pub fn new(label: impl Into<String>) -> Self {
-        let inner = Histogram::new_with_bounds(1, 60_000_000_000, 3)
-            .expect("hdrhistogram bounds");
+        let inner = Histogram::new_with_bounds(1, 60_000_000_000, 3).expect("hdrhistogram bounds");
         Self {
             inner: Mutex::new(inner),
             label: label.into(),

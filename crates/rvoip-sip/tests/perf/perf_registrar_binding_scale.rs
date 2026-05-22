@@ -91,7 +91,11 @@ async fn boot_mock_registrar(
             // stands in for the AOR; the Contact value isn't surfaced
             // through a stable API here so we store a constant marker.
             if let Some(from_uri) = req.from().map(|f| f.uri.to_string()) {
-                table.bindings.lock().await.insert(from_uri, "<bound>".to_string());
+                table
+                    .bindings
+                    .lock()
+                    .await
+                    .insert(from_uri, "<bound>".to_string());
             }
 
             let mut resp = create_response(&req, StatusCode::Ok);
@@ -102,7 +106,9 @@ async fn boot_mock_registrar(
                 HeaderName::Expires,
                 HeaderValue::Raw(b"3600".to_vec()),
             ));
-            let _ = sock.send_to(&Message::Response(resp).to_bytes(), from).await;
+            let _ = sock
+                .send_to(&Message::Response(resp).to_bytes(), from)
+                .await;
         }
     })
 }
@@ -266,7 +272,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_registrar_binding_scale", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let regs_per_core_per_sec = if cores > 0.0 { achieved_rps / cores } else { 0.0 };
+    let regs_per_core_per_sec = if cores > 0.0 {
+        achieved_rps / cores
+    } else {
+        0.0
+    };
     report
         .result("binding_count_target", binding_count)
         .result("bindings_at_steady", bindings_at_steady)

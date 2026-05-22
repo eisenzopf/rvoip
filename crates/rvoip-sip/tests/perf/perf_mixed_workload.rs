@@ -28,7 +28,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::events::Event;
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::stream_peer::EventReceiver;
@@ -121,7 +123,9 @@ async fn boot_mock_registrar(port: u16) -> JoinHandle<()> {
                 HeaderName::Expires,
                 HeaderValue::Raw(b"3600".to_vec()),
             ));
-            let _ = sock.send_to(&Message::Response(resp).to_bytes(), from).await;
+            let _ = sock
+                .send_to(&Message::Response(resp).to_bytes(), from)
+                .await;
         }
     })
 }
@@ -261,8 +265,7 @@ async fn run_one_point(
             let handles_for_record = Arc::clone(&handles);
             let h = if is_call {
                 tokio::spawn(async move {
-                    run_one_call(alice, from, target, call_hist, call_counters, call_timeout)
-                        .await;
+                    run_one_call(alice, from, target, call_hist, call_counters, call_timeout).await;
                 })
             } else {
                 tokio::spawn(async move {
@@ -319,7 +322,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_mixed_workload", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let cps_per_core = if cores > 0.0 { achieved_cps / cores } else { 0.0 };
+    let cps_per_core = if cores > 0.0 {
+        achieved_cps / cores
+    } else {
+        0.0
+    };
     report
         .result("call_ratio_pct", call_ratio_pct)
         .result("achieved_cps", round2(achieved_cps))

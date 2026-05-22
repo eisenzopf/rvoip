@@ -181,6 +181,37 @@ pub trait ServerTransaction:
         }
     }
 
+    /// Checks whether the original request matches dialog identifiers from
+    /// an ACK. Implementations with direct request access should override
+    /// this to avoid cloning the full SIP request on ACK hot paths.
+    fn original_request_matches_dialog(
+        &self,
+        call_id: &str,
+        from_tag: &str,
+        to_tag: Option<&str>,
+    ) -> bool {
+        if let Some(req) = self.original_request_sync() {
+            let Some(req_call_id) = req.call_id() else {
+                return false;
+            };
+            if req_call_id.value() != call_id {
+                return false;
+            }
+            let Some(req_from) = req.from_tag() else {
+                return false;
+            };
+            if req_from != from_tag {
+                return false;
+            }
+            match (req.to_tag(), to_tag) {
+                (Some(req_to), Some(ack_to)) => req_to == ack_to,
+                _ => true,
+            }
+        } else {
+            false
+        }
+    }
+
     /// Synchronous accessor for the original request if it's available without async operations.
     /// This is an internal helper method that should be implemented by transaction types
     /// that can provide synchronous access to the original request.

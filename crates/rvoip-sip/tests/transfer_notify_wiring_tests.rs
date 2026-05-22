@@ -29,9 +29,7 @@
 //! dialog event fires. The actions are no-ops otherwise, so appending
 //! them to shared `Both`-role transitions is safe for non-transfer calls.
 
-use rvoip_sip::state_table::{
-    Action, EventType, Role, StateKey, StateTable, YamlTableLoader,
-};
+use rvoip_sip::state_table::{Action, EventType, Role, StateKey, StateTable, YamlTableLoader};
 use rvoip_sip::types::CallState;
 use std::path::Path;
 

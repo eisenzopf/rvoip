@@ -26,10 +26,7 @@ async fn raw_header_name_is_canonicalized_for_lookup() {
     // Stage with lowercase; assert canonical form (Title-Case-Per-Token).
     let builder = coord
         .invite(None, "sip:bob@127.0.0.1:1")
-        .with_raw_header(
-            HeaderName::Other("x-customer-id".to_string()),
-            "cust-7",
-        )
+        .with_raw_header(HeaderName::Other("x-customer-id".to_string()), "cust-7")
         .expect("with_raw_header must accept application-controlled name");
 
     let staged = builder.staged_headers();
@@ -44,17 +41,11 @@ async fn raw_header_name_is_canonicalized_for_lookup() {
     // Equivalent uppercase input must produce the same canonical entry,
     // not a duplicate with different casing.
     let builder = builder
-        .with_raw_header(
-            HeaderName::Other("X-CUSTOMER-ID".to_string()),
-            "cust-8",
-        )
+        .with_raw_header(HeaderName::Other("X-CUSTOMER-ID".to_string()), "cust-8")
         .expect("identical name uppercased must still stage");
 
     let staged = builder.staged_headers();
-    let canonical_count = staged
-        .iter()
-        .filter(|h| h.name() == canonical)
-        .count();
+    let canonical_count = staged.iter().filter(|h| h.name() == canonical).count();
     assert_eq!(
         canonical_count, 2,
         "both stagings must land under the same canonical name; got {} matches",

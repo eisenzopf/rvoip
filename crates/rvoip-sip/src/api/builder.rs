@@ -30,8 +30,7 @@ impl SessionBuilder {
 
     /// Set the media port range
     pub fn with_media_ports(mut self, start: u16, end: u16) -> Self {
-        self.config.media_port_start = start;
-        self.config.media_port_end = end;
+        self.config = self.config.with_media_ports(start, end);
         self
     }
 

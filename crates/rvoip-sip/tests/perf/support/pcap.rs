@@ -33,7 +33,11 @@ impl PcapRecorder {
         // macOS / Linux loopback interface differs ("lo0" vs "lo"); try
         // both. We don't filter by port so the entire loopback stream
         // is captured; perf runs are short enough that this is fine.
-        let iface = if cfg!(target_os = "macos") { "lo0" } else { "lo" };
+        let iface = if cfg!(target_os = "macos") {
+            "lo0"
+        } else {
+            "lo"
+        };
         let result = Command::new("tcpdump")
             .args(["-i", iface, "-w"])
             .arg(&path)
@@ -53,9 +57,7 @@ impl PcapRecorder {
                 })
             }
             Err(e) => {
-                eprintln!(
-                    "[pcap] requested via RVOIP_PERF_PCAP=1 but tcpdump spawn failed: {e}",
-                );
+                eprintln!("[pcap] requested via RVOIP_PERF_PCAP=1 but tcpdump spawn failed: {e}",);
                 None
             }
         }

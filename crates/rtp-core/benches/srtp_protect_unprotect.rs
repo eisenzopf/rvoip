@@ -40,11 +40,7 @@ fn make_context() -> SrtpContext {
     // 16-byte master key + 14-byte salt per AES-CM-128 (RFC 3711 §4.1.1).
     let key = vec![0x42; 16];
     let salt = vec![0x37; 14];
-    SrtpContext::new(
-        SRTP_AES128_CM_SHA1_80,
-        SrtpCryptoKey::new(key, salt),
-    )
-    .expect("srtp context")
+    SrtpContext::new(SRTP_AES128_CM_SHA1_80, SrtpCryptoKey::new(key, salt)).expect("srtp context")
 }
 
 fn bench_protect(c: &mut Criterion) {
@@ -100,17 +96,14 @@ fn bench_protect_rtcp(c: &mut Criterion) {
     group.bench_function("compound_96", |b| {
         let mut ctx = make_context();
         b.iter(|| {
-            let out = ctx.protect_rtcp(black_box(&rtcp_data)).expect("protect_rtcp");
+            let out = ctx
+                .protect_rtcp(black_box(&rtcp_data))
+                .expect("protect_rtcp");
             black_box(out);
         });
     });
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    bench_protect,
-    bench_unprotect,
-    bench_protect_rtcp
-);
+criterion_group!(benches, bench_protect, bench_unprotect, bench_protect_rtcp);
 criterion_main!(benches);

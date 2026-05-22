@@ -3,9 +3,7 @@
 //! the end-to-end reliable-183 wire flow is verified by the multi-binary
 //! `prack_integration` test.
 
-use rvoip_sip::state_table::{
-    Action, EventType, Role, StateKey, StateTable, YamlTableLoader,
-};
+use rvoip_sip::state_table::{Action, EventType, Role, StateKey, StateTable, YamlTableLoader};
 use rvoip_sip::types::CallState;
 
 fn load() -> StateTable {

@@ -18,9 +18,7 @@ use rvoip_core::adapter::{
     RejectReason, SignatureHeaders, TransferTarget,
 };
 use rvoip_core::capability::{CapabilityDescriptor, NegotiatedCodecs};
-use rvoip_core::connection::{
-    Connection, ConnectionState, Direction, Transport, TransportHandle,
-};
+use rvoip_core::connection::{Connection, ConnectionState, Direction, Transport, TransportHandle};
 use rvoip_core::error::{Result as CoreResult, RvoipError};
 use rvoip_core::identity::IdentityAssurance;
 use rvoip_core::ids::{ConnectionId, ParticipantId, SessionId as CoreSessionId};
@@ -135,7 +133,9 @@ impl SipAdapter {
             }
             ApiEvent::CallAnswered { call_id, .. } => {
                 let conn_id = self.ensure_mapped(call_id);
-                self.try_send(AdapterEvent::Connected { connection_id: conn_id });
+                self.try_send(AdapterEvent::Connected {
+                    connection_id: conn_id,
+                });
             }
             ApiEvent::CallProgress {
                 call_id,
@@ -188,7 +188,10 @@ impl SipAdapter {
 
     fn try_send(&self, event: AdapterEvent) {
         if let Err(e) = self.out_tx.try_send(event) {
-            warn!(?e, "SipAdapter event channel full or closed; dropping event");
+            warn!(
+                ?e,
+                "SipAdapter event channel full or closed; dropping event"
+            );
         }
     }
 

@@ -6,6 +6,8 @@
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -19,6 +21,7 @@ use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::{DialogEvent, FlowFailureReason, SessionCoordinationEvent};
 use crate::manager::outbound_flow::OutboundFlow;
+use crate::manager::utils::DialogUtils;
 use crate::subscription::SubscriptionManager;
 
 // STIR/SHAKEN — the SIP-agnostic enum lives in infra-common so the
@@ -42,6 +45,16 @@ use rvoip_infra_common::events::cross_crate::IdentityVerificationStatus;
 pub enum IdentityVerificationDecision {
     Publish(Option<IdentityVerificationStatus>),
     Drop,
+}
+
+const TERMINATED_BYE_TOMBSTONE_TTL: Duration = Duration::from_secs(5);
+const TERMINATED_BYE_LOOKUP_HARD_MAX: usize = 65_536;
+const TERMINATED_BYE_PRUNE_INTERVAL: usize = 8_192;
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TerminatedByeTombstone {
+    pub(crate) cseq: u32,
+    created_at: Instant,
 }
 
 #[derive(Clone)]
@@ -69,8 +82,26 @@ pub struct DialogManager {
     /// Dialog lookup by call-id + tags (key: "call-id:local-tag:remote-tag")
     pub(crate) dialog_lookup: Arc<DashMap<String, DialogId>>,
 
+    /// Early dialog lookup by call-id + remote tag. Avoids scanning all
+    /// dialogs for new INVITEs that do not have a To tag.
+    pub(crate) early_dialog_lookup: Arc<DashMap<String, DialogId>>,
+
+    /// Recently terminated BYE lookup by call-id + tags. This preserves
+    /// idempotent 200 OK handling for late BYE retransmits after the full
+    /// dialog record has been removed from the hot lookup maps.
+    pub(crate) terminated_bye_lookup: Arc<DashMap<String, TerminatedByeTombstone>>,
+
+    /// Approximate insert counter used to prune terminated BYE tombstones
+    /// without scanning the full map on every call.
+    terminated_bye_insert_count: Arc<AtomicUsize>,
+
     /// Transaction to dialog mapping
     pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
+
+    /// Dialog to currently pending server transaction response. This lets
+    /// session-core answer the initial INVITE without scanning
+    /// transaction_to_dialog under high call volume.
+    pub(crate) pending_response_transaction_by_dialog: Arc<DashMap<DialogId, TransactionKey>>,
 
     /// Session to dialog mapping for cross-crate coordination
     pub(crate) session_to_dialog: Arc<DashMap<String, DialogId>>,
@@ -232,6 +263,15 @@ impl std::fmt::Debug for DialogManager {
         f.debug_struct("DialogManager")
             .field("local_address", &self.local_address)
             .field("dialogs_len", &self.dialogs.len())
+            .field("early_dialog_lookup_len", &self.early_dialog_lookup.len())
+            .field(
+                "terminated_bye_lookup_len",
+                &self.terminated_bye_lookup.len(),
+            )
+            .field(
+                "pending_response_transaction_by_dialog_len",
+                &self.pending_response_transaction_by_dialog.len(),
+            )
             .field(
                 "identity_verifier",
                 &self
@@ -301,7 +341,11 @@ impl DialogManager {
             config: Arc::new(std::sync::RwLock::new(None)),
             dialogs,
             dialog_lookup,
+            early_dialog_lookup: Arc::new(DashMap::new()),
+            terminated_bye_lookup: Arc::new(DashMap::new()),
+            terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_to_dialog: Arc::new(DashMap::new()),
+            pending_response_transaction_by_dialog: Arc::new(DashMap::new()),
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
             event_hub: Arc::new(tokio::sync::RwLock::new(None)),
@@ -777,7 +821,11 @@ impl DialogManager {
             config: Arc::new(std::sync::RwLock::new(None)),
             dialogs,
             dialog_lookup,
+            early_dialog_lookup: Arc::new(DashMap::new()),
+            terminated_bye_lookup: Arc::new(DashMap::new()),
+            terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_to_dialog: Arc::new(DashMap::new()),
+            pending_response_transaction_by_dialog: Arc::new(DashMap::new()),
             session_to_dialog: Arc::new(DashMap::new()),
             dialog_to_session: Arc::new(DashMap::new()),
             event_hub: Arc::new(tokio::sync::RwLock::new(None)),
@@ -1500,7 +1548,11 @@ impl DialogManager {
         // Step 4: Clear all mappings
         self.dialogs.clear();
         self.dialog_lookup.clear();
+        self.early_dialog_lookup.clear();
+        self.terminated_bye_lookup.clear();
+        self.terminated_bye_insert_count.store(0, Ordering::Relaxed);
         self.transaction_to_dialog.clear();
+        self.pending_response_transaction_by_dialog.clear();
 
         // Step 5: Report completion
         // Since we're in dialog-core, we emit DialogEvent::ShutdownComplete
@@ -1549,6 +1601,108 @@ impl DialogManager {
                 "Cleaned up transaction-dialog mapping for completed transaction {}",
                 transaction_id
             );
+        }
+    }
+
+    pub(crate) fn pending_response_transaction_for_dialog(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Option<TransactionKey> {
+        self.pending_response_transaction_by_dialog
+            .get(dialog_id)
+            .map(|entry| entry.value().clone())
+    }
+
+    pub(crate) fn clear_pending_response_transaction(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+    ) {
+        let should_remove = self
+            .pending_response_transaction_by_dialog
+            .get(dialog_id)
+            .is_some_and(|entry| entry.value() == transaction_id);
+        if should_remove {
+            self.pending_response_transaction_by_dialog
+                .remove(dialog_id);
+        }
+    }
+
+    pub(crate) fn remove_dialog_storage(&self, dialog_id: &DialogId) -> Option<Dialog> {
+        let (_, dialog) = self.dialogs.remove(dialog_id)?;
+
+        if dialog.state == DialogState::Terminated && dialog.remote_cseq != 0 {
+            if let Some((call_id, local_tag, remote_tag)) = dialog.dialog_id_tuple() {
+                let tombstone = TerminatedByeTombstone {
+                    cseq: dialog.remote_cseq,
+                    created_at: Instant::now(),
+                };
+                let key = DialogUtils::create_lookup_key(&call_id, &local_tag, &remote_tag);
+                self.terminated_bye_lookup.insert(key, tombstone);
+                let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
+                self.terminated_bye_lookup.insert(reverse_key, tombstone);
+
+                let insert_count = self
+                    .terminated_bye_insert_count
+                    .fetch_add(2, Ordering::Relaxed)
+                    + 2;
+                if insert_count % TERMINATED_BYE_PRUNE_INTERVAL == 0 {
+                    self.prune_terminated_bye_lookup();
+                }
+            }
+        }
+
+        if let Some(remote_tag) = dialog.remote_tag.as_ref() {
+            let key = DialogUtils::create_early_lookup_key(&dialog.call_id, remote_tag);
+            self.early_dialog_lookup.remove(&key);
+        }
+
+        if let Some((call_id, local_tag, remote_tag)) = dialog.dialog_id_tuple() {
+            let key = DialogUtils::create_lookup_key(&call_id, &local_tag, &remote_tag);
+            self.dialog_lookup.remove(&key);
+            let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
+            self.dialog_lookup.remove(&reverse_key);
+        }
+
+        if let Some((_, session_id)) = self.dialog_to_session.remove(dialog_id) {
+            self.session_to_dialog.remove(&session_id);
+        }
+        self.pending_response_transaction_by_dialog
+            .remove(dialog_id);
+
+        Some(dialog)
+    }
+
+    fn prune_terminated_bye_lookup(&self) {
+        let now = Instant::now();
+        let expired_keys: Vec<_> = self
+            .terminated_bye_lookup
+            .iter()
+            .filter(|entry| {
+                now.duration_since(entry.value().created_at) >= TERMINATED_BYE_TOMBSTONE_TTL
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in expired_keys {
+            self.terminated_bye_lookup.remove(&key);
+        }
+
+        let len = self.terminated_bye_lookup.len();
+        if len <= TERMINATED_BYE_LOOKUP_HARD_MAX {
+            return;
+        }
+
+        let overage = len - TERMINATED_BYE_LOOKUP_HARD_MAX;
+        let overflow_keys: Vec<_> = self
+            .terminated_bye_lookup
+            .iter()
+            .take(overage)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in overflow_keys {
+            self.terminated_bye_lookup.remove(&key);
         }
     }
 
@@ -1745,7 +1899,10 @@ impl DialogManager {
             .insert(session_id.to_string(), dialog_id.clone());
         self.dialog_to_session
             .insert(dialog_id.clone(), session_id.to_string());
-        self.transaction_to_dialog.insert(transaction_id, dialog_id);
+        self.transaction_to_dialog
+            .insert(transaction_id.clone(), dialog_id.clone());
+        self.pending_response_transaction_by_dialog
+            .insert(dialog_id, transaction_id);
         // Store additional request data if needed
     }
 

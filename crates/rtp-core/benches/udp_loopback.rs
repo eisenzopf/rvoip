@@ -19,9 +19,7 @@
 //! `RtpEvent::MediaReceived`.
 
 use bytes::Bytes;
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_rtp_core::srtp::{SrtpContext, SrtpCryptoKey, SRTP_AES128_CM_SHA1_80};
 use rvoip_rtp_core::traits::RtpEvent;
 use rvoip_rtp_core::transport::{RtpTransport, RtpTransportConfig, UdpRtpTransport};
@@ -154,9 +152,7 @@ fn bench_full_stack_srtp(c: &mut Criterion) {
                     // Both directions need a context per the current API;
                     // the send side is unused (this bench drives raw UDP
                     // from a sender socket), so we install a no-op send.
-                    transport
-                        .set_srtp_contexts(make_srtp(), make_srtp())
-                        .await;
+                    transport.set_srtp_contexts(make_srtp(), make_srtp()).await;
                     let mut rx = transport.subscribe();
                     let sender = UdpSocket::bind(LOOPBACK).await.expect("bind sender");
 

@@ -53,7 +53,10 @@ impl InfoBuilder {
             )
             .await?;
         self.coord
-            .dispatch_outbound(&self.session_id, crate::state_table::EventType::SendOutboundInfo)
+            .dispatch_outbound(
+                &self.session_id,
+                crate::state_table::EventType::SendOutboundInfo,
+            )
             .await?;
         Ok(())
     }

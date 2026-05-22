@@ -87,8 +87,7 @@ fn bench_call_setup_sequential(c: &mut Criterion) {
                 let start = Instant::now();
                 for _ in 0..iters {
                     for _ in 0..CALLS_PER_BATCH {
-                        let call_id =
-                            client.invite(&target).send().await.expect("invite send");
+                        let call_id = client.invite(&target).send().await.expect("invite send");
                         let handle = client.coordinator().session(&call_id);
                         client
                             .wait_for_answered(handle.id())
@@ -138,10 +137,8 @@ fn bench_call_setup_concurrent(c: &mut Criterion) {
                             let p = common::next_sip_port();
                             clients.push(Arc::new(Mutex::new(build_client(p).await)));
                         }
-                        let target = Arc::new(format!(
-                            "sip:bench-server@127.0.0.1:{}",
-                            server_port
-                        ));
+                        let target =
+                            Arc::new(format!("sip:bench-server@127.0.0.1:{}", server_port));
 
                         let start = Instant::now();
                         for _ in 0..iters {
@@ -194,5 +191,9 @@ fn bench_call_setup_concurrent(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_call_setup_sequential, bench_call_setup_concurrent);
+criterion_group!(
+    benches,
+    bench_call_setup_sequential,
+    bench_call_setup_concurrent
+);
 criterion_main!(benches);

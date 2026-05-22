@@ -84,48 +84,42 @@ fn bench_uncontended(c: &mut Criterion) {
         let store = rt.block_on(populated_store(n));
         // 256 probes spread across the keyspace so we don't accidentally
         // benchmark a single cache line / shard.
-        let id_probes: Vec<SessionId> =
-            (0..PROBE_COUNT).map(|i| session_key((i * 31) % n.max(1))).collect();
-        let call_probes: Vec<String> =
-            (0..PROBE_COUNT).map(|i| call_id_key((i * 31) % n.max(1))).collect();
+        let id_probes: Vec<SessionId> = (0..PROBE_COUNT)
+            .map(|i| session_key((i * 31) % n.max(1)))
+            .collect();
+        let call_probes: Vec<String> = (0..PROBE_COUNT)
+            .map(|i| call_id_key((i * 31) % n.max(1)))
+            .collect();
 
         group.throughput(Throughput::Elements(PROBE_COUNT as u64));
 
-        group.bench_with_input(
-            BenchmarkId::new("get_session", n),
-            &n,
-            |b, _| {
-                b.iter_custom(|iters| {
-                    rt.block_on(async {
-                        let start = Instant::now();
-                        for _ in 0..iters {
-                            for k in &id_probes {
-                                black_box(store.get_session(black_box(k)).await.ok());
-                            }
+        group.bench_with_input(BenchmarkId::new("get_session", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                rt.block_on(async {
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        for k in &id_probes {
+                            black_box(store.get_session(black_box(k)).await.ok());
                         }
-                        start.elapsed()
-                    })
-                });
-            },
-        );
+                    }
+                    start.elapsed()
+                })
+            });
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("find_by_call_id", n),
-            &n,
-            |b, _| {
-                b.iter_custom(|iters| {
-                    rt.block_on(async {
-                        let start = Instant::now();
-                        for _ in 0..iters {
-                            for k in &call_probes {
-                                black_box(store.find_by_call_id(black_box(k)).await);
-                            }
+        group.bench_with_input(BenchmarkId::new("find_by_call_id", n), &n, |b, _| {
+            b.iter_custom(|iters| {
+                rt.block_on(async {
+                    let start = Instant::now();
+                    for _ in 0..iters {
+                        for k in &call_probes {
+                            black_box(store.find_by_call_id(black_box(k)).await);
                         }
-                        start.elapsed()
-                    })
-                });
-            },
-        );
+                    }
+                    start.elapsed()
+                })
+            });
+        });
     }
     group.finish();
 }
@@ -418,8 +412,7 @@ fn bench_dialog_callid_key_type(c: &mut Criterion) {
                                 let map = Arc::clone(&string_map);
                                 handles.push(tokio::spawn(async move {
                                     for op in 0..CONTENDED_OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_POPULATION;
+                                        let idx = (t * 7919 + op * 17) % CONTENDED_POPULATION;
                                         let key = call_id_key(idx);
                                         let v = map.get(&key).map(|r| r.value().clone());
                                         black_box(v);
@@ -458,10 +451,8 @@ fn bench_dialog_callid_key_type(c: &mut Criterion) {
                                 let map = Arc::clone(&arc_str_map);
                                 handles.push(tokio::spawn(async move {
                                     for op in 0..CONTENDED_OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_POPULATION;
-                                        let key: Arc<str> =
-                                            Arc::from(call_id_key(idx).as_str());
+                                        let idx = (t * 7919 + op * 17) % CONTENDED_POPULATION;
+                                        let key: Arc<str> = Arc::from(call_id_key(idx).as_str());
                                         let v = map.get(&key).map(|r| r.value().clone());
                                         black_box(v);
                                     }

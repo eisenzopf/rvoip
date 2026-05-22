@@ -215,7 +215,8 @@ opt-level = 3            # Full speed optimization
 lto = true               # Link-time optimization across crates
 codegen-units = 1        # Single CGU for best inlining (slower compile)
 panic = "abort"          # No unwind tables; criterion catches panics at the harness layer
-strip = true             # Remove debug symbols from production binaries
+debug = true             # Keep DWARF symbols for release profiling
+strip = false            # Preserve symbols so samply/perf can resolve hot paths
 
 [profile.release-small]
 # Aggressive size optimization (smallest possible binary)

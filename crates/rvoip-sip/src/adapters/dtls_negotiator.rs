@@ -106,14 +106,15 @@ pub struct DtlsOffer {
 /// Returns `Some` only when *both* `a=fingerprint` AND `a=setup` are
 /// present on the audio m-line. RFC 8842 §5.1 requires both.
 pub fn detect_dtls_offer(sdp: &SdpSession) -> Option<DtlsOffer> {
-    let audio = sdp
-        .media_descriptions
-        .iter()
-        .find(|m| m.media == "audio")?;
+    let audio = sdp.media_descriptions.iter().find(|m| m.media == "audio")?;
 
     let mut fingerprint = None;
     let mut setup = None;
-    for attr in audio.generic_attributes.iter().chain(sdp.generic_attributes.iter()) {
+    for attr in audio
+        .generic_attributes
+        .iter()
+        .chain(sdp.generic_attributes.iter())
+    {
         match attr {
             ParsedAttribute::Fingerprint(hash, fp) if fingerprint.is_none() => {
                 fingerprint = Some((hash.clone(), fp.clone()));

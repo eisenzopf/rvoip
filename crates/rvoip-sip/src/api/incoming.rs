@@ -423,10 +423,7 @@ impl IncomingCall {
     }
 
     /// Begin a `ProvisionalBuilder` for a 1xx reliable provisional.
-    pub fn send_provisional_builder(
-        &self,
-        code: u16,
-    ) -> crate::api::respond::ProvisionalBuilder {
+    pub fn send_provisional_builder(&self, code: u16) -> crate::api::respond::ProvisionalBuilder {
         crate::api::respond::ProvisionalBuilder::new(
             self.coordinator.clone(),
             self.call_id.clone(),
@@ -478,11 +475,9 @@ impl SipHeaderView for IncomingCall {
             Some(r) => {
                 let name = name.clone();
                 Box::new(
-                    r.headers
-                        .iter()
-                        .filter(move |h| {
-                            crate::api::headers::view::header_name_eq(&h.name(), &name)
-                        }),
+                    r.headers.iter().filter(move |h| {
+                        crate::api::headers::view::header_name_eq(&h.name(), &name)
+                    }),
                 )
             }
             None => Box::new(std::iter::empty()),
@@ -1027,8 +1022,7 @@ impl IncomingRequest {
     ) -> Result<crate::api::respond::AuthChallengeBuilder> {
         let coord = self.coordinator.clone().ok_or_else(|| {
             SessionError::InvalidInput(
-                "IncomingRequest.challenge_builder() requires a coordinator hook"
-                    .to_string(),
+                "IncomingRequest.challenge_builder() requires a coordinator hook".to_string(),
             )
         })?;
         Ok(crate::api::respond::AuthChallengeBuilder::new(
@@ -1101,9 +1095,11 @@ impl SipHeaderView for IncomingRequest {
         match &self.request {
             Some(r) => {
                 let name = name.clone();
-                Box::new(r.headers.iter().filter(move |h| {
-                    crate::api::headers::view::header_name_eq(&h.name(), &name)
-                }))
+                Box::new(
+                    r.headers.iter().filter(move |h| {
+                        crate::api::headers::view::header_name_eq(&h.name(), &name)
+                    }),
+                )
             }
             None => Box::new(std::iter::empty()),
         }
@@ -1248,9 +1244,11 @@ impl SipHeaderView for IncomingResponse {
         match &self.response {
             Some(r) => {
                 let name = name.clone();
-                Box::new(r.headers.iter().filter(move |h| {
-                    crate::api::headers::view::header_name_eq(&h.name(), &name)
-                }))
+                Box::new(
+                    r.headers.iter().filter(move |h| {
+                        crate::api::headers::view::header_name_eq(&h.name(), &name)
+                    }),
+                )
             }
             None => Box::new(std::iter::empty()),
         }
@@ -1352,10 +1350,7 @@ impl IncomingRegister {
 
     /// Begin a generic non-2xx REGISTER response (404, 423 Interval
     /// Too Brief with `Min-Expires`, 503 Service Unavailable, …).
-    pub fn reject_builder(
-        &self,
-        status: u16,
-    ) -> crate::api::respond::RegisterResponseBuilder {
+    pub fn reject_builder(&self, status: u16) -> crate::api::respond::RegisterResponseBuilder {
         crate::api::respond::RegisterResponseBuilder::new_reject(
             self.transaction_id.clone(),
             self.coordinator.clone(),
@@ -1485,9 +1480,11 @@ impl SipHeaderView for IncomingRegister {
         match &self.request {
             Some(r) => {
                 let name = name.clone();
-                Box::new(r.headers.iter().filter(move |h| {
-                    crate::api::headers::view::header_name_eq(&h.name(), &name)
-                }))
+                Box::new(
+                    r.headers.iter().filter(move |h| {
+                        crate::api::headers::view::header_name_eq(&h.name(), &name)
+                    }),
+                )
             }
             None => Box::new(std::iter::empty()),
         }

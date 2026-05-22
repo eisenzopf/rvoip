@@ -45,10 +45,7 @@ fn extra_headers_fixture() -> Vec<TypedHeader> {
         HeaderName::Other(TENANT_HEADER_NAME.to_string()),
         HeaderValue::text(TENANT_HEADER_VALUE),
     );
-    let call_info = TypedHeader::Other(
-        HeaderName::CallInfo,
-        HeaderValue::text(CALL_INFO_URI),
-    );
+    let call_info = TypedHeader::Other(HeaderName::CallInfo, HeaderValue::text(CALL_INFO_URI));
     vec![tenant, call_info]
 }
 

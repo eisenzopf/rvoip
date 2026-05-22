@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
@@ -14,7 +14,7 @@ use rvoip_sip_transport::Transport;
 use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
-use crate::transaction::runner::{run_transaction_loop, AsRefKey, HasCommandSender};
+use crate::transaction::runner::{AsRefKey, HasCommandSender, run_transaction_loop};
 use crate::transaction::server::{
     CommonServerTransaction, ServerTransaction, ServerTransactionData,
 };
@@ -516,6 +516,31 @@ impl ServerTransaction for ServerNonInviteTransaction {
         // `Arc<Request>` — no lock needed.
         Some((*self.data.request).clone())
     }
+
+    fn original_request_matches_dialog(
+        &self,
+        call_id: &str,
+        from_tag: &str,
+        to_tag: Option<&str>,
+    ) -> bool {
+        let request = &self.data.request;
+        let Some(req_call_id) = request.call_id() else {
+            return false;
+        };
+        if req_call_id.value() != call_id {
+            return false;
+        }
+        let Some(req_from) = request.from_tag() else {
+            return false;
+        };
+        if req_from != from_tag {
+            return false;
+        }
+        match (request.to_tag(), to_tag) {
+            (Some(req_to), Some(ack_to)) => req_to == ack_to,
+            _ => true,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -649,13 +674,15 @@ mod tests {
     async fn test_server_noninvite_creation() {
         let setup = setup_test_environment(Method::Register, "sip:registrar.example.com").await;
         assert_eq!(setup.transaction.state(), TransactionState::Trying);
-        assert!(setup
-            .transaction
-            .data
-            .event_loop_handle
-            .lock()
-            .await
-            .is_some());
+        assert!(
+            setup
+                .transaction
+                .data
+                .event_loop_handle
+                .lock()
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]

@@ -12,6 +12,37 @@
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use rvoip_sip_core::Request;
+
+/// Dialog identifiers used to route 2xx ACKs back to their INVITE server
+/// transaction without scanning every active server transaction.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub(crate) struct ServerInviteDialogKey {
+    pub(crate) call_id: String,
+    pub(crate) from_tag: String,
+    pub(crate) to_tag: Option<String>,
+}
+
+impl ServerInviteDialogKey {
+    pub(crate) fn from_request(request: &Request) -> Option<Self> {
+        Some(Self {
+            call_id: request.call_id()?.value().to_string(),
+            from_tag: request.from_tag()?,
+            to_tag: request.to_tag(),
+        })
+    }
+
+    pub(crate) fn ack_lookup_keys(request: &Request) -> Option<(Self, Option<Self>)> {
+        let exact = Self::from_request(request)?;
+        let fallback = exact.to_tag.as_ref().map(|_| Self {
+            call_id: exact.call_id.clone(),
+            from_tag: exact.from_tag.clone(),
+            to_tag: None,
+        });
+        Some((exact, fallback))
+    }
+}
+
 /// Transaction timer data for transaction layer timers (A-K)
 ///
 /// SIP transactions employ a variety of timers to ensure reliability and

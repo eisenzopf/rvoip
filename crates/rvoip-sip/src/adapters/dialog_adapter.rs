@@ -22,6 +22,7 @@
 //! properly creates the dialog in dialog-core and sends the INVITE.
 
 use crate::api::types::DialogIdentity;
+use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 use crate::state_table::types::{DialogId, SessionId};
@@ -213,12 +214,15 @@ impl DialogAdapter {
     }
 
     pub(crate) fn abort_registration_refresh(&self, session_id: &SessionId) {
+        let guard = cleanup_diag::stage_guard(CleanupStage::TimerTaskShutdown, &session_id.0);
         if let Some((_, handle)) = self.registration_refresh_tasks.remove(session_id) {
             handle.abort();
         }
+        guard.finish_success();
     }
 
     pub(crate) fn abort_all_registration_refreshes(&self) {
+        let guard = cleanup_diag::stage_guard(CleanupStage::TimerTaskShutdown, "all");
         let handles: Vec<_> = self
             .registration_refresh_tasks
             .iter()
@@ -228,6 +232,7 @@ impl DialogAdapter {
         for handle in handles {
             handle.abort();
         }
+        guard.finish_success();
     }
 
     fn compute_registration_refresh_at(&self, now: Instant, accepted_expires: u32) -> Instant {
@@ -2002,6 +2007,7 @@ impl DialogAdapter {
 
     /// Clean up all mappings and resources for a session
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
+        let guard = cleanup_diag::stage_guard(CleanupStage::DialogCleanup, &session_id.0);
         // Remove from all mappings
         if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
             self.dialog_to_session.remove(&dialog_id.1);
@@ -2023,6 +2029,7 @@ impl DialogAdapter {
             "Cleaned up dialog adapter mappings for session {}",
             session_id.0
         );
+        guard.finish_success();
         Ok(())
     }
 
@@ -2096,64 +2103,67 @@ impl DialogAdapter {
         );
 
         // Build authorization header if credentials provided
-        let authorization =
-            if let Some(creds) = credentials {
-                // Get challenge from session
-                let mut session = self.store.get_session(session_id).await?;
-                if let Some(challenge) = session.auth_challenge.clone() {
-                    // RFC 7616 §3.4.5 — bump the per-(realm, nonce) NC
-                    // counter before computing. REGISTER reuses one nonce
-                    // across many refreshes, so this is exactly the path
-                    // where carriers reject `nc=00000001` repeats.
-                    let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
-                    let nc_value = *session
-                        .digest_nc
-                        .entry(nc_key)
-                        .and_modify(|n| *n += 1)
-                        .or_insert(1);
-                    self.store.update_session(session.clone()).await?;
+        let authorization = if let Some(creds) = credentials {
+            // Get challenge from session
+            let mut session = self.store.get_session(session_id).await?;
+            if let Some(challenge) = session.auth_challenge.clone() {
+                // RFC 7616 §3.4.5 — bump the per-(realm, nonce) NC
+                // counter before computing. REGISTER reuses one nonce
+                // across many refreshes, so this is exactly the path
+                // where carriers reject `nc=00000001` repeats.
+                let nc_key = (challenge.realm.clone(), challenge.nonce.clone());
+                let nc_value = *session
+                    .digest_nc
+                    .entry(nc_key)
+                    .and_modify(|n| *n += 1)
+                    .or_insert(1);
+                self.store.update_session(session.clone()).await?;
 
-                    tracing::info!(
+                tracing::info!(
                     "🔍 CLIENT: Computing digest for user={}, realm={}, nonce={}, uri={}, nc={}",
-                    creds.username, challenge.realm, challenge.nonce, registrar_uri, nc_value
+                    creds.username,
+                    challenge.realm,
+                    challenge.nonce,
+                    registrar_uri,
+                    nc_value
                 );
 
-                    // REGISTER body is empty; pass `None` so the qop
-                    // selector picks `auth` (or legacy if no qop offered)
-                    // rather than `auth-int`.
-                    let computed = crate::auth::DigestAuth::compute_response_with_state(
-                        &creds.username,
-                        &creds.password,
-                        &challenge,
-                        "REGISTER",
-                        registrar_uri,
-                        nc_value,
-                        None,
-                    )?;
+                // REGISTER body is empty; pass `None` so the qop
+                // selector picks `auth` (or legacy if no qop offered)
+                // rather than `auth-int`.
+                let computed = crate::auth::DigestAuth::compute_response_with_state(
+                    &creds.username,
+                    &creds.password,
+                    &challenge,
+                    "REGISTER",
+                    registrar_uri,
+                    nc_value,
+                    None,
+                )?;
 
-                    tracing::info!(
-                        "🔍 CLIENT: Computed response hash: {} (cnonce: {:?}, qop: {:?})",
-                        computed.response,
-                        computed.cnonce,
-                        computed.qop
-                    );
+                tracing::info!(
+                    "🔍 CLIENT: Computed response hash: {} (cnonce: {:?}, qop: {:?})",
+                    computed.response,
+                    computed.cnonce,
+                    computed.qop
+                );
 
-                    let auth_header = crate::auth::DigestAuth::format_authorization_with_state(
-                        &creds.username,
-                        &challenge,
-                        registrar_uri,
-                        &computed,
-                    );
+                let auth_header = crate::auth::DigestAuth::format_authorization_with_state(
+                    &creds.username,
+                    &challenge,
+                    registrar_uri,
+                    &computed,
+                );
 
-                    tracing::debug!("Computed digest auth for user {}", creds.username);
-                    Some(auth_header)
-                } else {
-                    tracing::debug!("No challenge stored, sending without auth");
-                    None
-                }
+                tracing::debug!("Computed digest auth for user {}", creds.username);
+                Some(auth_header)
             } else {
+                tracing::debug!("No challenge stored, sending without auth");
                 None
-            };
+            }
+        } else {
+            None
+        };
 
         // RFC 3581 NAT discovery: if the dialog manager has learned a
         // public address from a prior response's `Via:

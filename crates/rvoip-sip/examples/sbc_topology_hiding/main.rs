@@ -191,10 +191,7 @@ async fn main() -> rvoip_sip::Result<()> {
 
     let target = format!("sip:bob@127.0.0.1:{}", SBC_PORT + 1);
     let _call_id = alice
-        .invite(
-            Some(format!("sip:alice@127.0.0.1:{ALICE_PORT}")),
-            target,
-        )
+        .invite(Some(format!("sip:alice@127.0.0.1:{ALICE_PORT}")), target)
         .with_raw_header(HeaderName::Other("History-Info".to_string()), HISTORY_INFO)
         .expect("History-Info")
         .with_raw_header(HeaderName::Other("Diversion".to_string()), DIVERSION)
@@ -232,12 +229,21 @@ async fn main() -> rvoip_sip::Result<()> {
             for line in line.lines().take(20) {
                 println!("        {line}");
             }
-            check(line.contains(HISTORY_INFO), "carry-through: History-Info on wire");
+            check(
+                line.contains(HISTORY_INFO),
+                "carry-through: History-Info on wire",
+            );
             check(line.contains(DIVERSION), "carry-through: Diversion on wire");
-            check(line.contains(CUSTOMER_ID), "carry-through: X-Customer-ID on wire");
+            check(
+                line.contains(CUSTOMER_ID),
+                "carry-through: X-Customer-ID on wire",
+            );
             check(!line.contains(PRIVACY_VALUE), "strip: Privacy not on wire");
             check(line.contains(REWRITTEN_PAI), "rewrite: PAI rewritten");
-            check(!line.contains(UNTRUSTED_PAI), "rewrite: upstream PAI absent");
+            check(
+                !line.contains(UNTRUSTED_PAI),
+                "rewrite: upstream PAI absent",
+            );
         }
         None => eprintln!("[bob ] never saw inbound INVITE within 10s"),
     }

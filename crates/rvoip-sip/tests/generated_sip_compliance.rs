@@ -25,7 +25,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout};
 
-use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::types::Credentials;
@@ -37,6 +36,7 @@ use rvoip_sip_core::types::{
     HeaderName, Message, Method, Request, Response, StatusCode, TypedHeader,
 };
 use rvoip_sip_core::validation::{validate_generated_request, validate_generated_response};
+use rvoip_sip_dialog::transaction::utils::response_builders::create_response;
 
 fn random_port(base: u16) -> u16 {
     base + (rand::random::<u16>() % 1000)

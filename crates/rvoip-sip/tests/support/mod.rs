@@ -20,9 +20,7 @@ pub use established::{
     wait_for_call_answered, CallbackReceiver, EstablishedCall,
 };
 pub use handlers::{AutoAccept, B2buaCarryThrough};
-pub use registrar::{
-    boot_mock_registrar, CapturedRegister, MockRegistrar, RegistrarReply,
-};
+pub use registrar::{boot_mock_registrar, CapturedRegister, MockRegistrar, RegistrarReply};
 pub use ringing_uas::{boot_ringing_uas, CapturedRequest, RingingUas};
 pub use traces::{
     assert_header_on_wire, receiver_config, wait_for_inbound_method, SMOKE_HEADER_NAME,

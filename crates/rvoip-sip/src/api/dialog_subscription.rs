@@ -49,8 +49,7 @@ impl DialogSubscriptionHandle {
         })?;
         let session_id = subscription.session_id.clone().ok_or_else(|| {
             SessionError::InternalError(
-                "DialogSubscriptionHandle: subscription handle has no session id"
-                    .to_string(),
+                "DialogSubscriptionHandle: subscription handle has no session id".to_string(),
             )
         })?;
         Ok(Self {

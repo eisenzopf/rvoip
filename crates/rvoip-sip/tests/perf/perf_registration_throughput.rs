@@ -231,12 +231,17 @@ async fn run_one_point(
     } else {
         0.0
     };
-    let server_observed_delta =
-        server_count.load(Ordering::Relaxed).saturating_sub(server_count_baseline);
+    let server_observed_delta = server_count
+        .load(Ordering::Relaxed)
+        .saturating_sub(server_count_baseline);
 
     let mut report = ScenarioReport::new("perf_registration_throughput", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let regs_per_core_per_sec = if cores > 0.0 { achieved_rps / cores } else { 0.0 };
+    let regs_per_core_per_sec = if cores > 0.0 {
+        achieved_rps / cores
+    } else {
+        0.0
+    };
     report
         .result("achieved_rps", round2(achieved_rps))
         .result("regs_per_core_per_sec", round2(regs_per_core_per_sec))

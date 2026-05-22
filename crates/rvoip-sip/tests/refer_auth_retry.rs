@@ -85,9 +85,7 @@ async fn refer_extras_survive_401_driven_auth_retry() {
                     }
                     resp.headers.push(TypedHeader::Other(
                         HeaderName::Contact,
-                        HeaderValue::Raw(
-                            format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes(),
-                        ),
+                        HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes()),
                     ));
                     let _ = sock_task
                         .send_to(&Message::Response(resp).to_bytes(), from)
@@ -96,17 +94,19 @@ async fn refer_extras_survive_401_driven_auth_retry() {
                 Method::Ack => {}
                 Method::Refer => {
                     let count = count_task.fetch_add(1, Ordering::SeqCst);
-                    let x_trace_val = request
-                        .raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string()));
+                    let x_trace_val =
+                        request.raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string()));
                     let has_x_trace = x_trace_val.is_some();
                     let has_authorization = request
                         .raw_header_value(&HeaderName::Authorization)
                         .is_some();
                     let refer_to = request.raw_header_value(&HeaderName::ReferTo);
-                    captured_task
-                        .lock()
-                        .await
-                        .push((has_x_trace, x_trace_val, has_authorization, refer_to));
+                    captured_task.lock().await.push((
+                        has_x_trace,
+                        x_trace_val,
+                        has_authorization,
+                        refer_to,
+                    ));
 
                     if count == 0 {
                         let mut resp = create_response(&request, StatusCode::Unauthorized);
@@ -209,26 +209,35 @@ async fn refer_extras_survive_401_driven_auth_retry() {
     let (init_has_trace, init_trace, init_has_auth, init_refer_to) = &captured[0];
     assert!(*init_has_trace, "initial REFER must carry X-Trace");
     assert_eq!(init_trace.as_deref(), Some(TRACE_HEADER_VALUE));
-    assert!(!*init_has_auth, "initial REFER must NOT carry Authorization");
     assert!(
-        init_refer_to.as_deref().unwrap_or("").contains(REFER_TARGET),
+        !*init_has_auth,
+        "initial REFER must NOT carry Authorization"
+    );
+    assert!(
+        init_refer_to
+            .as_deref()
+            .unwrap_or("")
+            .contains(REFER_TARGET),
         "initial REFER must carry Refer-To: {REFER_TARGET}; got {:?}",
         init_refer_to
     );
 
     let (retry_has_trace, retry_trace, retry_has_auth, retry_refer_to) = &captured[1];
-    assert!(*retry_has_trace, "auth retry REFER must still carry X-Trace");
+    assert!(
+        *retry_has_trace,
+        "auth retry REFER must still carry X-Trace"
+    );
     assert_eq!(
         retry_trace.as_deref(),
         Some(TRACE_HEADER_VALUE),
         "retry REFER X-Trace must match the initial"
     );
+    assert!(*retry_has_auth, "auth retry REFER must carry Authorization");
     assert!(
-        *retry_has_auth,
-        "auth retry REFER must carry Authorization"
-    );
-    assert!(
-        retry_refer_to.as_deref().unwrap_or("").contains(REFER_TARGET),
+        retry_refer_to
+            .as_deref()
+            .unwrap_or("")
+            .contains(REFER_TARGET),
         "auth retry REFER must still carry Refer-To (method-shaped header survives stash)"
     );
 

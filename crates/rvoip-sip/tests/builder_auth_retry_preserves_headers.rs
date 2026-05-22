@@ -48,11 +48,7 @@ async fn invite_extras_survive_401_driven_auth_retry() {
         .try_init();
 
     let uas_addr = format!("127.0.0.1:{UAS_PORT}");
-    let sock = Arc::new(
-        UdpSocket::bind(&uas_addr)
-            .await
-            .expect("auth UAS bind"),
-    );
+    let sock = Arc::new(UdpSocket::bind(&uas_addr).await.expect("auth UAS bind"));
 
     let invite_count = Arc::new(AtomicU32::new(0));
     // For each captured INVITE, record:
@@ -84,9 +80,8 @@ async fn invite_extras_survive_401_driven_auth_retry() {
 
             let count = count_task.fetch_add(1, Ordering::SeqCst);
 
-            let x_trace_val = request.raw_header_value(&HeaderName::Other(
-                TRACE_HEADER_NAME.to_string(),
-            ));
+            let x_trace_val =
+                request.raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string()));
             let has_x_trace = x_trace_val.is_some();
             let has_authorization = request
                 .raw_header_value(&HeaderName::Authorization)

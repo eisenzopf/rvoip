@@ -13,9 +13,7 @@ use std::time::Duration;
 use crossterm::event::{self, Event as TerminalEvent, KeyEventKind};
 use tokio::sync::mpsc;
 
-use rvoip_sip::{
-    Endpoint, EndpointCall, EndpointEvent, EndpointIncomingCall, EndpointSipTrace,
-};
+use rvoip_sip::{Endpoint, EndpointCall, EndpointEvent, EndpointIncomingCall, EndpointSipTrace};
 
 use crate::audio::{start_cpal_audio, AudioBridge, RunningAudio};
 use crate::config::{format_registration, local_label, RuntimeOptions};
@@ -143,10 +141,8 @@ async fn run_runtime_inner(
                         id: call.id().to_string(),
                         target: target.clone(),
                     });
-                    let _ = event_tx.send(UiEvent::Log(format!(
-                        "calling {target} ({})",
-                        call.id()
-                    )));
+                    let _ =
+                        event_tx.send(UiEvent::Log(format!("calling {target} ({})", call.id())));
                     active_call = Some(call);
                 }
                 Err(err) => {

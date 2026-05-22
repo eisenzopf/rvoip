@@ -67,6 +67,9 @@ use crate::types::{IncomingCallInfo, SessionInfo};
 // Callback system removed - using event-driven approach
 use rvoip_infra_common::events::coordinator::GlobalEventCoordinator;
 use rvoip_media_core::types::AudioFrame;
+use rvoip_rtp_core::transport::{
+    DEFAULT_RTP_PORT_RANGE_END, DEFAULT_RTP_PORT_RANGE_START, MIN_PORT,
+};
 use rvoip_sip_core::types::sdp::CryptoSuite;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -612,6 +615,12 @@ pub struct Config {
 }
 
 impl Config {
+    /// Default RTP media port range start.
+    pub const DEFAULT_MEDIA_PORT_START: u16 = DEFAULT_RTP_PORT_RANGE_START;
+
+    /// Default RTP media port range end.
+    pub const DEFAULT_MEDIA_PORT_END: u16 = DEFAULT_RTP_PORT_RANGE_END;
+
     /// Create a config for local development/testing on 127.0.0.1.
     ///
     /// # Examples
@@ -626,13 +635,8 @@ impl Config {
         Self {
             local_ip: ip,
             sip_port: port,
-            // NEXT_STEPS B.2 — widened from 16000–17000 (1 000 ports
-            // → ~500 concurrent calls) to the rtp-core default range
-            // so a single load test or production deployment can't
-            // exhaust the pool. Apps that need a tighter range still
-            // override these via Config.
-            media_port_start: 16384,
-            media_port_end: 32767,
+            media_port_start: Self::DEFAULT_MEDIA_PORT_START,
+            media_port_end: Self::DEFAULT_MEDIA_PORT_END,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -694,13 +698,8 @@ impl Config {
         Self {
             local_ip: ip,
             sip_port: port,
-            // NEXT_STEPS B.2 — widened from 16000–17000 (1 000 ports
-            // → ~500 concurrent calls) to the rtp-core default range
-            // so a single load test or production deployment can't
-            // exhaust the pool. Apps that need a tighter range still
-            // override these via Config.
-            media_port_start: 16384,
-            media_port_end: 32767,
+            media_port_start: Self::DEFAULT_MEDIA_PORT_START,
+            media_port_end: Self::DEFAULT_MEDIA_PORT_END,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
@@ -985,6 +984,17 @@ impl Config {
         self
     }
 
+    /// Set the RTP media port range.
+    ///
+    /// The default range is [`Config::DEFAULT_MEDIA_PORT_START`] through
+    /// [`Config::DEFAULT_MEDIA_PORT_END`]. Values are checked by
+    /// [`Config::validate`].
+    pub fn with_media_ports(mut self, start: u16, end: u16) -> Self {
+        self.media_port_start = start;
+        self.media_port_end = end;
+        self
+    }
+
     /// Set the internal state-machine event channel capacity.
     ///
     /// The default is `1000`. Values below `1` are rejected by
@@ -1157,6 +1167,17 @@ impl Config {
         if self.session_event_dispatcher_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
                 "session_event_dispatcher_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.media_port_start < MIN_PORT {
+            return Err(SessionError::ConfigError(format!(
+                "media_port_start must be >= {}",
+                MIN_PORT
+            )));
+        }
+        if self.media_port_start > self.media_port_end {
+            return Err(SessionError::ConfigError(
+                "media_port_start must be <= media_port_end".to_string(),
             ));
         }
         if matches!(

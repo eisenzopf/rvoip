@@ -83,7 +83,10 @@ impl NotifyBuilder {
             )
             .await?;
         self.coord
-            .dispatch_outbound(&self.session_id, crate::state_table::EventType::SendOutboundNotify)
+            .dispatch_outbound(
+                &self.session_id,
+                crate::state_table::EventType::SendOutboundNotify,
+            )
             .await?;
         Ok(())
     }

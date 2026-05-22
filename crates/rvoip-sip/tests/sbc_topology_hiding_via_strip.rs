@@ -36,7 +36,9 @@ fn upstream_invite_three_vias_two_proxy_record_routes() -> rvoip_sip_core::Reque
         // its own listener-side egress.
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 "sbc.example.com",
                 Some(5060),
                 vec![Param::branch("z9hG4bKsbc")],
@@ -46,7 +48,9 @@ fn upstream_invite_three_vias_two_proxy_record_routes() -> rvoip_sip_core::Reque
         // Second Via — internal proxy.
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 "proxy.internal.example.com",
                 Some(5060),
                 vec![Param::branch("z9hG4bKproxy")],
@@ -56,7 +60,9 @@ fn upstream_invite_three_vias_two_proxy_record_routes() -> rvoip_sip_core::Reque
         // Third Via — the UAC.
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 "10.0.0.5",
                 Some(5060),
                 vec![Param::branch("z9hG4bKuac")],
@@ -67,9 +73,7 @@ fn upstream_invite_three_vias_two_proxy_record_routes() -> rvoip_sip_core::Reque
         // the header list per RFC 3261 §16.6), then two upstream
         // proxies whose entries the SBC wants to hide.
         .header(TypedHeader::RecordRoute(RecordRoute::new(vec![
-            RecordRouteEntry::new(Address::new(
-                "sip:sbc.example.com;lr".parse().unwrap(),
-            )),
+            RecordRouteEntry::new(Address::new("sip:sbc.example.com;lr".parse().unwrap())),
         ])))
         .header(TypedHeader::RecordRoute(RecordRoute::new(vec![
             RecordRouteEntry::new(Address::new(
@@ -204,7 +208,11 @@ fn strip_helpers_combined_yield_topology_hidden_wire_form() {
     let wire = request.to_string();
 
     // Positive assertions — SBC's own identity survives.
-    assert!(wire.contains("sbc.example.com"), "SBC Via/RR missing: {}", wire);
+    assert!(
+        wire.contains("sbc.example.com"),
+        "SBC Via/RR missing: {}",
+        wire
+    );
 
     // Negative assertions — upstream identities are hidden.
     assert!(
@@ -234,7 +242,9 @@ fn strip_via_is_noop_when_only_one_via_present() {
         .cseq(1)
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 "uac.example.com",
                 Some(5060),
                 vec![Param::branch("z9hG4bKsingle")],
@@ -263,9 +273,7 @@ fn strip_record_route_self_match_is_case_insensitive() {
         .call_id("case-insensitive-test")
         .cseq(1)
         .header(TypedHeader::RecordRoute(RecordRoute::new(vec![
-            RecordRouteEntry::new(Address::new(
-                "sip:SBC.Example.Com;lr".parse().unwrap(),
-            )),
+            RecordRouteEntry::new(Address::new("sip:SBC.Example.Com;lr".parse().unwrap())),
             RecordRouteEntry::new(Address::new(
                 "sip:proxy.upstream.example.com;lr".parse().unwrap(),
             )),
@@ -281,7 +289,11 @@ fn strip_record_route_self_match_is_case_insensitive() {
         .iter()
         .filter_map(|h| {
             if let TypedHeader::RecordRoute(rr) = h {
-                Some(rr.0.iter().map(|e| e.0.uri.host.to_string()).collect::<Vec<_>>())
+                Some(
+                    rr.0.iter()
+                        .map(|e| e.0.uri.host.to_string())
+                        .collect::<Vec<_>>(),
+                )
             } else {
                 None
             }

@@ -30,7 +30,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, SipTlsMode, UnifiedCoordinator};
 use serde_json::{json, Value};
@@ -48,11 +50,9 @@ fn write_self_signed_cert() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let cert_path = dir.path().join("server.crt");
     let key_path = dir.path().join("server.key");
-    let cert = rcgen::generate_simple_self_signed(vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-    ])
-    .expect("rcgen self-signed");
+    let cert =
+        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .expect("rcgen self-signed");
     std::fs::File::create(&cert_path)
         .and_then(|mut f| f.write_all(cert.serialize_pem().expect("cert PEM").as_bytes()))
         .expect("write cert");
@@ -258,7 +258,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_tls_overhead", load.clone());
     let cores = report.environment().cpu_count_physical() as f64;
-    let cps_per_core = if cores > 0.0 { achieved_cps / cores } else { 0.0 };
+    let cps_per_core = if cores > 0.0 {
+        achieved_cps / cores
+    } else {
+        0.0
+    };
 
     // Delta vs the matching UDP baseline (scenario 1). Reads
     // target/perf-results/perf_call_setup_cps[/<point>].json if it
@@ -327,9 +331,7 @@ fn read_udp_baseline_delta(
                     0.0
                 };
                 let p99_delta_pct = if udp_setup_p99 > 0 {
-                    ((tls_setup_p99 as f64 - udp_setup_p99 as f64)
-                        / udp_setup_p99 as f64)
-                        * 100.0
+                    ((tls_setup_p99 as f64 - udp_setup_p99 as f64) / udp_setup_p99 as f64) * 100.0
                 } else {
                     0.0
                 };
@@ -413,9 +415,7 @@ async fn perf_tls_overhead() {
 }
 
 fn perf_target_dir() -> PathBuf {
-    let manifest = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
-    );
+    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     manifest
         .parent()
         .and_then(|p| p.parent())

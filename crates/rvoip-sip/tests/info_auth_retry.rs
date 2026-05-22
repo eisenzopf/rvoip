@@ -77,9 +77,7 @@ async fn info_extras_survive_401_driven_auth_retry() {
                     }
                     resp.headers.push(TypedHeader::Other(
                         HeaderName::Contact,
-                        HeaderValue::Raw(
-                            format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes(),
-                        ),
+                        HeaderValue::Raw(format!("<sip:bob@127.0.0.1:{UAS_PORT}>").into_bytes()),
                     ));
                     let _ = sock_task
                         .send_to(&Message::Response(resp).to_bytes(), from)
@@ -88,8 +86,8 @@ async fn info_extras_survive_401_driven_auth_retry() {
                 Method::Ack => {}
                 Method::Info => {
                     let count = count_task.fetch_add(1, Ordering::SeqCst);
-                    let x_trace_val = request
-                        .raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string()));
+                    let x_trace_val =
+                        request.raw_header_value(&HeaderName::Other(TRACE_HEADER_NAME.to_string()));
                     let has_x_trace = x_trace_val.is_some();
                     let has_authorization = request
                         .raw_header_value(&HeaderName::Authorization)

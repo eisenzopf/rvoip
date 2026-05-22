@@ -59,11 +59,7 @@ impl RingingUas {
     }
 
     /// Wait for `predicate` to find a captured request, returning it.
-    pub async fn wait_for<F>(
-        &self,
-        predicate: F,
-        deadline: Duration,
-    ) -> Option<CapturedRequest>
+    pub async fn wait_for<F>(&self, predicate: F, deadline: Duration) -> Option<CapturedRequest>
     where
         F: Fn(&CapturedRequest) -> bool + Send + Sync,
     {
@@ -91,11 +87,7 @@ impl RingingUas {
 /// - Every captured request is appended to `captured` for assertions.
 pub async fn boot_ringing_uas(port: u16, ring_delay: Duration) -> RingingUas {
     let addr = format!("127.0.0.1:{port}");
-    let sock = Arc::new(
-        UdpSocket::bind(&addr)
-            .await
-            .expect("ringing UAS bind"),
-    );
+    let sock = Arc::new(UdpSocket::bind(&addr).await.expect("ringing UAS bind"));
     let captured = Arc::new(Mutex::new(Vec::<CapturedRequest>::new()));
     let count = Arc::new(AtomicU32::new(0));
 
@@ -136,8 +128,7 @@ pub async fn boot_ringing_uas(port: u16, ring_delay: Duration) -> RingingUas {
                 Method::Invite => {
                     // 100 Trying immediately.
                     let trying =
-                        Message::Response(create_response(&request, StatusCode::Trying))
-                            .to_bytes();
+                        Message::Response(create_response(&request, StatusCode::Trying)).to_bytes();
                     let _ = sock_task.send_to(&trying, from).await;
                     *last_invite_task.lock().await = Some((request.clone(), from));
 
@@ -159,14 +150,12 @@ pub async fn boot_ringing_uas(port: u16, ring_delay: Duration) -> RingingUas {
                 }
                 Method::Cancel => {
                     // 200 OK to the CANCEL itself.
-                    let ok = Message::Response(create_response(&request, StatusCode::Ok))
-                        .to_bytes();
+                    let ok =
+                        Message::Response(create_response(&request, StatusCode::Ok)).to_bytes();
                     let _ = sock_task.send_to(&ok, from).await;
                     // 487 Request Terminated to the originating INVITE so
                     // the UAC's INVITE transaction terminates per RFC 3261.
-                    if let Some((invite, invite_from)) =
-                        last_invite_task.lock().await.clone()
-                    {
+                    if let Some((invite, invite_from)) = last_invite_task.lock().await.clone() {
                         let mut terminated =
                             create_response(&invite, StatusCode::RequestTerminated);
                         attach_to_tag(&mut terminated, "ringing-uas-tag");

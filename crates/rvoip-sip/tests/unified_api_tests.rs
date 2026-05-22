@@ -253,7 +253,11 @@ async fn test_make_call() {
     let coordinator = UnifiedCoordinator::new(test_config(15201)).await.unwrap();
 
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15202").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15202",
+        )
+        .send()
         .await;
 
     assert!(session_id.is_ok());
@@ -271,7 +275,11 @@ async fn test_hold_resume() {
     let coordinator = UnifiedCoordinator::new(test_config(15203)).await.unwrap();
 
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15204").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15204",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -290,7 +298,11 @@ async fn test_conference_operations() {
 
     // Create first call
     let session1 = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15206").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15206",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -302,7 +314,11 @@ async fn test_conference_operations() {
 
     // Create second call
     let session2 = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:charlie@localhost:15207").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:charlie@localhost:15207",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -320,7 +336,11 @@ async fn test_dtmf_operations() {
     let coordinator = UnifiedCoordinator::new(test_config(15214)).await.unwrap();
 
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15215").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15215",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -336,7 +356,11 @@ async fn test_recording_operations() {
     let coordinator = UnifiedCoordinator::new(test_config(15216)).await.unwrap();
 
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15217").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15217",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -359,7 +383,11 @@ async fn test_session_queries() {
 
     // Make a call
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15219").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15219",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -381,7 +409,11 @@ async fn test_event_subscription() {
     let coordinator = UnifiedCoordinator::new(test_config(15220)).await.unwrap();
 
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15221").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15221",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -431,17 +463,29 @@ async fn test_multiple_calls() {
 
     // Make multiple calls
     let session1 = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15224").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15224",
+        )
+        .send()
         .await
         .unwrap();
 
     let session2 = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:charlie@localhost:15225").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:charlie@localhost:15225",
+        )
+        .send()
         .await
         .unwrap();
 
     let session3 = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:david@localhost:15226").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:david@localhost:15226",
+        )
+        .send()
         .await
         .unwrap();
 

@@ -6,6 +6,7 @@
 use crate::adapters::srtp_negotiator::{SrtpNegotiator, SrtpPair};
 use crate::api::events::{Event, MediaSecurityKeying, MediaSecurityProfile, MediaSecurityState};
 use crate::api::lifecycle::{LifecycleIndex, SessionEventPublisher};
+use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::session_store::SessionStore;
 use crate::state_table::types::SessionId;
@@ -22,7 +23,7 @@ use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 /// NEXT_STEPS B.1 diag — process-global cleanup counter so external
@@ -137,6 +138,31 @@ fn srtp_diagnostics_enabled() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn perf_no_media_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("RVOIP_PERF_NO_MEDIA")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn perf_no_media_rtp_port() -> u16 {
+    static PORT: OnceLock<u16> = OnceLock::new();
+    *PORT.get_or_init(|| {
+        std::env::var("RVOIP_PERF_NO_MEDIA_RTP_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|port| *port > 0)
+            .unwrap_or(9)
+    })
 }
 
 fn emit_srtp_diag(line: String) {
@@ -657,7 +683,8 @@ impl MediaAdapter {
         // transmitter spawns a send loop and we don't want any
         // plaintext packets going out before the encrypt-side
         // SrtpContext is in place.
-        if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
+        let no_media = perf_no_media_enabled();
+        if let Some(dialog_id) = self.session_to_dialog.get(session_id).filter(|_| !no_media) {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
             self.controller
@@ -705,12 +732,22 @@ impl MediaAdapter {
                 remote_addr,
                 session_id.0
             );
+        } else if no_media {
+            if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
+                self.record_media_security_negotiated(session_id, pair.suite, false)
+                    .await;
+            }
         }
 
         let parsed_answer = SdpSession::from_str(remote_sdp).ok();
         let answer_direction = parsed_answer.as_ref().and_then(audio_direction);
+        let local_port = if no_media {
+            self.perf_no_media_local_port()
+        } else {
+            self.get_local_port(session_id)?
+        };
         let config = NegotiatedConfig {
-            local_addr: SocketAddr::new(self.local_ip, self.get_local_port(session_id)?),
+            local_addr: SocketAddr::new(self.local_ip, local_port),
             remote_addr: SocketAddr::new(remote_ip, remote_port),
             codec: "PCMU".to_string(),
             payload_type: 0,
@@ -830,14 +867,18 @@ impl MediaAdapter {
             return Ok((sdp_answer, config));
         }
 
-        // Get our local port
-        let local_port = self.get_local_port(session_id)?;
+        let no_media = perf_no_media_enabled();
+        let local_port = if no_media {
+            self.perf_no_media_local_port()
+        } else {
+            self.get_local_port(session_id)?
+        };
 
         // Update media session with remote address. SRTP contexts must
         // be installed BEFORE establish_media_flow starts the audio
         // transmitter — see `negotiate_sdp_as_uac` for the same
         // ordering rationale.
-        if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
+        if let Some(dialog_id) = self.session_to_dialog.get(session_id).filter(|_| !no_media) {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
             self.controller
@@ -885,6 +926,11 @@ impl MediaAdapter {
                 remote_addr,
                 session_id.0
             );
+        } else if no_media {
+            if let Some((_, pair)) = self.negotiated_srtp.remove(session_id) {
+                self.record_media_security_negotiated(session_id, pair.suite, false)
+                    .await;
+            }
         }
 
         // Generate the SDP answer.
@@ -1346,6 +1392,14 @@ impl MediaAdapter {
         self.dialog_to_session
             .insert(dialog_id.clone(), session_id.clone());
 
+        if perf_no_media_enabled() {
+            tracing::info!(
+                "perf no-media mode: skipped media-core allocation for session {}",
+                session_id.0
+            );
+            return Ok(dialog_id);
+        }
+
         // Create media config with our settings
         let media_config = MediaConfig {
             local_addr: SocketAddr::new(self.local_ip, 0), // Let media-core allocate port
@@ -1441,6 +1495,11 @@ impl MediaAdapter {
                 ))
             })?
             .clone();
+        if perf_no_media_enabled() {
+            return self
+                .generate_perf_no_media_sdp_offer(session_id, direction)
+                .await;
+        }
         let info = self
             .controller
             .get_session_info(&dialog_id)
@@ -1947,6 +2006,7 @@ impl MediaAdapter {
     /// return `None` and exit their loops) as long as the dialog mapping is
     /// still present.
     pub async fn cleanup_session(&self, session_id: &SessionId) -> Result<()> {
+        let guard = cleanup_diag::stage_guard(CleanupStage::MediaCleanup, &session_id.0);
         // Resolve dialog_id — prefer the mapping populated by create_session
         // (which is authoritative once set) but fall back to the deterministic
         // form `media-<session_id>` when the mapping has been lost (e.g. on a
@@ -1964,13 +2024,15 @@ impl MediaAdapter {
         };
 
         if let Some(dialog_id) = dialog_id {
-            let _ = self
-                .controller
-                .remove_audio_frame_callback(&dialog_id)
-                .await;
-            // stop_media may return "session not found" on the fallback path
-            // (media-core already cleaned up) — expected; ignore.
-            let _ = self.controller.stop_media(&dialog_id).await;
+            if !perf_no_media_enabled() {
+                let _ = self
+                    .controller
+                    .remove_audio_frame_callback(&dialog_id)
+                    .await;
+                // stop_media may return "session not found" on the fallback path
+                // (media-core already cleaned up) — expected; ignore.
+                let _ = self.controller.stop_media(&dialog_id).await;
+            }
             self.dialog_to_session.remove(&dialog_id);
         }
 
@@ -1988,6 +2050,7 @@ impl MediaAdapter {
             "Cleaned up media adapter resources for session {}",
             session_id.0
         );
+        guard.finish_success();
         Ok(())
     }
 
@@ -2001,6 +2064,81 @@ impl MediaAdapter {
             .ok_or_else(|| {
                 SessionError::SessionNotFound(format!("No local port for session {}", session_id.0))
             })
+    }
+
+    async fn generate_perf_no_media_sdp_offer(
+        &self,
+        session_id: &SessionId,
+        direction: crate::types::MediaDirection,
+    ) -> Result<String> {
+        let (origin_session_id, origin_version) = self.next_sdp_origin(session_id).await?;
+        let origin_version = origin_version.to_string();
+        let advertised_ip = self
+            .public_rtp_addr()
+            .map(|sa| sa.ip())
+            .unwrap_or(self.local_ip);
+        let local_ip_str = advertised_ip.to_string();
+        let port = self.perf_no_media_local_port();
+        let (transport, crypto_attrs) = if self.offer_srtp {
+            let (negotiator, attrs) = SrtpNegotiator::new_offerer(&self.srtp_offered_suites)?;
+            self.pending_srtp_offerers
+                .insert(session_id.clone(), negotiator);
+            ("RTP/SAVP", attrs)
+        } else {
+            ("RTP/AVP", Vec::new())
+        };
+
+        let format_pts = self.effective_offered_formats();
+        let format_strings: Vec<String> = format_pts.iter().map(|pt| pt.to_string()).collect();
+        let formats_ref: Vec<&str> = format_strings.iter().map(|s| s.as_str()).collect();
+        let mut media_builder = SdpBuilder::new("Session")
+            .origin(
+                "-",
+                &origin_session_id,
+                &origin_version,
+                "IN",
+                "IP4",
+                &local_ip_str,
+            )
+            .connection("IN", "IP4", &local_ip_str)
+            .time("0", "0")
+            .media_audio(port, transport)
+            .formats(&formats_ref);
+        for (pt, pt_str) in format_pts.iter().zip(format_strings.iter()) {
+            if let Some(rtpmap) = rtpmap_for_pt(*pt) {
+                media_builder = media_builder.rtpmap(pt_str.as_str(), rtpmap);
+            }
+            if let Some(fmtp) = fmtp_for_pt(*pt) {
+                media_builder = media_builder.fmtp(pt_str.as_str(), fmtp);
+            }
+        }
+        for attr in crypto_attrs {
+            media_builder = media_builder.crypto_attribute(attr);
+        }
+        let session = media_builder
+            .attribute(direction_attribute(direction), None::<String>)
+            .done()
+            .build()
+            .map_err(|e| {
+                SessionError::SDPNegotiationFailed(format!(
+                    "SdpBuilder failed to build perf no-media offer: {}",
+                    e
+                ))
+            })?;
+
+        tracing::info!(
+            "perf no-media mode: generated SDP for session {} with advertised port {}",
+            session_id.0,
+            port
+        );
+        Ok(session.to_string())
+    }
+
+    fn perf_no_media_local_port(&self) -> u16 {
+        self.public_rtp_addr()
+            .filter(|addr| addr.port() != 0)
+            .map(|addr| addr.port())
+            .unwrap_or_else(perf_no_media_rtp_port)
     }
 
     /// Parse SDP to extract connection info from the audio m= section.

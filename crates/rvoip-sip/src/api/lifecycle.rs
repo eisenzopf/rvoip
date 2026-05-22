@@ -8,6 +8,7 @@
 use crate::adapters::SessionApiCrossCrateEvent;
 use crate::api::events::{Event, MediaSecurityState};
 use crate::api::handle::TransferOutcome;
+use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 use crate::state_table::types::SessionId;
 use crate::types::CallState;
@@ -328,8 +329,15 @@ impl SessionEventDispatcher {
             let coordinator = coordinator.clone();
             tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    if let Err(e) = coordinator.publish(event).await {
-                        tracing::warn!("Failed to publish app-level event: {}", e);
+                    let stage = cleanup_stage_for_event(&event.event);
+                    let label = cleanup_label_for_event(&event.event);
+                    let guard = cleanup_diag::stage_guard(stage, label);
+                    match coordinator.publish(event).await {
+                        Ok(()) => guard.finish_success(),
+                        Err(e) => {
+                            guard.finish_failure();
+                            tracing::warn!("Failed to publish app-level event: {}", e);
+                        }
                     }
                 }
             });
@@ -345,10 +353,18 @@ impl SessionEventDispatcher {
     fn publish(&self, event: Arc<SessionApiCrossCrateEvent>) {
         let idx = self.worker_index(&event.event);
         let tx = self.workers[idx].clone();
+        cleanup_diag::record_queue_depth(
+            cleanup_stage_for_event(&event.event),
+            tx.max_capacity().saturating_sub(tx.capacity()),
+        );
         match tx.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(event)) => {
                 tokio::spawn(async move {
+                    cleanup_diag::record_queue_depth(
+                        cleanup_stage_for_event(&event.event),
+                        tx.max_capacity(),
+                    );
                     if tx.send(event).await.is_err() {
                         tracing::warn!("Session event dispatcher closed while publishing event");
                     }
@@ -419,11 +435,23 @@ impl SessionEventPublisher {
 
     pub(crate) async fn publish_now(&self, event: Event) -> Result<()> {
         self.lifecycle.record_event(&event);
+        let stage = cleanup_stage_for_event(&event);
+        let label = cleanup_label_for_event(&event);
         let wrapped = SessionApiCrossCrateEvent::new(event);
-        self.coordinator
-            .publish(wrapped)
-            .await
-            .map_err(|e| SessionError::Other(format!("Failed to publish app-level event: {}", e)))
+        let guard = cleanup_diag::stage_guard(stage, label);
+        match self.coordinator.publish(wrapped).await {
+            Ok(()) => {
+                guard.finish_success();
+                Ok(())
+            }
+            Err(e) => {
+                guard.finish_failure();
+                Err(SessionError::Other(format!(
+                    "Failed to publish app-level event: {}",
+                    e
+                )))
+            }
+        }
     }
 }
 
@@ -432,6 +460,24 @@ fn default_dispatcher_workers() -> usize {
         .map(|n| n.get())
         .unwrap_or(4)
         .clamp(1, 16)
+}
+
+fn cleanup_stage_for_event(event: &Event) -> CleanupStage {
+    if matches!(
+        event,
+        Event::CallEnded { .. } | Event::CallFailed { .. } | Event::CallCancelled { .. }
+    ) {
+        CleanupStage::TerminalEventPublish
+    } else {
+        CleanupStage::SessionEventDispatch
+    }
+}
+
+fn cleanup_label_for_event(event: &Event) -> String {
+    event
+        .call_id()
+        .map(|call_id| call_id.to_string())
+        .unwrap_or_else(|| "-".to_string())
 }
 
 #[cfg(test)]

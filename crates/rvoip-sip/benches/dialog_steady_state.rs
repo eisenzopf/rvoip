@@ -49,9 +49,7 @@ fn spawn_auto_answer(mut peer: StreamPeer) -> tokio::task::JoinHandle<StreamPeer
                 Ok(Ok(incoming)) => {
                     if let Ok(handle) = incoming.accept().await {
                         tokio::spawn(async move {
-                            let _ = handle
-                                .wait_for_end(Some(Duration::from_secs(300)))
-                                .await;
+                            let _ = handle.wait_for_end(Some(Duration::from_secs(300))).await;
                         });
                     }
                 }
@@ -83,8 +81,7 @@ fn bench_steady_state(c: &mut Criterion) {
                     // table stays at size N.
                     let mut backlog_handles = Vec::with_capacity(n);
                     for _ in 0..n {
-                        let call_id =
-                            client.invite(&target).send().await.expect("invite send");
+                        let call_id = client.invite(&target).send().await.expect("invite send");
                         let handle = client.coordinator().session(&call_id);
                         client
                             .wait_for_answered(handle.id())
@@ -98,8 +95,7 @@ fn bench_steady_state(c: &mut Criterion) {
                     // it down. iters is controlled by criterion.
                     let start = Instant::now();
                     for _ in 0..iters {
-                        let call_id =
-                            client.invite(&target).send().await.expect("invite send");
+                        let call_id = client.invite(&target).send().await.expect("invite send");
                         let handle = client.coordinator().session(&call_id);
                         client
                             .wait_for_answered(handle.id())

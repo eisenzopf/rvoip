@@ -36,7 +36,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use serde_json::json;
@@ -253,13 +255,12 @@ async fn perf_backpressure_step() {
     // Recovery time: rough approximation — if recovery p99 ≤ 1.25 ×
     // baseline p99 then we recovered within the phase; report the
     // phase duration. If not, recovery_time_secs is null.
-    let recovery_time_secs = if baseline_p99 > 0
-        && recovery_p99 <= (baseline_p99 as f64 * 1.25) as u64
-    {
-        Some(recovery_secs)
-    } else {
-        None
-    };
+    let recovery_time_secs =
+        if baseline_p99 > 0 && recovery_p99 <= (baseline_p99 as f64 * 1.25) as u64 {
+            Some(recovery_secs)
+        } else {
+            None
+        };
 
     let load = LoadProfile {
         target_cps: knee_cps,
@@ -278,9 +279,15 @@ async fn perf_backpressure_step() {
         .result("spike_p99_ns", spike_p99)
         .result("recovery_p99_ns", recovery_p99)
         .result("recovery_time_secs", recovery_time_secs)
-        .result("dropped_during_spike", counters.failed_spike.load(Ordering::Relaxed))
+        .result(
+            "dropped_during_spike",
+            counters.failed_spike.load(Ordering::Relaxed),
+        )
         .result("calls_offered", counters.offered.load(Ordering::Relaxed))
-        .result("calls_succeeded", counters.succeeded.load(Ordering::Relaxed))
+        .result(
+            "calls_succeeded",
+            counters.succeeded.load(Ordering::Relaxed),
+        )
         .result(
             "errors",
             json!({

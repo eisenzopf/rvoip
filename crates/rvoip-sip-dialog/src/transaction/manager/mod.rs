@@ -174,15 +174,15 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::sync::{mpsc, Mutex};
-use tokio::time::{sleep, MissedTickBehavior};
+use tokio::sync::{Mutex, mpsc};
+use tokio::time::{MissedTickBehavior, sleep};
 use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
@@ -309,6 +309,8 @@ pub struct TransactionManager {
     client_transactions: Arc<DashMap<TransactionKey, ArcClientTransaction>>,
     /// Active server transactions. Same pattern as `client_transactions`.
     server_transactions: Arc<DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
+    /// Fast dialog-id lookup for 2xx ACKs targeting INVITE server transactions.
+    server_invite_dialog_index: Arc<DashMap<ServerInviteDialogKey, TransactionKey>>,
     /// Transaction destinations — `transaction_id → SocketAddr`.
     /// DashMap for sharded lock-free reads.
     transaction_destinations: Arc<DashMap<TransactionKey, SocketAddr>>,
@@ -500,6 +502,7 @@ impl TransactionManager {
             transport,
             client_transactions,
             server_transactions,
+            server_invite_dialog_index: Arc::new(DashMap::new()),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -608,6 +611,7 @@ impl TransactionManager {
             transport,
             client_transactions,
             server_transactions,
+            server_invite_dialog_index: Arc::new(DashMap::new()),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -751,6 +755,7 @@ impl TransactionManager {
             transport: default_transport,
             client_transactions,
             server_transactions,
+            server_invite_dialog_index: Arc::new(DashMap::new()),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -838,6 +843,7 @@ impl TransactionManager {
             transport,
             client_transactions,
             server_transactions,
+            server_invite_dialog_index: Arc::new(DashMap::new()),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -901,6 +907,7 @@ impl TransactionManager {
             event_subscribers,
             client_transactions,
             server_transactions,
+            server_invite_dialog_index: Arc::new(DashMap::new()),
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             timer_manager,
@@ -1622,7 +1629,9 @@ impl TransactionManager {
                 wait_iterations += 1;
                 if wait_iterations > 20 {
                     // 2 second timeout
-                    warn!("Timeout waiting for transactions to reach Destroyed state, forcing cleanup");
+                    warn!(
+                        "Timeout waiting for transactions to reach Destroyed state, forcing cleanup"
+                    );
                     break;
                 }
 
@@ -1633,6 +1642,7 @@ impl TransactionManager {
         // Now clear the transaction maps
         self.client_transactions.clear();
         self.server_transactions.clear();
+        self.server_invite_dialog_index.clear();
         self.transaction_destinations.clear();
 
         // Step 5: Emit TransactionEvent::ShutdownComplete
@@ -1850,6 +1860,7 @@ impl TransactionManager {
 
         // Defensive: also remove from server in case of duplication.
         if self.server_transactions.remove(transaction_id).is_some() {
+            self.remove_server_invite_dialog_index_for(transaction_id);
             debug!(%transaction_id, "Removed terminated server transaction");
             terminated = true;
         }
@@ -1861,6 +1872,7 @@ impl TransactionManager {
         {
             debug!(%transaction_id, "Removed transaction from destinations map");
         }
+        self.pending_inbound_bytes.remove(transaction_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
         if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(transaction_id) {
@@ -2217,7 +2229,7 @@ impl TransactionManager {
                     return Err(Error::Other(format!(
                         "Destination for transaction {:?} not found",
                         invite_tx_id
-                    )))
+                    )));
                 }
             }
         };
@@ -2415,7 +2427,7 @@ impl TransactionManager {
                 None => {
                     return Err(Error::Other(
                         "Missing branch parameter in Via header".to_string(),
-                    ))
+                    ));
                 }
             },
             None => return Err(Error::Other("Missing Via header in request".to_string())),
@@ -2449,6 +2461,7 @@ impl TransactionManager {
                 )?);
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerInviteTransaction");
+                self.index_server_invite_dialog(&request, &key);
                 tx
             }
             Method::Cancel => {
@@ -2572,6 +2585,18 @@ impl TransactionManager {
         Ok(transaction)
     }
 
+    fn index_server_invite_dialog(&self, request: &Request, key: &TransactionKey) {
+        if let Some(dialog_key) = ServerInviteDialogKey::from_request(request) {
+            self.server_invite_dialog_index
+                .insert(dialog_key, key.clone());
+        }
+    }
+
+    pub(crate) fn remove_server_invite_dialog_index_for(&self, transaction_id: &TransactionKey) {
+        self.server_invite_dialog_index
+            .retain(|_, indexed_id| indexed_id != transaction_id);
+    }
+
     /// Cancel an active INVITE client transaction
     ///
     /// Creates a CANCEL request based on the original INVITE and creates
@@ -2637,7 +2662,7 @@ impl TransactionManager {
                 return Err(Error::Other(format!(
                     "No destination found for transaction {}",
                     invite_tx_id
-                )))
+                )));
             }
         };
 
@@ -2820,6 +2845,10 @@ impl fmt::Debug for TransactionManager {
             .field("transport", &"Arc<dyn Transport>")
             .field("client_transactions", &"Arc<Mutex<HashMap<...>>>") // Indicate map exists
             .field("server_transactions", &"Arc<Mutex<HashMap<...>>>")
+            .field(
+                "server_invite_dialog_index",
+                &self.server_invite_dialog_index.len(),
+            )
             .field("transaction_destinations", &"Arc<Mutex<HashMap<...>>>")
             .field("events_tx", &self.events_tx) // Sender might be Debug
             .field("event_subscribers", &"Arc<Mutex<Vec<Sender>>>")

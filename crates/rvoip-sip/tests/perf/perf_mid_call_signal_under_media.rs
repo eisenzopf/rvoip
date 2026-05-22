@@ -36,7 +36,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_media_core::types::AudioFrame;
-use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle};
+use rvoip_sip::api::callback_peer::{
+    CallHandler, CallHandlerDecision, CallbackPeer, ShutdownHandle,
+};
 use rvoip_sip::api::handle::SessionHandle;
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
@@ -179,8 +181,8 @@ async fn run_one_point(
             let mut media_drop = drop_rx.resubscribe();
             let sent_frames_task = Arc::clone(&sent_frames);
             tokio::spawn(async move {
-                let mut next_tick = tokio::time::Instant::now()
-                    + Duration::from_millis(FRAME_INTERVAL_MS);
+                let mut next_tick =
+                    tokio::time::Instant::now() + Duration::from_millis(FRAME_INTERVAL_MS);
                 loop {
                     if media_drop.try_recv().is_ok() {
                         break;
@@ -266,7 +268,11 @@ async fn run_one_point(
             let _ = h.await;
         }
     };
-    let _ = tokio::time::timeout(call_timeout + Duration::from_secs(load.cooldown_secs), drain).await;
+    let _ = tokio::time::timeout(
+        call_timeout + Duration::from_secs(load.cooldown_secs),
+        drain,
+    )
+    .await;
 
     let resources = sampler.stop().await;
     let sent = sent_frames.load(Ordering::Relaxed);
@@ -281,7 +287,11 @@ async fn run_one_point(
     let resume_ok = ops.resume_ok.load(Ordering::Relaxed);
     let resume_fail = ops.resume_fail.load(Ordering::Relaxed);
     let total_ops = hold_ok + hold_fail + resume_ok + resume_fail;
-    let asr = if target > 0 { active as f64 / target as f64 } else { 0.0 };
+    let asr = if target > 0 {
+        active as f64 / target as f64
+    } else {
+        0.0
+    };
     let op_success_rate = if total_ops > 0 {
         (hold_ok + resume_ok) as f64 / total_ops as f64
     } else {
@@ -290,7 +300,11 @@ async fn run_one_point(
 
     let mut report = ScenarioReport::new("perf_mid_call_signal_under_media", load);
     let cores = report.environment().cpu_count_physical() as f64;
-    let dialogs_per_core = if cores > 0.0 { active as f64 / cores } else { 0.0 };
+    let dialogs_per_core = if cores > 0.0 {
+        active as f64 / cores
+    } else {
+        0.0
+    };
     report
         .result("target_concurrent", target)
         .result("achieved_concurrent", active)

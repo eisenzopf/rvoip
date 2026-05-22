@@ -48,8 +48,6 @@ async fn main() -> rvoip_sip::Result<()> {
 
 fn env(name: &str) -> rvoip_sip::Result<String> {
     std::env::var(name).map_err(|_| {
-        rvoip_sip::SessionError::ConfigError(format!(
-            "{name} environment variable is required"
-        ))
+        rvoip_sip::SessionError::ConfigError(format!("{name} environment variable is required"))
     })
 }

@@ -53,8 +53,11 @@ async fn main() -> Result<()> {
 
     println!("[alice] connected as {}", call_id);
     alice.hangup(&call_id).await?;
-    alice.shutdown_gracefully(Some(Duration::from_secs(2))).await?;
-    bob.shutdown_gracefully(Some(Duration::from_secs(2))).await?;
+    alice
+        .shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await?;
+    bob.shutdown_gracefully(Some(Duration::from_secs(2)))
+        .await?;
 
     bob_task
         .await

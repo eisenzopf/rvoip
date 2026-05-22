@@ -334,7 +334,10 @@ impl UdpRtpTransport {
                             // This is an RTCP packet. Hand the bytes
                             // downstream as a pooled `Bytes` view —
                             // zero copy, refcount-only.
-                            debug!("Received RTCP packet, type: {}", buffer.as_slice()[1] & 0x7F);
+                            debug!(
+                                "Received RTCP packet, type: {}",
+                                buffer.as_slice()[1] & 0x7F
+                            );
                             let rtcp_data = buffer.into_bytes(size);
                             let event = RtpEvent::RtcpReceived {
                                 data: rtcp_data,

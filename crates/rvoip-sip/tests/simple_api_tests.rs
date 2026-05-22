@@ -43,13 +43,15 @@ async fn test_make_outgoing_call() {
 async fn test_hold_resume_call_via_coordinator() {
     // Hold/resume is available via UnifiedCoordinator
     let config = test_config(15102);
-    let coordinator = rvoip_sip::UnifiedCoordinator::new(config)
-        .await
-        .unwrap();
+    let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make a call
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15103").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15103",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -66,13 +68,15 @@ async fn test_hold_resume_call_via_coordinator() {
 #[serial]
 async fn test_send_dtmf_via_coordinator() {
     let config = test_config(15104);
-    let coordinator = rvoip_sip::UnifiedCoordinator::new(config)
-        .await
-        .unwrap();
+    let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make a call
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15105").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15105",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -93,13 +97,15 @@ async fn test_send_dtmf_via_coordinator() {
 #[serial]
 async fn test_recording_via_coordinator() {
     let config = test_config(15109);
-    let coordinator = rvoip_sip::UnifiedCoordinator::new(config)
-        .await
-        .unwrap();
+    let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make a call
     let session_id = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15110").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15110",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -114,13 +120,15 @@ async fn test_recording_via_coordinator() {
 #[serial]
 async fn test_conference_creation_via_coordinator() {
     let config = test_config(15111);
-    let coordinator = rvoip_sip::UnifiedCoordinator::new(config)
-        .await
-        .unwrap();
+    let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Make first call
     let call1 = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:bob@localhost:15112").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:bob@localhost:15112",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -132,7 +140,11 @@ async fn test_conference_creation_via_coordinator() {
 
     // Make second call
     let call2 = coordinator
-        .invite(Some("sip:alice@localhost".to_string()), "sip:charlie@localhost:15113").send()
+        .invite(
+            Some("sip:alice@localhost".to_string()),
+            "sip:charlie@localhost:15113",
+        )
+        .send()
         .await
         .unwrap();
 
@@ -157,9 +169,7 @@ async fn test_wait_for_incoming_with_timeout() {
 #[serial]
 async fn test_accept_reject_incoming_via_coordinator() {
     let config = test_config(15116);
-    let coordinator = rvoip_sip::UnifiedCoordinator::new(config)
-        .await
-        .unwrap();
+    let coordinator = rvoip_sip::UnifiedCoordinator::new(config).await.unwrap();
 
     // Simulate accepting a call (would need real session ID)
     let fake_session_id = SessionId::new();
@@ -201,7 +211,11 @@ async fn test_peer_to_peer_call() {
     let _bob = StreamPeer::with_config(test_config(15120)).await.unwrap();
 
     // Alice calls Bob
-    let call_id = alice.invite("sip:bob@localhost:15120").send().await.unwrap();
+    let call_id = alice
+        .invite("sip:bob@localhost:15120")
+        .send()
+        .await
+        .unwrap();
     let handle = alice.coordinator().session(&call_id);
 
     // Alice hangs up

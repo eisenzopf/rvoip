@@ -49,10 +49,7 @@ impl CapturedRegister {
         let expires_header = req
             .raw_header_value(&HeaderName::Expires)
             .and_then(|s| s.trim().parse().ok());
-        let from_uri = req
-            .from()
-            .map(|f| f.uri.to_string())
-            .unwrap_or_default();
+        let from_uri = req.from().map(|f| f.uri.to_string()).unwrap_or_default();
         let pai = req.raw_header_value(&HeaderName::PAssertedIdentity);
         let raw = String::from_utf8_lossy(raw_bytes).into_owned();
         Self {
@@ -107,11 +104,7 @@ impl MockRegistrar {
 
     /// Block until at least `n` REGISTERs have been captured, or `timeout`
     /// elapses. Returns the captured snapshots.
-    pub async fn wait_for_n(
-        &self,
-        n: usize,
-        deadline: Duration,
-    ) -> Vec<CapturedRegister> {
+    pub async fn wait_for_n(&self, n: usize, deadline: Duration) -> Vec<CapturedRegister> {
         let waited = timeout(deadline, async {
             loop {
                 if self.count.load(Ordering::SeqCst) as usize >= n {
@@ -143,11 +136,7 @@ where
     F: Fn(u32) -> RegistrarReply + Send + Sync + 'static,
 {
     let addr = format!("127.0.0.1:{port}");
-    let sock = Arc::new(
-        UdpSocket::bind(&addr)
-            .await
-            .expect("mock registrar bind"),
-    );
+    let sock = Arc::new(UdpSocket::bind(&addr).await.expect("mock registrar bind"));
     let captured = Arc::new(Mutex::new(Vec::new()));
     let count = Arc::new(AtomicU32::new(0));
 

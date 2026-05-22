@@ -93,22 +93,15 @@ impl AuthChallengeBuilder {
     /// on the 401 / 407 response.
     fn build_challenge_header(&self) -> Result<TypedHeader> {
         let realm = self.realm.clone().ok_or_else(|| {
-            SessionError::InvalidInput(
-                "AuthChallengeBuilder requires with_realm(..)".to_string(),
-            )
+            SessionError::InvalidInput("AuthChallengeBuilder requires with_realm(..)".to_string())
         })?;
         let nonce = self.nonce.clone().ok_or_else(|| {
-            SessionError::InvalidInput(
-                "AuthChallengeBuilder requires with_nonce(..)".to_string(),
-            )
+            SessionError::InvalidInput("AuthChallengeBuilder requires with_nonce(..)".to_string())
         })?;
 
         match self.scheme {
             AuthScheme::Digest => {
-                let mut params = vec![
-                    DigestParam::Realm(realm),
-                    DigestParam::Nonce(nonce),
-                ];
+                let mut params = vec![DigestParam::Realm(realm), DigestParam::Nonce(nonce)];
                 if let Some(alg) = self.algorithm.as_ref() {
                     // Map common algorithm names (MD5, MD5-sess, SHA-256,
                     // SHA-256-sess) onto the typed `Algorithm` enum.
@@ -148,7 +141,9 @@ impl AuthChallengeBuilder {
                         challenge,
                     ])))
                 } else {
-                    Ok(TypedHeader::WwwAuthenticate(WwwAuthenticate(vec![challenge])))
+                    Ok(TypedHeader::WwwAuthenticate(WwwAuthenticate(vec![
+                        challenge,
+                    ])))
                 }
             }
             AuthScheme::Bearer => {
@@ -163,7 +158,9 @@ impl AuthChallengeBuilder {
                         challenge,
                     ])))
                 } else {
-                    Ok(TypedHeader::WwwAuthenticate(WwwAuthenticate(vec![challenge])))
+                    Ok(TypedHeader::WwwAuthenticate(WwwAuthenticate(vec![
+                        challenge,
+                    ])))
                 }
             }
         }

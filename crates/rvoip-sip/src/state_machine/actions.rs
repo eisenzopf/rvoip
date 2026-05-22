@@ -6,6 +6,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     adapters::{dialog_adapter::DialogAdapter, media_adapter::MediaAdapter},
     api::events::Event,
+    cleanup_diag::{self, CleanupStage},
     session_store::{SessionState, SessionStore},
     state_table::{Action, Condition},
 };
@@ -309,6 +310,10 @@ pub(crate) async fn execute_action(
             info!("Created media session ID: {:?}", media_id);
         }
         Action::GenerateLocalSDP => {
+            let guard = cleanup_diag::stage_guard(
+                CleanupStage::ActionGenerateLocalSdp,
+                &session.session_id.0,
+            );
             // Skip generation if a caller-supplied SDP is already in place
             // (e.g. `UnifiedCoordinator::accept_call_with_sdp` populated it
             // before dispatching `AcceptCall`). This lets b2bua hand the
@@ -334,6 +339,7 @@ pub(crate) async fn execute_action(
             // state machine while SendINVITE is still awaiting, and the auth
             // retry needs the original SDP offer from the store.
             session_store.update_session(session.clone()).await?;
+            guard.finish_success();
         }
         Action::SendRejectResponse => {
             let status = session.reject_status.unwrap_or(486);
@@ -382,6 +388,9 @@ pub(crate) async fn execute_action(
                 .await?;
         }
         Action::SendSIPResponse(code, _reason) => {
+            let guard = (*code == 200).then(|| {
+                cleanup_diag::stage_guard(CleanupStage::ActionSend200Ok, &session.session_id.0)
+            });
             dialog_adapter
                 .send_response(&session.session_id, *code, session.local_sdp.clone())
                 .await?;
@@ -392,6 +401,9 @@ pub(crate) async fn execute_action(
                     "Dialog established (UAS sent 200 OK) for session {}",
                     session.session_id
                 );
+            }
+            if let Some(guard) = guard {
+                guard.finish_success();
             }
         }
         Action::SendINVITE => {
@@ -614,7 +626,10 @@ pub(crate) async fn execute_action(
             // However, we still set dialog_established = true here because for UAC,
             // the dialog is considered established when ACK is sent
             session.dialog_established = true;
-            info!("SendACK action: dialog-core handles ACK sending, dialog marked as established for UAC session {}", session.session_id);
+            info!(
+                "SendACK action: dialog-core handles ACK sending, dialog marked as established for UAC session {}",
+                session.session_id
+            );
         }
         Action::SendBYE => {
             // SIP_API_DESIGN_2 §7.4 — application-staged
@@ -764,6 +779,10 @@ pub(crate) async fn execute_action(
             }
         }
         Action::NegotiateSDPAsUAS => {
+            let guard = cleanup_diag::stage_guard(
+                CleanupStage::ActionNegotiateSdpUas,
+                &session.session_id.0,
+            );
             // Skip negotiation when caller supplied the answer SDP ahead of
             // time via `accept_call_with_sdp`. Same reasoning as
             // `GenerateLocalSDP` above.
@@ -792,6 +811,7 @@ pub(crate) async fn execute_action(
                 session.sdp_negotiated = true;
                 info!("SDP negotiated as UAS for session {}", session.session_id);
             }
+            guard.finish_success();
         }
         Action::PrepareEarlyMediaSDP => {
             if let Some(sdp) = session.early_media_sdp.take() {
@@ -1140,6 +1160,10 @@ pub(crate) async fn execute_action(
                         .await?;
                 }
                 "Send200OK" => {
+                    let guard = cleanup_diag::stage_guard(
+                        CleanupStage::ActionSend200Ok,
+                        &session.session_id.0,
+                    );
                     info!("Sending 200 OK for session {}", session.session_id);
                     // For UAS, include SDP in 200 OK
                     if session.role == crate::state_table::Role::UAS {
@@ -1157,6 +1181,7 @@ pub(crate) async fn execute_action(
                             .send_response_session(&session.session_id, 200, "OK")
                             .await?;
                     }
+                    guard.finish_success();
                 }
                 "SuspendMedia" => {
                     if let Some(media_id) = &session.media_session_id {
@@ -1701,8 +1726,7 @@ pub(crate) async fn execute_action(
             session.session_timer_retry_count += 1;
             info!(
                 "🔄 422 Session Interval Too Small — retrying INVITE for session {} with Session-Expires={}s / Min-SE={}s (attempt {}/{})",
-                session.session_id, min_se, min_se,
-                session.session_timer_retry_count, CAP
+                session.session_id, min_se, min_se, session.session_timer_retry_count, CAP
             );
 
             dialog_adapter

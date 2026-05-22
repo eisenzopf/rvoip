@@ -50,9 +50,10 @@ impl CallHandler for B2buaCarryThrough {
         // Drive the outbound leg using the IncomingCall as the
         // SipHeaderView source for `with_headers_from`. Errors are
         // surfaced via a panic so the test fails loudly.
-        let builder = self
-            .outbound_coord
-            .invite(Some(self.outbound_from.clone()), self.outbound_target.clone());
+        let builder = self.outbound_coord.invite(
+            Some(self.outbound_from.clone()),
+            self.outbound_target.clone(),
+        );
 
         let (mut chain, _report) = builder
             .with_headers_from(&call, &self.carry_names)

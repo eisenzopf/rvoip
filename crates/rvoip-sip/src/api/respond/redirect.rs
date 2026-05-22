@@ -55,12 +55,7 @@ impl RedirectBuilder {
         // ride to the wire.
         self.coord
             .dialog_adapter()
-            .send_redirect_response_with_options(
-                &self.call_id,
-                self.status,
-                self.contacts,
-                extras,
-            )
+            .send_redirect_response_with_options(&self.call_id, self.status, self.contacts, extras)
             .await
     }
 }

@@ -30,5 +30,7 @@ pub use options::{
     take_staged, BuilderHeaderState, BuilderStrictness, HeaderCarryThroughReport,
     HeaderPolicyViolation, SipRequestOptions, ViolationReason,
 };
-pub use policy::{classify, forbidden_for_carry_through, validate_outbound, HeaderRole, MissingRequiredHeader};
+pub use policy::{
+    classify, forbidden_for_carry_through, validate_outbound, HeaderRole, MissingRequiredHeader,
+};
 pub use view::SipHeaderView;

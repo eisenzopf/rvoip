@@ -31,8 +31,8 @@ fn test_config_local_uri() {
 fn test_config_local_media_ports() {
     let c = Config::local("alice", 5060);
     assert!(c.media_port_start < c.media_port_end);
-    assert_eq!(c.media_port_start, 16000);
-    assert_eq!(c.media_port_end, 17000);
+    assert_eq!(c.media_port_start, Config::DEFAULT_MEDIA_PORT_START);
+    assert_eq!(c.media_port_end, Config::DEFAULT_MEDIA_PORT_END);
 }
 
 #[test]
@@ -75,6 +75,18 @@ fn test_config_default() {
     let c = Config::default();
     assert_eq!(c.sip_port, 5060);
     assert_eq!(c.local_uri, "sip:user@127.0.0.1:5060");
+}
+
+#[test]
+fn test_config_media_port_validation() {
+    let mut c = Config::local("alice", 5060).with_media_ports(40_000, 39_999);
+    assert!(c.validate().is_err());
+
+    c = Config::local("alice", 5060).with_media_ports(1_023, 2_000);
+    assert!(c.validate().is_err());
+
+    c = Config::local("alice", 5060).with_media_ports(40_000, 40_000);
+    assert!(c.validate().is_ok());
 }
 
 // ── Different names ─────────────────────────────────────────────────────────
