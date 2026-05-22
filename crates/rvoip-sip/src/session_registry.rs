@@ -2,144 +2,149 @@
 //!
 //! This module provides simple mappings for the single session constraint.
 //! Since only one session can exist at a time, the mappings are much simpler.
+//!
+//! Storage uses `arc_swap::ArcSwapOption` rather than `tokio::sync::RwLock`:
+//! each field holds at most one optional value, never a collection, so the
+//! single-writer-many-readers RwLock model adds overhead with no benefit.
+//! ArcSwap reads are wait-free atomic loads; writes are a single
+//! compare-and-swap. See `crates/rvoip-sip/docs/PROFILING.md` Scenario 8
+//! ("SessionRegistry contention") for the side-by-side benchmark this
+//! choice is grounded in.
 
+use arc_swap::ArcSwapOption;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use crate::types::{DialogId, IncomingCallInfo, MediaSessionId, SessionId};
 
-/// Registry for single session mappings
+/// Registry for single session mappings.
+///
+/// The `async fn` signatures are preserved across the RwLock → ArcSwap
+/// migration so existing callers (which uniformly `.await` every method)
+/// stay source-compatible. The await points are no-ops — each method
+/// resolves synchronously — but the cost of an immediately-ready future
+/// is negligible compared to the per-call `RwLock::read().await` that
+/// these methods used to perform.
 #[derive(Clone)]
 pub struct SessionRegistry {
-    /// Current session ID (if any)
-    current_session: Arc<RwLock<Option<SessionId>>>,
-    /// Current dialog ID (if any)
-    current_dialog: Arc<RwLock<Option<DialogId>>>,
-    /// Current media session ID (if any)
-    current_media: Arc<RwLock<Option<MediaSessionId>>>,
-    /// Temporary storage for pending incoming call
-    pending_incoming_call: Arc<RwLock<Option<IncomingCallInfo>>>,
-    /// SIP_API_DESIGN_2 Phase A: parsed inbound INVITE request,
-    /// retained while the call is in `Ringing` so
-    /// `IncomingCall::raw_request()` can surface it.
-    pending_incoming_request:
-        Arc<RwLock<Option<Arc<rvoip_sip_core::Request>>>>,
+    /// Current session ID (if any).
+    current_session: Arc<ArcSwapOption<SessionId>>,
+    /// Current dialog ID (if any).
+    current_dialog: Arc<ArcSwapOption<DialogId>>,
+    /// Current media session ID (if any).
+    current_media: Arc<ArcSwapOption<MediaSessionId>>,
+    /// Temporary storage for pending incoming call.
+    pending_incoming_call: Arc<ArcSwapOption<IncomingCallInfo>>,
+    /// SIP_API_DESIGN_2 Phase A: parsed inbound INVITE request, retained
+    /// while the call is in `Ringing` so `IncomingCall::raw_request()` can
+    /// surface it.
+    pending_incoming_request: Arc<ArcSwapOption<rvoip_sip_core::Request>>,
 }
 
 impl SessionRegistry {
-    /// Create a new session registry
+    /// Create a new session registry.
     pub fn new() -> Self {
         Self {
-            current_session: Arc::new(RwLock::new(None)),
-            current_dialog: Arc::new(RwLock::new(None)),
-            current_media: Arc::new(RwLock::new(None)),
-            pending_incoming_call: Arc::new(RwLock::new(None)),
-            pending_incoming_request: Arc::new(RwLock::new(None)),
+            current_session: Arc::new(ArcSwapOption::empty()),
+            current_dialog: Arc::new(ArcSwapOption::empty()),
+            current_media: Arc::new(ArcSwapOption::empty()),
+            pending_incoming_call: Arc::new(ArcSwapOption::empty()),
+            pending_incoming_request: Arc::new(ArcSwapOption::empty()),
         }
     }
 
-    /// Map a dialog ID to a session ID (single session version)
+    /// Map a dialog ID to a session ID (single session version).
     pub async fn map_dialog(&self, session_id: SessionId, dialog_id: DialogId) {
-        *self.current_session.write().await = Some(session_id);
-        *self.current_dialog.write().await = Some(dialog_id);
+        self.current_session.store(Some(Arc::new(session_id)));
+        self.current_dialog.store(Some(Arc::new(dialog_id)));
     }
 
-    /// Map a media session ID to a session ID (single session version)
+    /// Map a media session ID to a session ID (single session version).
     pub async fn map_media(&self, session_id: SessionId, media_id: MediaSessionId) {
-        *self.current_session.write().await = Some(session_id);
-        *self.current_media.write().await = Some(media_id);
+        self.current_session.store(Some(Arc::new(session_id)));
+        self.current_media.store(Some(Arc::new(media_id)));
     }
 
-    /// Get session ID by dialog ID (single session version)
+    /// Get session ID by dialog ID (single session version).
     pub async fn get_session_by_dialog(&self, dialog_id: &DialogId) -> Option<SessionId> {
-        let current_dialog = self.current_dialog.read().await;
-        if current_dialog.as_ref() == Some(dialog_id) {
-            self.current_session.read().await.clone()
+        if self.current_dialog.load().as_deref() == Some(dialog_id) {
+            self.current_session.load().as_deref().cloned()
         } else {
             None
         }
     }
 
-    /// Get session ID by media session ID (single session version)
+    /// Get session ID by media session ID (single session version).
     pub async fn get_session_by_media(&self, media_id: &MediaSessionId) -> Option<SessionId> {
-        let current_media = self.current_media.read().await;
-        if current_media.as_ref() == Some(media_id) {
-            self.current_session.read().await.clone()
+        if self.current_media.load().as_deref() == Some(media_id) {
+            self.current_session.load().as_deref().cloned()
         } else {
             None
         }
     }
 
-    /// Get dialog ID by session ID (single session version)
+    /// Get dialog ID by session ID (single session version).
     pub async fn get_dialog_by_session(&self, session_id: &SessionId) -> Option<DialogId> {
-        let current_session = self.current_session.read().await;
-        if current_session.as_ref() == Some(session_id) {
-            self.current_dialog.read().await.clone()
+        if self.current_session.load().as_deref() == Some(session_id) {
+            self.current_dialog.load().as_deref().cloned()
         } else {
             None
         }
     }
 
-    /// Get media session ID by session ID (single session version)
+    /// Get media session ID by session ID (single session version).
     pub async fn get_media_by_session(&self, session_id: &SessionId) -> Option<MediaSessionId> {
-        let current_session = self.current_session.read().await;
-        if current_session.as_ref() == Some(session_id) {
-            self.current_media.read().await.clone()
+        if self.current_session.load().as_deref() == Some(session_id) {
+            self.current_media.load().as_deref().cloned()
         } else {
             None
         }
     }
 
-    /// Remove all mappings for a session (single session version)
+    /// Remove all mappings for a session (single session version).
     pub async fn remove_session(&self, session_id: &SessionId) {
-        let current_session = self.current_session.read().await;
-        if current_session.as_ref() == Some(session_id) {
-            drop(current_session); // Release read lock
-            *self.current_session.write().await = None;
-            *self.current_dialog.write().await = None;
-            *self.current_media.write().await = None;
+        if self.current_session.load().as_deref() == Some(session_id) {
+            self.current_session.store(None);
+            self.current_dialog.store(None);
+            self.current_media.store(None);
         }
     }
 
-    /// Check if a session exists in the registry (single session version)
+    /// Check if a session exists in the registry (single session version).
     pub async fn contains_session(&self, session_id: &SessionId) -> bool {
-        let current_session = self.current_session.read().await;
-        current_session.as_ref() == Some(session_id)
+        self.current_session.load().as_deref() == Some(session_id)
     }
 
-    /// Get the total number of sessions in the registry (0 or 1)
+    /// Get the total number of sessions in the registry (0 or 1).
     pub async fn session_count(&self) -> usize {
-        if self.current_session.read().await.is_some() {
-            1
-        } else {
-            0
-        }
+        usize::from(self.current_session.load().is_some())
     }
 
-    /// Clear all mappings (single session version)
+    /// Clear all mappings (single session version).
     pub async fn clear(&self) {
-        *self.current_session.write().await = None;
-        *self.current_dialog.write().await = None;
-        *self.current_media.write().await = None;
-        *self.pending_incoming_call.write().await = None;
-        *self.pending_incoming_request.write().await = None;
+        self.current_session.store(None);
+        self.current_dialog.store(None);
+        self.current_media.store(None);
+        self.pending_incoming_call.store(None);
+        self.pending_incoming_request.store(None);
     }
 
-    /// Store pending incoming call info (single session version)
+    /// Store pending incoming call info (single session version).
     pub async fn store_pending_incoming_call(
         &self,
         _session_id: SessionId,
         info: IncomingCallInfo,
     ) {
-        *self.pending_incoming_call.write().await = Some(info);
+        self.pending_incoming_call.store(Some(Arc::new(info)));
     }
 
-    /// Get and remove pending incoming call info (single session version)
+    /// Get and remove pending incoming call info (single session version).
     pub async fn take_pending_incoming_call(
         &self,
         _session_id: &SessionId,
     ) -> Option<IncomingCallInfo> {
-        self.pending_incoming_call.write().await.take()
+        self.pending_incoming_call
+            .swap(None)
+            .map(|arc| (*arc).clone())
     }
 
     /// SIP_API_DESIGN_2 Phase A: store the parsed inbound INVITE so
@@ -150,7 +155,7 @@ impl SessionRegistry {
         &self,
         request: Arc<rvoip_sip_core::Request>,
     ) {
-        *self.pending_incoming_request.write().await = Some(request);
+        self.pending_incoming_request.store(Some(request));
     }
 
     /// Peek at the parsed inbound INVITE without consuming it. Used
@@ -160,7 +165,7 @@ impl SessionRegistry {
     pub async fn peek_pending_incoming_request(
         &self,
     ) -> Option<Arc<rvoip_sip_core::Request>> {
-        self.pending_incoming_request.read().await.clone()
+        self.pending_incoming_request.load_full()
     }
 
     /// Consume the parsed inbound INVITE once an
@@ -169,7 +174,7 @@ impl SessionRegistry {
     pub async fn take_pending_incoming_request(
         &self,
     ) -> Option<Arc<rvoip_sip_core::Request>> {
-        self.pending_incoming_request.write().await.take()
+        self.pending_incoming_request.swap(None)
     }
 }
 
@@ -178,9 +183,6 @@ impl Default for SessionRegistry {
         Self::new()
     }
 }
-
-// Tests removed - need to be rewritten for async methods
-// Single session constraint makes testing simpler anyway
 
 #[cfg(test)]
 mod tests {
@@ -262,7 +264,7 @@ mod tests {
         registry.map_dialog(session2.clone(), DialogId::new()).await;
 
         // Single-session registry: second map_dialog overwrites the first,
-        // so count is 1, not 2
+        // so count is 1, not 2.
         assert_eq!(registry.session_count().await, 1);
     }
 

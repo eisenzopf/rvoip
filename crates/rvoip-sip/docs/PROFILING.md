@@ -1,5 +1,12 @@
 # Profiling & performance benchmarks
 
+> **Looking for publishable absolute numbers** (calls/sec, REGs/sec,
+> concurrent active calls, p99 setup latency)? See
+> [`BENCHMARKING.md`](BENCHMARKING.md). This document is the developer
+> runbook for *finding* a performance problem with samply / dhat /
+> criterion — `BENCHMARKING.md` is the runbook for producing the
+> numbers a VoIP engineer cites when evaluating the library.
+
 A developer runbook for measuring the SIP stack under load. Pairs three
 tools — **Criterion** (throughput / latency numbers), **samply** (CPU
 flamegraphs), and **dhat** (heap profiling) — with four canonical
@@ -171,6 +178,27 @@ a long-running profiling example under `crates/rvoip-sip/examples/`
 mirroring `profiling_call_setup_loop` whenever you need a sustained
 workload that's CPU- or heap-profilable. The `[profile.flamegraph]`
 inheritance keeps symbols intact.
+
+### 8. SessionRegistry / DialogAdapter targeted lookups
+
+Scenarios 1–4 stress the whole stack; this one isolates the data
+structures the per-message and per-call paths land on inside
+`rvoip-sip` itself. The bench lives in `benches/session_lookup_create.rs`
+and follows the `rtp-core/benches/session_demux.rs` shape: each hot
+path is measured side-by-side with the candidate replacement at
+threads {1, 4, 8, 16}.
+
+| Tool | Command | What to look for |
+|---|---|---|
+| Criterion | `cargo bench -p rvoip-sip --bench session_lookup_create` | Five groups: `session_store_uncontended`, `session_store_contended`, `session_store_create`, `session_registry_lookup` (`rwlock` vs `arcswap`), `dialog_callid_key_type` (`dashmap_string` vs `dashmap_arc_str`). |
+| Decision rule (registry) | Read `session_registry_lookup/{rwlock,arcswap}/16` | `arcswap` should beat `rwlock` by ≥5× at threads=16 — wait-free atomic loads vs `tokio::sync::RwLock::read().await`. The swap landed in `src/session_registry.rs` is grounded here; re-run after any registry change to catch drift. |
+| Decision rule (callid) | Read `dialog_callid_key_type/{dashmap_string,dashmap_arc_str}/16` | If `dashmap_arc_str` is ≥30% faster, schedule a parser-level Call-ID intern so `DialogAdapter::callid_to_session` can move to `DashMap<Arc<str>, _>`. If the delta is small the String allocation isn't the dominant cost — flamegraph the per-inbound-message path before investing. |
+| Decision rule (store) | Read `session_store_contended/{get_session,find_by_call_id}/16` | If `find_by_call_id` is >2× slower than `get_session`, the second-hop dereference dominates — consider folding the indexes into a single `DashMap<SessionId, (SessionState, indexes)>` and inverting the lookup. Both groups today should scale roughly linearly with thread count; sub-linear scaling on `get_session` at 16 threads = DashMap shard contention on the SessionId hash distribution. |
+
+Run end-to-end deltas (`call_setup`, `dialog_steady_state`) alongside
+to size up the contribution of the swapped structure to whole-call
+cost — a 10× micro-bench win on a path that's <1% of call cost is not
+worth landing.
 
 ---
 

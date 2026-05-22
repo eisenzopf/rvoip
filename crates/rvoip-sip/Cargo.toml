@@ -140,6 +140,12 @@ name = "profiling_dhat_udp"
 path = "examples/profiling/dhat_udp.rs"
 required-features = ["dhat"]
 
+# Standalone listener for sipp-driven baseline benchmarks (rvoip vs
+# Asterisk vs FreeSWITCH parity). See `docs/BENCHMARKING.md`.
+[[example]]
+name = "perf_listener"
+path = "examples/perf_listener.rs"
+
 # SIP_API_DESIGN_2 §11 use-case walkthroughs — runnable end-to-end
 # demonstrations of the four target patterns (endpoint, gateway,
 # call-center agent, SBC). Each example boots multiple coordinators
@@ -337,6 +343,12 @@ harness = false
 [[bench]]
 name = "dialog_steady_state"
 harness = false
+# Targeted create/find micro-benchmarks. Each hot path is measured
+# side-by-side with a candidate replacement (RwLock vs ArcSwap, String
+# vs Arc<str> DashMap keys) — see Scenario 8 in docs/PROFILING.md.
+[[bench]]
+name = "session_lookup_create"
+harness = false
 
 [features]
 default = []
@@ -364,11 +376,104 @@ dhat = ["dep:dhat", "rvoip-infra-common/no-global-allocator"]
 # examples (`profiling_registration_storm`, `profiling_dialog_steady_state`).
 # Requires `RUSTFLAGS="--cfg tokio_unstable"` at build time.
 tokio-console = ["dep:console-subscriber"]
+# Opt-in publically-reportable concurrency benchmark suite under
+# tests/perf/. Pulls in hdrhistogram for latency percentiles and sysinfo
+# for environment-block capture. Off by default so `cargo build` /
+# `cargo test` are untouched. See `crates/rvoip-sip/docs/BENCHMARKING.md`.
+perf-tests = ["dep:hdrhistogram", "dep:sysinfo"]
 
 [[test]]
 name = "generated_sip_compliance"
 path = "tests/generated_sip_compliance.rs"
 required-features = ["generated-validation"]
+
+# Publically-reportable concurrency benchmark suite. Each scenario is a
+# real integration test that writes a JSON result file to
+# `target/perf-results/<scenario>.json`. Run with `--release` for citable
+# numbers. See `crates/rvoip-sip/docs/BENCHMARKING.md`.
+[[test]]
+name = "perf_call_setup_cps"
+path = "tests/perf/perf_call_setup_cps.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_concurrent_active_calls"
+path = "tests/perf/perf_concurrent_active_calls.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_registration_throughput"
+path = "tests/perf/perf_registration_throughput.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_mid_call_signal_under_media"
+path = "tests/perf/perf_mid_call_signal_under_media.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_rtp_steady_state"
+path = "tests/perf/perf_rtp_steady_state.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_tls_overhead"
+path = "tests/perf/perf_tls_overhead.rs"
+required-features = ["perf-tests", "dev-insecure-tls"]
+
+[[test]]
+name = "perf_srtp_overhead"
+path = "tests/perf/perf_srtp_overhead.rs"
+required-features = ["perf-tests"]
+
+[[test]]
+name = "perf_soak_30min"
+path = "tests/perf/perf_soak_30min.rs"
+required-features = ["perf-tests"]
+
+# Phase 3 — industry-recognised scenarios beyond Tier 1.
+[[test]]
+name = "perf_pdd_with_180_first"
+path = "tests/perf/perf_pdd_with_180_first.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_sustained_long_duration_calls"
+path = "tests/perf/perf_sustained_long_duration_calls.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_registrar_binding_scale"
+path = "tests/perf/perf_registrar_binding_scale.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_mixed_workload"
+path = "tests/perf/perf_mixed_workload.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_b2bua_forwarding"
+path = "tests/perf/perf_b2bua_forwarding.rs"
+required-features = ["perf-tests"]
+
+# Phase 4 — real-world workload + reliability + SIPp parity.
+[[test]]
+name = "perf_backpressure_step"
+path = "tests/perf/perf_backpressure_step.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_transport_recovery"
+path = "tests/perf/perf_transport_recovery.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_ai_agent_load"
+path = "tests/perf/perf_ai_agent_load.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_contact_center_transfers"
+path = "tests/perf/perf_contact_center_transfers.rs"
+required-features = ["perf-tests"]
+[[test]]
+name = "perf_sipp_parity"
+path = "tests/perf/perf_sipp_parity.rs"
+required-features = ["perf-tests"]
 
 [dependencies.sqlx]
 version = "0.7"
@@ -383,4 +488,17 @@ optional = true
 
 [dependencies.console-subscriber]
 version = "0.4"
+optional = true
+
+# perf-tests optional deps. Off by default; enabled via the `perf-tests`
+# feature. These live in `[dependencies]` (not `[dev-dependencies]`)
+# because Cargo does not allow `optional = true` on dev-dependencies —
+# same idiom as `dhat` and `console-subscriber` above. They are pulled
+# in only when the feature is enabled, so default builds are untouched.
+[dependencies.hdrhistogram]
+version = "7.5"
+optional = true
+
+[dependencies.sysinfo]
+version = "0.31"
 optional = true
