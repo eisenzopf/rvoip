@@ -2,8 +2,8 @@ use crate::adapter::{EndReason, OriginateRequest, RejectReason, TransferTarget};
 use crate::capability::CapabilityDescriptor;
 use crate::conversation::ConversationPolicy;
 use crate::ids::{
-    AiAttachmentId, BridgeId, ConnectionId, ConversationId, ListenerId, ParticipantId,
-    RecordingId, SessionId, TenantId,
+    AiAttachmentId, BridgeId, ConnectionId, ConversationId, ListenerId, ParticipantId, RecordingId,
+    SessionId, TenantId,
 };
 use crate::message::Message;
 use crate::participant::{ParticipantKind, ParticipantRole};

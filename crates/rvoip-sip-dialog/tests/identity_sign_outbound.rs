@@ -33,8 +33,7 @@ use rvoip_sip_dialog::manager::{
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-const SAMPLE_JWT: &str =
-    "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
+const SAMPLE_JWT: &str = "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
      eyJhdHRlc3QiOiJBIn0.\
      dGVzdHNpZw";
 
@@ -125,10 +124,7 @@ async fn signer_receives_e164_tn_from_tel_uri() {
     let signer = Arc::new(CannedSigner::new());
 
     // Build an INVITE: alice@example.com (named SIP) → +15559876543 (tel)
-    let _request = build_invite_with_uris(
-        "sip:alice@example.com",
-        "tel:+15559876543",
-    );
+    let _request = build_invite_with_uris("sip:alice@example.com", "tel:+15559876543");
 
     // Drive the signer directly. The hook in
     // `RequestLifecycle::pre_send_request` builds a PassportClaimSummary
@@ -205,13 +201,16 @@ fn identity_header_value_round_trips_to_typed_header() {
     );
 
     assert_eq!(identity.jwt, SAMPLE_JWT);
-    assert_eq!(identity.info.as_deref(), Some("https://cert.example.org/p.cer"));
+    assert_eq!(
+        identity.info.as_deref(),
+        Some("https://cert.example.org/p.cer")
+    );
     assert_eq!(identity.alg.as_deref(), Some("ES256"));
     assert_eq!(identity.ppt.as_deref(), Some("shaken"));
 
     let header = TypedHeader::Identity(identity);
-    let request = Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap())
-        .with_header(header);
+    let request =
+        Request::new(Method::Invite, "sip:bob@example.com".parse().unwrap()).with_header(header);
 
     let extracted = request.headers.iter().find_map(|h| match h {
         TypedHeader::Identity(id) => Some(id.clone()),

@@ -5,8 +5,8 @@
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-use rvoip_sip_dialog::{Dialog, DialogError, DialogState};
 use rvoip_sip_core::Method;
+use rvoip_sip_dialog::{Dialog, DialogError, DialogState};
 
 /// Test basic dialog creation and state management
 #[tokio::test]

@@ -58,9 +58,7 @@ impl PaddedCounter {
     fn update_max(&self, v: usize) {
         let _ = self
             .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
-                Some(cur.max(v))
-            });
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| Some(cur.max(v)));
     }
 }
 

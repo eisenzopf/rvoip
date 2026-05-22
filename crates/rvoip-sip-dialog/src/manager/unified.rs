@@ -114,8 +114,8 @@ use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
 use rvoip_sip_core::{Method, Request, Response, StatusCode, Uri};
 
 use crate::api::{
-    common::{CallHandle, DialogHandle},
     ApiError, ApiResult,
+    common::{CallHandle, DialogHandle},
 };
 use crate::config::DialogManagerConfig;
 use crate::dialog::{Dialog, DialogId, DialogState};
@@ -242,7 +242,12 @@ impl UnifiedDialogManager {
         );
 
         // Create core dialog manager with the provided transaction manager
-        let mut core = DialogManager::new(transaction_manager, local_address).await?;
+        let mut core = DialogManager::new_with_index_capacity(
+            transaction_manager,
+            local_address,
+            config.dialog_config().max_dialogs.unwrap_or(10_000),
+        )
+        .await?;
 
         // **NEW**: Inject the unified configuration into the core manager
         core.set_config(config.clone());
@@ -288,10 +293,11 @@ impl UnifiedDialogManager {
         );
 
         // Create core dialog manager with global events
-        let mut core = DialogManager::with_global_events(
+        let mut core = DialogManager::with_global_events_and_index_capacity(
             transaction_manager,
             transaction_events,
             local_address,
+            config.dialog_config().max_dialogs.unwrap_or(10_000),
         )
         .await?;
 
@@ -359,8 +365,10 @@ impl UnifiedDialogManager {
                 );
             }
             DialogManagerConfig::Hybrid(hybrid) => {
-                info!("Hybrid mode active - from_uri: {:?}, domain: {:?}, auto_auth: {}, auto_options: {}",
-                    hybrid.from_uri, hybrid.domain, hybrid.auto_auth, hybrid.auto_options_response);
+                info!(
+                    "Hybrid mode active - from_uri: {:?}, domain: {:?}, auto_auth: {}, auto_options: {}",
+                    hybrid.from_uri, hybrid.domain, hybrid.auto_auth, hybrid.auto_options_response
+                );
             }
         }
 
@@ -539,8 +547,7 @@ impl UnifiedDialogManager {
                 ApiError::internal(format!("Failed to create SUBSCRIBE transaction: {}", e))
             })?;
         self.core
-            .transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+            .link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
         self.core
             .transaction_manager()
             .send_request(&transaction_id)
@@ -590,8 +597,15 @@ impl UnifiedDialogManager {
         event_package: &str,
         expires: u32,
     ) -> ApiResult<()> {
-        self.send_subscribe_refresh_with_extras(dialog_id, event_package, expires, None, None, Vec::new())
-            .await
+        self.send_subscribe_refresh_with_extras(
+            dialog_id,
+            event_package,
+            expires,
+            None,
+            None,
+            Vec::new(),
+        )
+        .await
     }
 
     /// In-dialog SUBSCRIBE refresh with application-staged
@@ -608,12 +622,12 @@ impl UnifiedDialogManager {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<()> {
         use crate::transaction::dialog::{
-            request_builder_from_dialog_template, DialogRequestTemplate,
+            DialogRequestTemplate, request_builder_from_dialog_template,
         };
+        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::event::{Event, EventType};
         use rvoip_sip_core::types::expires::Expires;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
-        use rvoip_sip_core::types::TypedHeader;
 
         let (destination, request) = {
             let mut dialog = self
@@ -705,8 +719,7 @@ impl UnifiedDialogManager {
                 ))
             })?;
         self.core
-            .transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+            .link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
         self.core
             .transaction_manager()
             .send_request(&transaction_id)
@@ -861,9 +874,15 @@ impl UnifiedDialogManager {
                 if error_msg.contains("Transaction terminated after timeout")
                     || error_msg.contains("Transaction terminated")
                 {
-                    debug!("INVITE transaction terminated normally after 2xx response (RFC 3261 compliant): {}", e);
+                    debug!(
+                        "INVITE transaction terminated normally after 2xx response (RFC 3261 compliant): {}",
+                        e
+                    );
                     // This is expected behavior - the SIP call flow completed successfully
-                    info!("Created outgoing call with dialog ID: {} (transaction completed per RFC 3261)", dialog_id);
+                    info!(
+                        "Created outgoing call with dialog ID: {} (transaction completed per RFC 3261)",
+                        dialog_id
+                    );
                     return Ok(CallHandle::new(
                         dialog_id.clone(),
                         Arc::new(self.core.clone()),
@@ -1193,7 +1212,10 @@ impl UnifiedDialogManager {
             set_response_to_tag(&mut built_response, &to_tag);
         }
 
-        debug!("Successfully built response for transaction {} using proper RFC 3261 compliant headers", transaction_id);
+        debug!(
+            "Successfully built response for transaction {} using proper RFC 3261 compliant headers",
+            transaction_id
+        );
         Ok(built_response)
     }
 
@@ -1520,8 +1542,10 @@ impl UnifiedDialogManager {
                 );
             }
             _ => {
-                error!("Cannot send CANCEL for dialog {} in state {:?} - must be in Initial or Early state",
-                      dialog_id, dialog_state);
+                error!(
+                    "Cannot send CANCEL for dialog {} in state {:?} - must be in Initial or Early state",
+                    dialog_id, dialog_state
+                );
                 return Err(ApiError::Protocol {
                     message: format!("Cannot cancel dialog in state {:?}", dialog_state),
                 });

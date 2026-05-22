@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use rvoip_sip_dialog::{api::unified::UnifiedDialogApi, config::DialogManagerConfig};
 use rvoip_sip_core::{
     builder::{headers::ReferToExt, SimpleRequestBuilder},
     types::refer_to::ReferTo,
     Method,
 };
+use rvoip_sip_dialog::{api::unified::UnifiedDialogApi, config::DialogManagerConfig};
 
 /// Helper to create a test dialog API
 async fn create_test_dialog_api(port: u16) -> Arc<UnifiedDialogApi> {

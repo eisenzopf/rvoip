@@ -24,7 +24,7 @@ use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
 use crate::manager::utils::DialogUtils;
 use crate::manager::{DialogManager, SourceExtractor};
-use crate::transaction::{TransactionKey, utils::response_builders};
+use crate::transaction::{utils::response_builders, TransactionKey};
 use rvoip_sip_core::{HeaderName, Request, StatusCode, TypedHeader};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,7 +226,7 @@ impl DialogManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{ByeSequenceDisposition, classify_bye_sequence};
+    use super::{classify_bye_sequence, ByeSequenceDisposition};
     use crate::dialog::{Dialog, DialogState};
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::{Method, Request};

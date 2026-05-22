@@ -118,8 +118,11 @@ fn base_invite() -> Request {
         .cseq(1)
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
-                "10.0.0.5", Some(5060),
+                "SIP",
+                "2.0",
+                "UDP",
+                "10.0.0.5",
+                Some(5060),
                 vec![Param::branch("z9hG4bKmtu-test")],
             )
             .unwrap(),
@@ -180,14 +183,29 @@ async fn oversized_udp_request_fails_over_to_tcp() {
         .expect("send_message should succeed via TCP failover");
 
     // The TCP transport must have received the send; UDP must not have.
-    assert_eq!(tcp.count(), 1, "TCP transport should receive the failover send");
-    assert_eq!(udp.count(), 0, "UDP transport must be skipped when oversized");
+    assert_eq!(
+        tcp.count(),
+        1,
+        "TCP transport should receive the failover send"
+    );
+    assert_eq!(
+        udp.count(),
+        0,
+        "UDP transport must be skipped when oversized"
+    );
 
     // The TCP transport's recorded message must have its top Via flipped
     // to `SIP/2.0/TCP` so the peer routes the response back over TCP.
-    let received = tcp.last_request().expect("TCP must have a recorded request");
-    let top_via = received.first_via().expect("Via present on recorded request");
-    let top_entry = top_via.headers().first().expect("Via has at least one entry");
+    let received = tcp
+        .last_request()
+        .expect("TCP must have a recorded request");
+    let top_via = received
+        .first_via()
+        .expect("Via present on recorded request");
+    let top_entry = top_via
+        .headers()
+        .first()
+        .expect("Via has at least one entry");
     assert_eq!(
         top_entry.sent_protocol.transport, "TCP",
         "top Via sent-protocol must reflect the actual transport after failover"
@@ -220,7 +238,9 @@ async fn small_udp_request_stays_on_udp() {
     );
 
     let dest: SocketAddr = "127.0.0.1:5060".parse().unwrap();
-    mux.send_message(Message::Request(request), dest).await.unwrap();
+    mux.send_message(Message::Request(request), dest)
+        .await
+        .unwrap();
 
     assert_eq!(udp.count(), 1, "small request must stay on UDP");
     assert_eq!(tcp.count(), 0, "TCP must not receive a small request");
@@ -233,7 +253,10 @@ async fn oversized_udp_with_no_tcp_registered_is_message_too_large() {
     // No TCP in the registry — only UDP.
     let mux = MultiplexedTransport::new_without_trace(
         udp.clone() as Arc<dyn Transport>,
-        registry(vec![(TransportType::Udp, udp.clone() as Arc<dyn Transport>)]),
+        registry(vec![(
+            TransportType::Udp,
+            udp.clone() as Arc<dyn Transport>,
+        )]),
     )
     .unwrap();
 

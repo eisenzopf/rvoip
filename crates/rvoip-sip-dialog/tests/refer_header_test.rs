@@ -4,12 +4,12 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use rvoip_sip_dialog::{api::unified::UnifiedDialogApi, config::DialogManagerConfig};
 use rvoip_sip_core::{
     builder::{headers::ReferToExt, SimpleRequestBuilder},
     types::refer_to::ReferTo,
     Method,
 };
+use rvoip_sip_dialog::{api::unified::UnifiedDialogApi, config::DialogManagerConfig};
 
 #[tokio::test]
 async fn test_refer_has_header_not_body() {

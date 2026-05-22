@@ -2,8 +2,8 @@
 //!
 //! Tests that ensure RFC 3261 compliance in dialog management.
 
-use rvoip_sip_dialog::{Dialog, DialogState};
 use rvoip_sip_core::{Method, Uri};
+use rvoip_sip_dialog::{Dialog, DialogState};
 
 #[tokio::test]
 async fn test_dialog_creation_complies_with_rfc3261() {

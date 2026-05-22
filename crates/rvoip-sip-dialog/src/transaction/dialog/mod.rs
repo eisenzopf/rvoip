@@ -25,9 +25,9 @@ pub use quick::{
     bye_for_dialog, info_for_dialog, info_for_dialog_with_extras, message_for_dialog,
     message_for_dialog_with_extras, message_out_of_dialog, message_out_of_dialog_with_extras,
     notify_for_dialog, notify_for_dialog_with_extras, options_out_of_dialog_with_extras,
-    prack_for_dialog, refer_for_dialog, refer_for_dialog_with_contact, refer_for_dialog_with_extras,
-    reinvite_for_dialog, reinvite_for_dialog_with_extras, response_for_dialog_transaction,
-    subscribe_out_of_dialog, subscribe_out_of_dialog_with_extras,
+    prack_for_dialog, refer_for_dialog, refer_for_dialog_with_contact,
+    refer_for_dialog_with_extras, reinvite_for_dialog, reinvite_for_dialog_with_extras,
+    response_for_dialog_transaction, subscribe_out_of_dialog, subscribe_out_of_dialog_with_extras,
     subscribe_out_of_dialog_with_identity, subscribe_out_of_dialog_with_identity_and_extras,
     update_for_dialog, update_for_dialog_with_contact, update_for_dialog_with_extras,
 };

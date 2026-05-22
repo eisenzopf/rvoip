@@ -181,8 +181,7 @@ async fn ttl_expires_optional_is_carried() {
 
 #[tokio::test]
 async fn from_resolver_error_into_transport_error_maps_dns() {
-    let err: rvoip_sip_transport::error::Error =
-        ResolverError::Dns("timeout".to_string()).into();
+    let err: rvoip_sip_transport::error::Error = ResolverError::Dns("timeout".to_string()).into();
     assert!(matches!(
         err,
         rvoip_sip_transport::error::Error::DnsResolutionFailed(_)
@@ -191,8 +190,7 @@ async fn from_resolver_error_into_transport_error_maps_dns() {
 
 #[tokio::test]
 async fn from_resolver_error_into_transport_error_maps_forbidden() {
-    let err: rvoip_sip_transport::error::Error =
-        ResolverError::Forbidden("sips:+udp").into();
+    let err: rvoip_sip_transport::error::Error = ResolverError::Forbidden("sips:+udp").into();
     assert!(matches!(
         err,
         rvoip_sip_transport::error::Error::UnsupportedTransport(_)

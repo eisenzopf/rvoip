@@ -143,9 +143,7 @@ impl FromStr for Identity {
 
     fn from_str(s: &str) -> Result<Self> {
         if s.trim().is_empty() {
-            return Err(Error::ParseError(
-                "Empty Identity header value".to_string(),
-            ));
+            return Err(Error::ParseError("Empty Identity header value".to_string()));
         }
         let raw_input = s.trim();
 
@@ -159,9 +157,7 @@ impl FromStr for Identity {
 
         let jwt = jwt_part.trim().to_string();
         if jwt.is_empty() {
-            return Err(Error::ParseError(
-                "Identity header missing JWT".to_string(),
-            ));
+            return Err(Error::ParseError("Identity header missing JWT".to_string()));
         }
 
         let mut info = None;
@@ -247,8 +243,7 @@ impl TypedHeaderTrait for Identity {
 mod tests {
     use super::*;
 
-    const SAMPLE_JWT: &str =
-        "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
+    const SAMPLE_JWT: &str = "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
          eyJhdHRlc3QiOiJBIn0.\
          dGVzdHNpZw";
 
@@ -277,10 +272,7 @@ mod tests {
     #[test]
     fn raw_is_byte_preserved() {
         // Generic params + odd spacing should survive byte-for-byte in `raw`.
-        let input = format!(
-            "{};alg=ES256 ; ppt=shaken;x-extra=yes",
-            SAMPLE_JWT
-        );
+        let input = format!("{};alg=ES256 ; ppt=shaken;x-extra=yes", SAMPLE_JWT);
         let id = Identity::from_str(&input).expect("parse");
         assert_eq!(id.raw, input);
         // Display falls back to raw.

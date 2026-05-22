@@ -67,12 +67,8 @@ fn bench_listener_roundtrip(c: &mut Criterion) {
 
                     let start = Instant::now();
                     for _ in 0..iters {
-                        sender
-                            .send_to(payload, listener_addr)
-                            .await
-                            .expect("send");
-                        let (bytes, _src, _local) =
-                            listener.receive().await.expect("receive");
+                        sender.send_to(payload, listener_addr).await.expect("send");
+                        let (bytes, _src, _local) = listener.receive().await.expect("receive");
                         black_box(bytes);
                     }
                     start.elapsed()
@@ -128,5 +124,9 @@ fn bench_full_stack_roundtrip(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_listener_roundtrip, bench_full_stack_roundtrip);
+criterion_group!(
+    benches,
+    bench_listener_roundtrip,
+    bench_full_stack_roundtrip
+);
 criterion_main!(benches);

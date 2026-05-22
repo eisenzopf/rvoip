@@ -14,6 +14,8 @@ use std::time::Instant;
 
 use rvoip_sip_core::Request;
 
+use crate::transaction::TransactionKey;
+
 /// Dialog identifiers used to route 2xx ACKs back to their INVITE server
 /// transaction without scanning every active server transaction.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -40,6 +42,25 @@ impl ServerInviteDialogKey {
             to_tag: None,
         });
         Some((exact, fallback))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServerInviteAckIndexEntry {
+    pub(crate) transaction_id: TransactionKey,
+    pub(crate) expires_at: Option<Instant>,
+}
+
+impl ServerInviteAckIndexEntry {
+    pub(crate) fn active(transaction_id: TransactionKey) -> Self {
+        Self {
+            transaction_id,
+            expires_at: None,
+        }
+    }
+
+    pub(crate) fn is_expired(&self, now: Instant) -> bool {
+        self.expires_at.is_some_and(|expires_at| now >= expires_at)
     }
 }
 

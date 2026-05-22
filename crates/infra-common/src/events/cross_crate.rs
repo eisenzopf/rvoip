@@ -1567,32 +1567,74 @@ impl OrchestrationCrossCrateEvent {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RvoipCoreCrossCrateEvent {
     // --- Conversation lifecycle ---
-    ConversationOpened { conversation_id: String },
-    ConversationClosed { conversation_id: String },
+    ConversationOpened {
+        conversation_id: String,
+    },
+    ConversationClosed {
+        conversation_id: String,
+    },
 
     // --- Session lifecycle ---
-    SessionStarted { session_id: String, conversation_id: String },
-    SessionEnded { session_id: String },
-    SessionFailed { session_id: String, detail: String },
+    SessionStarted {
+        session_id: String,
+        conversation_id: String,
+    },
+    SessionEnded {
+        session_id: String,
+    },
+    SessionFailed {
+        session_id: String,
+        detail: String,
+    },
 
     // --- Connection lifecycle ---
-    ConnectionInbound { connection_id: String },
-    ConnectionOutbound { connection_id: String },
-    ConnectionConnected { connection_id: String },
-    ConnectionProgress { connection_id: String, kind: String },
-    ConnectionEnded { connection_id: String, reason: String },
-    ConnectionFailed { connection_id: String, detail: String },
+    ConnectionInbound {
+        connection_id: String,
+    },
+    ConnectionOutbound {
+        connection_id: String,
+    },
+    ConnectionConnected {
+        connection_id: String,
+    },
+    ConnectionProgress {
+        connection_id: String,
+        kind: String,
+    },
+    ConnectionEnded {
+        connection_id: String,
+        reason: String,
+    },
+    ConnectionFailed {
+        connection_id: String,
+        detail: String,
+    },
 
     // --- Bridge lifecycle ---
-    ConnectionsBridged { bridge_id: String, a: String, b: String },
-    ConnectionsUnbridged { bridge_id: String },
+    ConnectionsBridged {
+        bridge_id: String,
+        a: String,
+        b: String,
+    },
+    ConnectionsUnbridged {
+        bridge_id: String,
+    },
 
     // --- Transfer ---
-    ConnectionTransferred { connection_id: String, target: String },
+    ConnectionTransferred {
+        connection_id: String,
+        target: String,
+    },
 
     // --- Participant lifecycle ---
-    ParticipantJoined { session_id: String, participant_id: String },
-    ParticipantLeft { session_id: String, participant_id: String },
+    ParticipantJoined {
+        session_id: String,
+        participant_id: String,
+    },
+    ParticipantLeft {
+        session_id: String,
+        participant_id: String,
+    },
 
     // --- AI / listener attach ---
     AiAttached {
@@ -1600,18 +1642,37 @@ pub enum RvoipCoreCrossCrateEvent {
         attachment_id: String,
         provider_ref: String,
     },
-    AiDetached { attachment_id: String },
-    ListenerAttached { listener_id: String },
-    ListenerDetached { listener_id: String },
+    AiDetached {
+        attachment_id: String,
+    },
+    ListenerAttached {
+        listener_id: String,
+    },
+    ListenerDetached {
+        listener_id: String,
+    },
 
     // --- Messaging ---
-    MessageReceived { message_id: String, conversation_id: String },
-    MessageSent { message_id: String, conversation_id: String },
-    MessageDelivered { message_id: String },
-    MessageRead { message_id: String },
+    MessageReceived {
+        message_id: String,
+        conversation_id: String,
+    },
+    MessageSent {
+        message_id: String,
+        conversation_id: String,
+    },
+    MessageDelivered {
+        message_id: String,
+    },
+    MessageRead {
+        message_id: String,
+    },
 
     // --- DTMF ---
-    DtmfReceived { connection_id: String, digits: String },
+    DtmfReceived {
+        connection_id: String,
+        digits: String,
+    },
 
     // --- Transcription / recording ---
     TranscriptTurn {
@@ -1622,12 +1683,23 @@ pub enum RvoipCoreCrossCrateEvent {
         is_final: bool,
         assigned_provider: Option<String>,
     },
-    RecordingStarted { recording_id: String },
-    RecordingStopped { recording_id: String },
-    RecordingComplete { recording_id: String, sink: String },
+    RecordingStarted {
+        recording_id: String,
+    },
+    RecordingStopped {
+        recording_id: String,
+    },
+    RecordingComplete {
+        recording_id: String,
+        sink: String,
+    },
 
     // --- vCon ---
-    VconReady { session_id: String, handle_url: String, content_hash: String },
+    VconReady {
+        session_id: String,
+        handle_url: String,
+        content_hash: String,
+    },
     VconRedacted {
         session_id: String,
         old_url: String,
@@ -1641,8 +1713,12 @@ pub enum RvoipCoreCrossCrateEvent {
     },
 
     // --- Registration ---
-    RegistrationChanged { aor: String },
-    RegistrationHeartbeat { aor: String },
+    RegistrationChanged {
+        aor: String,
+    },
+    RegistrationHeartbeat {
+        aor: String,
+    },
 
     // --- Observability ---
     CapacityReport {
@@ -1651,7 +1727,11 @@ pub enum RvoipCoreCrossCrateEvent {
         active_bridges: u64,
         admission_in_use: u64,
     },
-    UsageRecord { tenant_id: String, kind: String, units: u64 },
+    UsageRecord {
+        tenant_id: String,
+        kind: String,
+        units: u64,
+    },
     Anomaly {
         kind: String,
         connection_id: Option<String>,

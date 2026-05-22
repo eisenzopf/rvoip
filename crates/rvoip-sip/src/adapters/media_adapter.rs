@@ -130,7 +130,19 @@ fn local_direction_from_remote_answer(
 }
 
 fn srtp_diagnostics_enabled() -> bool {
-    std::env::var("RVOIP_SRTP_DIAGNOSTICS")
+    env_flag("RVOIP_SRTP_DIAGNOSTICS")
+}
+
+fn media_diagnostics_enabled() -> bool {
+    env_flag("RVOIP_MEDIA_DIAGNOSTICS")
+}
+
+fn sdp_diagnostics_enabled() -> bool {
+    srtp_diagnostics_enabled() || media_diagnostics_enabled()
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -168,6 +180,20 @@ fn perf_no_media_rtp_port() -> u16 {
 fn emit_srtp_diag(line: String) {
     eprintln!("SRTP_DIAG {}", line);
     tracing::info!("SRTP_DIAG {}", line);
+}
+
+fn emit_media_diag(line: String) {
+    eprintln!("MEDIA_DIAG {}", line);
+    tracing::info!("MEDIA_DIAG {}", line);
+}
+
+fn emit_sdp_diag(line: String) {
+    if srtp_diagnostics_enabled() {
+        emit_srtp_diag(line.clone());
+    }
+    if media_diagnostics_enabled() {
+        emit_media_diag(line);
+    }
 }
 
 fn crypto_attribute_diag(count: usize) -> String {
@@ -620,10 +646,10 @@ impl MediaAdapter {
     ) -> Result<NegotiatedConfig> {
         // Parse remote SDP to extract IP and port
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
-        let diagnostics = srtp_diagnostics_enabled();
-        if diagnostics {
+        let srtp_diagnostics = srtp_diagnostics_enabled();
+        if sdp_diagnostics_enabled() {
             if let Ok(parsed) = SdpSession::from_str(remote_sdp) {
-                emit_srtp_diag(format!(
+                emit_sdp_diag(format!(
                     "remote_sdp_answer session={} media={}:{} transport={} {}",
                     session_id.0,
                     remote_ip,
@@ -657,7 +683,7 @@ impl MediaAdapter {
                     chosen.tag,
                     chosen.suite
                 );
-                if diagnostics {
+                if srtp_diagnostics {
                     emit_srtp_diag(format!(
                         "sdes_answer_accepted session={} suite={:?}",
                         session_id.0, chosen.suite
@@ -711,7 +737,7 @@ impl MediaAdapter {
                 );
                 self.record_media_security_negotiated(session_id, suite, true)
                     .await;
-                if diagnostics {
+                if srtp_diagnostics {
                     emit_srtp_diag(format!(
                         "srtp_contexts_installed session={} role=uac suite={:?}",
                         session_id.0, suite
@@ -774,9 +800,9 @@ impl MediaAdapter {
             SessionError::SDPNegotiationFailed(format!("Failed to parse remote SDP: {}", e))
         })?;
         let (remote_ip, remote_port) = self.parse_sdp_connection(remote_sdp)?;
-        let diagnostics = srtp_diagnostics_enabled();
-        if diagnostics {
-            emit_srtp_diag(format!(
+        let srtp_diagnostics = srtp_diagnostics_enabled();
+        if sdp_diagnostics_enabled() {
+            emit_sdp_diag(format!(
                 "remote_sdp_offer session={} media={}:{} transport={} {}",
                 session_id.0,
                 remote_ip,
@@ -807,7 +833,7 @@ impl MediaAdapter {
                     chosen.tag,
                     chosen.suite
                 );
-                if diagnostics {
+                if srtp_diagnostics {
                     emit_srtp_diag(format!(
                         "sdes_offer_accepted session={} suite={:?}",
                         session_id.0, chosen.suite
@@ -828,7 +854,7 @@ impl MediaAdapter {
                  rejecting m-line with port=0 per RFC 3264 §6",
                     session_id.0
                 );
-                if diagnostics {
+                if srtp_diagnostics {
                     emit_srtp_diag(format!(
                         "sdes_offer_rejected session={} reason=local_policy",
                         session_id.0
@@ -906,7 +932,7 @@ impl MediaAdapter {
                 );
                 self.record_media_security_negotiated(session_id, suite, true)
                     .await;
-                if diagnostics {
+                if srtp_diagnostics {
                     emit_srtp_diag(format!(
                         "srtp_contexts_installed session={} role=uas suite={:?}",
                         session_id.0, suite
@@ -970,8 +996,8 @@ impl MediaAdapter {
         )?;
         let offered_direction = audio_direction(&parsed_offer);
         let answer_direction = answer_direction_for_offer(&offered_direction);
-        if diagnostics {
-            emit_srtp_diag(format!(
+        if sdp_diagnostics_enabled() {
+            emit_sdp_diag(format!(
                 "local_sdp_answer session={} media={}:{} transport={} {} direction={}",
                 session_id.0,
                 advertised_ip,
@@ -1541,8 +1567,8 @@ impl MediaAdapter {
             ("RTP/AVP", Vec::new())
         };
         let crypto_attr_count = crypto_attrs.len();
-        if srtp_diagnostics_enabled() {
-            emit_srtp_diag(format!(
+        if sdp_diagnostics_enabled() {
+            emit_sdp_diag(format!(
                 "local_sdp_offer session={} media={}:{} transport={} {} direction={}",
                 session_id.0,
                 advertised_ip,
@@ -3347,5 +3373,70 @@ mod sdp_format_tests {
 
         assert_eq!(advertised_ip.to_string(), "203.0.113.42");
         assert_eq!(port, 16000, "zero port must defer to local_port_fallback");
+    }
+
+    #[tokio::test]
+    async fn uas_plain_avp_answer_uses_allocated_rtp_port() {
+        use crate::session_store::SessionStore;
+        use crate::state_table::types::Role;
+        use rvoip_media_core::relay::controller::MediaSessionController;
+        use std::net::Ipv4Addr;
+
+        let controller = Arc::new(MediaSessionController::new());
+        let store = Arc::new(SessionStore::new());
+        let session_id = SessionId("uas-plain-avp-answer-test".to_string());
+        store
+            .create_session(session_id.clone(), Role::UAS, false)
+            .await
+            .expect("create session");
+
+        let adapter = MediaAdapter::new(
+            controller,
+            store,
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            16000,
+            16100,
+        );
+        adapter
+            .start_session(&session_id)
+            .await
+            .expect("start media session");
+
+        let offer_sdp = SdpBuilder::new("Session")
+            .origin("-", "1", "0", "IN", "IP4", "127.0.0.1")
+            .connection("IN", "IP4", "127.0.0.1")
+            .time("0", "0")
+            .media_audio(35000, "RTP/AVP")
+            .formats(&["0"])
+            .rtpmap("0", "PCMU/8000")
+            .attribute("sendrecv", None::<String>)
+            .done()
+            .build()
+            .expect("offer builds")
+            .to_string();
+
+        let (answer_sdp, config) = adapter
+            .negotiate_sdp_as_uas(&session_id, &offer_sdp)
+            .await
+            .expect("plain RTP offer negotiates");
+        let parsed = SdpSession::from_str(&answer_sdp).expect("answer parses");
+        let media = parsed
+            .media_descriptions
+            .iter()
+            .find(|media| media.media == "audio")
+            .expect("audio media line");
+
+        assert_eq!(media.protocol, "RTP/AVP");
+        assert_eq!(media.formats, vec!["0".to_string()]);
+        assert_eq!(media.port, config.local_addr.port());
+        assert_ne!(
+            media.port, 5060,
+            "SDP answer must advertise the allocated RTP port, not the SIP listener port"
+        );
+
+        adapter
+            .cleanup_session(&session_id)
+            .await
+            .expect("cleanup media session");
     }
 }

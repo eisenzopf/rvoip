@@ -104,21 +104,18 @@ impl DialogEventHub {
         debug!("Publishing session coordination event: {:?}", event);
 
         // Convert to cross-crate event
-        if let Some(mut cross_crate_event) =
-            self.convert_coordination_to_cross_crate(event.clone())
+        if let Some(mut cross_crate_event) = self.convert_coordination_to_cross_crate(event.clone())
         {
             // STIR/SHAKEN (RFC 8224): run the installed verifier on
             // IncomingCall events before publishing. Uses the shared
             // `DialogManager::run_identity_verification` helper so the
             // adapter's publish path and this one apply the same
             // policy + reject contract — no drift between bridges.
-            if let RvoipCrossCrateEvent::DialogToSession(
-                DialogToSessionEvent::IncomingCall {
-                    ref raw_request,
-                    identity_verification: ref mut iv,
-                    ..
-                },
-            ) = cross_crate_event
+            if let RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingCall {
+                ref raw_request,
+                identity_verification: ref mut iv,
+                ..
+            }) = cross_crate_event
             {
                 match self
                     .dialog_manager
@@ -126,9 +123,7 @@ impl DialogEventHub {
                     .await
                 {
                     crate::manager::IdentityVerificationDecision::Drop => {
-                        info!(
-                            "🛑 [event_hub] STIR/SHAKEN rejected event; not publishing"
-                        );
+                        info!("🛑 [event_hub] STIR/SHAKEN rejected event; not publishing");
                         return Ok(false);
                     }
                     crate::manager::IdentityVerificationDecision::Publish(status) => {
@@ -428,11 +423,7 @@ impl DialogEventHub {
                         .dialog_manager
                         .transaction_manager()
                         .take_inbound_bytes(&transaction_id)
-                        .or_else(|| {
-                            Some(bytes::Bytes::from(
-                                response.to_string().into_bytes(),
-                            ))
-                        });
+                        .or_else(|| Some(bytes::Bytes::from(response.to_string().into_bytes())));
                     let response_method = response.cseq().map(|cseq| cseq.method.clone());
                     let is_invite_response =
                         matches!(response_method, Some(rvoip_sip_core::Method::Invite));
@@ -878,11 +869,7 @@ impl DialogEventHub {
                     .dialog_manager
                     .transaction_manager()
                     .take_inbound_bytes(&transaction_id)
-                    .or_else(|| {
-                        Some(bytes::Bytes::from(
-                            request.to_string().into_bytes(),
-                        ))
-                    });
+                    .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
                 let session_id = match self.dialog_manager.get_session_id(&dialog_id) {
                     Some(s) => s,
                     None => {
@@ -949,11 +936,7 @@ impl DialogEventHub {
                     .dialog_manager
                     .transaction_manager()
                     .take_inbound_bytes(&transaction_id)
-                    .or_else(|| {
-                        Some(bytes::Bytes::from(
-                            request.to_string().into_bytes(),
-                        ))
-                    });
+                    .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
                 // CapabilityQuery in today's dialog-core does not carry
                 // a dialog id; OPTIONS therefore surfaces as
                 // out-of-dialog (empty session_id, which the cross-

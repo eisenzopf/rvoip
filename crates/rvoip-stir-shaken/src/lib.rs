@@ -34,9 +34,7 @@ pub mod verifier;
 // Re-exports for convenience
 pub use cert_resolver::{CertResolver, ReqwestCertResolver};
 pub use errors::{SignerError, VerifierError};
-pub use profile::{
-    JwtClaimConstraints, TNAuthList, JWT_CLAIM_CONSTRAINTS_OID, TN_AUTH_LIST_OID,
-};
+pub use profile::{JwtClaimConstraints, TNAuthList, JWT_CLAIM_CONSTRAINTS_OID, TN_AUTH_LIST_OID};
 pub use signer::{ShakenSigner, ShakenSignerConfig};
 pub use trust::TrustStore;
 pub use types::{Attestation, OrigDest, OrigDestField, PassportClaims, PptType};

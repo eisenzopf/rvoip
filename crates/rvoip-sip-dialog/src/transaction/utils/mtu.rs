@@ -49,8 +49,11 @@ mod tests {
             .cseq(1)
             .header(TypedHeader::Via(
                 Via::new(
-                    "SIP", "2.0", "UDP",
-                    "10.0.0.5", Some(5060),
+                    "SIP",
+                    "2.0",
+                    "UDP",
+                    "10.0.0.5",
+                    Some(5060),
                     vec![Param::branch("z9hG4bKmtu-orig")],
                 )
                 .unwrap(),
@@ -90,8 +93,11 @@ mod tests {
         // Append a second Via (older hop).
         request.headers.push(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
-                "10.0.0.99", Some(5060),
+                "SIP",
+                "2.0",
+                "UDP",
+                "10.0.0.99",
+                Some(5060),
                 vec![Param::branch("z9hG4bKolder")],
             )
             .unwrap(),

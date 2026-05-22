@@ -8,12 +8,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::Duration;
 
+use rvoip_sip_core::Uri;
 use rvoip_sip_dialog::api::{DialogApi, DialogClient, DialogServer};
 use rvoip_sip_dialog::transaction::builders::client_quick; // Phase 3 functions
 use rvoip_sip_dialog::transaction::transport::{TransportManager, TransportManagerConfig};
 use rvoip_sip_dialog::transaction::TransactionManager;
 use rvoip_sip_dialog::DialogId;
-use rvoip_sip_core::Uri;
 use uuid;
 
 /// Test environment for Phase 3 dialog function validation

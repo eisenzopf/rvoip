@@ -101,11 +101,7 @@ impl RegisterHandler for DialogManager {
             let raw_request = self
                 .transaction_manager
                 .take_inbound_bytes(&transaction_id)
-                .or_else(|| {
-                    Some(bytes::Bytes::from(
-                        request.to_string().into_bytes(),
-                    ))
-                });
+                .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
             let event =
                 RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingRegister {
                     transaction_id: transaction_id.to_string(),

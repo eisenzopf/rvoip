@@ -190,10 +190,8 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
             _scts: &mut dyn Iterator<Item = &[u8]>,
             _ocsp_response: &[u8],
             _now: std::time::SystemTime,
-        ) -> Result<
-            tokio_rustls::rustls::client::ServerCertVerified,
-            tokio_rustls::rustls::Error,
-        > {
+        ) -> Result<tokio_rustls::rustls::client::ServerCertVerified, tokio_rustls::rustls::Error>
+        {
             Ok(tokio_rustls::rustls::client::ServerCertVerified::assertion())
         }
     }
@@ -215,10 +213,9 @@ async fn wss_server_accepts_tls_handshake_and_negotiates_sip_subprotocol() {
         http::HeaderValue::from_static("sips"),
     );
 
-    let (mut ws_stream, _response) =
-        tokio_tungstenite::client_async(request, tls_stream)
-            .await
-            .expect("ws upgrade over tls");
+    let (mut ws_stream, _response) = tokio_tungstenite::client_async(request, tls_stream)
+        .await
+        .expect("ws upgrade over tls");
 
     // The successful upgrade proves the WSS accept path:
     //  - TlsAcceptor::accept() handled the rustls handshake

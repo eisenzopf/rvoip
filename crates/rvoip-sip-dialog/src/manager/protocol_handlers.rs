@@ -430,11 +430,7 @@ impl MethodHandler for DialogManager {
             let raw_request = self
                 .transaction_manager
                 .take_inbound_bytes(&transaction_id)
-                .or_else(|| {
-                    Some(bytes::Bytes::from(
-                        request.to_string().into_bytes(),
-                    ))
-                });
+                .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
             let event = crate::events::SessionCoordinationEvent::TransferRequest {
                 dialog_id: dialog_id.clone(),
                 transaction_id: transaction_id.clone(),
@@ -710,11 +706,7 @@ fn extract_notify_fields(
         &rvoip_sip_core::Message::Request(request.clone()),
     )
     .and_then(|key| transaction_manager.peek_inbound_bytes(&key))
-    .or_else(|| {
-        Some(bytes::Bytes::from(
-            request.to_string().into_bytes(),
-        ))
-    });
+    .or_else(|| Some(bytes::Bytes::from(request.to_string().into_bytes())));
 
     NotifyFields {
         event_package,

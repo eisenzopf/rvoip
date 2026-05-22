@@ -663,11 +663,7 @@ impl Transport for TlsTransport {
         })
     }
 
-    async fn send_message_raw(
-        &self,
-        bytes: Bytes,
-        destination: SocketAddr,
-    ) -> Result<()> {
+    async fn send_message_raw(&self, bytes: Bytes, destination: SocketAddr) -> Result<()> {
         if self.is_closed() {
             return Err(Error::TransportClosed);
         }
@@ -893,9 +889,7 @@ pub(crate) fn load_certs(path: &Path) -> Result<Vec<Certificate>> {
 /// framing; returns `None` when more bytes are needed. Mirrors
 /// `transport::tcp::connection::TcpConnection::try_parse_message` so
 /// TLS framing matches TCP's behaviour exactly.
-fn try_parse_one(
-    buffer: &mut BytesMut,
-) -> Option<(rvoip_sip_core::Message, bytes::Bytes)> {
+fn try_parse_one(buffer: &mut BytesMut) -> Option<(rvoip_sip_core::Message, bytes::Bytes)> {
     if buffer.is_empty() {
         return None;
     }

@@ -2,9 +2,9 @@
 //!
 //! Tests request routing logic and dialog matching using **REAL IMPLEMENTATIONS**.
 
-use rvoip_sip_dialog::{Dialog, DialogState};
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::{HeaderName, Method, Request, TypedHeader, Uri};
+use rvoip_sip_dialog::{Dialog, DialogState};
 use uuid::Uuid;
 
 /// Test dialog tuple extraction for routing with real Dialog

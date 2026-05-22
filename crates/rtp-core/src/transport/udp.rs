@@ -3,6 +3,7 @@
 //! This module provides a UDP-based implementation of the RTP transport.
 
 use std::any::Any;
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,9 +28,43 @@ use tracing::{debug, error, info, trace, warn};
 /// 500 ms covers the worst-case spacing between the three retransmits
 /// while keeping the seen-set bounded under sustained DTMF traffic.
 const DTMF_DEDUP_TTL: Duration = Duration::from_millis(500);
+const RTP_DROP_LOG_INITIAL: u64 = 5;
+const RTP_DROP_LOG_EVERY: u64 = 1_000;
+const RTP_MALFORMED_WARN_EVERY: u64 = 10_000;
 
-fn srtp_diagnostics_enabled() -> bool {
-    std::env::var("RVOIP_SRTP_DIAGNOSTICS")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RtpMuxPacketClass {
+    Rtp,
+    Rtcp,
+    Stun,
+    Dtls,
+    Zrtp,
+    TurnChannelData,
+    TooSmall,
+    UnknownReserved,
+}
+
+impl RtpMuxPacketClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rtp => "rtp",
+            Self::Rtcp => "rtcp",
+            Self::Stun => "stun",
+            Self::Dtls => "dtls",
+            Self::Zrtp => "zrtp",
+            Self::TurnChannelData => "turn_channel_data",
+            Self::TooSmall => "too_small",
+            Self::UnknownReserved => "unknown_reserved",
+        }
+    }
+
+    fn is_media(self) -> bool {
+        matches!(self, Self::Rtp | Self::Rtcp)
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -37,6 +72,140 @@ fn srtp_diagnostics_enabled() -> bool {
             )
         })
         .unwrap_or(false)
+}
+
+fn srtp_diagnostics_enabled() -> bool {
+    env_flag("RVOIP_SRTP_DIAGNOSTICS")
+}
+
+fn rtp_diagnostics_enabled() -> bool {
+    env_flag("RVOIP_RTP_DIAGNOSTICS")
+}
+
+fn classify_rtp_mux_packet(buffer: &[u8]) -> RtpMuxPacketClass {
+    if buffer.len() < 2 {
+        return RtpMuxPacketClass::TooSmall;
+    }
+
+    match buffer[0] {
+        // RFC 7983 demux ranges for packets sharing an RTP port.
+        0..=3 => RtpMuxPacketClass::Stun,
+        16..=19 => RtpMuxPacketClass::Zrtp,
+        20..=63 => RtpMuxPacketClass::Dtls,
+        64..=79 => RtpMuxPacketClass::TurnChannelData,
+        128..=191 => {
+            if is_rtcp_packet(buffer) {
+                RtpMuxPacketClass::Rtcp
+            } else if buffer.len() < crate::packet::header::RTP_MIN_HEADER_SIZE {
+                RtpMuxPacketClass::TooSmall
+            } else {
+                RtpMuxPacketClass::Rtp
+            }
+        }
+        _ => RtpMuxPacketClass::UnknownReserved,
+    }
+}
+
+fn should_log_packet_drop(count: u64, diagnostics: bool) -> bool {
+    diagnostics && (count <= RTP_DROP_LOG_INITIAL || count % RTP_DROP_LOG_EVERY == 0)
+}
+
+fn should_log_malformed_rtp(count: u64, diagnostics: bool) -> bool {
+    if diagnostics {
+        count <= RTP_DROP_LOG_INITIAL || count % RTP_DROP_LOG_EVERY == 0
+    } else {
+        count == 1 || count % RTP_MALFORMED_WARN_EVERY == 0
+    }
+}
+
+fn packet_preview(buffer: &[u8]) -> String {
+    const PREVIEW_BYTES: usize = 16;
+
+    let visible = &buffer[..buffer.len().min(PREVIEW_BYTES)];
+    let mut hex = String::new();
+    for (idx, byte) in visible.iter().enumerate() {
+        if idx > 0 {
+            hex.push(' ');
+        }
+        let _ = write!(&mut hex, "{:02x}", byte);
+    }
+
+    let ascii: String = visible
+        .iter()
+        .map(|byte| {
+            if (*byte).is_ascii_graphic() || *byte == b' ' {
+                *byte as char
+            } else {
+                '.'
+            }
+        })
+        .collect();
+
+    format!(
+        "first_bytes_hex=\"{}\" first_bytes_ascii=\"{}\"",
+        hex, ascii
+    )
+}
+
+fn log_dropped_non_rtp_packet(
+    diagnostics: bool,
+    drop_count: u64,
+    local_addr: Option<SocketAddr>,
+    source: SocketAddr,
+    size: usize,
+    class: RtpMuxPacketClass,
+    buffer: &[u8],
+) {
+    if should_log_packet_drop(drop_count, diagnostics) {
+        let line = format!(
+            "RTP_DIAG dropped_non_rtp local={:?} source={} size={} class={} drops={} {}",
+            local_addr,
+            source,
+            size,
+            class.as_str(),
+            drop_count,
+            packet_preview(buffer)
+        );
+        eprintln!("{}", line);
+        info!("{}", line);
+    } else {
+        trace!(
+            "Dropped non-RTP datagram from {}: class={} size={}",
+            source,
+            class.as_str(),
+            size
+        );
+    }
+}
+
+fn log_malformed_rtp_packet(
+    diagnostics: bool,
+    drop_count: u64,
+    local_addr: Option<SocketAddr>,
+    source: SocketAddr,
+    size: usize,
+    error: &Error,
+    buffer: Option<&[u8]>,
+) {
+    if should_log_malformed_rtp(drop_count, diagnostics) {
+        let preview = buffer
+            .map(packet_preview)
+            .unwrap_or_else(|| "first_bytes_unavailable=true".to_string());
+        warn!(
+            "Dropped malformed RTP packet local={:?} source={} size={} class=rtp drops={} error={} {}",
+            local_addr,
+            source,
+            size,
+            drop_count,
+            error,
+            preview
+        );
+    } else {
+        debug!(
+            "Dropped malformed RTP packet from {}: size={} error={}",
+            source, size, error
+        );
+    }
 }
 
 use super::allocator::{GlobalPortAllocator, PairingStrategy};
@@ -294,13 +463,16 @@ impl UdpRtpTransport {
         let active_state = self.active.clone();
         let srtp_recv = self.srtp_recv.clone();
         let dtmf_seen = self.dtmf_seen.clone();
-        let diagnostics = srtp_diagnostics_enabled();
+        let srtp_diagnostics = srtp_diagnostics_enabled();
+        let rtp_diagnostics = rtp_diagnostics_enabled();
         let local_rtp_addr = rtp_socket.local_addr().ok();
         let recv_pool = self.recv_pool.clone();
 
         let rtp_receiver = tokio::spawn(async move {
             let mut first_inbound_rtp_logged = false;
             let mut srtp_unprotect_failures = 0_u64;
+            let mut non_rtp_drop_count = 0_u64;
+            let mut malformed_rtp_drop_count = 0_u64;
             debug!("UDP receive loop started on {:?}", rtp_socket.local_addr());
 
             loop {
@@ -321,16 +493,23 @@ impl UdpRtpTransport {
                     Ok((size, addr)) => {
                         info!("🔵 UDP recv_from returned {} bytes from {}", size, addr);
 
-                        // Check if it looks like an RTP or RTCP packet
-                        if size < 8 {
-                            // Too small to be either RTP or RTCP — buf
-                            // returns to pool via Drop when we loop.
-                            warn!("Received packet too small: {} bytes", size);
+                        let packet_class = classify_rtp_mux_packet(&buffer.as_slice()[..size]);
+                        if !packet_class.is_media() {
+                            non_rtp_drop_count = non_rtp_drop_count.saturating_add(1);
+                            log_dropped_non_rtp_packet(
+                                rtp_diagnostics,
+                                non_rtp_drop_count,
+                                local_rtp_addr,
+                                addr,
+                                size,
+                                packet_class,
+                                &buffer.as_slice()[..size],
+                            );
                             continue;
                         }
 
                         // Check if it's RTCP according to RFC 5761
-                        if is_rtcp_packet(&buffer.as_slice()[..size]) {
+                        if packet_class == RtpMuxPacketClass::Rtcp {
                             // This is an RTCP packet. Hand the bytes
                             // downstream as a pooled `Bytes` view —
                             // zero copy, refcount-only.
@@ -361,7 +540,7 @@ impl UdpRtpTransport {
                             // leaking timing or distinguishing failure
                             // modes to a network attacker.
                             let mut srtp_guard = srtp_recv.lock();
-                            if diagnostics && !first_inbound_rtp_logged {
+                            if srtp_diagnostics && !first_inbound_rtp_logged {
                                 info!(
                                     "SRTP_DIAG inbound_rtp_first local={:?} source={} size={} srtp_context={}",
                                     local_rtp_addr,
@@ -380,16 +559,7 @@ impl UdpRtpTransport {
                             // Non-SRTP path: zero-copy parse via
                             // `parse_from_bytes` so the payload is a
                             // refcounted slice of the pooled buf.
-                            //
-                            // `raw_for_fallback` carries a refcounted
-                            // clone of the original packet bytes
-                            // (non-SRTP only) so the parse-error
-                            // fallback below can synthesise a
-                            // MediaReceived event without a fresh
-                            // copy. The SRTP path doesn't reach the
-                            // fallback (auth failures `continue;`
-                            // immediately), so it stays `None`.
-                            let mut raw_for_fallback: Option<Bytes> = None;
+                            let mut raw_for_error: Option<Bytes> = None;
                             let parse_result: Result<RtpPacket> = if let Some(ctx) =
                                 srtp_guard.as_mut()
                             {
@@ -397,7 +567,7 @@ impl UdpRtpTransport {
                                     Ok(packet) => Ok(packet),
                                     Err(_) => {
                                         srtp_unprotect_failures += 1;
-                                        if diagnostics
+                                        if srtp_diagnostics
                                             && (srtp_unprotect_failures <= 5
                                                 || srtp_unprotect_failures % 50 == 0)
                                         {
@@ -421,7 +591,7 @@ impl UdpRtpTransport {
                                 // refcounted slice; no
                                 // copy_from_slice.
                                 let bytes = buffer.into_bytes(size);
-                                raw_for_fallback = Some(bytes.clone());
+                                raw_for_error = Some(bytes.clone());
                                 RtpPacket::parse_from_bytes(bytes)
                             };
                             drop(srtp_guard);
@@ -520,68 +690,17 @@ impl UdpRtpTransport {
                                     }
                                 }
                                 Err(e) => {
-                                    warn!("Failed to parse RTP packet: {}", e);
-
-                                    // Even though parsing failed, we still need to generate a MediaReceived event
-                                    // This allows higher layers to handle non-standard or malformed packets.
-                                    //
-                                    // Only the non-SRTP path reaches this arm (SRTP auth
-                                    // failures `continue;` above), so `raw_for_fallback`
-                                    // is guaranteed Some — and the clone is refcount-only
-                                    // (the underlying pooled buf already lives inside the
-                                    // Bytes we produced via `into_bytes`).
-                                    let raw = raw_for_fallback
-                                        .expect("parse error implies non-SRTP path");
-                                    let raw_slice = raw.as_ref();
-
-                                    // Use default/fallback values for required fields
-                                    let fallback_payload_type =
-                                        if size > 1 { raw_slice[1] & 0x7F } else { 0 };
-                                    let fallback_timestamp = if size >= 8 {
-                                        let mut ts = 0u32;
-                                        ts |= (raw_slice[4] as u32) << 24;
-                                        ts |= (raw_slice[5] as u32) << 16;
-                                        ts |= (raw_slice[6] as u32) << 8;
-                                        ts |= raw_slice[7] as u32;
-                                        ts
-                                    } else {
-                                        0
-                                    };
-
-                                    let fallback_marker = if size > 1 {
-                                        (raw_slice[1] & 0x80) != 0
-                                    } else {
-                                        false
-                                    };
-
-                                    // Refcount-only "copy" of the raw packet —
-                                    // the underlying allocation is the pooled buf,
-                                    // already wrapped in Bytes via `into_bytes`.
-                                    let raw_payload = raw.clone();
-
-                                    debug!("Generating fallback MediaReceived event for non-RTP packet ({})", e);
-
-                                    // Create a MediaReceived event with the data we have
-                                    let event = RtpEvent::MediaReceived {
-                                        payload_type: fallback_payload_type,
-                                        timestamp: fallback_timestamp,
-                                        marker: fallback_marker,
-                                        payload: raw_payload,
-                                        source: addr,
-                                        ssrc: 0, // Use 0 for non-RTP packets as we can't extract SSRC
-                                    };
-
-                                    // Send the event
-                                    if event_tx.receiver_count() > 0 {
-                                        if let Err(e) = event_tx.send(event) {
-                                            warn!(
-                                                "Failed to send fallback MediaReceived event: {}",
-                                                e
-                                            );
-                                        }
-                                    } else {
-                                        let _ = event_tx.send(event);
-                                    }
+                                    malformed_rtp_drop_count =
+                                        malformed_rtp_drop_count.saturating_add(1);
+                                    log_malformed_rtp_packet(
+                                        rtp_diagnostics,
+                                        malformed_rtp_drop_count,
+                                        local_rtp_addr,
+                                        addr,
+                                        size,
+                                        &e,
+                                        raw_for_error.as_deref(),
+                                    );
                                 }
                             }
                         }
@@ -883,9 +1002,9 @@ impl RtpTransport for UdpRtpTransport {
 /// distinguish RTCP from RTP packets:
 ///
 /// 1. Packets with payload types in the range 64-95 could be either RTP or RTCP.
-/// 2. For these ambiguous payload types, a packet is RTCP if:
-///    - The payload type is in the range 64-95 AND
-///    - The value corresponds to a known RTCP packet type (SR=200, RR=201, SDES=202, BYE=203, APP=204)
+/// 2. For these ambiguous payload types, a packet is RTCP if
+///    the second byte is a known RTCP packet type (SR=200, RR=201,
+///    SDES=202, BYE=203, APP=204, RTPFB=205, PSFB=206, XR=207).
 /// 3. All other packets in the range 64-95 are RTP.
 /// 4. All packets with payload types in the range 0-63 and 96-127 are RTP.
 ///
@@ -902,8 +1021,8 @@ fn is_rtcp_packet(buffer: &[u8]) -> bool {
     // For RTP, payload type is in the lower 7 bits of the second byte
     // For RTCP, packet type is the full second byte value
 
-    // First check: If the payload type is between 200-204, it's definitely RTCP
-    if version == 2 && (second_byte >= 200 && second_byte <= 204) {
+    // First check: If the packet type is between 200-207, it's RTCP.
+    if version == 2 && (second_byte >= 200 && second_byte <= 207) {
         debug!(
             "Identified RTCP packet: version={}, PT={}",
             version, second_byte
@@ -938,6 +1057,70 @@ mod tests {
     use super::*;
     use crate::packet::RtpHeader;
     use bytes::Bytes;
+
+    #[test]
+    fn classify_rtp_mux_packet_demuxes_known_ranges() {
+        let rtp = RtpPacket::new(
+            RtpHeader::new(0, 1, 160, 0x1122_3344),
+            Bytes::from_static(b"payload"),
+        )
+        .serialize()
+        .expect("rtp serializes");
+        assert_eq!(classify_rtp_mux_packet(&rtp), RtpMuxPacketClass::Rtp);
+
+        let rtcp_sr = [
+            0x80, 200, 0x00, 0x06, 0x11, 0x22, 0x33, 0x44, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(classify_rtp_mux_packet(&rtcp_sr), RtpMuxPacketClass::Rtcp);
+
+        let rtcp_rr = [0x80, 201, 0x00, 0x01, 0x11, 0x22, 0x33, 0x44];
+        assert_eq!(classify_rtp_mux_packet(&rtcp_rr), RtpMuxPacketClass::Rtcp);
+
+        let stun_binding = [
+            0x00, 0x01, 0x00, 0x00, 0x21, 0x12, 0xa4, 0x42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        assert_eq!(
+            classify_rtp_mux_packet(&stun_binding),
+            RtpMuxPacketClass::Stun
+        );
+
+        assert_eq!(
+            classify_rtp_mux_packet(&[22, 0xfe, 0xfd, 0, 0]),
+            RtpMuxPacketClass::Dtls
+        );
+        assert_eq!(
+            classify_rtp_mux_packet(&[0x10, 0, 0, 0]),
+            RtpMuxPacketClass::Zrtp
+        );
+        assert_eq!(
+            classify_rtp_mux_packet(&[0x40, 0, 0, 0]),
+            RtpMuxPacketClass::TurnChannelData
+        );
+        assert_eq!(
+            classify_rtp_mux_packet(&[0x80]),
+            RtpMuxPacketClass::TooSmall
+        );
+        assert_eq!(
+            classify_rtp_mux_packet(&[0x50, 0]),
+            RtpMuxPacketClass::UnknownReserved
+        );
+    }
+
+    #[test]
+    fn classify_ascii_sip_methods_as_non_rtp() {
+        for method in [
+            b"INVITE sip:bob@example.com SIP/2.0\r\n".as_slice(),
+            b"ACK sip:bob@example.com SIP/2.0\r\n".as_slice(),
+            b"BYE sip:bob@example.com SIP/2.0\r\n".as_slice(),
+        ] {
+            assert_eq!(
+                classify_rtp_mux_packet(method),
+                RtpMuxPacketClass::TurnChannelData,
+                "ASCII SIP methods begin in the RFC 7983 TURN ChannelData range and must not be parsed as RTP"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn test_udp_transport_creation() {
@@ -1147,6 +1330,75 @@ mod tests {
             },
             Ok(Err(e)) => panic!("Failed to receive event: {}", e),
             Err(_) => panic!("Timeout waiting for event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn udp_transport_drops_non_rtp_and_malformed_rtp_without_media_event() {
+        let config1 = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("drop_sender".to_string()),
+            use_port_allocator: false,
+        };
+
+        let config2 = RtpTransportConfig {
+            local_rtp_addr: "127.0.0.1:0".parse().unwrap(),
+            local_rtcp_addr: None,
+            symmetric_rtp: true,
+            rtcp_mux: true,
+            session_id: Some("drop_receiver".to_string()),
+            use_port_allocator: false,
+        };
+
+        let transport1 = UdpRtpTransport::new(config1).await.unwrap();
+        let transport2 = UdpRtpTransport::new(config2).await.unwrap();
+        let receiver_addr = transport2.local_rtp_addr().unwrap();
+        let mut events = transport2.subscribe();
+
+        let raw_sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        raw_sender
+            .send_to(b"INVITE sip:bob@example.com SIP/2.0\r\n", receiver_addr)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(150), events.recv())
+                .await
+                .is_err(),
+            "ASCII SIP datagrams on an RTP socket must be dropped, not emitted as media"
+        );
+
+        let malformed_rtp = [0x8f, 0x00, 0x00, 0x01, 0, 0, 0, 1, 0x12, 0x34, 0x56, 0x78];
+        raw_sender
+            .send_to(&malformed_rtp, receiver_addr)
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(tokio::time::Duration::from_millis(150), events.recv())
+                .await
+                .is_err(),
+            "RTP-looking malformed datagrams must be dropped, not emitted as fallback media"
+        );
+
+        let header = RtpHeader::new(0, 1000, 12345, 0xabcdef01);
+        let payload = Bytes::from_static(b"valid payload");
+        let packet = RtpPacket::new(header, payload.clone());
+        transport1.send_rtp(&packet, receiver_addr).await.unwrap();
+
+        match tokio::time::timeout(tokio::time::Duration::from_millis(500), events.recv()).await {
+            Ok(Ok(RtpEvent::MediaReceived {
+                payload_type,
+                timestamp,
+                payload: received_payload,
+                ..
+            })) => {
+                assert_eq!(payload_type, 0);
+                assert_eq!(timestamp, 12345);
+                assert_eq!(&received_payload[..], &payload[..]);
+            }
+            other => panic!("expected valid RTP after drops, got {:?}", other),
         }
     }
 

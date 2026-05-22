@@ -1,10 +1,10 @@
 //! Tests for REFER request handling and call transfers
 
+use rvoip_sip_core::types::refer_to::ReferTo;
+use rvoip_sip_core::{Method, Request, StatusCode};
 use rvoip_sip_dialog::dialog::DialogId;
 use rvoip_sip_dialog::events::SessionCoordinationEvent;
 use rvoip_sip_dialog::transaction::TransactionKey;
-use rvoip_sip_core::types::refer_to::ReferTo;
-use rvoip_sip_core::{Method, Request, StatusCode};
 use std::str::FromStr;
 
 #[test]

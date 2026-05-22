@@ -74,7 +74,7 @@ use rvoip_sip_core::types::sdp::CryptoSuite;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 pub use rvoip_media_core::relay::controller::{AudioSource, BridgeError, BridgeHandle};
 pub use rvoip_sip_dialog::api::RelUsage;
@@ -2992,7 +2992,7 @@ impl UnifiedCoordinator {
         users: std::collections::HashMap<String, String>,
     ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
         use crate::adapters::RegistrationAdapter;
-        use rvoip_sip_registrar::{api::ServiceMode, types::RegistrarConfig, RegistrarService};
+        use rvoip_sip_registrar::{RegistrarService, api::ServiceMode, types::RegistrarConfig};
 
         tracing::info!(
             "🔐 Starting server-side registration handler with realm: {}",
@@ -3049,8 +3049,8 @@ impl UnifiedCoordinator {
         use rvoip_sip_dialog::api::unified::UnifiedDialogApi;
         use rvoip_sip_dialog::config::DialogManagerConfig;
         use rvoip_sip_dialog::transaction::{
-            transport::{TransportManager, TransportManagerConfig},
             TransactionManager,
+            transport::{TransportManager, TransportManagerConfig},
         };
 
         // Create transport manager first (dialog-core's own transport manager).
@@ -3214,6 +3214,7 @@ impl UnifiedCoordinator {
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
+                dialog.max_dialogs = Some(config.transaction_event_channel_capacity);
                 dialog
             })
             .build();

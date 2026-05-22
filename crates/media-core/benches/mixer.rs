@@ -14,13 +14,9 @@
 //!   `mix_participants` round at N = {2, 4, 8, 16} participants. The
 //!   load-bearing number for conference scalability.
 
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_media_core::processing::audio::AudioMixer;
-use rvoip_media_core::types::conference::{
-    AudioStream, ConferenceMixingConfig, ParticipantId,
-};
+use rvoip_media_core::types::conference::{AudioStream, ConferenceMixingConfig, ParticipantId};
 use rvoip_media_core::types::AudioFrame;
 use std::time::Instant;
 use tokio::runtime::Builder;
@@ -106,8 +102,7 @@ fn bench_mix_cycle(c: &mut Criterion) {
                     let frames: Vec<(ParticipantId, AudioFrame)> = (0..n)
                         .map(|i| (participant(i), make_frame((i * 37) as i16)))
                         .collect();
-                    let inputs: Vec<AudioFrame> =
-                        frames.iter().map(|(_, f)| f.clone()).collect();
+                    let inputs: Vec<AudioFrame> = frames.iter().map(|(_, f)| f.clone()).collect();
 
                     let start = Instant::now();
                     for _ in 0..iters {

@@ -8,6 +8,10 @@
 //! Full end-to-end auto-PRACK behaviour (dialog lookup + transaction send) is
 //! covered by integration tests in session-core.
 
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_core::types::rack::RAck;
+use rvoip_sip_core::types::{HeaderName, Method, RSeq, Require, Supported, TypedHeader};
+use rvoip_sip_core::{Response, StatusCode, Uri, Version};
 use rvoip_sip_dialog::api::config::RelUsage;
 use rvoip_sip_dialog::dialog::Dialog;
 use rvoip_sip_dialog::manager::transaction_integration::{
@@ -15,10 +19,6 @@ use rvoip_sip_dialog::manager::transaction_integration::{
     inject_reliable_provisional_headers, should_send_reliably,
 };
 use rvoip_sip_dialog::transaction::dialog::prack_for_dialog;
-use rvoip_sip_core::builder::SimpleRequestBuilder;
-use rvoip_sip_core::types::rack::RAck;
-use rvoip_sip_core::types::{HeaderName, Method, RSeq, Require, Supported, TypedHeader};
-use rvoip_sip_core::{Response, StatusCode, Uri, Version};
 use std::net::SocketAddr;
 use std::str::FromStr;
 

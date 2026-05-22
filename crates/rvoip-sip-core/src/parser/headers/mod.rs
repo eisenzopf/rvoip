@@ -23,13 +23,13 @@ pub mod error_info;
 pub mod event; // Added for Event header
 pub mod expires;
 pub mod from;
+pub mod identity;
 pub mod in_reply_to;
 pub mod max_forwards;
 pub mod media_type;
 pub mod mime_version;
 pub mod min_expires;
 pub mod min_se; // Added
-pub mod identity;
 pub mod organization;
 pub mod p_asserted_identity;
 pub mod priority;
@@ -87,6 +87,7 @@ pub use error_info::parse_error_info;
 pub use event::parse_event_header_value; // Added for Event header value parsing
 pub use expires::parse_expires;
 pub use from::parse_from;
+pub use identity::parse_identity;
 pub use in_reply_to::parse_in_reply_to;
 pub use max_forwards::parse_max_forwards;
 pub use media_type::media_type as parse_media_type;
@@ -97,7 +98,6 @@ pub use min_expires::parse_min_expires as parse_min_expires_value;
 pub use min_se::parse_min_se_value; // Added
 pub use organization::parse_organization;
 pub use organization::parse_organization as parse_organization_value;
-pub use identity::parse_identity;
 pub use p_asserted_identity::{parse_p_asserted_identity, parse_p_preferred_identity};
 pub use priority::parse_priority;
 pub use proxy_authenticate::parse_proxy_authenticate;

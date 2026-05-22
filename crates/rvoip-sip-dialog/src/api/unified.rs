@@ -1019,10 +1019,14 @@ impl UnifiedDialogApi {
         let transaction_id = self
             .manager
             .core()
-            .transaction_to_dialog
-            .iter()
-            .find(|entry| entry.value() == &dialog_id)
-            .map(|entry| entry.key().clone())
+            .pending_response_transaction_for_dialog(&dialog_id)
+            .or_else(|| {
+                self.manager
+                    .core()
+                    .server_transactions_for_dialog(&dialog_id)
+                    .into_iter()
+                    .next()
+            })
             .ok_or_else(|| ApiError::Dialog {
                 message: format!("No transaction found for dialog {}", dialog_id),
             })?;
@@ -1172,20 +1176,12 @@ impl UnifiedDialogApi {
                         .clear_pending_response_transaction(&dialog_id, &key);
                     self.manager
                         .core()
-                        .transaction_to_dialog
-                        .iter()
-                        .filter(|entry| entry.value() == &dialog_id && entry.key().is_server())
-                        .map(|entry| entry.key().clone())
-                        .collect()
+                        .server_transactions_for_dialog(&dialog_id)
                 }
             } else {
                 self.manager
                     .core()
-                    .transaction_to_dialog
-                    .iter()
-                    .filter(|entry| entry.value() == &dialog_id && entry.key().is_server())
-                    .map(|entry| entry.key().clone())
-                    .collect()
+                    .server_transactions_for_dialog(&dialog_id)
             };
 
         let mut pending_non_invite: Option<crate::transaction::TransactionKey> = None;
@@ -1217,9 +1213,6 @@ impl UnifiedDialogApi {
                     "No server transaction found for dialog {} (session {})",
                     dialog_id, session_id
                 );
-                for entry in self.manager.core().transaction_to_dialog.iter() {
-                    debug!("Transaction {} -> Dialog {}", entry.key(), entry.value());
-                }
                 ApiError::Dialog {
                     message: format!("No transaction found for dialog {}", dialog_id),
                 }
@@ -1733,8 +1726,7 @@ impl UnifiedDialogApi {
 
         self.manager
             .inner_manager()
-            .transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+            .link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
 
         self.manager
             .inner_manager()

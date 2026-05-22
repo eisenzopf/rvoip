@@ -130,7 +130,11 @@ impl Harness {
         self.tx.send(event).await.expect("inject transport event");
     }
 
-    async fn wait_for_send(&self, want_at_least: usize, deadline_ms: u64) -> Vec<(Message, SocketAddr)> {
+    async fn wait_for_send(
+        &self,
+        want_at_least: usize,
+        deadline_ms: u64,
+    ) -> Vec<(Message, SocketAddr)> {
         let start = std::time::Instant::now();
         loop {
             let sent = self.transport.sent().await;
@@ -279,8 +283,9 @@ async fn uas_200_ok_is_forwarded_upstream_with_proxy_via_popped() {
 
     // Build a 200 OK as a real UAS would: copy the request's Via stack
     // verbatim onto the response (RFC 3261 §8.2.6.2).
-    let response = SimpleResponseBuilder::response_from_request(&forwarded, StatusCode::Ok, Some("OK"))
-        .build();
+    let response =
+        SimpleResponseBuilder::response_from_request(&forwarded, StatusCode::Ok, Some("OK"))
+            .build();
 
     // Inject the 200 OK from the UAS-facing side.
     harness
@@ -290,8 +295,7 @@ async fn uas_200_ok_is_forwarded_upstream_with_proxy_via_popped() {
     // Look for the upstream 200 OK — addressed to the UAC, not the UAS.
     let (msg, dest) = harness
         .wait_for(1000, |m, d| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::Ok)
-                && *d != uas_addr
+            matches!(m, Message::Response(r) if r.status() == StatusCode::Ok) && *d != uas_addr
         })
         .await;
     let Message::Response(upstream_resp) = msg else {
@@ -301,8 +305,7 @@ async fn uas_200_ok_is_forwarded_upstream_with_proxy_via_popped() {
     // mock transport with no rport handling, the destination defaults
     // to the UAC's declared sent-by address.
     assert!(
-        dest.to_string().starts_with("10.0.0.5")
-            || dest.to_string().starts_with("127.0.0.1"),
+        dest.to_string().starts_with("10.0.0.5") || dest.to_string().starts_with("127.0.0.1"),
         "200 OK should route towards the UAC's Via sent-by, got {}",
         dest
     );
@@ -333,9 +336,10 @@ async fn timer_c_fires_408_upstream_on_stalled_invite() {
     // No 1xx / final from UAS — Timer C fires, proxy injects 408
     // upstream. Look for the 408 in the sent log.
     harness
-        .wait_for(2000, |m, _| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::RequestTimeout)
-        })
+        .wait_for(
+            2000,
+            |m, _| matches!(m, Message::Response(r) if r.status() == StatusCode::RequestTimeout),
+        )
         .await;
 }
 
@@ -355,9 +359,10 @@ async fn max_forwards_zero_returns_483_too_many_hops() {
         .await;
 
     harness
-        .wait_for(1000, |m, _| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::TooManyHops)
-        })
+        .wait_for(
+            1000,
+            |m, _| matches!(m, Message::Response(r) if r.status() == StatusCode::TooManyHops),
+        )
         .await;
 }
 
@@ -389,9 +394,10 @@ async fn route_fn_none_returns_404_upstream() {
     let start = std::time::Instant::now();
     loop {
         let sent = transport.sent().await;
-        if let Some(_) = sent.iter().find(|(m, _)| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::NotFound)
-        }) {
+        if let Some(_) = sent
+            .iter()
+            .find(|(m, _)| matches!(m, Message::Response(r) if r.status() == StatusCode::NotFound))
+        {
             return;
         }
         if start.elapsed() > Duration::from_millis(1000) {

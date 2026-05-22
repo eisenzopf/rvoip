@@ -61,10 +61,7 @@ impl rvoip_sip_transport::Transport for ProgrammableTransport {
         destination: SocketAddr,
     ) -> Result<(), rvoip_sip_transport::Error> {
         let fails = self.fail_addrs.lock().await.contains_key(&destination);
-        self.sent
-            .lock()
-            .await
-            .push((message, destination));
+        self.sent.lock().await.push((message, destination));
         if fails {
             Err(rvoip_sip_transport::Error::ConnectFailed(
                 destination,
@@ -134,13 +131,7 @@ impl Harness {
     async fn wait_for_send_to(&self, addr: SocketAddr, deadline_ms: u64) {
         let start = std::time::Instant::now();
         loop {
-            if self
-                .transport
-                .sent()
-                .await
-                .iter()
-                .any(|(_, d)| *d == addr)
-            {
+            if self.transport.sent().await.iter().any(|(_, d)| *d == addr) {
                 return;
             }
             if start.elapsed() > Duration::from_millis(deadline_ms) {
@@ -277,6 +268,12 @@ async fn parallel_with_failover_fires_first_candidate_per_leg() {
         })
         .collect();
     // Backup candidates must NOT have been touched (primaries succeed).
-    assert!(!dests.contains(&leg_a[1]), "leg A backup should not be tried");
-    assert!(!dests.contains(&leg_b[1]), "leg B backup should not be tried");
+    assert!(
+        !dests.contains(&leg_a[1]),
+        "leg A backup should not be tried"
+    );
+    assert!(
+        !dests.contains(&leg_b[1]),
+        "leg B backup should not be tried"
+    );
 }

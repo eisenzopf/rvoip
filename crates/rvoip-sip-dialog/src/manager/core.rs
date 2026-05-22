@@ -50,6 +50,11 @@ pub enum IdentityVerificationDecision {
 const TERMINATED_BYE_TOMBSTONE_TTL: Duration = Duration::from_secs(5);
 const TERMINATED_BYE_LOOKUP_HARD_MAX: usize = 65_536;
 const TERMINATED_BYE_PRUNE_INTERVAL: usize = 8_192;
+const MIN_DIALOG_INDEX_CAPACITY: usize = 1024;
+
+fn dialog_index_capacity(max_dialogs: Option<usize>) -> usize {
+    max_dialogs.unwrap_or(10_000).max(MIN_DIALOG_INDEX_CAPACITY)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TerminatedByeTombstone {
@@ -97,6 +102,16 @@ pub struct DialogManager {
 
     /// Transaction to dialog mapping
     pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
+
+    /// Dialog to INVITE transaction mapping. This is the reverse hot-path
+    /// index for CANCEL and authenticated-INVITE retry handling; callers
+    /// should not scan `transaction_to_dialog` to rediscover INVITEs.
+    pub(crate) dialog_invite_transactions: Arc<DashMap<DialogId, Vec<TransactionKey>>>,
+
+    /// Dialog to server transaction mapping. Session-level response APIs
+    /// need this to select the pending UAS transaction without scanning the
+    /// many-to-one `transaction_to_dialog` map under high CPS load.
+    pub(crate) dialog_server_transactions: Arc<DashMap<DialogId, Vec<TransactionKey>>>,
 
     /// Dialog to currently pending server transaction response. This lets
     /// session-core answer the initial INVITE without scanning
@@ -222,6 +237,11 @@ pub struct DialogManager {
     /// keyed only by IP:port — locate the flow(s) to update in O(1).
     pub(crate) flow_by_destination: Arc<DashMap<SocketAddr, Vec<(String, u32, String)>>>,
 
+    /// Secondary outbound-flow index keyed by AoR. Used by registration
+    /// policy checks that only need to know whether an AoR has active flow
+    /// state, without scanning all outbound flows.
+    pub(crate) flow_by_aor: Arc<DashMap<String, Vec<(String, u32, String)>>>,
+
     /// Keep-alive interval for RFC 5626 outbound flows, threaded from
     /// `session-core::Config::outbound_keepalive_interval_secs`. `None`
     /// disables keep-alive entirely — `start_outbound_ping` becomes a
@@ -319,14 +339,28 @@ impl DialogManager {
         transaction_manager: Arc<TransactionManager>,
         local_address: SocketAddr,
     ) -> DialogResult<Self> {
+        Self::new_with_index_capacity(
+            transaction_manager,
+            local_address,
+            dialog_index_capacity(None),
+        )
+        .await
+    }
+
+    pub async fn new_with_index_capacity(
+        transaction_manager: Arc<TransactionManager>,
+        local_address: SocketAddr,
+        index_capacity: usize,
+    ) -> DialogResult<Self> {
         info!(
             "Creating new DialogManager with local address {}",
             local_address
         );
 
         // Create shared stores
-        let dialogs = Arc::new(DashMap::new());
-        let dialog_lookup = Arc::new(DashMap::new());
+        let index_capacity = index_capacity.max(MIN_DIALOG_INDEX_CAPACITY);
+        let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
+        let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
 
         // Create dialog event channel for subscription manager
         let (event_tx, _) = mpsc::channel(100);
@@ -341,29 +375,34 @@ impl DialogManager {
             config: Arc::new(std::sync::RwLock::new(None)),
             dialogs,
             dialog_lookup,
-            early_dialog_lookup: Arc::new(DashMap::new()),
-            terminated_bye_lookup: Arc::new(DashMap::new()),
+            early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
+            terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
-            transaction_to_dialog: Arc::new(DashMap::new()),
-            pending_response_transaction_by_dialog: Arc::new(DashMap::new()),
-            session_to_dialog: Arc::new(DashMap::new()),
-            dialog_to_session: Arc::new(DashMap::new()),
+            transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
+                index_capacity,
+            )),
+            session_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            dialog_to_session: Arc::new(DashMap::with_capacity(index_capacity)),
             event_hub: Arc::new(tokio::sync::RwLock::new(None)),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
-            reliable_provisional_tasks: Arc::new(DashMap::new()),
-            session_refresh_tasks: Arc::new(DashMap::new()),
+            reliable_provisional_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
+            session_refresh_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
             gruu_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            outbound_flows: Arc::new(DashMap::new()),
-            outbound_flow_tasks: Arc::new(DashMap::new()),
-            flow_by_destination: Arc::new(DashMap::new()),
+            outbound_flows: Arc::new(DashMap::with_capacity(index_capacity)),
+            outbound_flow_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
+            flow_by_destination: Arc::new(DashMap::with_capacity(index_capacity)),
+            flow_by_aor: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
             identity_verifier: Arc::new(std::sync::RwLock::new(None)),
             identity_signer: Arc::new(std::sync::RwLock::new(None)),
@@ -685,11 +724,7 @@ impl DialogManager {
 
         self.outbound_flows.insert(flow_key.clone(), flow);
         self.outbound_flow_tasks.insert(flow_key.clone(), handle);
-        // Secondary index for transport-event lookups by destination.
-        self.flow_by_destination
-            .entry(destination)
-            .or_insert_with(Vec::new)
-            .push(flow_key);
+        self.index_outbound_flow_key(flow_key, destination);
     }
 
     /// Stop (and forget) the RFC 5626 keep-alive flow for this key, if
@@ -703,14 +738,47 @@ impl DialogManager {
             handle.abort();
         }
         if let Some((_, flow)) = self.outbound_flows.remove(flow_key) {
-            if let Some(mut entry) = self.flow_by_destination.get_mut(&flow.destination) {
-                entry.value_mut().retain(|k| k != flow_key);
-            }
-            // Drop empty destination buckets so the secondary index
-            // doesn't leak entries across many reg/dereg cycles.
-            self.flow_by_destination
-                .remove_if(&flow.destination, |_, v| v.is_empty());
+            self.remove_outbound_flow_indexes(flow_key, flow.destination);
         }
+    }
+
+    pub(crate) fn index_outbound_flow_key(
+        &self,
+        flow_key: (String, u32, String),
+        destination: SocketAddr,
+    ) {
+        let aor = flow_key.0.clone();
+
+        let mut destination_keys = self
+            .flow_by_destination
+            .entry(destination)
+            .or_insert_with(Vec::new);
+        if !destination_keys.iter().any(|key| key == &flow_key) {
+            destination_keys.push(flow_key.clone());
+        }
+
+        let mut aor_keys = self.flow_by_aor.entry(aor).or_insert_with(Vec::new);
+        if !aor_keys.iter().any(|key| key == &flow_key) {
+            aor_keys.push(flow_key);
+        }
+    }
+
+    fn remove_outbound_flow_indexes(
+        &self,
+        flow_key: &(String, u32, String),
+        destination: SocketAddr,
+    ) {
+        if let Some(mut entry) = self.flow_by_destination.get_mut(&destination) {
+            entry.value_mut().retain(|key| key != flow_key);
+        }
+        self.flow_by_destination
+            .remove_if(&destination, |_, keys| keys.is_empty());
+
+        if let Some(mut entry) = self.flow_by_aor.get_mut(&flow_key.0) {
+            entry.value_mut().retain(|key| key != flow_key);
+        }
+        self.flow_by_aor
+            .remove_if(&flow_key.0, |_, keys| keys.is_empty());
     }
 
     /// Transport reported `KeepAlivePongReceived` from `source`. Update
@@ -799,14 +867,30 @@ impl DialogManager {
         transaction_events: mpsc::Receiver<TransactionEvent>,
         local_address: SocketAddr,
     ) -> DialogResult<Self> {
+        Self::with_global_events_and_index_capacity(
+            transaction_manager,
+            transaction_events,
+            local_address,
+            dialog_index_capacity(None),
+        )
+        .await
+    }
+
+    pub async fn with_global_events_and_index_capacity(
+        transaction_manager: Arc<TransactionManager>,
+        transaction_events: mpsc::Receiver<TransactionEvent>,
+        local_address: SocketAddr,
+        index_capacity: usize,
+    ) -> DialogResult<Self> {
         info!(
             "Creating new DialogManager with global transaction events and local address {}",
             local_address
         );
 
         // Create shared stores
-        let dialogs = Arc::new(DashMap::new());
-        let dialog_lookup = Arc::new(DashMap::new());
+        let index_capacity = index_capacity.max(MIN_DIALOG_INDEX_CAPACITY);
+        let dialogs = Arc::new(DashMap::with_capacity(index_capacity));
+        let dialog_lookup = Arc::new(DashMap::with_capacity(index_capacity.saturating_mul(2)));
 
         // Create dialog event channel for subscription manager
         let (event_tx, _) = mpsc::channel(100);
@@ -821,29 +905,34 @@ impl DialogManager {
             config: Arc::new(std::sync::RwLock::new(None)),
             dialogs,
             dialog_lookup,
-            early_dialog_lookup: Arc::new(DashMap::new()),
-            terminated_bye_lookup: Arc::new(DashMap::new()),
+            early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
+            terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
-            transaction_to_dialog: Arc::new(DashMap::new()),
-            pending_response_transaction_by_dialog: Arc::new(DashMap::new()),
-            session_to_dialog: Arc::new(DashMap::new()),
-            dialog_to_session: Arc::new(DashMap::new()),
+            transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
+                index_capacity,
+            )),
+            session_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            dialog_to_session: Arc::new(DashMap::with_capacity(index_capacity)),
             event_hub: Arc::new(tokio::sync::RwLock::new(None)),
             session_coordinator: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             dialog_event_receiver: Arc::new(tokio::sync::RwLock::new(None)),
             shutdown_signal: Arc::new(tokio::sync::Notify::new()),
             subscription_manager: Some(Arc::new(subscription_manager)),
-            reliable_provisional_tasks: Arc::new(DashMap::new()),
-            session_refresh_tasks: Arc::new(DashMap::new()),
+            reliable_provisional_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
+            session_refresh_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
             nat_discovered_addr: Arc::new(tokio::sync::RwLock::new(None)),
             service_route_by_aor: Arc::new(tokio::sync::RwLock::new(
                 std::collections::HashMap::new(),
             )),
             gruu_by_aor: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-            outbound_flows: Arc::new(DashMap::new()),
-            outbound_flow_tasks: Arc::new(DashMap::new()),
-            flow_by_destination: Arc::new(DashMap::new()),
+            outbound_flows: Arc::new(DashMap::with_capacity(index_capacity)),
+            outbound_flow_tasks: Arc::new(DashMap::with_capacity(index_capacity)),
+            flow_by_destination: Arc::new(DashMap::with_capacity(index_capacity)),
+            flow_by_aor: Arc::new(DashMap::with_capacity(index_capacity)),
             outbound_keepalive_interval: Arc::new(std::sync::RwLock::new(None)),
             identity_verifier: Arc::new(std::sync::RwLock::new(None)),
             identity_signer: Arc::new(std::sync::RwLock::new(None)),
@@ -909,6 +998,19 @@ impl DialogManager {
                 event = events.recv() => {
                     match event {
                         Some(event) => {
+                            match &event {
+                                TransactionEvent::StateChanged {
+                                    transaction_id,
+                                    new_state: TransactionState::Terminated,
+                                    ..
+                                }
+                                | TransactionEvent::TransactionTerminated { transaction_id } => {
+                                    self.transaction_manager
+                                        .mark_transaction_terminated_indexed(transaction_id);
+                                }
+                                _ => {}
+                            }
+
                             if matches!(
                                 &event,
                                 TransactionEvent::StateChanged { new_state, .. }
@@ -1030,6 +1132,90 @@ impl DialogManager {
             .map(|entry| entry.clone())
     }
 
+    pub(crate) fn link_transaction_to_dialog_indexed(
+        &self,
+        transaction_id: &TransactionKey,
+        dialog_id: &DialogId,
+    ) {
+        self.transaction_to_dialog
+            .insert(transaction_id.clone(), dialog_id.clone());
+
+        if transaction_id.method() == &Method::Invite {
+            let mut invite_transactions = self
+                .dialog_invite_transactions
+                .entry(dialog_id.clone())
+                .or_insert_with(Vec::new);
+            if !invite_transactions
+                .iter()
+                .any(|existing| existing == transaction_id)
+            {
+                invite_transactions.push(transaction_id.clone());
+            }
+        }
+
+        if transaction_id.is_server() {
+            let mut server_transactions = self
+                .dialog_server_transactions
+                .entry(dialog_id.clone())
+                .or_insert_with(Vec::new);
+            if !server_transactions
+                .iter()
+                .any(|existing| existing == transaction_id)
+            {
+                server_transactions.push(transaction_id.clone());
+            }
+        }
+    }
+
+    pub(crate) fn unlink_transaction_from_dialog_indexed(
+        &self,
+        transaction_id: &TransactionKey,
+    ) -> Option<DialogId> {
+        let removed_dialog_id = self
+            .transaction_to_dialog
+            .remove(transaction_id)
+            .map(|(_, dialog_id)| dialog_id);
+
+        if let Some(dialog_id) = removed_dialog_id.as_ref() {
+            self.remove_dialog_invite_transaction(dialog_id, transaction_id);
+            self.remove_dialog_server_transaction(dialog_id, transaction_id);
+        }
+
+        removed_dialog_id
+    }
+
+    fn remove_dialog_invite_transaction(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+    ) {
+        if transaction_id.method() != &Method::Invite {
+            return;
+        }
+
+        if let Some(mut entry) = self.dialog_invite_transactions.get_mut(dialog_id) {
+            entry.value_mut().retain(|tx_id| tx_id != transaction_id);
+        }
+        self.dialog_invite_transactions
+            .remove_if(dialog_id, |_, tx_ids| tx_ids.is_empty());
+    }
+
+    fn remove_dialog_server_transaction(
+        &self,
+        dialog_id: &DialogId,
+        transaction_id: &TransactionKey,
+    ) {
+        if !transaction_id.is_server() {
+            return;
+        }
+
+        if let Some(mut entry) = self.dialog_server_transactions.get_mut(dialog_id) {
+            entry.value_mut().retain(|tx_id| tx_id != transaction_id);
+        }
+        self.dialog_server_transactions
+            .remove_if(dialog_id, |_, tx_ids| tx_ids.is_empty());
+    }
+
     /// Handle transaction events not associated with any existing dialog
     ///
     /// This handles new incoming requests that should create dialogs.
@@ -1092,8 +1278,7 @@ impl DialogManager {
                         debug!("REFER request belongs to existing dialog {}", dialog_id);
 
                         // Store the transaction-to-dialog mapping
-                        self.transaction_to_dialog
-                            .insert(transaction_id.clone(), dialog_id.clone());
+                        self.link_transaction_to_dialog_indexed(transaction_id, &dialog_id);
 
                         // REFER within a dialog should be handled by the protocol handler
                         // which will emit the TransferRequest event to session-core
@@ -1552,7 +1737,11 @@ impl DialogManager {
         self.terminated_bye_lookup.clear();
         self.terminated_bye_insert_count.store(0, Ordering::Relaxed);
         self.transaction_to_dialog.clear();
+        self.dialog_invite_transactions.clear();
+        self.dialog_server_transactions.clear();
         self.pending_response_transaction_by_dialog.clear();
+        self.flow_by_destination.clear();
+        self.flow_by_aor.clear();
 
         // Step 5: Report completion
         // Since we're in dialog-core, we emit DialogEvent::ShutdownComplete
@@ -1596,7 +1785,10 @@ impl DialogManager {
     /// * `transaction_id` - The transaction ID to clean up
     pub fn cleanup_transaction_receiver(&self, transaction_id: &TransactionKey) {
         // Remove from transaction-to-dialog mapping if present
-        if self.transaction_to_dialog.remove(transaction_id).is_some() {
+        if self
+            .unlink_transaction_from_dialog_indexed(transaction_id)
+            .is_some()
+        {
             debug!(
                 "Cleaned up transaction-dialog mapping for completed transaction {}",
                 transaction_id
@@ -1611,6 +1803,16 @@ impl DialogManager {
         self.pending_response_transaction_by_dialog
             .get(dialog_id)
             .map(|entry| entry.value().clone())
+    }
+
+    pub(crate) fn server_transactions_for_dialog(
+        &self,
+        dialog_id: &DialogId,
+    ) -> Vec<TransactionKey> {
+        self.dialog_server_transactions
+            .get(dialog_id)
+            .map(|entry| entry.value().clone())
+            .unwrap_or_default()
     }
 
     pub(crate) fn clear_pending_response_transaction(
@@ -1669,6 +1871,8 @@ impl DialogManager {
         }
         self.pending_response_transaction_by_dialog
             .remove(dialog_id);
+        self.dialog_invite_transactions.remove(dialog_id);
+        self.dialog_server_transactions.remove(dialog_id);
 
         Some(dialog)
     }
@@ -1720,12 +1924,17 @@ impl DialogManager {
         &self,
         dialog_id: &DialogId,
     ) -> Option<TransactionKey> {
-        // Search through transaction-to-dialog mappings to find INVITE transaction
-        for entry in self.transaction_to_dialog.iter() {
-            let (tx_key, mapped_dialog_id) = entry.pair();
+        let Some(invite_transactions) = self.dialog_invite_transactions.get(dialog_id) else {
+            debug!("No INVITE transaction found for dialog {}", dialog_id);
+            return None;
+        };
 
-            // Check if this transaction belongs to our dialog and is an INVITE
-            if mapped_dialog_id == dialog_id && tx_key.method() == &Method::Invite {
+        for tx_key in invite_transactions.iter() {
+            if self
+                .transaction_to_dialog
+                .get(tx_key)
+                .is_some_and(|mapped_dialog_id| mapped_dialog_id.value() == dialog_id)
+            {
                 debug!(
                     "Found INVITE transaction {} for dialog {}",
                     tx_key, dialog_id
@@ -1899,8 +2108,7 @@ impl DialogManager {
             .insert(session_id.to_string(), dialog_id.clone());
         self.dialog_to_session
             .insert(dialog_id.clone(), session_id.to_string());
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+        self.link_transaction_to_dialog_indexed(&transaction_id, &dialog_id);
         self.pending_response_transaction_by_dialog
             .insert(dialog_id, transaction_id);
         // Store additional request data if needed
@@ -2025,7 +2233,9 @@ impl DialogManager {
     /// Returns true when at least one RFC 5626 outbound-flow monitor is
     /// active for the given AoR.
     pub fn outbound_flow_active_for_aor(&self, aor: &str) -> bool {
-        self.outbound_flows.iter().any(|entry| entry.key().0 == aor)
+        self.flow_by_aor
+            .get(aor)
+            .is_some_and(|flow_keys| !flow_keys.is_empty())
     }
 
     pub async fn handle_response(
@@ -2149,8 +2359,7 @@ impl DialogManager {
                 message: format!("Failed to create BYE transaction: {}", e),
             })?;
 
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+        self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
         debug!(
             "Associated BYE-with-Reason transaction {} with dialog {}",
             transaction_id, dialog_id
@@ -2251,8 +2460,7 @@ impl DialogManager {
                 message: format!("Failed to create INFO transaction: {}", e),
             })?;
 
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+        self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
 
         self.transaction_manager
             .send_request(&transaction_id)
@@ -2529,12 +2737,51 @@ mod outbound_flow_handler_tests {
             Duration::from_secs(25),
         ));
         manager.outbound_flows.insert(key.clone(), flow.clone());
-        manager
-            .flow_by_destination
-            .entry(dest)
-            .or_insert_with(Vec::new)
-            .push(key);
+        manager.index_outbound_flow_key(key, dest);
         flow
+    }
+
+    #[tokio::test]
+    async fn transaction_dialog_indexes_track_server_and_invite_keys() {
+        let (manager, _rx) = make_manager().await;
+        let dialog_id = DialogId(uuid::Uuid::new_v4());
+        let server_invite =
+            TransactionKey::new("z9hG4bK-server-invite".to_string(), Method::Invite, true);
+        let server_bye = TransactionKey::new("z9hG4bK-server-bye".to_string(), Method::Bye, true);
+        let client_invite =
+            TransactionKey::new("z9hG4bK-client-invite".to_string(), Method::Invite, false);
+
+        manager.link_transaction_to_dialog_indexed(&server_invite, &dialog_id);
+        manager.link_transaction_to_dialog_indexed(&server_bye, &dialog_id);
+        manager.link_transaction_to_dialog_indexed(&client_invite, &dialog_id);
+
+        let server_transactions = manager.server_transactions_for_dialog(&dialog_id);
+        assert!(server_transactions.contains(&server_invite));
+        assert!(server_transactions.contains(&server_bye));
+        assert!(!server_transactions.contains(&client_invite));
+        assert_eq!(
+            manager.find_invite_transaction_for_dialog(&dialog_id),
+            Some(server_invite.clone())
+        );
+
+        manager.unlink_transaction_from_dialog_indexed(&server_invite);
+        let server_transactions = manager.server_transactions_for_dialog(&dialog_id);
+        assert!(!server_transactions.contains(&server_invite));
+        assert!(server_transactions.contains(&server_bye));
+        assert_eq!(
+            manager.find_invite_transaction_for_dialog(&dialog_id),
+            Some(client_invite.clone())
+        );
+
+        manager.unlink_transaction_from_dialog_indexed(&server_bye);
+        assert!(
+            manager
+                .server_transactions_for_dialog(&dialog_id)
+                .is_empty()
+        );
+
+        manager.unlink_transaction_from_dialog_indexed(&client_invite);
+        assert_eq!(manager.find_invite_transaction_for_dialog(&dialog_id), None);
     }
 
     #[tokio::test]

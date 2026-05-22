@@ -220,7 +220,8 @@ mod tests {
 
     #[test]
     fn tn_from_sip_uri_with_e164_user() {
-        let uri: rvoip_sip_core::types::uri::Uri = "sip:+15551234567@gw.example.com".parse().unwrap();
+        let uri: rvoip_sip_core::types::uri::Uri =
+            "sip:+15551234567@gw.example.com".parse().unwrap();
         assert_eq!(tn_from_uri(&uri).as_deref(), Some("+15551234567"));
     }
 

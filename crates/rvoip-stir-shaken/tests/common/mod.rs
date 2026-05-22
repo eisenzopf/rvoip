@@ -105,8 +105,7 @@ impl TestPki {
         let root_cert = root_params.self_signed(&root_kp).expect("self-sign root");
 
         // --- Leaf (always P-256, regardless of root alg) ---
-        let leaf_kp =
-            KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("leaf keypair");
+        let leaf_kp = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).expect("leaf keypair");
 
         let mut leaf_params =
             CertificateParams::new(vec!["leaf.test".into()]).expect("leaf params");
@@ -126,9 +125,7 @@ impl TestPki {
         }
         if let Some(jcc) = &spec.jcc {
             if !jcc.permitted.is_empty() {
-                leaf_params
-                    .custom_extensions
-                    .push(build_jcc_extension(jcc));
+                leaf_params.custom_extensions.push(build_jcc_extension(jcc));
             }
         }
 
@@ -267,4 +264,3 @@ impl CertResolver for StaticDerResolver {
 pub fn resolver_for(der: Vec<u8>) -> Arc<dyn CertResolver> {
     Arc::new(StaticDerResolver { der })
 }
-

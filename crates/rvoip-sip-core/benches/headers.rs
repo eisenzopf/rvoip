@@ -16,8 +16,7 @@ use rvoip_sip_core::parser::headers::{
 };
 
 // Via includes the header name + HCOLON; no trailing CRLF.
-const VIA_SIMPLE: &[u8] =
-    b"Via: SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds";
+const VIA_SIMPLE: &[u8] = b"Via: SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds";
 const VIA_PARAMS: &[u8] = b"Via: SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bK776asdhds;received=192.0.2.101;rport=5060;ttl=64";
 const VIA_STACK: &[u8] = b"Via: SIP/2.0/UDP proxy1.example.com:5060;branch=z9hG4bKa, SIP/2.0/UDP proxy2.example.com:5060;branch=z9hG4bKb, SIP/2.0/UDP pc33.atlanta.example.com:5060;branch=z9hG4bKc";
 
@@ -133,5 +132,10 @@ fn bench_scalar_headers(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_via, bench_address_headers, bench_scalar_headers);
+criterion_group!(
+    benches,
+    bench_via,
+    bench_address_headers,
+    bench_scalar_headers
+);
 criterion_main!(benches);

@@ -263,13 +263,21 @@ impl JitterBuffer {
             }
             Outcome::Inserted { depth } => {
                 self.frames_received.fetch_add(1, Ordering::Relaxed);
-                trace!("Added frame to jitter buffer: seq={}, buffer_depth={}", seq, depth);
+                trace!(
+                    "Added frame to jitter buffer: seq={}, buffer_depth={}",
+                    seq,
+                    depth
+                );
             }
             Outcome::InsertedAfterOverflow { depth, evicted_seq } => {
                 self.frames_received.fetch_add(1, Ordering::Relaxed);
                 self.frames_dropped_overflow.fetch_add(1, Ordering::Relaxed);
                 warn!("Buffer overflow, dropped frame: seq={}", evicted_seq);
-                trace!("Added frame to jitter buffer: seq={}, buffer_depth={}", seq, depth);
+                trace!(
+                    "Added frame to jitter buffer: seq={}, buffer_depth={}",
+                    seq,
+                    depth
+                );
             }
         }
 

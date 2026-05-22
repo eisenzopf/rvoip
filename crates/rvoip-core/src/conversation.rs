@@ -18,7 +18,9 @@ pub enum ConversationPolicy {
 
 impl Default for ConversationPolicy {
     fn default() -> Self {
-        ConversationPolicy::Ephemeral { idle_close_secs: 30 }
+        ConversationPolicy::Ephemeral {
+            idle_close_secs: 30,
+        }
     }
 }
 

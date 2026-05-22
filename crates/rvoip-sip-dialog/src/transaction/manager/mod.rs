@@ -231,6 +231,12 @@ pub(crate) type ArcClientTransaction = Arc<dyn ClientTransaction>;
 /// Type alias for an Arc wrapped server transaction
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
+const MIN_TRANSACTION_INDEX_CAPACITY: usize = 1024;
+
+fn transaction_index_capacity(capacity: Option<usize>) -> usize {
+    capacity.unwrap_or(100).max(MIN_TRANSACTION_INDEX_CAPACITY)
+}
+
 fn transport_token_for_request(request: &Request) -> &'static str {
     match select_transport_for_request(request) {
         TransportType::Udp => "UDP",
@@ -309,8 +315,20 @@ pub struct TransactionManager {
     client_transactions: Arc<DashMap<TransactionKey, ArcClientTransaction>>,
     /// Active server transactions. Same pattern as `client_transactions`.
     server_transactions: Arc<DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
+    /// Indexed queue of transactions that reached `Terminated`.
+    /// The periodic cleanup task drains this instead of scanning every active
+    /// transaction map on each tick; occasional full sweeps remain as a
+    /// defensive fallback.
+    terminated_transactions: Arc<DashMap<TransactionKey, ()>>,
     /// Fast dialog-id lookup for 2xx ACKs targeting INVITE server transactions.
-    server_invite_dialog_index: Arc<DashMap<ServerInviteDialogKey, TransactionKey>>,
+    /// Entries remain briefly after transaction removal so end-to-end ACKs
+    /// never need to scan active transactions.
+    server_invite_dialog_index: Arc<DashMap<ServerInviteDialogKey, ServerInviteAckIndexEntry>>,
+    /// Reverse index used to retire only the ACK keys belonging to a
+    /// transaction, avoiding full-map scans during transaction cleanup.
+    server_invite_dialog_keys_by_tx: Arc<DashMap<TransactionKey, Vec<ServerInviteDialogKey>>>,
+    server_invite_dialog_index_capacity: usize,
+    server_invite_dialog_index_insert_count: Arc<AtomicUsize>,
     /// Transaction destinations — `transaction_id → SocketAddr`.
     /// DashMap for sharded lock-free reads.
     transaction_destinations: Arc<DashMap<TransactionKey, SocketAddr>>,
@@ -479,13 +497,14 @@ impl TransactionManager {
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
+        let index_capacity = transaction_index_capacity(Some(events_capacity));
 
-        let client_transactions = Arc::new(DashMap::new());
-        let server_transactions = Arc::new(DashMap::new());
-        let transaction_destinations = Arc::new(DashMap::new());
+        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::new());
-        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(AtomicBool::new(false));
@@ -502,7 +521,13 @@ impl TransactionManager {
             transport,
             client_transactions,
             server_transactions,
-            server_invite_dialog_index: Arc::new(DashMap::new()),
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
+                index_capacity.saturating_mul(2),
+            )),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index_capacity: index_capacity,
+            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -516,7 +541,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         };
 
         // Start the message processing loop
@@ -589,13 +614,14 @@ impl TransactionManager {
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
+        let index_capacity = transaction_index_capacity(Some(events_capacity));
 
-        let client_transactions = Arc::new(DashMap::new());
-        let server_transactions = Arc::new(DashMap::new());
-        let transaction_destinations = Arc::new(DashMap::new());
+        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::new());
-        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(AtomicBool::new(false));
@@ -611,7 +637,13 @@ impl TransactionManager {
             transport,
             client_transactions,
             server_transactions,
-            server_invite_dialog_index: Arc::new(DashMap::new()),
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
+                index_capacity.saturating_mul(2),
+            )),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index_capacity: index_capacity,
+            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -625,7 +657,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         };
 
         // Start the message processing loop
@@ -732,13 +764,14 @@ impl TransactionManager {
         // Create the transaction manager using the default transport and event channel
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
+        let index_capacity = transaction_index_capacity(Some(events_capacity));
 
-        let client_transactions = Arc::new(DashMap::new());
-        let server_transactions = Arc::new(DashMap::new());
-        let transaction_destinations = Arc::new(DashMap::new());
+        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::new());
-        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let transport_rx = Arc::new(Mutex::new(transport_rx));
         let running = Arc::new(AtomicBool::new(false));
@@ -755,7 +788,13 @@ impl TransactionManager {
             transport: default_transport,
             client_transactions,
             server_transactions,
-            server_invite_dialog_index: Arc::new(DashMap::new()),
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
+                index_capacity.saturating_mul(2),
+            )),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index_capacity: index_capacity,
+            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -769,7 +808,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         };
 
         // Start the message processing loop
@@ -821,12 +860,13 @@ impl TransactionManager {
         timer_settings_opt: Option<TimerSettings>,
     ) -> Self {
         let (events_tx, _) = mpsc::channel(100); // Dummy receiver, will be ignored
-        let client_transactions = Arc::new(DashMap::new());
-        let server_transactions = Arc::new(DashMap::new());
-        let transaction_destinations = Arc::new(DashMap::new());
+        let index_capacity = transaction_index_capacity(None);
+        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
-        let subscriber_to_transactions = Arc::new(DashMap::new());
-        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
         let (_, transport_rx) = mpsc::channel(100); // Dummy channel
         let transport_rx = Arc::new(Mutex::new(transport_rx));
@@ -843,7 +883,13 @@ impl TransactionManager {
             transport,
             client_transactions,
             server_transactions,
-            server_invite_dialog_index: Arc::new(DashMap::new()),
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
+                index_capacity.saturating_mul(2),
+            )),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index_capacity: index_capacity,
+            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -857,7 +903,7 @@ impl TransactionManager {
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         }
     }
 
@@ -882,8 +928,9 @@ impl TransactionManager {
         let event_subscribers = Arc::new(ArcSwap::from_pointee(Vec::new()));
 
         // Transaction registries
-        let client_transactions = Arc::new(DashMap::new());
-        let server_transactions = Arc::new(DashMap::new());
+        let index_capacity = transaction_index_capacity(Some(10));
+        let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
 
         // Setup timer manager
         let timer_settings = build_timer_settings();
@@ -894,11 +941,11 @@ impl TransactionManager {
         let running = Arc::new(AtomicBool::new(false));
 
         // Track destinations
-        let transaction_destinations = Arc::new(DashMap::new());
+        let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
 
         // Initialize subscriber-related fields
-        let subscriber_to_transactions = Arc::new(DashMap::new());
-        let transaction_to_subscribers = Arc::new(DashMap::new());
+        let subscriber_to_transactions = Arc::new(DashMap::with_capacity(index_capacity));
+        let transaction_to_subscribers = Arc::new(DashMap::with_capacity(index_capacity));
         let next_subscriber_id = Arc::new(AtomicUsize::new(0));
 
         Self {
@@ -907,7 +954,13 @@ impl TransactionManager {
             event_subscribers,
             client_transactions,
             server_transactions,
-            server_invite_dialog_index: Arc::new(DashMap::new()),
+            terminated_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index: Arc::new(DashMap::with_capacity(
+                index_capacity.saturating_mul(2),
+            )),
+            server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
+            server_invite_dialog_index_capacity: index_capacity,
+            server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             timer_manager,
@@ -919,7 +972,7 @@ impl TransactionManager {
             next_subscriber_id,
             transport_rx: Arc::new(Mutex::new(transport_rx)),
             sip_trace: None,
-            pending_inbound_bytes: Arc::new(dashmap::DashMap::new()),
+            pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         }
     }
 
@@ -1642,7 +1695,9 @@ impl TransactionManager {
         // Now clear the transaction maps
         self.client_transactions.clear();
         self.server_transactions.clear();
+        self.terminated_transactions.clear();
         self.server_invite_dialog_index.clear();
+        self.server_invite_dialog_keys_by_tx.clear();
         self.transaction_destinations.clear();
 
         // Step 5: Emit TransactionEvent::ShutdownComplete
@@ -1776,6 +1831,20 @@ impl TransactionManager {
             }
         }
 
+        if let Some(manager_instance) = manager.as_ref() {
+            match &event {
+                TransactionEvent::StateChanged {
+                    transaction_id,
+                    new_state: TransactionState::Terminated,
+                    ..
+                }
+                | TransactionEvent::TransactionTerminated { transaction_id } => {
+                    manager_instance.mark_transaction_terminated_indexed(transaction_id);
+                }
+                _ => {}
+            }
+        }
+
         // Special handling for transaction termination
         if let TransactionEvent::TransactionTerminated { transaction_id } = &event {
             if let Some(manager_instance) = manager {
@@ -1860,7 +1929,7 @@ impl TransactionManager {
 
         // Defensive: also remove from server in case of duplication.
         if self.server_transactions.remove(transaction_id).is_some() {
-            self.remove_server_invite_dialog_index_for(transaction_id);
+            self.retire_server_invite_dialog_index_for(transaction_id);
             debug!(%transaction_id, "Removed terminated server transaction");
             terminated = true;
         }
@@ -1872,6 +1941,7 @@ impl TransactionManager {
         {
             debug!(%transaction_id, "Removed transaction from destinations map");
         }
+        self.terminated_transactions.remove(transaction_id);
         self.pending_inbound_bytes.remove(transaction_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
@@ -1909,7 +1979,10 @@ impl TransactionManager {
         // We use spawn to avoid blocking and make this a background task
         let manager_clone = self.clone();
         tokio::spawn(async move {
-            match manager_clone.cleanup_terminated_transactions().await {
+            match manager_clone
+                .cleanup_indexed_terminated_transactions()
+                .await
+            {
                 Ok(count) if count > 0 => {
                     debug!("Cleaned up {} additional terminated transactions", count);
                 }
@@ -1949,6 +2022,7 @@ impl TransactionManager {
             let mut cleanup_interval = tokio::time::interval(Duration::from_secs(1));
             cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let cleanup_running = Arc::new(AtomicBool::new(false));
+            let mut cleanup_ticks = 0usize;
 
             // Run the message processing loop
             loop {
@@ -1984,6 +2058,8 @@ impl TransactionManager {
                         ).await;
                     }
                     _ = cleanup_interval.tick() => {
+                        cleanup_ticks = cleanup_ticks.wrapping_add(1);
+                        let full_sweep = cleanup_ticks % 10 == 0;
                         if cleanup_running
                             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
                             .is_ok()
@@ -1991,9 +2067,19 @@ impl TransactionManager {
                             let manager_clone = manager_arc.clone();
                             let cleanup_running = cleanup_running.clone();
                             tokio::spawn(async move {
-                                match manager_clone.cleanup_terminated_transactions().await {
+                                let cleanup_result = if full_sweep {
+                                    manager_clone.cleanup_terminated_transactions().await
+                                } else {
+                                    manager_clone.cleanup_indexed_terminated_transactions().await
+                                };
+
+                                match cleanup_result {
                                     Ok(count) if count > 0 => {
-                                        debug!("Periodic cleanup removed {} terminated transactions", count);
+                                        debug!(
+                                            full_sweep,
+                                            "Periodic cleanup removed {} terminated transactions",
+                                            count
+                                        );
                                     }
                                     Err(e) => {
                                         error!("Periodic transaction cleanup failed: {}", e);
@@ -2259,24 +2345,16 @@ impl TransactionManager {
         &self,
         message: &Message,
     ) -> Result<Option<TransactionKey>> {
-        match message {
-            Message::Request(_req) => {
-                for entry in self.server_transactions.iter() {
-                    if entry.value().matches(message) {
-                        return Ok(Some(entry.key().clone()));
-                    }
-                }
-                Ok(None)
-            }
-            Message::Response(_resp) => {
-                for entry in self.client_transactions.iter() {
-                    if entry.value().matches(message) {
-                        return Ok(Some(entry.key().clone()));
-                    }
-                }
-                Ok(None)
-            }
-        }
+        let Some(key) = transaction_key_from_message(message) else {
+            return Ok(None);
+        };
+
+        let found = match message {
+            Message::Request(_) => self.server_transactions.contains_key(&key),
+            Message::Response(_) => self.client_transactions.contains_key(&key),
+        };
+
+        Ok(found.then_some(key))
     }
 
     /// Find the matching client-side INVITE transaction for a CANCEL request.
@@ -2296,20 +2374,15 @@ impl TransactionManager {
             return Err(Error::Other("Not a CANCEL request".to_string()));
         }
 
-        let invite_tx_keys: Vec<TransactionKey> = self
+        let Some(cancel_key) = TransactionKey::from_request(cancel_request) else {
+            return Ok(None);
+        };
+        let invite_key = TransactionKey::new(cancel_key.branch, Method::Invite, false);
+
+        Ok(self
             .client_transactions
-            .iter()
-            .filter(|r| *r.key().method() == Method::Invite && !r.key().is_server)
-            .map(|r| r.key().clone())
-            .collect();
-
-        // Use the utility to find the matching INVITE transaction
-        let tx_id = crate::transaction::method::cancel::find_invite_transaction_for_cancel(
-            cancel_request,
-            invite_tx_keys,
-        );
-
-        Ok(tx_id)
+            .contains_key(&invite_key)
+            .then_some(invite_key))
     }
 
     /// Find the matching server-side INVITE transaction for an inbound
@@ -2326,19 +2399,15 @@ impl TransactionManager {
             return Err(Error::Other("Not a CANCEL request".to_string()));
         }
 
-        let invite_tx_keys: Vec<TransactionKey> = self
+        let Some(cancel_key) = TransactionKey::from_request(cancel_request) else {
+            return Ok(None);
+        };
+        let invite_key = cancel_key.with_method(Method::Invite);
+
+        Ok(self
             .server_transactions
-            .iter()
-            .filter(|r| *r.key().method() == Method::Invite && r.key().is_server)
-            .map(|r| r.key().clone())
-            .collect();
-
-        let tx_id = crate::transaction::method::cancel::find_invite_transaction_for_cancel(
-            cancel_request,
-            invite_tx_keys,
-        );
-
-        Ok(tx_id)
+            .contains_key(&invite_key)
+            .then_some(invite_key))
     }
 
     /// Retrieve the original request that created a server transaction.
@@ -2470,37 +2539,19 @@ impl TransactionManager {
                     warn!(method = %request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
 
-                // For CANCEL, try to find the target INVITE transaction.
-                // Search BOTH client and server transactions — on the UAC
-                // side the matching INVITE is a client transaction (we
-                // sent the INVITE), and on the UAS side it's a server
-                // transaction (peer sent the INVITE to us). Before this
-                // fix, only client transactions were searched, which
-                // meant UAS-side CANCELs never notified the TU.
-                let mut target_invite_tx_id = None;
-
-                let mut invite_tx_keys: Vec<TransactionKey> = self
-                    .client_transactions
-                    .iter()
-                    .filter(|r| r.key().method() == &Method::Invite && !r.key().is_server)
-                    .map(|r| r.key().clone())
-                    .collect();
-                let server_invite_keys: Vec<TransactionKey> = self
-                    .server_transactions
-                    .iter()
-                    .filter(|r| r.key().method() == &Method::Invite && r.key().is_server)
-                    .map(|r| r.key().clone())
-                    .collect();
-                invite_tx_keys.extend(server_invite_keys);
-
-                if let Some(invite_tx_id) =
-                    cancel::find_matching_invite_transaction(&request, invite_tx_keys)
+                // For CANCEL, the matching INVITE has the same transaction
+                // key with method rewritten to INVITE. Keep this indexed
+                // instead of scanning all active transactions.
+                let invite_tx_id = key.with_method(Method::Invite);
+                let target_invite_tx_id = if self.client_transactions.contains_key(&invite_tx_id)
+                    || self.server_transactions.contains_key(&invite_tx_id)
                 {
-                    target_invite_tx_id = Some(invite_tx_id);
                     debug!(method=%request.method(), "Found matching INVITE transaction for CANCEL");
+                    Some(invite_tx_id)
                 } else {
                     debug!(method=%request.method(), "No matching INVITE transaction found for CANCEL");
-                }
+                    None
+                };
 
                 // Create a non-INVITE server transaction for CANCEL
                 let tx = Arc::new(ServerNonInviteTransaction::new(
@@ -2587,14 +2638,90 @@ impl TransactionManager {
 
     fn index_server_invite_dialog(&self, request: &Request, key: &TransactionKey) {
         if let Some(dialog_key) = ServerInviteDialogKey::from_request(request) {
-            self.server_invite_dialog_index
-                .insert(dialog_key, key.clone());
+            self.insert_server_invite_dialog_index_entry(
+                dialog_key,
+                ServerInviteAckIndexEntry::active(key.clone()),
+            );
         }
     }
 
-    pub(crate) fn remove_server_invite_dialog_index_for(&self, transaction_id: &TransactionKey) {
+    pub(crate) fn insert_server_invite_dialog_index_entry(
+        &self,
+        dialog_key: ServerInviteDialogKey,
+        entry: ServerInviteAckIndexEntry,
+    ) {
+        let transaction_id = entry.transaction_id.clone();
+        let is_active = entry.expires_at.is_none();
+
         self.server_invite_dialog_index
-            .retain(|_, indexed_id| indexed_id != transaction_id);
+            .insert(dialog_key.clone(), entry);
+
+        if is_active {
+            let mut keys = self
+                .server_invite_dialog_keys_by_tx
+                .entry(transaction_id)
+                .or_default();
+            if !keys.iter().any(|existing| existing == &dialog_key) {
+                keys.push(dialog_key);
+            }
+        }
+
+        let inserts = self
+            .server_invite_dialog_index_insert_count
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let prune_interval = (self.server_invite_dialog_index_capacity / 4).max(1024);
+        if inserts % prune_interval == 0
+            || self.server_invite_dialog_index.len()
+                > self.server_invite_dialog_index_capacity.saturating_mul(2)
+        {
+            self.prune_server_invite_dialog_index();
+        }
+    }
+
+    pub(crate) fn retire_server_invite_dialog_index_for(&self, transaction_id: &TransactionKey) {
+        let expires_at = Instant::now() + self.timer_settings.t4;
+
+        if let Some((_, keys)) = self.server_invite_dialog_keys_by_tx.remove(transaction_id) {
+            for key in keys {
+                if let Some(mut indexed) = self.server_invite_dialog_index.get_mut(&key) {
+                    if indexed.transaction_id == *transaction_id {
+                        indexed.expires_at = Some(expires_at);
+                    }
+                }
+            }
+        }
+
+        if self.server_invite_dialog_index.len()
+            > self.server_invite_dialog_index_capacity.saturating_mul(2)
+        {
+            self.prune_server_invite_dialog_index();
+        }
+    }
+
+    pub(crate) fn mark_transaction_terminated_indexed(&self, transaction_id: &TransactionKey) {
+        self.terminated_transactions
+            .insert(transaction_id.clone(), ());
+    }
+
+    fn prune_server_invite_dialog_index(&self) {
+        let now = Instant::now();
+        let expired_keys: Vec<ServerInviteDialogKey> = self
+            .server_invite_dialog_index
+            .iter()
+            .filter(|entry| entry.value().is_expired(now))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in expired_keys {
+            if self
+                .server_invite_dialog_index
+                .get(&key)
+                .is_some_and(|entry| entry.value().is_expired(now))
+            {
+                self.server_invite_dialog_index.remove(&key);
+            }
+        }
     }
 
     /// Cancel an active INVITE client transaction
@@ -2845,6 +2972,10 @@ impl fmt::Debug for TransactionManager {
             .field("transport", &"Arc<dyn Transport>")
             .field("client_transactions", &"Arc<Mutex<HashMap<...>>>") // Indicate map exists
             .field("server_transactions", &"Arc<Mutex<HashMap<...>>>")
+            .field(
+                "terminated_transactions",
+                &self.terminated_transactions.len(),
+            )
             .field(
                 "server_invite_dialog_index",
                 &self.server_invite_dialog_index.len(),

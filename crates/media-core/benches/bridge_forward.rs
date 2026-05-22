@@ -90,9 +90,8 @@ fn bench_contended_lookup(c: &mut Criterion) {
             |b, &tasks| {
                 b.iter_custom(|iters| {
                     rt.block_on(async move {
-                        let map = Arc::new(TokioRwLock::new(populated_hashmap(
-                            CONTENDED_DIALOG_COUNT,
-                        )));
+                        let map =
+                            Arc::new(TokioRwLock::new(populated_hashmap(CONTENDED_DIALOG_COUNT)));
                         let mut total = Duration::ZERO;
                         for _ in 0..iters {
                             let start = Instant::now();
@@ -101,8 +100,7 @@ fn bench_contended_lookup(c: &mut Criterion) {
                                 let map = Arc::clone(&map);
                                 handles.push(tokio::spawn(async move {
                                     for op in 0..OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_DIALOG_COUNT;
+                                        let idx = (t * 7919 + op * 17) % CONTENDED_DIALOG_COUNT;
                                         let key = dialog(idx);
                                         let guard = map.read().await;
                                         let v = guard.get(&key).cloned();
@@ -124,45 +122,40 @@ fn bench_contended_lookup(c: &mut Criterion) {
 
         // Variant 2: `Arc<DashMap>` — sharded, lock-free reads. Models
         // the Phase C7 refactor.
-        group.bench_with_input(
-            BenchmarkId::new("dashmap", tasks),
-            &tasks,
-            |b, &tasks| {
-                b.iter_custom(|iters| {
-                    rt.block_on(async move {
-                        let map: Arc<DashMap<DialogId, SessionHandle>> = {
-                            let m = DashMap::with_capacity(CONTENDED_DIALOG_COUNT);
-                            for i in 0..CONTENDED_DIALOG_COUNT {
-                                m.insert(dialog(i), Arc::new(i as u64));
-                            }
-                            Arc::new(m)
-                        };
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let start = Instant::now();
-                            let mut handles = Vec::with_capacity(tasks);
-                            for t in 0..tasks {
-                                let map = Arc::clone(&map);
-                                handles.push(tokio::spawn(async move {
-                                    for op in 0..OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_DIALOG_COUNT;
-                                        let key = dialog(idx);
-                                        let v = map.get(&key).map(|r| r.value().clone());
-                                        black_box(v);
-                                    }
-                                }));
-                            }
-                            for h in handles {
-                                h.await.expect("task");
-                            }
-                            total += start.elapsed();
+        group.bench_with_input(BenchmarkId::new("dashmap", tasks), &tasks, |b, &tasks| {
+            b.iter_custom(|iters| {
+                rt.block_on(async move {
+                    let map: Arc<DashMap<DialogId, SessionHandle>> = {
+                        let m = DashMap::with_capacity(CONTENDED_DIALOG_COUNT);
+                        for i in 0..CONTENDED_DIALOG_COUNT {
+                            m.insert(dialog(i), Arc::new(i as u64));
                         }
-                        total
-                    })
-                });
-            },
-        );
+                        Arc::new(m)
+                    };
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        let mut handles = Vec::with_capacity(tasks);
+                        for t in 0..tasks {
+                            let map = Arc::clone(&map);
+                            handles.push(tokio::spawn(async move {
+                                for op in 0..OPS_PER_TASK as usize {
+                                    let idx = (t * 7919 + op * 17) % CONTENDED_DIALOG_COUNT;
+                                    let key = dialog(idx);
+                                    let v = map.get(&key).map(|r| r.value().clone());
+                                    black_box(v);
+                                }
+                            }));
+                        }
+                        for h in handles {
+                            h.await.expect("task");
+                        }
+                        total += start.elapsed();
+                    }
+                    total
+                })
+            });
+        });
     }
     group.finish();
 }

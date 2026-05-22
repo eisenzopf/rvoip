@@ -1587,12 +1587,10 @@ impl TryFrom<&Header> for TypedHeader {
                     Err(e) => Err(Error::from(e.to_owned())),
                 }
             }
-            HeaderName::Identity => {
-                match parser::headers::parse_identity(value_bytes) {
-                    Ok((_, id)) => Ok(TypedHeader::Identity(id)),
-                    Err(e) => Err(Error::from(e.to_owned())),
-                }
-            }
+            HeaderName::Identity => match parser::headers::parse_identity(value_bytes) {
+                Ok((_, id)) => Ok(TypedHeader::Identity(id)),
+                Err(e) => Err(Error::from(e.to_owned())),
+            },
             _ => Ok(TypedHeader::Other(
                 header.name.clone(),
                 HeaderValue::Raw(value_bytes.to_vec()),

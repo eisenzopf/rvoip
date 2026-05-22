@@ -1265,21 +1265,22 @@ pub fn message_out_of_dialog_with_extras(
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
-    let mut request = rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Message, &target_uri)
-        .map_err(|e| Error::Other(format!("Failed to build MESSAGE request: {}", e)))?
-        .from(
-            "",
-            &from_uri,
-            Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
-        )
-        .to("", &target_uri, None)
-        .call_id(&format!("msg-{}", uuid::Uuid::new_v4()))
-        .cseq(cseq)
-        .via(&local_address.to_string(), via_transport, Some(&branch))
-        .max_forwards(70)
-        .content_type(&ct)
-        .body(bytes::Bytes::from(body))
-        .build();
+    let mut request =
+        rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Message, &target_uri)
+            .map_err(|e| Error::Other(format!("Failed to build MESSAGE request: {}", e)))?
+            .from(
+                "",
+                &from_uri,
+                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
+            )
+            .to("", &target_uri, None)
+            .call_id(&format!("msg-{}", uuid::Uuid::new_v4()))
+            .cseq(cseq)
+            .via(&local_address.to_string(), via_transport, Some(&branch))
+            .max_forwards(70)
+            .content_type(&ct)
+            .body(bytes::Bytes::from(body))
+            .build();
 
     // Pre-computed Digest / Bearer authorization (used by 401 retry
     // and by callers with externally-computed credentials).
@@ -1317,21 +1318,19 @@ pub fn options_out_of_dialog_with_extras(
     let branch = crate::transaction::utils::dialog_utils::generate_branch();
     let via_transport = via_transport_for_uris(&target_uri, &from_uri);
 
-    let mut builder = rvoip_sip_core::builder::SimpleRequestBuilder::new(
-        Method::Options,
-        &target_uri,
-    )
-    .map_err(|e| Error::Other(format!("Failed to build OPTIONS request: {}", e)))?
-    .from(
-        "",
-        &from_uri,
-        Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
-    )
-    .to("", &target_uri, None)
-    .call_id(&format!("opt-{}", uuid::Uuid::new_v4()))
-    .cseq(cseq)
-    .via(&local_address.to_string(), via_transport, Some(&branch))
-    .max_forwards(70);
+    let mut builder =
+        rvoip_sip_core::builder::SimpleRequestBuilder::new(Method::Options, &target_uri)
+            .map_err(|e| Error::Other(format!("Failed to build OPTIONS request: {}", e)))?
+            .from(
+                "",
+                &from_uri,
+                Some(&format!("tag-{}", uuid::Uuid::new_v4().simple())),
+            )
+            .to("", &target_uri, None)
+            .call_id(&format!("opt-{}", uuid::Uuid::new_v4()))
+            .cseq(cseq)
+            .via(&local_address.to_string(), via_transport, Some(&branch))
+            .max_forwards(70);
 
     if let Some(accept_value) = accept {
         builder = builder.header(TypedHeader::Other(

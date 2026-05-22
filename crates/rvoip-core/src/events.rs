@@ -6,9 +6,7 @@ use crate::ids::{
 use crate::store::VconHandle;
 use crate::stream::QualitySnapshot;
 use chrono::{DateTime, Utc};
-use rvoip_infra_common::events::cross_crate::{
-    RvoipCoreCrossCrateEvent, RvoipCrossCrateEvent,
-};
+use rvoip_infra_common::events::cross_crate::{RvoipCoreCrossCrateEvent, RvoipCrossCrateEvent};
 
 /// Normalized event vocabulary emitted by rvoip-core. Adapters produce
 /// `AdapterEvent`s, which are translated into these by the orchestrator.
@@ -273,16 +271,16 @@ impl Event {
     pub fn to_cross_crate(&self) -> RvoipCrossCrateEvent {
         use Event::*;
         let inner = match self {
-            ConversationOpened { conversation_id, .. } => {
-                RvoipCoreCrossCrateEvent::ConversationOpened {
-                    conversation_id: conversation_id.to_string(),
-                }
-            }
-            ConversationClosed { conversation_id, .. } => {
-                RvoipCoreCrossCrateEvent::ConversationClosed {
-                    conversation_id: conversation_id.to_string(),
-                }
-            }
+            ConversationOpened {
+                conversation_id, ..
+            } => RvoipCoreCrossCrateEvent::ConversationOpened {
+                conversation_id: conversation_id.to_string(),
+            },
+            ConversationClosed {
+                conversation_id, ..
+            } => RvoipCoreCrossCrateEvent::ConversationClosed {
+                conversation_id: conversation_id.to_string(),
+            },
             SessionStarted {
                 session_id,
                 conversation_id,
@@ -388,16 +386,12 @@ impl Event {
             AiDetached { attachment_id, .. } => RvoipCoreCrossCrateEvent::AiDetached {
                 attachment_id: attachment_id.to_string(),
             },
-            ListenerAttached { listener_id, .. } => {
-                RvoipCoreCrossCrateEvent::ListenerAttached {
-                    listener_id: listener_id.to_string(),
-                }
-            }
-            ListenerDetached { listener_id, .. } => {
-                RvoipCoreCrossCrateEvent::ListenerDetached {
-                    listener_id: listener_id.to_string(),
-                }
-            }
+            ListenerAttached { listener_id, .. } => RvoipCoreCrossCrateEvent::ListenerAttached {
+                listener_id: listener_id.to_string(),
+            },
+            ListenerDetached { listener_id, .. } => RvoipCoreCrossCrateEvent::ListenerDetached {
+                listener_id: listener_id.to_string(),
+            },
             MessageReceived {
                 message_id,
                 conversation_id,
@@ -444,16 +438,12 @@ impl Event {
                 is_final: *is_final,
                 assigned_provider: assigned_provider.clone(),
             },
-            RecordingStarted { recording_id, .. } => {
-                RvoipCoreCrossCrateEvent::RecordingStarted {
-                    recording_id: recording_id.to_string(),
-                }
-            }
-            RecordingStopped { recording_id, .. } => {
-                RvoipCoreCrossCrateEvent::RecordingStopped {
-                    recording_id: recording_id.to_string(),
-                }
-            }
+            RecordingStarted { recording_id, .. } => RvoipCoreCrossCrateEvent::RecordingStarted {
+                recording_id: recording_id.to_string(),
+            },
+            RecordingStopped { recording_id, .. } => RvoipCoreCrossCrateEvent::RecordingStopped {
+                recording_id: recording_id.to_string(),
+            },
             RecordingComplete {
                 recording_id, sink, ..
             } => RvoipCoreCrossCrateEvent::RecordingComplete {
@@ -468,7 +458,10 @@ impl Event {
                 content_hash: handle.content_hash.clone(),
             },
             VconRedacted {
-                session_id, old, new, ..
+                session_id,
+                old,
+                new,
+                ..
             } => RvoipCoreCrossCrateEvent::VconRedacted {
                 session_id: session_id.to_string(),
                 old_url: old.url.clone(),
@@ -482,9 +475,9 @@ impl Event {
                 connection_id: connection_id.to_string(),
                 identity_id: identity_id.as_ref().map(|i| i.to_string()),
             },
-            RegistrationChanged { aor, .. } => RvoipCoreCrossCrateEvent::RegistrationChanged {
-                aor: aor.clone(),
-            },
+            RegistrationChanged { aor, .. } => {
+                RvoipCoreCrossCrateEvent::RegistrationChanged { aor: aor.clone() }
+            }
             RegistrationHeartbeat { aor, .. } => {
                 RvoipCoreCrossCrateEvent::RegistrationHeartbeat { aor: aor.clone() }
             }

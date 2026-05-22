@@ -51,9 +51,7 @@ impl TestCertPair {
             .distinguished_name
             .push(rcgen::DnType::CommonName, "STIR-SHAKEN test cert");
 
-        let cert = params
-            .self_signed(&key_pair)
-            .expect("self-sign");
+        let cert = params.self_signed(&key_pair).expect("self-sign");
         let cert_der = cert.der().to_vec();
 
         Self {
@@ -222,7 +220,10 @@ async fn claim_mismatch_on_from_uri_rejects() {
 
     let outcome = verifier.verify(&raw_bytes, &identity, &request).await;
     assert!(
-        matches!(outcome, VerificationOutcome::ClaimMismatch { field: "orig" }),
+        matches!(
+            outcome,
+            VerificationOutcome::ClaimMismatch { field: "orig" }
+        ),
         "expected ClaimMismatch on orig, got {:?}",
         outcome
     );

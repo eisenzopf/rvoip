@@ -246,9 +246,10 @@ async fn inbound_with_our_branch_in_via_stack_returns_482() {
     // forward this looped INVITE downstream — check by counting UAS
     // forwards.
     let _ = harness
-        .wait_for(1500, |m, _| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::LoopDetected)
-        })
+        .wait_for(
+            1500,
+            |m, _| matches!(m, Message::Response(r) if r.status() == StatusCode::LoopDetected),
+        )
         .await;
     let uas_invites = harness
         .transport
@@ -308,9 +309,9 @@ async fn timer_c_resets_on_1xx_and_does_not_fire_408() {
     let sent = harness.transport.sent().await;
     let timeouts = sent
         .iter()
-        .filter(|(m, _)| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::RequestTimeout)
-        })
+        .filter(
+            |(m, _)| matches!(m, Message::Response(r) if r.status() == StatusCode::RequestTimeout),
+        )
         .count();
     assert_eq!(
         timeouts, 0,
@@ -357,7 +358,9 @@ async fn redirect_3xx_emits_event_with_contact_uris() {
         .await
         .expect("event arrived")
         .expect("event channel still open");
-    let ProxyEvent::RedirectReceived { status, contacts, .. } = evt;
+    let ProxyEvent::RedirectReceived {
+        status, contacts, ..
+    } = evt;
     assert_eq!(status, StatusCode::MovedTemporarily);
     assert_eq!(contacts.len(), 1);
     assert_eq!(
@@ -367,9 +370,10 @@ async fn redirect_3xx_emits_event_with_contact_uris() {
 
     // The 302 still forwards upstream to the UAC (observability-only).
     let _ = harness
-        .wait_for(1500, |m, _| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::MovedTemporarily)
-        })
+        .wait_for(
+            1500,
+            |m, _| matches!(m, Message::Response(r) if r.status() == StatusCode::MovedTemporarily),
+        )
         .await;
 }
 
@@ -385,10 +389,7 @@ async fn redirect_interceptor_refork_swallows_3xx_and_spawns_new_leg() {
 
     #[async_trait]
     impl RedirectInterceptor for ReForkToBackup {
-        async fn on_redirect(
-            &self,
-            _info: RedirectInfo,
-        ) -> Option<RedirectDecision> {
+        async fn on_redirect(&self, _info: RedirectInfo) -> Option<RedirectDecision> {
             Some(RedirectDecision::ReFork {
                 mode: rvoip_sip_proxy::ForkMode::Sequential,
                 targets: vec![self.backup],
@@ -401,7 +402,9 @@ async fn redirect_interceptor_refork_swallows_3xx_and_spawns_new_leg() {
     let harness = Harness::new(RouteDecision::to(uas_addr)).await;
     harness
         .proxy
-        .set_redirect_interceptor(Some(Arc::new(ReForkToBackup { backup: backup_addr })));
+        .set_redirect_interceptor(Some(Arc::new(ReForkToBackup {
+            backup: backup_addr,
+        })));
 
     harness
         .inject(
@@ -439,15 +442,10 @@ async fn redirect_interceptor_refork_swallows_3xx_and_spawns_new_leg() {
 
     // Settle briefly, then verify the 302 did NOT reach the UAC.
     tokio::time::sleep(Duration::from_millis(150)).await;
-    let saw_302_upstream = harness
-        .transport
-        .sent()
-        .await
-        .iter()
-        .any(|(m, d)| {
-            matches!(m, Message::Response(r) if r.status() == StatusCode::MovedTemporarily)
-                && *d == UAC_ADDR.parse::<SocketAddr>().unwrap()
-        });
+    let saw_302_upstream = harness.transport.sent().await.iter().any(|(m, d)| {
+        matches!(m, Message::Response(r) if r.status() == StatusCode::MovedTemporarily)
+            && *d == UAC_ADDR.parse::<SocketAddr>().unwrap()
+    });
     assert!(
         !saw_302_upstream,
         "interceptor returned ReFork — 302 must not propagate upstream"

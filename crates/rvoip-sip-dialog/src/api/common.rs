@@ -579,29 +579,16 @@ impl CallHandle {
     pub async fn answer(&self, sdp_answer: Option<String>) -> ApiResult<()> {
         info!("Answering call {}", self.call_id());
 
-        // Find the transaction associated with this dialog
-        // We need to look through the transaction-to-dialog mappings to find the INVITE transaction
+        // Find the indexed server INVITE transaction associated with this dialog.
         let transaction_id = {
             let dialog_manager = &self.dialog_handle.dialog_manager;
-            let mut found_tx_id = None;
-
-            // Search through transaction mappings to find the INVITE transaction for this dialog
-            for entry in dialog_manager.transaction_to_dialog.iter() {
-                if entry.value() == self.call_id() {
-                    // Check if this is an INVITE transaction (server-side)
-                    let tx_key = entry.key();
-                    if tx_key.to_string().contains("INVITE")
-                        && tx_key.to_string().contains("server")
-                    {
-                        found_tx_id = Some(tx_key.clone());
-                        break;
-                    }
-                }
-            }
-
-            found_tx_id.ok_or_else(|| ApiError::Internal {
-                message: "No INVITE transaction found for this call".to_string(),
-            })?
+            dialog_manager
+                .server_transactions_for_dialog(self.call_id())
+                .into_iter()
+                .find(|tx_key| tx_key.method() == &rvoip_sip_core::Method::Invite)
+                .ok_or_else(|| ApiError::Internal {
+                    message: "No INVITE transaction found for this call".to_string(),
+                })?
         };
 
         // Get the original INVITE request to build a proper response
@@ -651,7 +638,7 @@ impl CallHandle {
                 response = response.with_body(sdp.as_bytes().to_vec());
                 // Add Content-Type header for SDP
                 use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-                use rvoip_sip_core::{types::content_type::ContentType, TypedHeader};
+                use rvoip_sip_core::{TypedHeader, types::content_type::ContentType};
                 response
                     .headers
                     .push(TypedHeader::ContentType(ContentType::new(

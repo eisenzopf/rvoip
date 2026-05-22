@@ -116,8 +116,7 @@ impl ShakenSigner {
     /// in [`EncodingKey`] form — call sites typically read the PEM
     /// from disk at boot and `Arc`-wrap the resulting signer.
     pub fn from_pem(pem: &[u8], config: ShakenSignerConfig) -> Result<Self, SignerErrorKind> {
-        let key = EncodingKey::from_ec_pem(pem)
-            .map_err(|_| SignerErrorKind::KeyUnavailable)?;
+        let key = EncodingKey::from_ec_pem(pem).map_err(|_| SignerErrorKind::KeyUnavailable)?;
         Ok(Self { key, config })
     }
 
@@ -167,9 +166,7 @@ impl ShakenSigner {
             Some("B") | Some("b") => Some(Attestation::Partial),
             Some("C") | Some("c") => Some(Attestation::Gateway),
             Some(_) => return Err(SignerErrorKind::InvalidClaims),
-            None if matches!(self.config.ppt, PptType::Shaken) => {
-                Some(self.config.default_attest)
-            }
+            None if matches!(self.config.ppt, PptType::Shaken) => Some(self.config.default_attest),
             None => None,
         };
 
@@ -243,9 +240,7 @@ impl PASSporTSigner for ShakenSigner {
 /// Parse a JWT into `(header_json, payload_json, signature_b64)`
 /// without verifying the signature. Used by tests and by the
 /// verifier-side claim-extraction code.
-pub(crate) fn split_compact_jwt(
-    jwt: &str,
-) -> Result<(Vec<u8>, Vec<u8>, String), SignerErrorKind> {
+pub(crate) fn split_compact_jwt(jwt: &str) -> Result<(Vec<u8>, Vec<u8>, String), SignerErrorKind> {
     let mut parts = jwt.split('.');
     let header_b64 = parts.next().ok_or(SignerErrorKind::InvalidClaims)?;
     let payload_b64 = parts.next().ok_or(SignerErrorKind::InvalidClaims)?;
@@ -281,9 +276,7 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
 -----END PRIVATE KEY-----\n";
 
     fn test_config() -> ShakenSignerConfig {
-        ShakenSignerConfig::new(
-            Url::parse("https://cert.example.org/p.cer").expect("url"),
-        )
+        ShakenSignerConfig::new(Url::parse("https://cert.example.org/p.cer").expect("url"))
     }
 
     fn full_claim_summary() -> PassportClaimSummary {
@@ -315,10 +308,8 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
         let signer = ShakenSigner::from_pem(TEST_EC_PEM, test_config()).expect("load PEM");
         let value = signer.sign(full_claim_summary()).await.expect("sign");
 
-        let (header_bytes, _payload_bytes, _sig) =
-            split_compact_jwt(&value.jwt).expect("split");
-        let header: serde_json::Value =
-            serde_json::from_slice(&header_bytes).expect("header json");
+        let (header_bytes, _payload_bytes, _sig) = split_compact_jwt(&value.jwt).expect("split");
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes).expect("header json");
 
         assert_eq!(header["alg"], "ES256");
         assert_eq!(header["typ"], "passport");
@@ -355,8 +346,7 @@ OF/2NxApJCzGCEDdfSp6VQO30hyhRANCAAQRWz+jn65BtOMvdyHKcvjBeBSDZH2r\n\
         let value = signer.sign(summary).await.expect("sign");
 
         let (_h, payload_bytes, _s) = split_compact_jwt(&value.jwt).expect("split");
-        let payload: serde_json::Value =
-            serde_json::from_slice(&payload_bytes).expect("json");
+        let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).expect("json");
         assert_eq!(payload["attest"], "C");
     }
 

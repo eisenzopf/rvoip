@@ -93,10 +93,7 @@ impl HickoryResolver {
         }
     }
 
-    async fn lookup_srv(
-        &self,
-        name: &str,
-    ) -> Result<Vec<(u16, u16, u16, String)>, ResolverError> {
+    async fn lookup_srv(&self, name: &str) -> Result<Vec<(u16, u16, u16, String)>, ResolverError> {
         match self.inner.srv_lookup(name).await {
             Ok(lookup) => Ok(lookup
                 .iter()
@@ -135,8 +132,12 @@ impl HickoryResolver {
                 Some(n) => n,
                 None => continue,
             };
-            let flags = std::str::from_utf8(rdata_naptr.flags()).unwrap_or("").to_string();
-            let service = std::str::from_utf8(rdata_naptr.services()).unwrap_or("").to_string();
+            let flags = std::str::from_utf8(rdata_naptr.flags())
+                .unwrap_or("")
+                .to_string();
+            let service = std::str::from_utf8(rdata_naptr.services())
+                .unwrap_or("")
+                .to_string();
             // RFC 3263 SIP NAPTRs use empty regexp + non-empty replacement.
             let replacement = rdata_naptr.replacement().to_utf8();
             let replacement = replacement.trim_end_matches('.').to_string();
@@ -200,7 +201,11 @@ impl HickoryResolver {
             }
             // Fallback to A/AAAA on host with scheme-default port.
             return self
-                .a_fallback(host, transport_from_uri, default_port_for_scheme(uri.scheme()))
+                .a_fallback(
+                    host,
+                    transport_from_uri,
+                    default_port_for_scheme(uri.scheme()),
+                )
                 .await;
         }
 
@@ -245,8 +250,12 @@ impl HickoryResolver {
         }
 
         // (6) Last-resort A/AAAA.
-        self.a_fallback(host, transport_from_uri, default_port_for_scheme(uri.scheme()))
-            .await
+        self.a_fallback(
+            host,
+            transport_from_uri,
+            default_port_for_scheme(uri.scheme()),
+        )
+        .await
     }
 
     async fn a_fallback(
@@ -279,10 +288,7 @@ impl HickoryResolver {
         for (_prio, _weight, port, target) in ordered {
             let ips = self.lookup_ip(&target).await?;
             if ips.is_empty() {
-                trace!(
-                    "RFC 3263: SRV target {} produced no A/AAAA records",
-                    target
-                );
+                trace!("RFC 3263: SRV target {} produced no A/AAAA records", target);
                 continue;
             }
             for (ip, expires) in ips {

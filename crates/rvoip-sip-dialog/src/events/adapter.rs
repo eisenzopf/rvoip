@@ -193,20 +193,17 @@ impl DialogEventAdapter {
         event: SessionCoordinationEvent,
     ) -> Result<()> {
         // Convert to cross-crate event if applicable
-        if let Some(mut cross_crate_event) =
-            self.convert_coordination_to_cross_crate_event(&event)
+        if let Some(mut cross_crate_event) = self.convert_coordination_to_cross_crate_event(&event)
         {
             // Run STIR/SHAKEN verification on IncomingCall before publishing.
             // Routes through `DialogManager::run_identity_verification` so
             // both this path and `DialogEventHub::try_publish_*` apply
             // the same RFC 8224 contract (no drift between bridges).
-            if let RvoipCrossCrateEvent::DialogToSession(
-                DialogToSessionEvent::IncomingCall {
-                    ref raw_request,
-                    identity_verification: ref mut iv,
-                    ..
-                },
-            ) = cross_crate_event
+            if let RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingCall {
+                ref raw_request,
+                identity_verification: ref mut iv,
+                ..
+            }) = cross_crate_event
             {
                 if let Some(manager) = self.dialog_manager.read().await.as_ref() {
                     match manager.run_identity_verification(&event, raw_request).await {
@@ -329,9 +326,9 @@ impl DialogEventAdapter {
                     .try_read()
                     .ok()
                     .and_then(|guard| {
-                        guard
-                            .as_ref()
-                            .and_then(|m| m.transaction_manager().take_inbound_bytes(transaction_id))
+                        guard.as_ref().and_then(|m| {
+                            m.transaction_manager().take_inbound_bytes(transaction_id)
+                        })
                     })
                     .unwrap_or_else(|| {
                         bytes::Bytes::from(
@@ -347,7 +344,7 @@ impl DialogEventAdapter {
                         sdp_offer,
                         headers: std::collections::HashMap::new(),
                         transaction_id: transaction_id.to_string(),
-                        source_addr: "unknown".to_string(),    // TODO: Extract from source
+                        source_addr: "unknown".to_string(), // TODO: Extract from source
                         raw_request: Some(raw_bytes),
                         // STIR/SHAKEN Phase 1: filled in by the async
                         // `publish_session_coordination_event` wrapper

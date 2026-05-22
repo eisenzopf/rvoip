@@ -3,13 +3,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rvoip_sip_dialog::events::DialogEventHub;
-use rvoip_sip_dialog::transaction::{TransactionManager, TransactionState};
-use rvoip_sip_dialog::{DialogManager, DialogManagerConfig};
 use rvoip_infra_common::events::{EventCoordinatorConfig, GlobalEventCoordinator};
 use rvoip_sip_core::builder::SimpleRequestBuilder;
 use rvoip_sip_core::types::{ContentLength, HeaderName, TypedHeader};
 use rvoip_sip_core::{Message, Method, Request, Response};
+use rvoip_sip_dialog::events::DialogEventHub;
+use rvoip_sip_dialog::transaction::{TransactionManager, TransactionState};
+use rvoip_sip_dialog::{DialogManager, DialogManagerConfig};
 use tokio::sync::{mpsc, Mutex};
 
 #[derive(Debug, Clone)]

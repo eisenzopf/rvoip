@@ -168,16 +168,46 @@ Content-Length: 0\r\n\r\n";
 /// Full corpus used across micro-benches. Order is stable so saved
 /// Criterion baselines stay comparable across runs.
 pub const CORPUS: &[Fixture] = &[
-    Fixture { name: "register_minimal", bytes: REGISTER_MINIMAL.as_bytes() },
-    Fixture { name: "register_authd", bytes: REGISTER_AUTHD.as_bytes() },
-    Fixture { name: "invite_minimal", bytes: INVITE_MINIMAL.as_bytes() },
-    Fixture { name: "invite_sdp_audio", bytes: INVITE_SDP_AUDIO.as_bytes() },
-    Fixture { name: "response_100_trying", bytes: RESPONSE_100_TRYING.as_bytes() },
-    Fixture { name: "response_180_ringing", bytes: RESPONSE_180_RINGING.as_bytes() },
-    Fixture { name: "response_200_ok_invite", bytes: RESPONSE_200_OK_INVITE.as_bytes() },
-    Fixture { name: "ack", bytes: ACK.as_bytes() },
-    Fixture { name: "bye", bytes: BYE.as_bytes() },
-    Fixture { name: "options", bytes: OPTIONS.as_bytes() },
+    Fixture {
+        name: "register_minimal",
+        bytes: REGISTER_MINIMAL.as_bytes(),
+    },
+    Fixture {
+        name: "register_authd",
+        bytes: REGISTER_AUTHD.as_bytes(),
+    },
+    Fixture {
+        name: "invite_minimal",
+        bytes: INVITE_MINIMAL.as_bytes(),
+    },
+    Fixture {
+        name: "invite_sdp_audio",
+        bytes: INVITE_SDP_AUDIO.as_bytes(),
+    },
+    Fixture {
+        name: "response_100_trying",
+        bytes: RESPONSE_100_TRYING.as_bytes(),
+    },
+    Fixture {
+        name: "response_180_ringing",
+        bytes: RESPONSE_180_RINGING.as_bytes(),
+    },
+    Fixture {
+        name: "response_200_ok_invite",
+        bytes: RESPONSE_200_OK_INVITE.as_bytes(),
+    },
+    Fixture {
+        name: "ack",
+        bytes: ACK.as_bytes(),
+    },
+    Fixture {
+        name: "bye",
+        bytes: BYE.as_bytes(),
+    },
+    Fixture {
+        name: "options",
+        bytes: OPTIONS.as_bytes(),
+    },
 ];
 
 pub fn corpus() -> &'static [Fixture] {

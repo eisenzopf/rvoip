@@ -13,8 +13,8 @@ use crate::dialog::dialog_utils::extract_uri_from_contact;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
-use rvoip_sip_core::HeaderName;
 use rvoip_sip_core::types::TypedHeader;
+use rvoip_sip_core::HeaderName;
 use rvoip_sip_core::{Request, Uri};
 
 /// Trait for dialog storage operations

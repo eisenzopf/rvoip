@@ -47,9 +47,7 @@ pub const DEFAULT_TIMER_C: Duration = Duration::from_secs(180);
 /// The closure runs on the proxy event-loop task, so it must not
 /// block — defer slow lookups to a separate task and return the
 /// resolved address asynchronously via a channel + cache if needed.
-pub type RouteFn = Arc<
-    dyn Fn(&Request) -> Option<RouteDecision> + Send + Sync + 'static,
->;
+pub type RouteFn = Arc<dyn Fn(&Request) -> Option<RouteDecision> + Send + Sync + 'static>;
 
 /// Observable events emitted by [`StatefulProxy`] for application
 /// consumption. Subscribe via [`StatefulProxy::subscribe_events`] or
@@ -161,10 +159,7 @@ impl RouteDecision {
     /// `Vec<SocketAddr>` is one leg — the proxy walks the entries
     /// in order on transport-level failure (RFC 3263 §4.3).
     pub fn parallel_with_failover(legs: Vec<Vec<SocketAddr>>) -> Self {
-        let targets = legs
-            .iter()
-            .filter_map(|leg| leg.first().copied())
-            .collect();
+        let targets = legs.iter().filter_map(|leg| leg.first().copied()).collect();
         Self {
             mode: ForkMode::Parallel,
             targets,
@@ -175,10 +170,7 @@ impl RouteDecision {
     /// Sequential fork with per-leg candidate failover. Same shape as
     /// [`Self::parallel_with_failover`].
     pub fn sequential_with_failover(legs: Vec<Vec<SocketAddr>>) -> Self {
-        let targets = legs
-            .iter()
-            .filter_map(|leg| leg.first().copied())
-            .collect();
+        let targets = legs.iter().filter_map(|leg| leg.first().copied()).collect();
         Self {
             mode: ForkMode::Sequential,
             targets,
@@ -302,10 +294,7 @@ struct Leg {
 /// and spawns fresh downstream legs for the new targets.
 #[async_trait::async_trait]
 pub trait RedirectInterceptor: Send + Sync {
-    async fn on_redirect(
-        &self,
-        info: RedirectInfo,
-    ) -> Option<RedirectDecision>;
+    async fn on_redirect(&self, info: RedirectInfo) -> Option<RedirectDecision>;
 }
 
 /// Snapshot of the 3xx response handed to a [`RedirectInterceptor`].
@@ -407,10 +396,7 @@ impl StatefulProxy {
     /// Install (or replace) a [`RedirectInterceptor`]. Apps that want
     /// to re-fork on 3xx instead of forwarding the redirect upstream
     /// supply an interceptor here.
-    pub fn set_redirect_interceptor(
-        &self,
-        interceptor: Option<Arc<dyn RedirectInterceptor>>,
-    ) {
+    pub fn set_redirect_interceptor(&self, interceptor: Option<Arc<dyn RedirectInterceptor>>) {
         *self
             .redirect_interceptor
             .write()
@@ -442,10 +428,7 @@ impl StatefulProxy {
     /// consumer of the primary stream for the lifetime of the manager;
     /// mixed-mode (proxy + dialog UA on the same manager) is out of
     /// scope for Phase 6.
-    pub fn run(
-        self: Arc<Self>,
-        events: mpsc::Receiver<TransactionEvent>,
-    ) -> JoinHandle<()> {
+    pub fn run(self: Arc<Self>, events: mpsc::Receiver<TransactionEvent>) -> JoinHandle<()> {
         tokio::spawn(async move {
             self.event_loop(events).await;
         })
@@ -580,12 +563,8 @@ impl StatefulProxy {
         let decision = match (self.route_fn)(&request) {
             Some(d) if !d.targets.is_empty() => d,
             _ => {
-                self.respond_locally(
-                    &upstream_tx_id,
-                    &original_request,
-                    StatusCode::NotFound,
-                )
-                .await?;
+                self.respond_locally(&upstream_tx_id, &original_request, StatusCode::NotFound)
+                    .await?;
                 return Ok(());
             }
         };
@@ -621,10 +600,7 @@ impl StatefulProxy {
                     let candidates = decision.candidates_for_leg(idx);
                     fork.legs_started
                         .store(idx + 1, std::sync::atomic::Ordering::Release);
-                    if let Err(e) = self
-                        .start_leg(&fork, &request, &candidates)
-                        .await
-                    {
+                    if let Err(e) = self.start_leg(&fork, &request, &candidates).await {
                         warn!(
                             "proxy: failed to start parallel leg {} (candidates {:?}): {}",
                             idx, candidates, e
@@ -734,10 +710,7 @@ impl StatefulProxy {
                     }
                     debug!(
                         "proxy: started leg to {} (upstream tx={} downstream tx={} mode={:?})",
-                        destination,
-                        fork.upstream_server_tx,
-                        downstream_tx_id,
-                        fork.mode
+                        destination, fork.upstream_server_tx, downstream_tx_id, fork.mode
                     );
                     return Ok(());
                 }
@@ -814,11 +787,14 @@ impl StatefulProxy {
 
         let class = status.as_u16() / 100;
         if class == 2 {
-            return self.aggregate_success(&fork, downstream_tx_id, response).await;
+            return self
+                .aggregate_success(&fork, downstream_tx_id, response)
+                .await;
         }
 
         // 3xx / 4xx / 5xx / 6xx
-        self.aggregate_failure(&fork, downstream_tx_id, response).await
+        self.aggregate_failure(&fork, downstream_tx_id, response)
+            .await
     }
 
     async fn aggregate_success(
@@ -899,8 +875,9 @@ impl StatefulProxy {
                         // — the 3xx is "consumed" by the re-fork.
                         {
                             let mut legs = fork.legs.lock().await;
-                            if let Some(leg) =
-                                legs.iter_mut().find(|l| l.downstream_client_tx == downstream_tx_id)
+                            if let Some(leg) = legs
+                                .iter_mut()
+                                .find(|l| l.downstream_client_tx == downstream_tx_id)
                             {
                                 leg.cancelled = true;
                                 leg.final_status = Some(response.status());
@@ -915,10 +892,7 @@ impl StatefulProxy {
                                 .start_leg(fork, &fork.original_request, &[target])
                                 .await
                             {
-                                warn!(
-                                    "proxy: 3xx re-fork start_leg to {} failed: {}",
-                                    target, e
-                                );
+                                warn!("proxy: 3xx re-fork start_leg to {} failed: {}", target, e);
                             }
                         }
                         // Don't fall through to the failure path —
@@ -1019,12 +993,18 @@ impl StatefulProxy {
         // (preserves leg-start order).
         let best = {
             let legs = fork.legs.lock().await;
-            let any_6xx = legs.iter().find(|l| matches!(l.final_status, Some(s) if s.as_u16() / 100 == 6));
+            let any_6xx = legs
+                .iter()
+                .find(|l| matches!(l.final_status, Some(s) if s.as_u16() / 100 == 6));
             if let Some(leg) = any_6xx {
                 leg.last_response.clone()
             } else {
                 legs.iter()
-                    .filter_map(|l| l.last_response.clone().map(|r| (l.final_status.unwrap().as_u16(), r)))
+                    .filter_map(|l| {
+                        l.last_response
+                            .clone()
+                            .map(|r| (l.final_status.unwrap().as_u16(), r))
+                    })
                     .min_by_key(|(code, _)| *code)
                     .map(|(_, r)| r)
             }
@@ -1062,11 +1042,7 @@ impl StatefulProxy {
 
     /// CANCEL every leg in `fork` except `winner`. Marks them as
     /// cancelled so the resulting 487 isn't surfaced upstream.
-    async fn cancel_siblings(
-        &self,
-        fork: &Arc<ForkContext>,
-        winner: &TransactionKey,
-    ) {
+    async fn cancel_siblings(&self, fork: &Arc<ForkContext>, winner: &TransactionKey) {
         let cancel_targets: Vec<TransactionKey> = {
             let mut legs = fork.legs.lock().await;
             let mut to_cancel = Vec::new();
@@ -1110,11 +1086,10 @@ impl StatefulProxy {
             if let Some(fork_ref) = me.forks_by_upstream.get(&tx_id) {
                 let fork = fork_ref.clone();
                 drop(fork_ref);
-                me.cancel_siblings(&fork, &TransactionKey::new(
-                    String::new(),
-                    Method::Invite,
-                    false,
-                ))
+                me.cancel_siblings(
+                    &fork,
+                    &TransactionKey::new(String::new(), Method::Invite, false),
+                )
                 .await;
                 if fork
                     .upstream_responded
@@ -1127,17 +1102,10 @@ impl StatefulProxy {
                     .is_ok()
                 {
                     if let Err(e) = me
-                        .respond_locally(
-                            &tx_id,
-                            &fork.original_request,
-                            StatusCode::RequestTimeout,
-                        )
+                        .respond_locally(&tx_id, &fork.original_request, StatusCode::RequestTimeout)
                         .await
                     {
-                        warn!(
-                            "proxy: Timer C 408 send failed for tx={}: {}",
-                            tx_id, e
-                        );
+                        warn!("proxy: Timer C 408 send failed for tx={}: {}", tx_id, e);
                     }
                 }
             }
@@ -1155,10 +1123,7 @@ impl StatefulProxy {
     /// 1xx so a long-ringing INVITE doesn't time out, while a stalled
     /// one (no 1xx within `timer_c`) still triggers 408 upstream.
     fn reset_timer_c(self: &Arc<Self>, upstream_tx_id: TransactionKey) {
-        if self
-            .timer_c_tasks
-            .contains_key(&upstream_tx_id)
-        {
+        if self.timer_c_tasks.contains_key(&upstream_tx_id) {
             self.cancel_timer_c(&upstream_tx_id);
             self.start_timer_c(upstream_tx_id);
         }
@@ -1255,7 +1220,9 @@ impl StatefulProxy {
         }
         // RFC 3261 §16.6 step 3 — if no Max-Forwards present, add one
         // with value 70. Anything else risks unbounded forwarding.
-        request.headers.push(TypedHeader::MaxForwards(MaxForwards::new(69)));
+        request
+            .headers
+            .push(TypedHeader::MaxForwards(MaxForwards::new(69)));
         Ok(())
     }
 }

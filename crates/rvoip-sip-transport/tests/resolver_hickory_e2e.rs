@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use hickory_proto::rr::rdata::{NAPTR, SRV};
 use hickory_proto::rr::{LowerName, Name, RData, Record, RecordType};
-use hickory_resolver::config::{NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig};
 use hickory_resolver::config::ResolverOpts;
+use hickory_resolver::config::{NameServerConfig, NameServerConfigGroup, Protocol, ResolverConfig};
 use hickory_server::authority::{Catalog, ZoneType};
 use hickory_server::store::in_memory::InMemoryAuthority;
 use hickory_server::ServerFuture;
@@ -59,8 +59,11 @@ fn add_record(authority: &mut InMemoryAuthority, owner: &str, rtype: RecordType,
 
 fn build_fixture_authority() -> InMemoryAuthority {
     let origin = name("example.test.");
-    let mut authority =
-        InMemoryAuthority::empty(origin.clone(), ZoneType::Primary, /* allow_axfr */ false);
+    let mut authority = InMemoryAuthority::empty(
+        origin.clone(),
+        ZoneType::Primary,
+        /* allow_axfr */ false,
+    );
 
     // Top-level domain NAPTRs — SIPS+D2T first (lower order), then SIP+D2U.
     add_record(

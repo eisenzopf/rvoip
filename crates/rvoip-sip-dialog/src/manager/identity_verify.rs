@@ -294,10 +294,7 @@ mod tests {
             .reject_status(),
             Some(437)
         );
-        assert_eq!(
-            VerificationOutcome::BadSignature.reject_status(),
-            Some(438)
-        );
+        assert_eq!(VerificationOutcome::BadSignature.reject_status(), Some(438));
         assert_eq!(
             VerificationOutcome::ClaimMismatch { field: "orig.tn" }.reject_status(),
             Some(438)

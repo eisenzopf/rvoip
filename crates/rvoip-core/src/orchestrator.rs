@@ -192,7 +192,12 @@ impl Orchestrator {
                 });
             }
             AdapterEvent::Native { kind, detail } => {
-                debug!(?transport, ?kind, ?detail, "adapter native event (unmapped)");
+                debug!(
+                    ?transport,
+                    ?kind,
+                    ?detail,
+                    "adapter native event (unmapped)"
+                );
             }
         }
     }
@@ -280,11 +285,7 @@ impl Orchestrator {
         adapter.send_dtmf(connection_id, digits, duration_ms).await
     }
 
-    pub async fn send_message(
-        &self,
-        connection_id: ConnectionId,
-        message: Message,
-    ) -> Result<()> {
+    pub async fn send_message(&self, connection_id: ConnectionId, message: Message) -> Result<()> {
         let adapter = self.adapter_for(&connection_id)?;
         adapter.send_message(connection_id, message).await
     }
@@ -324,11 +325,7 @@ impl Orchestrator {
     // Bridging stays stubbed at step 4. Step 9+ wires the SIP-fast-path
     // strategy (`rvoip-sip::server::SipBridgeStrategy`) and step 10+ wires
     // the cross-transport frame-pump.
-    pub async fn bridge_connections(
-        &self,
-        _a: ConnectionId,
-        _b: ConnectionId,
-    ) -> Result<BridgeId> {
+    pub async fn bridge_connections(&self, _a: ConnectionId, _b: ConnectionId) -> Result<BridgeId> {
         Err(RvoipError::NotImplemented(
             "bridge_connections — fast-path strategy / frame-pump lands in step 9+",
         ))

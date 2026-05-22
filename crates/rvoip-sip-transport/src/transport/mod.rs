@@ -254,11 +254,7 @@ pub trait Transport: Send + Sync + fmt::Debug {
     ///
     /// The default returns `NotImplemented` so each transport opts in
     /// explicitly.
-    async fn send_message_raw(
-        &self,
-        _bytes: Bytes,
-        _destination: SocketAddr,
-    ) -> Result<()> {
+    async fn send_message_raw(&self, _bytes: Bytes, _destination: SocketAddr) -> Result<()> {
         Err(crate::error::Error::NotImplemented(
             "send_message_raw is not supported on this transport".to_string(),
         ))

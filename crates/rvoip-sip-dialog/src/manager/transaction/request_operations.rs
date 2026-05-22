@@ -5,14 +5,14 @@
 
 use tracing::debug;
 
-use rvoip_sip_core::{Request, Response, Method};
-use rvoip_sip_dialog::TransactionKey;
-use rvoip_sip_dialog::builders::{dialog_utils, dialog_quick};
-use rvoip_sip_dialog::utils::DialogRequestTemplate;
-use crate::errors::DialogResult;
+use super::traits::{TransactionHelpers, TransactionIntegration};
 use crate::dialog::DialogId;
+use crate::errors::DialogResult;
 use crate::manager::core::DialogManager;
-use super::traits::{TransactionIntegration, TransactionHelpers};
+use rvoip_sip_core::{Method, Request, Response};
+use rvoip_sip_dialog::TransactionKey;
+use rvoip_sip_dialog::builders::{dialog_quick, dialog_utils};
+use rvoip_sip_dialog::utils::DialogRequestTemplate;
 
 /// Implementation of TransactionIntegration for DialogManager
 impl TransactionIntegration for DialogManager {
@@ -26,15 +26,20 @@ impl TransactionIntegration for DialogManager {
         method: Method,
         body: Option<bytes::Bytes>,
     ) -> DialogResult<TransactionKey> {
-        debug!("Sending {} request for dialog {} using Phase 3 dialog functions", method, dialog_id);
+        debug!(
+            "Sending {} request for dialog {} using Phase 3 dialog functions",
+            method, dialog_id
+        );
 
         // Get dialog context and build the request. Destination is resolved
         // from the final request next hop after Route headers are present.
         let (destination, request, event_package, subscription_state) = {
             let mut dialog = self.get_dialog_mut(dialog_id)?;
 
-            let fallback_destination = dialog.get_remote_target_address().await
-                .ok_or_else(|| crate::errors::DialogError::routing_error("No remote target address available"))?;
+            let fallback_destination =
+                dialog.get_remote_target_address().await.ok_or_else(|| {
+                    crate::errors::DialogError::routing_error("No remote target address available")
+                })?;
 
             // Convert body to String if provided
             let body_string = body.map(|b| String::from_utf8_lossy(&b).to_string());
@@ -63,13 +68,14 @@ impl TransactionIntegration for DialogManager {
 
                 // For certain methods in confirmed dialogs, remote tag is required
                 (_, crate::dialog::DialogState::Confirmed) => {
-                    return Err(crate::errors::DialogError::protocol_error(
-                        &format!("{} request in confirmed dialog missing remote tag", method)
-                    ));
-                },
+                    return Err(crate::errors::DialogError::protocol_error(&format!(
+                        "{} request in confirmed dialog missing remote tag",
+                        method
+                    )));
+                }
 
                 // For early/initial dialogs, remote tag may be None (will be set to None, not empty string)
-                _ => None
+                _ => None,
             };
 
             // Build request using Phase 3 dialog quick functions (MUCH simpler!)
@@ -80,7 +86,7 @@ impl TransactionIntegration for DialogManager {
                 remote_tag,
                 body_string,
                 event_package.as_deref(),
-                subscription_state.as_ref()
+                subscription_state.as_ref(),
             )?;
 
             let destination = crate::dialog::dialog_utils::resolve_uri_to_socketaddr(
@@ -101,13 +107,17 @@ impl TransactionIntegration for DialogManager {
             self.transaction_manager
                 .create_non_invite_client_transaction(request, destination)
                 .await
-        }.map_err(|e| crate::errors::DialogError::TransactionError {
+        }
+        .map_err(|e| crate::errors::DialogError::TransactionError {
             message: format!("Failed to create {} transaction: {}", method, e),
         })?;
 
         // Associate transaction with dialog BEFORE sending
-        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
-        debug!("✅ Associated {} transaction {} with dialog {}", method, transaction_id, dialog_id);
+        self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
+        debug!(
+            "✅ Associated {} transaction {} with dialog {}",
+            method, transaction_id, dialog_id
+        );
 
         // Send the request using transaction-core
         self.transaction_manager
@@ -117,7 +127,10 @@ impl TransactionIntegration for DialogManager {
                 message: format!("Failed to send request: {}", e),
             })?;
 
-        debug!("Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions", method, dialog_id, transaction_id);
+        debug!(
+            "Successfully sent {} request for dialog {} (transaction: {}) using Phase 3 dialog functions",
+            method, dialog_id, transaction_id
+        );
 
         Ok(transaction_id)
     }
@@ -130,7 +143,11 @@ impl TransactionIntegration for DialogManager {
         transaction_id: &TransactionKey,
         response: Response,
     ) -> DialogResult<()> {
-        debug!("Sending response {} for transaction {}", response.status_code(), transaction_id);
+        debug!(
+            "Sending response {} for transaction {}",
+            response.status_code(),
+            transaction_id
+        );
 
         // Use transaction-core to send the response
         self.transaction_manager
@@ -140,7 +157,10 @@ impl TransactionIntegration for DialogManager {
                 message: format!("Failed to send response: {}", e),
             })?;
 
-        debug!("Successfully sent response for transaction {}", transaction_id);
+        debug!(
+            "Successfully sent response for transaction {}",
+            transaction_id
+        );
         Ok(())
     }
 }
@@ -151,8 +171,11 @@ impl TransactionHelpers for DialogManager {
     ///
     /// Creates the mapping between transactions and dialogs for proper message routing.
     fn link_transaction_to_dialog(&self, transaction_id: &TransactionKey, dialog_id: &DialogId) {
-        self.transaction_to_dialog.insert(transaction_id.clone(), dialog_id.clone());
-        debug!("Linked transaction {} to dialog {}", transaction_id, dialog_id);
+        self.link_transaction_to_dialog_indexed(transaction_id, dialog_id);
+        debug!(
+            "Linked transaction {} to dialog {}",
+            transaction_id, dialog_id
+        );
     }
 
     /// Create ACK for 2xx response using transaction-core helpers
@@ -167,7 +190,8 @@ impl TransactionHelpers for DialogManager {
 
         // Use transaction-core's helper method to create ACK for 2xx response
         // This ensures proper ACK construction according to RFC 3261
-        let ack_request = self.transaction_manager
+        let ack_request = self
+            .transaction_manager
             .create_ack_for_2xx(original_invite_tx_id, response)
             .await
             .map_err(|e| crate::errors::DialogError::TransactionError {
@@ -205,7 +229,9 @@ impl DialogManager {
                         // re-INVITE: We have a remote tag, so this is for an established dialog
                         // re-INVITE requires SDP content for session modification
                         let sdp_content = body_string.ok_or_else(|| {
-                            crate::errors::DialogError::protocol_error("re-INVITE request requires SDP content for session modification")
+                            crate::errors::DialogError::protocol_error(
+                                "re-INVITE request requires SDP content for session modification",
+                            )
                         })?;
 
                         dialog_quick::reinvite_for_dialog(
@@ -217,10 +243,14 @@ impl DialogManager {
                             &sdp_content,
                             template.cseq_number,
                             local_address,
-                            if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
-                            self.local_contact_uri()
+                            if template.route_set.is_empty() {
+                                None
+                            } else {
+                                Some(template.route_set.clone())
+                            },
+                            self.local_contact_uri(),
                         )
-                    },
+                    }
                     None => {
                         // Initial INVITE: No remote tag yet, creating new dialog
                         use rvoip_sip_dialog::client::builders::InviteBuilder;
@@ -229,12 +259,12 @@ impl DialogManager {
                             .from_detailed(
                                 Some("User"), // Display name
                                 template.local_uri.to_string(),
-                                Some(&local_tag)
+                                Some(&local_tag),
                             )
                             .to_detailed(
                                 Some("User"), // Display name
                                 template.remote_uri.to_string(),
-                                None // No remote tag for initial INVITE
+                                None, // No remote tag for initial INVITE
                             )
                             .call_id(&template.call_id)
                             .cseq(template.cseq_number)
@@ -258,12 +288,14 @@ impl DialogManager {
                         invite_builder.build()
                     }
                 }
-            },
+            }
 
             Method::Bye => {
                 // BYE requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error("BYE request requires remote tag in established dialog")
+                    crate::errors::DialogError::protocol_error(
+                        "BYE request requires remote tag in established dialog",
+                    )
                 })?;
 
                 dialog_quick::bye_for_dialog(
@@ -274,15 +306,21 @@ impl DialogManager {
                     &remote_tag,
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                    if template.route_set.is_empty() {
+                        None
+                    } else {
+                        Some(template.route_set.clone())
+                    },
                     None,
                 )
-            },
+            }
 
             Method::Refer => {
                 // REFER requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error("REFER request requires remote tag in established dialog")
+                    crate::errors::DialogError::protocol_error(
+                        "REFER request requires remote tag in established dialog",
+                    )
                 })?;
 
                 let target_uri = if let Some(body) = body_string.clone() {
@@ -305,15 +343,21 @@ impl DialogManager {
                     &target_uri,
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                    if template.route_set.is_empty() {
+                        None
+                    } else {
+                        Some(template.route_set.clone())
+                    },
                     self.local_contact_uri(),
                 )
-            },
+            }
 
             Method::Update => {
                 // UPDATE requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error("UPDATE request requires remote tag in established dialog")
+                    crate::errors::DialogError::protocol_error(
+                        "UPDATE request requires remote tag in established dialog",
+                    )
                 })?;
 
                 dialog_quick::update_for_dialog_with_contact(
@@ -325,15 +369,21 @@ impl DialogManager {
                     body_string, // SDP content
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) },
+                    if template.route_set.is_empty() {
+                        None
+                    } else {
+                        Some(template.route_set.clone())
+                    },
                     self.local_contact_uri(),
                 )
-            },
+            }
 
             Method::Info => {
                 // INFO requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error("INFO request requires remote tag in established dialog")
+                    crate::errors::DialogError::protocol_error(
+                        "INFO request requires remote tag in established dialog",
+                    )
                 })?;
 
                 let content = body_string.unwrap_or_else(|| "Application info".to_string());
@@ -347,14 +397,20 @@ impl DialogManager {
                     Some("application/info".to_string()),
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    if template.route_set.is_empty() {
+                        None
+                    } else {
+                        Some(template.route_set.clone())
+                    },
                 )
-            },
+            }
 
             Method::Notify => {
                 // NOTIFY requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error("NOTIFY request requires remote tag in established dialog")
+                    crate::errors::DialogError::protocol_error(
+                        "NOTIFY request requires remote tag in established dialog",
+                    )
                 })?;
 
                 // Get event type from dialog's event_package field (RFC 6665)
@@ -374,14 +430,20 @@ impl DialogManager {
                     sub_state_str,
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    if template.route_set.is_empty() {
+                        None
+                    } else {
+                        Some(template.route_set.clone())
+                    },
                 )
-            },
+            }
 
             Method::Message => {
                 // MESSAGE requires both tags in established dialogs
                 let remote_tag = remote_tag.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error("MESSAGE request requires remote tag in established dialog")
+                    crate::errors::DialogError::protocol_error(
+                        "MESSAGE request requires remote tag in established dialog",
+                    )
                 })?;
 
                 let content = body_string.unwrap_or_else(|| "".to_string());
@@ -395,17 +457,27 @@ impl DialogManager {
                     Some("text/plain".to_string()),
                     template.cseq_number,
                     local_address,
-                    if template.route_set.is_empty() { None } else { Some(template.route_set.clone()) }
+                    if template.route_set.is_empty() {
+                        None
+                    } else {
+                        Some(template.route_set.clone())
+                    },
                 )
-            },
+            }
 
             _ => {
                 // For any other method, require established dialog
                 let remote_tag = remote_tag.ok_or_else(|| {
-                    crate::errors::DialogError::protocol_error(&format!("{} request requires remote tag in established dialog", method))
+                    crate::errors::DialogError::protocol_error(&format!(
+                        "{} request requires remote tag in established dialog",
+                        method
+                    ))
                 })?;
 
-                let contact = if matches!(method, Method::Update | Method::Refer | Method::Subscribe | Method::Notify) {
+                let contact = if matches!(
+                    method,
+                    Method::Update | Method::Refer | Method::Subscribe | Method::Notify
+                ) {
                     self.local_contact_uri()
                 } else {
                     None
@@ -433,8 +505,12 @@ impl DialogManager {
                     None,
                 )
             }
-        }.map_err(|e| crate::errors::DialogError::InternalError {
-            message: format!("Failed to build {} request using Phase 3 dialog functions: {}", method, e),
+        }
+        .map_err(|e| crate::errors::DialogError::InternalError {
+            message: format!(
+                "Failed to build {} request using Phase 3 dialog functions: {}",
+                method, e
+            ),
             context: None,
         })?;
 

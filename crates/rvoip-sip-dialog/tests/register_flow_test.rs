@@ -6,13 +6,13 @@
 //! - Authorization header support
 //! - Response processing (200 OK, 401 Unauthorized)
 
+use rvoip_sip_core::{Method, Request, Response, StatusCode};
 use rvoip_sip_dialog::{
     api::unified::UnifiedDialogApi,
     config::DialogManagerConfig,
     transaction::transport::{TransportManager, TransportManagerConfig},
     transaction::{TransactionKey, TransactionManager},
 };
-use rvoip_sip_core::{Method, Request, Response, StatusCode};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::Duration;

@@ -311,12 +311,10 @@ impl SubscriptionManager {
 
         let from_tag = request.from().and_then(|f| f.tag().map(|s| s.to_string()));
 
-        let event_id = request
-            .header(&HeaderName::Event)
-            .and_then(|h| match h {
-                TypedHeader::Event(e) => e.id.clone(),
-                _ => None,
-            });
+        let event_id = request.header(&HeaderName::Event).and_then(|h| match h {
+            TypedHeader::Event(e) => e.id.clone(),
+            _ => None,
+        });
 
         let lookup_key = subscription_lookup_key(
             &call_id,

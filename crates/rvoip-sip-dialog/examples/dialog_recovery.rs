@@ -9,12 +9,12 @@ use tokio::time::{sleep, Duration};
 use tracing::{info, Level};
 use tracing_subscriber;
 
-use rvoip_sip_dialog::{
-    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::DialogEventHub,
-};
 use rvoip_infra_common::events::{
     cross_crate::{DialogToSessionEvent, RvoipCrossCrateEvent},
     EventCoordinatorConfig, GlobalEventCoordinator,
+};
+use rvoip_sip_dialog::{
+    api::unified::UnifiedDialogApi, config::DialogManagerConfig, events::DialogEventHub,
 };
 
 /// Dialog recovery example using unified API

@@ -8,13 +8,13 @@ use tokio::time::{sleep, Duration};
 use tracing::{info, Level};
 use tracing_subscriber;
 
+use rvoip_infra_common::events::{
+    cross_crate::RvoipCrossCrateEvent, EventCoordinatorConfig, GlobalEventCoordinator,
+};
 use rvoip_sip_dialog::{
     api::unified::{InfoRequestOptions, UnifiedDialogApi, UpdateRequestOptions},
     config::DialogManagerConfig,
     events::DialogEventHub,
-};
-use rvoip_infra_common::events::{
-    cross_crate::RvoipCrossCrateEvent, EventCoordinatorConfig, GlobalEventCoordinator,
 };
 
 /// Global events test using unified API

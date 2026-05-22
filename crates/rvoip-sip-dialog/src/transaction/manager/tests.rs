@@ -120,6 +120,20 @@ mod tests {
             .build())
     }
 
+    fn create_test_ack() -> std::result::Result<Request, Box<dyn std::error::Error>> {
+        let builder = SimpleRequestBuilder::new(Method::Ack, "sip:bob@example.com")?;
+
+        Ok(builder
+            .from("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .to("Bob", "sip:bob@example.com", Some("bob-tag-resp"))
+            .contact("sip:alice@127.0.0.1:5060", None)
+            .call_id("test-call-id-1234")
+            .cseq(101)
+            .via("127.0.0.1:5060", "UDP", Some("z9hG4bK.ackbranchvalue"))
+            .max_forwards(70)
+            .build())
+    }
+
     /// Helper to create a simple 200 OK response for testing
     fn create_test_response(
         request: &Request,
@@ -1219,6 +1233,32 @@ mod tests {
         // Clean up
         manager.shutdown().await;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn server_invite_ack_index_survives_transaction_retirement() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let source = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let transaction = manager
+            .create_server_transaction(invite_request, source)
+            .await?;
+        let transaction_id = transaction.id().clone();
+
+        manager.retire_server_invite_dialog_index_for(&transaction_id);
+
+        let ack_request = create_test_ack().map_err(|e| Error::Other(e.to_string()))?;
+        assert_eq!(
+            manager.find_server_invite_for_ack(&ack_request),
+            Some(transaction_id.clone())
+        );
+
+        manager.shutdown().await;
         Ok(())
     }
 

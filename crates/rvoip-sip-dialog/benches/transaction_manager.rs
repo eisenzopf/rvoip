@@ -90,8 +90,7 @@ fn bench_contended_lookup(c: &mut Criterion) {
                                 let map = Arc::clone(&map);
                                 handles.push(tokio::spawn(async move {
                                     for op in 0..CONTENDED_OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_TABLE_SIZE;
+                                        let idx = (t * 7919 + op * 17) % CONTENDED_TABLE_SIZE;
                                         let key = make_key(idx, false);
                                         let guard = map.lock().await;
                                         let v = guard.get(&key).copied();
@@ -135,8 +134,7 @@ fn bench_contended_lookup(c: &mut Criterion) {
                                 let map = Arc::clone(&map);
                                 handles.push(tokio::spawn(async move {
                                     for op in 0..CONTENDED_OPS_PER_TASK as usize {
-                                        let idx =
-                                            (t * 7919 + op * 17) % CONTENDED_TABLE_SIZE;
+                                        let idx = (t * 7919 + op * 17) % CONTENDED_TABLE_SIZE;
                                         let key = make_key(idx, false);
                                         let v = map.get(&key).map(|r| *r);
                                         black_box(v);
@@ -218,9 +216,7 @@ fn bench_cross_await_tail(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("dialog_txn_p99");
     group.sample_size(20);
-    group.throughput(Throughput::Elements(
-        (READER_TASKS * READS_PER_TASK) as u64,
-    ));
+    group.throughput(Throughput::Elements((READER_TASKS * READS_PER_TASK) as u64));
 
     // ---- Variant: Mutex<HashMap>, slow holder awaits inside the guard.
     group.bench_function("mutex_hold", |b| {
@@ -254,10 +250,7 @@ fn bench_cross_await_tail(c: &mut Criterion) {
                             for _ in 0..(READS_PER_TASK / SLOW_EVERY_N_READS) {
                                 let guard = map.lock().await;
                                 let _entry = guard.get(&make_key(0, false));
-                                tokio::time::sleep(Duration::from_micros(
-                                    SLOW_HOLD_MICROS,
-                                ))
-                                .await;
+                                tokio::time::sleep(Duration::from_micros(SLOW_HOLD_MICROS)).await;
                                 drop(guard);
                             }
                         }));
@@ -332,10 +325,8 @@ fn bench_cross_await_tail(c: &mut Criterion) {
                                     map.get(&make_key(0, false)).map(|r| r.value().clone());
                                 if let Some(tx) = tx_arc {
                                     let _g = tx.inner.lock().await;
-                                    tokio::time::sleep(Duration::from_micros(
-                                        SLOW_HOLD_MICROS,
-                                    ))
-                                    .await;
+                                    tokio::time::sleep(Duration::from_micros(SLOW_HOLD_MICROS))
+                                        .await;
                                 }
                             }
                         }));

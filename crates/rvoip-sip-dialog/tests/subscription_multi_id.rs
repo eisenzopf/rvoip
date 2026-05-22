@@ -106,8 +106,7 @@ async fn inbound_notify_disambiguates_by_event_id_when_call_id_and_tags_match() 
     let (event_tx, mut event_rx) = mpsc::channel(100);
     let dialogs: Arc<DashMap<DialogId, Dialog>> = Arc::new(DashMap::new());
     let dialog_lookup: Arc<DashMap<String, DialogId>> = Arc::new(DashMap::new());
-    let manager =
-        SubscriptionManager::new(dialogs.clone(), dialog_lookup.clone(), event_tx);
+    let manager = SubscriptionManager::new(dialogs.clone(), dialog_lookup.clone(), event_tx);
 
     // Two subscriber-side dialogs that differ only in `event_id`. We
     // populate the lookup map and the dialog store directly, mimicking
@@ -116,12 +115,7 @@ async fn inbound_notify_disambiguates_by_event_id_when_call_id_and_tags_match() 
     let to_tag = "local-uac-tag";
     let from_tag = "remote-notifier-tag";
 
-    fn make_dialog(
-        call_id: &str,
-        local_tag: &str,
-        remote_tag: &str,
-        event_id: &str,
-    ) -> Dialog {
+    fn make_dialog(call_id: &str, local_tag: &str, remote_tag: &str, event_id: &str) -> Dialog {
         use rvoip_sip_core::types::Uri;
         let local_uri: Uri = "sip:subscriber@example.com".parse().unwrap();
         let remote_uri: Uri = "sip:notifier@example.com".parse().unwrap();
@@ -177,13 +171,10 @@ async fn inbound_notify_disambiguates_by_event_id_when_call_id_and_tags_match() 
         .await
         .expect("notify presence-1");
 
-    let observed = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        event_rx.recv(),
-    )
-    .await
-    .expect("NotifyReceived for presence-1")
-    .expect("recv");
+    let observed = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv())
+        .await
+        .expect("NotifyReceived for presence-1")
+        .expect("recv");
     match observed {
         DialogEvent::NotifyReceived { dialog_id, .. } => {
             assert_eq!(
@@ -199,13 +190,10 @@ async fn inbound_notify_disambiguates_by_event_id_when_call_id_and_tags_match() 
         .await
         .expect("notify presence-2");
 
-    let observed = tokio::time::timeout(
-        std::time::Duration::from_millis(500),
-        event_rx.recv(),
-    )
-    .await
-    .expect("NotifyReceived for presence-2")
-    .expect("recv");
+    let observed = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv())
+        .await
+        .expect("NotifyReceived for presence-2")
+        .expect("recv");
     match observed {
         DialogEvent::NotifyReceived { dialog_id, .. } => {
             assert_eq!(

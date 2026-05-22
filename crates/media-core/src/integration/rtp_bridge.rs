@@ -784,7 +784,10 @@ impl RtpBridge {
 
     /// Get all active sessions
     pub async fn get_active_sessions(&self) -> Vec<MediaSessionId> {
-        self.sessions.iter().map(|entry| entry.key().clone()).collect()
+        self.sessions
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect()
     }
 
     /// Clean up expired sessions

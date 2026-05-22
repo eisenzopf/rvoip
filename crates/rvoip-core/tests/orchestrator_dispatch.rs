@@ -204,7 +204,9 @@ async fn register_then_dispatch_routes_through_adapter() {
     .await
     .unwrap();
     orch.send_dtmf(conn_id.clone(), "1234", 100).await.unwrap();
-    orch.end_connection(conn_id, EndReason::Normal).await.unwrap();
+    orch.end_connection(conn_id, EndReason::Normal)
+        .await
+        .unwrap();
 
     assert_eq!(counts.hold.load(Ordering::SeqCst), 1);
     assert_eq!(counts.resume.load(Ordering::SeqCst), 1);

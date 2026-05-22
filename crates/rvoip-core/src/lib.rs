@@ -94,8 +94,8 @@ pub mod stream;
 pub mod vcon;
 
 pub use adapter::{
-    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason,
-    OriginateRequest, RejectReason, SignatureHeaders, TransferTarget,
+    AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
+    RejectReason, SignatureHeaders, TransferTarget,
 };
 pub use bridge::{BridgeError, BridgeHandle, BridgeManager};
 pub use capability::{CapabilityDescriptor, CapabilityIntersection, CodecInfo, NegotiatedCodecs};

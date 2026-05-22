@@ -108,6 +108,11 @@ fn test_config_lan_pbx_profile_sets_advertised_addresses() {
     assert_eq!(c.bind_addr, bind);
     assert_eq!(c.sip_advertised_addr, Some(advertised));
     assert_eq!(c.media_public_addr.unwrap().ip(), advertised.ip());
+    assert_eq!(
+        c.media_public_addr.unwrap().port(),
+        0,
+        "LAN PBX media public address must not reuse the SIP port; SDP should advertise the allocated RTP port"
+    );
 }
 
 #[test]

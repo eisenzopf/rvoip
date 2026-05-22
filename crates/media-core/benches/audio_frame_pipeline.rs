@@ -21,9 +21,7 @@
 //!   refactor.
 
 use bytes::Bytes;
-use criterion::{
-    black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput,
-};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rvoip_media_core::relay::controller::MediaSessionController;
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
 use std::sync::Arc;
@@ -96,40 +94,36 @@ fn bench_concurrent(c: &mut Criterion) {
     for &tasks in &CONCURRENT_TASK_COUNTS {
         let total_ops = (tasks as u64) * OPS_PER_TASK;
         group.throughput(Throughput::Elements(total_ops));
-        group.bench_with_input(
-            BenchmarkId::new("zero_copy", tasks),
-            &tasks,
-            |b, &tasks| {
-                b.iter_custom(|iters| {
-                    rt.block_on(async move {
-                        let ctrl = Arc::new(MediaSessionController::new());
-                        let mut total = Duration::ZERO;
-                        for _ in 0..iters {
-                            let start = Instant::now();
-                            let mut handles = Vec::with_capacity(tasks);
-                            for t in 0..tasks {
-                                let ctrl = Arc::clone(&ctrl);
-                                handles.push(tokio::spawn(async move {
-                                    let packet = make_packet(t as u16);
-                                    for _ in 0..OPS_PER_TASK {
-                                        let out = ctrl
-                                            .process_rtp_packet_zero_copy(&packet)
-                                            .await
-                                            .expect("zero_copy");
-                                        black_box(out);
-                                    }
-                                }));
-                            }
-                            for h in handles {
-                                h.await.expect("task");
-                            }
-                            total += start.elapsed();
+        group.bench_with_input(BenchmarkId::new("zero_copy", tasks), &tasks, |b, &tasks| {
+            b.iter_custom(|iters| {
+                rt.block_on(async move {
+                    let ctrl = Arc::new(MediaSessionController::new());
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let start = Instant::now();
+                        let mut handles = Vec::with_capacity(tasks);
+                        for t in 0..tasks {
+                            let ctrl = Arc::clone(&ctrl);
+                            handles.push(tokio::spawn(async move {
+                                let packet = make_packet(t as u16);
+                                for _ in 0..OPS_PER_TASK {
+                                    let out = ctrl
+                                        .process_rtp_packet_zero_copy(&packet)
+                                        .await
+                                        .expect("zero_copy");
+                                    black_box(out);
+                                }
+                            }));
                         }
-                        total
-                    })
-                });
-            },
-        );
+                        for h in handles {
+                            h.await.expect("task");
+                        }
+                        total += start.elapsed();
+                    }
+                    total
+                })
+            });
+        });
     }
     group.finish();
 }

@@ -114,7 +114,9 @@ fn make_invite() -> rvoip_sip_core::Message {
 
 #[tokio::test]
 async fn empty_candidate_list_yields_invalid_address() {
-    let inner = Arc::new(ProgrammableTransport::new("127.0.0.1:5060".parse().unwrap()));
+    let inner = Arc::new(ProgrammableTransport::new(
+        "127.0.0.1:5060".parse().unwrap(),
+    ));
     let mux = mux(inner.clone());
 
     let err = mux
@@ -130,7 +132,9 @@ async fn empty_candidate_list_yields_invalid_address() {
 
 #[tokio::test]
 async fn single_candidate_succeeds_yields_addr() {
-    let inner = Arc::new(ProgrammableTransport::new("127.0.0.1:5060".parse().unwrap()));
+    let inner = Arc::new(ProgrammableTransport::new(
+        "127.0.0.1:5060".parse().unwrap(),
+    ));
     let mux = mux(inner.clone());
 
     let candidates = vec![target("10.0.0.1:5060", TransportType::Udp)];
@@ -144,7 +148,9 @@ async fn single_candidate_succeeds_yields_addr() {
 
 #[tokio::test]
 async fn first_candidate_recoverable_failure_falls_over_to_second() {
-    let inner = Arc::new(ProgrammableTransport::new("127.0.0.1:5060".parse().unwrap()));
+    let inner = Arc::new(ProgrammableTransport::new(
+        "127.0.0.1:5060".parse().unwrap(),
+    ));
     let mux = mux(inner.clone());
     inner.program(
         "10.0.0.1:5060".parse().unwrap(),
@@ -168,7 +174,9 @@ async fn first_candidate_recoverable_failure_falls_over_to_second() {
 
 #[tokio::test]
 async fn all_candidates_fail_recoverably_returns_last_error() {
-    let inner = Arc::new(ProgrammableTransport::new("127.0.0.1:5060".parse().unwrap()));
+    let inner = Arc::new(ProgrammableTransport::new(
+        "127.0.0.1:5060".parse().unwrap(),
+    ));
     let mux = mux(inner.clone());
     inner.program(
         "10.0.0.1:5060".parse().unwrap(),
@@ -197,7 +205,9 @@ async fn all_candidates_fail_recoverably_returns_last_error() {
 
 #[tokio::test]
 async fn non_recoverable_failure_aborts_immediately() {
-    let inner = Arc::new(ProgrammableTransport::new("127.0.0.1:5060".parse().unwrap()));
+    let inner = Arc::new(ProgrammableTransport::new(
+        "127.0.0.1:5060".parse().unwrap(),
+    ));
     let mux = mux(inner.clone());
     // MessageTooLarge is non-recoverable per Error::is_recoverable.
     inner.program(

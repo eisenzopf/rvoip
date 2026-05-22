@@ -266,8 +266,9 @@ async fn first_200_wins_and_cancels_siblings() {
 
     // UAS B answers 200 OK.
     let uas_b_invite = &invites[&uas_b];
-    let resp = SimpleResponseBuilder::response_from_request(uas_b_invite, StatusCode::Ok, Some("OK"))
-        .build();
+    let resp =
+        SimpleResponseBuilder::response_from_request(uas_b_invite, StatusCode::Ok, Some("OK"))
+            .build();
     harness.inject(Message::Response(resp), uas_b).await;
 
     // Upstream 200 OK forwarded back towards UAC.
@@ -324,8 +325,8 @@ async fn sequential_fork_advances_on_failure_and_succeeds_on_later_target() {
         unreachable!();
     };
     // UAS A returns 404.
-    let resp = SimpleResponseBuilder::response_from_request(&leg_a, StatusCode::NotFound, None)
-        .build();
+    let resp =
+        SimpleResponseBuilder::response_from_request(&leg_a, StatusCode::NotFound, None).build();
     harness.inject(Message::Response(resp), uas_a).await;
 
     // Proxy advances to UAS B.
@@ -338,8 +339,8 @@ async fn sequential_fork_advances_on_failure_and_succeeds_on_later_target() {
         unreachable!();
     };
     // UAS B answers 200 OK.
-    let resp = SimpleResponseBuilder::response_from_request(&leg_b, StatusCode::Ok, Some("OK"))
-        .build();
+    let resp =
+        SimpleResponseBuilder::response_from_request(&leg_b, StatusCode::Ok, Some("OK")).build();
     harness.inject(Message::Response(resp), uas_b).await;
 
     // 200 OK forwarded upstream.
@@ -382,9 +383,12 @@ async fn all_legs_fail_picks_lowest_status_upstream() {
 
     // UAS A returns 503 Service Unavailable, UAS B returns 404 Not Found.
     // §16.7 step 6: pick the lowest-class final (404 beats 503).
-    let resp_a =
-        SimpleResponseBuilder::response_from_request(&invites[&uas_a], StatusCode::ServiceUnavailable, None)
-            .build();
+    let resp_a = SimpleResponseBuilder::response_from_request(
+        &invites[&uas_a],
+        StatusCode::ServiceUnavailable,
+        None,
+    )
+    .build();
     let resp_b =
         SimpleResponseBuilder::response_from_request(&invites[&uas_b], StatusCode::NotFound, None)
             .build();

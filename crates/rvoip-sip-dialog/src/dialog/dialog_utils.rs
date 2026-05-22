@@ -214,9 +214,8 @@ pub mod uri_resolver {
 /// from `/etc/resolv.conf` (or the OS resolver). Failure to construct
 /// (sandboxed CI without resolv.conf) is logged once and `None` is
 /// cached forever so IP-literal-only code paths still work.
-async fn process_default_resolver() -> Option<std::sync::Arc<
-    dyn rvoip_sip_transport::resolver::Resolver,
->> {
+async fn process_default_resolver(
+) -> Option<std::sync::Arc<dyn rvoip_sip_transport::resolver::Resolver>> {
     use std::sync::Arc;
     static DEFAULT_RESOLVER: tokio::sync::OnceCell<
         Option<Arc<dyn rvoip_sip_transport::resolver::Resolver>>,

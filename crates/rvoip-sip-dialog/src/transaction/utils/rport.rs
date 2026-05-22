@@ -91,8 +91,11 @@ mod response_wrapper_tests {
 
     fn response_with_via_carrying_rport() -> Response {
         let via = Via::new(
-            "SIP", "2.0", "UDP",
-            "10.0.0.5", Some(5060),
+            "SIP",
+            "2.0",
+            "UDP",
+            "10.0.0.5",
+            Some(5060),
             vec![Param::branch("z9hG4bKtest"), Param::Rport(None)],
         )
         .expect("valid Via");
@@ -107,7 +110,10 @@ mod response_wrapper_tests {
         assert!(stamp_response_via_with_source(&mut response, source));
 
         let via = response.first_via().expect("via present");
-        assert_eq!(via.received(), Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
+        assert_eq!(
+            via.received(),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+        );
         assert_eq!(via.rport(), Some(Some(33000)));
     }
 
@@ -128,8 +134,11 @@ mod tests {
         // Mimic what a UAC behind NAT puts on the wire:
         // `Via: SIP/2.0/UDP 10.0.0.5:5060;branch=z9hG4bKtest;rport`
         Via::new(
-            "SIP", "2.0", "UDP",
-            "10.0.0.5", Some(5060),
+            "SIP",
+            "2.0",
+            "UDP",
+            "10.0.0.5",
+            Some(5060),
             vec![
                 rvoip_sip_core::types::param::Param::branch("z9hG4bKtest"),
                 rvoip_sip_core::types::param::Param::Rport(None),
@@ -140,8 +149,11 @@ mod tests {
 
     fn make_via_without_rport() -> Via {
         Via::new(
-            "SIP", "2.0", "UDP",
-            "10.0.0.5", Some(5060),
+            "SIP",
+            "2.0",
+            "UDP",
+            "10.0.0.5",
+            Some(5060),
             vec![rvoip_sip_core::types::param::Param::branch("z9hG4bKtest")],
         )
         .expect("valid Via")
@@ -154,7 +166,10 @@ mod tests {
 
         assert!(stamp_received_rport(&mut via, source));
 
-        assert_eq!(via.received(), Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
+        assert_eq!(
+            via.received(),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+        );
         // RFC 3581: `;rport` with no value becomes `;rport=<src_port>`.
         assert_eq!(via.rport(), Some(Some(33000)));
     }
@@ -166,7 +181,10 @@ mod tests {
 
         assert!(stamp_received_rport(&mut via, source));
 
-        assert_eq!(via.received(), Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
+        assert_eq!(
+            via.received(),
+            Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+        );
         // No rport on inbound → no rport on response (RFC 3581 opt-in).
         assert_eq!(via.rport(), None);
     }
@@ -198,7 +216,10 @@ mod tests {
         stamp_received_rport(&mut via, first);
         stamp_received_rport(&mut via, second);
 
-        assert_eq!(via.received(), Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9))));
+        assert_eq!(
+            via.received(),
+            Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)))
+        );
         assert_eq!(via.rport(), Some(Some(44000)));
     }
 

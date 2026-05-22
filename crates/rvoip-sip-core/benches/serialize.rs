@@ -15,16 +15,12 @@ fn bench_to_bytes(c: &mut Criterion) {
     for fx in fixtures::corpus() {
         let msg = parse_message(fx.bytes).expect("fixture parses");
         group.throughput(Throughput::Bytes(fx.bytes.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(fx.name),
-            &msg,
-            |b, msg| {
-                b.iter(|| {
-                    let out = black_box(msg).to_bytes();
-                    black_box(out);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(fx.name), &msg, |b, msg| {
+            b.iter(|| {
+                let out = black_box(msg).to_bytes();
+                black_box(out);
+            });
+        });
     }
     group.finish();
 }

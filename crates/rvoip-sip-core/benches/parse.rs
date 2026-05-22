@@ -33,17 +33,13 @@ fn bench_parse_strict(c: &mut Criterion) {
     let mut group = c.benchmark_group("core_parse_message");
     for fx in fixtures::corpus() {
         group.throughput(Throughput::Bytes(fx.bytes.len() as u64));
-        group.bench_with_input(
-            BenchmarkId::new("strict", fx.name),
-            fx.bytes,
-            |b, bytes| {
-                b.iter(|| {
-                    let msg = parse_message_with_mode(black_box(bytes), ParseMode::Strict)
-                        .expect("parse");
-                    black_box(msg);
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("strict", fx.name), fx.bytes, |b, bytes| {
+            b.iter(|| {
+                let msg =
+                    parse_message_with_mode(black_box(bytes), ParseMode::Strict).expect("parse");
+                black_box(msg);
+            });
+        });
     }
     group.finish();
 }

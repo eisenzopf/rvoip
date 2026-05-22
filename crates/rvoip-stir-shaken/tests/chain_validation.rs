@@ -16,9 +16,7 @@
 mod common;
 
 use bytes::Bytes;
-use common::{
-    resolver_for, JccSpec, LeafSpec, TestPki, TnAuthEntry,
-};
+use common::{resolver_for, JccSpec, LeafSpec, TestPki, TnAuthEntry};
 use rvoip_sip_core::types::address::Address;
 use rvoip_sip_core::types::from::From as FromHeader;
 use rvoip_sip_core::types::identity::Identity;
@@ -103,14 +101,8 @@ async fn empty_trust_store_preserves_legacy_behaviour() {
         tnauth_entries: vec![],
         ..LeafSpec::default()
     });
-    let outcome = sign_and_verify(
-        &pki,
-        ShakenVerifierConfig::default(),
-        ORIG_TN,
-        DEST_TN,
-        "A",
-    )
-    .await;
+    let outcome =
+        sign_and_verify(&pki, ShakenVerifierConfig::default(), ORIG_TN, DEST_TN, "A").await;
     assert!(
         matches!(outcome, VerificationOutcome::Valid { .. }),
         "expected Valid (legacy passthrough), got {:?}",

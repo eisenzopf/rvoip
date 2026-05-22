@@ -19,7 +19,7 @@ use crate::errors::DialogResult;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::protocol::response_handler::response_has_auth_challenge;
 use crate::transaction::builders::{dialog_quick, dialog_utils};
-use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
+use crate::transaction::dialog::{DialogRequestTemplate, request_builder_from_dialog_template};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
 use rvoip_sip_core::{Method, Request, Response};
 use std::net::SocketAddr;
@@ -48,11 +48,7 @@ pub fn detect_reliable_provisional(response: &Response) -> Option<u32> {
         }
     }
 
-    if requires_100rel {
-        rseq_value
-    } else {
-        None
-    }
+    if requires_100rel { rseq_value } else { None }
 }
 
 /// Inspect a request's `Supported`/`Require` headers for the `100rel`
@@ -106,7 +102,7 @@ pub fn inject_100rel_policy(request: &mut Request, policy: RelUsage) {
                 request
                     .headers
                     .push(TypedHeader::Supported(Supported::new(vec![
-                        "100rel".to_string()
+                        "100rel".to_string(),
                     ])));
             }
         }
@@ -259,8 +255,10 @@ impl DialogManager {
 
                 // For certain methods in confirmed dialogs, remote tag is required
                 (_, crate::dialog::DialogState::Confirmed) => {
-                    error!("Dialog {} in Confirmed state but missing remote tag for {} request. Dialog details: local_tag={:?}, remote_tag={:?}",
-                           dialog_id, method, dialog.local_tag, dialog.remote_tag);
+                    error!(
+                        "Dialog {} in Confirmed state but missing remote tag for {} request. Dialog details: local_tag={:?}, remote_tag={:?}",
+                        dialog_id, method, dialog.local_tag, dialog.remote_tag
+                    );
                     return Err(crate::errors::DialogError::protocol_error(&format!(
                         "{} request in confirmed dialog missing remote tag",
                         method
@@ -551,9 +549,7 @@ impl DialogManager {
 
             let candidates = self
                 .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
-                        &request,
-                    ),
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
                 )
                 .await;
 
@@ -721,24 +717,26 @@ impl DialogManager {
         &self,
         dialog_id: &DialogId,
     ) -> Option<TransactionKey> {
-        use rvoip_sip_core::types::cseq::CSeq;
         use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::cseq::CSeq;
 
         let candidates: Vec<TransactionKey> = self
-            .transaction_to_dialog
-            .iter()
-            .filter_map(|entry| {
-                let (tx_key, mapped_dialog_id) = entry.pair();
-                if mapped_dialog_id == dialog_id
-                    && tx_key.method() == &Method::Invite
-                    && !tx_key.is_server()
-                {
-                    Some(tx_key.clone())
-                } else {
-                    None
-                }
+            .dialog_invite_transactions
+            .get(dialog_id)
+            .map(|entry| {
+                entry
+                    .iter()
+                    .filter(|tx_key| {
+                        !tx_key.is_server()
+                            && self
+                                .transaction_to_dialog
+                                .get(tx_key)
+                                .is_some_and(|mapped| mapped.value() == dialog_id)
+                    })
+                    .cloned()
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         let mut best: Option<(u32, TransactionKey)> = None;
         for tx_key in candidates {
@@ -781,8 +779,8 @@ impl DialogManager {
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
-        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::TypedHeader;
+        use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
 
         debug!("Resending INVITE with auth for dialog {}", dialog_id);
 
@@ -881,9 +879,7 @@ impl DialogManager {
 
             let candidates = self
                 .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
-                        &request,
-                    ),
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
                 )
                 .await;
 
@@ -1001,9 +997,7 @@ impl DialogManager {
 
             let candidates = self
                 .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
-                        &request,
-                    ),
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
                 )
                 .await;
 
@@ -1112,17 +1106,15 @@ impl DialogManager {
             let (caller_contact, extra_headers): (
                 Vec<rvoip_sip_core::types::TypedHeader>,
                 Vec<rvoip_sip_core::types::TypedHeader>,
-            ) = extra_headers.into_iter().partition(|h| {
-                matches!(h, rvoip_sip_core::types::TypedHeader::Contact(_))
-            });
-            let override_contact_uri = caller_contact
+            ) = extra_headers
                 .into_iter()
-                .find_map(|h| match h {
-                    rvoip_sip_core::types::TypedHeader::Contact(c) => c
-                        .address()
-                        .map(|addr| addr.uri.to_string()),
-                    _ => None,
-                });
+                .partition(|h| matches!(h, rvoip_sip_core::types::TypedHeader::Contact(_)));
+            let override_contact_uri = caller_contact.into_iter().find_map(|h| match h {
+                rvoip_sip_core::types::TypedHeader::Contact(c) => {
+                    c.address().map(|addr| addr.uri.to_string())
+                }
+                _ => None,
+            });
             if let Some(uri) = override_contact_uri {
                 invite_builder = invite_builder.contact(uri);
             } else if let Some(contact) = self.local_contact_uri() {
@@ -1154,9 +1146,7 @@ impl DialogManager {
 
             let candidates = self
                 .resolve_uri_to_candidates(
-                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(
-                        &request,
-                    ),
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
                 )
                 .await;
 
@@ -1234,9 +1224,8 @@ impl DialogManager {
 
         let method = request.method();
         let candidates: Vec<ResolvedTarget> = if candidates.is_empty() {
-            let next_hop = crate::transaction::transport::multiplexed::next_hop_uri_for_request(
-                &request,
-            );
+            let next_hop =
+                crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request);
             let transport = rvoip_sip_transport::resolver::select_transport_for_uri(&next_hop);
             vec![ResolvedTarget::immediate(fallback, transport)]
         } else {
@@ -1283,8 +1272,7 @@ impl DialogManager {
             // returns) can locate the dialog. Removed on failed
             // attempts so the next candidate's tx replaces it.
             if let Some(dialog_id) = tx_to_dialog {
-                self.transaction_to_dialog
-                    .insert(tx_id.clone(), dialog_id.clone());
+                self.link_transaction_to_dialog_indexed(&tx_id, dialog_id);
             }
 
             match self.transaction_manager.send_request(&tx_id).await {
@@ -1312,16 +1300,17 @@ impl DialogManager {
                         if attempt > 1 {
                             debug!(
                                 "RFC 3263 §4.3: candidate {}/{} ({}) succeeded after {} prior failure(s) (benign terminate)",
-                                attempt, total, target.addr, attempt - 1
+                                attempt,
+                                total,
+                                target.addr,
+                                attempt - 1
                             );
                         }
                         return Ok((tx_id, target.addr));
                     }
 
-                    let is_transport_failure = matches!(
-                        &e,
-                        crate::transaction::error::Error::TransportError { .. }
-                    );
+                    let is_transport_failure =
+                        matches!(&e, crate::transaction::error::Error::TransportError { .. });
                     if is_transport_failure && idx + 1 < total {
                         debug!(
                             "RFC 3263 §4.3: candidate {}/{} ({}) failed with transport error: {}; trying next",
@@ -1331,7 +1320,7 @@ impl DialogManager {
                         // attempt's tx is the canonical one for this
                         // dialog.
                         if tx_to_dialog.is_some() {
-                            self.transaction_to_dialog.remove(&tx_id);
+                            self.unlink_transaction_from_dialog_indexed(&tx_id);
                         }
                         last_err = Some(crate::errors::DialogError::TransactionError {
                             message: format!(
@@ -1349,12 +1338,14 @@ impl DialogManager {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| crate::errors::DialogError::TransactionError {
-            message: format!(
-                "RFC 3263 §4.3 failover exhausted: all {} candidate(s) failed",
-                total
-            ),
-        }))
+        Err(
+            last_err.unwrap_or_else(|| crate::errors::DialogError::TransactionError {
+                message: format!(
+                    "RFC 3263 §4.3 failover exhausted: all {} candidate(s) failed",
+                    total
+                ),
+            }),
+        )
     }
 }
 
@@ -1402,7 +1393,7 @@ pub fn inject_session_timer_headers(request: &mut Request, secs: u32, min_se: u3
         request
             .headers
             .push(TypedHeader::Supported(Supported::new(vec![
-                "timer".to_string()
+                "timer".to_string(),
             ])));
     }
 }
@@ -1436,8 +1427,7 @@ impl TransactionHelpers for DialogManager {
     ///
     /// Creates the mapping between transactions and dialogs for proper message routing.
     fn link_transaction_to_dialog(&self, transaction_id: &TransactionKey, dialog_id: &DialogId) {
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+        self.link_transaction_to_dialog_indexed(transaction_id, dialog_id);
         debug!(
             "Linked transaction {} to dialog {}",
             transaction_id, dialog_id
@@ -1583,7 +1573,7 @@ impl DialogManager {
                     transaction_id, dialog_id
                 );
                 // Clean up transaction association
-                self.transaction_to_dialog.remove(transaction_id);
+                self.unlink_transaction_from_dialog_indexed(transaction_id);
             }
 
             _ => {
@@ -1654,8 +1644,8 @@ impl DialogManager {
                         // §7.1 default for a UAC that originally requested
                         // `refresher=uac` is that the UAC refreshes.
                         if transaction_id.method() == &rvoip_sip_core::Method::Invite {
-                            use rvoip_sip_core::types::session_expires::Refresher;
                             use rvoip_sip_core::types::TypedHeader;
+                            use rvoip_sip_core::types::session_expires::Refresher;
                             if let Some(se) = response.headers.iter().find_map(|h| {
                                 if let TypedHeader::SessionExpires(se) = h {
                                     Some(se)
@@ -2078,7 +2068,7 @@ impl DialogManager {
         );
 
         // Clean up transaction-dialog association
-        self.transaction_to_dialog.remove(transaction_id);
+        self.unlink_transaction_from_dialog_indexed(transaction_id);
 
         if transaction_id.method() == &rvoip_sip_core::Method::Bye {
             self.emit_session_coordination_event(SessionCoordinationEvent::CallTerminating {
@@ -2115,7 +2105,10 @@ impl DialogManager {
             return Ok(());
         }
 
-        info!("✅ RFC 3261: ACK received for transaction {} in dialog {} - time to start media (UAS side)", transaction_id, dialog_id);
+        info!(
+            "✅ RFC 3261: ACK received for transaction {} in dialog {} - time to start media (UAS side)",
+            transaction_id, dialog_id
+        );
 
         // Extract any SDP from the ACK (though typically ACK doesn't have SDP for 2xx responses)
         let negotiated_sdp = if !request.body().is_empty() {
@@ -2456,11 +2449,12 @@ impl DialogManager {
                 context: None,
             })?;
 
-            let destination = self.resolve_uri_to_socketaddr(
-                &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
-            )
-            .await
-            .unwrap_or(fallback_destination);
+            let destination = self
+                .resolve_uri_to_socketaddr(
+                    &crate::transaction::transport::multiplexed::next_hop_uri_for_request(&request),
+                )
+                .await
+                .unwrap_or(fallback_destination);
 
             (destination, request)
         };
@@ -2473,8 +2467,7 @@ impl DialogManager {
                 message: format!("Failed to create PRACK transaction: {}", e),
             })?;
 
-        self.transaction_to_dialog
-            .insert(transaction_id.clone(), dialog_id.clone());
+        self.link_transaction_to_dialog_indexed(&transaction_id, dialog_id);
 
         self.transaction_manager
             .send_request(&transaction_id)
@@ -2517,7 +2510,7 @@ impl DialogManager {
 
         // Remove orphaned mappings
         for tx_id in orphaned_transactions {
-            self.transaction_to_dialog.remove(&tx_id);
+            self.unlink_transaction_from_dialog_indexed(&tx_id);
             orphaned_count += 1;
         }
 

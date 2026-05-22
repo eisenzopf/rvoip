@@ -80,8 +80,8 @@ impl JwtClaimConstraints {
 /// }
 /// ```
 pub fn parse_tnauth_list(body: &[u8]) -> Result<TNAuthList, String> {
-    let (tag, contents, _rest) = read_tlv(body)
-        .ok_or_else(|| "TNAuthList: outer TLV truncated".to_string())?;
+    let (tag, contents, _rest) =
+        read_tlv(body).ok_or_else(|| "TNAuthList: outer TLV truncated".to_string())?;
     if tag != 0x30 {
         return Err(format!(
             "TNAuthList: expected outer SEQUENCE (0x30), got {:#x}",
@@ -92,8 +92,8 @@ pub fn parse_tnauth_list(body: &[u8]) -> Result<TNAuthList, String> {
     let mut out = TNAuthList::default();
     let mut cur = contents;
     while !cur.is_empty() {
-        let (entry_tag, entry_body, rest) = read_tlv(cur)
-            .ok_or_else(|| "TNAuthList: entry TLV truncated".to_string())?;
+        let (entry_tag, entry_body, rest) =
+            read_tlv(cur).ok_or_else(|| "TNAuthList: entry TLV truncated".to_string())?;
         match entry_tag {
             0x80 => {
                 let s = std::str::from_utf8(entry_body)
@@ -132,10 +132,7 @@ pub fn parse_tnauth_list(body: &[u8]) -> Result<TNAuthList, String> {
                 out.tn_ranges.push((start, count));
             }
             other => {
-                return Err(format!(
-                    "TNAuthList: unknown TNEntry tag {:#x}",
-                    other
-                ));
+                return Err(format!("TNAuthList: unknown TNEntry tag {:#x}", other));
             }
         }
         cur = rest;
@@ -157,8 +154,8 @@ pub fn parse_tnauth_list(body: &[u8]) -> Result<TNAuthList, String> {
 /// }
 /// ```
 pub fn parse_jwt_claim_constraints(body: &[u8]) -> Result<JwtClaimConstraints, String> {
-    let (tag, contents, _rest) = read_tlv(body)
-        .ok_or_else(|| "JWTClaimConstraints: outer TLV truncated".to_string())?;
+    let (tag, contents, _rest) =
+        read_tlv(body).ok_or_else(|| "JWTClaimConstraints: outer TLV truncated".to_string())?;
     if tag != 0x30 {
         return Err(format!(
             "JWTClaimConstraints: expected outer SEQUENCE (0x30), got {:#x}",
@@ -169,8 +166,8 @@ pub fn parse_jwt_claim_constraints(body: &[u8]) -> Result<JwtClaimConstraints, S
     let mut out = JwtClaimConstraints::default();
     let mut cur = contents;
     while !cur.is_empty() {
-        let (entry_tag, entry_body, rest) = read_tlv(cur)
-            .ok_or_else(|| "JWTClaimConstraints: entry TLV truncated".to_string())?;
+        let (entry_tag, entry_body, rest) =
+            read_tlv(cur).ok_or_else(|| "JWTClaimConstraints: entry TLV truncated".to_string())?;
         match entry_tag {
             0xA0 => {
                 // mustInclude — RFC 8226 lists claim names; SHAKEN doesn't
@@ -225,9 +222,7 @@ pub fn parse_jwt_claim_constraints(body: &[u8]) -> Result<JwtClaimConstraints, S
                             ));
                         }
                         let v = std::str::from_utf8(val_body)
-                            .map_err(|_| {
-                                "JWTClaimConstraints: value not UTF-8".to_string()
-                            })?
+                            .map_err(|_| "JWTClaimConstraints: value not UTF-8".to_string())?
                             .to_string();
                         values.push(v);
                         vbytes = val_rest;
@@ -275,7 +270,11 @@ fn read_tlv(bytes: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     if bytes.len() < header_len + len {
         return None;
     }
-    Some((tag, &bytes[header_len..header_len + len], &bytes[header_len + len..]))
+    Some((
+        tag,
+        &bytes[header_len..header_len + len],
+        &bytes[header_len + len..],
+    ))
 }
 
 /// Decode a DER INTEGER value into a `u64`. Returns `None` if the

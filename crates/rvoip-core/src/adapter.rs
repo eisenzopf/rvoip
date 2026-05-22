@@ -70,11 +70,24 @@ pub struct SignatureHeaders {
 /// subscribe directly to the adapter.
 #[derive(Clone, Debug)]
 pub enum AdapterEvent {
-    InboundConnection { connection: Connection },
-    Connected { connection_id: ConnectionId },
-    Ended { connection_id: ConnectionId, reason: EndReason },
-    Failed { connection_id: ConnectionId, detail: String },
-    Native { kind: &'static str, detail: String },
+    InboundConnection {
+        connection: Connection,
+    },
+    Connected {
+        connection_id: ConnectionId,
+    },
+    Ended {
+        connection_id: ConnectionId,
+        reason: EndReason,
+    },
+    Failed {
+        connection_id: ConnectionId,
+        detail: String,
+    },
+    Native {
+        kind: &'static str,
+        detail: String,
+    },
 }
 
 /// The cross-transport adapter contract. Every transport-specific crate

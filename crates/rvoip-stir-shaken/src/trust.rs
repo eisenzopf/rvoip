@@ -79,17 +79,12 @@ impl TrustStore {
     /// Build borrowed `webpki::TrustAnchor` views over the stored
     /// DER blobs. Errors if any anchor fails to parse — caller maps
     /// that to a configuration-time fatal.
-    pub(crate) fn as_trust_anchors(
-        &self,
-    ) -> Result<Vec<webpki::TrustAnchor<'_>>, VerifierError> {
+    pub(crate) fn as_trust_anchors(&self) -> Result<Vec<webpki::TrustAnchor<'_>>, VerifierError> {
         self.anchors_der
             .iter()
             .map(|der| {
                 webpki::TrustAnchor::try_from_cert_der(der).map_err(|e| {
-                    VerifierError::CertChain(format!(
-                        "trust anchor cert parse failed: {}",
-                        e
-                    ))
+                    VerifierError::CertChain(format!("trust anchor cert parse failed: {}", e))
                 })
             })
             .collect()
@@ -108,19 +103,20 @@ impl std::fmt::Debug for TrustStore {
 /// each base64 body to DER. Returns an empty vec if no CERTIFICATE
 /// blocks are present (caller decides whether that's an error).
 pub(crate) fn decode_pem_bundle(pem: &[u8]) -> Result<Vec<Vec<u8>>, VerifierError> {
-    let text = std::str::from_utf8(pem).map_err(|_| {
-        VerifierError::CertChain("PEM bundle is not valid UTF-8".into())
-    })?;
+    let text = std::str::from_utf8(pem)
+        .map_err(|_| VerifierError::CertChain("PEM bundle is not valid UTF-8".into()))?;
 
     let mut out = Vec::new();
     let mut cursor = text;
     while let Some(begin_idx) = cursor.find("-----BEGIN CERTIFICATE-----") {
         let after_begin = &cursor[begin_idx + "-----BEGIN CERTIFICATE-----".len()..];
-        let end_idx = after_begin.find("-----END CERTIFICATE-----").ok_or_else(|| {
-            VerifierError::CertChain(
-                "PEM bundle has BEGIN CERTIFICATE without matching END CERTIFICATE".into(),
-            )
-        })?;
+        let end_idx = after_begin
+            .find("-----END CERTIFICATE-----")
+            .ok_or_else(|| {
+                VerifierError::CertChain(
+                    "PEM bundle has BEGIN CERTIFICATE without matching END CERTIFICATE".into(),
+                )
+            })?;
         let body = &after_begin[..end_idx];
         let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
         let der = BASE64_STANDARD

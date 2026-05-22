@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, trace, warn};
 
@@ -14,7 +14,7 @@ use rvoip_sip_transport::Transport;
 use crate::transaction::common_logic;
 use crate::transaction::error::{Error, Result};
 use crate::transaction::logic::TransactionLogic;
-use crate::transaction::runner::{AsRefKey, HasCommandSender, run_transaction_loop};
+use crate::transaction::runner::{run_transaction_loop, AsRefKey, HasCommandSender};
 use crate::transaction::server::{
     CommonServerTransaction, ServerTransaction, ServerTransactionData,
 };
@@ -674,15 +674,13 @@ mod tests {
     async fn test_server_noninvite_creation() {
         let setup = setup_test_environment(Method::Register, "sip:registrar.example.com").await;
         assert_eq!(setup.transaction.state(), TransactionState::Trying);
-        assert!(
-            setup
-                .transaction
-                .data
-                .event_loop_handle
-                .lock()
-                .await
-                .is_some()
-        );
+        assert!(setup
+            .transaction
+            .data
+            .event_loop_handle
+            .lock()
+            .await
+            .is_some());
     }
 
     #[tokio::test]

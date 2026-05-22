@@ -6,13 +6,13 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
+use rvoip_sip_core::builder::SimpleRequestBuilder;
+use rvoip_sip_core::{ContentLength, Method, Request, StatusCode, TypedHeader, Uri};
 use rvoip_sip_dialog::api::{DialogApi, DialogClient, DialogServer};
 use rvoip_sip_dialog::transaction::builders::client_quick; // Use the new builders
 use rvoip_sip_dialog::transaction::transport::{TransportManager, TransportManagerConfig};
 use rvoip_sip_dialog::transaction::TransactionManager;
 use rvoip_sip_dialog::DialogId;
-use rvoip_sip_core::builder::SimpleRequestBuilder;
-use rvoip_sip_core::{ContentLength, Method, Request, StatusCode, TypedHeader, Uri};
 use uuid::Uuid;
 
 /// Test environment for dialog-core API testing using **REAL TRANSPORT**

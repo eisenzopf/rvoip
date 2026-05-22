@@ -53,8 +53,7 @@ pub fn parse_identity(input: &[u8]) -> ParseResult<Identity> {
 mod tests {
     use super::*;
 
-    const SAMPLE_JWT: &str =
-        "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
+    const SAMPLE_JWT: &str = "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
          eyJhdHRlc3QiOiJBIn0.\
          dGVzdHNpZw";
 

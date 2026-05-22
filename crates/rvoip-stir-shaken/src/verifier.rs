@@ -273,8 +273,7 @@ impl PASSporTVerifier for ShakenVerifier {
             Err(reason) => return VerificationOutcome::BadChain { reason },
         };
         let leaf_der = &bundle[0];
-        let intermediates_der: Vec<&[u8]> =
-            bundle.iter().skip(1).map(|d| d.as_slice()).collect();
+        let intermediates_der: Vec<&[u8]> = bundle.iter().skip(1).map(|d| d.as_slice()).collect();
 
         let (_, cert) = match X509Certificate::from_der(leaf_der) {
             Ok(c) => c,
@@ -304,7 +303,12 @@ impl PASSporTVerifier for ShakenVerifier {
             }
         }
 
-        let spki_bytes = cert.tbs_certificate.subject_pki.subject_public_key.data.as_ref();
+        let spki_bytes = cert
+            .tbs_certificate
+            .subject_pki
+            .subject_public_key
+            .data
+            .as_ref();
 
         // Step 4 — verify the JWS signature using the cert's
         // public key. ES256 = ECDSA over P-256 / SHA-256. Raw EC
@@ -472,9 +476,10 @@ fn enforce_shaken_profile(
     if tnauth.spcs.is_empty() {
         if let Some(orig_tn) = payload.orig.tn.as_deref() {
             let matches_tn = tnauth.tns.iter().any(|t| t == orig_tn);
-            let matches_range = tnauth.tn_ranges.iter().any(|(start, count)| {
-                tn_within_range(orig_tn, start, *count)
-            });
+            let matches_range = tnauth
+                .tn_ranges
+                .iter()
+                .any(|(start, count)| tn_within_range(orig_tn, start, *count));
             if !matches_tn && !matches_range {
                 return Err(VerificationOutcome::BadChain {
                     reason: format!(

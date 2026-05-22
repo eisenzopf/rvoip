@@ -38,7 +38,9 @@ fn nat_uac_invite() -> rvoip_sip_core::Request {
         .cseq(1)
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 // UAC's INTERNAL address — what's in the Via sent-by.
                 "10.0.0.5",
                 Some(5060),
@@ -61,14 +63,12 @@ fn response_via_gets_received_and_rport_when_inbound_via_had_rport_flag() {
 
     // NAT-translated source address — what the server's socket
     // recvfrom() reports.
-    let nat_source =
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 33000);
+    let nat_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 33000);
 
     // Build a 200 OK exactly as `ServerInviteTransaction::send_response`
     // would (canonical RFC 3261 §8.2.6.2 header copy).
     let mut response =
-        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
-            .build();
+        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK")).build();
 
     // Apply the stamp helper that the server transaction calls
     // before handing the response to the transport.
@@ -123,7 +123,9 @@ fn response_via_only_gets_received_when_inbound_via_had_no_rport() {
         .cseq(1)
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 "10.0.0.5",
                 Some(5060),
                 vec![Param::branch("z9hG4bKno-rport")],
@@ -132,15 +134,16 @@ fn response_via_only_gets_received_when_inbound_via_had_no_rport() {
         ))
         .build();
 
-    let nat_source =
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 33000);
+    let nat_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 33000);
     let mut response =
-        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
-            .build();
+        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK")).build();
     stamp_response_via_with_source(&mut response, nat_source);
 
     let top_via = response.first_via().expect("Via copied from request");
-    assert_eq!(top_via.received(), Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
+    assert_eq!(
+        top_via.received(),
+        Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+    );
     assert_eq!(
         top_via.rport(),
         None,
@@ -149,7 +152,11 @@ fn response_via_only_gets_received_when_inbound_via_had_no_rport() {
 
     let wire = response.to_string();
     assert!(wire.contains("received=198.51.100.7"));
-    assert!(!wire.contains("rport="), "wire form leaked rport=: {}", wire);
+    assert!(
+        !wire.contains("rport="),
+        "wire form leaked rport=: {}",
+        wire
+    );
 }
 
 #[test]
@@ -163,8 +170,7 @@ fn ipv6_nat_source_is_stamped_correctly() {
     );
 
     let mut response =
-        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
-            .build();
+        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK")).build();
     stamp_response_via_with_source(&mut response, nat_source);
 
     let top_via = response.first_via().expect("Via");
@@ -192,7 +198,9 @@ fn second_via_in_chain_is_not_modified() {
         // Top Via — proxy (most recent hop)
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 "proxy.example.com",
                 Some(5060),
                 vec![Param::branch("z9hG4bKproxy"), Param::Rport(None)],
@@ -202,7 +210,9 @@ fn second_via_in_chain_is_not_modified() {
         // Second Via — UAC (older hop, untouched by this server)
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
+                "SIP",
+                "2.0",
+                "UDP",
                 "10.0.0.5",
                 Some(5060),
                 vec![Param::branch("z9hG4bKuac")],
@@ -211,16 +221,17 @@ fn second_via_in_chain_is_not_modified() {
         ))
         .build();
 
-    let nat_source =
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 33000);
+    let nat_source = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 33000);
     let mut response =
-        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK"))
-            .build();
+        SimpleResponseBuilder::response_from_request(&request, StatusCode::Ok, Some("OK")).build();
     stamp_response_via_with_source(&mut response, nat_source);
 
     // Top Via (proxy) — stamped.
     let top_via = response.first_via().expect("top Via");
-    assert_eq!(top_via.received(), Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))));
+    assert_eq!(
+        top_via.received(),
+        Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)))
+    );
     assert_eq!(top_via.rport(), Some(Some(33000)));
 
     // Second Via (UAC's) — UNTOUCHED. Wire form check is the

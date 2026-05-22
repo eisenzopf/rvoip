@@ -22,7 +22,9 @@
 
 use bytes::Bytes;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rvoip_media_core::relay::controller::{bridge::BridgeHandle, MediaConfig, MediaSessionController};
+use rvoip_media_core::relay::controller::{
+    bridge::BridgeHandle, MediaConfig, MediaSessionController,
+};
 use rvoip_media_core::types::DialogId;
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
 use std::collections::HashMap;
@@ -182,7 +184,8 @@ async fn drive_one_round(fix: &BridgeFixture) {
     // Phase 2: collect all receives concurrently.
     let recv_futs = fix.bridges.iter().enumerate().map(|(idx, ep)| async move {
         let mut buf = [0u8; 2048];
-        match tokio::time::timeout(Duration::from_millis(2000), ep.receiver.recv_from(&mut buf)).await
+        match tokio::time::timeout(Duration::from_millis(2000), ep.receiver.recv_from(&mut buf))
+            .await
         {
             Ok(Ok((n, _src))) => black_box(n),
             Ok(Err(e)) => panic!("recv_from err: {e}"),

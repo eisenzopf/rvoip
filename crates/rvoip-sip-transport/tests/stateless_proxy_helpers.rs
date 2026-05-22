@@ -85,8 +85,11 @@ fn signed_invite_bytes(jwt: &str) -> Bytes {
         .cseq(1)
         .header(TypedHeader::Via(
             Via::new(
-                "SIP", "2.0", "UDP",
-                "10.0.0.5", Some(5060),
+                "SIP",
+                "2.0",
+                "UDP",
+                "10.0.0.5",
+                Some(5060),
                 vec![Param::branch("z9hG4bKuac")],
             )
             .unwrap(),
@@ -188,8 +191,11 @@ async fn response_forward_pops_top_via_and_preserves_identity_bytes() {
     // Top Via = the proxy's (must be popped).
     .header(TypedHeader::Via(
         Via::new(
-            "SIP", "2.0", "UDP",
-            "proxy.example.com", Some(5060),
+            "SIP",
+            "2.0",
+            "UDP",
+            "proxy.example.com",
+            Some(5060),
             vec![Param::branch("z9hG4bKproxy-det-001")],
         )
         .unwrap(),
@@ -197,8 +203,11 @@ async fn response_forward_pops_top_via_and_preserves_identity_bytes() {
     // Second Via = the UAC's — survives the pop.
     .header(TypedHeader::Via(
         Via::new(
-            "SIP", "2.0", "UDP",
-            "10.0.0.5", Some(5060),
+            "SIP",
+            "2.0",
+            "UDP",
+            "10.0.0.5",
+            Some(5060),
             vec![Param::branch("z9hG4bKuac")],
         )
         .unwrap(),
@@ -255,8 +264,8 @@ CSeq: 1 INVITE\r\n\
 \r\n",
     );
 
-    let err = apply_via_rewrite(bytes.clone(), ViaRewrite::Pop)
-        .expect_err("missing Via must error");
+    let err =
+        apply_via_rewrite(bytes.clone(), ViaRewrite::Pop).expect_err("missing Via must error");
     let msg = err.to_string();
     assert!(
         msg.contains("Via"),
@@ -276,8 +285,11 @@ fn via_helpers_round_trip_at_the_typed_layer() {
     // need byte preservation — verify their composition works.
 
     let mut via = Via::new(
-        "SIP", "2.0", "UDP",
-        "10.0.0.5", Some(5060),
+        "SIP",
+        "2.0",
+        "UDP",
+        "10.0.0.5",
+        Some(5060),
         vec![Param::branch("z9hG4bKuac")],
     )
     .unwrap();
@@ -294,8 +306,11 @@ fn via_helpers_round_trip_at_the_typed_layer() {
     // Loop detection: a fabricated "previously stamped" Via with the
     // proxy's branch should trip the check.
     let stamped = Via::new(
-        "SIP", "2.0", "UDP",
-        "proxy.example.com", Some(5060),
+        "SIP",
+        "2.0",
+        "UDP",
+        "proxy.example.com",
+        Some(5060),
         vec![Param::branch("z9hG4bKproxy")],
     )
     .unwrap();
@@ -303,8 +318,11 @@ fn via_helpers_round_trip_at_the_typed_layer() {
 
     // Unrelated branch — no loop.
     let unrelated = Via::new(
-        "SIP", "2.0", "UDP",
-        "other.example.com", None,
+        "SIP",
+        "2.0",
+        "UDP",
+        "other.example.com",
+        None,
         vec![Param::branch("z9hG4bKunrelated")],
     )
     .unwrap();

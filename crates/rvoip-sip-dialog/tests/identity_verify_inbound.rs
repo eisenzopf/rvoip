@@ -29,8 +29,7 @@ use rvoip_sip_dialog::manager::{
 use std::str::FromStr;
 use std::sync::Arc;
 
-const SAMPLE_JWT: &str =
-    "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
+const SAMPLE_JWT: &str = "eyJhbGciOiJFUzI1NiIsInR5cCI6InBhc3Nwb3J0IiwicHB0Ijoic2hha2VuIn0.\
      eyJhdHRlc3QiOiJBIn0.\
      dGVzdHNpZw";
 
@@ -163,17 +162,14 @@ fn policy_gate_matches_rfc_8224_intent() {
 
     // RequireValid: rejects bad outcomes, but lets NoIdentity through
     // (cf. SBC pass-through use case).
-    assert!(
-        !VerificationOutcome::Valid {
-            attest: None,
-            origid: None,
-        }
-        .should_reject(VerificationPolicy::RequireValid)
-    );
+    assert!(!VerificationOutcome::Valid {
+        attest: None,
+        origid: None,
+    }
+    .should_reject(VerificationPolicy::RequireValid));
     assert!(VerificationOutcome::BadSignature.should_reject(VerificationPolicy::RequireValid));
-    assert!(
-        VerificationOutcome::Stale { skew_secs: 600 }.should_reject(VerificationPolicy::RequireValid)
-    );
+    assert!(VerificationOutcome::Stale { skew_secs: 600 }
+        .should_reject(VerificationPolicy::RequireValid));
     assert!(
         !VerificationOutcome::NoIdentity.should_reject(VerificationPolicy::RequireValid),
         "RequireValid keeps NoIdentity (annotate-through)"

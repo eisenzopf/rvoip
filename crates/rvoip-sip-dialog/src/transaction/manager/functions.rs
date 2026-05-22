@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -477,9 +477,10 @@ impl TransactionManager {
             terminated = true;
         }
         if !terminated && self.server_transactions.remove(tx_id).is_some() {
-            self.remove_server_invite_dialog_index_for(tx_id);
+            self.retire_server_invite_dialog_index_for(tx_id);
             terminated = true;
         }
+        self.terminated_transactions.remove(tx_id);
         self.transaction_destinations.remove(tx_id);
         self.pending_inbound_bytes.remove(tx_id);
 
@@ -549,9 +550,28 @@ impl TransactionManager {
     ///
     /// # Returns
     /// * `Result<usize>` - The number of transactions cleaned up
+    pub async fn cleanup_indexed_terminated_transactions(&self) -> Result<usize> {
+        let terminated_keys: Vec<TransactionKey> = self
+            .terminated_transactions
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        if terminated_keys.is_empty() {
+            return Ok(0);
+        }
+
+        debug!(
+            "Found {} indexed terminated transactions",
+            terminated_keys.len()
+        );
+
+        self.cleanup_terminated_transaction_keys(terminated_keys, true)
+            .await
+    }
+
     pub async fn cleanup_terminated_transactions(&self) -> Result<usize> {
         let mut cleaned_count = 0;
-        let mut terminated_transaction_ids = Vec::new();
 
         // Cleanup client transactions
         let terminated_client_keys: Vec<TransactionKey> = self
@@ -564,13 +584,9 @@ impl TransactionManager {
             "Found {} terminated client transactions",
             terminated_client_keys.len()
         );
-        for key in terminated_client_keys {
-            debug!(%key, "Removing terminated client transaction");
-            self.client_transactions.remove(&key);
-            self.pending_inbound_bytes.remove(&key);
-            terminated_transaction_ids.push(key);
-            cleaned_count += 1;
-        }
+        cleaned_count += self
+            .cleanup_terminated_transaction_keys(terminated_client_keys, false)
+            .await?;
 
         // Cleanup server transactions
         let terminated_server_keys: Vec<TransactionKey> = self
@@ -583,14 +599,9 @@ impl TransactionManager {
             "Found {} terminated server transactions",
             terminated_server_keys.len()
         );
-        for key in terminated_server_keys {
-            debug!(%key, "Removing terminated server transaction");
-            self.server_transactions.remove(&key);
-            self.remove_server_invite_dialog_index_for(&key);
-            self.pending_inbound_bytes.remove(&key);
-            terminated_transaction_ids.push(key);
-            cleaned_count += 1;
-        }
+        cleaned_count += self
+            .cleanup_terminated_transaction_keys(terminated_server_keys, false)
+            .await?;
 
         // Cleanup orphaned entries in the transaction_destinations map
         {
@@ -611,50 +622,6 @@ impl TransactionManager {
             }
         }
 
-        // **CRITICAL FIX**: Clean up subscriber mappings for all terminated transactions
-        {
-            let mut subscriber_ids_to_clean = Vec::new();
-            for tx_id in &terminated_transaction_ids {
-                if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
-                    debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
-                    subscriber_ids_to_clean.extend(subscriber_ids);
-                }
-            }
-
-            if !subscriber_ids_to_clean.is_empty() {
-                for subscriber_id in subscriber_ids_to_clean {
-                    let mut empty = false;
-                    let mut changed = false;
-                    let mut new_count = 0;
-                    let mut old_count = 0;
-                    if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id)
-                    {
-                        let tx_list = entry.value_mut();
-                        old_count = tx_list.len();
-                        tx_list.retain(|tx_id| !terminated_transaction_ids.contains(tx_id));
-                        new_count = tx_list.len();
-                        empty = tx_list.is_empty();
-                        changed = old_count != new_count;
-                    }
-                    if empty {
-                        self.subscriber_to_transactions.remove(&subscriber_id);
-                        debug!(subscriber_id, "Removed empty subscriber mapping");
-                    } else if changed {
-                        debug!(
-                            subscriber_id,
-                            old_count, new_count, "Cleaned up subscriber transaction list"
-                        );
-                    }
-                }
-            }
-        }
-
-        // Unregister terminated transactions from timer manager
-        for tx_id in &terminated_transaction_ids {
-            self.timer_manager.unregister_transaction(tx_id).await;
-            debug!(%tx_id, "Unregistered terminated transaction from timer manager");
-        }
-
         // Also manually check for client transactions that look terminated but don't have the state set
         {
             let potentially_terminated: Vec<TransactionKey> = self
@@ -672,14 +639,111 @@ impl TransactionManager {
                 })
                 .collect();
 
-            for key in potentially_terminated {
-                debug!(%key, "Removing potentially terminated client transaction");
-                self.client_transactions.remove(&key);
-                cleaned_count += 1;
-            }
+            cleaned_count += self
+                .cleanup_terminated_transaction_keys(potentially_terminated, false)
+                .await?;
         }
 
         debug!("Cleaned up {} terminated transactions", cleaned_count);
+        Ok(cleaned_count)
+    }
+
+    async fn cleanup_terminated_transaction_keys(
+        &self,
+        transaction_keys: Vec<TransactionKey>,
+        requeue_active: bool,
+    ) -> Result<usize> {
+        let mut cleaned_count = 0;
+        let mut terminated_transaction_ids = Vec::new();
+
+        for key in transaction_keys {
+            self.terminated_transactions.remove(&key);
+            let mut removed = false;
+
+            let remove_client = self
+                .client_transactions
+                .get(&key)
+                .map(|entry| entry.value().state() == TransactionState::Terminated)
+                .unwrap_or(false);
+            if remove_client {
+                debug!(%key, "Removing terminated client transaction");
+                self.client_transactions.remove(&key);
+                removed = true;
+            }
+
+            let remove_server = self
+                .server_transactions
+                .get(&key)
+                .map(|entry| entry.value().state() == TransactionState::Terminated)
+                .unwrap_or(false);
+            if remove_server {
+                debug!(%key, "Removing terminated server transaction");
+                self.server_transactions.remove(&key);
+                self.retire_server_invite_dialog_index_for(&key);
+                removed = true;
+            }
+
+            if removed {
+                self.transaction_destinations.remove(&key);
+                self.pending_inbound_bytes.remove(&key);
+                terminated_transaction_ids.push(key);
+                cleaned_count += 1;
+            } else if requeue_active
+                && (self.client_transactions.contains_key(&key)
+                    || self.server_transactions.contains_key(&key))
+            {
+                self.terminated_transactions.insert(key, ());
+            }
+        }
+
+        if terminated_transaction_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let terminated_set: HashSet<TransactionKey> =
+            terminated_transaction_ids.iter().cloned().collect();
+
+        // **CRITICAL FIX**: Clean up subscriber mappings for all terminated transactions
+        let mut subscriber_ids_to_clean = Vec::new();
+        for tx_id in &terminated_transaction_ids {
+            if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
+                debug!(%tx_id, subscriber_count = subscriber_ids.len(), "Removed terminated transaction from subscriber mappings");
+                subscriber_ids_to_clean.extend(subscriber_ids);
+            }
+        }
+
+        if !subscriber_ids_to_clean.is_empty() {
+            for subscriber_id in subscriber_ids_to_clean {
+                let mut empty = false;
+                let mut changed = false;
+                let mut new_count = 0;
+                let mut old_count = 0;
+                if let Some(mut entry) = self.subscriber_to_transactions.get_mut(&subscriber_id) {
+                    let tx_list = entry.value_mut();
+                    old_count = tx_list.len();
+                    tx_list.retain(|tx_id| !terminated_set.contains(tx_id));
+                    new_count = tx_list.len();
+                    empty = tx_list.is_empty();
+                    changed = old_count != new_count;
+                }
+                if empty {
+                    self.subscriber_to_transactions.remove(&subscriber_id);
+                    debug!(subscriber_id, "Removed empty subscriber mapping");
+                } else if changed {
+                    debug!(
+                        subscriber_id,
+                        old_count, new_count, "Cleaned up subscriber transaction list"
+                    );
+                }
+            }
+        }
+
+        // Unregister terminated transactions from timer manager
+        for tx_id in &terminated_transaction_ids {
+            self.timer_manager.unregister_transaction(tx_id).await;
+            debug!(%tx_id, "Unregistered terminated transaction from timer manager");
+        }
+
         Ok(cleaned_count)
     }
 

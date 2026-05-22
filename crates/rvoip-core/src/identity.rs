@@ -136,10 +136,8 @@ pub trait IdentityProvider: Send + Sync {
     async fn resolve(&self, identity_ref: &str) -> Result<Identity>;
     async fn devices(&self, identity_id: IdentityId) -> Result<Vec<Device>>;
     async fn reachable_via(&self, identity_id: IdentityId) -> Result<Vec<ReachabilityHint>>;
-    async fn authenticate(
-        &self,
-        credential: Credential,
-    ) -> Result<(IdentityId, IdentityAssurance)>;
+    async fn authenticate(&self, credential: Credential)
+        -> Result<(IdentityId, IdentityAssurance)>;
     async fn assurance_level(&self, id: IdentityId) -> Result<IdentityAssurance>;
     fn subscribe_reachability(&self) -> mpsc::Receiver<ReachabilityChange>;
 }

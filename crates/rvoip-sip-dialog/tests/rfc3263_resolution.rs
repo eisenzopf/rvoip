@@ -117,8 +117,7 @@ async fn set_resolver_round_trips() {
 async fn manager_uses_configured_resolver_for_invite_destination() {
     let manager = build_manager().await;
     let mock = Arc::new(
-        MockResolver::default()
-            .with_response(vec![target("10.0.0.42:5061", TransportType::Tls)]),
+        MockResolver::default().with_response(vec![target("10.0.0.42:5061", TransportType::Tls)]),
     );
     manager.set_resolver(Some(mock.clone()));
 
@@ -174,8 +173,7 @@ async fn configured_resolver_overrides_default_for_ip_literal_uri_resolution_pat
     // configured resolver is authoritative for that DialogManager.
     let manager = build_manager().await;
     let mock = Arc::new(
-        MockResolver::default()
-            .with_response(vec![target("203.0.113.7:5060", TransportType::Udp)]),
+        MockResolver::default().with_response(vec![target("203.0.113.7:5060", TransportType::Udp)]),
     );
     manager.set_resolver(Some(mock.clone()));
 
