@@ -1182,6 +1182,20 @@ pub struct EndpointConfig {
     pub media: Option<EndpointMediaConfig>,
     /// Whether automatic `180 Ringing` is sent for inbound INVITEs.
     pub auto_180_ringing: Option<bool>,
+    /// Whether automatic `100 Trying` timer tasks are armed for inbound INVITEs.
+    pub auto_100_trying: Option<bool>,
+    /// Whether inbound INVITEs are immediately accepted before app callbacks.
+    pub fast_auto_accept_incoming_calls: Option<bool>,
+    /// Cleanup-stage timing diagnostics.
+    pub cleanup_diagnostics: Option<bool>,
+    /// Per-operation cleanup diagnostic event logs.
+    pub cleanup_diagnostic_events: Option<bool>,
+    /// SRTP negotiation diagnostic log lines.
+    pub srtp_diagnostics: Option<bool>,
+    /// RTP packet diagnostic log lines.
+    pub rtp_diagnostics: Option<bool>,
+    /// SDP media diagnostic log lines.
+    pub media_sdp_diagnostics: Option<bool>,
     /// SIP trace diagnostics.
     pub sip_trace: Option<crate::api::events::SipTraceConfig>,
     /// Whether an application should register immediately after startup.
@@ -1391,6 +1405,13 @@ pub struct EndpointBuilder {
     sip_udp_parse_queue_capacity: Option<usize>,
     srtp_mode: Option<EndpointSrtpMode>,
     auto_180_ringing: Option<bool>,
+    auto_100_trying: Option<bool>,
+    fast_auto_accept_incoming_calls: Option<bool>,
+    cleanup_diagnostics: Option<bool>,
+    cleanup_diagnostic_events: Option<bool>,
+    srtp_diagnostics: Option<bool>,
+    rtp_diagnostics: Option<bool>,
+    media_sdp_diagnostics: Option<bool>,
     account_username: Option<String>,
     auth_username: Option<String>,
     password: Option<String>,
@@ -1425,6 +1446,13 @@ impl EndpointBuilder {
             sip_udp_parse_queue_capacity: None,
             srtp_mode: None,
             auto_180_ringing: None,
+            auto_100_trying: None,
+            fast_auto_accept_incoming_calls: None,
+            cleanup_diagnostics: None,
+            cleanup_diagnostic_events: None,
+            srtp_diagnostics: None,
+            rtp_diagnostics: None,
+            media_sdp_diagnostics: None,
             account_username: None,
             auth_username: None,
             password: None,
@@ -1462,6 +1490,27 @@ impl EndpointBuilder {
         }
         if let Some(auto_180_ringing) = config.auto_180_ringing {
             builder = builder.auto_180_ringing(auto_180_ringing);
+        }
+        if let Some(auto_100_trying) = config.auto_100_trying {
+            builder = builder.auto_100_trying(auto_100_trying);
+        }
+        if let Some(fast_auto_accept) = config.fast_auto_accept_incoming_calls {
+            builder = builder.fast_auto_accept_incoming_calls(fast_auto_accept);
+        }
+        if let Some(cleanup_diagnostics) = config.cleanup_diagnostics {
+            builder = builder.cleanup_diagnostics(cleanup_diagnostics);
+        }
+        if let Some(cleanup_diagnostic_events) = config.cleanup_diagnostic_events {
+            builder = builder.cleanup_diagnostic_events(cleanup_diagnostic_events);
+        }
+        if let Some(srtp_diagnostics) = config.srtp_diagnostics {
+            builder = builder.srtp_diagnostics(srtp_diagnostics);
+        }
+        if let Some(rtp_diagnostics) = config.rtp_diagnostics {
+            builder = builder.rtp_diagnostics(rtp_diagnostics);
+        }
+        if let Some(media_sdp_diagnostics) = config.media_sdp_diagnostics {
+            builder = builder.media_sdp_diagnostics(media_sdp_diagnostics);
         }
 
         if let Some(network) = config.network {
@@ -1694,6 +1743,48 @@ impl EndpointBuilder {
         self
     }
 
+    /// Enable or disable automatic `100 Trying` timer tasks on inbound INVITEs.
+    pub fn auto_100_trying(mut self, enabled: bool) -> Self {
+        self.auto_100_trying = Some(enabled);
+        self
+    }
+
+    /// Enable or disable immediate session-path accept for inbound INVITEs.
+    pub fn fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
+        self.fast_auto_accept_incoming_calls = Some(enabled);
+        self
+    }
+
+    /// Enable or disable cleanup-stage timing diagnostics.
+    pub fn cleanup_diagnostics(mut self, enabled: bool) -> Self {
+        self.cleanup_diagnostics = Some(enabled);
+        self
+    }
+
+    /// Enable or disable per-operation cleanup diagnostic event logs.
+    pub fn cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
+        self.cleanup_diagnostic_events = Some(enabled);
+        self
+    }
+
+    /// Enable or disable SRTP negotiation diagnostic log lines.
+    pub fn srtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.srtp_diagnostics = Some(enabled);
+        self
+    }
+
+    /// Enable or disable RTP packet diagnostic log lines.
+    pub fn rtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.rtp_diagnostics = Some(enabled);
+        self
+    }
+
+    /// Enable or disable SDP media diagnostic log lines.
+    pub fn media_sdp_diagnostics(mut self, enabled: bool) -> Self {
+        self.media_sdp_diagnostics = Some(enabled);
+        self
+    }
+
     /// Set the SRTP offer policy.
     pub fn srtp(mut self, mode: EndpointSrtpMode) -> Self {
         self.srtp_mode = Some(mode);
@@ -1799,6 +1890,27 @@ impl EndpointBuilder {
         }
         if let Some(auto_180_ringing) = self.auto_180_ringing {
             config.auto_180_ringing = auto_180_ringing;
+        }
+        if let Some(auto_100_trying) = self.auto_100_trying {
+            config.auto_100_trying = auto_100_trying;
+        }
+        if let Some(fast_auto_accept) = self.fast_auto_accept_incoming_calls {
+            config.fast_auto_accept_incoming_calls = fast_auto_accept;
+        }
+        if let Some(cleanup_diagnostics) = self.cleanup_diagnostics {
+            config.cleanup_diagnostics = cleanup_diagnostics;
+        }
+        if let Some(cleanup_diagnostic_events) = self.cleanup_diagnostic_events {
+            config.cleanup_diagnostic_events = cleanup_diagnostic_events;
+        }
+        if let Some(srtp_diagnostics) = self.srtp_diagnostics {
+            config.srtp_diagnostics = srtp_diagnostics;
+        }
+        if let Some(rtp_diagnostics) = self.rtp_diagnostics {
+            config.rtp_diagnostics = rtp_diagnostics;
+        }
+        if let Some(media_sdp_diagnostics) = self.media_sdp_diagnostics {
+            config.media_sdp_diagnostics = media_sdp_diagnostics;
         }
         if self.transport == EndpointTransport::Tls && config.sip_tls_mode == SipTlsMode::Disabled {
             config.sip_tls_mode = SipTlsMode::ClientOnly;
@@ -2234,6 +2346,12 @@ mod tests {
                 "name": "alice",
                 "profile": "asterisk-udp",
                 "auto180Ringing": false,
+                "auto100Trying": false,
+                "cleanupDiagnostics": true,
+                "cleanupDiagnosticEvents": true,
+                "srtpDiagnostics": true,
+                "rtpDiagnostics": true,
+                "mediaSdpDiagnostics": true,
                 "account": {
                     "username": "1001",
                     "password": "secret",
@@ -2268,6 +2386,12 @@ mod tests {
         assert!(parts.config.offer_srtp);
         assert!(!parts.config.srtp_required);
         assert!(!parts.config.auto_180_ringing);
+        assert!(!parts.config.auto_100_trying);
+        assert!(parts.config.cleanup_diagnostics);
+        assert!(parts.config.cleanup_diagnostic_events);
+        assert!(parts.config.srtp_diagnostics);
+        assert!(parts.config.rtp_diagnostics);
+        assert!(parts.config.media_sdp_diagnostics);
         assert_eq!(parts.config.sip_udp_parse_workers, Some(4));
         assert_eq!(parts.config.sip_udp_parse_queue_capacity, Some(8192));
         assert_eq!(

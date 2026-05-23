@@ -161,6 +161,10 @@ impl ServerInviteLogic {
 
         // Start Timer 100 with 200ms interval
         let interval_100 = timer_config.timer_100_interval;
+        if interval_100.is_zero() {
+            trace!(id=%tx_id, "Timer 100 disabled by transaction timer settings");
+            return;
+        }
 
         // Keep Timer 100 off the transaction command queue. Under high CPS,
         // enqueuing one timer command per INVITE adds avoidable command-loop
@@ -908,20 +912,20 @@ impl ServerInviteTransaction {
         let data_for_runner = data.clone();
         let logic_for_runner = logic.clone();
 
-        // **RFC 3261 COMPLIANCE FIX**: Start Timer 100 for initial Proceeding state
-        // Timer 100 must be started when the transaction begins in Proceeding state
-        let initial_cmd_tx = data.cmd_tx.clone();
-        let initial_data = data.clone();
-        let initial_logic = logic.clone();
+        if !timer_config.timer_100_interval.is_zero() {
+            // **RFC 3261 COMPLIANCE FIX**: Start Timer 100 for initial Proceeding state.
+            let initial_cmd_tx = data.cmd_tx.clone();
+            let initial_data = data.clone();
+            let initial_logic = logic.clone();
 
-        // Start Timer 100 immediately for the initial Proceeding state
-        tokio::spawn(async move {
-            let mut temp_timer_handles = ServerInviteTimerHandles::default();
-            initial_logic
-                .start_timer_100(&initial_data, &mut temp_timer_handles, initial_cmd_tx)
-                .await;
-            // Timer handles will be managed by the main transaction loop
-        });
+            tokio::spawn(async move {
+                let mut temp_timer_handles = ServerInviteTimerHandles::default();
+                initial_logic
+                    .start_timer_100(&initial_data, &mut temp_timer_handles, initial_cmd_tx)
+                    .await;
+                // Timer handles will be managed by the main transaction loop
+            });
+        }
 
         // Spawn the generic event loop runner - get the receiver from the data first in a separate tokio task
         let event_loop_handle = tokio::spawn(async move {

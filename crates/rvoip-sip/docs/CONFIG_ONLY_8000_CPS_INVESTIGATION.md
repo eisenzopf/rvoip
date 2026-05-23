@@ -1,0 +1,712 @@
+# Config-Only 8000 CPS Zero-Retransmit Investigation
+
+## Current Status
+
+The high-CPS fast-answer behavior has been moved into public
+`rvoip-sip` `Config` APIs and the benchmark listener no longer depends
+on the old `RVOIP_*` server behavior environment variables. A follow-up
+wiring audit removed the remaining env-backed runtime diagnostic toggles
+from the high-CPS server path.
+
+The current branch builds and the targeted config tests pass. A fresh
+Config-only `8000 CPS` media-enabled listener accepts and cleans all
+`120000/120000` calls with no leaked state, no UDP full-socket drops, no
+transport queue backpressure, and no duplicate cache misses.
+
+The remaining problem is retransmits. The earlier env-driven fast path
+had reached `0` SIPp retransmits at `8000 CPS`. After moving the behavior
+into `Config`, an interim run still had a small retransmit count
+reported by the user (`91`). After the wiring audit and listener rewrite
+in this branch, the server behavior is Config-owned, but the latest
+Config-only validation still has recovered INVITE/BYE retransmits:
+
+| Run | Result | Retransmits | Notes |
+| --- | ---: | ---: | --- |
+| Env-driven fast path before Config migration | `120000/120000` | `0` | Achieved after suppressing automatic `180 Ringing` and using UDP burst workers/queues. |
+| Config-only, diagnostics off | `120000/120000` | `5395` | No failed calls, no listener leak, UDP full-socket drop delta `0`. |
+| Config-only, diagnostics on | `120000/120000` | `2990` | No failed calls, final `in_flight=0`, all duplicate retransmits recovered by indexed caches. |
+| Config-audit rerun, diagnostics off | `120000/120000` | `4171` | `2026-05-23 01:57`, no failed calls, warnings `0`, dead messages `0`, response `>=500 ms` count `2576`, final listener `accepted_total=120000 cleaned_total=120000`, UDP full-socket drop delta `0`. |
+
+This means the public Config wiring is in place, but the zero-retransmit
+performance target is not yet restored. The next
+developer should not assume the retransmits are correctness failures:
+they are currently fast-recovered duplicates. The open question is why
+some first responses still miss SIPp's `500 ms` retransmit timer.
+
+## Goal
+
+Make the media-enabled `8000 CPS` SIPp benchmark run with no server
+behavior env vars and meet:
+
+- `120000/120000` successful calls.
+- `0` SIPp retransmits.
+- final listener `in_flight=0`.
+- `accepted_total == cleaned_total`.
+- cleanup diagnostics `active_total=0`.
+- UDP full-socket-buffer drops delta `0`.
+- duplicate INVITE/BYE cache misses `0`.
+
+Load-generation env vars are still allowed for SIPp and the shell
+harness. The rvoip server process must get high-CPS behavior from
+`Config`, not from env.
+
+## What Changed In This Branch
+
+### Public Config Profile
+
+Added a public Config profile:
+
+```rust
+Config::local("perf-listener", port)
+    .with_high_cps_udp_auto_answer(20_000)
+```
+
+The profile applies:
+
+- `auto_180_ringing = false`
+- `with_channel_capacity(capacity)`
+- `sip_udp_parse_workers = Some(1)`
+- `sip_udp_parse_queue_capacity = Some(capacity)`
+- `media_mode = MediaMode::Enabled`
+- no socket buffer enlargement
+- no `server_call_capacity` inflation
+
+The profile deliberately does not set `server_call_capacity`. During
+the earlier migration, using broad call capacity for media preallocation
+also inflated dialog/transaction indexes and made retransmits worse. The
+current branch keeps media capacity separate.
+
+Relevant files:
+
+- `crates/rvoip-sip/src/api/unified.rs`
+- `crates/rvoip-sip/src/api/builder.rs`
+- `crates/rvoip-sip/src/api/stream_peer.rs`
+- `crates/rvoip-sip/src/api/callback_peer.rs`
+
+### Media Capacity Controls
+
+Added Config controls:
+
+```rust
+.with_media_session_capacity(20_000)
+.with_media_port_capacity(16_384, 49_152)
+```
+
+`with_media_port_capacity(start, capacity)` computes the media port end
+from Config instead of relying on hard-coded perf env ranges. The
+`16384 + 49152 - 1` range reaches `65535`.
+
+`UnifiedCoordinator::create_media_controller` now wires:
+
+```rust
+config
+    .media_session_capacity
+    .or(config.server_call_capacity)
+    .unwrap_or(0)
+```
+
+into:
+
+```rust
+MediaSessionController::with_port_range_and_capacity(...)
+```
+
+This keeps media preallocation independent from dialog/transaction
+capacity unless an application intentionally uses `server_call_capacity`
+as the fallback.
+
+### Config-Owned Diagnostics
+
+Added Config flags:
+
+```rust
+.with_sip_udp_diagnostics(true)
+.with_media_setup_diagnostics(true)
+.with_cleanup_diagnostics(true)
+.with_cleanup_diagnostic_events(true)
+.with_srtp_diagnostics(true)
+.with_rtp_diagnostics(true)
+.with_media_sdp_diagnostics(true)
+```
+
+`UnifiedCoordinator::new` now propagates them to:
+
+- `rvoip_sip_transport::diagnostics::set_enabled`
+- `rvoip_sip_dialog::diagnostics::set_enabled`
+- `rvoip_media_core::diagnostics::set_enabled`
+- `rvoip_sip::cleanup_diag::set_enabled`
+- `rvoip_sip::cleanup_diag::set_event_logs_enabled`
+- `rvoip_sip::adapters::media_adapter::set_sdp_diagnostics`
+- `rvoip_rtp_core::transport::set_udp_diagnostics`
+
+The old env-backed runtime diagnostic toggles were removed from the
+server path:
+
+- `RVOIP_SIP_DIAGNOSTICS`
+- `RVOIP_SRTP_DIAGNOSTICS`
+- `RVOIP_MEDIA_DIAGNOSTICS`
+- `RVOIP_RTP_DIAGNOSTICS`
+- `RVOIP_PERF_CLEANUP_DIAG`
+- `RVOIP_PERF_CLEANUP_DIAG_EVENTS`
+
+`Config::state_table_path` is now the only runtime custom state-table
+override; the old `RVOIP_STATE_TABLE` fallback was removed.
+
+Residual env reads in the audited runtime crates are not server behavior
+configuration:
+
+- `RVOIP_TEST` and `RVOIP_TEST_TRANSACTION_TIMEOUT_MS` are test hooks.
+- `RUN_SOCKET_TESTS` gates socket tests.
+- `USER` is used only for the RTP RTCP CNAME default.
+
+### Perf Listener Rewrite
+
+`crates/rvoip-sip/examples/perf_listener.rs` now builds this profile by
+default:
+
+```rust
+Config::local("perf-listener", port)
+    .with_high_cps_udp_auto_answer(20_000)
+    .with_media_port_capacity(16_384, 49_152)
+    .with_media_session_capacity(20_000)
+```
+
+It also accepts an optional `--diagnostics` CLI flag that enables the
+Config diagnostics flags used by the perf listener.
+
+The listener no longer reads these old server behavior env vars:
+
+- `RVOIP_PERF_CHANNEL_CAPACITY`
+- `RVOIP_PERF_SERVER_CAPACITY`
+- `RVOIP_PERF_SIP_UDP_PARSE_*`
+- `RVOIP_PERF_AUTO_180_RINGING`
+- `RVOIP_PERF_SUPPRESS_AUTO_180`
+- `RVOIP_PERF_MEDIA_ENABLED`
+- `RVOIP_PERF_NO_MEDIA`
+- `RVOIP_PERF_NO_MEDIA_RTP_PORT`
+- `RVOIP_PERF_RTP_PORT_*`
+- `RVOIP_PERF_MEDIA_PORT_*`
+- `RVOIP_SIP_UDP_PARSE_WORKERS`
+- `RVOIP_SIP_UDP_PARSE_QUEUE_CAPACITY`
+
+Verification command used:
+
+```bash
+rg -n 'RVOIP_PERF_CHANNEL_CAPACITY|RVOIP_PERF_SERVER_CAPACITY|RVOIP_PERF_SIP_UDP_PARSE|RVOIP_PERF_AUTO_180|RVOIP_PERF_MEDIA_ENABLED|RVOIP_PERF_RTP_PORT|RVOIP_PERF_MEDIA_PORT|RVOIP_PERF_SUPPRESS_AUTO_180|RVOIP_SIP_UDP_PARSE_WORKERS|RVOIP_SIP_UDP_PARSE_QUEUE_CAPACITY|RVOIP_PERF_NO_MEDIA|RVOIP_PERF_NO_MEDIA_RTP_PORT' \
+  crates/rvoip-sip/examples/perf_listener.rs \
+  crates/rvoip-sip/tests/perf/perf_call_setup_cps.rs \
+  crates/rvoip-sip/src \
+  crates/rvoip-sip-dialog/src \
+  crates/rvoip-sip-transport/src \
+  crates/media-core/src \
+  crates/rtp-core/src
+```
+
+It returned no matches.
+
+### Perf Test Harness Update
+
+`crates/rvoip-sip/tests/perf/perf_call_setup_cps.rs` now uses:
+
+```rust
+config.with_high_cps_udp_auto_answer(channel_capacity)
+```
+
+for the high-CPS server profile. Load-generator env vars remain in the
+SIPp scripts and perf harness; those are not server behavior knobs.
+
+### Tests Added Or Updated
+
+Updated/added coverage in:
+
+- `crates/rvoip-sip/tests/config_channel_capacity_integration.rs`
+- `crates/rvoip-sip/tests/config_tests.rs`
+
+Covered cases include:
+
+- high-CPS profile sets fast-answer, channel capacity, UDP parse worker,
+  UDP parse queue capacity, and media enabled.
+- high-CPS profile does not set `server_call_capacity`.
+- media session capacity is independent from `server_call_capacity`.
+- media port capacity computes `16384-65535` for capacity `49152`.
+- media port overflow/range validation fails.
+- zero media capacities are rejected.
+- Config diagnostics flags are retained.
+
+Commands run and passing after the wiring audit:
+
+```bash
+cargo fmt --all --check
+cargo test -p rvoip-sip --test config_channel_capacity_integration -- --nocapture
+cargo test -p rvoip-sip --test config_tests -- --nocapture
+cargo test -p rvoip-sip endpoint_json_config_maps_builder_fields -- --nocapture
+cargo check -p rvoip-sip --examples
+cargo build --release -p rvoip-sip --example perf_listener
+```
+
+## Important Prior Investigation Context
+
+### 5000 CPS Was Clean
+
+The media-enabled `5000 CPS` path was cleaned up before this Config
+migration. Final listener state drained and cleanup diagnostics ended
+with `active_total=0`.
+
+### 6000 CPS Exposed The Next Knee
+
+A media-enabled `6000 CPS` run still failed acceptance after the invalid
+RTP flood was fixed:
+
+- success about `99.0%`
+- retransmissions about `3844`
+- final in-flight about `929`
+- p99 still below `150 ms`
+- final cleanup `active_total=0`
+
+That pointed away from a cleanup leak and toward pressure during setup,
+socket churn, response timing, or scheduler/runtime contention.
+
+### RTP Port Capacity Was Fixed
+
+The RTP port range had been hard-coded/misleading in perf envs. The new
+Config media port capacity API is intended to make this explicit:
+
+```rust
+with_media_port_capacity(16_384, 49_152)
+```
+
+### Invalid RTP Version Flood Was Fixed Separately
+
+The `Invalid RTP version: 1` issue was diagnosed as non-RTP datagrams
+arriving on RTP sockets, not bad SDP negotiation. The RTP receive path
+was updated to classify/drop non-RTP/RTCP datagrams instead of parsing
+them as RTP or converting them into media events.
+
+That issue is not the current retransmit root cause.
+
+### Removing Automatic 180 Ringing Got To Zero Retransmits
+
+The high-CPS IVR/call-center-style fast-answer path improved sharply
+when automatic `180 Ringing` was suppressed. In this benchmark the
+server accepts every INVITE immediately, so sending `180` and then `200`
+adds one extra outbound UDP response per call. At `8000 CPS`, that is
+`120000` extra outbound datagrams over the 15 second steady run.
+
+The Config default remains PBX/compliance-friendly:
+
+```rust
+auto_180_ringing = true
+```
+
+The high-CPS auto-answer profile intentionally sets:
+
+```rust
+auto_180_ringing = false
+```
+
+This is appropriate for fast-answer services where the application is
+ready to send final `200 OK` immediately.
+
+## How To Reproduce The Current Config-Only Runs
+
+Build:
+
+```bash
+cargo build --release -p rvoip-sip --example perf_listener
+```
+
+Start the listener without any `RVOIP_*` server behavior env vars:
+
+```bash
+target/release/examples/perf_listener 35060 192.168.5.2
+```
+
+For Config-owned diagnostics:
+
+```bash
+target/release/examples/perf_listener 35060 192.168.5.2 --diagnostics
+```
+
+The second argument must be the address SIPp containers can use to reach
+the host listener. On this macOS Docker setup, `host.docker.internal`
+resolves inside the container to `192.168.5.2`, while it may not resolve
+on the host process itself.
+
+Run the Dockerized SIPp harness from the workspace root:
+
+```bash
+RVOIP_PERF_RESULTS=crates/rvoip-sip/tests/perf/sipp_scenarios/results/config_only_8000_$(date +%Y%m%d_%H%M%S) \
+RVOIP_PERF_CPS=8000 \
+RVOIP_PERF_STEADY_SECS=15 \
+RVOIP_PERF_SIPP_SHARD_CPS=1000 \
+RVOIP_PERF_TRACE_SCREEN=0 \
+crates/rvoip-sip/tests/perf/sipp_scenarios/run_comparison_dockerized.sh \
+  192.168.5.2 35060 rvoip
+```
+
+Query listener state while the listener is still running:
+
+```bash
+curl -s http://127.0.0.1:35061/state
+```
+
+Stop the listener with SIGINT so final diagnostics print:
+
+```bash
+pkill -INT -f 'target/release/examples/perf_listener 35060'
+```
+
+## Current Config-Only Results
+
+### Diagnostics Off
+
+Fresh config-audit rerun after removing the remaining env-backed runtime
+diagnostic toggles:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_config_audit_8000_20260523_015707
+```
+
+Aggregate:
+
+- `TotalCallCreated=120000`
+- `SuccessfulCall=120000`
+- `FailedCall=0`
+- `Retransmissions=4171`
+- `Warnings=0`
+- `DeadCallMsgs=0`
+- response `>=500 ms` buckets `2576`
+- host UDP full-socket-buffer drops delta `0`
+
+Listener final state after stop:
+
+- `accepted_total=120000`
+- `cleaned_total=120000`
+- `in_flight=0`
+
+This confirms config wiring is not the remaining blocker. The residual
+problem is first-response latency under the 8000 CPS burst.
+
+Result directory:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/config_only_8000_20260523_003707
+```
+
+Aggregate SIPp result:
+
+- `TotalCallCreated=120000`
+- `SuccessfulCall=120000`
+- `FailedCall=0`
+- `Retransmissions=5395`
+- `Warnings=0`
+- `DeadCallMsgs=0`
+- p99 bucket `<1000 ms`
+- host UDP full-socket-buffer drops delta `0`
+
+Listener final state before stop:
+
+- `accepted_total=120000`
+- `cleaned_total=120000`
+- `in_flight=0`
+
+### Diagnostics On
+
+Result directory:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/config_only_diag_8000_20260523_004058
+```
+
+Aggregate SIPp result:
+
+- `TotalCallCreated=120000`
+- `SuccessfulCall=120000`
+- `FailedCall=0`
+- `Retransmissions=2990`
+- `Warnings=5`
+- `DeadCallMsgs=5`
+- p99 bucket `<1000 ms`
+- host UDP full-socket-buffer drops delta `0`
+
+Per-shard retransmissions:
+
+| Shard | Retransmits | Warnings/Dead |
+| --- | ---: | ---: |
+| s0 | `131` | `0/0` |
+| s1 | `416` | `0/0` |
+| s2 | `313` | `0/0` |
+| s3 | `603` | `0/0` |
+| s4 | `341` | `3/3` |
+| s5 | `558` | `2/2` |
+| s6 | `65` | `0/0` |
+| s7 | `563` | `0/0` |
+
+Final listener state:
+
+- `accepted_total=120000`
+- `cleaned_total=120000`
+- `in_flight=0`
+
+Media setup diagnostics:
+
+- `start_avg_us=110.3`
+- `start_max_us=10311`
+- `rtp_port_avg_us=1.1`
+- `rtp_port_max_us=234`
+- `rtp_session_avg_us=106.5`
+- `rtp_session_max_us=10306`
+- `stop_avg_us=35.1`
+- `stop_max_us=393`
+- `port_release_avg_us=0.9`
+- `port_release_max_us=145`
+
+SIP UDP diagnostics:
+
+- `recv=362990`
+- `queued=362990`
+- `queue_full=0`
+- `parse_ok=362990`
+- `parse_err=0`
+- `transport_backpressure_events=0`
+- `manager_backpressure_events=0`
+- `sends=243038`
+- `send_errors=0`
+- `resp_1xx=0`
+- `resp_2xx=243038`
+- send latency buckets:
+  - `<100us=242705`
+  - `<500us=330`
+  - `<1ms=2`
+  - `<5ms=1`
+  - `<10ms=0`
+  - `>=10ms=0`
+
+Duplicate recovery diagnostics:
+
+- `dup_invite_existing_tx=1869`
+- `dup_invite_cache_hit=1869`
+- `dup_invite_cache_miss=0`
+- `dup_bye_tombstone_hit=1121`
+- `dup_bye_tombstone_miss=0`
+- `invite_2xx_ack_removed=119998`
+- `invite_2xx_ack_avg_ms=35.748`
+
+Important observation:
+
+```text
+dup_invite_cache_hit + dup_bye_tombstone_hit = 1869 + 1121 = 2990
+```
+
+That exactly matches the SIPp retransmission count for the diagnostics
+run. The retransmits are being recovered by indexed/cache paths. They
+are not creating new sessions, new media, or cleanup leaks.
+
+## What The Diagnostics Rule Out
+
+Current data does not support these as the remaining root cause:
+
+- automatic `180 Ringing`: `resp_1xx=0`.
+- kernel UDP receive drops on the host: full-socket-buffer drop delta `0`.
+- UDP parse queue saturation: `queue_full=0`.
+- transport/manager backpressure: both backpressure counters `0`.
+- SIP parse failures: `parse_err=0`.
+- send syscall latency: nearly all sends completed under `100 us`.
+- missing duplicate indexes: duplicate INVITE/BYE cache misses `0`.
+- media port allocator slowness: `rtp_port_avg_us=1.1`, max `234 us`.
+- media teardown leak: listener drains to `accepted_total == cleaned_total`.
+- cleanup leak: final cleanup active count is `0`.
+
+Current data still leaves these possibilities open:
+
+- queue/scheduler delay before the first final INVITE response is built.
+- queue/scheduler delay before BYE `200 OK` is sent.
+- transaction/dialog manager event-loop latency not captured by current
+  send-latency counters.
+- app/session-event path delay before auto-answer reaches
+  `send_response_for_session`.
+- SIPp container receive scheduling or Docker networking effects.
+- packet delivery timing where the server sends quickly, but SIPp does
+  not receive/process before its `500 ms` retransmit timer.
+
+## Why The Existing Diagnostics Are Not Enough
+
+The current transport send latency bucket measures the outbound send
+operation once the response is already being sent. It does not measure
+the full time from inbound request arrival to response send completion.
+
+For the remaining retransmits, the next needed measurement is:
+
+```text
+UDP datagram received
+  -> parsed
+  -> queued to transport/transaction/dialog/session
+  -> application auto-answer decision
+  -> final response built
+  -> response send completed
+```
+
+split by method and response:
+
+- INVITE to first `200 OK`.
+- retransmitted INVITE to cached `200 OK`.
+- BYE to `200 OK`.
+- retransmitted BYE to tombstone/cache `200 OK`.
+
+Without that end-to-end per-request latency histogram, we cannot tell
+whether the remaining tail is inside rvoip or outside it.
+
+## Recommended Next Work
+
+### 1. Add Config-Gated Response Timing Diagnostics
+
+Add counters/histograms behind `Config::with_sip_udp_diagnostics(true)`
+for:
+
+- inbound UDP receive timestamp.
+- parse queue wait.
+- transaction/dialog manager queue wait.
+- INVITE first-response latency from receive to send completion.
+- INVITE cached-response latency from receive to send completion.
+- BYE first-response latency from receive to send completion.
+- BYE tombstone-response latency from receive to send completion.
+- p50/p95/p99/p99.9/max for each path.
+- counts over `500 ms` for each path.
+
+The key acceptance question is simple:
+
+```text
+Do any first INVITE 200 OK or BYE 200 OK responses leave rvoip after 500 ms?
+```
+
+If yes, optimize the internal path. If no, investigate SIPp/container
+receive timing and network delivery.
+
+### 2. Capture A macOS sample During The Active Window
+
+Run one diagnostic `8000 CPS` listener and sample for about 10 seconds
+during the 15 second steady phase:
+
+```bash
+target/release/examples/perf_listener 35060 192.168.5.2 --diagnostics
+```
+
+In another shell after SIPp starts:
+
+```bash
+pid=$(pgrep -f 'target/release/examples/perf_listener 35060')
+sample "$pid" 10 -file /tmp/rvoip_config_only_8000.sample.txt
+```
+
+Look specifically for:
+
+- transaction manager contention.
+- dialog lookup/cache contention.
+- session event-handler queueing.
+- auto-answer path work before final `200 OK`.
+- BYE handler work before `200 OK`.
+- Tokio scheduler/runtime overhead.
+- allocator pressure.
+- media setup unexpectedly reappearing in hot stacks.
+
+### 3. If Server Response Latency Exceeds 500 ms
+
+Optimize the measured path, not the SIPp scenario. Likely candidates:
+
+- direct fast-answer path for the high-CPS auto-answer profile.
+- fewer task/queue hops before INVITE `200 OK`.
+- ensure BYE `200 OK` is emitted before cleanup work, not after.
+- avoid any broad session/dialog scans in the first-response path.
+- keep duplicate INVITE/BYE indexed-cache behavior unchanged.
+
+Do not reintroduce broad `server_call_capacity` inflation as a media
+capacity workaround.
+
+### 4. If Server Response Latency Stays Low
+
+If the new histograms prove rvoip sends all first responses well below
+`500 ms`, collect evidence outside the server:
+
+- packet capture on host and container interfaces.
+- SIPp per-shard receive timing.
+- Docker networking scheduling/timing.
+- CPU utilization and runnable-thread pressure inside the SIPp
+  containers.
+
+Only make SIPp or socket-buffer changes after proving the server sends
+responses before the retransmit timer.
+
+## Useful Code Pointers
+
+### Config And Coordinator
+
+- `crates/rvoip-sip/src/api/unified.rs`
+  - `Config`
+  - `Config::with_high_cps_udp_auto_answer`
+  - `Config::with_media_port_capacity`
+  - `Config::with_media_session_capacity`
+  - `Config::with_sip_udp_diagnostics`
+  - `Config::with_media_setup_diagnostics`
+  - `UnifiedCoordinator::new`
+  - `UnifiedCoordinator::create_media_controller`
+
+### Public API Builders
+
+- `crates/rvoip-sip/src/api/builder.rs`
+- `crates/rvoip-sip/src/api/stream_peer.rs`
+- `crates/rvoip-sip/src/api/callback_peer.rs`
+
+### Listener And Perf Harness
+
+- `crates/rvoip-sip/examples/perf_listener.rs`
+- `crates/rvoip-sip/tests/perf/perf_call_setup_cps.rs`
+- `crates/rvoip-sip/tests/perf/sipp_scenarios/run_comparison_dockerized.sh`
+- `crates/rvoip-sip/tests/perf/sipp_scenarios/uac_perf.xml`
+
+`uac_perf.xml` has `retrans="500"` on INVITE/BYE sends. That is why any
+server-side response tail over `500 ms` appears as a retransmit.
+
+### Diagnostics
+
+- `crates/rvoip-sip-transport/src/diagnostics.rs`
+- `crates/rvoip-sip-dialog/src/diagnostics.rs`
+- `crates/media-core/src/diagnostics.rs`
+
+### BYE Handling
+
+- `crates/rvoip-sip/src/state_table/wiring_manifest.rs`
+  - documents that dialog-core sends BYE `200 OK`; session-core only
+    cleans up.
+- `crates/rvoip-sip-dialog/src/manager/protocol_handlers.rs`
+- `crates/rvoip-sip-dialog/src/manager/transaction_integration.rs`
+
+The next response-latency instrumentation should confirm whether BYE
+`200 OK` is actually sent before expensive cleanup under `8000 CPS`
+load.
+
+## Things Not To Change Blindly
+
+- Do not enlarge UDP socket buffers by default. Previous large-buffer
+  testing worsened results.
+- Do not use `server_call_capacity` as a catch-all capacity knob for
+  media. It also changes dialog/transaction index sizing.
+- Do not change SIPp retransmit timers to hide the problem.
+- Do not disable media for the target run. The current target is
+  media-enabled `8000 CPS`.
+- Do not remove duplicate caches. Current diagnostics show they are
+  working and prevent retransmits from creating duplicate sessions.
+
+## Handoff Summary
+
+The Config migration is now real enough that the listener starts from
+public Config and no longer reads the old fast-path envs. The server is
+correct under load: all calls succeed, all cleanup drains, UDP queues do
+not back up, media allocation is fast, and duplicate retransmits are
+handled by indexed caches.
+
+The remaining gap is performance, not correctness: restoring `0`
+retransmits requires finding why a subset of first INVITE/BYE responses
+still miss SIPp's `500 ms` retransmit timer after the env-to-Config
+migration. The next decisive change is end-to-end request-to-response
+latency diagnostics, Config-gated through `with_sip_udp_diagnostics`,
+followed by a sampled `8000 CPS` diagnostic run.

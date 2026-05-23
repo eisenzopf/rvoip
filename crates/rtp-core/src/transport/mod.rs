@@ -115,5 +115,5 @@ pub use allocator::{
 };
 pub use security_transport::SecurityRtpTransport;
 pub use tcp::TcpRtpTransport;
-pub use udp::UdpRtpTransport;
+pub use udp::{set_diagnostics as set_udp_diagnostics, UdpRtpTransport};
 pub use validation::{PlatformSocketStrategy, PlatformType, RtpSocketValidator};

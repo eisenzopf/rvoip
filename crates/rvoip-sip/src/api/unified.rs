@@ -210,6 +210,12 @@ pub struct Config {
     pub media_port_start: u16,
     /// Ending port for media
     pub media_port_end: u16,
+    /// Requested media port range capacity when configured by capacity.
+    ///
+    /// `None` means the explicit start/end range is authoritative. When set,
+    /// validation checks that the configured range can satisfy the requested
+    /// number of RTP ports.
+    pub media_port_capacity: Option<usize>,
     /// Bind address for SIP
     pub bind_addr: SocketAddr,
     /// Optional advertised address for SIP Via sent-by and fallback Contact
@@ -217,7 +223,7 @@ pub struct Config {
     /// `0.0.0.0`, while the advertised address must be routable by peers.
     pub sip_advertised_addr: Option<SocketAddr>,
     /// Optional path to custom state table YAML
-    /// Priority: 1) This config path, 2) RVOIP_STATE_TABLE env var, 3) Embedded default
+    /// Priority: 1) this config path, 2) embedded default
     pub state_table_path: Option<String>,
     /// Local SIP URI (e.g., "sip:alice@127.0.0.1:5060")
     pub local_uri: String,
@@ -236,6 +242,24 @@ pub struct Config {
     /// contact-center, and auto-answer services that immediately send a final
     /// response and do not need the extra provisional response.
     pub auto_180_ringing: bool,
+
+    /// Whether INVITE server transactions arm the automatic RFC 3261
+    /// `100 Trying` timer.
+    ///
+    /// Default: `true`, which preserves RFC-friendly behavior for ordinary
+    /// endpoints. Set to `false` only for fixed fast-answer services that
+    /// immediately send a final response and do not need one timer task per
+    /// inbound INVITE.
+    pub auto_100_trying: bool,
+
+    /// Whether inbound INVITEs are accepted immediately in the session event
+    /// path before application callback dispatch.
+    ///
+    /// Default: `false`, preserving normal app-controlled accept/reject/defer
+    /// behavior. Set to `true` only for fixed auto-answer services and
+    /// high-CPS benchmarks where the app callback must not sit on the first
+    /// final response path.
+    pub fast_auto_accept_incoming_calls: bool,
 
     /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
     /// INVITEs. `None` disables session timers entirely. Common carrier
@@ -508,6 +532,13 @@ pub struct Config {
     /// and controlled tests.
     pub media_mode: MediaMode,
 
+    /// Optional capacity hint for media-core session and RTP port indexes.
+    ///
+    /// This is intentionally separate from [`Config::server_call_capacity`]:
+    /// high-CPS media servers may want RTP/media preallocation without
+    /// inflating SIP dialog and transaction indexes.
+    pub media_session_capacity: Option<usize>,
+
     /// STUN server (RFC 8489 §14) to probe for the RTP-side public
     /// mapping at coordinator boot. Format: `"host:port"` or `"host"`
     /// (default port 3478). Common public servers:
@@ -671,6 +702,41 @@ pub struct Config {
     /// tying that memory reservation to the larger event-queue capacities.
     pub server_call_capacity: Option<usize>,
 
+    /// Enable SIP UDP transport and duplicate-recovery diagnostics.
+    ///
+    /// This is a Config-owned replacement for benchmark-only diagnostic env
+    /// toggles. It enables UDP receive/send counters and SIP duplicate
+    /// INVITE/BYE cache counters for this process.
+    pub sip_udp_diagnostics: bool,
+
+    /// Enable media setup/teardown timing diagnostics.
+    ///
+    /// This records media start/stop, RTP port allocation, RTP session
+    /// creation, event subscription, and handler-spawn timing.
+    pub media_setup_diagnostics: bool,
+
+    /// Enable cleanup-stage timing diagnostics.
+    ///
+    /// This records cleanup and high-rate call-progress subpath counters used
+    /// by the perf listener and high-CPS investigations.
+    pub cleanup_diagnostics: bool,
+
+    /// Enable per-operation cleanup diagnostic event logs.
+    ///
+    /// This is intentionally separate from [`Config::cleanup_diagnostics`]
+    /// because it emits one log line per measured operation and is much more
+    /// expensive under load.
+    pub cleanup_diagnostic_events: bool,
+
+    /// Enable SRTP negotiation diagnostic log lines.
+    pub srtp_diagnostics: bool,
+
+    /// Enable RTP packet diagnostic log lines.
+    pub rtp_diagnostics: bool,
+
+    /// Enable SDP media diagnostic log lines.
+    pub media_sdp_diagnostics: bool,
+
     /// SIP_API_DESIGN_2 §7.4 — application-supplied headers stamped
     /// on every outbound message the state machine emits
     /// **automatically** (session-timer auto-BYE, dialog-terminated-
@@ -715,12 +781,15 @@ impl Config {
             sip_port: port,
             media_port_start: Self::DEFAULT_MEDIA_PORT_START,
             media_port_end: Self::DEFAULT_MEDIA_PORT_END,
+            media_port_capacity: None,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
+            auto_100_trying: true,
+            fast_auto_accept_incoming_calls: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -751,6 +820,7 @@ impl Config {
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
+            media_session_capacity: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -767,6 +837,13 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
+            sip_udp_diagnostics: false,
+            media_setup_diagnostics: false,
+            cleanup_diagnostics: false,
+            cleanup_diagnostic_events: false,
+            srtp_diagnostics: false,
+            rtp_diagnostics: false,
+            media_sdp_diagnostics: false,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -786,12 +863,15 @@ impl Config {
             sip_port: port,
             media_port_start: Self::DEFAULT_MEDIA_PORT_START,
             media_port_end: Self::DEFAULT_MEDIA_PORT_END,
+            media_port_capacity: None,
             bind_addr: SocketAddr::new(ip, port),
             sip_advertised_addr: None,
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
             auto_180_ringing: true,
+            auto_100_trying: true,
+            fast_auto_accept_incoming_calls: false,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -822,6 +902,7 @@ impl Config {
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
             media_mode: MediaMode::Enabled,
+            media_session_capacity: None,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -838,6 +919,13 @@ impl Config {
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
+            sip_udp_diagnostics: false,
+            media_setup_diagnostics: false,
+            cleanup_diagnostics: false,
+            cleanup_diagnostic_events: false,
+            srtp_diagnostics: false,
+            rtp_diagnostics: false,
+            media_sdp_diagnostics: false,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -1089,6 +1177,24 @@ impl Config {
         self
     }
 
+    /// Apply a high-CPS UDP auto-answer profile.
+    ///
+    /// This keeps media enabled, suppresses automatic `180 Ringing`, sizes SIP
+    /// event queues from `capacity`, and configures the UDP receive path for a
+    /// single fast parse worker with a queue sized to the same burst capacity.
+    /// It leaves automatic `100 Trying` enabled because Timer 100 remains part
+    /// of the transaction pacing/recovery behavior under overload. It does not
+    /// enlarge socket buffers and does not set
+    /// [`Config::server_call_capacity`].
+    pub fn with_high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
+        self = self.with_channel_capacity(capacity);
+        self.auto_180_ringing = false;
+        self.sip_udp_parse_workers = Some(1);
+        self.sip_udp_parse_queue_capacity = Some(capacity);
+        self.media_mode = MediaMode::Enabled;
+        self
+    }
+
     fn dialog_index_capacity_hint(&self) -> usize {
         self.server_call_capacity
             .unwrap_or(self.transaction_event_channel_capacity)
@@ -1114,6 +1220,22 @@ impl Config {
     pub fn with_media_ports(mut self, start: u16, end: u16) -> Self {
         self.media_port_start = start;
         self.media_port_end = end;
+        self.media_port_capacity = None;
+        self
+    }
+
+    /// Set the RTP media port range by start port and requested capacity.
+    ///
+    /// Validation rejects capacity `0`, start ports below [`MIN_PORT`], and
+    /// requested capacities that do not fit in the `u16` port space.
+    pub fn with_media_port_capacity(mut self, start: u16, capacity: usize) -> Self {
+        self.media_port_start = start;
+        self.media_port_end = capacity
+            .checked_sub(1)
+            .and_then(|offset| (start as usize).checked_add(offset))
+            .and_then(|end| u16::try_from(end).ok())
+            .unwrap_or(u16::MAX);
+        self.media_port_capacity = Some(capacity);
         self
     }
 
@@ -1127,9 +1249,35 @@ impl Config {
         self
     }
 
+    /// Enable or disable the automatic RFC 3261 `100 Trying` timer.
+    ///
+    /// The default is `true`. High-CPS immediate-answer services can set this
+    /// to `false` to avoid spawning a timer task for every INVITE when a final
+    /// response is expected well before Timer 100 would fire.
+    pub fn with_auto_100_trying(mut self, enabled: bool) -> Self {
+        self.auto_100_trying = enabled;
+        self
+    }
+
+    /// Enable or disable immediate session-path accept for inbound INVITEs.
+    ///
+    /// This is intentionally separate from [`Config::auto_180_ringing`]:
+    /// disabling 180 only removes the provisional response, while enabling
+    /// this option sends the final answer before app callbacks run.
+    pub fn with_fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
+        self.fast_auto_accept_incoming_calls = enabled;
+        self
+    }
+
     /// Set media allocation behavior.
     pub fn with_media_mode(mut self, mode: MediaMode) -> Self {
         self.media_mode = mode;
+        self
+    }
+
+    /// Set the media-core session and RTP allocator capacity hint.
+    pub fn with_media_session_capacity(mut self, capacity: usize) -> Self {
+        self.media_session_capacity = Some(capacity);
         self
     }
 
@@ -1251,6 +1399,48 @@ impl Config {
     /// Values below `1` are rejected by [`Config::validate`].
     pub fn with_session_event_dispatcher_channel_capacity(mut self, capacity: usize) -> Self {
         self.session_event_dispatcher_channel_capacity = capacity;
+        self
+    }
+
+    /// Enable or disable SIP UDP transport and duplicate-recovery diagnostics.
+    pub fn with_sip_udp_diagnostics(mut self, enabled: bool) -> Self {
+        self.sip_udp_diagnostics = enabled;
+        self
+    }
+
+    /// Enable or disable media setup/teardown timing diagnostics.
+    pub fn with_media_setup_diagnostics(mut self, enabled: bool) -> Self {
+        self.media_setup_diagnostics = enabled;
+        self
+    }
+
+    /// Enable or disable cleanup-stage timing diagnostics.
+    pub fn with_cleanup_diagnostics(mut self, enabled: bool) -> Self {
+        self.cleanup_diagnostics = enabled;
+        self
+    }
+
+    /// Enable or disable per-operation cleanup diagnostic event logs.
+    pub fn with_cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
+        self.cleanup_diagnostic_events = enabled;
+        self
+    }
+
+    /// Enable or disable SRTP negotiation diagnostic log lines.
+    pub fn with_srtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.srtp_diagnostics = enabled;
+        self
+    }
+
+    /// Enable or disable RTP packet diagnostic log lines.
+    pub fn with_rtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.rtp_diagnostics = enabled;
+        self
+    }
+
+    /// Enable or disable SDP media diagnostic log lines.
+    pub fn with_media_sdp_diagnostics(mut self, enabled: bool) -> Self {
+        self.media_sdp_diagnostics = enabled;
         self
     }
 
@@ -1423,6 +1613,16 @@ impl Config {
                 "server_call_capacity must be at least 1 when set".to_string(),
             ));
         }
+        if matches!(self.media_session_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "media_session_capacity must be at least 1 when set".to_string(),
+            ));
+        }
+        if matches!(self.media_port_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "media_port_capacity must be at least 1 when set".to_string(),
+            ));
+        }
         if self.media_port_start < MIN_PORT {
             return Err(SessionError::ConfigError(format!(
                 "media_port_start must be >= {}",
@@ -1433,6 +1633,15 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "media_port_start must be <= media_port_end".to_string(),
             ));
+        }
+        if let Some(capacity) = self.media_port_capacity {
+            let available = self.media_port_end as usize - self.media_port_start as usize + 1;
+            if available < capacity {
+                return Err(SessionError::ConfigError(format!(
+                    "media port range {}-{} provides {} ports, below requested media_port_capacity {}",
+                    self.media_port_start, self.media_port_end, available, capacity
+                )));
+            }
         }
         if let MediaMode::SignalingOnly { sdp_rtp_port: 0 } = self.media_mode {
             return Err(SessionError::ConfigError(
@@ -1852,6 +2061,21 @@ impl UnifiedCoordinator {
     /// ```
     pub async fn new(config: Config) -> Result<Arc<Self>> {
         config.validate()?;
+        rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
+        rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
+        rvoip_media_core::diagnostics::set_enabled(
+            config.media_setup_diagnostics || config.sip_udp_diagnostics,
+        );
+        crate::cleanup_diag::set_enabled(config.cleanup_diagnostics);
+        crate::cleanup_diag::set_event_logs_enabled(config.cleanup_diagnostic_events);
+        crate::adapters::media_adapter::set_sdp_diagnostics(
+            config.srtp_diagnostics,
+            config.media_sdp_diagnostics,
+        );
+        rvoip_rtp_core::transport::set_udp_diagnostics(
+            config.srtp_diagnostics,
+            config.rtp_diagnostics,
+        );
 
         let global_event_config = rvoip_infra_common::events::EventCoordinatorConfig::monolithic()
             .with_channel_capacity(config.global_event_channel_capacity);
@@ -2079,6 +2303,8 @@ impl UnifiedCoordinator {
         media_adapter
             .set_app_event_publisher(app_event_publisher.clone())
             .await;
+        let fast_auto_accept_incoming_calls = config.fast_auto_accept_incoming_calls;
+        let fast_auto_accept_queue_capacity = config.incoming_call_channel_capacity;
 
         let coordinator = Arc::new(Self {
             helpers,
@@ -2109,6 +2335,10 @@ impl UnifiedCoordinator {
                 state_event_rx,
                 app_event_publisher.clone(),
                 sip_trace_owner_id,
+            )
+            .with_fast_auto_accept_incoming_calls(
+                fast_auto_accept_incoming_calls,
+                fast_auto_accept_queue_capacity,
             );
 
         // SIP_API_DESIGN_2 Phase D — give the handler a weak handle
@@ -2121,6 +2351,10 @@ impl UnifiedCoordinator {
         event_handler.start(shutdown_rx).await?;
 
         Ok(coordinator)
+    }
+
+    pub(crate) fn fast_auto_accept_incoming_calls(&self) -> bool {
+        self.config.fast_auto_accept_incoming_calls
     }
 
     // ===== Shutdown =====
@@ -3483,6 +3717,8 @@ impl UnifiedCoordinator {
                 SessionError::InternalError(format!("Failed to create transaction manager: {}", e))
             })?;
 
+        let mut transaction_manager = transaction_manager;
+        transaction_manager.set_auto_100_trying(config.auto_100_trying);
         let transaction_manager = Arc::new(transaction_manager);
 
         // Create dialog config - use hybrid mode to support both incoming and outgoing calls
@@ -3533,7 +3769,10 @@ impl UnifiedCoordinator {
         let controller = Arc::new(MediaSessionController::with_port_range_and_capacity(
             config.media_port_start,
             config.media_port_end,
-            config.server_call_capacity.unwrap_or(0),
+            config
+                .media_session_capacity
+                .or(config.server_call_capacity)
+                .unwrap_or(0),
         ));
 
         // Create and set up the event hub

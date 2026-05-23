@@ -6,33 +6,14 @@
 //! Run via:
 //! ```text
 //! cargo run -p rvoip-sip --release --example perf_listener -- 5060
-//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 host.docker.internal
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics
 //! ```
 //!
-//! The optional second argument, or `RVOIP_PERF_ADVERTISED_ADDR`, sets
-//! the SIP Contact/Via fallback address and SDP `o=`/`c=` public media
-//! address. Use it for Docker-sidecar SIPp runs so the 200 OK does not
-//! advertise `127.0.0.1` back to the container.
-//!
-//! Perf sizing knobs:
-//! - `RVOIP_PERF_CHANNEL_CAPACITY` (default 20000)
-//! - `RVOIP_PERF_SERVER_CAPACITY` (optional hot-index capacity profile)
-//! - `RVOIP_PERF_RTP_PORT_CAPACITY` / `RVOIP_PERF_MEDIA_PORT_CAPACITY`
-//!   (default follows explicit RTP range when set, otherwise channel capacity)
-//! - `RVOIP_PERF_RTP_PORT_START` / `RVOIP_PERF_MEDIA_PORT_START`
-//! - `RVOIP_PERF_RTP_PORT_END` / `RVOIP_PERF_MEDIA_PORT_END`
-//! - `RVOIP_PERF_SESSION_EVENT_WORKERS`
-//! - `RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY`
-//! - `RVOIP_PERF_SIP_UDP_RECV_BUFFER` / `RVOIP_PERF_SIP_UDP_SEND_BUFFER`
-//! - `RVOIP_PERF_SIP_UDP_PARSE_WORKERS` (default 1)
-//! - `RVOIP_PERF_SIP_UDP_PARSE_QUEUE_CAPACITY` (default follows channel capacity)
-//! - `RVOIP_PERF_CLEANUP_DIAG=1` (periodic cleanup-stage summary)
-//! - `RVOIP_PERF_CLEANUP_DIAG_EVENTS=1` (per-operation cleanup timestamps)
-//! - `RVOIP_SIP_UDP_DIAGNOSTICS=1` (UDP/SIP retransmit and backpressure summary)
-//! - `RVOIP_MEDIA_SETUP_DIAGNOSTICS=1` (media start/stop phase timing summary)
-//! - `RVOIP_PERF_MEDIA_ENABLED=0` (SIP+SDP only; skip RTP/media-core allocation)
-//! - `RVOIP_PERF_SIGNALING_ONLY_RTP_PORT` (default 9 when media is disabled)
-//! - `RVOIP_PERF_AUTO_180_RINGING=1` (opt back into PBX-style provisional ringing)
+//! The optional second argument sets the SIP Contact/Via fallback address and
+//! SDP `o=`/`c=` public media address. Use a container-visible host IP for
+//! Docker-sidecar SIPp runs so the 200 OK does not advertise `127.0.0.1` back
+//! to the container.
 //!
 //! The process runs forever; SIGINT to terminate.
 
@@ -49,6 +30,10 @@ use rvoip_sip::api::unified::Config;
 use rvoip_sip::cleanup_diag;
 use rvoip_sip_dialog::diagnostics as sip_retrans_diag;
 use rvoip_sip_transport::diagnostics as sip_udp_diag;
+
+const HIGH_CPS_CAPACITY: usize = 20_000;
+const HIGH_CPS_RTP_PORT_START: u16 = 16_384;
+const HIGH_CPS_RTP_PORT_CAPACITY: usize = 49_152;
 
 #[derive(Clone)]
 struct CountingAccept {
@@ -115,14 +100,17 @@ async fn main() {
 
     let mut args = std::env::args().skip(1);
     let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5060);
-    let advertised_arg = args
-        .next()
-        .or_else(|| std::env::var("RVOIP_PERF_ADVERTISED_ADDR").ok());
-
-    let accepted = Arc::new(AtomicU64::new(0));
-    let handler = CountingAccept {
-        accepted: Arc::clone(&accepted),
-    };
+    let mut advertised_arg = None;
+    let mut diagnostics_enabled = false;
+    for arg in args {
+        if arg == "--diagnostics" {
+            diagnostics_enabled = true;
+        } else if advertised_arg.is_none() {
+            advertised_arg = Some(arg);
+        } else {
+            panic!("unexpected perf_listener argument '{arg}'");
+        }
+    }
 
     let config = if let Some(raw) = advertised_arg {
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
@@ -141,7 +129,13 @@ async fn main() {
     } else {
         Config::local("rvoip-perf-listener", port)
     };
-    let config = apply_perf_config(config);
+    let config = apply_perf_config(config, diagnostics_enabled);
+    print_effective_config(&config);
+
+    let accepted = Arc::new(AtomicU64::new(0));
+    let handler = CountingAccept {
+        accepted: Arc::clone(&accepted),
+    };
 
     let peer = CallbackPeer::new(handler, config)
         .await
@@ -150,7 +144,6 @@ async fn main() {
     println!("rvoip-sip perf_listener: listening on 0.0.0.0:{port} (UDP SIP)");
     println!("Accepts every inbound INVITE via auto-accept handler. SIGINT to stop.");
 
-    // Hold the shutdown signal before `run()` consumes the peer.
     let shutdown = peer.shutdown_handle();
 
     // Report accepted-call count every 5 s so the operator can watch
@@ -169,7 +162,7 @@ async fn main() {
             let mut last_t = Instant::now();
             loop {
                 tokio::time::sleep(Duration::from_secs(5)).await;
-                let now_acc = accepted.load(Ordering::Relaxed);
+                let now_acc = observed_answered_total(&accepted);
                 let now_cln = cleanup_session_diag::cleaned_total();
                 let now_t = Instant::now();
                 let dt = now_t.duration_since(last_t).as_secs_f64();
@@ -203,8 +196,6 @@ async fn main() {
         })
     };
 
-    // Drive the peer's event loop on a task so we can listen for
-    // SIGINT on the main task and trigger graceful shutdown.
     let run_task = tokio::spawn(async move {
         let _ = peer.run().await;
     });
@@ -212,7 +203,7 @@ async fn main() {
     let _ = tokio::signal::ctrl_c().await;
     println!(
         "[perf_listener] stopping. final accepted_total={} cleaned_total={}",
-        accepted.load(Ordering::Relaxed),
+        observed_answered_total(&accepted),
         cleanup_session_diag::cleaned_total(),
     );
     if cleanup_diag::enabled() {
@@ -223,6 +214,19 @@ async fn main() {
     shutdown.shutdown();
     reporter.abort();
     let _ = tokio::time::timeout(Duration::from_secs(3), run_task).await;
+}
+
+fn observed_answered_total(accepted: &AtomicU64) -> u64 {
+    let callback_count = accepted.load(Ordering::Relaxed);
+    if callback_count > 0 {
+        return callback_count;
+    }
+
+    if sip_retrans_diag::enabled() {
+        return sip_retrans_diag::snapshot().invite_2xx_cache_insert;
+    }
+
+    callback_count
 }
 
 fn print_sip_udp_diagnostics() {
@@ -240,160 +244,58 @@ fn print_sip_udp_diagnostics() {
     }
 }
 
-fn apply_perf_config(config: Config) -> Config {
-    let channel_capacity = env_usize("RVOIP_PERF_CHANNEL_CAPACITY", 20_000).max(1);
-    let mut config = config.with_channel_capacity(channel_capacity);
-    if let Some(server_capacity) = env_usize_opt("RVOIP_PERF_SERVER_CAPACITY") {
-        let server_capacity = server_capacity.max(1);
-        println!(
-            "rvoip-sip perf_listener: Config::server_capacity={} (channel capacity {})",
-            server_capacity, channel_capacity
-        );
-        config = config.with_server_capacity(server_capacity);
-    } else {
-        println!(
-            "rvoip-sip perf_listener: Config::server_capacity=<unset> (channel capacity {})",
-            channel_capacity
-        );
-    }
-    println!(
-        "rvoip-sip perf_listener: Config::global_event_channel_capacity={}",
-        config.global_event_channel_capacity
-    );
-    config = apply_perf_media_ports(config, channel_capacity);
-    if let Some(workers) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_WORKERS") {
-        config = config.with_session_event_dispatcher_workers(workers);
-    }
-    if let Some(capacity) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY") {
-        config = config.with_session_event_dispatcher_channel_capacity(capacity);
-    }
-    if let Some(recv_buffer) = env_usize_opt("RVOIP_PERF_SIP_UDP_RECV_BUFFER") {
-        config = config.with_sip_udp_recv_buffer_size(recv_buffer);
-    }
-    if let Some(send_buffer) = env_usize_opt("RVOIP_PERF_SIP_UDP_SEND_BUFFER") {
-        config = config.with_sip_udp_send_buffer_size(send_buffer);
-    }
-    let udp_parse_workers = env_usize_opt("RVOIP_PERF_SIP_UDP_PARSE_WORKERS")
-        .unwrap_or(1)
-        .max(1);
-    println!("rvoip-sip perf_listener: Config::sip_udp_parse_workers={udp_parse_workers}");
-    config = config.with_sip_udp_parse_workers(udp_parse_workers);
-
-    let udp_parse_queue_capacity = env_usize_opt("RVOIP_PERF_SIP_UDP_PARSE_QUEUE_CAPACITY")
-        .unwrap_or(channel_capacity)
-        .max(1);
-    println!(
-        "rvoip-sip perf_listener: Config::sip_udp_parse_queue_capacity={udp_parse_queue_capacity}"
-    );
-    config = config.with_sip_udp_parse_queue_capacity(udp_parse_queue_capacity);
-
-    let auto_180_ringing = env_bool("RVOIP_PERF_AUTO_180_RINGING", false).unwrap_or(false);
-    println!("rvoip-sip perf_listener: Config::auto_180_ringing={auto_180_ringing}");
-    config = config.with_auto_180_ringing(auto_180_ringing);
-    let signaling_only_port = env_usize_opt("RVOIP_PERF_SIGNALING_ONLY_RTP_PORT")
-        .and_then(|port| u16::try_from(port).ok())
-        .filter(|port| *port > 0);
-    if env_bool("RVOIP_PERF_MEDIA_ENABLED", true) == Some(false) || signaling_only_port.is_some() {
-        let port = signaling_only_port.unwrap_or(9);
-        println!("rvoip-sip perf_listener: Config::media_mode=SignalingOnly(sdp_rtp_port={port})");
-        config = config.with_signaling_only_media(port);
-    }
+fn apply_perf_config(config: Config, diagnostics_enabled: bool) -> Config {
     config
+        .with_high_cps_udp_auto_answer(HIGH_CPS_CAPACITY)
+        .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
+        .with_media_session_capacity(HIGH_CPS_CAPACITY)
+        .with_sip_udp_diagnostics(diagnostics_enabled)
+        .with_media_setup_diagnostics(diagnostics_enabled)
+        .with_cleanup_diagnostics(diagnostics_enabled)
 }
 
-fn apply_perf_media_ports(config: Config, channel_capacity: usize) -> Config {
-    let media_port_start =
-        env_u16_any(&["RVOIP_PERF_RTP_PORT_START", "RVOIP_PERF_MEDIA_PORT_START"])
-            .unwrap_or(config.media_port_start);
-    let explicit_end = env_u16_any(&["RVOIP_PERF_RTP_PORT_END", "RVOIP_PERF_MEDIA_PORT_END"]);
-    let media_port_capacity = env_usize_any(&[
-        "RVOIP_PERF_RTP_PORT_CAPACITY",
-        "RVOIP_PERF_MEDIA_PORT_CAPACITY",
-    ])
-    .unwrap_or_else(|| {
-        explicit_end
-            .map(|end| (end as usize).saturating_sub(media_port_start as usize) + 1)
-            .unwrap_or(channel_capacity)
-    })
-    .max(1);
-
-    let capacity_end = port_range_end_for_capacity(media_port_start, media_port_capacity);
-    let media_port_end = explicit_end.unwrap_or(config.media_port_end.max(capacity_end));
-    if media_port_start > media_port_end {
-        panic!(
-            "invalid RTP media port range: start {} is greater than end {}",
-            media_port_start, media_port_end
-        );
-    }
-
-    let available_ports = media_port_end as usize - media_port_start as usize + 1;
-    if available_ports < media_port_capacity {
-        eprintln!(
-            "rvoip-sip perf_listener: RTP media port range {}-{} provides {} ports, below requested capacity {}",
-            media_port_start, media_port_end, available_ports, media_port_capacity
-        );
-    } else {
-        println!(
-            "rvoip-sip perf_listener: RTP media port range {}-{} ({} ports, requested capacity {})",
-            media_port_start, media_port_end, available_ports, media_port_capacity
-        );
-    }
-
-    config.with_media_ports(media_port_start, media_port_end)
-}
-
-fn port_range_end_for_capacity(start: u16, capacity: usize) -> u16 {
-    let end = start as usize + capacity.saturating_sub(1);
-    end.min(u16::MAX as usize) as u16
-}
-
-fn env_usize(name: &str, default: usize) -> usize {
-    env_usize_opt(name).unwrap_or(default)
-}
-
-fn env_usize_opt(name: &str) -> Option<usize> {
-    std::env::var(name).ok().and_then(|s| s.parse().ok())
-}
-
-fn env_bool(name: &str, default: bool) -> Option<bool> {
-    let raw = match std::env::var(name) {
-        Ok(value) => value,
-        Err(_) => return Some(default),
-    };
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-fn env_usize_any(names: &[&str]) -> Option<usize> {
-    names.iter().find_map(|name| env_usize_opt(name))
-}
-
-fn env_u16_opt(name: &str) -> Option<u16> {
-    std::env::var(name).ok().and_then(|s| s.parse().ok())
-}
-
-fn env_u16_any(names: &[&str]) -> Option<u16> {
-    names.iter().find_map(|name| env_u16_opt(name))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn perf_media_capacity_expands_default_port_range() {
-        let start = Config::DEFAULT_MEDIA_PORT_START;
-        assert_eq!(
-            port_range_end_for_capacity(start, 20_000),
-            start.saturating_add(19_999)
-        );
-    }
-
-    #[test]
-    fn perf_media_capacity_caps_at_u16_max() {
-        assert_eq!(port_range_end_for_capacity(60_000, 20_000), u16::MAX);
-    }
+fn print_effective_config(config: &Config) {
+    println!(
+        "rvoip-sip perf_listener: high_cps_config capacity={} auto_180_ringing={} \
+         auto_100_trying={} \
+         fast_auto_accept_incoming_calls={} \
+         sip_udp_parse_workers={:?} sip_udp_parse_queue_capacity={:?}",
+        HIGH_CPS_CAPACITY,
+        config.auto_180_ringing,
+        config.auto_100_trying,
+        config.fast_auto_accept_incoming_calls,
+        config.sip_udp_parse_workers,
+        config.sip_udp_parse_queue_capacity,
+    );
+    println!(
+        "rvoip-sip perf_listener: channels incoming={} state={} sip_transport={} \
+         transaction={} global={} session_dispatch={}",
+        config.incoming_call_channel_capacity,
+        config.state_event_channel_capacity,
+        config.sip_transport_channel_capacity,
+        config.transaction_event_channel_capacity,
+        config.global_event_channel_capacity,
+        config.session_event_dispatcher_channel_capacity,
+    );
+    println!(
+        "rvoip-sip perf_listener: media range {}-{} requested_capacity={:?} \
+         media_session_capacity={:?} server_capacity={:?} mode={:?}",
+        config.media_port_start,
+        config.media_port_end,
+        config.media_port_capacity,
+        config.media_session_capacity,
+        config.server_call_capacity,
+        config.media_mode,
+    );
+    println!(
+        "rvoip-sip perf_listener: diagnostics sip_udp={} media_setup={} cleanup={} \
+         cleanup_events={} srtp={} rtp={} media_sdp={}",
+        config.sip_udp_diagnostics,
+        config.media_setup_diagnostics,
+        config.cleanup_diagnostics,
+        config.cleanup_diagnostic_events,
+        config.srtp_diagnostics,
+        config.rtp_diagnostics,
+        config.media_sdp_diagnostics
+    );
 }

@@ -1099,9 +1099,39 @@ impl StreamPeerBuilder {
         self
     }
 
+    /// Set the RTP media port range by start port and requested capacity.
+    pub fn media_port_capacity(mut self, start: u16, capacity: usize) -> Self {
+        self.config = self.config.with_media_port_capacity(start, capacity);
+        self
+    }
+
+    /// Set the media-core session and RTP allocator capacity hint.
+    pub fn media_session_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_media_session_capacity(capacity);
+        self
+    }
+
+    /// Apply the high-CPS UDP auto-answer profile.
+    pub fn high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_high_cps_udp_auto_answer(capacity);
+        self
+    }
+
     /// Enable or disable automatic `180 Ringing` on inbound INVITEs.
     pub fn auto_180_ringing(mut self, enabled: bool) -> Self {
         self.config = self.config.with_auto_180_ringing(enabled);
+        self
+    }
+
+    /// Enable or disable automatic `100 Trying` timer tasks on inbound INVITEs.
+    pub fn auto_100_trying(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_auto_100_trying(enabled);
+        self
+    }
+
+    /// Enable or disable immediate session-path accept for inbound INVITEs.
+    pub fn fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_fast_auto_accept_incoming_calls(enabled);
         self
     }
 
@@ -1128,6 +1158,48 @@ impl StreamPeerBuilder {
     /// Set the per-worker UDP parse queue capacity.
     pub fn sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_sip_udp_parse_queue_capacity(capacity);
+        self
+    }
+
+    /// Enable or disable SIP UDP transport and duplicate-recovery diagnostics.
+    pub fn sip_udp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_udp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable media setup/teardown timing diagnostics.
+    pub fn media_setup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_setup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable cleanup-stage timing diagnostics.
+    pub fn cleanup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable per-operation cleanup diagnostic event logs.
+    pub fn cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostic_events(enabled);
+        self
+    }
+
+    /// Enable or disable SRTP negotiation diagnostic log lines.
+    pub fn srtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_srtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable RTP packet diagnostic log lines.
+    pub fn rtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_rtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable SDP media diagnostic log lines.
+    pub fn media_sdp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_sdp_diagnostics(enabled);
         self
     }
 

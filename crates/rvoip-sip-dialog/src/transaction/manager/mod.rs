@@ -290,14 +290,7 @@ fn normalize_top_client_via(request: &mut Request, branch: &str) -> bool {
 }
 
 fn sip_diagnostics_enabled() -> bool {
-    std::env::var("RVOIP_SIP_DIAGNOSTICS")
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    diagnostics::enabled()
 }
 
 /// Defines the public API for the RFC 3261 SIP Transaction Manager.
@@ -419,6 +412,16 @@ fn build_timer_settings() -> TimerSettings {
 }
 
 impl TransactionManager {
+    /// Enable or disable the INVITE server transaction automatic `100 Trying`
+    /// timer used by newly-created server transactions.
+    pub fn set_auto_100_trying(&mut self, enabled: bool) {
+        self.timer_settings.timer_100_interval = if enabled {
+            TimerSettings::default().timer_100_interval
+        } else {
+            std::time::Duration::ZERO
+        };
+    }
+
     /// Returns the timer settings in effect for this manager. Session-timer
     /// refresh logic needs this to pick a deadline for awaiting UPDATE /
     /// re-INVITE responses.
@@ -2624,7 +2627,7 @@ impl TransactionManager {
                     remote_addr,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    None, // No timer override
+                    Some(self.timer_settings.clone()),
                 )?);
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerInviteTransaction");
@@ -2658,7 +2661,7 @@ impl TransactionManager {
                     remote_addr,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    None, // No timer override
+                    Some(self.timer_settings.clone()),
                 )?);
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for CANCEL");
@@ -2691,7 +2694,7 @@ impl TransactionManager {
                     remote_addr,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    None, // No timer override
+                    Some(self.timer_settings.clone()),
                 )?);
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for UPDATE");
@@ -2704,7 +2707,7 @@ impl TransactionManager {
                     remote_addr,
                     self.transport.clone(),
                     self.events_tx.clone(),
-                    None, // No timer override
+                    Some(self.timer_settings.clone()),
                 )?);
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction");

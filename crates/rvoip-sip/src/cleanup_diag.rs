@@ -1,6 +1,6 @@
 //! Perf-only cleanup-stage diagnostics.
 //!
-//! This module is intentionally process-global and env-gated. The SIPp
+//! This module is intentionally process-global and config-gated. The SIPp
 //! cleanup backlog investigation needs low-friction counters from several
 //! subsystems without changing public call semantics or threading a metrics
 //! object through the session stack.
@@ -9,10 +9,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-const ENABLE_UNSET: u8 = 0;
-#[cfg(test)]
 const ENABLE_OFF: u8 = 1;
-#[cfg(test)]
 const ENABLE_ON: u8 = 2;
 
 const BUCKET_UPPER_US: [u64; 18] = [
@@ -251,20 +248,29 @@ impl Drop for CleanupStageGuard {
     }
 }
 
-static ENABLE_OVERRIDE: AtomicU8 = AtomicU8::new(ENABLE_UNSET);
-static ENV_ENABLED: OnceLock<bool> = OnceLock::new();
-static EVENT_LOGS_ENABLED: OnceLock<bool> = OnceLock::new();
+static ENABLE_OVERRIDE: AtomicU8 = AtomicU8::new(ENABLE_OFF);
+static EVENT_LOGS_OVERRIDE: AtomicU8 = AtomicU8::new(ENABLE_OFF);
 static METRICS: OnceLock<Vec<StageMetrics>> = OnceLock::new();
+
+/// Enable or disable cleanup diagnostics for this process.
+pub fn set_enabled(enabled: bool) {
+    ENABLE_OVERRIDE.store(
+        if enabled { ENABLE_ON } else { ENABLE_OFF },
+        Ordering::Relaxed,
+    );
+}
+
+/// Enable or disable per-operation cleanup diagnostic event logs.
+pub fn set_event_logs_enabled(enabled: bool) {
+    EVENT_LOGS_OVERRIDE.store(
+        if enabled { ENABLE_ON } else { ENABLE_OFF },
+        Ordering::Relaxed,
+    );
+}
 
 /// Whether cleanup diagnostics are enabled for this process.
 pub fn enabled() -> bool {
-    match ENABLE_OVERRIDE.load(Ordering::Relaxed) {
-        #[cfg(test)]
-        ENABLE_OFF => false,
-        #[cfg(test)]
-        ENABLE_ON => true,
-        _ => *ENV_ENABLED.get_or_init(|| env_flag("RVOIP_PERF_CLEANUP_DIAG")),
-    }
+    ENABLE_OVERRIDE.load(Ordering::Relaxed) == ENABLE_ON
 }
 
 /// Start timing a cleanup stage. Returns an inert guard when diagnostics are off.
@@ -429,19 +435,7 @@ fn update_max(slot: &AtomicU64, value: u64) {
 }
 
 fn per_operation_logs_enabled() -> bool {
-    enabled() && *EVENT_LOGS_ENABLED.get_or_init(|| env_flag("RVOIP_PERF_CLEANUP_DIAG_EVENTS"))
-}
-
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    enabled() && EVENT_LOGS_OVERRIDE.load(Ordering::Relaxed) == ENABLE_ON
 }
 
 fn micros_u64(value: u128) -> u64 {
@@ -457,10 +451,8 @@ fn unix_ms() -> u128 {
 
 #[cfg(test)]
 pub(crate) fn set_enabled_for_tests(enabled: bool) {
-    ENABLE_OVERRIDE.store(
-        if enabled { ENABLE_ON } else { ENABLE_OFF },
-        Ordering::Relaxed,
-    );
+    set_enabled(enabled);
+    set_event_logs_enabled(false);
 }
 
 #[cfg(test)]

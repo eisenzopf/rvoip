@@ -9,6 +9,8 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
     assert_eq!(Config::default().sip_udp_send_buffer_size, None);
     assert_eq!(Config::default().sip_udp_parse_workers, None);
     assert_eq!(Config::default().sip_udp_parse_queue_capacity, None);
+    assert_eq!(Config::default().media_port_capacity, None);
+    assert_eq!(Config::default().media_session_capacity, None);
     assert_eq!(Config::default().transaction_event_channel_capacity, 10_000);
     assert_eq!(Config::default().global_event_channel_capacity, 10_000);
     assert!(Config::default().session_event_dispatcher_workers >= 1);
@@ -17,6 +19,15 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
         10_000
     );
     assert_eq!(Config::default().server_call_capacity, None);
+    assert!(!Config::default().sip_udp_diagnostics);
+    assert!(!Config::default().media_setup_diagnostics);
+    assert!(!Config::default().cleanup_diagnostics);
+    assert!(!Config::default().cleanup_diagnostic_events);
+    assert!(!Config::default().srtp_diagnostics);
+    assert!(!Config::default().rtp_diagnostics);
+    assert!(!Config::default().media_sdp_diagnostics);
+    assert!(Config::default().auto_100_trying);
+    assert!(!Config::default().fast_auto_accept_incoming_calls);
 }
 
 #[test]
@@ -60,6 +71,24 @@ fn channel_capacity_sets_related_signaling_queues() {
 }
 
 #[test]
+fn high_cps_udp_auto_answer_profile_sets_fast_config_without_server_capacity() {
+    let config = Config::local("capacity-test", 5060).with_high_cps_udp_auto_answer(20_000);
+
+    assert!(!config.auto_180_ringing);
+    assert!(config.auto_100_trying);
+    assert!(!config.fast_auto_accept_incoming_calls);
+    assert_eq!(config.incoming_call_channel_capacity, 20_000);
+    assert_eq!(config.state_event_channel_capacity, 20_000);
+    assert_eq!(config.sip_transport_channel_capacity, 200_000);
+    assert_eq!(config.transaction_event_channel_capacity, 200_000);
+    assert_eq!(config.global_event_channel_capacity, 200_000);
+    assert_eq!(config.session_event_dispatcher_channel_capacity, 200_000);
+    assert_eq!(config.sip_udp_parse_workers, Some(1));
+    assert_eq!(config.sip_udp_parse_queue_capacity, Some(20_000));
+    assert_eq!(config.server_call_capacity, None);
+}
+
+#[test]
 fn server_capacity_sets_hot_index_capacity_only() {
     let config = Config::local("capacity-test", 5060).with_server_capacity(2048);
 
@@ -88,6 +117,39 @@ fn server_capacity_composes_with_channel_capacity() {
 }
 
 #[test]
+fn media_session_capacity_is_independent_from_server_capacity() {
+    let config = Config::local("capacity-test", 5060).with_media_session_capacity(4096);
+
+    assert_eq!(config.media_session_capacity, Some(4096));
+    assert_eq!(config.server_call_capacity, None);
+    assert_eq!(config.transaction_event_channel_capacity, 10_000);
+}
+
+#[test]
+fn media_port_capacity_sets_requested_range() {
+    let config = Config::local("capacity-test", 5060).with_media_port_capacity(16_384, 49_152);
+
+    assert_eq!(config.media_port_start, 16_384);
+    assert_eq!(config.media_port_end, 65_535);
+    assert_eq!(config.media_port_capacity, Some(49_152));
+    config.validate().expect("valid RTP media port capacity");
+}
+
+#[test]
+fn media_port_capacity_overflow_is_rejected() {
+    let config = Config::local("capacity-test", 5060).with_media_port_capacity(60_000, 20_000);
+
+    let err = config
+        .validate()
+        .expect_err("overflowing RTP media port capacity must fail");
+    assert!(
+        err.to_string()
+            .contains("below requested media_port_capacity"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
 fn zero_incoming_call_channel_capacity_is_rejected() {
     let mut config = Config::local("capacity-test", 5060);
     config.incoming_call_channel_capacity = 0;
@@ -96,6 +158,32 @@ fn zero_incoming_call_channel_capacity_is_rejected() {
     assert!(
         err.to_string()
             .contains("incoming_call_channel_capacity must be at least 1"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn zero_media_session_capacity_is_rejected_when_set() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.media_session_capacity = Some(0);
+
+    let err = config.validate().expect_err("zero capacity must fail");
+    assert!(
+        err.to_string()
+            .contains("media_session_capacity must be at least 1"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
+fn zero_media_port_capacity_is_rejected_when_set() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.media_port_capacity = Some(0);
+
+    let err = config.validate().expect_err("zero capacity must fail");
+    assert!(
+        err.to_string()
+            .contains("media_port_capacity must be at least 1"),
         "unexpected validation error: {err}"
     );
 }

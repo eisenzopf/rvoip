@@ -24,8 +24,15 @@ use rvoip_sip_core::sdp::SdpBuilder;
 use rvoip_sip_core::types::sdp::{CryptoAttribute, CryptoSuite, ParsedAttribute, SdpSession};
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
+
+const DIAG_OFF: u8 = 1;
+const DIAG_ON: u8 = 2;
+
+static SRTP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
+static MEDIA_SDP_DIAGNOSTICS: AtomicU8 = AtomicU8::new(DIAG_OFF);
 
 /// NEXT_STEPS B.1 diag — process-global cleanup counter so external
 /// observers (the `perf_listener` example, integration tests) can read
@@ -131,26 +138,26 @@ fn local_direction_from_remote_answer(
 }
 
 fn srtp_diagnostics_enabled() -> bool {
-    env_flag("RVOIP_SRTP_DIAGNOSTICS")
+    SRTP_DIAGNOSTICS.load(Ordering::Relaxed) == DIAG_ON
 }
 
 fn media_diagnostics_enabled() -> bool {
-    env_flag("RVOIP_MEDIA_DIAGNOSTICS")
+    MEDIA_SDP_DIAGNOSTICS.load(Ordering::Relaxed) == DIAG_ON
 }
 
 fn sdp_diagnostics_enabled() -> bool {
     srtp_diagnostics_enabled() || media_diagnostics_enabled()
 }
 
-fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+pub(crate) fn set_sdp_diagnostics(srtp_enabled: bool, media_enabled: bool) {
+    SRTP_DIAGNOSTICS.store(
+        if srtp_enabled { DIAG_ON } else { DIAG_OFF },
+        Ordering::Relaxed,
+    );
+    MEDIA_SDP_DIAGNOSTICS.store(
+        if media_enabled { DIAG_ON } else { DIAG_OFF },
+        Ordering::Relaxed,
+    );
 }
 
 fn emit_srtp_diag(line: String) {

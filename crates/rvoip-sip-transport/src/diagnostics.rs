@@ -1,17 +1,16 @@
 //! Lightweight UDP/SIP transport diagnostics for high-rate benchmarks.
 //!
-//! Counters are only updated when `RVOIP_SIP_UDP_DIAGNOSTICS=1` is set so the
-//! normal transport hot path does not pay an atomic cost during regular use.
+//! Counters are only updated when enabled through `Config::sip_udp_diagnostics`
+//! so the normal transport hot path does not pay an atomic cost during regular
+//! use.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use rvoip_sip_core::{Message, Method};
 
 const SEND_BUCKET_LABELS: [&str; 6] = ["<100us", "<500us", "<1ms", "<5ms", "<10ms", ">=10ms"];
 
-static ENABLED: OnceLock<bool> = OnceLock::new();
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
 static UDP_DATAGRAMS_RECEIVED: AtomicU64 = AtomicU64::new(0);
@@ -71,21 +70,18 @@ pub struct Snapshot {
 
 pub fn enabled() -> bool {
     match ENABLED_OVERRIDE.load(Ordering::Relaxed) {
-        1 => return false,
-        2 => return true,
-        _ => {}
+        2 => true,
+        _ => false,
     }
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("RVOIP_SIP_UDP_DIAGNOSTICS").ok().as_deref(),
-            Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
-        )
-    })
+}
+
+pub fn set_enabled(enabled: bool) {
+    ENABLED_OVERRIDE.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
 }
 
 #[cfg(test)]
 fn set_enabled_for_tests(enabled: bool) {
-    ENABLED_OVERRIDE.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+    set_enabled(enabled);
 }
 
 pub fn reset() {

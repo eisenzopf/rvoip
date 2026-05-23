@@ -267,6 +267,18 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Enable or disable automatic `100 Trying` timer tasks on inbound INVITEs.
+    pub fn auto_100_trying(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_auto_100_trying(enabled);
+        self
+    }
+
+    /// Enable or disable immediate session-path accept for inbound INVITEs.
+    pub fn fast_auto_accept_incoming_calls(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_fast_auto_accept_incoming_calls(enabled);
+        self
+    }
+
     /// Enable or disable real media-core RTP allocation.
     pub fn media_enabled(mut self, enabled: bool) -> Self {
         self.config = self.config.with_media_enabled(enabled);
@@ -281,6 +293,24 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Set the RTP media port range by start port and requested capacity.
+    pub fn media_port_capacity(mut self, start: u16, capacity: usize) -> Self {
+        self.config = self.config.with_media_port_capacity(start, capacity);
+        self
+    }
+
+    /// Set the media-core session and RTP allocator capacity hint.
+    pub fn media_session_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_media_session_capacity(capacity);
+        self
+    }
+
+    /// Apply the high-CPS UDP auto-answer profile.
+    pub fn high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_high_cps_udp_auto_answer(capacity);
+        self
+    }
+
     /// Set the UDP parse worker count.
     pub fn sip_udp_parse_workers(mut self, workers: usize) -> Self {
         self.config = self.config.with_sip_udp_parse_workers(workers);
@@ -290,6 +320,48 @@ impl CallbackPeerBuilder {
     /// Set the per-worker UDP parse queue capacity.
     pub fn sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_sip_udp_parse_queue_capacity(capacity);
+        self
+    }
+
+    /// Enable or disable SIP UDP transport and duplicate-recovery diagnostics.
+    pub fn sip_udp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_udp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable media setup/teardown timing diagnostics.
+    pub fn media_setup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_setup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable cleanup-stage timing diagnostics.
+    pub fn cleanup_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable per-operation cleanup diagnostic event logs.
+    pub fn cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_cleanup_diagnostic_events(enabled);
+        self
+    }
+
+    /// Enable or disable SRTP negotiation diagnostic log lines.
+    pub fn srtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_srtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable RTP packet diagnostic log lines.
+    pub fn rtp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_rtp_diagnostics(enabled);
+        self
+    }
+
+    /// Enable or disable SDP media diagnostic log lines.
+    pub fn media_sdp_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_sdp_diagnostics(enabled);
         self
     }
 
@@ -1612,6 +1684,7 @@ impl<H: CallHandler> CallbackPeer<H> {
         let established_callbacks = self.established_callbacks.clone();
         let terminal_callbacks = self.terminal_callbacks.clone();
         let deferred_calls = self.deferred_calls.clone();
+        let fast_auto_accept_incoming_calls = coordinator.fast_auto_accept_incoming_calls();
 
         handlers.spawn(async move {
             let dispatch_guard = cleanup_diag::stage_guard(
@@ -1661,6 +1734,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                     // out of Ringing and the call becomes a no-op error we ignore.
                     match decision {
                         CallHandlerDecision::Accept => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback accept decision for {} already handled by fast auto-accept",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let accept_guard = cleanup_diag::stage_guard(
                                 CleanupStage::CallbackAcceptCall,
                                 call_id.to_string(),
@@ -1689,6 +1770,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                             }
                         }
                         CallHandlerDecision::AcceptWithSdp(sdp) => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback accept-with-SDP decision for {} already handled by fast auto-accept",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let accept_guard = cleanup_diag::stage_guard(
                                 CleanupStage::CallbackAcceptCall,
                                 call_id.to_string(),

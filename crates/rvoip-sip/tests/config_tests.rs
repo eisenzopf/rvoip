@@ -76,6 +76,13 @@ fn test_config_default() {
     assert_eq!(c.sip_port, 5060);
     assert_eq!(c.local_uri, "sip:user@127.0.0.1:5060");
     assert!(c.auto_180_ringing);
+    assert!(c.auto_100_trying);
+    assert!(!c.fast_auto_accept_incoming_calls);
+    assert!(!c.cleanup_diagnostics);
+    assert!(!c.cleanup_diagnostic_events);
+    assert!(!c.srtp_diagnostics);
+    assert!(!c.rtp_diagnostics);
+    assert!(!c.media_sdp_diagnostics);
     assert_eq!(c.media_mode, MediaMode::Enabled);
 }
 
@@ -95,15 +102,39 @@ fn test_config_media_port_validation() {
 fn test_config_graduated_perf_knobs_are_configurable() {
     let c = Config::local("alice", 5060)
         .with_auto_180_ringing(false)
+        .with_auto_100_trying(false)
+        .with_fast_auto_accept_incoming_calls(true)
         .with_sip_udp_parse_workers(4)
         .with_sip_udp_parse_queue_capacity(8192)
         .with_global_event_channel_capacity(16_384)
+        .with_media_session_capacity(4096)
+        .with_media_port_capacity(16_384, 1024)
+        .with_sip_udp_diagnostics(true)
+        .with_media_setup_diagnostics(true)
+        .with_cleanup_diagnostics(true)
+        .with_cleanup_diagnostic_events(true)
+        .with_srtp_diagnostics(true)
+        .with_rtp_diagnostics(true)
+        .with_media_sdp_diagnostics(true)
         .with_signaling_only_media(9);
 
     assert!(!c.auto_180_ringing);
+    assert!(!c.auto_100_trying);
+    assert!(c.fast_auto_accept_incoming_calls);
     assert_eq!(c.sip_udp_parse_workers, Some(4));
     assert_eq!(c.sip_udp_parse_queue_capacity, Some(8192));
     assert_eq!(c.global_event_channel_capacity, 16_384);
+    assert_eq!(c.media_session_capacity, Some(4096));
+    assert_eq!(c.media_port_start, 16_384);
+    assert_eq!(c.media_port_end, 17_407);
+    assert_eq!(c.media_port_capacity, Some(1024));
+    assert!(c.sip_udp_diagnostics);
+    assert!(c.media_setup_diagnostics);
+    assert!(c.cleanup_diagnostics);
+    assert!(c.cleanup_diagnostic_events);
+    assert!(c.srtp_diagnostics);
+    assert!(c.rtp_diagnostics);
+    assert!(c.media_sdp_diagnostics);
     assert_eq!(c.media_mode, MediaMode::SignalingOnly { sdp_rtp_port: 9 });
 }
 
