@@ -78,7 +78,11 @@ rvoip                         facade crate; re-exports rvoip-core + adapters as 
 │                             commands, events, ConnectionAdapter trait, MediaStream trait,
 │                             ConversationStore trait, VconStore trait, Orchestrator entry point
 ├── rvoip-uctp                  UCTP wire implementation: envelope encode/decode, substrate framing,
-│                             capability negotiation algorithm, error model
+│                             capability negotiation algorithm, error model, **UCTP envelope-level
+│                             state machine** (per CONVERSATION_PROTOCOL.md §7), and **shared
+│                             substrate helpers** (TLS config, length-prefixed codec, datagram
+│                             pack/unpack, request/response correlation) consumed by the
+│                             substrate-adapter crates below
 ├── rvoip-quic                UCTP substrate adapter — QUIC streams + datagrams
 ├── rvoip-webtransport        UCTP substrate adapter — WT streams + datagrams
 ├── rvoip-websocket           UCTP substrate adapter — WS text frames + co-located WebRTC for media
@@ -134,6 +138,37 @@ The `rvoip` facade is feature-flagged so consumers compile only what they need:
 
 Default features: `[uctp, sip, rtp, media, vcon, identity]` — the UCTP + SIP-bridge minimum plus vCon emission and the standards-track identity backends. WebRTC, AAuth, and DTLS-SRTP fingerprint binding are opt-in. Full Thelve uses `full`.
 
+### 2.3 UCTP substrate adapters share a QUIC foundation
+
+`rvoip-quic` and `rvoip-webtransport` both run on a `quinn::Endpoint` underneath — WebTransport is HTTP/3-over-QUIC, so the underlying transport, TLS, datagram, and stream-framing machinery are identical. UCTP §4.1 and §4.2 specify identical envelope framing (4-byte big-endian length prefix on bidi streams) and identical datagram framing (8-byte UCTP header + RTP). Production deployments can register both adapters against **one** `quinn::Endpoint` configured with both ALPNs (`uctp/1` for raw QUIC, `h3` for WebTransport); incoming connections are dispatched by negotiated ALPN. This shape is recommended but not mandatory — separate endpoints work as well, and `rvoip-websocket` (see §2.4) uses an entirely separate stack.
+
+### 2.4 v0 spike scope vs production scope
+
+Several features described in this document are foundational at the architectural level but deferrable for an initial UCTP spike that validates the substrate-agnostic shape. The first cut ships **rvoip-uctp + rvoip-quic + rvoip-webtransport** with signaling + messaging + media datagrams + cross-transport bridging to a SIP customer; the items below are tracked as separate work after that lands:
+
+| Feature | Reference | v0 status | Production status |
+|---|---|---|---|
+| vCon emission at session.ended | §3.9, §11.4 | Deferred; bearer-stub auth, no vCon write | Always-on (per spec) |
+| IdentityAssurance gradient beyond `Anonymous` | §3.8 | Deferred; single-level for spike | Full gradient per §3.8 |
+| Per-request signing (RFC 9421 / DPoP / AAuth) | §8 | Deferred; bearer stub only | Standards-track identity backends in default features |
+| DTMF, connection.quality reports | UCTP §7.5, §10.3 | Deferred | Wired through the adapter contract |
+| `rvoip-websocket` substrate | §2 | Deferred to v1 (needs `webrtc-rs` for media) | Required for browsers without WebTransport |
+| `Orchestrator::bridge_connections` automated frame-pump | §10.2 | Stubbed today; v0 demo pumps frames manually | Required for any non-toy bridge |
+
+A v0 spike that ships the first cut listed above validates the architecture end-to-end without the deferred items. Treat this matrix as the "what's optional for the first UCTP-bearing PR" reference, not as a long-term feature gate.
+
+### 2.5 Future-protocol roadmap
+
+rvoip's QUIC-first architecture is positioned to absorb the IETF's broader QUIC convergence without protocol surgery. Each item below is **planned**, not v1 — but the architecture reserves space so the integration is incremental when each standard stabilizes:
+
+|---|---|---|
+| **SIP-over-QUIC** ([draft-hurst-sip-quic-00](https://www.ietf.org/archive/id/draft-hurst-sip-quic-00.html)) | IETF draft, early | New `Quic` variant in `rvoip-sip-transport`'s transport enum (alongside Udp / Tcp / Tls / Ws / Wss). ALPN `b"sip"` per the draft. **Zero protocol changes** above the transport layer — `rvoip-sip-dialog`, `rvoip-sip` don't notice. Benefits: 0-RTT re-REGISTER, connection migration across mobile network changes, stream multiplexing eliminates HOL blocking on Dialogs sharing a connection. |
+| **RoQ — RTP-over-QUIC** ([draft-ietf-avtcore-rtp-over-quic-14](https://datatracker.ietf.org/doc/draft-ietf-avtcore-rtp-over-quic/)) | IETF draft, late-stage | Reserved namespace: new `rvoip-roq` interop adapter (peer of `rvoip-sip` and `rvoip-webrtc`). Bridges RoQ-speaking media peers (with external SIP/WebRTC signaling) into UCTP Sessions. **UCTP's own datagram format (§7.7 / CONVERSATION_PROTOCOL.md §10.1) intentionally diverges from RoQ** — see §3.6 — but interop with non-rvoip RoQ peers is a clean adapter add when the standard solidifies. |
+| **MoQ — Media-over-QUIC** ([drafts](https://datatracker.ietf.org/wg/moq/about/) + production at Cloudflare/Meta/Twitch) | Active IETF working group; production deployments | Reserved namespace: new `rvoip-moq` adapter for **broadcast-scale fan-out** (1 publisher → many subscribers). MoQ's design center is one-to-many distribution at low latency with CDN-style edge caching and bandwidth ladders — a different scale and shape than UCTP's small-N interactive routing (§10.6). Complementary, not competitive: UCTP §7.7 handles interactive conferencing up to ~32 Participants; `rvoip-moq` would handle "this Session is also streamed to 10,000 viewers." |
+| **`noq`** ([n0-computer/noq](https://github.com/n0-computer/noq)) | Production via iroh 0.96+ | Drop-in `quinn` replacement (API-compatible fork) that adds QUIC Multipath, QUIC Address Discovery (QAD), and QUIC NAT Traversal (QNT). Future migration path if (a) mobile UCTP agents need multipath/NAT-traversal, or (b) rvoip wants to support direct peer-to-peer Connections without server relay. v1 stays on quinn; noq is a v1.x / v2 swap if those use cases arrive. |
+
+**Deployment payoff.** One `quinn::Endpoint` per deployment can serve `uctp/1`, `h3`, AND (when added) `sip` ALPNs on the same UDP port. The endpoint dispatches incoming connections to the right adapter (`rvoip-quic` / `rvoip-webtransport` / `rvoip-sip` Quic variant) based on negotiated ALPN. One port, one cert, one TLS stack — three protocols. This is the unusually clean operational story rvoip's QUIC-first architecture buys us.
+
 ---
 
 ## 3. Core abstractions
@@ -173,9 +208,13 @@ pub struct Session {
     pub conversation_id: ConversationId,
     pub state: SessionState,             // Initiating | Active | Ending | Ended | Failed
     pub medium: SessionMedium,           // Voice | Video | VoiceVideo | ScreenShare | TextChat | Mixed
-    pub participants: HashSet<ParticipantId>,
+    pub participants: HashSet<ParticipantId>,   // N ≥ 1; multi-party first-class per voip-3 §9.8
     pub connections: HashMap<ConnectionId, ConnectionRef>,
     pub negotiated_capabilities: CapabilityIntersection,
+    pub subscriptions: HashMap<               // multi-party routing table per §10.6
+        (ConnectionId, StreamId),             //   publisher
+        HashSet<ConnectionId>,                //   subscribers
+    >,
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub end_reason: Option<EndReason>,
@@ -287,6 +326,8 @@ Implementations:
 - `WebTransportDatagramMediaStream` (in rvoip-webtransport) — RTP-in-WT-datagram per UCTP §10.
 - `DtlsSrtpMediaStream` (in rvoip-webrtc) — DTLS-SRTP for WebRTC interop.
 
+**On RoQ compatibility.** UCTP's datagram format (CONVERSATION_PROTOCOL.md §10.1) is intentionally **not** wire-compatible with `draft-ietf-avtcore-rtp-over-quic` (RoQ). UCTP prepends an 8-byte header (`ver | flags | stream_local_id | datagram_seq`) before the RTP packet to enable multi-Connection multiplexing per QUIC connection and substrate-level loss detection without parsing RTP. RoQ's flow-ID varint is single-flow per QUIC connection and reads RTP headers for loss detection. Alignment with RoQ is a v1+ revisit once IETF adoption stabilizes; until then, `QuicDatagramMediaStream` and `WebTransportDatagramMediaStream` follow UCTP §10.1.
+
 Bridging works against this trait — see §10.
 
 **Why channel-based, not per-frame `async fn recv_frame()`:** RTP at 50fps × N Streams × M codecs in a 10k-call server is an enormous number of awaits per second. A channel-based shape lets each adapter feed a `mpsc::Sender<MediaFrame>` from its own task and the bridge task pumps `Receiver → Sender` pairs at minimal overhead.
@@ -317,7 +358,7 @@ pub struct Device {
 
 ### 3.8 `IdentityAssurance`
 
-The identity gradient — one type that all identity backends translate their primitives into. Adopted from Dick Hardt's AAuth thinking; reusable regardless of which backend implements it.
+The identity gradient — one type that all identity backends translate their primitives into. Adopted from Dick Hardt's AAuth thinking; reusable regardless of which backend implements it. This section **settles** voip-3 §11's open question on "where Identity and authentication live" with a concrete gradient; voip-3 itself stays silent on assurance levels, leaving them to implementations.
 
 ```rust
 pub enum IdentityAssurance {
@@ -362,6 +403,8 @@ pub enum CredentialKind {
 Sessions and tenants may require a minimum assurance level (per §9). When a Connection's assurance is below the Session's required minimum, it is rejected with `403 Forbidden-For-Assurance`. When two Connections of different assurance are bridged, the effective Session assurance is the lower of the two; the vCon `parties[]` records each Participant's assurance level individually.
 
 ### 3.9 In-flight `Vcon` builder
+
+vCon (the IETF Virtualized Conversations envelope) is a concept **not present in voip-3** — the conversation model has no equivalent of a signed, durable Session-end artifact. rvoip adopts vCon as the canonical durable record because (a) PRD §1.2.3 commits the project to being the first-mover Rust adoption, and (b) compliance-bound deployments (healthcare, financial services, lawful intercept) structurally need a signed conversation envelope per Session. Other voip-3-aligned implementations may pick a different durable record or none at all; rvoip commits to vCon.
 
 Every Session has an associated in-flight vCon builder that is populated as the Session progresses. This is owned by the Session and accessible to harness/transcription via a handle:
 
@@ -815,17 +858,27 @@ Triggered by `RenegotiateMedia` command. Adapter handles re-INVITE / renegotiate
 
 ## 10. Bridging model
 
-### 10.1 Decision: explicit 1:1 bridges; no SFU/MCU in v1
+### 10.1 Decision: 1:1 interop bridges + N-party UCTP-native Sessions
 
-`BridgeConnections(a, b)` explicitly bridges two Connections. **>2-party Sessions are out of scope for v1.** Multi-party voice/video requires a Selective Forwarding Unit (SFU) or Multi-point Conference Unit (MCU); both are substantial subsystems with their own product motivation (selective forwarding, simulcast/SVC, layer adaptation, audio mixing matrix). v1 deliberately does not bundle them.
-
-Why 1:1 is enough for v1:
-- Contact-center: caller ↔ worker. 1:1.
+**1:1 bridges** are the v1 commitment for interop between non-UCTP transports — SIP↔WebRTC, SIP↔UCTP, WebRTC↔UCTP. `BridgeConnections(a, b)` explicitly bridges two Connections of any substrate combination. The 1:1-bridge use cases are:
+- Contact-center: caller ↔ worker.
 - Voice AI: caller ↔ in-process AI. 1:1 bridge to the AI's audio sink/source.
-- SIP↔WebRTC interop: caller ↔ web client. 1:1.
-- SIP↔UCTP interop: PSTN caller ↔ UCTP-native worker. 1:1.
+- SIP↔WebRTC interop: caller ↔ web client.
+- SIP↔UCTP interop: PSTN caller ↔ UCTP-native worker.
 
-These are the entire set of v1 use cases. Multi-party meetings can be added in v2 by integrating an SFU adapter (likely an adapter that fronts an existing SFU like LiveKit, mediasoup, or Janus).
+**Multi-party Sessions** are first-class for UCTP-native Connections (per CONVERSATION_PROTOCOL.md §7.7): a Session may have N Participants, each publishing/subscribing to Streams via `stream.subscribe` / `stream.unsubscribe`. Multi-party media routing is server-side fan-out using the same `MediaStream` trait the 1:1 bridge uses — no separate SFU/MCU subsystem is required for the routing primitive itself. See §10.6 for the routing-table shape.
+
+**In scope for v1:**
+- N-Participant UCTP-native Sessions with explicit subscribe/unsubscribe routing
+- Server-side fan-out via `Orchestrator::add_subscription` / `remove_subscription`
+- Mixed Sessions: 1+ SIP-bridged Participant alongside N UCTP-native Participants (the SIP side is a 1:1 bridge; the UCTP side participates in N-party routing)
+
+**Deferred to v1.x / v2:**
+- Simulcast / SVC layer selection
+- Server-side audio mixing matrices (for low-bandwidth clients)
+- Energy-based active-speaker detection beyond a hook (v1 wires the `stream.active-speaker` envelope; default implementation is no-op until later)
+- Federation across UCTP servers (CONVERSATION_PROTOCOL.md §13)
+- Integrating a heavyweight external SFU (LiveKit, mediasoup, Janus) for bandwidth/quality features at scale
 
 ### 10.2 Bridge implementation
 
@@ -890,6 +943,47 @@ impl Orchestrator {
     ) -> Result<ListenerHandle> { /* ... */ }
 }
 ```
+
+### 10.6 Multi-party Session routing
+
+For UCTP-native multi-party Sessions (CONVERSATION_PROTOCOL.md §7.7), the server maintains a routing table per Session:
+
+```
+publisher (ConnectionId, StreamId) → set of subscriber ConnectionIds
+```
+
+When a publisher's media datagram arrives, the router looks up the subscriber set, rewrites the UCTP datagram header's `stream_local_id` per subscriber, and forwards. Routing is in-process per `Orchestrator` for v1; federation (cross-server fan-out per CONVERSATION_PROTOCOL.md §13) is v1+ work.
+
+```rust
+impl Orchestrator {
+    pub async fn add_subscription(
+        &self,
+        sid: SessionId,
+        subscriber: ConnectionId,
+        publisher: ConnectionId,
+        strm_id: StreamId,
+    ) -> Result<()>;
+
+    pub async fn remove_subscription(
+        &self,
+        sid: SessionId,
+        subscriber: ConnectionId,
+        strm_id: StreamId,
+    ) -> Result<()>;
+
+    /// Bulk subscribe — for `stream.subscribe` envelope translation.
+    pub async fn apply_subscriptions(
+        &self,
+        sid: SessionId,
+        subscriber: ConnectionId,
+        request: SubscribeRequest,    // strm_id | from_participant | from_participant+kinds
+    ) -> Result<()>;
+}
+```
+
+**Per-Session Participant cap** is configurable (default: 32). Hitting the cap rejects new `session.invite`s with `503 capacity-exceeded`. The cap is a backstop, not a target — the routing primitive scales with the number of subscriptions, not raw Participant count, but caps simplify capacity planning.
+
+**Mixing 1:1 interop and multi-party UCTP-native.** A Session may have one SIP-bridged Participant (carried by `SipAdapter` via a 1:1 `MediaStream` pair from §10.2) plus N UCTP-native Participants (each carried by a substrate adapter, routed via the multi-party fan-out from this section). The Session abstraction is unchanged; only the per-Connection adapter differs. From the SIP side, the bridge picks one specific UCTP Participant's outgoing audio (or a server-side mix if the deployment opts in to v1.x mixing); from the UCTP side, the SIP Participant appears as one more publisher to subscribe to.
 
 ---
 

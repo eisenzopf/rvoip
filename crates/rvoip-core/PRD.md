@@ -88,6 +88,8 @@ vCon (the IETF Virtualized Conversations envelope) is on a credible standardizat
 
 The next decade of real-time media transport will not be RTP-over-UDP alone. RTP-over-QUIC (RoQ), QUIC-RTP-Tunnelling (QRT), and Media-over-QUIC (MoQ) are being standardized at the IETF and deployed at Cloudflare, Meta, the BBC, and Twitch. A voice library architected around UDP+RTP today will need a major refactor when QUIC media becomes table stakes — and that refactor is likely to be deeply invasive (it touches transport, congestion control, NAT traversal, and the codec packetization assumptions). rvoip is built with QUIC and WebTransport as peer substrates from v1, so when RoQ and MoQ ship in production, the library is ready, not retrofitted. This is a long-horizon bet whose payoff window is 2027-2029, but the architectural cost of getting it wrong now compounds the longer it waits.
 
+**Concrete tracks.** The IETF QUIC convergence covers four real-time-relevant standards rvoip is positioned to absorb without protocol surgery, each as either a new substrate adapter or a new transport variant: **UCTP-over-QUIC** (shipped — `rvoip-quic`), **WebTransport** (shipped — `rvoip-webtransport`), **SIP-over-QUIC** ([draft-hurst-sip-quic-00](https://www.ietf.org/archive/id/draft-hurst-sip-quic-00.html), planned — a Quic transport variant inside `rvoip-sip-transport`), and **RoQ + MoQ** (planned — interop adapters `rvoip-roq` and `rvoip-moq` respectively; the latter unlocks broadcast-scale fan-out beyond v1's N≤32 interactive routing). See `INTERFACE_DESIGN.md` §2.5 for the integration shape of each. The strategic point: one `quinn::Endpoint` per deployment can serve `uctp/1`, `h3`, and `sip` ALPNs on the same UDP port — one port, one cert, one TLS stack, three protocols. That's the operational payoff of being QUIC-first across the stack rather than bolting QUIC onto a TCP/UDP-shaped codebase later.
+
 ### 1.2.5 AI agents as first-class peer Participants
 
 Most current voice-AI architectures treat the AI as a bolt-on: an audio Stream gets piped to ASR, ASR text gets piped to an LLM, LLM text gets piped to TTS, TTS audio gets piped back. The AI is not a Participant in the architectural model — it is an audio coupling. voip-3's `Participant.kind = ai` makes the AI a peer of human Participants, with identity, role, capabilities, and lifecycle. rvoip implements that model directly: an AI can join, leave, take over, hand off, observe, supervise, and be observed under the same primitives as a human worker. This is not cosmetic — it is what makes "AI handed off to human without disruption", "human consults AI then returns to caller", "AI listener provides real-time coaching to a human agent", and "two AI agents collaborate on a Session as peers" expressible without per-feature special-casing in the consumer. The vision payoff is multi-agent voice coordination becoming a normal pattern instead of a research demo.
@@ -95,6 +97,8 @@ Most current voice-AI architectures treat the AI as a bolt-on: an audio Stream g
 ### 1.2.6 Honest scope: vision vs. v1 commitment
 
 This document, taken at face value, describes a v1 that is 3-5 years of focused engineering for a small team. The visionary uses above motivate the design choices in §3-§14, but they do not all need to ship in v1 to make rvoip useful. A trimmed v1 — production-grade SIP B2BUA, the AI harness, basic WebRTC interop, single-tenant `Client` SDK, and vCon emission — covers §1.2.1 (the voice AI infrastructure wedge) and partially §1.2.2 (FreeSWITCH+Janus replacement) on its own. The rest of the design — UCTP server over QUIC/WebTransport, full identity-assurance gradient, AAuth, federation, DTLS-SRTP fingerprint binding — can be deferred to v1.x or v2 without sacrificing the v1 wedge. Reviewers should weigh the v1 commitment in §3-§14 against the §1.2 vision and push back where the v1 over-reaches what one team can credibly ship before the competitive landscape moves past it.
+
+The concrete spike-vs-production breakdown for the UCTP-bearing portion of v1 lives in **`INTERFACE_DESIGN.md` §2.4** as a feature matrix (what's deferred for the first cut: vCon write, full identity gradient, RFC 9421 signing, DTMF, quality reports, `rvoip-websocket`, automated `bridge_connections`). That matrix is the scannable version of this section for the substrate-adapter side; PRD §1.2.6 remains the canonical statement of the overall v1 wedge.
 
 ## 2. Shape
 
@@ -254,12 +258,15 @@ These belong above the voice plane, in whatever consumer is using rvoip. Thelve 
 - Voicemail business logic — rvoip provides the recording primitive; the consumer owns greetings, retention, transcription policy.
 - Rate cards, invoicing, contract terms — rvoip emits raw usage; the consumer (Thelve, the CPaaS biller, etc.) handles billing (see §9).
 - Fraud detection rules — rvoip emits anomaly signals; the consumer decides what to do.
+- **Multi-party Sessions and SFU/MCU.** v1 ships 1:1 bridges only (per `INTERFACE_DESIGN.md` §10.1). voip-3 §6.3 / §9.8 describes multi-party Sessions as first-class at the model level; rvoip v1 deliberately defers them. >2-party voice/video requires an SFU/MCU subsystem (selective forwarding, simulcast/SVC, audio mixing matrix) with its own substantial product motivation; v2 will likely integrate an existing SFU (LiveKit, mediasoup, Janus) via an SFU adapter rather than implement one. Today, "multi-party" use cases in v1 must be expressed as multiple 1:1 bridges with a coordinator above rvoip — the consumer owns that pattern.
 
 If a feature is about *who* takes the call, *why*, *with what context*, or *what to learn from it*, it lives above rvoip — in Thelve, in the CPaaS, in the call center app. rvoip stays under that line.
 
 ## 6. Multi-tenancy (cross-cutting)
 
 rvoip is multi-tenant first-class. Adding `tenant_id` later is brutally invasive; adding it now costs almost nothing.
+
+> **Relationship to voip-3.** The voip-3 conversation model (§2.2) explicitly lists multi-tenancy as a non-goal of the vocabulary spec — the model deliberately stays portable across deployments that may or may not have tenants. rvoip is a concrete implementation that commits the other way: tenancy is structural, threaded through every command and event. Other voip-3-aligned implementations are free to make a different choice; voip-3 doesn't dictate.
 
 - Every **command** carries `tenant_id`. Every **event** rvoip emits echoes the `tenant_id` of the call it relates to.
 - Per-tenant **quotas**: max concurrent calls, max concurrent recordings, max concurrent AI runtime sessions. Layered on top of the global admission semaphore. A runaway tenant cannot starve another.

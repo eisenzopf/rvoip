@@ -64,6 +64,7 @@ A UCTP-speaking server (Thelve, the canonical example) terminates UCTP from clie
 6. **Forward compatibility.** Unknown envelope types and unknown payload fields are silently ignored by old endpoints. Required new behavior is gated on a capability flag.
 7. **Idempotency where it matters.** Lifecycle transitions (`session.end`, `connection.end`, `message.send`) can be retried with the same envelope ID without side effects.
 8. **Servers can speak both directions.** UCTP is symmetric — a server can send a session.start to a client just as a client can to a server. Telephony's caller/callee asymmetry is a property of the Participant role, not the protocol.
+9. **Multi-party is first-class.** A Session is N-Participant by design (not 2-Participant with optional fan-out). N=2 is a degenerate case. Multi-party media routing is server-side; SFU/MCU machinery may be used internally but is not exposed at the UCTP wire (see §7.7).
 
 ---
 
@@ -411,6 +412,9 @@ The full v0 catalog. Each is detailed in §7–§11.
 | `connection.end` | bidi | End a single Connection |
 | `stream.opened` | S→C | A media Stream started flowing |
 | `stream.closed` | S→C | A media Stream ended |
+| `stream.subscribe` | bidi | Subscribe to peer Streams in a multi-party Session (§7.7) |
+| `stream.unsubscribe` | bidi | Unsubscribe from previously-subscribed peer Streams (§7.7) |
+| `stream.active-speaker` | S→C | Advisory active-speaker change in a multi-party Session (§7.7) |
 | **Message (§9)** | | |
 | `message.send` | bidi | Send a Message in a Conversation |
 | `message.delivered` | S→C | Delivery receipt |
@@ -922,6 +926,66 @@ The vCon is **not** delivered inline — clients fetch it explicitly via `record
 
 Access policy: a vCon is fetchable by participants of the Session (via their `auth.session` token) plus any tenant-level role granted vCon-read scope. The server enforces; UCTP carries the request and response.
 
+### 7.7 Multi-party Sessions
+
+A Session may contain any number of Participants (N ≥ 1). voip-3 §6.3 / §9.8 describes multi-Participant Sessions as first-class: each Participant brings their own Connection(s) and Streams; the Session does not require uniformity. UCTP supports this directly:
+
+- **Participant lifecycle** is per §7.2 — `session.participant.joined` / `session.participant.left` is multicast to every other Participant when membership changes.
+- **Stream publishing.** Each Participant's Streams are advertised via their own `connection.offer` / `connection.answer`. After `connection.ready` fires, those Streams become available for subscription by other Participants.
+- **Stream subscription is explicit.** After `session.started`, a Participant subscribes to peer Streams via `stream.subscribe`. They may subscribe by `strm_id`, by `from_participant`, or by Stream `kind`. A Participant does **not** receive media from Streams it has not subscribed to.
+- **Datagram fan-out is server-side.** A publisher's datagrams (§10.1) arrive at the server keyed by the publisher's Connection and `stream_local_id`. The server forwards each datagram to every Participant subscribed to that `strm_id`, rewriting the `stream_local_id` in the UCTP datagram header to match the subscriber's Connection-local mapping. `datagram_seq` MAY be re-numbered per egress Connection.
+- **Active speaker** (advisory, optional): the server MAY emit `stream.active-speaker` envelopes when audio-energy detection identifies a new dominant speaker. Clients MUST NOT rely on it for correctness; missing events do not mean no one is speaking.
+- **No SFU envelopes.** Servers may use SFU/MCU machinery internally (selective forwarding, simulcast/SVC, mixing matrices) to scale large Sessions, but no SFU-specific envelopes are exposed at the UCTP wire. From a Participant's perspective, the protocol is unchanged regardless of N.
+- **1:1 is N=2.** A 2-Participant Session uses the same envelopes and lifecycle as a 50-Participant Session.
+
+#### `stream.subscribe` (bidi)
+```json
+{
+  "type": "stream.subscribe",
+  "sid": "sess_...",
+  "connid": "conn_...",
+  "payload": {
+    "by_participant": "part_...",
+    "subscriptions": [
+      { "strm_id": "strm_..." }
+      | { "from_participant": "part_..." }
+      | { "from_participant": "part_...", "kinds": ["audio", "video"] }
+    ]
+  }
+}
+```
+
+Each entry in `subscriptions` is one of the three forms shown. A `from_participant`-only entry subscribes to all of that peer's current and future Streams; adding `kinds` filters to a subset. The server responds with `ack` when the routing table is updated, or `error` (404 not-found if any `strm_id` or `from_participant` is unknown; 488 incompatible-capabilities if codec sets don't align).
+
+#### `stream.unsubscribe` (bidi)
+```json
+{
+  "type": "stream.unsubscribe",
+  "sid": "sess_...",
+  "connid": "conn_...",
+  "payload": {
+    "strm_ids": ["strm_..."]
+  }
+}
+```
+
+Removes routing-table entries for the listed Streams toward this Connection. Idempotent.
+
+#### `stream.active-speaker` (S→C, advisory)
+```json
+{
+  "type": "stream.active-speaker",
+  "sid": "sess_...",
+  "payload": {
+    "active_participant": "part_..." | null,
+    "strm_id": "strm_...",
+    "changed_at": "..."
+  }
+}
+```
+
+`active_participant: null` indicates silence / no dominant speaker. Detection algorithm is implementation-policy; servers may emit at any cadence or not at all.
+
 ---
 
 ## 8. Capability negotiation
@@ -1124,6 +1188,8 @@ UCTP datagram header:
 
 This dual-header approach (UCTP datagram header + RTP header) is intentional: the UCTP header makes the datagram self-describing for routing across many Connections on one substrate; the RTP header preserves compatibility with codecs and tooling that expect RTP.
 
+In multi-party Sessions (§7.7), `stream_local_id` is **Connection-local** — the server rewrites this header when fanning a publisher's datagram out to subscribers, mapping the publisher's Stream ID to each subscriber's Connection-local handle. The RTP payload is forwarded unchanged. `datagram_seq` MAY be re-numbered per egress Connection if loss-detection statistics differ.
+
 ### 10.2 WebSocket fallback (no datagrams)
 
 When UCTP runs over WebSocket, media does **not** flow on the WebSocket. Instead, the Connection negotiates a co-located WebRTC PeerConnection. The signaling for the PeerConnection (ICE candidates, DTLS fingerprints, SDP) is carried as `connection.offer`/`connection.answer` payload fields under `substrate_setup`. The PeerConnection's media uses standard WebRTC DTLS-SRTP.
@@ -1269,13 +1335,12 @@ These need closure before v1.
 1. **Binary encoding choice.** CBOR vs. custom. Decision after profiling.
 2. **Federation model.** Mesh, hierarchical, hybrid. Out of scope for v0; major decision for v1.
 3. **End-to-end encryption.** Currently UCTP relies on substrate TLS/QUIC TLS for hop-by-hop confidentiality, plus optional E2EE at the application layer (e.g., libsignal-style ratchet on `message.send` payloads). A protocol-level E2EE story is deferred.
-4. **Multi-party media.** v0 specifies 1:1 media bridging at the gateway (per `INTERFACE_DESIGN.md` decision); >2-party voice/video would require an SFU/MCU integration. Whether UCTP itself reserves SFU control envelopes (`sfu.subscribe`, `sfu.unsubscribe`) or treats SFU as out-of-band is open.
-5. **Recording / lawful intercept.** Should be UCTP-native `recording.start` / `recording.stop` envelopes, or pushed to a server-side admin API? Lean: UCTP-native, with strong policy controls.
-6. **Conversation persistence semantics.** voip-3 says Conversations are durable. Does the server hold them indefinitely? Per-tenant retention? Deletion semantics? Needs settling for compliance.
-7. **Presence beyond reachability.** `auth.session` returns reachability hints, but rich presence ("busy", "do-not-disturb", "in-meeting") is application-level today. Should UCTP define a small core (`available` / `busy` / `away` / `dnd`) and let applications extend?
-8. **Group Conversations & Sessions at scale.** Default policy for joining a Conversation that already has 1000+ Participants — invite-only, open, ACL? Out of scope for v0.
-9. **Push notifications.** Mobile clients sleep; UCTP server needs to wake them via APNs/FCM. The bridge (`push.register` / `push.deliver`) is needed but not specified here.
-10. **Rate limiting and back-pressure.** Per-Connection envelope rate limits and how the substrate signals back-pressure (QUIC stream flow control vs. application-level pacing).
+4. **Recording / lawful intercept.** Should be UCTP-native `recording.start` / `recording.stop` envelopes, or pushed to a server-side admin API? Lean: UCTP-native, with strong policy controls.
+5. **Conversation persistence semantics.** voip-3 says Conversations are durable. Does the server hold them indefinitely? Per-tenant retention? Deletion semantics? Needs settling for compliance.
+6. **Presence beyond reachability.** `auth.session` returns reachability hints, but rich presence ("busy", "do-not-disturb", "in-meeting") is application-level today. Should UCTP define a small core (`available` / `busy` / `away` / `dnd`) and let applications extend?
+7. **Group Conversations & Sessions at scale.** Default policy for joining a Conversation that already has 1000+ Participants — invite-only, open, ACL? Out of scope for v0. (Note: §7.7 commits to N-Participant Sessions; this open question is about *very large* groups and per-tenant ACL policy, not the multi-party model itself.)
+8. **Push notifications.** Mobile clients sleep; UCTP server needs to wake them via APNs/FCM. The bridge (`push.register` / `push.deliver`) is needed but not specified here.
+9. **Rate limiting and back-pressure.** Per-Connection envelope rate limits and how the substrate signals back-pressure (QUIC stream flow control vs. application-level pacing).
 
 ---
 
@@ -1301,6 +1366,7 @@ Per project direction, voip-3 (`/Users/jonathan/Developer/Rudeless/voip-3-conver
 16. **No identity-assurance gradient.** voip-3 §11 lists identity as open. UCTP §5.6 commits to the gradient (Anonymous → Pseudonymous → Identified → TaskScoped → UserAuthorized) and routes assurance through `auth.session`, `CapabilityDescriptor`, and `403 forbidden-for-assurance-level` errors.
 17. **No per-request signing model.** voip-3 has no protocol-level message authentication. UCTP §5.5 commits to [RFC 9421 HTTP Message Signatures](https://datatracker.ietf.org/doc/rfc9421/) plus Hardt's `Signature-Key` / `Signature-Agent` headers for substrates that carry HTTP-shaped requests.
 18. **No agent-identity model.** UCTP §5 lists `aauth` as a supported (experimental) auth method. AAuth (`draft-hardt-oauth-aauth-protocol`) is the candidate agent-to-agent identity protocol — accommodated, not yet committed to.
+19. **No multi-party Session wire model.** voip-3 §6.3 / §9.8 made multi-Participant Sessions first-class but the original UCTP draft said nothing about wire expression. UCTP §7.7 now commits to the N-Participant lifecycle, `stream.subscribe` / `stream.unsubscribe` / `stream.active-speaker` envelopes, and the server-side datagram fan-out model. SFU/MCU machinery remains server-internal and is not exposed at the UCTP wire.
 
 These items are **decisions made by UCTP** for the purpose of being a real protocol. A future voip-3 revision may fold any of them into the conceptual model or explicitly defer them.
 
