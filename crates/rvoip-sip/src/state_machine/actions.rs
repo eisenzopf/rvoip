@@ -402,6 +402,12 @@ pub(crate) async fn execute_action(
             if *code == 200 {
                 let response_started_at = session.incoming_invite_received_at.take();
                 if let Some(transaction_id) = session.pending_inbound_invite_transaction_id.take() {
+                    let udp_receive_timing = dialog_adapter
+                        .dialog_api
+                        .dialog_manager()
+                        .core()
+                        .transaction_manager()
+                        .take_inbound_timing(&transaction_id);
                     dialog_adapter
                         .send_response_for_transaction(
                             &session.session_id,
@@ -410,6 +416,13 @@ pub(crate) async fn execute_action(
                             session.local_sdp.clone(),
                         )
                         .await?;
+                    if let Some(timing) = udp_receive_timing {
+                        if let Some(received_at) = timing.received_at {
+                            rvoip_sip_dialog::diagnostics::record_udp_receive_to_invite_200(
+                                received_at.elapsed(),
+                            );
+                        }
+                    }
                 } else {
                     dialog_adapter
                         .send_response(&session.session_id, *code, session.local_sdp.clone())

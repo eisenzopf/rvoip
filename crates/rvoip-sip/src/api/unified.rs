@@ -632,6 +632,19 @@ pub struct Config {
     /// backpressure the UDP receive loop. Default: `10000`.
     pub sip_transport_channel_capacity: usize,
 
+    /// Optional SIP transport-manager forwarding worker count.
+    ///
+    /// `None` preserves the single per-transport event bridge. Values above
+    /// `1` enable keyed sharding between transport receive/parse and
+    /// transaction-manager ingress.
+    pub sip_transport_dispatch_workers: Option<usize>,
+
+    /// Optional SIP transport-manager forwarding queue capacity.
+    ///
+    /// `None` uses [`Config::sip_transport_channel_capacity`]. When dispatch
+    /// workers are enabled, this capacity is divided across workers.
+    pub sip_transport_dispatch_queue_capacity: Option<usize>,
+
     /// Optional SIP UDP receive socket buffer size (`SO_RCVBUF`) in bytes.
     ///
     /// `None` preserves the OS default, which is appropriate for clients and
@@ -688,6 +701,19 @@ pub struct Config {
     /// dispatch workers are enabled, this capacity is divided across workers.
     pub sip_transaction_dispatch_queue_capacity: Option<usize>,
 
+    /// Optional dialog-core transaction-event dispatch worker count.
+    ///
+    /// `None` preserves the single dialog event processor. High-CPS servers can
+    /// set this above `1` to fan out transaction events by stable call key while
+    /// preserving per-call dialog ordering.
+    pub sip_dialog_dispatch_workers: Option<usize>,
+
+    /// Optional dialog-core transaction-event dispatch queue capacity.
+    ///
+    /// `None` uses the dialog max-dialog capacity hint. When dispatch workers
+    /// are enabled, this capacity is divided across workers.
+    pub sip_dialog_dispatch_queue_capacity: Option<usize>,
+
     /// Capacity for the infra-common global cross-crate event bus used inside
     /// this coordinator.
     ///
@@ -737,6 +763,14 @@ pub struct Config {
     /// is intentionally separate from [`Config::sip_udp_diagnostics`] because
     /// it adds hot-path timestamp and atomic work under high CPS.
     pub sip_transaction_timing_diagnostics: bool,
+
+    /// Enable high-cardinality dialog timing diagnostics.
+    ///
+    /// This records transaction-event-to-dialog queueing, dialog handler,
+    /// dialog lookup, and dialog-to-session publish histograms. It is separate
+    /// from transaction timing so 20k CPS tests can isolate the current hot
+    /// layer.
+    pub sip_dialog_timing_diagnostics: bool,
 
     /// Enable media setup/teardown timing diagnostics.
     ///
@@ -857,6 +891,8 @@ impl Config {
             incoming_call_channel_capacity: 1000,
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
+            sip_transport_dispatch_workers: None,
+            sip_transport_dispatch_queue_capacity: None,
             sip_udp_recv_buffer_size: None,
             sip_udp_send_buffer_size: None,
             sip_udp_parse_workers: None,
@@ -865,12 +901,15 @@ impl Config {
             transaction_event_channel_capacity: 10_000,
             sip_transaction_dispatch_workers: None,
             sip_transaction_dispatch_queue_capacity: None,
+            sip_dialog_dispatch_workers: None,
+            sip_dialog_dispatch_queue_capacity: None,
             global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
+            sip_dialog_timing_diagnostics: false,
             media_setup_diagnostics: false,
             cleanup_diagnostics: false,
             cleanup_diagnostic_events: false,
@@ -943,6 +982,8 @@ impl Config {
             incoming_call_channel_capacity: 1000,
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
+            sip_transport_dispatch_workers: None,
+            sip_transport_dispatch_queue_capacity: None,
             sip_udp_recv_buffer_size: None,
             sip_udp_send_buffer_size: None,
             sip_udp_parse_workers: None,
@@ -951,12 +992,15 @@ impl Config {
             transaction_event_channel_capacity: 10_000,
             sip_transaction_dispatch_workers: None,
             sip_transaction_dispatch_queue_capacity: None,
+            sip_dialog_dispatch_workers: None,
+            sip_dialog_dispatch_queue_capacity: None,
             global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
+            sip_dialog_timing_diagnostics: false,
             media_setup_diagnostics: false,
             cleanup_diagnostics: false,
             cleanup_diagnostic_events: false,
@@ -1359,6 +1403,37 @@ impl Config {
         self
     }
 
+    /// Set the SIP transport-manager forwarding worker count.
+    ///
+    /// Values above `1` enable keyed sharding between transport receive/parse
+    /// and transaction-manager ingress. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_sip_transport_dispatch_workers(mut self, workers: usize) -> Self {
+        self.sip_transport_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the SIP transport-manager forwarding queue capacity.
+    ///
+    /// `None` uses [`Config::sip_transport_channel_capacity`]. Values below
+    /// `1` are rejected by [`Config::validate`].
+    pub fn with_sip_transport_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.sip_transport_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set SIP transport-manager forwarding worker and queue overrides
+    /// together.
+    pub fn with_sip_transport_dispatch_config(
+        mut self,
+        workers: Option<usize>,
+        queue_capacity: Option<usize>,
+    ) -> Self {
+        self.sip_transport_dispatch_workers = workers;
+        self.sip_transport_dispatch_queue_capacity = queue_capacity;
+        self
+    }
+
     /// Set SIP UDP socket receive/send buffer sizes in bytes.
     ///
     /// Use this for high-CPS server profiles where the kernel UDP queue must
@@ -1456,6 +1531,37 @@ impl Config {
         self
     }
 
+    /// Set the dialog-core transaction-event dispatch worker count.
+    ///
+    /// Values above `1` enable keyed sharding of transaction events before
+    /// dialog protocol handling. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_sip_dialog_dispatch_workers(mut self, workers: usize) -> Self {
+        self.sip_dialog_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the dialog-core transaction-event dispatch queue capacity.
+    ///
+    /// `None` uses the dialog max-dialog capacity hint. Values below `1` are
+    /// rejected by [`Config::validate`].
+    pub fn with_sip_dialog_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.sip_dialog_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set dialog-core transaction-event dispatch worker and queue overrides
+    /// together.
+    pub fn with_sip_dialog_dispatch_config(
+        mut self,
+        workers: Option<usize>,
+        queue_capacity: Option<usize>,
+    ) -> Self {
+        self.sip_dialog_dispatch_workers = workers;
+        self.sip_dialog_dispatch_queue_capacity = queue_capacity;
+        self
+    }
+
     /// Set the infra-common global event bus channel capacity.
     ///
     /// The default is `10000`. Values below `1` are rejected by
@@ -1490,6 +1596,12 @@ impl Config {
     /// Enable or disable high-cardinality transaction timing diagnostics.
     pub fn with_sip_transaction_timing_diagnostics(mut self, enabled: bool) -> Self {
         self.sip_transaction_timing_diagnostics = enabled;
+        self
+    }
+
+    /// Enable or disable high-cardinality dialog timing diagnostics.
+    pub fn with_sip_dialog_timing_diagnostics(mut self, enabled: bool) -> Self {
+        self.sip_dialog_timing_diagnostics = enabled;
         self
     }
 
@@ -1645,6 +1757,26 @@ impl Config {
                 "sip_transport_channel_capacity must be at least 1".to_string(),
             ));
         }
+        if matches!(self.sip_transport_dispatch_workers, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_transport_dispatch_workers must be at least 1 when set".to_string(),
+            ));
+        }
+        if let Some(workers) = self.sip_transport_dispatch_workers {
+            if workers
+                > rvoip_sip_dialog::transaction::transport::MAX_TRANSPORT_EVENT_DISPATCH_WORKERS
+            {
+                return Err(SessionError::ConfigError(format!(
+                    "sip_transport_dispatch_workers must be <= {} when set",
+                    rvoip_sip_dialog::transaction::transport::MAX_TRANSPORT_EVENT_DISPATCH_WORKERS
+                )));
+            }
+        }
+        if matches!(self.sip_transport_dispatch_queue_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_transport_dispatch_queue_capacity must be at least 1 when set".to_string(),
+            ));
+        }
         if matches!(self.sip_udp_recv_buffer_size, Some(0)) {
             return Err(SessionError::ConfigError(
                 "sip_udp_recv_buffer_size must be at least 1 when set".to_string(),
@@ -1694,6 +1826,24 @@ impl Config {
         if matches!(self.sip_transaction_dispatch_queue_capacity, Some(0)) {
             return Err(SessionError::ConfigError(
                 "sip_transaction_dispatch_queue_capacity must be at least 1 when set".to_string(),
+            ));
+        }
+        if matches!(self.sip_dialog_dispatch_workers, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_dialog_dispatch_workers must be at least 1 when set".to_string(),
+            ));
+        }
+        if let Some(workers) = self.sip_dialog_dispatch_workers {
+            if workers > rvoip_sip_dialog::manager::MAX_DIALOG_EVENT_DISPATCH_WORKERS {
+                return Err(SessionError::ConfigError(format!(
+                    "sip_dialog_dispatch_workers must be <= {} when set",
+                    rvoip_sip_dialog::manager::MAX_DIALOG_EVENT_DISPATCH_WORKERS
+                )));
+            }
+        }
+        if matches!(self.sip_dialog_dispatch_queue_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_dialog_dispatch_queue_capacity must be at least 1 when set".to_string(),
             ));
         }
         if self.global_event_channel_capacity == 0 {
@@ -2168,6 +2318,9 @@ impl UnifiedCoordinator {
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_transaction_timing_enabled(
             config.sip_transaction_timing_diagnostics,
+        );
+        rvoip_sip_dialog::diagnostics::set_dialog_timing_enabled(
+            config.sip_dialog_timing_diagnostics,
         );
         rvoip_media_core::diagnostics::set_enabled(config.media_setup_diagnostics);
         crate::cleanup_diag::set_enabled(config.cleanup_diagnostics);
@@ -3747,6 +3900,8 @@ impl UnifiedCoordinator {
             udp_parse_workers: config.sip_udp_parse_workers,
             udp_parse_queue_capacity: config.sip_udp_parse_queue_capacity,
             udp_parse_dispatch: config.sip_udp_parse_dispatch,
+            transport_event_dispatch_workers: config.sip_transport_dispatch_workers,
+            transport_event_dispatch_queue_capacity: config.sip_transport_dispatch_queue_capacity,
             // Default build: `Config::tls_insecure_skip_verify` is not
             // compiled, so we always pass `false`. Only the
             // `dev-insecure-tls` build surfaces the field.
@@ -3841,6 +3996,8 @@ impl UnifiedCoordinator {
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
                 dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
+                dialog.event_dispatch_workers = config.sip_dialog_dispatch_workers;
+                dialog.event_dispatch_queue_capacity = config.sip_dialog_dispatch_queue_capacity;
                 dialog
             })
             .build();

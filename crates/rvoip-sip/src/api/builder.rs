@@ -118,6 +118,18 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the SIP transport-manager forwarding worker count.
+    pub fn with_sip_transport_dispatch_workers(mut self, workers: usize) -> Self {
+        self.config.sip_transport_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the SIP transport-manager forwarding queue capacity.
+    pub fn with_sip_transport_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_transport_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
     /// Set SIP UDP socket receive/send buffer sizes in bytes.
     pub fn with_sip_udp_socket_buffers(
         mut self,
@@ -151,6 +163,15 @@ impl SessionBuilder {
     /// Set the per-worker UDP parse queue capacity.
     pub fn with_sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
         self.config.sip_udp_parse_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the UDP parse worker dispatch strategy.
+    pub fn with_sip_udp_parse_dispatch(
+        mut self,
+        dispatch: rvoip_sip_transport::UdpParseDispatch,
+    ) -> Self {
+        self.config.sip_udp_parse_dispatch = Some(dispatch);
         self
     }
 
@@ -205,6 +226,36 @@ impl SessionBuilder {
     /// Set the transaction-manager event channel capacity.
     pub fn with_transaction_event_channel_capacity(mut self, capacity: usize) -> Self {
         self.config.transaction_event_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the transaction-manager ingress dispatch worker count.
+    pub fn with_sip_transaction_dispatch_workers(mut self, workers: usize) -> Self {
+        self.config.sip_transaction_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the transaction-manager ingress dispatch queue capacity.
+    pub fn with_sip_transaction_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_transaction_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the dialog-core transaction-event dispatch worker count.
+    pub fn with_sip_dialog_dispatch_workers(mut self, workers: usize) -> Self {
+        self.config.sip_dialog_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the dialog-core transaction-event dispatch queue capacity.
+    pub fn with_sip_dialog_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_dialog_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Enable or disable high-cardinality dialog timing diagnostics.
+    pub fn with_sip_dialog_timing_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_dialog_timing_diagnostics(enabled);
         self
     }
 
@@ -269,15 +320,47 @@ mod tests {
         let builder = SessionBuilder::new()
             .with_channel_capacity(256)
             .with_server_capacity(128)
-            .with_sip_udp_socket_buffers(Some(65_536), Some(32_768));
+            .with_sip_transport_dispatch_workers(2)
+            .with_sip_transport_dispatch_queue_capacity(4096)
+            .with_sip_udp_socket_buffers(Some(65_536), Some(32_768))
+            .with_sip_udp_parse_workers(4)
+            .with_sip_udp_parse_queue_capacity(8192)
+            .with_sip_udp_parse_dispatch(rvoip_sip_transport::UdpParseDispatch::RoundRobin)
+            .with_sip_transaction_dispatch_workers(4)
+            .with_sip_transaction_dispatch_queue_capacity(8192)
+            .with_sip_dialog_dispatch_workers(4)
+            .with_sip_dialog_dispatch_queue_capacity(8192)
+            .with_sip_dialog_timing_diagnostics(true);
 
         assert_eq!(builder.config.incoming_call_channel_capacity, 256);
         assert_eq!(builder.config.state_event_channel_capacity, 256);
         assert_eq!(builder.config.sip_transport_channel_capacity, 2560);
+        assert_eq!(builder.config.sip_transport_dispatch_workers, Some(2));
+        assert_eq!(
+            builder.config.sip_transport_dispatch_queue_capacity,
+            Some(4096)
+        );
         assert_eq!(builder.config.server_call_capacity, Some(128));
         assert_eq!(builder.config.sip_udp_recv_buffer_size, Some(65_536));
         assert_eq!(builder.config.sip_udp_send_buffer_size, Some(32_768));
+        assert_eq!(builder.config.sip_udp_parse_workers, Some(4));
+        assert_eq!(builder.config.sip_udp_parse_queue_capacity, Some(8192));
+        assert_eq!(
+            builder.config.sip_udp_parse_dispatch,
+            Some(rvoip_sip_transport::UdpParseDispatch::RoundRobin)
+        );
         assert_eq!(builder.config.transaction_event_channel_capacity, 2560);
+        assert_eq!(builder.config.sip_transaction_dispatch_workers, Some(4));
+        assert_eq!(
+            builder.config.sip_transaction_dispatch_queue_capacity,
+            Some(8192)
+        );
+        assert_eq!(builder.config.sip_dialog_dispatch_workers, Some(4));
+        assert_eq!(
+            builder.config.sip_dialog_dispatch_queue_capacity,
+            Some(8192)
+        );
+        assert!(builder.config.sip_dialog_timing_diagnostics);
         assert_eq!(
             builder.config.session_event_dispatcher_channel_capacity,
             2560

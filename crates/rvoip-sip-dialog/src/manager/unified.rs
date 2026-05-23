@@ -293,11 +293,12 @@ impl UnifiedDialogManager {
         );
 
         // Create core dialog manager with global events
-        let mut core = DialogManager::with_global_events_and_index_capacity(
+        let mut core = DialogManager::with_global_events_and_index_capacity_and_config(
             transaction_manager,
             transaction_events,
             local_address,
             config.dialog_config().max_dialogs.unwrap_or(10_000),
+            Some(config.clone()),
         )
         .await?;
 

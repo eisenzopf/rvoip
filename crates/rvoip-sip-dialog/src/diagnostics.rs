@@ -51,6 +51,7 @@ const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 static TRANSACTION_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
+static DIALOG_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
 
 static DUP_INVITE_EXISTING_TX: AtomicU64 = AtomicU64::new(0);
 static DUP_INVITE_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
@@ -239,6 +240,22 @@ static TRANSACTION_HANDLER_OTHER: LatencyMetric = LatencyMetric::new();
 static SERVER_TRANSACTION_CREATE: LatencyMetric = LatencyMetric::new();
 static EXISTING_TRANSACTION_DISPATCH: LatencyMetric = LatencyMetric::new();
 static TRANSACTION_EVENT_BROADCAST: LatencyMetric = LatencyMetric::new();
+static UDP_RECEIVE_TO_INVITE_200: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_DISPATCH_QUEUE: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_DISPATCH_BACKPRESSURE: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_HANDLER_TOTAL: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_HANDLER_INVITE: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_HANDLER_ACK: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_HANDLER_BYE: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_HANDLER_CANCEL: LatencyMetric = LatencyMetric::new();
+static DIALOG_EVENT_HANDLER_OTHER: LatencyMetric = LatencyMetric::new();
+static DIALOG_SESSION_PUBLISH_TOTAL: LatencyMetric = LatencyMetric::new();
+static DIALOG_SESSION_PUBLISH_INCOMING_CALL: LatencyMetric = LatencyMetric::new();
+static DIALOG_SESSION_PUBLISH_ACK: LatencyMetric = LatencyMetric::new();
+static DIALOG_SESSION_PUBLISH_BYE: LatencyMetric = LatencyMetric::new();
+static DIALOG_SESSION_PUBLISH_OTHER: LatencyMetric = LatencyMetric::new();
+static DIALOG_LOOKUP: LatencyMetric = LatencyMetric::new();
+static DIALOG_INITIAL_INVITE_SETUP: LatencyMetric = LatencyMetric::new();
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LatencySnapshot {
@@ -306,6 +323,22 @@ pub struct Snapshot {
     pub server_transaction_create: LatencySnapshot,
     pub existing_transaction_dispatch: LatencySnapshot,
     pub transaction_event_broadcast: LatencySnapshot,
+    pub udp_receive_to_invite_200: LatencySnapshot,
+    pub dialog_event_dispatch_queue: LatencySnapshot,
+    pub dialog_event_dispatch_backpressure: LatencySnapshot,
+    pub dialog_event_handler_total: LatencySnapshot,
+    pub dialog_event_handler_invite: LatencySnapshot,
+    pub dialog_event_handler_ack: LatencySnapshot,
+    pub dialog_event_handler_bye: LatencySnapshot,
+    pub dialog_event_handler_cancel: LatencySnapshot,
+    pub dialog_event_handler_other: LatencySnapshot,
+    pub dialog_session_publish_total: LatencySnapshot,
+    pub dialog_session_publish_incoming_call: LatencySnapshot,
+    pub dialog_session_publish_ack: LatencySnapshot,
+    pub dialog_session_publish_bye: LatencySnapshot,
+    pub dialog_session_publish_other: LatencySnapshot,
+    pub dialog_lookup: LatencySnapshot,
+    pub dialog_initial_invite_setup: LatencySnapshot,
 }
 
 pub fn enabled() -> bool {
@@ -331,6 +364,18 @@ pub fn set_transaction_timing_enabled(enabled: bool) {
     TRANSACTION_TIMING_ENABLED.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
 }
 
+pub fn dialog_timing_enabled() -> bool {
+    enabled()
+        && match DIALOG_TIMING_ENABLED.load(Ordering::Relaxed) {
+            2 => true,
+            _ => false,
+        }
+}
+
+pub fn set_dialog_timing_enabled(enabled: bool) {
+    DIALOG_TIMING_ENABLED.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+}
+
 #[cfg(test)]
 fn set_enabled_for_tests(enabled: bool) {
     set_enabled(enabled);
@@ -339,6 +384,11 @@ fn set_enabled_for_tests(enabled: bool) {
 #[cfg(test)]
 fn set_transaction_timing_enabled_for_tests(enabled: bool) {
     set_transaction_timing_enabled(enabled);
+}
+
+#[cfg(test)]
+fn set_dialog_timing_enabled_for_tests(enabled: bool) {
+    set_dialog_timing_enabled(enabled);
 }
 
 pub fn reset() {
@@ -358,6 +408,9 @@ pub fn reset() {
         bucket.store(0, Ordering::Relaxed);
     }
     for metric in transaction_latency_metrics() {
+        metric.reset();
+    }
+    for metric in dialog_latency_metrics() {
         metric.reset();
     }
 }
@@ -464,6 +517,22 @@ pub fn snapshot() -> Snapshot {
         server_transaction_create: SERVER_TRANSACTION_CREATE.snapshot(),
         existing_transaction_dispatch: EXISTING_TRANSACTION_DISPATCH.snapshot(),
         transaction_event_broadcast: TRANSACTION_EVENT_BROADCAST.snapshot(),
+        udp_receive_to_invite_200: UDP_RECEIVE_TO_INVITE_200.snapshot(),
+        dialog_event_dispatch_queue: DIALOG_EVENT_DISPATCH_QUEUE.snapshot(),
+        dialog_event_dispatch_backpressure: DIALOG_EVENT_DISPATCH_BACKPRESSURE.snapshot(),
+        dialog_event_handler_total: DIALOG_EVENT_HANDLER_TOTAL.snapshot(),
+        dialog_event_handler_invite: DIALOG_EVENT_HANDLER_INVITE.snapshot(),
+        dialog_event_handler_ack: DIALOG_EVENT_HANDLER_ACK.snapshot(),
+        dialog_event_handler_bye: DIALOG_EVENT_HANDLER_BYE.snapshot(),
+        dialog_event_handler_cancel: DIALOG_EVENT_HANDLER_CANCEL.snapshot(),
+        dialog_event_handler_other: DIALOG_EVENT_HANDLER_OTHER.snapshot(),
+        dialog_session_publish_total: DIALOG_SESSION_PUBLISH_TOTAL.snapshot(),
+        dialog_session_publish_incoming_call: DIALOG_SESSION_PUBLISH_INCOMING_CALL.snapshot(),
+        dialog_session_publish_ack: DIALOG_SESSION_PUBLISH_ACK.snapshot(),
+        dialog_session_publish_bye: DIALOG_SESSION_PUBLISH_BYE.snapshot(),
+        dialog_session_publish_other: DIALOG_SESSION_PUBLISH_OTHER.snapshot(),
+        dialog_lookup: DIALOG_LOOKUP.snapshot(),
+        dialog_initial_invite_setup: DIALOG_INITIAL_INVITE_SETUP.snapshot(),
     }
 }
 
@@ -490,7 +559,12 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          udp_receive_to_incoming_call_emit=[{}] bye_receive_to_200=[{}] \
          transaction_dispatch_queue=[{}] transaction_handler=[total=[{}] invite=[{}] \
          ack=[{}] bye=[{}] cancel=[{}] other=[{}]] server_transaction_create=[{}] \
-         existing_transaction_dispatch=[{}] transaction_event_broadcast=[{}]",
+         existing_transaction_dispatch=[{}] transaction_event_broadcast=[{}] \
+         udp_receive_to_invite_200=[{}] dialog_event_dispatch_queue=[{}] \
+         dialog_event_dispatch_backpressure=[{}] dialog_event_handler=[total=[{}] \
+         invite=[{}] ack=[{}] bye=[{}] cancel=[{}] other=[{}]] \
+         dialog_session_publish=[total=[{}] incoming_call=[{}] ack=[{}] bye=[{}] \
+         other=[{}]] dialog_lookup=[{}] dialog_initial_invite_setup=[{}]",
         snapshot.duplicate_invite_existing_transaction,
         snapshot.duplicate_invite_cache_hit,
         snapshot.duplicate_invite_cache_miss,
@@ -543,6 +617,22 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         format_latency(&snapshot.server_transaction_create),
         format_latency(&snapshot.existing_transaction_dispatch),
         format_latency(&snapshot.transaction_event_broadcast),
+        format_latency(&snapshot.udp_receive_to_invite_200),
+        format_latency(&snapshot.dialog_event_dispatch_queue),
+        format_latency(&snapshot.dialog_event_dispatch_backpressure),
+        format_latency(&snapshot.dialog_event_handler_total),
+        format_latency(&snapshot.dialog_event_handler_invite),
+        format_latency(&snapshot.dialog_event_handler_ack),
+        format_latency(&snapshot.dialog_event_handler_bye),
+        format_latency(&snapshot.dialog_event_handler_cancel),
+        format_latency(&snapshot.dialog_event_handler_other),
+        format_latency(&snapshot.dialog_session_publish_total),
+        format_latency(&snapshot.dialog_session_publish_incoming_call),
+        format_latency(&snapshot.dialog_session_publish_ack),
+        format_latency(&snapshot.dialog_session_publish_bye),
+        format_latency(&snapshot.dialog_session_publish_other),
+        format_latency(&snapshot.dialog_lookup),
+        format_latency(&snapshot.dialog_initial_invite_setup),
     )
 }
 
@@ -662,6 +752,12 @@ pub fn record_bye_receive_to_200(elapsed: Duration) {
     );
 }
 
+pub fn record_udp_receive_to_invite_200(elapsed: Duration) {
+    if enabled() {
+        UDP_RECEIVE_TO_INVITE_200.record(elapsed);
+    }
+}
+
 pub(crate) fn record_transaction_dispatch_queue_delay(elapsed: Duration) {
     if transaction_timing_enabled() {
         TRANSACTION_DISPATCH_QUEUE.record(elapsed);
@@ -697,6 +793,57 @@ pub(crate) fn record_existing_transaction_dispatch(elapsed: Duration) {
 pub(crate) fn record_transaction_event_broadcast(elapsed: Duration) {
     if transaction_timing_enabled() {
         TRANSACTION_EVENT_BROADCAST.record(elapsed);
+    }
+}
+
+pub(crate) fn record_dialog_event_dispatch_queue_delay(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        DIALOG_EVENT_DISPATCH_QUEUE.record(elapsed);
+    }
+}
+
+pub(crate) fn record_dialog_event_dispatch_backpressure(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        DIALOG_EVENT_DISPATCH_BACKPRESSURE.record(elapsed);
+    }
+}
+
+pub(crate) fn record_dialog_event_handler(kind: &str, elapsed: Duration) {
+    if !dialog_timing_enabled() {
+        return;
+    }
+    DIALOG_EVENT_HANDLER_TOTAL.record(elapsed);
+    match kind {
+        "invite" => DIALOG_EVENT_HANDLER_INVITE.record(elapsed),
+        "ack" => DIALOG_EVENT_HANDLER_ACK.record(elapsed),
+        "bye" => DIALOG_EVENT_HANDLER_BYE.record(elapsed),
+        "cancel" => DIALOG_EVENT_HANDLER_CANCEL.record(elapsed),
+        _ => DIALOG_EVENT_HANDLER_OTHER.record(elapsed),
+    }
+}
+
+pub(crate) fn record_dialog_session_publish(kind: &str, elapsed: Duration) {
+    if !dialog_timing_enabled() {
+        return;
+    }
+    DIALOG_SESSION_PUBLISH_TOTAL.record(elapsed);
+    match kind {
+        "incoming_call" => DIALOG_SESSION_PUBLISH_INCOMING_CALL.record(elapsed),
+        "ack_received" => DIALOG_SESSION_PUBLISH_ACK.record(elapsed),
+        "bye_received" => DIALOG_SESSION_PUBLISH_BYE.record(elapsed),
+        _ => DIALOG_SESSION_PUBLISH_OTHER.record(elapsed),
+    }
+}
+
+pub(crate) fn record_dialog_lookup(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        DIALOG_LOOKUP.record(elapsed);
+    }
+}
+
+pub(crate) fn record_dialog_initial_invite_setup(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        DIALOG_INITIAL_INVITE_SETUP.record(elapsed);
     }
 }
 
@@ -889,6 +1036,27 @@ fn transaction_latency_metrics() -> [&'static LatencyMetric; 10] {
     ]
 }
 
+fn dialog_latency_metrics() -> [&'static LatencyMetric; 16] {
+    [
+        &UDP_RECEIVE_TO_INVITE_200,
+        &DIALOG_EVENT_DISPATCH_QUEUE,
+        &DIALOG_EVENT_DISPATCH_BACKPRESSURE,
+        &DIALOG_EVENT_HANDLER_TOTAL,
+        &DIALOG_EVENT_HANDLER_INVITE,
+        &DIALOG_EVENT_HANDLER_ACK,
+        &DIALOG_EVENT_HANDLER_BYE,
+        &DIALOG_EVENT_HANDLER_CANCEL,
+        &DIALOG_EVENT_HANDLER_OTHER,
+        &DIALOG_SESSION_PUBLISH_TOTAL,
+        &DIALOG_SESSION_PUBLISH_INCOMING_CALL,
+        &DIALOG_SESSION_PUBLISH_ACK,
+        &DIALOG_SESSION_PUBLISH_BYE,
+        &DIALOG_SESSION_PUBLISH_OTHER,
+        &DIALOG_LOOKUP,
+        &DIALOG_INITIAL_INVITE_SETUP,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,25 +1065,35 @@ mod tests {
     fn retransmission_diagnostics_format_counts() {
         set_enabled_for_tests(false);
         set_transaction_timing_enabled_for_tests(false);
+        set_dialog_timing_enabled_for_tests(false);
         reset();
         record_duplicate_invite_existing_transaction();
         record_udp_receive_to_incoming_call_emit(Duration::from_micros(125));
+        record_udp_receive_to_invite_200(Duration::from_micros(225));
         record_transaction_dispatch_queue_delay(Duration::from_micros(75));
         record_transaction_handler("invite", Duration::from_micros(100));
         record_server_transaction_create(Duration::from_micros(350));
         record_existing_transaction_dispatch(Duration::from_micros(400));
         record_transaction_event_broadcast(Duration::from_micros(450));
+        record_dialog_event_dispatch_queue_delay(Duration::from_micros(80));
+        record_dialog_event_handler("invite", Duration::from_micros(90));
+        record_dialog_session_publish("incoming_call", Duration::from_micros(110));
         let disabled = snapshot();
         assert_eq!(disabled.duplicate_invite_existing_transaction, 0);
         assert_eq!(disabled.udp_receive_to_incoming_call_emit.count, 0);
+        assert_eq!(disabled.udp_receive_to_invite_200.count, 0);
         assert_eq!(disabled.transaction_dispatch_queue.count, 0);
         assert_eq!(disabled.transaction_handler_total.count, 0);
         assert_eq!(disabled.server_transaction_create.count, 0);
         assert_eq!(disabled.existing_transaction_dispatch.count, 0);
         assert_eq!(disabled.transaction_event_broadcast.count, 0);
+        assert_eq!(disabled.dialog_event_dispatch_queue.count, 0);
+        assert_eq!(disabled.dialog_event_handler_total.count, 0);
+        assert_eq!(disabled.dialog_session_publish_total.count, 0);
 
         set_enabled_for_tests(true);
         set_transaction_timing_enabled_for_tests(false);
+        set_dialog_timing_enabled_for_tests(false);
         reset();
 
         record_transaction_dispatch_queue_delay(Duration::from_micros(75));
@@ -923,14 +1101,21 @@ mod tests {
         record_server_transaction_create(Duration::from_micros(350));
         record_existing_transaction_dispatch(Duration::from_micros(400));
         record_transaction_event_broadcast(Duration::from_micros(450));
+        record_dialog_event_dispatch_queue_delay(Duration::from_micros(80));
+        record_dialog_event_handler("invite", Duration::from_micros(90));
+        record_dialog_session_publish("incoming_call", Duration::from_micros(110));
         let transaction_disabled = snapshot();
         assert_eq!(transaction_disabled.transaction_dispatch_queue.count, 0);
         assert_eq!(transaction_disabled.transaction_handler_total.count, 0);
         assert_eq!(transaction_disabled.server_transaction_create.count, 0);
         assert_eq!(transaction_disabled.existing_transaction_dispatch.count, 0);
         assert_eq!(transaction_disabled.transaction_event_broadcast.count, 0);
+        assert_eq!(transaction_disabled.dialog_event_dispatch_queue.count, 0);
+        assert_eq!(transaction_disabled.dialog_event_handler_total.count, 0);
+        assert_eq!(transaction_disabled.dialog_session_publish_total.count, 0);
 
         set_transaction_timing_enabled_for_tests(true);
+        set_dialog_timing_enabled_for_tests(true);
         reset();
 
         record_duplicate_invite_existing_transaction();
@@ -946,6 +1131,7 @@ mod tests {
         record_duplicate_bye_terminated_dialog();
         record_udp_receive_to_incoming_call_emit(Duration::from_micros(125));
         record_bye_receive_to_200(Duration::from_micros(250));
+        record_udp_receive_to_invite_200(Duration::from_micros(275));
         record_transaction_dispatch_queue_delay(Duration::from_micros(75));
         record_transaction_handler("invite", Duration::from_micros(100));
         record_transaction_handler("ack", Duration::from_micros(150));
@@ -955,6 +1141,19 @@ mod tests {
         record_server_transaction_create(Duration::from_micros(350));
         record_existing_transaction_dispatch(Duration::from_micros(400));
         record_transaction_event_broadcast(Duration::from_micros(450));
+        record_dialog_event_dispatch_queue_delay(Duration::from_micros(75));
+        record_dialog_event_dispatch_backpressure(Duration::from_micros(80));
+        record_dialog_event_handler("invite", Duration::from_micros(100));
+        record_dialog_event_handler("ack", Duration::from_micros(150));
+        record_dialog_event_handler("bye", Duration::from_micros(200));
+        record_dialog_event_handler("cancel", Duration::from_micros(250));
+        record_dialog_event_handler("other", Duration::from_micros(300));
+        record_dialog_session_publish("incoming_call", Duration::from_micros(125));
+        record_dialog_session_publish("ack_received", Duration::from_micros(175));
+        record_dialog_session_publish("bye_received", Duration::from_micros(225));
+        record_dialog_session_publish("other", Duration::from_micros(275));
+        record_dialog_lookup(Duration::from_micros(325));
+        record_dialog_initial_invite_setup(Duration::from_micros(375));
 
         let snapshot = snapshot();
         assert_eq!(snapshot.duplicate_invite_existing_transaction, 1);
@@ -962,6 +1161,7 @@ mod tests {
         assert_eq!(snapshot.duplicate_bye_tombstone_hit, 1);
         assert_eq!(snapshot.udp_receive_to_incoming_call_emit.count, 1);
         assert_eq!(snapshot.bye_receive_to_200.count, 1);
+        assert_eq!(snapshot.udp_receive_to_invite_200.count, 1);
         assert_eq!(snapshot.transaction_dispatch_queue.count, 1);
         assert_eq!(snapshot.transaction_handler_total.count, 5);
         assert_eq!(snapshot.transaction_handler_invite.count, 1);
@@ -972,6 +1172,21 @@ mod tests {
         assert_eq!(snapshot.server_transaction_create.count, 1);
         assert_eq!(snapshot.existing_transaction_dispatch.count, 1);
         assert_eq!(snapshot.transaction_event_broadcast.count, 1);
+        assert_eq!(snapshot.dialog_event_dispatch_queue.count, 1);
+        assert_eq!(snapshot.dialog_event_dispatch_backpressure.count, 1);
+        assert_eq!(snapshot.dialog_event_handler_total.count, 5);
+        assert_eq!(snapshot.dialog_event_handler_invite.count, 1);
+        assert_eq!(snapshot.dialog_event_handler_ack.count, 1);
+        assert_eq!(snapshot.dialog_event_handler_bye.count, 1);
+        assert_eq!(snapshot.dialog_event_handler_cancel.count, 1);
+        assert_eq!(snapshot.dialog_event_handler_other.count, 1);
+        assert_eq!(snapshot.dialog_session_publish_total.count, 4);
+        assert_eq!(snapshot.dialog_session_publish_incoming_call.count, 1);
+        assert_eq!(snapshot.dialog_session_publish_ack.count, 1);
+        assert_eq!(snapshot.dialog_session_publish_bye.count, 1);
+        assert_eq!(snapshot.dialog_session_publish_other.count, 1);
+        assert_eq!(snapshot.dialog_lookup.count, 1);
+        assert_eq!(snapshot.dialog_initial_invite_setup.count, 1);
         let summary = format_summary(&snapshot);
         assert!(summary.contains("dup_invite_cache_hit=1"));
         assert!(summary.contains("dup_bye_tombstone_hit=1"));
@@ -979,5 +1194,9 @@ mod tests {
         assert!(summary.contains("bye_receive_to_200=[count=1"));
         assert!(summary.contains("transaction_dispatch_queue=[count=1"));
         assert!(summary.contains("transaction_handler=[total=[count=5"));
+        assert!(summary.contains("udp_receive_to_invite_200=[count=1"));
+        assert!(summary.contains("dialog_event_dispatch_queue=[count=1"));
+        assert!(summary.contains("dialog_event_handler=[total=[count=5"));
+        assert!(summary.contains("dialog_session_publish=[total=[count=4"));
     }
 }

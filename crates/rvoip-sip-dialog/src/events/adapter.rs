@@ -329,7 +329,7 @@ impl DialogEventAdapter {
                         guard.as_ref().map(|m| {
                             let transaction_manager = m.transaction_manager();
                             (
-                                transaction_manager.take_inbound_timing(transaction_id),
+                                transaction_manager.peek_inbound_timing(transaction_id),
                                 transaction_manager.take_inbound_bytes(transaction_id),
                             )
                         })

@@ -102,6 +102,37 @@ High-cardinality transaction timing diagnostics are opt-in via
 `--transaction-timing-diagnostics` because timestamp and atomic histogram
 work materially perturbs the `8000 CPS` run.
 
+### Dialog Dispatch Follow-Up
+
+The 20k signaling-only runs moved the pressure point past transaction
+ingress: with `--transaction-dispatch-workers 4`,
+`transport_manager_to_transaction` dropped to low p999 values, while
+`udp_receive_to_incoming_call_emit` and `bye_receive_to_200` rose into
+hundreds of milliseconds or worse. The next code target is therefore the
+transaction-event-to-dialog path.
+
+Follow-up instrumentation and Config-owned knobs have been added for
+that layer:
+
+- `Config::with_sip_dialog_dispatch_workers(N)`
+- `Config::with_sip_dialog_dispatch_queue_capacity(N)`
+- `Config::with_sip_dialog_timing_diagnostics(true)`
+- `perf_listener --sip-dialog-dispatch-workers N`
+- `perf_listener --sip-dialog-dispatch-queue-capacity N`
+- `perf_listener --dialog-timing-diagnostics`
+
+The default remains one dialog event processor. Values above `1` use
+keyed sharding by call identity or transaction key; unkeyed events
+fallback round-robin. This keeps per-call ordering for INVITE, ACK, BYE,
+and CANCEL while allowing a server Config to test dialog fanout.
+
+New diagnostic spans include dialog event dispatch queue delay, dialog
+handler duration by method, dialog lookup duration, dialog-to-session
+publish duration by event kind, and UDP receive-to-INVITE-200 completion.
+The next perf matrix should test the current clean 18k/failed 20k profile
+with `--sip-dialog-dispatch-workers 1/2/4/8` and
+`--dialog-timing-diagnostics`.
+
 The first media-enabled transaction matrix was not trustworthy as a
 transaction comparison because every run was dominated by session/media
 setup delay. A macOS `sample` capture under load showed hot samples in
@@ -200,6 +231,34 @@ single-loop default. `4` workers is a reasonable conservative candidate,
 but the best worker count is not settled from one matrix because counts
 vary run to run. `20000 CPS` exposes a different saturation mode that
 transaction fanout alone does not solve.
+
+Follow-up experiment scaffolding now lives in
+`SIGNALING_SHARDING_PERF_EXPERIMENT.md` with a repeatable runner:
+`crates/rvoip-sip/tests/perf/sipp_scenarios/run_signaling_sharding_matrix.sh`.
+The runner only uses Config-backed listener flags, including UDP parse
+fanout, SIP transport-manager forwarding workers, transaction-manager
+dispatch workers, and queue capacity knobs.
+
+Two `18000 CPS` signaling-only matrices were added there. With default
+socket buffers, the best clean point was UDP RR `4`, SIP transport
+workers `2`, transaction workers `1`: `270000/270000`, cleanup
+`270000/270000`, host UDP drops `0`, retransmits `7601`. A repeat with
+4 MB Config-owned UDP socket buffers reduced host UDP drop sensitivity
+but did not improve the best clean retransmit count; its best clean
+points were transport `4` / transaction `2` (`9774` retransmits) and
+transport `2` / transaction `2` (`9921` retransmits).
+
+Focused repeats kept `18000 CPS` clean but showed run-to-run variance:
+transport `2` / transaction `1` repeated best at `13142` retransmits,
+with transport `4` / transaction `2` close behind at `13734`. Testing
+the repeat winner at `20000 CPS` failed (`284999/285000`, `456188`
+retransmits, listener `296540/295430`) without host UDP drops. A
+`20000 CPS` transport `2` / transaction `4` run removed most
+transport-to-transaction queue delay but still failed worse (`543008`
+retransmits). The remaining `20k` pressure is therefore downstream of
+transaction ingress, in the transaction-to-dialog / dialog incoming-call
+path measured by `udp_receive_to_incoming_call_emit` and
+`bye_receive_to_200`.
 
 This changes the next optimization target: the SIP receive, transaction,
 dialog, and fused response path can hit zero retransmits at `8000 CPS`

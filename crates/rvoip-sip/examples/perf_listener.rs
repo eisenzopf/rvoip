@@ -29,6 +29,20 @@
 //! cost.
 //! `--transaction-timing-diagnostics` adds high-cardinality transaction
 //! manager timing histograms on top of `--diagnostics`.
+//! `--dialog-timing-diagnostics` adds high-cardinality dialog ingress and
+//! publish timing histograms on top of `--diagnostics`.
+//! `--high-cps-capacity`, `--udp-parse-queue-capacity`,
+//! `--sip-transport-channel-capacity`,
+//! `--sip-transport-dispatch-workers`,
+//! `--sip-transport-dispatch-queue-capacity`,
+//! `--sip-udp-recv-buffer-size`, `--sip-udp-send-buffer-size`,
+//! `--transaction-event-channel-capacity`,
+//! `--transaction-dispatch-workers`,
+//! `--transaction-dispatch-queue-capacity`,
+//! `--sip-dialog-dispatch-workers`,
+//! `--sip-dialog-dispatch-queue-capacity`, and
+//! `--session-event-dispatcher-*` expose Config-backed sharding and queue
+//! sizing knobs for perf matrix runs.
 //!
 //! The process runs forever; SIGINT to terminate.
 
@@ -41,7 +55,7 @@ use rvoip_media_core::diagnostics as media_setup_diag;
 use rvoip_sip::adapters::media_adapter::cleanup_session_diag;
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer};
 use rvoip_sip::api::incoming::IncomingCall;
-use rvoip_sip::api::unified::{Config, MediaMode};
+use rvoip_sip::api::unified::Config;
 use rvoip_sip::cleanup_diag;
 use rvoip_sip_dialog::diagnostics as sip_retrans_diag;
 use rvoip_sip_transport::diagnostics as sip_udp_diag;
@@ -55,6 +69,7 @@ const HIGH_CPS_RTP_PORT_CAPACITY: usize = 49_152;
 struct PerfDiagnostics {
     summary: bool,
     transaction_timing: bool,
+    dialog_timing: bool,
     cleanup_events: bool,
     wire: bool,
 }
@@ -114,10 +129,22 @@ async fn main() {
     let mut advertised_arg = None;
     let mut diagnostics = PerfDiagnostics::default();
     let mut fast_auto_accept = false;
+    let mut high_cps_capacity = HIGH_CPS_CAPACITY;
     let mut udp_parse_workers = None;
+    let mut udp_parse_queue_capacity = None;
     let mut udp_parse_round_robin = false;
     let mut transaction_dispatch_workers = None;
     let mut transaction_dispatch_queue_capacity = None;
+    let mut sip_dialog_dispatch_workers = None;
+    let mut sip_dialog_dispatch_queue_capacity = None;
+    let mut sip_transport_channel_capacity = None;
+    let mut sip_transport_dispatch_workers = None;
+    let mut sip_transport_dispatch_queue_capacity = None;
+    let mut sip_udp_recv_buffer_size = None;
+    let mut sip_udp_send_buffer_size = None;
+    let mut transaction_event_channel_capacity = None;
+    let mut session_event_dispatcher_workers = None;
+    let mut session_event_dispatcher_queue_capacity = None;
     let mut signaling_only_media = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -132,11 +159,18 @@ async fn main() {
                 diagnostics.summary = true;
                 diagnostics.transaction_timing = true;
             }
+            "--dialog-timing-diagnostics" => {
+                diagnostics.summary = true;
+                diagnostics.dialog_timing = true;
+            }
             "--wire-diagnostics" => {
                 diagnostics.wire = true;
             }
             "--fast-auto-accept" => {
                 fast_auto_accept = true;
+            }
+            "--high-cps-capacity" => {
+                high_cps_capacity = next_usize_arg(&mut args, "--high-cps-capacity");
             }
             "--udp-parse-workers" => {
                 let value = args
@@ -147,6 +181,10 @@ async fn main() {
                         .parse::<usize>()
                         .unwrap_or_else(|e| panic!("invalid --udp-parse-workers '{value}': {e}")),
                 );
+            }
+            "--udp-parse-queue-capacity" => {
+                udp_parse_queue_capacity =
+                    Some(next_usize_arg(&mut args, "--udp-parse-queue-capacity"));
             }
             "--udp-parse-round-robin" => {
                 udp_parse_round_robin = true;
@@ -170,6 +208,60 @@ async fn main() {
                     Some(value.parse::<usize>().unwrap_or_else(|e| {
                         panic!("invalid --transaction-dispatch-queue-capacity '{value}': {e}")
                     }));
+            }
+            "--sip-dialog-dispatch-workers" => {
+                sip_dialog_dispatch_workers =
+                    Some(next_usize_arg(&mut args, "--sip-dialog-dispatch-workers"));
+            }
+            "--sip-dialog-dispatch-queue-capacity" => {
+                sip_dialog_dispatch_queue_capacity = Some(next_usize_arg(
+                    &mut args,
+                    "--sip-dialog-dispatch-queue-capacity",
+                ));
+            }
+            "--sip-transport-channel-capacity" => {
+                sip_transport_channel_capacity = Some(next_usize_arg(
+                    &mut args,
+                    "--sip-transport-channel-capacity",
+                ));
+            }
+            "--sip-transport-dispatch-workers" => {
+                sip_transport_dispatch_workers = Some(next_usize_arg(
+                    &mut args,
+                    "--sip-transport-dispatch-workers",
+                ));
+            }
+            "--sip-transport-dispatch-queue-capacity" => {
+                sip_transport_dispatch_queue_capacity = Some(next_usize_arg(
+                    &mut args,
+                    "--sip-transport-dispatch-queue-capacity",
+                ));
+            }
+            "--sip-udp-recv-buffer-size" => {
+                sip_udp_recv_buffer_size =
+                    Some(next_usize_arg(&mut args, "--sip-udp-recv-buffer-size"));
+            }
+            "--sip-udp-send-buffer-size" => {
+                sip_udp_send_buffer_size =
+                    Some(next_usize_arg(&mut args, "--sip-udp-send-buffer-size"));
+            }
+            "--transaction-event-channel-capacity" => {
+                transaction_event_channel_capacity = Some(next_usize_arg(
+                    &mut args,
+                    "--transaction-event-channel-capacity",
+                ));
+            }
+            "--session-event-dispatcher-workers" => {
+                session_event_dispatcher_workers = Some(next_usize_arg(
+                    &mut args,
+                    "--session-event-dispatcher-workers",
+                ));
+            }
+            "--session-event-dispatcher-queue-capacity" => {
+                session_event_dispatcher_queue_capacity = Some(next_usize_arg(
+                    &mut args,
+                    "--session-event-dispatcher-queue-capacity",
+                ));
             }
             _ if advertised_arg.is_none() => {
                 advertised_arg = Some(arg);
@@ -221,13 +313,25 @@ async fn main() {
         config,
         diagnostics,
         fast_auto_accept,
+        high_cps_capacity,
         udp_parse_workers,
+        udp_parse_queue_capacity,
         udp_parse_round_robin,
         transaction_dispatch_workers,
         transaction_dispatch_queue_capacity,
+        sip_dialog_dispatch_workers,
+        sip_dialog_dispatch_queue_capacity,
+        sip_transport_channel_capacity,
+        sip_transport_dispatch_workers,
+        sip_transport_dispatch_queue_capacity,
+        sip_udp_recv_buffer_size,
+        sip_udp_send_buffer_size,
+        transaction_event_channel_capacity,
+        session_event_dispatcher_workers,
+        session_event_dispatcher_queue_capacity,
         signaling_only_media,
     );
-    print_effective_config(&config);
+    print_effective_config(&config, high_cps_capacity);
 
     let accepted = Arc::new(AtomicU64::new(0));
     let handler = CountingAccept {
@@ -345,18 +449,32 @@ fn apply_perf_config(
     config: Config,
     diagnostics: PerfDiagnostics,
     fast_auto_accept: bool,
+    high_cps_capacity: usize,
     udp_parse_workers: Option<usize>,
+    udp_parse_queue_capacity: Option<usize>,
     udp_parse_round_robin: bool,
     transaction_dispatch_workers: Option<usize>,
     transaction_dispatch_queue_capacity: Option<usize>,
+    sip_dialog_dispatch_workers: Option<usize>,
+    sip_dialog_dispatch_queue_capacity: Option<usize>,
+    sip_transport_channel_capacity: Option<usize>,
+    sip_transport_dispatch_workers: Option<usize>,
+    sip_transport_dispatch_queue_capacity: Option<usize>,
+    sip_udp_recv_buffer_size: Option<usize>,
+    sip_udp_send_buffer_size: Option<usize>,
+    transaction_event_channel_capacity: Option<usize>,
+    session_event_dispatcher_workers: Option<usize>,
+    session_event_dispatcher_queue_capacity: Option<usize>,
     signaling_only_media: bool,
 ) -> Config {
+    let media_session_capacity = high_cps_capacity.min(HIGH_CPS_RTP_PORT_CAPACITY);
     let mut config = config
-        .with_high_cps_udp_auto_answer(HIGH_CPS_CAPACITY)
+        .with_high_cps_udp_auto_answer(high_cps_capacity)
         .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
-        .with_media_session_capacity(HIGH_CPS_CAPACITY)
+        .with_media_session_capacity(media_session_capacity)
         .with_sip_udp_diagnostics(diagnostics.summary)
         .with_sip_transaction_timing_diagnostics(diagnostics.transaction_timing)
+        .with_sip_dialog_timing_diagnostics(diagnostics.dialog_timing)
         .with_media_setup_diagnostics(diagnostics.summary)
         .with_cleanup_diagnostics(diagnostics.summary)
         .with_cleanup_diagnostic_events(diagnostics.cleanup_events)
@@ -367,6 +485,9 @@ fn apply_perf_config(
     if let Some(workers) = udp_parse_workers {
         config = config.with_sip_udp_parse_workers(workers);
     }
+    if let Some(capacity) = udp_parse_queue_capacity {
+        config = config.with_sip_udp_parse_queue_capacity(capacity);
+    }
     if udp_parse_round_robin {
         config = config.with_sip_udp_parse_dispatch(UdpParseDispatch::RoundRobin);
     }
@@ -376,8 +497,37 @@ fn apply_perf_config(
     if let Some(capacity) = transaction_dispatch_queue_capacity {
         config = config.with_sip_transaction_dispatch_queue_capacity(capacity);
     }
+    if let Some(workers) = sip_dialog_dispatch_workers {
+        config = config.with_sip_dialog_dispatch_workers(workers);
+    }
+    if let Some(capacity) = sip_dialog_dispatch_queue_capacity {
+        config = config.with_sip_dialog_dispatch_queue_capacity(capacity);
+    }
+    if let Some(capacity) = sip_transport_channel_capacity {
+        config = config.with_sip_transport_channel_capacity(capacity);
+    }
+    if let Some(workers) = sip_transport_dispatch_workers {
+        config = config.with_sip_transport_dispatch_workers(workers);
+    }
+    if let Some(capacity) = sip_transport_dispatch_queue_capacity {
+        config = config.with_sip_transport_dispatch_queue_capacity(capacity);
+    }
+    if sip_udp_recv_buffer_size.is_some() || sip_udp_send_buffer_size.is_some() {
+        let recv_buffer_size = sip_udp_recv_buffer_size.or(config.sip_udp_recv_buffer_size);
+        let send_buffer_size = sip_udp_send_buffer_size.or(config.sip_udp_send_buffer_size);
+        config = config.with_sip_udp_socket_buffers(recv_buffer_size, send_buffer_size);
+    }
+    if let Some(capacity) = transaction_event_channel_capacity {
+        config = config.with_transaction_event_channel_capacity(capacity);
+    }
+    if let Some(workers) = session_event_dispatcher_workers {
+        config = config.with_session_event_dispatcher_workers(workers);
+    }
+    if let Some(capacity) = session_event_dispatcher_queue_capacity {
+        config = config.with_session_event_dispatcher_channel_capacity(capacity);
+    }
     if signaling_only_media {
-        config = config.with_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
+        config = config.with_signaling_only_media(9);
     }
     if fast_auto_accept {
         config.with_fast_auto_accept_incoming_calls(true)
@@ -386,24 +536,35 @@ fn apply_perf_config(
     }
 }
 
-fn print_effective_config(config: &Config) {
+fn print_effective_config(config: &Config, high_cps_capacity: usize) {
     println!(
         "rvoip-sip perf_listener: high_cps_config capacity={} auto_180_ringing={} \
          auto_100_trying={} \
          fast_auto_accept_incoming_calls={} \
+         sip_transport_dispatch_workers={:?} \
+         sip_transport_dispatch_queue_capacity={:?} \
+         sip_udp_recv_buffer_size={:?} sip_udp_send_buffer_size={:?} \
          sip_udp_parse_workers={:?} sip_udp_parse_queue_capacity={:?} \
          sip_udp_parse_dispatch={:?} \
          sip_transaction_dispatch_workers={:?} \
-         sip_transaction_dispatch_queue_capacity={:?}",
-        HIGH_CPS_CAPACITY,
+         sip_transaction_dispatch_queue_capacity={:?} \
+         sip_dialog_dispatch_workers={:?} \
+         sip_dialog_dispatch_queue_capacity={:?}",
+        high_cps_capacity,
         config.auto_180_ringing,
         config.auto_100_trying,
         config.fast_auto_accept_incoming_calls,
+        config.sip_transport_dispatch_workers,
+        config.sip_transport_dispatch_queue_capacity,
+        config.sip_udp_recv_buffer_size,
+        config.sip_udp_send_buffer_size,
         config.sip_udp_parse_workers,
         config.sip_udp_parse_queue_capacity,
         config.sip_udp_parse_dispatch,
         config.sip_transaction_dispatch_workers,
         config.sip_transaction_dispatch_queue_capacity,
+        config.sip_dialog_dispatch_workers,
+        config.sip_dialog_dispatch_queue_capacity,
     );
     println!(
         "rvoip-sip perf_listener: channels incoming={} state={} sip_transport={} \
@@ -426,10 +587,16 @@ fn print_effective_config(config: &Config) {
         config.media_mode,
     );
     println!(
+        "rvoip-sip perf_listener: dispatch session_event_workers={} \
+         session_event_queue_capacity={}",
+        config.session_event_dispatcher_workers, config.session_event_dispatcher_channel_capacity,
+    );
+    println!(
         "rvoip-sip perf_listener: diagnostics sip_udp={} transaction_timing={} \
-         media_setup={} cleanup={} cleanup_events={} srtp={} rtp={} media_sdp={}",
+         dialog_timing={} media_setup={} cleanup={} cleanup_events={} srtp={} rtp={} media_sdp={}",
         config.sip_udp_diagnostics,
         config.sip_transaction_timing_diagnostics,
+        config.sip_dialog_timing_diagnostics,
         config.media_setup_diagnostics,
         config.cleanup_diagnostics,
         config.cleanup_diagnostic_events,
@@ -437,4 +604,16 @@ fn print_effective_config(config: &Config) {
         config.rtp_diagnostics,
         config.media_sdp_diagnostics
     );
+}
+
+fn next_usize_arg(
+    args: &mut std::iter::Peekable<std::iter::Skip<std::env::Args>>,
+    flag: &str,
+) -> usize {
+    let value = args
+        .next()
+        .unwrap_or_else(|| panic!("{flag} requires a value"));
+    value
+        .parse::<usize>()
+        .unwrap_or_else(|e| panic!("invalid {flag} '{value}': {e}"))
 }

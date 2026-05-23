@@ -124,7 +124,12 @@ impl DialogManager {
         request: Request,
     ) -> DialogResult<()> {
         // Find the dialog for this BYE
-        if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
+        let lookup_started = diagnostics::dialog_timing_enabled().then(std::time::Instant::now);
+        let dialog_id = self.find_dialog_for_request(&request).await;
+        if let Some(started) = lookup_started {
+            diagnostics::record_dialog_lookup(started.elapsed());
+        }
+        if let Some(dialog_id) = dialog_id {
             self.process_bye_in_dialog(transaction_id, request, dialog_id)
                 .await
         } else {

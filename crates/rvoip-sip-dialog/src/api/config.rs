@@ -236,6 +236,22 @@ pub struct DialogConfig {
     /// usage. Set to None for unlimited dialogs (not recommended for production).
     pub max_dialogs: Option<usize>,
 
+    /// Optional dialog transaction-event dispatch worker count.
+    ///
+    /// `None` preserves the single dialog event processor. Values above `1`
+    /// enable keyed sharding between transaction-manager events and dialog
+    /// protocol handling while preserving per-call ordering.
+    #[serde(default)]
+    pub event_dispatch_workers: Option<usize>,
+
+    /// Optional dialog transaction-event dispatch queue capacity.
+    ///
+    /// `None` uses the transaction-event channel capacity selected by the
+    /// embedding stack. When dispatch workers are enabled, this capacity is
+    /// divided across workers.
+    #[serde(default)]
+    pub event_dispatch_queue_capacity: Option<usize>,
+
     /// Enable automatic dialog cleanup
     ///
     /// When true, terminated dialogs are automatically cleaned up at
@@ -286,6 +302,8 @@ impl Default for DialogConfig {
             user_agent: Some("RVOIP-Dialog/1.0".to_string()),
             dialog_timeout: Duration::from_secs(180), // 3 minutes
             max_dialogs: Some(10000),
+            event_dispatch_workers: None,
+            event_dispatch_queue_capacity: None,
             auto_cleanup: true,
             cleanup_interval: Duration::from_secs(30),
             use_100rel: RelUsage::default(),
@@ -405,6 +423,18 @@ impl DialogConfig {
         self
     }
 
+    /// Set the dialog transaction-event dispatch worker count.
+    pub fn with_event_dispatch_workers(mut self, workers: usize) -> Self {
+        self.event_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the dialog transaction-event dispatch queue capacity.
+    pub fn with_event_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.event_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
     /// Set the 100rel (reliable provisional) policy (RFC 3262).
     ///
     /// # Examples
@@ -489,6 +519,23 @@ impl DialogConfig {
             if max == 0 {
                 return Err("Max dialogs must be greater than 0".to_string());
             }
+        }
+
+        if matches!(self.event_dispatch_workers, Some(0)) {
+            return Err("Dialog event dispatch workers must be greater than 0".to_string());
+        }
+
+        if let Some(workers) = self.event_dispatch_workers {
+            if workers > crate::manager::MAX_DIALOG_EVENT_DISPATCH_WORKERS {
+                return Err(format!(
+                    "Dialog event dispatch workers must be <= {}",
+                    crate::manager::MAX_DIALOG_EVENT_DISPATCH_WORKERS
+                ));
+            }
+        }
+
+        if matches!(self.event_dispatch_queue_capacity, Some(0)) {
+            return Err("Dialog event dispatch queue capacity must be greater than 0".to_string());
         }
 
         if self.cleanup_interval.as_secs() == 0 {

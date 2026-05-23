@@ -6,6 +6,9 @@
 // Core dialog manager implementation
 pub mod core;
 
+/// Maximum dialog transaction-event dispatch workers accepted by configuration.
+pub const MAX_DIALOG_EVENT_DISPATCH_WORKERS: usize = 64;
+
 // **NEW**: Unified dialog manager (replaces client/server split)
 pub mod unified;
 

@@ -88,6 +88,8 @@ impl DialogManager {
         request: Request,
         source: SocketAddr,
     ) -> DialogResult<()> {
+        let setup_started =
+            crate::diagnostics::dialog_timing_enabled().then(std::time::Instant::now);
         tracing::debug!(
             "🔍 INVITE HANDLER: Processing initial INVITE request from {}",
             source
@@ -225,6 +227,9 @@ impl DialogManager {
         );
         self.notify_session_layer(event).await?;
         tracing::debug!("🔍 INVITE HANDLER: Successfully sent SessionCoordinationEvent::IncomingCall for dialog {}", dialog_id);
+        if let Some(started) = setup_started {
+            crate::diagnostics::record_dialog_initial_invite_setup(started.elapsed());
+        }
         info!("Initial INVITE processed, created dialog {}", dialog_id);
         Ok(())
     }
