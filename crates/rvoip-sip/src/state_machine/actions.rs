@@ -399,9 +399,30 @@ pub(crate) async fn execute_action(
             let guard = (*code == 200).then(|| {
                 cleanup_diag::stage_guard(CleanupStage::ActionSend200Ok, &session.session_id.0)
             });
-            dialog_adapter
-                .send_response(&session.session_id, *code, session.local_sdp.clone())
-                .await?;
+            if *code == 200 {
+                let response_started_at = session.incoming_invite_received_at.take();
+                if let Some(transaction_id) = session.pending_inbound_invite_transaction_id.take() {
+                    dialog_adapter
+                        .send_response_for_transaction(
+                            &session.session_id,
+                            &transaction_id,
+                            *code,
+                            session.local_sdp.clone(),
+                        )
+                        .await?;
+                } else {
+                    dialog_adapter
+                        .send_response(&session.session_id, *code, session.local_sdp.clone())
+                        .await?;
+                }
+                if let Some(started_at) = response_started_at {
+                    rvoip_sip_dialog::diagnostics::record_first_invite_to_200(started_at.elapsed());
+                }
+            } else {
+                dialog_adapter
+                    .send_response(&session.session_id, *code, session.local_sdp.clone())
+                    .await?;
+            }
             // RFC 3261: Dialog is established when UAS sends 200 OK to INVITE
             if *code == 200 {
                 session.dialog_established = true;

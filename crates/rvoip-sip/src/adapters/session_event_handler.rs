@@ -1238,7 +1238,7 @@ impl SessionCrossCrateEventHandler {
         to: String,
         sdp: Option<String>,
         headers: &std::collections::HashMap<String, String>,
-        _transaction_id: &str,
+        transaction_id: &str,
         _source_addr: &str,
         raw_request: Option<bytes::Bytes>,
     ) -> Result<()> {
@@ -1297,6 +1297,18 @@ impl SessionCrossCrateEventHandler {
             })?;
         session.local_uri = Some(to.clone());
         session.remote_uri = Some(from.clone());
+        session.incoming_invite_received_at = Some(Instant::now());
+        match transaction_id.parse::<rvoip_sip_dialog::transaction::TransactionKey>() {
+            Ok(transaction_id) => {
+                session.pending_inbound_invite_transaction_id = Some(transaction_id);
+            }
+            Err(e) => {
+                debug!(
+                    "IncomingCall for session {} carried unparsable transaction id {}: {}",
+                    session_id, transaction_id, e
+                );
+            }
+        }
         let session_remote_sdp = session.remote_sdp.clone();
 
         self.state_machine
@@ -1326,34 +1338,6 @@ impl SessionCrossCrateEventHandler {
                 },
             )
             .await;
-
-        // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
-        // forwarded across the bus so `IncomingCall::raw_request()`
-        // can expose the typed `Arc<Request>`. Failure to parse is
-        // never fatal — we fall back to the legacy headers-only path.
-        if let Some(bytes) = raw_request.as_ref() {
-            match rvoip_sip_core::parse_message(bytes.as_ref()) {
-                Ok(rvoip_sip_core::Message::Request(req)) => {
-                    self.registry
-                        .store_pending_incoming_request(Arc::new(req))
-                        .await;
-                }
-                Ok(_) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        "IncomingCall raw_request was not a SIP request"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        error = %e,
-                        "Failed to re-parse inbound INVITE bytes; \
-                         IncomingCall.raw_request() will be None"
-                    );
-                }
-            }
-        }
 
         let our_dialog_id = DialogId(dialog_uuid);
         let rvoip_dialog_id = rvoip_sip_dialog::DialogId::from(our_dialog_id.clone());
@@ -1385,15 +1369,21 @@ impl SessionCrossCrateEventHandler {
             error!("Failed to publish StoreDialogMapping for UAS: {}", e);
         }
 
+        let event_type = if self.fast_auto_accept_incoming_calls {
+            EventType::IncomingCallAutoAccept {
+                from: from.clone(),
+                sdp,
+            }
+        } else {
+            EventType::IncomingCall {
+                from: from.clone(),
+                sdp,
+            }
+        };
+
         if let Err(e) = self
             .state_machine
-            .process_event(
-                &session_id,
-                EventType::IncomingCall {
-                    from: from.clone(),
-                    sdp,
-                },
-            )
+            .process_event(&session_id, event_type)
             .await
         {
             error!("Failed to process incoming call event: {}", e);
@@ -1401,18 +1391,32 @@ impl SessionCrossCrateEventHandler {
             self.registry.remove_session(&session_id).await;
         } else {
             if self.fast_auto_accept_incoming_calls {
-                match self
-                    .state_machine
-                    .process_event(&session_id, EventType::AcceptCall)
-                    .await
-                {
+                debug!("Fast auto-accepted inbound call {}", session_id);
+            }
+
+            // SIP_API_DESIGN_2 Phase A: re-parse the inbound INVITE bytes
+            // after the fast 200 OK path has completed, but before app
+            // observation events are published. Failure to parse is never
+            // fatal — we fall back to the legacy headers-only path.
+            if let Some(bytes) = raw_request.as_ref() {
+                match rvoip_sip_core::parse_message(bytes.as_ref()) {
+                    Ok(rvoip_sip_core::Message::Request(req)) => {
+                        self.registry
+                            .store_pending_incoming_request(Arc::new(req))
+                            .await;
+                    }
                     Ok(_) => {
-                        debug!("Fast auto-accepted inbound call {}", session_id);
+                        tracing::warn!(
+                            session_id = %session_id,
+                            "IncomingCall raw_request was not a SIP request"
+                        );
                     }
                     Err(e) => {
-                        debug!(
-                            "Fast auto-accept for inbound call {} was not applied: {}",
-                            session_id, e
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %e,
+                            "Failed to re-parse inbound INVITE bytes; \
+                             IncomingCall.raw_request() will be None"
                         );
                     }
                 }
@@ -1723,7 +1727,7 @@ impl SessionCrossCrateEventHandler {
                     .replace("\\n", "\n")
                     .replace("\\\"", "\"")
             });
-        let _transaction_id = self
+        let transaction_id = self
             .extract_field(event_str, "transaction_id: \"")
             .unwrap_or_else(|| "unknown".to_string());
         let _source_addr = self
@@ -1752,6 +1756,18 @@ impl SessionCrossCrateEventHandler {
             })?;
         session.local_uri = Some(to.clone()); // The "To" header is us (answerer)
         session.remote_uri = Some(from.clone()); // The "From" header is the caller
+        session.incoming_invite_received_at = Some(Instant::now());
+        match transaction_id.parse::<rvoip_sip_dialog::transaction::TransactionKey>() {
+            Ok(transaction_id) => {
+                session.pending_inbound_invite_transaction_id = Some(transaction_id);
+            }
+            Err(e) => {
+                debug!(
+                    "IncomingCall for session {} carried unparsable transaction id {}: {}",
+                    session_id, transaction_id, e
+                );
+            }
+        }
 
         // Store session data for SimplePeer event
         let session_remote_sdp = session.remote_sdp.clone();
@@ -1818,9 +1834,16 @@ impl SessionCrossCrateEventHandler {
         }
 
         // Process the event - state machine will handle the rest
-        let event_type = EventType::IncomingCall {
-            from: from.clone(),
-            sdp,
+        let event_type = if self.fast_auto_accept_incoming_calls {
+            EventType::IncomingCallAutoAccept {
+                from: from.clone(),
+                sdp,
+            }
+        } else {
+            EventType::IncomingCall {
+                from: from.clone(),
+                sdp,
+            }
         };
 
         if let Err(e) = self

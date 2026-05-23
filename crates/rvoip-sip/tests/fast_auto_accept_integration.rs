@@ -6,6 +6,8 @@ use rvoip_sip::api::events::{CallId, Event};
 use rvoip_sip::api::incoming::IncomingCall;
 use rvoip_sip::api::stream_peer::EventReceiver;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
+use rvoip_sip::state_table::{Action, EventType, Role, StateKey, YamlTableLoader};
+use rvoip_sip::types::CallState;
 use rvoip_sip::SipTraceConfig;
 use tokio::sync::{mpsc, Notify};
 
@@ -53,6 +55,39 @@ async fn wait_for_call_answered(
             Ok(Some(_)) => continue,
         }
     }
+}
+
+#[test]
+fn incoming_call_auto_accept_transition_sends_200_without_180_or_accept_event() {
+    let table = YamlTableLoader::load_embedded_default().expect("default state table loads");
+    let key = StateKey {
+        role: Role::UAS,
+        state: CallState::Idle,
+        event: EventType::IncomingCallAutoAccept {
+            from: String::new(),
+            sdp: None,
+        },
+    };
+
+    let transition = table
+        .get_transition(&key)
+        .expect("UAS Idle + IncomingCallAutoAccept transition must exist");
+
+    assert_eq!(transition.next_state, Some(CallState::Answering));
+    assert!(transition.actions.contains(&Action::CreateMediaSession));
+    assert!(transition.actions.contains(&Action::StoreRemoteSDP));
+    assert!(transition.actions.contains(&Action::GenerateLocalSDP));
+    assert!(transition.actions.contains(&Action::NegotiateSDPAsUAS));
+    assert!(transition
+        .actions
+        .contains(&Action::SendSIPResponse(200, "OK".to_string())));
+    assert!(!transition
+        .actions
+        .contains(&Action::SendSIPResponse(180, "Ringing".to_string())));
+    assert!(
+        transition.publish_events.is_empty(),
+        "app observation is published by the handler only after the 200 OK path completes"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -126,6 +126,10 @@ pub enum EventType {
         from: String,
         sdp: Option<String>,
     },
+    IncomingCallAutoAccept {
+        from: String,
+        sdp: Option<String>,
+    },
     AcceptCall,
     RejectCall {
         status: u16,
@@ -366,6 +370,10 @@ impl EventType {
                 target: String::new(),
             },
             EventType::IncomingCall { .. } => EventType::IncomingCall {
+                from: String::new(),
+                sdp: None,
+            },
+            EventType::IncomingCallAutoAccept { .. } => EventType::IncomingCallAutoAccept {
                 from: String::new(),
                 sdp: None,
             },

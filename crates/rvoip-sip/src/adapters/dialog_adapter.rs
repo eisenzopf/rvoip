@@ -1323,6 +1323,36 @@ impl DialogAdapter {
             })
     }
 
+    /// Send a UAS response through a known inbound server transaction.
+    pub async fn send_response_for_transaction(
+        &self,
+        session_id: &SessionId,
+        transaction_id: &TransactionKey,
+        code: u16,
+        sdp: Option<String>,
+    ) -> Result<()> {
+        tracing::info!(
+            "DialogAdapter sending {} response for session {} via transaction {} with SDP: {}",
+            code,
+            session_id.0,
+            transaction_id,
+            sdp.is_some()
+        );
+
+        self.dialog_api
+            .send_response_for_session_transaction(&session_id.0, transaction_id, code, sdp)
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    "Failed to send response for session {} via transaction {}: {}",
+                    session_id.0,
+                    transaction_id,
+                    e
+                );
+                SessionError::DialogError(format!("Failed to send response: {}", e))
+            })
+    }
+
     /// Send ACK (for UAC after 200 OK)
     pub async fn send_ack(&self, session_id: &SessionId, response: &Response) -> Result<()> {
         // Get the dialog ID for this session

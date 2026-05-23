@@ -32,12 +32,16 @@ Config-only validation still has recovered INVITE/BYE retransmits:
 | Inline fast-accept listener experiment | `119999/120000` | `3497` | `2026-05-23 02:09`, `fast_auto_accept_incoming_calls=true`; lower retransmits but failed target: one SIPp timeout/dead-call path and final listener `accepted_total=120000 cleaned_total=119999`. |
 | Auto-100-disabled rerun, diagnostics off | `120000/120000` | `3257` | `2026-05-23 02:35`, no failed calls, warnings/dead messages `7/7`, response `>=500 ms` count `2013`, final listener `accepted_total=120000 cleaned_total=120000`, UDP full-socket drop delta `0`. |
 | Auto-100-disabled rerun, diagnostics on | `120000/120000` | `3365` | `2026-05-23 02:37`, `resp_1xx=0`, `resp_2xx=243379`, duplicate cache misses `0`, cleanup `active_total=0`, UDP full-socket drop delta `0`. |
+| Fused fast-200 path, diagnostics on | `120000/120000` | `11433` | `2026-05-23 03:02`, `fast_auto_accept_incoming_calls=true`; listener `accepted_total=120000 cleaned_total=119135`, `resp_1xx=0`, duplicate cache misses `0`, `first_invite_to_200 over_500ms=0`, max `10726 us`, UDP full-socket drop delta `0`. |
+| Fused fast-200 path, diagnostics off | `120000/120000` | `71566` | `2026-05-23 03:04`, `fast_auto_accept_incoming_calls=true`; listener `accepted_total=120000 cleaned_total=117787`, warnings/dead messages `20775/20775`, response `>=500 ms` count `25714`, UDP full-socket drop delta `0`. |
 
-This means the public Config wiring is in place, but the zero-retransmit
-performance target is not yet restored. The next
-developer should not assume the retransmits are correctness failures:
-they are currently fast-recovered duplicates. The open question is why
-some first responses still miss SIPp's `500 ms` retransmit timer.
+This means the public Config wiring is in place, and the fused fast-200
+path now proves the handler/action segment can send the first `200 OK`
+quickly. The zero-retransmit performance target is still not restored.
+The next developer should not assume every retransmit is a correctness
+failure: many are fast-recovered duplicates. The open question is the
+latency before the fused handler starts, plus why the fast path leaves
+ACK/BYE cleanup short at 8000 CPS.
 
 ## Goal
 
@@ -83,8 +87,8 @@ the earlier migration, using broad call capacity for media preallocation
 also inflated dialog/transaction indexes and made retransmits worse. The
 current branch keeps media capacity separate. The profile also keeps
 `fast_auto_accept_incoming_calls = false`; that remains an explicit
-application opt-in because the inline fast-accept experiment reduced
-retransmits but missed the target by one completed cleanup.
+application opt-in because the fused fast-200 benchmark still missed the
+cleanup/retransmit target.
 
 Relevant files:
 
@@ -473,16 +477,25 @@ Final diagnostics:
 - Duplicate recovery `dup_invite_cache_miss=0`,
   `dup_bye_tombstone_miss=0`
 
-### Inline Fast-Accept Experiment
+### Fused Fast-200 Path
 
-After auditing `Config::with_fast_auto_accept_incoming_calls(true)`, the
-runtime path was tightened so fast accept is no longer queued to a
-background worker after the public incoming-call event is published.
-When enabled, the dialog-to-session handler now awaits
-`EventType::AcceptCall` before publishing the app-level
-`Event::IncomingCall`. Callback `Accept`, `AcceptWithSdp`, `Reject`,
-`Redirect`, and `Defer` decisions are treated as already handled; deferred
-guards are resolved so they cannot fire a late 503 watchdog.
+`Config::with_fast_auto_accept_incoming_calls(true)` now uses an
+internal `IncomingCallAutoAccept` state-table event instead of the old
+two-step `IncomingCall -> AcceptCall` sequence. The UAS `Idle ->
+Answering` transition creates media, stores remote SDP, generates and
+negotiates the local SDP answer, and sends `200 OK` without sending
+`180 Ringing` and without queueing a second `AcceptCall`.
+
+The inbound INVITE transaction id is stored on the session during setup.
+`SendSIPResponse(200)` consumes that exact transaction id when present,
+so the final response no longer has to rediscover the pending server
+transaction from dialog/session indexes. The handler parses and stores
+`raw_request` after the fast 200 path completes, before publishing the
+observational app `Event::IncomingCall`.
+
+`sip_udp_diagnostics` also reports a
+`first_invite_to_200=[count=... p50_us=... p95_us=... p99_us=... p999_us=... max_us=... over_500ms=...]`
+histogram for the fused handler/action segment.
 
 Important semantics:
 
@@ -492,7 +505,7 @@ Important semantics:
 - With default config, the normal `IncomingCall` transition still sends
   automatic `180 Ringing` first. For an immediate final answer, pair fast
   accept with `auto_180_ringing=false`.
-- The 200 OK is still gated by the normal UAS accept actions:
+- The 200 OK is still gated by the normal UAS answer actions:
   `GenerateLocalSDP`, `NegotiateSDPAsUAS`, then `SendSIPResponse(200)`.
 
 The focused integration test passed:
@@ -501,8 +514,8 @@ The focused integration test passed:
 cargo test -p rvoip-sip --test fast_auto_accept_integration -- --nocapture
 ```
 
-The 8000 CPS listener experiment with fast accept enabled did not meet the
-benchmark target:
+The original inline fast-accept 8000 CPS listener experiment did not meet
+the benchmark target:
 
 ```text
 crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_fast_accept_inline_8000_20260523_020958
@@ -526,9 +539,49 @@ Listener final state after stop:
 - `cleaned_total=119999`
 - `in_flight=1`
 
-Because this profile failed the success/cleanup target, the benchmark
-listener was left on the previous explicit callback-accept profile rather
-than enabling fast accept by default.
+The new fused fast-200 path was then benchmarked at 8000 CPS.
+
+Diagnostics-on result:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_fused_fast200_diag_20260523_030156
+```
+
+- SIPp `TotalCallCreated=120000`
+- SIPp `SuccessfulCall=120000`
+- SIPp `FailedCall=0`
+- SIPp `Retransmissions=11433`
+- SIPp `Warnings=5268`
+- SIPp `DeadCallMsgs=5268`
+- response `>=500 ms` buckets `7022`
+- listener final `accepted_total=120000 cleaned_total=119135`
+- SIP UDP `resp_1xx=0`
+- duplicate cache misses `0`
+- `first_invite_to_200 count=120000 avg_us=187 p50_us=250 p95_us=500 p99_us=500 p999_us=1000 max_us=10726 over_500ms=0`
+- host UDP full-socket-buffer drops delta `0`
+
+Diagnostics-off result:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_fused_fast200_prod_20260523_030413
+```
+
+- SIPp `TotalCallCreated=120000`
+- SIPp `SuccessfulCall=120000`
+- SIPp `FailedCall=0`
+- SIPp `Retransmissions=71566`
+- SIPp `Warnings=20775`
+- SIPp `DeadCallMsgs=20775`
+- response `>=500 ms` buckets `25714`
+- listener final `accepted_total=120000 cleaned_total=117787`
+- host UDP full-socket-buffer drops delta `0`
+
+This path proves the handler/action work after the session event starts is
+fast, but it is not stable enough to make it the high-CPS profile default.
+The remaining latency is earlier than the fused state-machine action, or
+outside the server after send completion. The cleanup gap also means the
+next pass must account for missing ACK/BYE observation under fast auto
+answer.
 
 Result directory:
 

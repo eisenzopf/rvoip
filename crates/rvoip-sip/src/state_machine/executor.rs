@@ -96,7 +96,9 @@ impl PendingOptionsSlot {
 
 fn state_machine_stage_for_event(event: &EventType) -> CleanupStage {
     match event {
-        EventType::IncomingCall { .. } => CleanupStage::StateMachineIncomingCall,
+        EventType::IncomingCall { .. } | EventType::IncomingCallAutoAccept { .. } => {
+            CleanupStage::StateMachineIncomingCall
+        }
         EventType::AcceptCall => CleanupStage::StateMachineAcceptCall,
         EventType::DialogBYE | EventType::DialogTerminated | EventType::DialogCANCEL => {
             CleanupStage::StateMachineTerminalEvent
@@ -108,6 +110,7 @@ fn state_machine_stage_for_event(event: &EventType) -> CleanupStage {
 fn state_machine_event_name(event: &EventType) -> &'static str {
     match event {
         EventType::IncomingCall { .. } => "IncomingCall",
+        EventType::IncomingCallAutoAccept { .. } => "IncomingCallAutoAccept",
         EventType::AcceptCall => "AcceptCall",
         EventType::DialogBYE => "DialogBYE",
         EventType::DialogTerminated => "DialogTerminated",
@@ -383,7 +386,8 @@ impl StateMachine {
                 session.remote_uri = Some(target.clone());
                 // local_uri should be set when session is created
             }
-            EventType::IncomingCall { from, sdp } => {
+            EventType::IncomingCall { from, sdp }
+            | EventType::IncomingCallAutoAccept { from, sdp } => {
                 session.remote_uri = Some(from.clone());
                 if let Some(sdp_data) = sdp {
                     session.remote_sdp = Some(sdp_data.clone());

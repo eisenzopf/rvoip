@@ -1185,7 +1185,9 @@ impl Config {
     /// burst capacity. It disables automatic `100 Trying` because fixed
     /// immediate-answer services should send the final response before Timer
     /// 100 would fire, and avoiding the timer task/message reduces hot-path
-    /// work. It does not enlarge socket buffers and does not set
+    /// work. It does not enable the fused fast-auto-accept path yet; that
+    /// remains an explicit opt-in until the 8000 CPS cleanup/retransmit target
+    /// is stable. It does not enlarge socket buffers and does not set
     /// [`Config::server_call_capacity`].
     pub fn with_high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
         self = self.with_channel_capacity(capacity);
