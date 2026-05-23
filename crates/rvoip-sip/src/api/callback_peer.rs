@@ -1806,6 +1806,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                             }
                         }
                         CallHandlerDecision::Reject { status, reason } => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback reject decision for {} ignored because fast auto-accept already answered the call",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let _ = coordinator
                                 .reject(&call_id)
                                 .with_status(status)
@@ -1814,6 +1822,14 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 .await;
                         }
                         CallHandlerDecision::Redirect(target) => {
+                            if fast_auto_accept_incoming_calls {
+                                tracing::debug!(
+                                    "Callback redirect decision for {} ignored because fast auto-accept already answered the call",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             let _ = coordinator
                                 .redirect(&call_id)
                                 .with_status(302)
@@ -1822,6 +1838,15 @@ impl<H: CallHandler> CallbackPeer<H> {
                                 .await;
                         }
                         CallHandlerDecision::Defer(guard) => {
+                            if fast_auto_accept_incoming_calls {
+                                guard.resolve_without_response();
+                                tracing::debug!(
+                                    "Callback defer decision for {} ignored because fast auto-accept already answered the call",
+                                    call_id
+                                );
+                                return;
+                            }
+
                             deferred_calls.lock().await.insert(call_id, guard);
                         }
                     }

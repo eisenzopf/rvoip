@@ -68,41 +68,6 @@ fn session_dispatch_shard(session_id: &str, shard_count: usize) -> usize {
     (hasher.finish() as usize) % shard_count.max(1)
 }
 
-fn spawn_fast_auto_accept_workers(
-    state_machine: Arc<StateMachineExecutor>,
-    queue_capacity: usize,
-) -> Arc<Vec<mpsc::Sender<SessionId>>> {
-    let worker_count = dialog_dispatch_worker_count();
-    let per_worker_capacity = queue_capacity.max(1);
-    let mut txs = Vec::with_capacity(worker_count);
-
-    for _ in 0..worker_count {
-        let (tx, mut rx) = mpsc::channel::<SessionId>(per_worker_capacity);
-        let state_machine = Arc::clone(&state_machine);
-        tokio::spawn(async move {
-            while let Some(session_id) = rx.recv().await {
-                match state_machine
-                    .process_event(&session_id, EventType::AcceptCall)
-                    .await
-                {
-                    Ok(_) => {
-                        debug!("Fast auto-accepted inbound call {}", session_id);
-                    }
-                    Err(e) => {
-                        debug!(
-                            "Fast auto-accept for inbound call {} was not applied: {}",
-                            session_id, e
-                        );
-                    }
-                }
-            }
-        });
-        txs.push(tx);
-    }
-
-    Arc::new(txs)
-}
-
 /// Handler for processing cross-crate events in rvoip-sip
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -127,9 +92,6 @@ pub struct SessionCrossCrateEventHandler {
 
     /// Immediately accept inbound calls after the state machine records them.
     fast_auto_accept_incoming_calls: bool,
-
-    /// Worker queues for config-driven fast auto-answer.
-    fast_auto_accept_txs: Option<Arc<Vec<mpsc::Sender<SessionId>>>>,
 
     /// Internal state-machine event stream owned by rvoip-sip.
     state_machine_event_rx:
@@ -758,7 +720,6 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: None,
             fast_auto_accept_incoming_calls: false,
-            fast_auto_accept_txs: None,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher: SessionEventPublisher::new(
@@ -787,7 +748,6 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: Some(incoming_call_tx),
             fast_auto_accept_incoming_calls: false,
-            fast_auto_accept_txs: None,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher,
@@ -849,12 +809,9 @@ impl SessionCrossCrateEventHandler {
     pub(crate) fn with_fast_auto_accept_incoming_calls(
         mut self,
         enabled: bool,
-        queue_capacity: usize,
+        _queue_capacity: usize,
     ) -> Self {
         self.fast_auto_accept_incoming_calls = enabled;
-        self.fast_auto_accept_txs = enabled.then(|| {
-            spawn_fast_auto_accept_workers(Arc::clone(&self.state_machine), queue_capacity)
-        });
         self
     }
 
@@ -1443,20 +1400,20 @@ impl SessionCrossCrateEventHandler {
             let _ = self.state_machine.store.remove_session(&session_id).await;
             self.registry.remove_session(&session_id).await;
         } else {
-            if let Some(txs) = self.fast_auto_accept_txs.as_ref() {
-                let idx = session_dispatch_shard(&session_id.0, txs.len());
-                let tx = txs[idx].clone();
-                match tx.try_send(session_id.clone()) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(accept_session_id)) => {
-                        tokio::spawn(async move {
-                            if tx.send(accept_session_id).await.is_err() {
-                                debug!("Fast auto-accept worker queue closed");
-                            }
-                        });
+            if self.fast_auto_accept_incoming_calls {
+                match self
+                    .state_machine
+                    .process_event(&session_id, EventType::AcceptCall)
+                    .await
+                {
+                    Ok(_) => {
+                        debug!("Fast auto-accepted inbound call {}", session_id);
                     }
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                        debug!("Fast auto-accept worker queue closed");
+                    Err(e) => {
+                        debug!(
+                            "Fast auto-accept for inbound call {} was not applied: {}",
+                            session_id, e
+                        );
                     }
                 }
             }

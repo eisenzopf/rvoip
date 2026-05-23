@@ -26,6 +26,7 @@ Config-only validation still has recovered INVITE/BYE retransmits:
 | Config-only, diagnostics off | `120000/120000` | `5395` | No failed calls, no listener leak, UDP full-socket drop delta `0`. |
 | Config-only, diagnostics on | `120000/120000` | `2990` | No failed calls, final `in_flight=0`, all duplicate retransmits recovered by indexed caches. |
 | Config-audit rerun, diagnostics off | `120000/120000` | `4171` | `2026-05-23 01:57`, no failed calls, warnings `0`, dead messages `0`, response `>=500 ms` count `2576`, final listener `accepted_total=120000 cleaned_total=120000`, UDP full-socket drop delta `0`. |
+| Inline fast-accept listener experiment | `119999/120000` | `3497` | `2026-05-23 02:09`, `fast_auto_accept_incoming_calls=true`; lower retransmits but failed target: one SIPp timeout/dead-call path and final listener `accepted_total=120000 cleaned_total=119999`. |
 
 This means the public Config wiring is in place, but the zero-retransmit
 performance target is not yet restored. The next
@@ -386,6 +387,63 @@ Listener final state after stop:
 
 This confirms config wiring is not the remaining blocker. The residual
 problem is first-response latency under the 8000 CPS burst.
+
+### Inline Fast-Accept Experiment
+
+After auditing `Config::with_fast_auto_accept_incoming_calls(true)`, the
+runtime path was tightened so fast accept is no longer queued to a
+background worker after the public incoming-call event is published.
+When enabled, the dialog-to-session handler now awaits
+`EventType::AcceptCall` before publishing the app-level
+`Event::IncomingCall`. Callback `Accept`, `AcceptWithSdp`, `Reject`,
+`Redirect`, and `Defer` decisions are treated as already handled; deferred
+guards are resolved so they cannot fire a late 503 watchdog.
+
+Important semantics:
+
+- `fast_auto_accept_incoming_calls=true` is unconditional auto-answer.
+  Application callbacks still run for observation, but they cannot veto the
+  call.
+- With default config, the normal `IncomingCall` transition still sends
+  automatic `180 Ringing` first. For an immediate final answer, pair fast
+  accept with `auto_180_ringing=false`.
+- The 200 OK is still gated by the normal UAS accept actions:
+  `GenerateLocalSDP`, `NegotiateSDPAsUAS`, then `SendSIPResponse(200)`.
+
+The focused integration test passed:
+
+```bash
+cargo test -p rvoip-sip --test fast_auto_accept_integration -- --nocapture
+```
+
+The 8000 CPS listener experiment with fast accept enabled did not meet the
+benchmark target:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_fast_accept_inline_8000_20260523_020958
+```
+
+Aggregate:
+
+- `TotalCallCreated=120000`
+- `SuccessfulCall=119999`
+- `FailedCall=0`
+- `CurrentCall=1`
+- `Retransmissions=3497`
+- `Warnings=1`
+- `FatalErrors=1`
+- `DeadCallMsgs=1`
+- host UDP full-socket-buffer drops delta `0`
+
+Listener final state after stop:
+
+- `accepted_total=120000`
+- `cleaned_total=119999`
+- `in_flight=1`
+
+Because this profile failed the success/cleanup target, the benchmark
+listener was left on the previous explicit callback-accept profile rather
+than enabling fast accept by default.
 
 Result directory:
 
