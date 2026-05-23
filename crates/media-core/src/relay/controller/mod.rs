@@ -55,11 +55,16 @@ use codec_core::codecs::g711::G711Variant;
 
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
-use rvoip_rtp_core::transport::{
-    AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig,
-};
+use rvoip_rtp_core::transport::{GlobalPortAllocator, PortAllocator, PortAllocatorConfig};
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
 use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
+
+const RTP_SESSION_BIND_RETRIES: usize = 8;
+
+fn is_retryable_rtp_bind_error(error: &rtp_core::Error) -> bool {
+    let text = error.to_string();
+    text.contains("bind") || text.contains("Address already in use")
+}
 
 // Sub-modules
 pub mod advanced_processing;
@@ -214,6 +219,15 @@ pub struct MediaSessionController {
 impl MediaSessionController {
     /// Create a new media session controller
     pub fn new() -> Self {
+        Self::new_with_capacity_hint(0)
+    }
+
+    /// Create a media session controller with preallocated hot indexes.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::new_with_capacity_hint(capacity)
+    }
+
+    fn new_with_capacity_hint(capacity_hint: usize) -> Self {
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         let (conference_event_tx, conference_event_rx) = mpsc::unbounded_channel();
 
@@ -268,13 +282,13 @@ impl MediaSessionController {
         ));
 
         Self {
-            sessions: Arc::new(DashMap::new()),
-            rtp_sessions: Arc::new(DashMap::new()),
+            sessions: Arc::new(DashMap::with_capacity(capacity_hint)),
+            rtp_sessions: Arc::new(DashMap::with_capacity(capacity_hint)),
             event_tx,
             event_rx: RwLock::new(None),
             event_hub: Arc::new(RwLock::new(None)),
-            session_to_media: Arc::new(DashMap::new()),
-            media_to_session: Arc::new(DashMap::new()),
+            session_to_media: Arc::new(DashMap::with_capacity(capacity_hint)),
+            media_to_session: Arc::new(DashMap::with_capacity(capacity_hint)),
             audio_mixer: None,
             conference_config: ConferenceMixingConfig::default(),
             conference_event_tx,
@@ -285,17 +299,17 @@ impl MediaSessionController {
             performance_metrics,
             frame_pool,
             rtp_buffer_pool,
-            advanced_processors: Arc::new(DashMap::new()),
+            advanced_processors: Arc::new(DashMap::with_capacity(capacity_hint)),
             default_processor_config,
             simd_processor,
-            audio_frame_callbacks: Arc::new(DashMap::new()),
-            dtmf_callbacks: Arc::new(DashMap::new()),
+            audio_frame_callbacks: Arc::new(DashMap::with_capacity(capacity_hint)),
+            dtmf_callbacks: Arc::new(DashMap::with_capacity(capacity_hint)),
             codec_mapper,
             rtp_bridge,
-            bridge_partners: Arc::new(DashMap::new()),
-            cn_gate_state: Arc::new(DashMap::new()),
+            bridge_partners: Arc::new(DashMap::with_capacity(capacity_hint)),
+            cn_gate_state: Arc::new(DashMap::with_capacity(capacity_hint)),
             comfort_noise_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            media_directions: Arc::new(DashMap::new()),
+            media_directions: Arc::new(DashMap::with_capacity(capacity_hint)),
         }
     }
 
@@ -366,12 +380,23 @@ impl MediaSessionController {
 
     /// Create a new media session controller with custom port range
     pub fn with_port_range(base_port: u16, max_port: u16) -> Self {
-        let mut controller = Self::new();
+        Self::with_port_range_and_capacity(base_port, max_port, 0)
+    }
+
+    /// Create a media session controller with custom port range and capacity.
+    pub fn with_port_range_and_capacity(
+        base_port: u16,
+        max_port: u16,
+        capacity_hint: usize,
+    ) -> Self {
+        let mut controller = Self::new_with_capacity_hint(capacity_hint);
 
         // Create a custom port allocator with the specified range
         let mut config = PortAllocatorConfig::default();
         config.port_range_start = base_port;
         config.port_range_end = max_port;
+        config.validate_ports = false;
+        config.capacity_hint = capacity_hint;
 
         controller.port_allocator = Some(Arc::new(PortAllocator::with_config(config)));
         info!(
@@ -456,6 +481,7 @@ impl MediaSessionController {
         let mut port_config = PortAllocatorConfig::default();
         port_config.port_range_start = base_port;
         port_config.port_range_end = max_port;
+        port_config.validate_ports = false;
         let port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
 
         Ok(Self {
@@ -511,14 +537,6 @@ impl MediaSessionController {
             GlobalPortAllocator::instance().await
         };
 
-        let dialog_session_id = format!("dialog_{}", dialog_id);
-        let (local_rtp_addr, _) = allocator
-            .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
-            .await
-            .map_err(|e| Error::config(format!("Failed to allocate RTP port: {}", e)))?;
-
-        let rtp_port = local_rtp_addr.port();
-
         // Determine payload type from preferred codec
         let payload_type = config
             .preferred_codec
@@ -533,22 +551,67 @@ impl MediaSessionController {
             .map(|codec| self.codec_mapper.get_clock_rate(codec))
             .unwrap_or(8000);
 
-        // Create RTP session configuration
-        let rtp_config = RtpSessionConfig {
-            local_addr: local_rtp_addr,
-            remote_addr: config.remote_addr,
-            ssrc: Some(rand::random()),    // Generate random SSRC
-            payload_type,                  // Use negotiated payload type
-            clock_rate,                    // Use codec-appropriate clock rate
-            jitter_buffer_size: Some(500), // Increased from 50 to handle burst traffic
-            max_packet_age_ms: Some(1000), // Increased from 200ms to 1s for localhost testing
-            enable_jitter_buffer: false,   // Disabled to reduce processing overhead
-        };
+        let dialog_session_id = format!("dialog_{}", dialog_id);
+        let mut last_bind_error: Option<rtp_core::Error> = None;
+        let mut created_session = None;
+        for attempt in 1..=RTP_SESSION_BIND_RETRIES {
+            let (local_rtp_addr, _) = allocator
+                .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
+                .await
+                .map_err(|e| Error::config(format!("Failed to allocate RTP port: {}", e)))?;
 
-        // Create actual RTP session
-        let rtp_session = RtpSession::new(rtp_config)
-            .await
-            .map_err(|e| Error::config(format!("Failed to create RTP session: {}", e)))?;
+            // Create RTP session configuration
+            let rtp_config = RtpSessionConfig {
+                local_addr: local_rtp_addr,
+                remote_addr: config.remote_addr,
+                ssrc: Some(rand::random()),    // Generate random SSRC
+                payload_type,                  // Use negotiated payload type
+                clock_rate,                    // Use codec-appropriate clock rate
+                jitter_buffer_size: Some(500), // Increased from 50 to handle burst traffic
+                max_packet_age_ms: Some(1000), // Increased from 200ms to 1s for localhost testing
+                enable_jitter_buffer: false,   // Disabled to reduce processing overhead
+            };
+
+            match RtpSession::new(rtp_config).await {
+                Ok(rtp_session) => {
+                    created_session = Some((local_rtp_addr, rtp_session));
+                    break;
+                }
+                Err(e) => {
+                    let _ = allocator.release_session(&dialog_session_id).await;
+                    let should_retry =
+                        is_retryable_rtp_bind_error(&e) && attempt < RTP_SESSION_BIND_RETRIES;
+                    if should_retry {
+                        // Try the next reserved port. The allocator no longer probe-binds
+                        // for media-controller sessions; the real RTP socket bind is the
+                        // authoritative availability check.
+                        debug!(
+                            "RTP bind failed for {} on {} (attempt {}/{}); retrying with another port: {}",
+                            dialog_id, local_rtp_addr, attempt, RTP_SESSION_BIND_RETRIES, e
+                        );
+                        last_bind_error = Some(e);
+                        continue;
+                    }
+
+                    return Err(Error::config(format!(
+                        "Failed to create RTP session on {}: {}",
+                        local_rtp_addr, e
+                    )));
+                }
+            }
+        }
+
+        let (local_rtp_addr, rtp_session) = created_session.ok_or_else(|| {
+            Error::config(format!(
+                "Failed to create RTP session after {} bind attempts: {}",
+                RTP_SESSION_BIND_RETRIES,
+                last_bind_error
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "no bind attempt completed".to_string())
+            ))
+        })?;
+
+        let rtp_port = local_rtp_addr.port();
 
         // Subscribe to RTP session events before wrapping
         let rtp_events = rtp_session.subscribe();

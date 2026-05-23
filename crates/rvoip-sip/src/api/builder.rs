@@ -50,6 +50,12 @@ impl SessionBuilder {
         self
     }
 
+    /// Set a server-side active-call capacity profile.
+    pub fn with_server_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_server_capacity(capacity);
+        self
+    }
+
     /// Set the internal state-machine event channel capacity.
     pub fn with_state_event_channel_capacity(mut self, capacity: usize) -> Self {
         self.config.state_event_channel_capacity = capacity;
@@ -59,6 +65,30 @@ impl SessionBuilder {
     /// Set the SIP transport event channel capacity.
     pub fn with_sip_transport_channel_capacity(mut self, capacity: usize) -> Self {
         self.config.sip_transport_channel_capacity = capacity;
+        self
+    }
+
+    /// Set SIP UDP socket receive/send buffer sizes in bytes.
+    pub fn with_sip_udp_socket_buffers(
+        mut self,
+        recv_buffer_size: Option<usize>,
+        send_buffer_size: Option<usize>,
+    ) -> Self {
+        self.config = self
+            .config
+            .with_sip_udp_socket_buffers(recv_buffer_size, send_buffer_size);
+        self
+    }
+
+    /// Set the SIP UDP receive socket buffer size (`SO_RCVBUF`) in bytes.
+    pub fn with_sip_udp_recv_buffer_size(mut self, size: usize) -> Self {
+        self.config.sip_udp_recv_buffer_size = Some(size);
+        self
+    }
+
+    /// Set the SIP UDP send socket buffer size (`SO_SNDBUF`) in bytes.
+    pub fn with_sip_udp_send_buffer_size(mut self, size: usize) -> Self {
+        self.config.sip_udp_send_buffer_size = Some(size);
         self
     }
 
@@ -126,11 +156,17 @@ mod tests {
 
     #[test]
     fn test_builder_channel_capacity_profile() {
-        let builder = SessionBuilder::new().with_channel_capacity(256);
+        let builder = SessionBuilder::new()
+            .with_channel_capacity(256)
+            .with_server_capacity(128)
+            .with_sip_udp_socket_buffers(Some(65_536), Some(32_768));
 
         assert_eq!(builder.config.incoming_call_channel_capacity, 256);
         assert_eq!(builder.config.state_event_channel_capacity, 256);
         assert_eq!(builder.config.sip_transport_channel_capacity, 2560);
+        assert_eq!(builder.config.server_call_capacity, Some(128));
+        assert_eq!(builder.config.sip_udp_recv_buffer_size, Some(65_536));
+        assert_eq!(builder.config.sip_udp_send_buffer_size, Some(32_768));
         assert_eq!(builder.config.transaction_event_channel_capacity, 2560);
         assert_eq!(
             builder.config.session_event_dispatcher_channel_capacity,

@@ -78,6 +78,13 @@ pub struct PortAllocatorConfig {
 
     /// Whether to validate port availability before returning
     pub validate_ports: bool,
+
+    /// Optional preallocation hint for allocation tracking indexes.
+    ///
+    /// `0` preserves lazy allocation. Servers with known RTP capacity can set
+    /// this to the expected active media-session count to avoid rehashing under
+    /// call setup bursts.
+    pub capacity_hint: usize,
 }
 
 impl Default for PortAllocatorConfig {
@@ -95,6 +102,7 @@ impl Default for PortAllocatorConfig {
             // multi-coord test processes — not just allocator-internal collisions.
             allocation_retries: 50,
             validate_ports: true,
+            capacity_hint: 0,
         }
     }
 }
@@ -147,10 +155,12 @@ impl PortAllocator {
 
         Self {
             config: config.clone(),
-            allocated_ports: Arc::new(Mutex::new(HashSet::new())),
-            released_ports: Arc::new(Mutex::new(Vec::new())),
+            allocated_ports: Arc::new(Mutex::new(HashSet::with_capacity(config.capacity_hint))),
+            released_ports: Arc::new(Mutex::new(Vec::with_capacity(
+                config.capacity_hint.min(1024),
+            ))),
             last_released_cleanup: Arc::new(Mutex::new(Instant::now())),
-            session_ports: Arc::new(Mutex::new(HashMap::new())),
+            session_ports: Arc::new(Mutex::new(HashMap::with_capacity(config.capacity_hint))),
             last_port: Arc::new(Mutex::new(config.port_range_start)),
             socket_strategy,
         }
@@ -712,6 +722,7 @@ mod tests {
             default_ip: IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             allocation_retries: 20,
             validate_ports: false,
+            capacity_hint: 0,
         };
 
         let allocator = PortAllocator::with_config(config.clone());

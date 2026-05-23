@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, trace};
 
+use super::socket::{bind_std_udp_socket, UdpSocketOptions};
 use crate::error::{Error, Result};
 
 /// UDP sender for sending SIP messages
@@ -19,9 +20,17 @@ impl UdpSender {
 
     /// Binds a new UDP socket and creates a sender
     pub async fn bind(addr: SocketAddr) -> Result<Self> {
-        let socket = UdpSocket::bind(addr)
-            .await
-            .map_err(|e| Error::BindFailed(addr, e))?;
+        Self::bind_with_socket_options(addr, UdpSocketOptions::default()).await
+    }
+
+    /// Binds a new UDP socket with explicit socket options and creates a sender.
+    pub async fn bind_with_socket_options(
+        addr: SocketAddr,
+        socket_options: UdpSocketOptions,
+    ) -> Result<Self> {
+        let std_socket =
+            bind_std_udp_socket(addr, socket_options).map_err(|e| Error::BindFailed(addr, e))?;
+        let socket = UdpSocket::from_std(std_socket).map_err(|e| Error::BindFailed(addr, e))?;
         Ok(Self {
             socket: Arc::new(socket),
         })

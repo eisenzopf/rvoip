@@ -20,7 +20,7 @@ pub use error::{Error, Result};
 pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
 pub use transport::tcp::TcpTransport;
 pub use transport::tls::TlsTransport;
-pub use transport::udp::UdpTransport;
+pub use transport::udp::{UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
 pub use transport::{Transport, TransportEvent};
 
@@ -44,6 +44,6 @@ pub mod prelude {
     pub use crate::{
         bind_tcp, bind_udp, events::TransportEventAdapter, factory::TransportFactory,
         manager::TransportManager, Error, Result, TcpTransport, TlsTransport, Transport,
-        TransportEvent, UdpTransport, WebSocketTransport,
+        TransportEvent, UdpSocketOptions, UdpTransport, WebSocketTransport,
     };
 }

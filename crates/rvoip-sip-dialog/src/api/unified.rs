@@ -149,8 +149,8 @@ use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
 use rvoip_sip_core::{Method, Request, Response, StatusCode};
 
 use super::{
-    ApiError, ApiResult, DialogStats,
     common::{CallHandle, DialogHandle},
+    ApiError, ApiResult, DialogStats,
 };
 use crate::config::DialogManagerConfig;
 use crate::dialog::{Dialog, DialogId, DialogState};
@@ -204,10 +204,10 @@ pub struct UnifiedDialogApi {
 
 fn add_contact_header(response: &mut Response, contact_uri: &str) -> ApiResult<()> {
     use rvoip_sip_core::types::{
-        TypedHeader,
         address::Address,
         contact::{Contact, ContactParamInfo},
         uri::Uri,
+        TypedHeader,
     };
     use std::str::FromStr;
 
@@ -386,10 +386,10 @@ pub(crate) fn build_outbound_contact(
     outbound_params: &rvoip_sip_core::types::outbound::OutboundContactParams,
 ) -> Result<rvoip_sip_core::types::contact::Contact, rvoip_sip_core::error::Error> {
     use rvoip_sip_core::types::{
-        Address,
         contact::{Contact, ContactParamInfo},
         outbound::{mark_uri_as_outbound, set_outbound_contact_params},
         uri::Uri,
+        Address,
     };
     use std::str::FromStr;
     let uri = Uri::from_str(contact_uri)?;
@@ -985,10 +985,10 @@ impl UnifiedDialogApi {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<()> {
         use rvoip_sip_core::types::{
-            TypedHeader,
             address::Address,
             contact::{Contact, ContactParamInfo},
             uri::Uri,
+            TypedHeader,
         };
         use std::str::FromStr;
 
@@ -1482,8 +1482,8 @@ impl UnifiedDialogApi {
         options: RegisterRequestOptions,
     ) -> ApiResult<Response> {
         use crate::transaction::client::builders::RegisterBuilder;
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
 
         // SIP_API_DESIGN_2 §7.1 — `options.refresh` distinguishes the
         // initial REGISTER from an in-dialog refresh per RFC 3261
@@ -1549,7 +1549,7 @@ impl UnifiedDialogApi {
         }
 
         if let Some(proxy_uri) = &options.outbound_proxy_uri {
-            use rvoip_sip_core::types::{TypedHeader, route::Route};
+            use rvoip_sip_core::types::{route::Route, TypedHeader};
             builder = builder.header(TypedHeader::Route(Route::with_uri(proxy_uri.clone())));
         }
 
@@ -1766,8 +1766,8 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ReferRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
 
         // The body must remain single-line `Refer-To: <uri>\r\n`. The
         // downstream NOTIFY/REFER request builder extracts `target_uri`
@@ -2036,8 +2036,8 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ByeRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::reason::Reason;
+        use rvoip_sip_core::types::TypedHeader;
 
         let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
         if let Some(reason_text) = opts.reason {
@@ -2065,8 +2065,8 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: CancelRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::reason::Reason;
+        use rvoip_sip_core::types::TypedHeader;
 
         let mut extras: Vec<TypedHeader> = opts.extra_headers.clone();
         if let Some(reason_text) = opts.reason {
@@ -2085,10 +2085,10 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: UpdateRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::min_se::MinSE;
         use rvoip_sip_core::types::session_expires::SessionExpires;
         use rvoip_sip_core::types::supported::Supported;
+        use rvoip_sip_core::types::TypedHeader;
 
         let body = opts.sdp.map(bytes::Bytes::from);
         let mut extras = opts.extra_headers;
@@ -2102,7 +2102,7 @@ impl UnifiedDialogApi {
             extras.push(TypedHeader::SessionExpires(SessionExpires::new(1800, None)));
             extras.push(TypedHeader::MinSE(MinSE::new(90)));
             extras.push(TypedHeader::Supported(Supported::new(vec![
-                "timer".to_string(),
+                "timer".to_string()
             ])));
         }
         self.manager
@@ -2118,11 +2118,11 @@ impl UnifiedDialogApi {
         dialog_id: &DialogId,
         opts: ReInviteRequestOptions,
     ) -> ApiResult<TransactionKey> {
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
         use rvoip_sip_core::types::min_se::MinSE;
         use rvoip_sip_core::types::session_expires::SessionExpires;
         use rvoip_sip_core::types::supported::Supported;
+        use rvoip_sip_core::types::TypedHeader;
 
         // Precomputed Authorization rides as a typed extra alongside
         // application headers — the in-dialog request builder will
@@ -2141,7 +2141,7 @@ impl UnifiedDialogApi {
             extras.push(TypedHeader::SessionExpires(SessionExpires::new(1800, None)));
             extras.push(TypedHeader::MinSE(MinSE::new(90)));
             extras.push(TypedHeader::Supported(Supported::new(vec![
-                "timer".to_string(),
+                "timer".to_string()
             ])));
         }
         let body = opts.sdp.map(bytes::Bytes::from);
@@ -2447,8 +2447,8 @@ impl UnifiedDialogApi {
     /// ```
     pub async fn create(config: DialogManagerConfig) -> ApiResult<Self> {
         use crate::transaction::{
-            TransactionManager,
             transport::{TransportManager, TransportManagerConfig},
+            TransactionManager,
         };
 
         info!(

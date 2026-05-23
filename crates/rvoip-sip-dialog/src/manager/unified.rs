@@ -114,8 +114,8 @@ use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager};
 use rvoip_sip_core::{Method, Request, Response, StatusCode, Uri};
 
 use crate::api::{
-    ApiError, ApiResult,
     common::{CallHandle, DialogHandle},
+    ApiError, ApiResult,
 };
 use crate::config::DialogManagerConfig;
 use crate::dialog::{Dialog, DialogId, DialogState};
@@ -622,12 +622,12 @@ impl UnifiedDialogManager {
         extra_headers: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> ApiResult<()> {
         use crate::transaction::dialog::{
-            DialogRequestTemplate, request_builder_from_dialog_template,
+            request_builder_from_dialog_template, DialogRequestTemplate,
         };
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::event::{Event, EventType};
         use rvoip_sip_core::types::expires::Expires;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
 
         let (destination, request) = {
             let mut dialog = self

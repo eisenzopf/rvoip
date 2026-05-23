@@ -194,6 +194,13 @@ impl LifecycleIndex {
         Self::default()
     }
 
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: Arc::new(DashMap::with_capacity(capacity)),
+            waiters: Arc::new(DashMap::with_capacity(capacity)),
+        }
+    }
+
     pub(crate) fn record_event(&self, event: &Event) {
         let Some(call_id) = event.call_id().cloned() else {
             return;

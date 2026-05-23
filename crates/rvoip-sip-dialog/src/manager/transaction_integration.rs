@@ -19,7 +19,7 @@ use crate::errors::DialogResult;
 use crate::events::{DialogEvent, SessionCoordinationEvent};
 use crate::protocol::response_handler::response_has_auth_challenge;
 use crate::transaction::builders::{dialog_quick, dialog_utils};
-use crate::transaction::dialog::{DialogRequestTemplate, request_builder_from_dialog_template};
+use crate::transaction::dialog::{request_builder_from_dialog_template, DialogRequestTemplate};
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionState};
 use rvoip_sip_core::{Method, Request, Response};
 use std::net::SocketAddr;
@@ -48,7 +48,11 @@ pub fn detect_reliable_provisional(response: &Response) -> Option<u32> {
         }
     }
 
-    if requires_100rel { rseq_value } else { None }
+    if requires_100rel {
+        rseq_value
+    } else {
+        None
+    }
 }
 
 /// Inspect a request's `Supported`/`Require` headers for the `100rel`
@@ -102,7 +106,7 @@ pub fn inject_100rel_policy(request: &mut Request, policy: RelUsage) {
                 request
                     .headers
                     .push(TypedHeader::Supported(Supported::new(vec![
-                        "100rel".to_string(),
+                        "100rel".to_string()
                     ])));
             }
         }
@@ -717,8 +721,8 @@ impl DialogManager {
         &self,
         dialog_id: &DialogId,
     ) -> Option<TransactionKey> {
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::cseq::CSeq;
+        use rvoip_sip_core::types::TypedHeader;
 
         let candidates: Vec<TransactionKey> = self
             .dialog_invite_transactions
@@ -779,8 +783,8 @@ impl DialogManager {
         extras: Vec<rvoip_sip_core::types::TypedHeader>,
     ) -> DialogResult<TransactionKey> {
         use crate::transaction::client::builders::InviteBuilder;
-        use rvoip_sip_core::types::TypedHeader;
         use rvoip_sip_core::types::header::{HeaderName, HeaderValue};
+        use rvoip_sip_core::types::TypedHeader;
 
         debug!("Resending INVITE with auth for dialog {}", dialog_id);
 
@@ -1393,7 +1397,7 @@ pub fn inject_session_timer_headers(request: &mut Request, secs: u32, min_se: u3
         request
             .headers
             .push(TypedHeader::Supported(Supported::new(vec![
-                "timer".to_string(),
+                "timer".to_string()
             ])));
     }
 }
@@ -1644,8 +1648,8 @@ impl DialogManager {
                         // §7.1 default for a UAC that originally requested
                         // `refresher=uac` is that the UAC refreshes.
                         if transaction_id.method() == &rvoip_sip_core::Method::Invite {
-                            use rvoip_sip_core::types::TypedHeader;
                             use rvoip_sip_core::types::session_expires::Refresher;
+                            use rvoip_sip_core::types::TypedHeader;
                             if let Some(se) = response.headers.iter().find_map(|h| {
                                 if let TypedHeader::SessionExpires(se) = h {
                                     Some(se)

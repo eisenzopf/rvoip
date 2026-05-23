@@ -1,31 +1,31 @@
 #[cfg(test)]
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
+    use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
+    use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
+    use crate::transaction::error::{Error, Result};
+    use crate::transaction::manager::ClientTransaction;
     use crate::transaction::Transaction;
     use crate::transaction::TransactionEvent;
     use crate::transaction::TransactionKey;
     use crate::transaction::TransactionManager;
     use crate::transaction::TransactionState;
-    use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
-    use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
-    use crate::transaction::error::{Error, Result};
-    use crate::transaction::manager::ClientTransaction;
     use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_core::prelude::*;
+    use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_core::types::Address;
     use rvoip_sip_core::types::Contact;
     use rvoip_sip_core::types::ContactParamInfo;
-    use rvoip_sip_core::types::status::StatusCode;
     use rvoip_sip_transport::Transport;
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;
     use std::net::SocketAddr;
     use std::str::FromStr;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::Mutex;
+    use std::sync::Arc;
     use tokio::sync::mpsc;
+    use tokio::sync::Mutex;
     use tracing::{debug, info};
 
     /// Create a mock transport for testing
@@ -221,11 +221,9 @@ mod tests {
 
         assert_eq!(sent_request.first_via_transport(), Some("TLS"));
         assert_eq!(top_via_port(&sent_request), Some(5071));
-        assert!(
-            top_via_branch(&sent_request)
-                .as_deref()
-                .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE))
-        );
+        assert!(top_via_branch(&sent_request)
+            .as_deref()
+            .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE)));
         assert!(top_via_has_rport(&sent_request));
         Ok(())
     }
@@ -313,11 +311,9 @@ mod tests {
 
         assert_eq!(sent_request.first_via_transport(), Some("TLS"));
         assert_eq!(top_via_port(&sent_request), Some(5071));
-        assert!(
-            top_via_branch(&sent_request)
-                .as_deref()
-                .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE))
-        );
+        assert!(top_via_branch(&sent_request)
+            .as_deref()
+            .is_some_and(|branch| branch.starts_with(RFC3261_BRANCH_MAGIC_COOKIE)));
         assert!(top_via_has_rport(&sent_request));
         Ok(())
     }
@@ -1175,6 +1171,122 @@ mod tests {
         // Clean up
         manager.shutdown().await;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invite_retransmission_after_2xx_reuses_cached_response() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let transaction = manager
+            .create_server_transaction(invite_request.clone(), source)
+            .await?;
+        let tx_id = transaction.id().clone();
+
+        let ok_response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        manager.send_response(&tx_id, ok_response).await?;
+
+        let terminated = manager
+            .wait_for_transaction_state(
+                &tx_id,
+                TransactionState::Terminated,
+                std::time::Duration::from_millis(500),
+            )
+            .await?;
+        assert!(
+            terminated,
+            "INVITE server transaction should terminate after 2xx"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let before = transport.get_sent_messages().await.len();
+
+        transport_tx
+            .send(rvoip_sip_transport::TransportEvent::MessageReceived {
+                message: Message::Request(invite_request),
+                source,
+                destination: transport.local_addr().unwrap(),
+                transport_type: rvoip_sip_transport::transport::TransportType::Udp,
+                raw_bytes: None,
+            })
+            .await
+            .unwrap();
+
+        let mut retransmitted = false;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let sent_messages = transport.get_sent_messages().await;
+            if sent_messages.len() > before {
+                let last_msg = sent_messages.last().unwrap();
+                assert!(
+                    matches!(last_msg.0, Message::Response(ref resp) if resp.status_code() == 200),
+                    "retransmitted message should be cached 200 OK"
+                );
+                assert_eq!(last_msg.1, source);
+                retransmitted = true;
+                break;
+            }
+        }
+
+        assert!(
+            retransmitted,
+            "retransmitted INVITE should resend cached 2xx"
+        );
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invite_2xx_is_retransmitted_until_ack() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let transaction = manager
+            .create_server_transaction(invite_request.clone(), source)
+            .await?;
+        let tx_id = transaction.id().clone();
+
+        let ok_response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        manager.send_response(&tx_id, ok_response).await?;
+
+        let terminated = manager
+            .wait_for_transaction_state(
+                &tx_id,
+                TransactionState::Terminated,
+                std::time::Duration::from_millis(500),
+            )
+            .await?;
+        assert!(
+            terminated,
+            "INVITE server transaction should terminate after 2xx"
+        );
+
+        let before = transport.get_sent_messages().await.len();
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
+        let sent_messages = transport.get_sent_messages().await;
+        assert!(
+            sent_messages.len() > before,
+            "cached INVITE 2xx should be retransmitted without waiting for another INVITE"
+        );
+        let last_msg = sent_messages.last().unwrap();
+        assert!(
+            matches!(last_msg.0, Message::Response(ref resp) if resp.status_code() == 200),
+            "proactive retransmission should resend cached 200 OK"
+        );
+        assert_eq!(last_msg.1, source);
+
+        manager.shutdown().await;
         Ok(())
     }
 

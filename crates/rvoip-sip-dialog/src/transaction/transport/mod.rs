@@ -10,7 +10,7 @@ use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
-    TcpTransport, Transport, TransportEvent, UdpTransport, WebSocketTransport,
+    TcpTransport, Transport, TransportEvent, UdpSocketOptions, UdpTransport, WebSocketTransport,
 };
 
 use crate::transaction::error::{Error, Result};
@@ -44,6 +44,10 @@ pub struct TransportManagerConfig {
     pub tls_bind_addresses: Vec<SocketAddr>,
     /// Default event channel capacity
     pub default_channel_capacity: usize,
+    /// Optional UDP socket receive buffer size (`SO_RCVBUF`) in bytes.
+    pub udp_recv_buffer_size: Option<usize>,
+    /// Optional UDP socket send buffer size (`SO_SNDBUF`) in bytes.
+    pub udp_send_buffer_size: Option<usize>,
     /// TLS certificate path
     pub tls_cert_path: Option<String>,
     /// TLS key path
@@ -84,6 +88,8 @@ impl Default for TransportManagerConfig {
             // level downstream; this just keeps the funnel from being
             // the bottleneck.
             default_channel_capacity: 10_000,
+            udp_recv_buffer_size: None,
+            udp_send_buffer_size: None,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
@@ -125,6 +131,8 @@ impl TransportManager {
         let transports = Arc::new(Mutex::new(HashMap::new()));
         let transport_factory = Arc::new(TransportFactory::new(TransportFactoryConfig {
             channel_capacity: config.default_channel_capacity,
+            udp_recv_buffer_size: config.udp_recv_buffer_size,
+            udp_send_buffer_size: config.udp_send_buffer_size,
             ..Default::default()
         }));
 
@@ -342,15 +350,22 @@ impl TransportManager {
 
     /// Adds a UDP transport to the manager
     pub async fn add_udp_transport(&self, bind_addr: SocketAddr) -> Result<Arc<dyn Transport>> {
-        let (transport, rx) =
-            UdpTransport::bind(bind_addr, Some(self.config.default_channel_capacity))
-                .await
-                .map_err(|e| {
-                    Error::Transport(format!(
-                        "Failed to bind UDP transport to {}: {}",
-                        bind_addr, e
-                    ))
-                })?;
+        let socket_options = UdpSocketOptions::new(
+            self.config.udp_recv_buffer_size,
+            self.config.udp_send_buffer_size,
+        );
+        let (transport, rx) = UdpTransport::bind_with_socket_options(
+            bind_addr,
+            Some(self.config.default_channel_capacity),
+            socket_options,
+        )
+        .await
+        .map_err(|e| {
+            Error::Transport(format!(
+                "Failed to bind UDP transport to {}: {}",
+                bind_addr, e
+            ))
+        })?;
 
         let transport_arc = Arc::new(transport);
 

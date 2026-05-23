@@ -280,6 +280,12 @@ impl AudioTransmitter {
 
     /// Start audio transmission
     pub async fn start(&mut self) {
+        if matches!(self.config.source, AudioSource::PassThrough) {
+            *self.is_active.write().await = false;
+            debug!("AudioTransmitter: pass-through source has no background TX task");
+            return;
+        }
+
         // If we never managed to snapshot a send handle (e.g. the
         // session was locked at construction), try again now — the
         // construction-time lock contention is gone by definition.

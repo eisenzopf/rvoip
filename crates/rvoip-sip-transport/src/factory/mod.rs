@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::transport::tcp::pool::PoolConfig;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::tls::{TlsRole, TlsTransport};
-use crate::transport::udp::UdpTransport;
+use crate::transport::udp::{UdpSocketOptions, UdpTransport};
 use crate::transport::ws::WebSocketTransport;
 use crate::transport::{Transport, TransportEvent};
 
@@ -95,6 +95,10 @@ pub struct TransportFactoryConfig {
     pub tls_client_key_path: Option<String>,
     /// Dev-only insecure server certificate verification.
     pub tls_insecure_skip_verify: bool,
+    /// Optional UDP socket receive buffer size (`SO_RCVBUF`) in bytes.
+    pub udp_recv_buffer_size: Option<usize>,
+    /// Optional UDP socket send buffer size (`SO_SNDBUF`) in bytes.
+    pub udp_send_buffer_size: Option<usize>,
 }
 
 impl Default for TransportFactoryConfig {
@@ -109,6 +113,8 @@ impl Default for TransportFactoryConfig {
             tls_client_cert_path: None,
             tls_client_key_path: None,
             tls_insecure_skip_verify: false,
+            udp_recv_buffer_size: None,
+            udp_send_buffer_size: None,
         }
     }
 }
@@ -138,8 +144,16 @@ impl TransportFactory {
     ) -> Result<(Arc<dyn Transport>, mpsc::Receiver<TransportEvent>)> {
         match transport_type {
             TransportType::Udp => {
-                let (transport, rx) =
-                    UdpTransport::bind(bind_addr, Some(self.config.channel_capacity)).await?;
+                let options = UdpSocketOptions::new(
+                    self.config.udp_recv_buffer_size,
+                    self.config.udp_send_buffer_size,
+                );
+                let (transport, rx) = UdpTransport::bind_with_socket_options(
+                    bind_addr,
+                    Some(self.config.channel_capacity),
+                    options,
+                )
+                .await?;
                 Ok((Arc::new(transport), rx))
             }
             TransportType::Tcp => {

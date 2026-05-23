@@ -39,6 +39,16 @@ impl SessionStore {
         }
     }
 
+    /// Create a new session store with preallocated index capacity.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            sessions: Arc::new(DashMap::with_capacity(capacity)),
+            by_dialog: Arc::new(DashMap::with_capacity(capacity)),
+            by_call_id: Arc::new(DashMap::with_capacity(capacity)),
+            by_media_id: Arc::new(DashMap::with_capacity(capacity)),
+        }
+    }
+
     /// Create a new session (supports multiple sessions for transfers)
     pub async fn create_session(
         &self,

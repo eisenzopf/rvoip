@@ -40,6 +40,7 @@ Cargo.backup
 # Test output directories
 crates/sip-client/tests/full_roundtrip/
 crates/session-core/examples/pbx/output/
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/*
 *.log
 .claude/
 

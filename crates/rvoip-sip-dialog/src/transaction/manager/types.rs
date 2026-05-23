@@ -10,9 +10,9 @@
 /// the necessary structure to implement the state machines and timer-based
 /// behaviors that SIP transactions require.
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use rvoip_sip_core::Request;
+use rvoip_sip_core::{Request, Response};
 
 use crate::transaction::TransactionKey;
 
@@ -49,6 +49,21 @@ impl ServerInviteDialogKey {
 pub(crate) struct ServerInviteAckIndexEntry {
     pub(crate) transaction_id: TransactionKey,
     pub(crate) expires_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct Invite2xxResponseCacheEntry {
+    pub(crate) response: Response,
+    pub(crate) destination: SocketAddr,
+    pub(crate) expires_at: Instant,
+    pub(crate) next_retransmit_at: Instant,
+    pub(crate) retransmit_interval: Duration,
+}
+
+impl Invite2xxResponseCacheEntry {
+    pub(crate) fn is_expired(&self, now: Instant) -> bool {
+        now >= self.expires_at
+    }
 }
 
 impl ServerInviteAckIndexEntry {

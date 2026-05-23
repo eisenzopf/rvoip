@@ -524,6 +524,25 @@ impl ServerInviteLogic {
                 // No state transition needed for INVITE retransmission
                 Ok(None)
             }
+            TransactionState::Terminated => {
+                let response = {
+                    let last_response = data.last_response.lock().await;
+                    last_response.clone()
+                };
+                if let Some(response) = response {
+                    if response.status().is_success() {
+                        debug!(id=%tx_id, "Retransmitting cached 2xx response for INVITE retransmission");
+                        if let Err(e) = data
+                            .transport
+                            .send_message(Message::Response(response), data.remote_addr)
+                            .await
+                        {
+                            error!(id=%tx_id, error=%e, "Failed to retransmit 2xx response");
+                        }
+                    }
+                }
+                Ok(None)
+            }
             _ => {
                 // INVITE retransmissions in other states are ignored
                 trace!(id=%tx_id, state=?current_state, "Ignoring INVITE retransmission in state {:?}", current_state);

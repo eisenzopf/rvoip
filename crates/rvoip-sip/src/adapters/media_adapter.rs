@@ -601,7 +601,11 @@ impl MediaAdapter {
     /// Start a media session
     pub async fn start_session(&self, session_id: &SessionId) -> Result<()> {
         // Check if session already exists
-        if let Some(dialog_id) = self.session_to_dialog.get(session_id) {
+        if let Some(dialog_id) = self
+            .session_to_dialog
+            .get(session_id)
+            .map(|entry| entry.value().clone())
+        {
             // Session already exists, check if it's started in media-core
             if self.controller.get_session_info(&dialog_id).await.is_some() {
                 tracing::debug!("Media session already started for session {}", session_id.0);
@@ -710,7 +714,14 @@ impl MediaAdapter {
         // plaintext packets going out before the encrypt-side
         // SrtpContext is in place.
         let no_media = perf_no_media_enabled();
-        if let Some(dialog_id) = self.session_to_dialog.get(session_id).filter(|_| !no_media) {
+        let dialog_id = if no_media {
+            None
+        } else {
+            self.session_to_dialog
+                .get(session_id)
+                .map(|entry| entry.value().clone())
+        };
+        if let Some(dialog_id) = dialog_id {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
             self.controller
@@ -904,7 +915,14 @@ impl MediaAdapter {
         // be installed BEFORE establish_media_flow starts the audio
         // transmitter — see `negotiate_sdp_as_uac` for the same
         // ordering rationale.
-        if let Some(dialog_id) = self.session_to_dialog.get(session_id).filter(|_| !no_media) {
+        let dialog_id = if no_media {
+            None
+        } else {
+            self.session_to_dialog
+                .get(session_id)
+                .map(|entry| entry.value().clone())
+        };
+        if let Some(dialog_id) = dialog_id {
             let remote_addr = SocketAddr::new(remote_ip, remote_port);
 
             self.controller

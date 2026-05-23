@@ -638,7 +638,7 @@ impl CallHandle {
                 response = response.with_body(sdp.as_bytes().to_vec());
                 // Add Content-Type header for SDP
                 use rvoip_sip_core::parser::headers::content_type::ContentTypeValue;
-                use rvoip_sip_core::{TypedHeader, types::content_type::ContentType};
+                use rvoip_sip_core::{types::content_type::ContentType, TypedHeader};
                 response
                     .headers
                     .push(TypedHeader::ContentType(ContentType::new(

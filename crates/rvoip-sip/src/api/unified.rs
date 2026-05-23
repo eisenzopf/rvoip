@@ -74,7 +74,7 @@ use rvoip_sip_core::types::sdp::CryptoSuite;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 
 pub use rvoip_media_core::relay::controller::{AudioSource, BridgeError, BridgeHandle};
 pub use rvoip_sip_dialog::api::RelUsage;
@@ -569,6 +569,20 @@ pub struct Config {
     /// backpressure the UDP receive loop. Default: `10000`.
     pub sip_transport_channel_capacity: usize,
 
+    /// Optional SIP UDP receive socket buffer size (`SO_RCVBUF`) in bytes.
+    ///
+    /// `None` preserves the OS default, which is appropriate for clients and
+    /// small servers. High-CPS server profiles should set this alongside the
+    /// transport channel capacity so kernel UDP bursts do not overflow before
+    /// the async receive loop can drain them.
+    pub sip_udp_recv_buffer_size: Option<usize>,
+
+    /// Optional SIP UDP send socket buffer size (`SO_SNDBUF`) in bytes.
+    ///
+    /// `None` preserves the OS default. Server deployments with large reply
+    /// bursts can set this to match the receive-side sizing policy.
+    pub sip_udp_send_buffer_size: Option<usize>,
+
     /// Capacity for the transaction-manager event channel consumed by dialog
     /// core.
     ///
@@ -592,6 +606,15 @@ pub struct Config {
     /// the synchronous `publish_now` path so session cleanup happens after
     /// the terminal event is visible. Default: `10000`.
     pub session_event_dispatcher_channel_capacity: usize,
+
+    /// Expected server-side active call capacity for hot lookup indexes.
+    ///
+    /// `None` keeps client/small-endpoint behavior lazy and uses existing
+    /// channel-derived defaults. Server/high-CPS profiles should set this to
+    /// the expected active-call burst size so dialog, transaction, session,
+    /// lifecycle, and media indexes can reserve capacity up front without
+    /// tying that memory reservation to the larger event-queue capacities.
+    pub server_call_capacity: Option<usize>,
 
     /// SIP_API_DESIGN_2 §7.4 — application-supplied headers stamped
     /// on every outbound message the state machine emits
@@ -678,9 +701,12 @@ impl Config {
             incoming_call_channel_capacity: 1000,
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
+            sip_udp_recv_buffer_size: None,
+            sip_udp_send_buffer_size: None,
             transaction_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
+            server_call_capacity: None,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -741,9 +767,12 @@ impl Config {
             incoming_call_channel_capacity: 1000,
             state_event_channel_capacity: 1000,
             sip_transport_channel_capacity: 10_000,
+            sip_udp_recv_buffer_size: None,
+            sip_udp_send_buffer_size: None,
             transaction_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
+            server_call_capacity: None,
             auto_emit_extra_headers: Vec::new(),
         }
     }
@@ -984,6 +1013,29 @@ impl Config {
         self
     }
 
+    /// Set a server-side active-call capacity profile.
+    ///
+    /// This reserves hot lookup indexes for `capacity` active or
+    /// burst-arriving calls without changing event queue sizes. Clients should
+    /// usually leave this unset and use the defaults.
+    pub fn with_server_capacity(mut self, capacity: usize) -> Self {
+        self.server_call_capacity = Some(capacity);
+        self
+    }
+
+    fn dialog_index_capacity_hint(&self) -> usize {
+        self.server_call_capacity
+            .unwrap_or(self.transaction_event_channel_capacity)
+            .max(1)
+    }
+
+    fn transaction_index_capacity_hint(&self) -> usize {
+        self.server_call_capacity
+            .map(|capacity| capacity.saturating_mul(4))
+            .unwrap_or(self.transaction_event_channel_capacity)
+            .max(1)
+    }
+
     /// Set the RTP media port range.
     ///
     /// The default range is [`Config::DEFAULT_MEDIA_PORT_START`] through
@@ -1010,6 +1062,33 @@ impl Config {
     /// [`Config::validate`].
     pub fn with_sip_transport_channel_capacity(mut self, capacity: usize) -> Self {
         self.sip_transport_channel_capacity = capacity;
+        self
+    }
+
+    /// Set SIP UDP socket receive/send buffer sizes in bytes.
+    ///
+    /// Use this for high-CPS server profiles where the kernel UDP queue must
+    /// absorb bursts while application queues drain. Pass `None` for either
+    /// side to keep that side at the OS default.
+    pub fn with_sip_udp_socket_buffers(
+        mut self,
+        recv_buffer_size: Option<usize>,
+        send_buffer_size: Option<usize>,
+    ) -> Self {
+        self.sip_udp_recv_buffer_size = recv_buffer_size;
+        self.sip_udp_send_buffer_size = send_buffer_size;
+        self
+    }
+
+    /// Set the SIP UDP receive socket buffer size (`SO_RCVBUF`) in bytes.
+    pub fn with_sip_udp_recv_buffer_size(mut self, size: usize) -> Self {
+        self.sip_udp_recv_buffer_size = Some(size);
+        self
+    }
+
+    /// Set the SIP UDP send socket buffer size (`SO_SNDBUF`) in bytes.
+    pub fn with_sip_udp_send_buffer_size(mut self, size: usize) -> Self {
+        self.sip_udp_send_buffer_size = Some(size);
         self
     }
 
@@ -1154,6 +1233,16 @@ impl Config {
                 "sip_transport_channel_capacity must be at least 1".to_string(),
             ));
         }
+        if matches!(self.sip_udp_recv_buffer_size, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_udp_recv_buffer_size must be at least 1 when set".to_string(),
+            ));
+        }
+        if matches!(self.sip_udp_send_buffer_size, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_udp_send_buffer_size must be at least 1 when set".to_string(),
+            ));
+        }
         if self.transaction_event_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
                 "transaction_event_channel_capacity must be at least 1".to_string(),
@@ -1167,6 +1256,11 @@ impl Config {
         if self.session_event_dispatcher_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
                 "session_event_dispatcher_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if matches!(self.server_call_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "server_call_capacity must be at least 1 when set".to_string(),
             ));
         }
         if self.media_port_start < MIN_PORT {
@@ -1600,7 +1694,12 @@ impl UnifiedCoordinator {
             .clone();
 
         // Create core components
-        let store = Arc::new(SessionStore::new());
+        let store = Arc::new(
+            config
+                .server_call_capacity
+                .map(SessionStore::with_capacity)
+                .unwrap_or_else(SessionStore::new),
+        );
         let registry = Arc::new(SessionRegistry::new());
 
         let sip_trace_owner_id = config
@@ -1792,7 +1891,10 @@ impl UnifiedCoordinator {
         // Create incoming call channel
         let (incoming_tx, incoming_rx) = mpsc::channel(config.incoming_call_channel_capacity);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let lifecycle = LifecycleIndex::new();
+        let lifecycle = config
+            .server_call_capacity
+            .map(LifecycleIndex::with_capacity)
+            .unwrap_or_else(LifecycleIndex::new);
         let app_event_publisher = SessionEventPublisher::with_dispatcher(
             global_coordinator.clone(),
             lifecycle.clone(),
@@ -2992,7 +3094,7 @@ impl UnifiedCoordinator {
         users: std::collections::HashMap<String, String>,
     ) -> Result<Arc<rvoip_sip_registrar::RegistrarService>> {
         use crate::adapters::RegistrationAdapter;
-        use rvoip_sip_registrar::{RegistrarService, api::ServiceMode, types::RegistrarConfig};
+        use rvoip_sip_registrar::{api::ServiceMode, types::RegistrarConfig, RegistrarService};
 
         tracing::info!(
             "🔐 Starting server-side registration handler with realm: {}",
@@ -3049,8 +3151,8 @@ impl UnifiedCoordinator {
         use rvoip_sip_dialog::api::unified::UnifiedDialogApi;
         use rvoip_sip_dialog::config::DialogManagerConfig;
         use rvoip_sip_dialog::transaction::{
-            TransactionManager,
             transport::{TransportManager, TransportManagerConfig},
+            TransactionManager,
         };
 
         // Create transport manager first (dialog-core's own transport manager).
@@ -3127,6 +3229,8 @@ impl UnifiedCoordinator {
                 .as_ref()
                 .map(|p| p.to_string_lossy().into_owned()),
             default_channel_capacity: config.sip_transport_channel_capacity,
+            udp_recv_buffer_size: config.sip_udp_recv_buffer_size,
+            udp_send_buffer_size: config.sip_udp_send_buffer_size,
             // Default build: `Config::tls_insecure_skip_verify` is not
             // compiled, so we always pass `false`. Only the
             // `dev-insecure-tls` build surfaces the field.
@@ -3190,15 +3294,17 @@ impl UnifiedCoordinator {
         })?;
 
         // Create transaction manager using transport manager
-        let (transaction_manager, event_rx) = TransactionManager::with_transport_manager(
-            transport_manager,
-            transport_event_rx,
-            Some(config.transaction_event_channel_capacity),
-        )
-        .await
-        .map_err(|e| {
-            SessionError::InternalError(format!("Failed to create transaction manager: {}", e))
-        })?;
+        let (transaction_manager, event_rx) =
+            TransactionManager::with_transport_manager_and_index_capacity(
+                transport_manager,
+                transport_event_rx,
+                Some(config.transaction_event_channel_capacity),
+                Some(config.transaction_index_capacity_hint()),
+            )
+            .await
+            .map_err(|e| {
+                SessionError::InternalError(format!("Failed to create transaction manager: {}", e))
+            })?;
 
         let transaction_manager = Arc::new(transaction_manager);
 
@@ -3214,7 +3320,7 @@ impl UnifiedCoordinator {
                 dialog.local_contact_uri = config.contact_uri.clone();
                 dialog.tls_local_address = dialog_tls_local_address;
                 dialog.tls_advertised_local_address = config.tls_advertised_addr;
-                dialog.max_dialogs = Some(config.transaction_event_channel_capacity);
+                dialog.max_dialogs = Some(config.dialog_index_capacity_hint());
                 dialog
             })
             .build();
@@ -3247,9 +3353,10 @@ impl UnifiedCoordinator {
         use rvoip_media_core::relay::controller::MediaSessionController;
 
         // Create media controller with port range
-        let controller = Arc::new(MediaSessionController::with_port_range(
+        let controller = Arc::new(MediaSessionController::with_port_range_and_capacity(
             config.media_port_start,
             config.media_port_end,
+            config.server_call_capacity.unwrap_or(0),
         ));
 
         // Create and set up the event hub

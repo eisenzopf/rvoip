@@ -1,8 +1,10 @@
 mod listener;
 mod sender;
+mod socket;
 
 pub use listener::UdpListener;
 pub use sender::UdpSender;
+pub use socket::UdpSocketOptions;
 
 use std::fmt;
 use std::net::SocketAddr;
@@ -45,6 +47,7 @@ struct UdpTransportInner {
     /// over IPSec) or a known larger one (e.g. controlled DC fabric)
     /// can tune the threshold.
     safe_max_bytes: usize,
+    socket_options: UdpSocketOptions,
 }
 
 impl UdpTransport {
@@ -58,6 +61,21 @@ impl UdpTransport {
         Self::bind_with_mtu(addr, channel_capacity, UDP_SAFE_MAX_BYTES).await
     }
 
+    /// Creates a new UDP transport with explicit socket options.
+    pub async fn bind_with_socket_options(
+        addr: SocketAddr,
+        channel_capacity: Option<usize>,
+        socket_options: UdpSocketOptions,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_mtu_and_socket_options(
+            addr,
+            channel_capacity,
+            UDP_SAFE_MAX_BYTES,
+            socket_options,
+        )
+        .await
+    }
+
     /// Same as [`Self::bind`] but with a caller-supplied MTU threshold
     /// for the UDP→TCP failover decision (RFC 3261 §18.1.1). Useful
     /// for deployments with a known smaller path MTU (e.g. SIP over
@@ -67,16 +85,32 @@ impl UdpTransport {
         channel_capacity: Option<usize>,
         safe_max_bytes: usize,
     ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
+        Self::bind_with_mtu_and_socket_options(
+            addr,
+            channel_capacity,
+            safe_max_bytes,
+            UdpSocketOptions::default(),
+        )
+        .await
+    }
+
+    /// Same as [`Self::bind_with_mtu`] but with explicit UDP socket options.
+    pub async fn bind_with_mtu_and_socket_options(
+        addr: SocketAddr,
+        channel_capacity: Option<usize>,
+        safe_max_bytes: usize,
+        socket_options: UdpSocketOptions,
+    ) -> Result<(Self, mpsc::Receiver<TransportEvent>)> {
         // Create the event channel
         let capacity = channel_capacity.unwrap_or(DEFAULT_CHANNEL_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel(capacity);
 
         // Create the UDP listener
-        let listener = UdpListener::bind(addr).await?;
+        let listener = UdpListener::bind_with_socket_options(addr, socket_options).await?;
         let local_addr = listener.local_addr()?;
         info!(
-            "SIP UDP transport bound to {} (MTU threshold {} bytes)",
-            local_addr, safe_max_bytes
+            "SIP UDP transport bound to {} (MTU threshold {} bytes, socket options {:?})",
+            local_addr, safe_max_bytes, socket_options
         );
 
         // Create the UDP sender (shares same socket)
@@ -96,6 +130,7 @@ impl UdpTransport {
                 shutdown_tx,
                 shutdown_rx,
                 safe_max_bytes,
+                socket_options,
             }),
         };
 
@@ -130,8 +165,14 @@ impl UdpTransport {
                 shutdown_tx,
                 shutdown_rx,
                 safe_max_bytes: UDP_SAFE_MAX_BYTES,
+                socket_options: UdpSocketOptions::default(),
             }),
         }
+    }
+
+    /// Returns the socket options requested at bind time.
+    pub fn socket_options(&self) -> UdpSocketOptions {
+        self.inner.socket_options
     }
 
     // Spawns a task to receive packets from the UDP socket
@@ -324,6 +365,17 @@ mod tests {
                 .await
                 .expect("bind_with_mtu");
         assert_eq!(transport.max_safe_message_size(), 900);
+        transport.close().await.ok();
+    }
+
+    #[tokio::test]
+    async fn bind_with_socket_options_preserves_requested_values() {
+        let options = UdpSocketOptions::new(Some(4096), Some(4096));
+        let (transport, _rx) =
+            UdpTransport::bind_with_socket_options("127.0.0.1:0".parse().unwrap(), None, options)
+                .await
+                .expect("bind_with_socket_options");
+        assert_eq!(transport.socket_options(), options);
         transport.close().await.ok();
     }
 }

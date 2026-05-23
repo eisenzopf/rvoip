@@ -5,8 +5,8 @@
 
 use dashmap::DashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -47,13 +47,20 @@ pub enum IdentityVerificationDecision {
     Drop,
 }
 
-const TERMINATED_BYE_TOMBSTONE_TTL: Duration = Duration::from_secs(5);
-const TERMINATED_BYE_LOOKUP_HARD_MAX: usize = 65_536;
+const TERMINATED_BYE_TOMBSTONE_TTL: Duration = Duration::from_secs(32);
+const MIN_TERMINATED_BYE_LOOKUP_HARD_MAX: usize = 65_536;
+const TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER: usize = 16;
 const TERMINATED_BYE_PRUNE_INTERVAL: usize = 8_192;
 const MIN_DIALOG_INDEX_CAPACITY: usize = 1024;
 
 fn dialog_index_capacity(max_dialogs: Option<usize>) -> usize {
     max_dialogs.unwrap_or(10_000).max(MIN_DIALOG_INDEX_CAPACITY)
+}
+
+fn terminated_bye_lookup_hard_max(index_capacity: usize) -> usize {
+    index_capacity
+        .saturating_mul(TERMINATED_BYE_LOOKUP_HARD_MAX_MULTIPLIER)
+        .max(MIN_TERMINATED_BYE_LOOKUP_HARD_MAX)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -99,6 +106,11 @@ pub struct DialogManager {
     /// Approximate insert counter used to prune terminated BYE tombstones
     /// without scanning the full map on every call.
     terminated_bye_insert_count: Arc<AtomicUsize>,
+
+    /// Capacity-derived safety cap for the terminated BYE tombstone index.
+    /// Server/high-CPS deployments increase this with their dialog index
+    /// capacity so late retransmits are not evicted while still within TTL.
+    terminated_bye_lookup_hard_max: usize,
 
     /// Transaction to dialog mapping
     pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
@@ -289,6 +301,10 @@ impl std::fmt::Debug for DialogManager {
                 &self.terminated_bye_lookup.len(),
             )
             .field(
+                "terminated_bye_lookup_hard_max",
+                &self.terminated_bye_lookup_hard_max,
+            )
+            .field(
                 "pending_response_transaction_by_dialog_len",
                 &self.pending_response_transaction_by_dialog.len(),
             )
@@ -378,6 +394,7 @@ impl DialogManager {
             early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
             terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
+            terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
@@ -908,6 +925,7 @@ impl DialogManager {
             early_dialog_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
             terminated_bye_lookup: Arc::new(DashMap::with_capacity(index_capacity)),
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
+            terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
@@ -1831,28 +1849,13 @@ impl DialogManager {
     }
 
     pub(crate) fn remove_dialog_storage(&self, dialog_id: &DialogId) -> Option<Dialog> {
-        let (_, dialog) = self.dialogs.remove(dialog_id)?;
-
-        if dialog.state == DialogState::Terminated && dialog.remote_cseq != 0 {
-            if let Some((call_id, local_tag, remote_tag)) = dialog.dialog_id_tuple() {
-                let tombstone = TerminatedByeTombstone {
-                    cseq: dialog.remote_cseq,
-                    created_at: Instant::now(),
-                };
-                let key = DialogUtils::create_lookup_key(&call_id, &local_tag, &remote_tag);
-                self.terminated_bye_lookup.insert(key, tombstone);
-                let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
-                self.terminated_bye_lookup.insert(reverse_key, tombstone);
-
-                let insert_count = self
-                    .terminated_bye_insert_count
-                    .fetch_add(2, Ordering::Relaxed)
-                    + 2;
-                if insert_count % TERMINATED_BYE_PRUNE_INTERVAL == 0 {
-                    self.prune_terminated_bye_lookup();
-                }
+        {
+            if let Some(dialog) = self.dialogs.get(dialog_id) {
+                self.insert_terminated_bye_tombstone(dialog.value());
             }
         }
+
+        let (_, dialog) = self.dialogs.remove(dialog_id)?;
 
         if let Some(remote_tag) = dialog.remote_tag.as_ref() {
             let key = DialogUtils::create_early_lookup_key(&dialog.call_id, remote_tag);
@@ -1877,6 +1880,31 @@ impl DialogManager {
         Some(dialog)
     }
 
+    fn insert_terminated_bye_tombstone(&self, dialog: &Dialog) {
+        if dialog.state != DialogState::Terminated || dialog.remote_cseq == 0 {
+            return;
+        }
+
+        if let Some((call_id, local_tag, remote_tag)) = dialog.dialog_id_tuple() {
+            let tombstone = TerminatedByeTombstone {
+                cseq: dialog.remote_cseq,
+                created_at: Instant::now(),
+            };
+            let key = DialogUtils::create_lookup_key(&call_id, &local_tag, &remote_tag);
+            self.terminated_bye_lookup.insert(key, tombstone);
+            let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
+            self.terminated_bye_lookup.insert(reverse_key, tombstone);
+
+            let insert_count = self
+                .terminated_bye_insert_count
+                .fetch_add(2, Ordering::Relaxed)
+                + 2;
+            if insert_count % TERMINATED_BYE_PRUNE_INTERVAL == 0 {
+                self.prune_terminated_bye_lookup();
+            }
+        }
+    }
+
     fn prune_terminated_bye_lookup(&self) {
         let now = Instant::now();
         let expired_keys: Vec<_> = self
@@ -1893,11 +1921,11 @@ impl DialogManager {
         }
 
         let len = self.terminated_bye_lookup.len();
-        if len <= TERMINATED_BYE_LOOKUP_HARD_MAX {
+        if len <= self.terminated_bye_lookup_hard_max {
             return;
         }
 
-        let overage = len - TERMINATED_BYE_LOOKUP_HARD_MAX;
+        let overage = len - self.terminated_bye_lookup_hard_max;
         let overflow_keys: Vec<_> = self
             .terminated_bye_lookup
             .iter()
@@ -2726,6 +2754,58 @@ mod outbound_flow_handler_tests {
         SocketAddr::from_str(&format!("127.0.0.1:{port}")).unwrap()
     }
 
+    #[test]
+    fn terminated_bye_lookup_hard_max_scales_with_index_capacity() {
+        assert_eq!(
+            terminated_bye_lookup_hard_max(MIN_DIALOG_INDEX_CAPACITY),
+            MIN_TERMINATED_BYE_LOOKUP_HARD_MAX
+        );
+        assert_eq!(terminated_bye_lookup_hard_max(100_000), 1_600_000);
+    }
+
+    #[tokio::test]
+    async fn remove_dialog_storage_indexes_terminated_bye_tombstone() {
+        let (manager, _rx) = make_manager().await;
+        let mut dialog = Dialog::new(
+            "terminated-bye-index-test".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-tag".to_string()),
+            Some("bob-tag".to_string()),
+            true,
+        );
+        dialog.state = DialogState::Terminated;
+        dialog.remote_cseq = 42;
+        let dialog_id = dialog.id.clone();
+
+        manager.store_dialog(dialog).await.expect("store dialog");
+        let removed = manager
+            .remove_dialog_storage(&dialog_id)
+            .expect("dialog removed");
+        let (call_id, local_tag, remote_tag) =
+            removed.dialog_id_tuple().expect("full dialog tuple");
+        let key = DialogUtils::create_lookup_key(&call_id, &local_tag, &remote_tag);
+        let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
+
+        assert_eq!(
+            manager
+                .terminated_bye_lookup
+                .get(&key)
+                .expect("forward tombstone")
+                .cseq,
+            42
+        );
+        assert_eq!(
+            manager
+                .terminated_bye_lookup
+                .get(&reverse_key)
+                .expect("reverse tombstone")
+                .cseq,
+            42
+        );
+        assert!(!manager.dialogs.contains_key(&dialog_id));
+    }
+
     fn install_flow(
         manager: &DialogManager,
         key: (String, u32, String),
@@ -2774,11 +2854,9 @@ mod outbound_flow_handler_tests {
         );
 
         manager.unlink_transaction_from_dialog_indexed(&server_bye);
-        assert!(
-            manager
-                .server_transactions_for_dialog(&dialog_id)
-                .is_empty()
-        );
+        assert!(manager
+            .server_transactions_for_dialog(&dialog_id)
+            .is_empty());
 
         manager.unlink_transaction_from_dialog_indexed(&client_invite);
         assert_eq!(manager.find_invite_transaction_for_dialog(&dialog_id), None);

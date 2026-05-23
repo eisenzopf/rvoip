@@ -174,15 +174,15 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use dashmap::DashMap;
-use tokio::sync::{Mutex, mpsc};
-use tokio::time::{MissedTickBehavior, sleep};
+use tokio::sync::{mpsc, Mutex};
+use tokio::time::{sleep, MissedTickBehavior};
 use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
@@ -232,9 +232,19 @@ pub(crate) type ArcClientTransaction = Arc<dyn ClientTransaction>;
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
 const MIN_TRANSACTION_INDEX_CAPACITY: usize = 1024;
+// Keep successful INVITE responses available long enough for high-load UAC
+// retransmission windows. Entries are removed as soon as the 2xx ACK arrives,
+// so this is a tail bound for lossy/missing-ACK calls, not a full call-volume
+// retention period.
+const INVITE_2XX_RESPONSE_CACHE_TTL: Duration = Duration::from_secs(90);
+const MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY: usize = 65_536;
 
 fn transaction_index_capacity(capacity: Option<usize>) -> usize {
     capacity.unwrap_or(100).max(MIN_TRANSACTION_INDEX_CAPACITY)
+}
+
+fn invite_2xx_response_cache_capacity(index_capacity: usize) -> usize {
+    index_capacity.max(MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY)
 }
 
 fn transport_token_for_request(request: &Request) -> &'static str {
@@ -329,6 +339,11 @@ pub struct TransactionManager {
     server_invite_dialog_keys_by_tx: Arc<DashMap<TransactionKey, Vec<ServerInviteDialogKey>>>,
     server_invite_dialog_index_capacity: usize,
     server_invite_dialog_index_insert_count: Arc<AtomicUsize>,
+    /// Cache of successful INVITE responses for retransmitted INVITEs after
+    /// the INVITE server transaction has entered the RFC 3261 2xx path.
+    invite_2xx_response_cache: Arc<DashMap<TransactionKey, Invite2xxResponseCacheEntry>>,
+    invite_2xx_response_cache_capacity: usize,
+    invite_2xx_response_cache_insert_count: Arc<AtomicUsize>,
     /// Transaction destinations — `transaction_id → SocketAddr`.
     /// DashMap for sharded lock-free reads.
     transaction_destinations: Arc<DashMap<TransactionKey, SocketAddr>>,
@@ -498,6 +513,7 @@ impl TransactionManager {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
         let index_capacity = transaction_index_capacity(Some(events_capacity));
+        let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
 
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
@@ -528,6 +544,9 @@ impl TransactionManager {
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
             server_invite_dialog_index_capacity: index_capacity,
             server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
+            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -615,6 +634,7 @@ impl TransactionManager {
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
         let index_capacity = transaction_index_capacity(Some(events_capacity));
+        let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
 
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
@@ -644,6 +664,9 @@ impl TransactionManager {
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
             server_invite_dialog_index_capacity: index_capacity,
             server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
+            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -745,6 +768,28 @@ impl TransactionManager {
         transport_rx: mpsc::Receiver<TransportEvent>,
         capacity: Option<usize>,
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
+        Self::with_transport_manager_and_index_capacity(
+            transport_manager,
+            transport_rx,
+            capacity,
+            None,
+        )
+        .await
+    }
+
+    /// Creates a transaction manager with separate event-queue and hot-index
+    /// capacities.
+    ///
+    /// Server profiles often need large event queues for SIP bursts without
+    /// reserving every transaction lookup map at the same size. `index_capacity`
+    /// controls active transaction maps and retransmission indexes; `capacity`
+    /// remains the transaction event queue size.
+    pub async fn with_transport_manager_and_index_capacity(
+        transport_manager: crate::transaction::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+        index_capacity: Option<usize>,
+    ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
         // Wrap the manager's per-flavour registry behind a
         // `MultiplexedTransport` so outbound requests get URI-aware
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
@@ -764,7 +809,8 @@ impl TransactionManager {
         // Create the transaction manager using the default transport and event channel
         let events_capacity = capacity.unwrap_or(100);
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
-        let index_capacity = transaction_index_capacity(Some(events_capacity));
+        let index_capacity = transaction_index_capacity(index_capacity.or(Some(events_capacity)));
+        let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
 
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
@@ -795,6 +841,9 @@ impl TransactionManager {
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
             server_invite_dialog_index_capacity: index_capacity,
             server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
+            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -861,6 +910,7 @@ impl TransactionManager {
     ) -> Self {
         let (events_tx, _) = mpsc::channel(100); // Dummy receiver, will be ignored
         let index_capacity = transaction_index_capacity(None);
+        let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let transaction_destinations = Arc::new(DashMap::with_capacity(index_capacity));
@@ -890,6 +940,9 @@ impl TransactionManager {
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
             server_invite_dialog_index_capacity: index_capacity,
             server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
+            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -929,6 +982,7 @@ impl TransactionManager {
 
         // Transaction registries
         let index_capacity = transaction_index_capacity(Some(10));
+        let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
 
@@ -961,6 +1015,9 @@ impl TransactionManager {
             server_invite_dialog_keys_by_tx: Arc::new(DashMap::with_capacity(index_capacity)),
             server_invite_dialog_index_capacity: index_capacity,
             server_invite_dialog_index_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
+            invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
+            invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             timer_manager,
@@ -1261,7 +1318,11 @@ impl TransactionManager {
 
         use crate::transaction::server::TransactionExt;
         if let Some(server_tx) = tx.as_server_transaction() {
-            server_tx.send_response(response).await
+            let result = server_tx.send_response(response).await;
+            if result.is_ok() {
+                self.cache_invite_2xx_response_for(transaction_id).await;
+            }
+            result
         } else {
             Err(Error::Other(
                 "Failed to downcast to server transaction".to_string(),
@@ -1773,6 +1834,22 @@ impl TransactionManager {
             Vec::new() // No specific subscribers for this transaction or global event
         };
 
+        if let Some(manager_instance) = manager.as_ref() {
+            match &event {
+                TransactionEvent::StateChanged {
+                    transaction_id,
+                    new_state: TransactionState::Terminated,
+                    ..
+                }
+                | TransactionEvent::TransactionTerminated { transaction_id } => {
+                    manager_instance
+                        .cache_invite_2xx_response_for(transaction_id)
+                        .await;
+                }
+                _ => {}
+            }
+        }
+
         // Send to primary channel if it's available
         if let Err(e) = primary_tx.send(event.clone()).await {
             // During shutdown, channel closed errors are expected
@@ -2023,6 +2100,10 @@ impl TransactionManager {
             cleanup_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let cleanup_running = Arc::new(AtomicBool::new(false));
             let mut cleanup_ticks = 0usize;
+            let mut invite_2xx_retransmit_interval =
+                tokio::time::interval(Duration::from_millis(100));
+            invite_2xx_retransmit_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let invite_2xx_retransmit_running = Arc::new(AtomicBool::new(false));
 
             // Run the message processing loop
             loop {
@@ -2087,6 +2168,22 @@ impl TransactionManager {
                                     _ => {}
                                 }
                                 cleanup_running.store(false, Ordering::Release);
+                            });
+                        }
+                    }
+                    _ = invite_2xx_retransmit_interval.tick() => {
+                        if invite_2xx_retransmit_running
+                            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            let manager_clone = manager_arc.clone();
+                            let retransmit_running = invite_2xx_retransmit_running.clone();
+                            tokio::spawn(async move {
+                                let count = manager_clone.retransmit_due_invite_2xx_responses().await;
+                                if count > 0 {
+                                    trace!("Retransmitted {} cached INVITE 2xx responses", count);
+                                }
+                                retransmit_running.store(false, Ordering::Release);
                             });
                         }
                     }
@@ -2699,6 +2796,146 @@ impl TransactionManager {
         }
     }
 
+    pub(crate) async fn cache_invite_2xx_response_for(&self, transaction_id: &TransactionKey) {
+        let Some(tx) = self
+            .server_transactions
+            .get(transaction_id)
+            .map(|entry| entry.value().clone())
+        else {
+            return;
+        };
+
+        if tx.kind() != TransactionKind::InviteServer {
+            return;
+        }
+
+        let response = {
+            let response_guard = tx.data().last_response.lock().await;
+            response_guard.clone()
+        };
+
+        let Some(response) = response else {
+            return;
+        };
+
+        if !response.status().is_success() {
+            return;
+        }
+
+        let now = Instant::now();
+        self.insert_invite_2xx_response_cache_entry(
+            transaction_id.clone(),
+            Invite2xxResponseCacheEntry {
+                response,
+                destination: tx.data().remote_addr,
+                expires_at: now + INVITE_2XX_RESPONSE_CACHE_TTL,
+                next_retransmit_at: now + self.timer_settings.t1,
+                retransmit_interval: self.timer_settings.t1,
+            },
+        );
+    }
+
+    fn insert_invite_2xx_response_cache_entry(
+        &self,
+        transaction_id: TransactionKey,
+        entry: Invite2xxResponseCacheEntry,
+    ) {
+        self.invite_2xx_response_cache.insert(transaction_id, entry);
+
+        let inserts = self
+            .invite_2xx_response_cache_insert_count
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let prune_interval = (self.invite_2xx_response_cache_capacity / 4).max(1024);
+        if inserts % prune_interval == 0
+            || self.invite_2xx_response_cache.len() > self.invite_2xx_response_cache_capacity
+        {
+            self.prune_invite_2xx_response_cache();
+        }
+    }
+
+    pub(crate) async fn retransmit_cached_invite_2xx_response(
+        &self,
+        transaction_id: &TransactionKey,
+        source: SocketAddr,
+    ) -> Result<bool> {
+        let entry = self
+            .invite_2xx_response_cache
+            .get(transaction_id)
+            .map(|entry| entry.value().clone());
+
+        let Some(entry) = entry else {
+            return Ok(false);
+        };
+
+        if entry.is_expired(Instant::now()) {
+            self.invite_2xx_response_cache.remove(transaction_id);
+            return Ok(false);
+        }
+
+        let destination = if source == entry.destination {
+            entry.destination
+        } else {
+            source
+        };
+        self.transport
+            .send_message(Message::Response(entry.response), destination)
+            .await
+            .map_err(|e| Error::transport_error(e, "Failed to retransmit cached INVITE 2xx"))?;
+
+        Ok(true)
+    }
+
+    async fn retransmit_due_invite_2xx_responses(&self) -> usize {
+        let now = Instant::now();
+        let mut expired = Vec::new();
+        let mut due = Vec::new();
+
+        for mut entry in self.invite_2xx_response_cache.iter_mut() {
+            if entry.is_expired(now) {
+                expired.push(entry.key().clone());
+                continue;
+            }
+
+            if now >= entry.next_retransmit_at {
+                due.push((entry.response.clone(), entry.destination));
+                entry.retransmit_interval = entry
+                    .retransmit_interval
+                    .saturating_mul(2)
+                    .min(self.timer_settings.t2);
+                entry.next_retransmit_at = now + entry.retransmit_interval;
+            }
+        }
+
+        for key in expired {
+            self.invite_2xx_response_cache.remove(&key);
+        }
+
+        let mut retransmitted = 0usize;
+        for (response, destination) in due {
+            match self
+                .transport
+                .send_message(Message::Response(response), destination)
+                .await
+            {
+                Ok(()) => retransmitted += 1,
+                Err(e) => {
+                    debug!(
+                        error = %e,
+                        destination = %destination,
+                        "Failed to retransmit cached INVITE 2xx response"
+                    );
+                }
+            }
+        }
+
+        retransmitted
+    }
+
+    pub(crate) fn remove_invite_2xx_response_cache(&self, transaction_id: &TransactionKey) {
+        self.invite_2xx_response_cache.remove(transaction_id);
+    }
+
     pub(crate) fn mark_transaction_terminated_indexed(&self, transaction_id: &TransactionKey) {
         self.terminated_transactions
             .insert(transaction_id.clone(), ());
@@ -2721,6 +2958,45 @@ impl TransactionManager {
             {
                 self.server_invite_dialog_index.remove(&key);
             }
+        }
+    }
+
+    fn prune_invite_2xx_response_cache(&self) {
+        let now = Instant::now();
+        let expired_keys: Vec<TransactionKey> = self
+            .invite_2xx_response_cache
+            .iter()
+            .filter(|entry| entry.value().is_expired(now))
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in expired_keys {
+            if self
+                .invite_2xx_response_cache
+                .get(&key)
+                .is_some_and(|entry| entry.value().is_expired(now))
+            {
+                self.invite_2xx_response_cache.remove(&key);
+            }
+        }
+
+        let len = self.invite_2xx_response_cache.len();
+        if len <= self.invite_2xx_response_cache_capacity {
+            return;
+        }
+
+        let mut entries: Vec<(TransactionKey, Instant)> = self
+            .invite_2xx_response_cache
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().expires_at))
+            .collect();
+        entries.sort_by_key(|(_, expires_at)| *expires_at);
+
+        for (key, _) in entries
+            .into_iter()
+            .take(len.saturating_sub(self.invite_2xx_response_cache_capacity))
+        {
+            self.invite_2xx_response_cache.remove(&key);
         }
     }
 

@@ -25,7 +25,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
 
 use rvoip_infra_common::events::cross_crate::SipTraceDirection;
@@ -51,8 +51,8 @@ use crate::transaction::{
     TransactionKind, TransactionState,
 };
 
-use super::TransactionManager;
 use super::types::*;
+use super::TransactionManager;
 
 /// Handle transport message events and route them to appropriate transactions.
 ///
@@ -141,6 +141,7 @@ pub async fn handle_transport_message(
                                         match result {
                                             Ok(_) => {
                                                 // Successfully processed ACK
+                                                manager.remove_invite_2xx_response_cache(&tx_id);
 
                                                 // Broadcast the event
                                                 TransactionManager::broadcast_event(
@@ -395,11 +396,35 @@ pub async fn handle_transport_message(
 
                         let lifecycle = tx.data().get_lifecycle();
                         if !matches!(lifecycle, TransactionLifecycle::Active) {
+                            if request.method() == Method::Invite
+                                && manager
+                                    .retransmit_cached_invite_2xx_response(&tx_id, source)
+                                    .await?
+                            {
+                                return Ok(());
+                            }
                             debug!(%tx_id, ?lifecycle, "Skipping request processing for non-active transaction");
                             return Ok(());
                         }
 
+                        if request.method() == Method::Invite
+                            && tx.state() == TransactionState::Terminated
+                            && manager
+                                .retransmit_cached_invite_2xx_response(&tx_id, source)
+                                .await?
+                        {
+                            return Ok(());
+                        }
+
                         tx.process_request(request.clone()).await?;
+                        return Ok(());
+                    }
+
+                    if request.method() == Method::Invite
+                        && manager
+                            .retransmit_cached_invite_2xx_response(&tx_id, source)
+                            .await?
+                    {
                         return Ok(());
                     }
 
@@ -628,8 +653,8 @@ pub fn create_via_header_for_transport(
     branch: &str,
     transport: &str,
 ) -> Result<TypedHeader> {
-    use rvoip_sip_core::types::Param;
     use rvoip_sip_core::types::via::Via;
+    use rvoip_sip_core::types::Param;
 
     let via_params = vec![Param::branch(branch.to_string()), Param::Rport(None)];
 
@@ -851,10 +876,33 @@ impl TransactionManager {
             if let Some(transaction) = existing {
                 let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
+                    if request.method() == Method::Invite
+                        && self
+                            .retransmit_cached_invite_2xx_response(&key, source)
+                            .await?
+                    {
+                        return Ok(());
+                    }
                     debug!(%key, ?lifecycle, "Skipping request processing for non-active transaction");
                     return Ok(());
                 }
+                if request.method() == Method::Invite
+                    && transaction.state() == TransactionState::Terminated
+                    && self
+                        .retransmit_cached_invite_2xx_response(&key, source)
+                        .await?
+                {
+                    return Ok(());
+                }
                 return transaction.process_request(request).await;
+            }
+
+            if request.method() == Method::Invite
+                && self
+                    .retransmit_cached_invite_2xx_response(&key, source)
+                    .await?
+            {
+                return Ok(());
             }
         }
 
@@ -1096,6 +1144,7 @@ impl TransactionManager {
                         "Processing ACK for non-2xx response in transaction {}",
                         invite_key
                     );
+                    self.remove_invite_2xx_response_cache(&invite_key);
                     return transaction.process_request(request).await;
                 }
             }
@@ -1109,6 +1158,7 @@ impl TransactionManager {
                 "Found ACK for 2xx response using dialog-based matching: {}",
                 tx_id
             );
+            self.remove_invite_2xx_response_cache(&tx_id);
 
             // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
             // Instead, emit AckReceived event for dialog-core to handle
@@ -1141,7 +1191,9 @@ impl TransactionManager {
 
         if let Some(entry) = self.lookup_server_invite_by_dialog_key(&exact_key) {
             debug!(call_id=%exact_key.call_id, "Found matching INVITE server transaction for ACK by dialog index");
-            return Some(entry.transaction_id);
+            let transaction_id = entry.transaction_id;
+            self.remove_invite_2xx_response_cache(&transaction_id);
+            return Some(transaction_id);
         }
 
         if let Some(fallback_key) = fallback_key.as_ref() {
@@ -1149,6 +1201,7 @@ impl TransactionManager {
                 debug!(call_id=%fallback_key.call_id, "Found matching INVITE server transaction for ACK by dialog index fallback");
                 let transaction_id = entry.transaction_id.clone();
                 self.insert_server_invite_dialog_index_entry(exact_key, entry);
+                self.remove_invite_2xx_response_cache(&transaction_id);
                 return Some(transaction_id);
             }
         }

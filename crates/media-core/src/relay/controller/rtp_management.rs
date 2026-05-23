@@ -288,9 +288,7 @@ impl MediaSessionController {
 
     /// Start audio transmission for a dialog with default configuration (pass-through mode)
     pub async fn start_audio_transmission(&self, dialog_id: &DialogId) -> Result<()> {
-        let config = AudioTransmitterConfig::default(); // Uses pass-through mode
-        self.start_audio_transmission_with_config(dialog_id, config)
-            .await
+        self.enable_pass_through_transmission(dialog_id).await
     }
 
     /// Start audio transmission for a dialog with tone generation (for backward compatibility)
@@ -313,6 +311,10 @@ impl MediaSessionController {
         config: AudioTransmitterConfig,
     ) -> Result<()> {
         info!("🎵 Starting audio transmission for dialog: {}", dialog_id);
+
+        if matches!(config.source, AudioSource::PassThrough) {
+            return self.enable_pass_through_transmission(dialog_id).await;
+        }
 
         // Snapshot the per-session Arc + check the already-started
         // guard inside the shard guard, drop the guard, then build &
@@ -340,6 +342,34 @@ impl MediaSessionController {
         }
 
         info!("✅ Audio transmission started for dialog: {}", dialog_id);
+        Ok(())
+    }
+
+    /// Enable pass-through mode without starting a background audio generation task.
+    ///
+    /// Pass-through means the RTP session is ready for externally supplied frames,
+    /// not that media-core should synthesize periodic silence. Creating a 20ms
+    /// timer task for every default pass-through call was a major high-CPS
+    /// bottleneck.
+    async fn enable_pass_through_transmission(&self, dialog_id: &DialogId) -> Result<()> {
+        let existing = {
+            let mut entry = self
+                .rtp_sessions
+                .get_mut(dialog_id)
+                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+            let wrapper = entry.value_mut();
+            wrapper.transmission_enabled = true;
+            wrapper.audio_transmitter.take()
+        };
+
+        if let Some(transmitter) = existing {
+            transmitter.stop().await;
+        }
+
+        debug!(
+            "✅ Pass-through enabled for dialog {} without background TX task",
+            dialog_id
+        );
         Ok(())
     }
 
@@ -464,9 +494,10 @@ impl MediaSessionController {
                 info!("✅ Custom audio set for dialog: {}", dialog_id);
                 Ok(())
             }
-            None => Err(Error::config(
-                "Audio transmission not active for dialog".to_string(),
-            )),
+            None => {
+                self.start_audio_transmission_with_custom_audio(dialog_id, samples, repeat)
+                    .await
+            }
         }
     }
 
@@ -499,9 +530,17 @@ impl MediaSessionController {
                 info!("✅ Tone generation set for dialog: {}", dialog_id);
                 Ok(())
             }
-            None => Err(Error::config(
-                "Audio transmission not active for dialog".to_string(),
-            )),
+            None => {
+                let config = AudioTransmitterConfig {
+                    source: AudioSource::Tone {
+                        frequency,
+                        amplitude,
+                    },
+                    ..Default::default()
+                };
+                self.start_audio_transmission_with_config(dialog_id, config)
+                    .await
+            }
         }
     }
 
@@ -516,6 +555,10 @@ impl MediaSessionController {
     /// [`establish_media_flow`](Self::establish_media_flow) first.
     pub async fn set_audio_source(&self, dialog_id: &DialogId, source: AudioSource) -> Result<()> {
         info!("🎵 Setting audio source for dialog: {}", dialog_id);
+
+        if matches!(source, AudioSource::PassThrough) {
+            return self.enable_pass_through_transmission(dialog_id).await;
+        }
 
         let transmitter = {
             let mut entry = self
@@ -534,38 +577,23 @@ impl MediaSessionController {
                 debug!("✅ Audio source updated for dialog: {}", dialog_id);
                 Ok(())
             }
-            None => Err(Error::config(format!(
-                "Audio transmission not active for dialog {} — call start_audio_transmission first",
-                dialog_id
-            ))),
+            None => {
+                let config = AudioTransmitterConfig {
+                    source,
+                    ..Default::default()
+                };
+                self.start_audio_transmission_with_config(dialog_id, config)
+                    .await
+            }
         }
     }
 
     /// Enable pass-through mode for a dialog (no audio generation)
     pub async fn set_pass_through_mode(&self, dialog_id: &DialogId) -> Result<()> {
         info!("🔄 Setting pass-through mode for dialog: {}", dialog_id);
-
-        let transmitter = {
-            let mut entry = self
-                .rtp_sessions
-                .get_mut(dialog_id)
-                .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
-            entry.value_mut().audio_transmitter.take()
-        };
-
-        match transmitter {
-            Some(t) => {
-                t.set_pass_through().await;
-                if let Some(mut entry) = self.rtp_sessions.get_mut(dialog_id) {
-                    entry.value_mut().audio_transmitter = Some(t);
-                }
-                info!("✅ Pass-through mode enabled for dialog: {}", dialog_id);
-                Ok(())
-            }
-            None => Err(Error::config(
-                "Audio transmission not active for dialog".to_string(),
-            )),
-        }
+        self.enable_pass_through_transmission(dialog_id).await?;
+        info!("✅ Pass-through mode enabled for dialog: {}", dialog_id);
+        Ok(())
     }
 
     /// Start audio transmission with custom audio samples

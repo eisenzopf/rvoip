@@ -6,8 +6,10 @@
 mod tests {
     use super::super::*;
     use crate::types::DialogId;
+    use rvoip_rtp_core::transport::AllocationStrategy;
     use std::collections::HashMap;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_start_stop_session() {
@@ -108,6 +110,102 @@ mod tests {
 
         println!("✨ Dynamic port allocation test completed successfully!");
         println!("🔧 rtp-core's PortAllocator is providing conflict-free dynamic allocation");
+    }
+
+    fn bind_adjacent_port_probe() -> (StdUdpSocket, u16) {
+        for _ in 0..100 {
+            let held = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            let first = held.local_addr().unwrap().port();
+            if first == u16::MAX {
+                continue;
+            }
+
+            if let Ok(second) = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, first + 1)) {
+                drop(second);
+                return (held, first);
+            }
+        }
+
+        panic!("failed to find adjacent UDP ports for retry test");
+    }
+
+    #[tokio::test]
+    async fn test_start_media_retries_when_reserved_port_bind_fails() {
+        let (_held_socket, occupied_port) = bind_adjacent_port_probe();
+        let mut controller = MediaSessionController::new();
+        let mut port_config = PortAllocatorConfig::default();
+        port_config.port_range_start = occupied_port;
+        port_config.port_range_end = occupied_port + 1;
+        port_config.allocation_strategy = AllocationStrategy::Incremental;
+        port_config.validate_ports = false;
+        controller.port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
+
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        };
+
+        let dialog_id = DialogId::new("retry_bind_conflict");
+        controller
+            .start_media(dialog_id.clone(), config)
+            .await
+            .expect("start_media should retry the next reserved port");
+
+        let session_info = controller
+            .get_session_info(&dialog_id)
+            .await
+            .expect("session should exist after retry");
+        assert_eq!(session_info.rtp_port, Some(occupied_port + 1));
+
+        controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("session should stop cleanly");
+    }
+
+    #[tokio::test]
+    async fn test_pass_through_media_flow_does_not_spawn_transmitter() {
+        let controller = MediaSessionController::new();
+        let dialog_id = DialogId::new("pass_through_no_tx_task");
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        };
+
+        controller
+            .start_media(dialog_id.clone(), config)
+            .await
+            .expect("media session should start");
+        controller
+            .establish_media_flow(
+                &dialog_id,
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 40000),
+            )
+            .await
+            .expect("pass-through media flow should establish");
+
+        let wrapper = controller
+            .rtp_sessions
+            .get(&dialog_id)
+            .expect("rtp session should exist");
+        assert!(
+            wrapper.transmission_enabled,
+            "pass-through keeps external RTP frame transmission enabled"
+        );
+        assert!(
+            wrapper.audio_transmitter.is_none(),
+            "default pass-through must not spawn a periodic audio transmitter"
+        );
+        drop(wrapper);
+
+        controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("session should stop cleanly");
     }
 
     #[tokio::test]

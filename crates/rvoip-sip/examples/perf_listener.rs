@@ -16,12 +16,14 @@
 //!
 //! Perf sizing knobs:
 //! - `RVOIP_PERF_CHANNEL_CAPACITY` (default 20000)
+//! - `RVOIP_PERF_SERVER_CAPACITY` (optional hot-index preallocation)
 //! - `RVOIP_PERF_RTP_PORT_CAPACITY` / `RVOIP_PERF_MEDIA_PORT_CAPACITY`
 //!   (default follows `RVOIP_PERF_CHANNEL_CAPACITY`)
 //! - `RVOIP_PERF_RTP_PORT_START` / `RVOIP_PERF_MEDIA_PORT_START`
 //! - `RVOIP_PERF_RTP_PORT_END` / `RVOIP_PERF_MEDIA_PORT_END`
 //! - `RVOIP_PERF_SESSION_EVENT_WORKERS`
 //! - `RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY`
+//! - `RVOIP_PERF_SIP_UDP_RECV_BUFFER` / `RVOIP_PERF_SIP_UDP_SEND_BUFFER`
 //! - `RVOIP_PERF_CLEANUP_DIAG=1` (periodic cleanup-stage summary)
 //! - `RVOIP_PERF_CLEANUP_DIAG_EVENTS=1` (per-operation cleanup timestamps)
 //! - `RVOIP_PERF_NO_MEDIA=1` (SIP+SDP only; skip RTP/media-core allocation)
@@ -215,12 +217,26 @@ async fn main() {
 fn apply_perf_config(config: Config) -> Config {
     let channel_capacity = env_usize("RVOIP_PERF_CHANNEL_CAPACITY", 20_000).max(1);
     let mut config = config.with_channel_capacity(channel_capacity);
+    if let Some(server_capacity) = env_usize_opt("RVOIP_PERF_SERVER_CAPACITY") {
+        let server_capacity = server_capacity.max(1);
+        println!(
+            "rvoip-sip perf_listener: server hot-index capacity {} (channel capacity {})",
+            server_capacity, channel_capacity
+        );
+        config = config.with_server_capacity(server_capacity);
+    }
     config = apply_perf_media_ports(config, channel_capacity);
     if let Some(workers) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_WORKERS") {
         config = config.with_session_event_dispatcher_workers(workers);
     }
     if let Some(capacity) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY") {
         config = config.with_session_event_dispatcher_channel_capacity(capacity);
+    }
+    if let Some(recv_buffer) = env_usize_opt("RVOIP_PERF_SIP_UDP_RECV_BUFFER") {
+        config = config.with_sip_udp_recv_buffer_size(recv_buffer);
+    }
+    if let Some(send_buffer) = env_usize_opt("RVOIP_PERF_SIP_UDP_SEND_BUFFER") {
+        config = config.with_sip_udp_send_buffer_size(send_buffer);
     }
     config
 }
