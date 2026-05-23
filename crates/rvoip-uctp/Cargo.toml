@@ -1,0 +1,87 @@
+[package]
+name = "rvoip-uctp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "UCTP (Universal Conversation Transport Protocol) — envelopes, state machine, capability negotiation, and substrate helpers shared by rvoip-quic and rvoip-webtransport"
+
+[features]
+# Disables certificate verification on the client side. For tests and demos
+# only; never enable in production builds.
+dev-dangerous = []
+
+[dependencies]
+# Workspace internal
+rvoip-core.workspace = true
+rvoip-auth-core.workspace = true
+
+# Async runtime + concurrency primitives
+tokio = { workspace = true }
+tokio-util.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+dashmap.workspace = true
+parking_lot.workspace = true
+
+# Wire encoding + protocol
+serde.workspace = true
+serde_json.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+
+# Substrate
+quinn.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+rcgen.workspace = true
+
+# Observability
+tracing.workspace = true
+metrics.workspace = true
+
+# Errors
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber.workspace = true
+
+# Phase 4 demo + bridge_smoke test consume the SIP family + adapter crates.
+rvoip-quic.workspace = true
+rvoip-webtransport.workspace = true
+rvoip-websocket.workspace = true
+rvoip-sip.workspace = true
+rvoip-media-core.workspace = true
+url = "2"
+
+[lints]
+workspace = true
+
+# Phase 4 demo binaries — see examples/uctp_to_sip_bridge/README.md
+[[example]]
+name = "orchestrator_bridge"
+path = "examples/uctp_to_sip_bridge/orchestrator_bridge.rs"
+
+[[example]]
+name = "uctp_agent_quic"
+path = "examples/uctp_to_sip_bridge/uctp_agent_quic.rs"
+
+[[example]]
+name = "uctp_agent_wt"
+path = "examples/uctp_to_sip_bridge/uctp_agent_wt.rs"
+
+[[example]]
+name = "uctp_agent_ws"
+path = "examples/uctp_to_sip_bridge/uctp_agent_ws.rs"
+
+[[example]]
+name = "sip_caller"
+path = "examples/uctp_to_sip_bridge/sip_caller.rs"

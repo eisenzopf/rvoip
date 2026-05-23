@@ -28,6 +28,13 @@ pub enum RvoipError {
     #[error("admission rejected: {0}")]
     AdmissionRejected(&'static str),
 
+    /// A codec name reached `codec_to_pt` that no RTP payload-type
+    /// mapping is registered for. Surfaces as a clear "this codec can't
+    /// be bridged" diagnostic instead of being masked as a generic
+    /// transcoder error (carries the codec name for the operator).
+    #[error("unsupported codec for bridge: {0}")]
+    UnsupportedCodec(String),
+
     #[error("adapter error: {0}")]
     Adapter(String),
 

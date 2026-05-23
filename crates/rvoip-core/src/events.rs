@@ -5,6 +5,7 @@ use crate::ids::{
 };
 use crate::store::VconHandle;
 use crate::stream::QualitySnapshot;
+use crate::vcon::VconRef;
 use chrono::{DateTime, Utc};
 use rvoip_infra_common::events::cross_crate::{RvoipCoreCrossCrateEvent, RvoipCrossCrateEvent};
 
@@ -176,6 +177,12 @@ pub enum Event {
     RecordingComplete {
         recording_id: RecordingId,
         sink: String,
+        /// Opaque reference to the persisted vCon document.
+        ///
+        /// v0 always emits `None`; the `rvoip-vcon` crate landing in v0.x
+        /// populates `Some(VconRef::Local { uuid })` at session.ended. See
+        /// UCTP plan §2.4 / §7 (vCon emission row).
+        vcon_ref: Option<VconRef>,
         at: DateTime<Utc>,
     },
 
@@ -445,7 +452,10 @@ impl Event {
                 recording_id: recording_id.to_string(),
             },
             RecordingComplete {
-                recording_id, sink, ..
+                recording_id,
+                sink,
+                vcon_ref: _,
+                ..
             } => RvoipCoreCrossCrateEvent::RecordingComplete {
                 recording_id: recording_id.to_string(),
                 sink: sink.clone(),

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>UCTP WebTransport smoke</title>
+    <style>
+      body { font-family: ui-monospace, monospace; padding: 1.5rem; max-width: 60rem; }
+      pre { background: #111; color: #eee; padding: 1rem; border-radius: .25rem; overflow-x: auto; }
+      .ok { color: #5f5; } .err { color: #f55; }
+    </style>
+  </head>
+  <body>
+    <h1>UCTP WebTransport browser smoke</h1>
+    <p>Opens <code>new WebTransport(...)</code> against the
+       <code>orchestrator_bridge</code> at
+       <code>https://localhost:4433/uctp</code>, sends one
+       <code>auth.hello</code> envelope, and prints the
+       <code>auth.challenge</code> reply.</p>
+    <button id="run">Run smoke</button>
+    <pre id="log"></pre>
+    <script src="agent.js"></script>
+  </body>
+</html>

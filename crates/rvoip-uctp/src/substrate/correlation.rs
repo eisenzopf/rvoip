@@ -1,0 +1,130 @@
+//! Envelope-id round-trip correlation.
+//!
+//! Senders that need to await a response register an `EnvelopeId` here
+//! before sending; the receiver dispatches incoming envelopes by their
+//! `in_reply_to` field. Per design doc §3.7 the default TTL is 30s,
+//! matching CONVERSATION_PROTOCOL.md §7.3's reconnect grace window.
+
+use std::time::Duration;
+
+use dashmap::DashMap;
+use tokio::sync::oneshot;
+use tokio::time::timeout;
+
+use crate::envelope::UctpEnvelope;
+use crate::errors::SubstrateError;
+use crate::ids::EnvelopeId;
+
+#[derive(Default)]
+pub struct Pending {
+    inner: DashMap<EnvelopeId, oneshot::Sender<UctpEnvelope>>,
+}
+
+impl Pending {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register interest in a response to `id` and await it (up to `ttl`).
+    pub async fn wait_for(
+        &self,
+        id: EnvelopeId,
+        ttl: Duration,
+    ) -> Result<UctpEnvelope, SubstrateError> {
+        let (tx, rx) = oneshot::channel();
+        self.inner.insert(id.clone(), tx);
+        match timeout(ttl, rx).await {
+            Ok(Ok(env)) => Ok(env),
+            Ok(Err(_)) => {
+                // Sender dropped — surfaces as Closed.
+                self.inner.remove(&id);
+                Err(SubstrateError::Closed)
+            }
+            Err(_) => {
+                self.inner.remove(&id);
+                Err(SubstrateError::Closed)
+            }
+        }
+    }
+
+    /// Match an inbound envelope's `in_reply_to` against a pending entry.
+    /// Returns `Ok(())` when delivered, or `Err(env)` to give the
+    /// envelope back to the caller for normal inbound routing.
+    pub fn deliver(&self, env: UctpEnvelope) -> Result<(), UctpEnvelope> {
+        let Some(reply_to) = env.in_reply_to.as_ref() else {
+            return Err(env);
+        };
+        let key = EnvelopeId::from_string(reply_to.clone());
+        match self.inner.remove(&key) {
+            Some((_, tx)) => {
+                // If the receiver is gone, the response is dropped.
+                let _ = tx.send(env);
+                Ok(())
+            }
+            None => Err(env),
+        }
+    }
+
+    /// Drop every pending waiter; used during coordinator shutdown.
+    pub fn close(&self) {
+        self.inner.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::MessageType;
+    use chrono::Utc;
+
+    fn env_with(id: &str, in_reply_to: Option<&str>) -> UctpEnvelope {
+        UctpEnvelope {
+            v: 1,
+            msg_type: MessageType::Ack,
+            id: id.into(),
+            ts: Utc::now(),
+            cid: None,
+            sid: None,
+            connid: None,
+            in_reply_to: in_reply_to.map(String::from),
+            payload: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_returns_on_deliver() {
+        let p = std::sync::Arc::new(Pending::new());
+        let req_id = EnvelopeId::new();
+        let id_for_task = req_id.clone();
+        let p_in = p.clone();
+        let task = tokio::spawn(async move {
+            p_in.wait_for(id_for_task, Duration::from_secs(5)).await
+        });
+
+        // Tiny yield so the wait task registers before deliver.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let env = env_with("env_reply", Some(req_id.as_str()));
+        assert!(p.deliver(env).is_ok());
+
+        let got = task.await.unwrap().unwrap();
+        assert_eq!(got.id, "env_reply");
+    }
+
+    #[tokio::test]
+    async fn wait_for_times_out() {
+        let p = Pending::new();
+        let result = p
+            .wait_for(EnvelopeId::new(), Duration::from_millis(50))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deliver_returns_env_when_no_pending_entry() {
+        let p = Pending::new();
+        let env = env_with("env_x", Some("env_y"));
+        let returned = p.deliver(env).unwrap_err();
+        assert_eq!(returned.in_reply_to.as_deref(), Some("env_y"));
+    }
+}

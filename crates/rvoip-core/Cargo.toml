@@ -20,6 +20,7 @@ dashmap.workspace = true
 rvoip-infra-common.workspace = true
 rvoip-media-core.workspace = true
 tracing.workspace = true
+metrics.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

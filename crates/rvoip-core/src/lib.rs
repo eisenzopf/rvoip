@@ -91,6 +91,7 @@ pub mod participant;
 pub mod session;
 pub mod store;
 pub mod stream;
+pub mod subscriptions;
 pub mod vcon;
 
 pub use adapter::{

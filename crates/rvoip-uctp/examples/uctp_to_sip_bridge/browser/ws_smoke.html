@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>UCTP WebSocket browser smoke</title>
+    <style>
+      body { font-family: ui-monospace, monospace; padding: 1.5rem; max-width: 60rem; }
+      pre { background: #111; color: #eee; padding: 1rem; border-radius: .25rem; overflow-x: auto; }
+      .ok { color: #5f5; } .err { color: #f55; }
+    </style>
+  </head>
+  <body>
+    <h1>UCTP WebSocket browser smoke (older-browser fallback)</h1>
+    <p>Opens a plain <code>WebSocket</code> against the
+       <code>orchestrator_bridge</code> at <code>ws://127.0.0.1:7777</code>,
+       sends one <code>auth.hello</code> envelope, prints the
+       <code>auth.challenge</code> reply.</p>
+    <p>Unlike the WebTransport variant, plain WS doesn't need cert
+       pinning — works in any browser without flags. This is the
+       fallback path for older browsers and constrained networks per
+       CONVERSATION_PROTOCOL.md §4.3.</p>
+    <button id="run">Run smoke</button>
+    <pre id="log"></pre>
+    <script src="ws_agent.js"></script>
+  </body>
+</html>

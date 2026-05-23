@@ -19,6 +19,11 @@ members = [
     "crates/infra-common",
     "crates/users-core",
     "crates/rvoip-stir-shaken",
+    "crates/rvoip-uctp",
+    "crates/rvoip-quic",
+    "crates/rvoip-webtransport",
+    "crates/rvoip-websocket",
+    "crates/auth-core",
 ]
 
 # orchestration-core is excluded from the workspace as part of the
@@ -44,6 +49,9 @@ default-members = [
     "crates/rvoip-core",
     "crates/codec-core",
     "crates/infra-common",
+    "crates/rvoip-uctp",
+    "crates/rvoip-quic",
+    "crates/rvoip-webtransport",
 ]
 
 # ✨ WORKSPACE PACKAGE INHERITANCE - Define common metadata once!
@@ -154,6 +162,13 @@ rvoip-audio-core = { path = "crates/audio-core", version = "0.1.26" }
 rvoip-sip-client = { path = "crates/sip-client", version = "0.1.26", features = ["simple-api"] }
 rvoip = { path = "crates/rvoip", version = "0.1.26" }
 rvoip-infra-common = { path = "crates/infra-common", version = "0.1.26" }
+# UCTP family — substrate-agnostic application protocol + per-substrate adapters.
+# See crates/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md for the design.
+rvoip-uctp = { path = "crates/rvoip-uctp", version = "0.1.26" }
+rvoip-quic = { path = "crates/rvoip-quic", version = "0.1.26" }
+rvoip-webtransport = { path = "crates/rvoip-webtransport", version = "0.1.26" }
+rvoip-websocket = { path = "crates/rvoip-websocket", version = "0.1.26" }
+rvoip-auth-core = { path = "crates/auth-core", version = "0.1.0" }
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }
@@ -186,7 +201,7 @@ log = "0.4"
 ordered-float = { version = "4.2.0", features = ["serde"] }
 socket2 = { version = "0.5", features = ["all"] }
 mio = { version = "0.8", features = ["os-poll", "net"] }
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring", "std"] }  # "std" needed for RootCertStore::add in rvoip-uctp::substrate::tls
 rustls-pemfile = "2.0"
 sha2 = "0.10"
 hmac = "0.12"
@@ -198,6 +213,19 @@ x509-parser = "0.15"
 webpki-roots = "0.25"
 serial_test = "3.1"
 fastrand = "2.0"
+
+# UCTP substrate deps — QUIC, WebTransport, length-prefix codec, metrics.
+# Consumed by rvoip-uctp / rvoip-quic / rvoip-webtransport.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+web-transport-quinn = "0.5"
+tokio-util = { version = "0.7", features = ["codec", "compat"] }
+metrics = "0.23"
+# rvoip-websocket signaling + media. tokio-tungstenite for the WebSocket
+# transport, webrtc for the co-located PeerConnection media plane.
+# webrtc is pre-1.0 and API-volatile — pinned strictly. Bumping requires
+# verifying the WebRtcMediaBridge still compiles.
+tokio-tungstenite = "0.29"
+webrtc = "=0.20.0-alpha.1"
 hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
 tracing-appender = "0.2"
 env_logger = "0.11"

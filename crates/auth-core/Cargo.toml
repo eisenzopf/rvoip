@@ -52,6 +52,10 @@ rand = "0.8"
 
 # Internal dependencies
 rvoip-infra-common = { path = "../infra-common", version = "0.1.0" }
+rvoip-core = { path = "../rvoip-core", version = "0.1.26" }
+
+# uuid (used by bearer_stub for the throwaway JWK key id)
+uuid = { version = "1.7", features = ["v4"] }
 
 [dev-dependencies]
 mockito = "1.4"

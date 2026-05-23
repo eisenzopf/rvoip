@@ -18,6 +18,29 @@ use std::sync::Arc;
 
 pub use rvoip_media_core::relay::controller::{BridgeError, BridgeHandle};
 
+pub mod cross_handle;
+pub mod frame_pump;
+
+pub use cross_handle::CrossBridgeHandle;
+
+/// Map an `audio_codecs` codec name (per CONVERSATION_PROTOCOL.md §8)
+/// to its standard RTP payload type.
+///
+/// Returns `None` for codec names not in the table so the bridge layer
+/// can produce a clear "unsupported codec" diagnostic
+/// ([`crate::RvoipError::UnsupportedCodec`]) instead of forwarding an
+/// arbitrary dynamic PT (e.g. `96`) and getting a generic transcoder
+/// error several layers down.
+pub fn codec_to_pt(name: &str) -> Option<u8> {
+    match name.to_ascii_lowercase().as_str() {
+        "pcmu" | "g.711-mu" | "g711-mu" | "g711-u" => Some(0),
+        "pcma" | "g.711-a" | "g711-a" => Some(8),
+        "g729" | "g.729" => Some(18),
+        "opus" => Some(111),
+        _ => None,
+    }
+}
+
 /// Per-process registry of active media bridges.
 ///
 /// Backed by `DashMap` for lock-free concurrent reads/writes plus a secondary

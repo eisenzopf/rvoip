@@ -1196,6 +1196,27 @@ When UCTP runs over WebSocket, media does **not** flow on the WebSocket. Instead
 
 This is the only case where UCTP envelopes carry SDP-shaped payloads. The SDP is for the WebRTC media plane only — not for the Session, not for the Connection's UCTP-level identity.
 
+#### 10.2.1 `substrate_setup` schema for WebSocket+WebRTC
+
+```json
+"substrate_setup": {
+  "kind": "websocket+webrtc",
+  "sdp": "v=0\r\no=- 0 0 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=rtpmap:111 opus/48000/2\r\na=ice-ufrag:...\r\na=ice-pwd:...\r\na=fingerprint:sha-256 AB:CD:...\r\na=setup:actpass\r\na=candidate:1 1 udp 2113937151 192.0.2.1 12345 typ host\r\n..."
+}
+```
+
+- `kind` MUST be `"websocket+webrtc"` (reserved for future variants).
+- `sdp` MUST be a complete SDP offer (in `connection.offer`) or answer (in `connection.answer`) carrying:
+  - `a=ice-ufrag` / `a=ice-pwd` — ICE credentials
+  - `a=fingerprint:<algorithm> <hex>` — DTLS fingerprint
+  - `a=candidate:...` — all ICE candidates gathered before sending (no trickle-ICE in v0; see §10.2.2)
+  - `a=setup:actpass`/`active`/`passive` — DTLS role per RFC 5763 §5
+- v0 implementations gather all candidates via `RTCPeerConnection`'s `gathering_complete_promise()` (or equivalent) before emitting the `connection.offer` — peers do not need to support trickle ICE.
+
+#### 10.2.2 Trickle ICE (v1)
+
+Trickle ICE — emitting candidates incrementally as they're gathered — is **v1** work. v0.x ships full-SDP exchange only. When trickle is added, a new envelope type `connection.ice-candidate` will carry mid-session candidates without re-running the full offer/answer.
+
 ### 10.3 RTCP / quality feedback
 
 Quality reports (loss, jitter, RTT, MOS) are carried as `connection.quality` envelopes (signaling channel), not as RTCP-on-datagrams. RTCP is preserved when interoperating with SIP/WebRTC, but UCTP-native peers exchange structured quality JSON.

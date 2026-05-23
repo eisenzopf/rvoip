@@ -1054,8 +1054,9 @@ cargo run -p rvoip-uctp --example sip_caller
 
 ## 7. Known tensions / gaps to revisit after v0
 
-- **`rvoip_core::Orchestrator::bridge_connections` is stubbed** (orchestrator.rs:329). v0 example pumps frames manually. Closing this is an rvoip-core follow-up; INTERFACE_DESIGN.md §10.2 already specifies the `BridgeManager`/`BridgeHandle` shape.
-- **Multi-party routing not implemented in v0.** Protocol supports it (CONVERSATION_PROTOCOL.md §7.7 + INTERFACE_DESIGN.md §10.6); implementation ships 1:1 only. `Orchestrator::add_subscription` / `remove_subscription` / `apply_subscriptions` and the per-Session routing table are v0.x rvoip-core work. v0 envelopes **parse** the new types (`stream.subscribe`, `stream.unsubscribe`, `stream.active-speaker`) so the wire format is stable; received `stream.subscribe` / `stream.unsubscribe` envelopes are rejected with `error` code `503` (`category: "transient"`, `reason: "multi-party-routing-not-implemented"`) until the routing layer lands. (`503` is the closest in-spec code per CONVERSATION_PROTOCOL.md §11.2; an earlier draft of this plan invented `501 not-implemented`, which is not defined in the spec. See the explicit spec-reconciliation action item at the end of this section.)
+- ~~**`rvoip_core::Orchestrator::bridge_connections` is stubbed** (orchestrator.rs:329). v0 example pumps frames manually.~~ **Resolved in v0** — `bridge_connections` is fully implemented at `orchestrator.rs:345-426` with `BridgeManager` + `CrossBridgeHandle` + `frame_pump` under `crates/rvoip-core/src/bridge/`. The cross-transport demo no longer pumps frames manually.
+- **Auth gating on session/connection envelopes** — the coordinator currently accepts `session.invite` and `connection.offer` from any peer regardless of whether `auth.session` has completed. With the v0 bearer stub this is fine (the stub returns Pseudonymous unconditionally); with real validators in v0.x it becomes an unauthenticated-DoS surface. Gating requires per-peer auth state on the coordinator and updating tests that currently bypass auth — defer to the v0.x identity-assurance enforcement track.
+- **Multi-party routing** — v0.x track in progress, see §12. MP1 (orchestrator subscription-table API) + MP2 (`SubscriptionHandler` trait + coordinator delegation + concrete `OrchestratorSubscriptionHandler`) have landed. Default coordinator (constructed via `start()` with no handler) preserves the `error` code `503 transient/multi-party-routing-not-implemented` reject for back-compat; coordinators constructed via `start_full(...)` with a real handler route through `Orchestrator::add_subscription` / `remove_subscription`. Remaining: MP2.6 (publisher registration + adapter wiring), MP3 (media-path fanout), MP2.5 (Session tracking + `from_participant` resolution). (`503` is the closest in-spec code per CONVERSATION_PROTOCOL.md §11.2; an earlier draft of this plan invented `501 not-implemented`, which is not defined in the spec.)
 - **`MediaStream::frames_in/out` return owned channel ends per call.** v0 wraps them in `StdMutex<Option<...>>` (the pattern `SipAdapter::subscribe_events` already uses). A trait revision to return clones is out of scope for v0.
 - **Auth in v0 is `bearer` stub with no validation.** `rvoip_auth_core::BearerValidator::stub()` returns `IdentityAssurance::Pseudonymous` for non-empty tokens. Step-up, DPoP, JWT, AAuth, RFC 9421 — all v0.x in `auth-core` (see §1.4). When real validators land they slot into the same trait; `rvoip-uctp` picks them up unchanged.
 - **No vCon in v0** — deferred to v0.x in the new `rvoip-vcon` crate (see §1.4 roadmap). Consequence: v0 emits `RecordingComplete` with `vcon_ref: None` and does **not** emit `recording.vcon-ready`; the envelope parser still recognizes the type so the wire stays forward-compatible. Per INTERFACE_DESIGN.md §2 / §3.9 / §11.4 and CONVERSATION_PROTOCOL.md §7.6, vCon is v1-mandatory; v0 is explicitly a spike that ships before this work.
@@ -1141,8 +1142,128 @@ INTERFACE_DESIGN.md is the architectural source of truth. The places where the p
 | Topic | Note |
 |---|---|
 | **`web-transport-quinn` over `wtransport`** | Picked because it shares a `quinn::Endpoint` cleanly with `rvoip-quic`. Implementation choice; INTERFACE_DESIGN.md needn't take a position. |
+| **Capability negotiation lives in `rvoip-core`, not `rvoip-uctp`** | Plan §3.2 originally placed `negotiate_streams()` under `rvoip-uctp::capability`. During Phase 1 the implementation moved it to [`rvoip_core::capability`](../rvoip-core/src/capability.rs) so the descriptor and its negotiation algorithm co-locate. `rvoip-uctp` calls it via `rvoip_core::capability::negotiate_streams` from `UctpCoordinator::handle_connection_offer`. The wire-format `Codec` ↔ internal `CodecInfo` conversion also lives there. |
 | **Spec §11.2 error-code catalog inconsistency** | CONVERSATION_PROTOCOL.md §11.2 lists the canonical error codes, but §16 references `505 version-not-supported` and v0.x routing work would benefit from a `501 not-implemented` code — neither in the §11.2 table. Plan §7 uses in-spec codes only (`503` for the multi-party rejection case) and flags the inconsistency for the spec owner to reconcile. |
 
 ---
 
-The plan is consistent with INTERFACE_DESIGN.md, PRD.md, and CONVERSATION_PROTOCOL.md as a v0-spike-scoped document. v0.x scope is enumerated in §1.4. Ready to execute Phase 0.
+## 11. v0 spike — what shipped
+
+**Status as of v0 close:** Phases 0–4 complete; cross-transport bridging proven end-to-end.
+
+### Source of truth
+
+The companion docs (CONVERSATION_PROTOCOL.md, INTERFACE_DESIGN.md) remain authoritative. This section is the **as-built record** of the v0 cut.
+
+### Test surface (all green)
+
+**83 tests across the UCTP-family crates** (rvoip-core + rvoip-uctp + rvoip-quic + rvoip-webtransport). Composition:
+
+- `rvoip-core`: 7 MP1 subscription-table tests + 5 MP3a fanout tests + 2 VconRef tests + the pre-existing orchestrator-dispatch and bridge-pump tests.
+- `rvoip-uctp`: 12 test binaries, ~60 tests. New since audit: VconRef round-trip×2, 488-rejects, 488-accepts, 404-unknown-connid, shutdown-emits-session-end, MP2-handler-integration×7 (3 original + 4 MP2.5 `from_participant`), MP2.6 publisher-registration×2, MP3b live multi-party media×2.
+- `rvoip-quic`: unit + adapter + 3 loopback tests.
+- `rvoip-webtransport`: adapter + loopback tests.
+- Headline integration tests:
+  - `bridge_smoke_three_adapters_register_and_fire_events` (1:1 adapter registration sanity)
+  - `quic_to_wt_bridge_flows_frames_end_to_end` + `wt_to_wt_bridge_flows_frames_end_to_end` (cross-transport 1:1 bridge)
+  - `fanout_routes_media_from_publisher_to_subscriber_over_quic` (live multi-party media via the QUIC wire)
+
+### Notable improvements past the original plan
+
+- **Coordinator 488 path** (§3.5): `handle_connection_offer` now runs `negotiate_streams` against the local descriptor and emits `error 488 capability/incompatible-capabilities` on disjoint codec sets. The wire side of capability negotiation is now correct.
+- **404 unknown-sid/connid** (§3.5): `handle_session_accept`/`handle_session_cancel`/`handle_connection_answer`/`handle_connection_ready`/`handle_end` emit `error 404 not-found` for envelopes addressed to ids the coordinator never saw. Stops silent envelope drops that masked bugs.
+- **Shutdown choreography** (§3.5 layers 2b–2c): `UctpCoordinator::shutdown()` now synthesizes a local `session.end` envelope + `UctpSessionEvent::SessionEnded` for every Active/Inviting/Ending session, then drains the `Pending` correlation map. Substrate close happens after `shutdown()` returns — clean teardown for peers.
+- **Backpressure soft timeout** (§3.5): outbound signaling sends wrap a `tokio::time::timeout(SIGNALING_SEND_TIMEOUT, ...)` (5s default, exported constant). On timeout the coordinator cancels its driver and surfaces `UctpError::Closed` so the adapter can close the substrate.
+- **Quinn stats sampler** (§3.9): `substrate::spawn_stats_sampler` is the canonical per-connection poller, called by both `rvoip-quic` and `rvoip-webtransport` so per-transport metric series have identical shape. Counters use `.absolute()` for cumulative `quinn::Connection::stats()` values; gauges for RTT/CWND.
+- **`Event::RecordingComplete.vcon_ref`** (§2.4 placeholder): present as `Option<VconRef>` with `VconRef::{Local{uuid}, Url{url}}` in [`vcon.rs`](../rvoip-core/src/vcon.rs). v0 always emits `None`; v0.x's `rvoip-vcon` populates it without a wire-shape change.
+- **Public surface** (§3.2): [`rvoip-uctp/src/lib.rs`](src/lib.rs) re-exports `UctpEnvelope`, `MessageType`, `UctpCoordinator`, `UctpSessionEvent`, `UctpSessionState`, `UctpConnectionState`, `default_v0_descriptor`, `ENVELOPE_CHANNEL_CAP`, `SIGNALING_SEND_TIMEOUT`, errors, and ids — adapter authors no longer need to reach into deep module paths.
+
+### Architectural cleanups landed post-PR-E
+
+Five items from the audit's "architectural issues" list, knocked out as foundation work alongside the v0.x multi-party track:
+
+- **A1 — Per-direction `FormatConverter`** ([orchestrator.rs:392-410](../rvoip-core/src/orchestrator.rs)): `bridge_connections` now constructs two independent `Arc<RwLock<FormatConverter>>` instances, one per transcoding direction. The converter caches a `Resampler` keyed by *input* sample rate, so the previous shared `Arc` thrashed the cache on every G.711-mu↔Opus frame and risked cross-direction state corruption. Per-direction also removes the bidirectional lock contention point under normal voice traffic.
+- **A2 — `bridge_connections` poll-with-deadline** ([orchestrator.rs:382-407](../rvoip-core/src/orchestrator.rs), [config.rs:15-32](../rvoip-core/src/config.rs)): admission now polls both adapters for an audio stream every 50ms up to `Config::bridge_stream_deadline` (default 2s) before failing. Callers can trigger a bridge from `Event::ConnectionInbound` without manually waiting for `ConnectionConnected` — closes the implicit-ordering footgun.
+- **A5 — Unknown-stream metric verified.** Audit confirmed both `rvoip-quic` and `rvoip-webtransport` `spawn_datagram_reader` already emit `uctp_datagram_drops_total{reason="unknown-stream"}` when an inbound datagram's `stream_local_id` has no matching local MediaStream. No code change needed.
+- **A6 — Structured `UnsupportedCodec`** ([bridge/mod.rs:31-46](../rvoip-core/src/bridge/mod.rs), [error.rs:30-36](../rvoip-core/src/error.rs)): `codec_to_pt` returns `Option<u8>` instead of sentinel PT 96. Unknown codecs now produce `RvoipError::UnsupportedCodec(name)` at admission time with the actual codec name in the error — clear diagnostic vs. the previous masked-as-transcoder-error path.
+- **A8 — `BearerAuthError` naming clarified.** Plan §3.2.1 wrote the auth-core error as `AuthError`; the implementation correctly named it `BearerAuthError` to avoid colliding with the pre-existing SIP Digest `auth_core::error::AuthError`. The code is right; the plan-prose name is the one that's mildly out of date. Documented here so a future reader doesn't try to "fix" the implementation back to the plan's spelling.
+
+### Demo runner
+
+[`scripts/demo-uctp-bridge.sh`](../../scripts/demo-uctp-bridge.sh) brings up the orchestrator + UCTP agents (QUIC, WT, or both) with prefixed colored log streams. Demonstrates the live cross-transport auto-bridge: a raw-QUIC peer and a WebTransport peer both connect to the same orchestrator and are auto-bridged via `Event::ConnectionsBridged`. Default: orchestrator + both UCTP agents (proves the bridge). Argument forms: `quic | wt | sip` in any combination.
+
+### Deferred to v0.x (correctly out of v0 scope)
+
+These items remain v0.x work per §1.4 — listed here so a future reader sees the explicit hand-off:
+
+- **Per-peer auth gating** of session/connection envelopes (see §7 above). Lands with the identity-assurance enforcement track.
+- **`Pending` integration into envelope flows** — the field, accessor, and shutdown drain are wired (§3.5 layer 2b), but no v0 envelope path uses `wait_for/deliver`. DPoP step-up, `message.history`, and similar request/response envelopes drive this in v0.x.
+- **vCon emission** — `rvoip-vcon` crate, `recording.vcon-ready` envelope, `RecordingComplete { vcon_ref: Some(...) }` populated at session.ended. ✅ `VconRef` placeholder already in `rvoip-core`; unblocks the crate landing without a wire-shape break.
+- **Multi-party routing** — **functionally complete**, see §12. MP1 + MP2 + MP2.5 + MP2.6 + MP3a + MP3b all landed. Only MP3c (strict per-subscriber `stream_local_id` rewriting per spec §10.1) remains, and is a polish item, not a functional gap — today's MediaFrame-level fanout works end-to-end with single-stream subscribers.
+- **DTMF + quality reports end-to-end** — wire types parse, adapters return `NotImplemented`.
+- **`rvoip-websocket` adapter** — placeholder `examples/uctp_to_sip_bridge/uctp_agent_ws.rs` ships in v0; the real adapter lands once `webrtc-rs` integration is in.
+- **Per-connection `uctp.connection.lifetime` and per-frame `uctp.stream.frame` tracing spans** — require coordinator restructuring to carry per-connection span context across handler calls.
+
+### Gate
+
+```bash
+cargo test -p rvoip-core -p rvoip-uctp -p rvoip-quic -p rvoip-webtransport
+cargo test -p rvoip-uctp --test cross_transport_bridge -- --nocapture
+./scripts/demo-uctp-bridge.sh  # manual; observe auto-bridge fire
+```
+
+All green confirms the v0 spike's headline claim — UCTP bridges across substrate types in one process — plus that v0.x foundations (MP1, MP2) are in place without regressing v0.
+
+---
+
+## 12. v0.x — Multi-party routing track
+
+**Spec authority:** CONVERSATION_PROTOCOL.md §7.7 (wire), INTERFACE_DESIGN.md §3.2 + §10.6 (architecture).
+
+**Goal:** N-Participant Sessions for UCTP-native peers — server-side selective forwarding of media datagrams from each publisher's Stream to the set of Connections that subscribed to it. No SFU/MCU envelopes leak to the wire (§7.7 last bullet); from a peer's perspective the protocol shape is identical regardless of N.
+
+### Phase status
+
+| # | Phase | Status | What lands |
+|---|---|---|---|
+| MP1 | Subscription-table API | ✅ | `Orchestrator::add_subscription` / `remove_subscription` / `subscribers_for` / `drop_session_subscriptions`. Per-Session DashMap-backed registry. Cleanup wired into `forget_connection`. Idempotent semantics throughout. ([subscriptions.rs](../rvoip-core/src/subscriptions.rs), [orchestrator.rs:153-211](../rvoip-core/src/orchestrator.rs)) |
+| MP2 | `SubscriptionHandler` trait + coordinator delegation | ✅ | Trait in `rvoip-uctp::state::subscription`; `RejectingHandler` default (preserves legacy 503); `UctpCoordinator::start_full(...)` accepts an `Arc<dyn SubscriptionHandler>`; on `stream.subscribe`/`stream.unsubscribe` the coordinator delegates and emits ack/error appropriately. Concrete `OrchestratorSubscriptionHandler` in `rvoip-uctp::state::orchestrator_handler` resolves explicit `strm_id` subscriptions through the `PublisherRegistry` into `Orchestrator::add_subscription`. ([state/subscription.rs](src/state/subscription.rs), [state/orchestrator_handler.rs](src/state/orchestrator_handler.rs), [state/coordinator.rs](src/state/coordinator.rs)) |
+| MP2.6 | Publisher registration + adapter wiring | ✅ | Coordinator emits `stream.opened` on `connection.ready` (drains the `ConnectionMachine`'s `pending_streams`, allocates `stream_local_id` per stream, calls `subscription_handler.register_publisher`). `UctpQuicConfig::subscription_handler` + `UctpWtConfig::subscription_handler` thread the handler into `UctpCoordinator::start_full(...)`. `Orchestrator::publisher_registry()` exposes the lazily-initialized shared registry. ([state/connection.rs](src/state/connection.rs) `AcceptedStream` + `take_pending_streams`, [state/coordinator.rs](src/state/coordinator.rs) `handle_connection_ready`) |
+| MP3a | `fanout_frame` primitive | ✅ | `Orchestrator::fanout_frame(sid, publisher, strm_id, frame) -> usize` looks up subscribers, queries each subscriber's `ConnectionAdapter::streams(...)`, finds the first MediaStream matching the frame's `kind`, pushes via `frames_out`. Best-effort delivery; returns delivery count. 5 isolation tests in [tests/fanout_frame.rs](../rvoip-core/tests/fanout_frame.rs). |
+| MP3b | Adapter datagram-receive fanout | ✅ | QUIC + WT adapters thread an optional `Arc<Orchestrator>` through their config + server; at InboundInvite time the adapter constructs a `FanoutContext { orchestrator, sid, publisher_connid }` and hands it to `spawn_datagram_reader`. After each successful local route, the reader calls `orchestrator.fanout_frame(...)`. Live-wire test in [tests/multi_party_media.rs](tests/multi_party_media.rs) — two QUIC peers, B subscribes to A, frames injected at A's client-side `frames_out` arrive at B's client-side `frames_in`. |
+| MP3c | Per-subscriber `stream_local_id` rewriting | ⏳ | Strict CONVERSATION_PROTOCOL.md §10.1 multi-party note compliance: server allocates per-(subscriber, strm) `stream_local_id`s and emits synthetic `stream.opened` toward subscribers. Today MP3b fans out at the `MediaFrame` level so the subscriber's adapter pump re-frames with its local id; spec-strict rewriting at the datagram header lands here. Required if/when a subscriber maps multiple inbound strms to its own local-id namespace. |
+| MP2.5 | `from_participant` resolution | ✅ | `PublisherRegistry` stores `PublisherEntry { connection, participant, kind }` and a `(SessionId, ParticipantId) → Vec<strm_id>` secondary index ([crates/rvoip-core/src/subscriptions.rs](../rvoip-core/src/subscriptions.rs)). `SubscriptionHandler::register_publisher` takes a `PublisherInfo` bundle with participant + kind ([src/state/subscription.rs](src/state/subscription.rs)). Coordinator captures `connection.offer.by_participant` onto each `AcceptedStream` and passes it through. `OrchestratorSubscriptionHandler::subscribe` resolves `from_participant` via `streams_for_participant(...)`, honors the optional `kinds` filter, and emits per-stream `add_subscription` calls. 4 new tests cover the four success/failure cases (all-streams, kinds-filtered, unknown-participant 404, kinds-match-nothing 488). **Session tracking on the Orchestrator** is *not* required for this — the publisher registry's participant index is sufficient. Full `Orchestrator::sessions` map landing if/when v0.x needs per-Session presence events or richer Session.connections introspection. |
+
+### Order of phases (as executed)
+
+MP1 → MP2 → MP2.6 → MP3a → MP3b → MP2.5. **All six phases landed.** MP3c (strict per-subscriber `stream_local_id` rewriting) is the only remaining item and is polish, not a functional gap — see the §11 deferred list.
+
+### What the v0.x multi-party track now does
+
+End-to-end, on the real QUIC wire ([tests/multi_party_media.rs](tests/multi_party_media.rs)):
+
+1. **Publisher peer** connects, authenticates, sends `connection.offer` with `streams_offered` and a `by_participant`.
+2. **Coordinator** runs §8.1 capability negotiation; on Ok, stores accepted streams (including publisher participant) on the `ConnectionMachine`.
+3. **Publisher peer** sends `connection.ready`. Coordinator drains pending streams, allocates `stream_local_id` per stream, emits `stream.opened`, and calls `SubscriptionHandler::register_publisher(PublisherInfo { connection, participant, kind, ... })`.
+4. **`OrchestratorSubscriptionHandler`** writes the publisher entry into the shared `PublisherRegistry` — both by `(sid, strm_id)` and by `(sid, participant)`.
+5. **Subscriber peer** connects, authenticates, sends `stream.subscribe` in any of the three §7.7 forms:
+   - **explicit `strm_id`** → `PublisherRegistry::publisher(...)` → `Orchestrator::add_subscription(...)`
+   - **`from_participant`** → `PublisherRegistry::streams_for_participant(...)` → one `add_subscription` per stream
+   - **`from_participant` + `kinds`** → as above, filtered by stream `kind` (`"audio"` / `"video"` / `"data"`)
+6. **Publisher peer** sends a media datagram. Adapter's `spawn_datagram_reader` unpacks, routes locally, then calls `Orchestrator::fanout_frame(sid, publisher_connid, strm_id, frame)`.
+7. **Orchestrator** queries `subscribers_for(...)`, finds each subscriber's `MediaStream` via its adapter, pushes the frame to that stream's `frames_out`.
+8. **Subscriber peer's adapter** sends the frame back over the wire (the subscriber's own outbound pump packs it as a datagram on the subscriber's connection).
+9. **Subscriber peer** receives the frame on its client-side `frames_in`. ✅
+
+Cleanup is automatic: `forget_connection` drops every subscription and publisher entry that names the departing Connection; `drop_session_subscriptions` clears a whole Session's table at `session.ended`.
+
+### Out-of-scope past MP3c (deferred to v1+)
+
+Listed here so the surface stays bounded:
+
+- **MP3c — Strict per-subscriber `stream_local_id` rewriting at the datagram header** (spec §10.1 multi-party note). Today's MediaFrame-level fanout works for single-stream subscribers; spec-strict header rewriting matters when a subscriber needs to disambiguate multiple inbound streams via its own local-id namespace. Required if/when a deployment surfaces that need; not blocking single-stream subscriptions.
+- **Server-side audio mixing (MCU semantics)** — INTERFACE_DESIGN.md §10.1 + §10.6 defer past v1. v0.x ships selective forwarding only.
+- **`stream.active-speaker` detection emission** — wire type parses; server-side emission (RFC 6464 parsing or on-device VAD) is its own follow-up with no spec-compliance pressure.
+- **Per-tenant subscription caps** — INTERFACE_DESIGN.md §10.6 mentions a 32-Participant default cap; enforcement is a few lines but not in the v0.x track.
+- **Federated routing** (cross-orchestrator fanout) — CONVERSATION_PROTOCOL.md §13 + INTERFACE_DESIGN.md §10.6 mark this v1+.
+- **`rvoip-moq` adapter** for broadcast-scale (1→thousands) fanout — INTERFACE_DESIGN.md §2.x explicitly carves this out as a separate adapter, not the v0.x multi-party track.

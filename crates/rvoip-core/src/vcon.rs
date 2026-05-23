@@ -7,6 +7,27 @@ use crate::identity::IdentityAssurance;
 use crate::ids::{AttachmentId, ParticipantId, StreamId};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Opaque reference to a vCon document.
+///
+/// Placeholder per UCTP plan §2.4: v0 always carries `None`; v0.x's
+/// `rvoip-vcon` crate populates `Some(VconRef::Local { uuid })` at
+/// `session.ended`. The `Url` variant is reserved for v0.x's remote-
+/// resolvable vCon URIs and is intentionally not constructed in v0 —
+/// the variant exists so the serde wire shape doesn't churn when
+/// `rvoip-vcon` introduces it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum VconRef {
+    /// Local store reference; the uuid resolves through whatever
+    /// `VconStore` the orchestrator was built with.
+    Local { uuid: Uuid },
+    /// Future: HTTPS-resolvable vCon URI. Variant reserved; not
+    /// constructed in v0.
+    Url { url: String },
+}
 
 #[derive(Clone, Debug)]
 pub struct VconParty {
@@ -77,4 +98,31 @@ pub trait VconBuilderHandle: Send + Sync {
     fn add_analysis(&self, analysis: VconAnalysis);
     fn add_attachment(&self, attachment: VconAttachment);
     fn snapshot(&self) -> VconSnapshot;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vcon_ref_local_roundtrips_through_json() {
+        let uuid = Uuid::nil();
+        let v = VconRef::Local { uuid };
+        let json = serde_json::to_value(&v).expect("encode");
+        assert_eq!(json["kind"], "local");
+        assert_eq!(json["uuid"], uuid.to_string());
+        let back: VconRef = serde_json::from_value(json).expect("decode");
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn vcon_ref_url_roundtrips_through_json() {
+        let v = VconRef::Url {
+            url: "https://vcons.example/abc123".into(),
+        };
+        let json = serde_json::to_value(&v).expect("encode");
+        assert_eq!(json["kind"], "url");
+        let back: VconRef = serde_json::from_value(json).expect("decode");
+        assert_eq!(v, back);
+    }
 }
