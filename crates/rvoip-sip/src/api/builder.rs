@@ -3,7 +3,7 @@
 //! Just builds the UnifiedCoordinator with configuration.
 //! No complex setup - the state table handles everything.
 
-use crate::api::unified::{Config, UnifiedCoordinator};
+use crate::api::unified::{Config, MediaMode, UnifiedCoordinator};
 use crate::errors::Result;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -31,6 +31,26 @@ impl SessionBuilder {
     /// Set the media port range
     pub fn with_media_ports(mut self, start: u16, end: u16) -> Self {
         self.config = self.config.with_media_ports(start, end);
+        self
+    }
+
+    /// Enable or disable automatic `180 Ringing` on inbound INVITEs.
+    pub fn with_auto_180_ringing(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_auto_180_ringing(enabled);
+        self
+    }
+
+    /// Enable or disable real media-core RTP allocation.
+    pub fn with_media_enabled(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_enabled(enabled);
+        self
+    }
+
+    /// Skip media-core RTP allocation while still generating SDP.
+    pub fn with_signaling_only_media(mut self, sdp_rtp_port: u16) -> Self {
+        self.config = self
+            .config
+            .with_media_mode(MediaMode::SignalingOnly { sdp_rtp_port });
         self
     }
 
@@ -89,6 +109,18 @@ impl SessionBuilder {
     /// Set the SIP UDP send socket buffer size (`SO_SNDBUF`) in bytes.
     pub fn with_sip_udp_send_buffer_size(mut self, size: usize) -> Self {
         self.config.sip_udp_send_buffer_size = Some(size);
+        self
+    }
+
+    /// Set the UDP parse worker count.
+    pub fn with_sip_udp_parse_workers(mut self, workers: usize) -> Self {
+        self.config.sip_udp_parse_workers = Some(workers);
+        self
+    }
+
+    /// Set the per-worker UDP parse queue capacity.
+    pub fn with_sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config.sip_udp_parse_queue_capacity = Some(capacity);
         self
     }
 

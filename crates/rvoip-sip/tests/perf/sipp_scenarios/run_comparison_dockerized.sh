@@ -67,6 +67,16 @@ ceil_div() {
   echo $(( (n + d - 1) / d ))
 }
 
+udp_stat() {
+  local pattern="$1"
+  if ! command -v netstat >/dev/null 2>&1; then
+    echo 0
+    return
+  fi
+  netstat -s -p udp 2>/dev/null \
+    | awk -v pattern="$pattern" '$0 ~ pattern { print $1; found=1 } END { if (!found) print 0 }'
+}
+
 runner_count_for_cps() {
   local cps="$1"
   if [[ -n "${RVOIP_PERF_SIPP_RUNNERS:-}" ]]; then
@@ -126,6 +136,9 @@ for CPS in $CPS_LEVELS; do
   PIDS=()
 
   echo "[run_comparison] === ${TAG} @ ${CPS} CPS (${RUNNERS} runner(s), steady ${STEADY_SECS}s) ==="
+  UDP_DROPS_BEFORE="$(udp_stat 'dropped due to full socket buffers')"
+  UDP_RECV_BEFORE="$(udp_stat 'datagrams received')"
+  UDP_OUT_BEFORE="$(udp_stat 'datagrams output')"
 
   for (( shard=0; shard<RUNNERS; shard++ )); do
     REMAINING_SHARDS=$(( RUNNERS - shard ))
@@ -156,6 +169,27 @@ for CPS in $CPS_LEVELS; do
   done
 
   echo "[run_comparison] rc=$RC"
+  UDP_DROPS_AFTER="$(udp_stat 'dropped due to full socket buffers')"
+  UDP_RECV_AFTER="$(udp_stat 'datagrams received')"
+  UDP_OUT_AFTER="$(udp_stat 'datagrams output')"
+  UDP_DROPS_DELTA=$(( UDP_DROPS_AFTER - UDP_DROPS_BEFORE ))
+  UDP_RECV_DELTA=$(( UDP_RECV_AFTER - UDP_RECV_BEFORE ))
+  UDP_OUT_DELTA=$(( UDP_OUT_AFTER - UDP_OUT_BEFORE ))
+  echo "[run_comparison] host_udp recv_delta=${UDP_RECV_DELTA} out_delta=${UDP_OUT_DELTA} full_socket_drops_delta=${UDP_DROPS_DELTA}"
+  {
+    echo "tag=${TAG}"
+    echo "cps=${CPS}"
+    echo "rc=${RC}"
+    echo "udp_recv_before=${UDP_RECV_BEFORE}"
+    echo "udp_recv_after=${UDP_RECV_AFTER}"
+    echo "udp_recv_delta=${UDP_RECV_DELTA}"
+    echo "udp_out_before=${UDP_OUT_BEFORE}"
+    echo "udp_out_after=${UDP_OUT_AFTER}"
+    echo "udp_out_delta=${UDP_OUT_DELTA}"
+    echo "udp_full_socket_drops_before=${UDP_DROPS_BEFORE}"
+    echo "udp_full_socket_drops_after=${UDP_DROPS_AFTER}"
+    echo "udp_full_socket_drops_delta=${UDP_DROPS_DELTA}"
+  } > "$RESULTS_DIR/${TAG}_${CPS}cps_host_udp_netstat.txt"
   sleep 2
 done
 

@@ -190,6 +190,7 @@ use rvoip_sip_core::{Host, TypedHeader};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{Transport, TransportEvent};
 
+use crate::diagnostics;
 use crate::transaction::client::{
     ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
     CommonClientTransaction, TransactionExt,
@@ -2828,6 +2829,7 @@ impl TransactionManager {
             Invite2xxResponseCacheEntry {
                 response,
                 destination: tx.data().remote_addr,
+                created_at: now,
                 expires_at: now + INVITE_2XX_RESPONSE_CACHE_TTL,
                 next_retransmit_at: now + self.timer_settings.t1,
                 retransmit_interval: self.timer_settings.t1,
@@ -2841,6 +2843,7 @@ impl TransactionManager {
         entry: Invite2xxResponseCacheEntry,
     ) {
         self.invite_2xx_response_cache.insert(transaction_id, entry);
+        diagnostics::record_invite_2xx_cache_insert();
 
         let inserts = self
             .invite_2xx_response_cache_insert_count
@@ -2870,9 +2873,11 @@ impl TransactionManager {
 
         if entry.is_expired(Instant::now()) {
             self.invite_2xx_response_cache.remove(transaction_id);
+            diagnostics::record_invite_2xx_cache_expired();
             return Ok(false);
         }
 
+        diagnostics::record_duplicate_invite_cache_hit();
         let destination = if source == entry.destination {
             entry.destination
         } else {
@@ -2909,6 +2914,7 @@ impl TransactionManager {
 
         for key in expired {
             self.invite_2xx_response_cache.remove(&key);
+            diagnostics::record_invite_2xx_cache_expired();
         }
 
         let mut retransmitted = 0usize;
@@ -2918,7 +2924,10 @@ impl TransactionManager {
                 .send_message(Message::Response(response), destination)
                 .await
             {
-                Ok(()) => retransmitted += 1,
+                Ok(()) => {
+                    retransmitted += 1;
+                    diagnostics::record_invite_2xx_proactive_retransmit();
+                }
                 Err(e) => {
                     debug!(
                         error = %e,
@@ -2933,7 +2942,9 @@ impl TransactionManager {
     }
 
     pub(crate) fn remove_invite_2xx_response_cache(&self, transaction_id: &TransactionKey) {
-        self.invite_2xx_response_cache.remove(transaction_id);
+        if let Some((_, entry)) = self.invite_2xx_response_cache.remove(transaction_id) {
+            diagnostics::record_invite_2xx_ack_removed(entry.created_at.elapsed());
+        }
     }
 
     pub(crate) fn mark_transaction_terminated_indexed(&self, transaction_id: &TransactionKey) {

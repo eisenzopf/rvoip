@@ -63,7 +63,7 @@ use crate::api::events::{
 };
 use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
-use crate::api::unified::{Config, RegistrationHandle, UnifiedCoordinator};
+use crate::api::unified::{Config, MediaMode, RegistrationHandle, UnifiedCoordinator};
 use crate::cleanup_diag::{self, CleanupStage};
 use crate::errors::{Result, SessionError};
 
@@ -258,6 +258,38 @@ impl CallbackPeerBuilder {
         Fut: Future<Output = Result<()>> + Send + 'static,
     {
         self.event = Some(Arc::new(move |event| Box::pin(f(event))));
+        self
+    }
+
+    /// Enable or disable automatic `180 Ringing` on inbound INVITEs.
+    pub fn auto_180_ringing(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_auto_180_ringing(enabled);
+        self
+    }
+
+    /// Enable or disable real media-core RTP allocation.
+    pub fn media_enabled(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_media_enabled(enabled);
+        self
+    }
+
+    /// Skip media-core RTP allocation while still generating SDP.
+    pub fn signaling_only_media(mut self, sdp_rtp_port: u16) -> Self {
+        self.config = self
+            .config
+            .with_media_mode(MediaMode::SignalingOnly { sdp_rtp_port });
+        self
+    }
+
+    /// Set the UDP parse worker count.
+    pub fn sip_udp_parse_workers(mut self, workers: usize) -> Self {
+        self.config = self.config.with_sip_udp_parse_workers(workers);
+        self
+    }
+
+    /// Set the per-worker UDP parse queue capacity.
+    pub fn sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_sip_udp_parse_queue_capacity(capacity);
         self
     }
 

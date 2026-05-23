@@ -13,7 +13,7 @@ pub mod ws;
 
 pub use tcp::TcpTransport;
 pub use tls::TlsTransport;
-pub use udp::{UdpSocketOptions, UdpTransport};
+pub use udp::{UdpParseConfig, UdpSocketOptions, UdpTransport};
 pub use ws::WebSocketTransport;
 
 /// Represents the transport type/protocol

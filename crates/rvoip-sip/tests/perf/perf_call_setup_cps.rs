@@ -26,9 +26,13 @@
 //! - `RVOIP_PERF_COOLDOWN_SECS` (default 5)
 //! - `RVOIP_PERF_CALL_TIMEOUT_SECS` (default 15) — per-call timeout
 //! - `RVOIP_PERF_CHANNEL_CAPACITY` (default max(1000, max_CPS * 4))
+//! - `RVOIP_PERF_SERVER_CAPACITY`  (optional hot-index capacity profile)
 //! - `RVOIP_PERF_WORKER_THREADS`   (default 8)
 //! - `RVOIP_PERF_SESSION_EVENT_WORKERS`
 //! - `RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY`
+//! - `RVOIP_PERF_SIP_UDP_PARSE_WORKERS` (default 1)
+//! - `RVOIP_PERF_SIP_UDP_PARSE_QUEUE_CAPACITY` (default follows channel capacity)
+//! - `RVOIP_PERF_AUTO_180_RINGING=1` to opt into PBX-style provisional ringing
 //!
 //! See `docs/BENCHMARKING.md` for full interpretation.
 
@@ -394,11 +398,30 @@ fn perf_channel_capacity(points: &[f64]) -> usize {
 
 fn perf_config(config: Config, channel_capacity: usize) -> Config {
     let mut config = config.with_channel_capacity(channel_capacity);
+    if let Some(server_capacity) = env_usize_opt("RVOIP_PERF_SERVER_CAPACITY") {
+        config = config.with_server_capacity(server_capacity.max(1));
+    }
     if let Some(workers) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_WORKERS") {
         config = config.with_session_event_dispatcher_workers(workers);
     }
     if let Some(capacity) = env_usize_opt("RVOIP_PERF_SESSION_EVENT_CHANNEL_CAPACITY") {
         config = config.with_session_event_dispatcher_channel_capacity(capacity);
+    }
+    let udp_parse_workers = env_usize_opt("RVOIP_PERF_SIP_UDP_PARSE_WORKERS")
+        .unwrap_or(1)
+        .max(1);
+    config = config.with_sip_udp_parse_workers(udp_parse_workers);
+    let udp_parse_queue_capacity = env_usize_opt("RVOIP_PERF_SIP_UDP_PARSE_QUEUE_CAPACITY")
+        .unwrap_or(channel_capacity)
+        .max(1);
+    config = config.with_sip_udp_parse_queue_capacity(udp_parse_queue_capacity);
+    let auto_180_ringing = env_bool("RVOIP_PERF_AUTO_180_RINGING", false).unwrap_or(false);
+    config = config.with_auto_180_ringing(auto_180_ringing);
+    let signaling_only_port = env_usize_opt("RVOIP_PERF_SIGNALING_ONLY_RTP_PORT")
+        .and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port > 0);
+    if env_bool("RVOIP_PERF_MEDIA_ENABLED", true) == Some(false) || signaling_only_port.is_some() {
+        config = config.with_signaling_only_media(signaling_only_port.unwrap_or(9));
     }
     config
 }
@@ -409,4 +432,16 @@ fn env_usize(name: &str, default: usize) -> usize {
 
 fn env_usize_opt(name: &str) -> Option<usize> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
+}
+
+fn env_bool(name: &str, default: bool) -> Option<bool> {
+    let raw = match std::env::var(name) {
+        Ok(value) => value,
+        Err(_) => return Some(default),
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }

@@ -44,6 +44,8 @@ pub struct StateMachine {
 
     /// Event publisher (optional - for legacy compatibility)
     event_tx: Option<tokio::sync::mpsc::Sender<SessionEvent>>,
+    /// Whether the default inbound INVITE path sends automatic 180 Ringing.
+    auto_180_ringing: bool,
     // SimplePeer events now handled by SessionCrossCrateEventHandler
 }
 
@@ -166,7 +168,8 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: None, // No event channel by default
-                            // SimplePeer events handled by SessionCrossCrateEventHandler
+            auto_180_ringing: true,
+            // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
 
@@ -184,6 +187,7 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: Some(event_tx),
+            auto_180_ringing: true,
             // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
@@ -194,6 +198,7 @@ impl StateMachine {
         dialog_adapter: Arc<DialogAdapter>,
         media_adapter: Arc<MediaAdapter>,
         event_tx: tokio::sync::mpsc::Sender<SessionEvent>,
+        auto_180_ringing: bool,
     ) -> Self {
         Self {
             table,
@@ -201,6 +206,7 @@ impl StateMachine {
             dialog_adapter,
             media_adapter,
             event_tx: Some(event_tx),
+            auto_180_ringing,
             // SimplePeer events handled by SessionCrossCrateEventHandler
         }
     }
@@ -637,6 +643,9 @@ impl StateMachine {
         // 5. Execute actions
         let mut actions_executed = Vec::new();
         for action in &transition.actions {
+            if self.should_skip_action(action) {
+                continue;
+            }
             let action_start = Instant::now();
             let result = actions::execute_action(
                 action,
@@ -644,6 +653,7 @@ impl StateMachine {
                 &self.dialog_adapter,
                 &self.media_adapter,
                 &self.store,
+                self.auto_180_ringing,
                 &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
             )
             .await;
@@ -803,6 +813,10 @@ impl StateMachine {
             actions_executed,
             events_published: transition.publish_events.clone(),
         })
+    }
+
+    fn should_skip_action(&self, action: &Action) -> bool {
+        matches!(action, Action::SendSIPResponse(180, _)) && !self.auto_180_ringing
     }
 
     /// Convert event template to concrete event

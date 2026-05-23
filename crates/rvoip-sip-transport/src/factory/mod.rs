@@ -7,7 +7,7 @@ use crate::error::{Error, Result};
 use crate::transport::tcp::pool::PoolConfig;
 use crate::transport::tcp::TcpTransport;
 use crate::transport::tls::{TlsRole, TlsTransport};
-use crate::transport::udp::{UdpSocketOptions, UdpTransport};
+use crate::transport::udp::{UdpParseConfig, UdpSocketOptions, UdpTransport};
 use crate::transport::ws::WebSocketTransport;
 use crate::transport::{Transport, TransportEvent};
 
@@ -99,6 +99,10 @@ pub struct TransportFactoryConfig {
     pub udp_recv_buffer_size: Option<usize>,
     /// Optional UDP socket send buffer size (`SO_SNDBUF`) in bytes.
     pub udp_send_buffer_size: Option<usize>,
+    /// Optional UDP parse worker count.
+    pub udp_parse_workers: Option<usize>,
+    /// Optional per-worker UDP parse queue capacity.
+    pub udp_parse_queue_capacity: Option<usize>,
 }
 
 impl Default for TransportFactoryConfig {
@@ -115,6 +119,8 @@ impl Default for TransportFactoryConfig {
             tls_insecure_skip_verify: false,
             udp_recv_buffer_size: None,
             udp_send_buffer_size: None,
+            udp_parse_workers: None,
+            udp_parse_queue_capacity: None,
         }
     }
 }
@@ -148,10 +154,17 @@ impl TransportFactory {
                     self.config.udp_recv_buffer_size,
                     self.config.udp_send_buffer_size,
                 );
-                let (transport, rx) = UdpTransport::bind_with_socket_options(
+                let parse_config = UdpParseConfig::from_optional(
+                    self.config.udp_parse_workers,
+                    self.config.udp_parse_queue_capacity,
+                    self.config.channel_capacity,
+                );
+                let (transport, rx) = UdpTransport::bind_with_mtu_socket_options_and_parse_config(
                     bind_addr,
                     Some(self.config.channel_capacity),
+                    crate::transport::udp::UDP_SAFE_MAX_BYTES,
                     options,
+                    parse_config,
                 )
                 .await?;
                 Ok((Arc::new(transport), rx))

@@ -508,8 +508,8 @@ pub use api::lifecycle::{
 // Configuration & registration
 pub use api::unified::{AudioSource, BridgeError, BridgeHandle, Registration, RelUsage};
 pub use api::{
-    Config, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode, SipTlsMode,
-    SrtpSuitePolicy, UnifiedCoordinator,
+    Config, MediaMode, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipContactMode,
+    SipTlsMode, SrtpSuitePolicy, UnifiedCoordinator,
 };
 
 // Events
@@ -553,7 +553,7 @@ pub mod prelude {
         EndpointEvent, EndpointEvents, EndpointIncomingCall, EndpointMediaConfig,
         EndpointNetworkConfig, EndpointProfile, EndpointProfileName, EndpointRegistrationInfo,
         EndpointRegistrationStatus, EndpointSipTrace, EndpointSrtpMode, EndpointTransport, Event,
-        EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaSecurityKeying,
+        EventReceiver, HeaderName, IncomingCall, IncomingCallGuard, MediaMode, MediaSecurityKeying,
         MediaSecurityProfile, MediaSecurityState, PeerControl, Registration, RegistrationHandle,
         RegistrationInfo, RegistrationStatus, Result, SessionError, SessionHandle, SipContactMode,
         SipReason, SipTlsMode, SipTrace, SipTraceConfig, SipTraceDirection, SrtpSuitePolicy,

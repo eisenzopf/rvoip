@@ -279,6 +279,7 @@ pub(crate) async fn execute_action(
     dialog_adapter: &Arc<DialogAdapter>,
     media_adapter: &Arc<MediaAdapter>,
     session_store: &Arc<SessionStore>,
+    auto_180_ringing: bool,
     _simple_peer_event_tx: &Option<tokio::sync::mpsc::Sender<Event>>, // Unused - events handled by SessionCrossCrateEventHandler
 ) -> Result<ActionOutcome, Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing action: {:?}", action);
@@ -388,6 +389,13 @@ pub(crate) async fn execute_action(
                 .await?;
         }
         Action::SendSIPResponse(code, _reason) => {
+            if *code == 180 && !auto_180_ringing {
+                debug!(
+                    "Suppressing automatic 180 Ringing for session {} via Config::auto_180_ringing=false",
+                    session.session_id
+                );
+                return Ok(ActionOutcome::default());
+            }
             let guard = (*code == 200).then(|| {
                 cleanup_diag::stage_guard(CleanupStage::ActionSend200Ok, &session.session_id.0)
             });

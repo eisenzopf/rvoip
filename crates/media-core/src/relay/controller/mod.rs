@@ -28,6 +28,7 @@ use tracing::{debug, error, info, warn};
 use crate::codec::audio::common::AudioCodec;
 use crate::codec::audio::G711Codec;
 use crate::codec::mapping::CodecMapper;
+use crate::diagnostics;
 use crate::error::{Error, Result};
 use crate::integration::{IntegrationEvent, RtpBridge, RtpBridgeConfig, RtpEventCallback};
 use crate::performance::{
@@ -55,11 +56,21 @@ use codec_core::codecs::g711::G711Variant;
 
 use rvoip_rtp_core as rtp_core;
 use rvoip_rtp_core::session::{RtpSessionStats, RtpStreamStats};
-use rvoip_rtp_core::transport::{GlobalPortAllocator, PortAllocator, PortAllocatorConfig};
+use rvoip_rtp_core::transport::{
+    AllocationStrategy, GlobalPortAllocator, PortAllocator, PortAllocatorConfig,
+};
 use rvoip_rtp_core::{RtpHeader, RtpPacket};
 use rvoip_rtp_core::{RtpSession, RtpSessionConfig};
 
 const RTP_SESSION_BIND_RETRIES: usize = 8;
+
+fn configured_port_range_len(base_port: u16, max_port: u16) -> usize {
+    if max_port < base_port {
+        0
+    } else {
+        usize::from(max_port - base_port) + 1
+    }
+}
 
 fn is_retryable_rtp_bind_error(error: &rtp_core::Error) -> bool {
     let text = error.to_string();
@@ -397,6 +408,11 @@ impl MediaSessionController {
         config.port_range_end = max_port;
         config.validate_ports = false;
         config.capacity_hint = capacity_hint;
+        if capacity_hint > 0 {
+            config.allocation_strategy = AllocationStrategy::Incremental;
+            config.prefer_port_reuse = false;
+            config.allocation_retries = configured_port_range_len(base_port, max_port) as u32;
+        }
 
         controller.port_allocator = Some(Arc::new(PortAllocator::with_config(config)));
         info!(
@@ -482,6 +498,9 @@ impl MediaSessionController {
         port_config.port_range_start = base_port;
         port_config.port_range_end = max_port;
         port_config.validate_ports = false;
+        port_config.allocation_strategy = AllocationStrategy::Incremental;
+        port_config.prefer_port_reuse = false;
+        port_config.allocation_retries = configured_port_range_len(base_port, max_port) as u32;
         let port_allocator = Some(Arc::new(PortAllocator::with_config(port_config)));
 
         Ok(Self {
@@ -518,6 +537,7 @@ impl MediaSessionController {
 
     /// Start a media session for a dialog
     pub async fn start_media(&self, dialog_id: DialogId, config: MediaConfig) -> Result<()> {
+        let media_start_guard = diagnostics::MediaStartGuard::new();
         info!("Starting media session for dialog: {}", dialog_id);
 
         // Check if media session already exists for this dialog
@@ -555,10 +575,12 @@ impl MediaSessionController {
         let mut last_bind_error: Option<rtp_core::Error> = None;
         let mut created_session = None;
         for attempt in 1..=RTP_SESSION_BIND_RETRIES {
+            let allocate_started = Instant::now();
             let (local_rtp_addr, _) = allocator
                 .allocate_port_pair(&dialog_session_id, Some(config.local_addr.ip()))
                 .await
                 .map_err(|e| Error::config(format!("Failed to allocate RTP port: {}", e)))?;
+            diagnostics::record_rtp_port_allocate(allocate_started.elapsed());
 
             // Create RTP session configuration
             let rtp_config = RtpSessionConfig {
@@ -572,12 +594,15 @@ impl MediaSessionController {
                 enable_jitter_buffer: false,   // Disabled to reduce processing overhead
             };
 
+            let session_started = Instant::now();
             match RtpSession::new(rtp_config).await {
                 Ok(rtp_session) => {
+                    diagnostics::record_rtp_session_new(session_started.elapsed());
                     created_session = Some((local_rtp_addr, rtp_session));
                     break;
                 }
                 Err(e) => {
+                    diagnostics::record_rtp_session_new(session_started.elapsed());
                     let _ = allocator.release_session(&dialog_session_id).await;
                     let should_retry =
                         is_retryable_rtp_bind_error(&e) && attempt < RTP_SESSION_BIND_RETRIES;
@@ -614,7 +639,9 @@ impl MediaSessionController {
         let rtp_port = local_rtp_addr.port();
 
         // Subscribe to RTP session events before wrapping
+        let subscribe_started = Instant::now();
         let rtp_events = rtp_session.subscribe();
+        diagnostics::record_rtp_event_subscription(subscribe_started.elapsed());
 
         // Wrap RTP session
         let rtp_wrapper = RtpSessionWrapper {
@@ -652,7 +679,9 @@ impl MediaSessionController {
         });
 
         // Spawn task to handle RTP events for this session
+        let handler_started = Instant::now();
         self.spawn_rtp_event_handler(dialog_id.clone(), rtp_events, payload_type);
+        diagnostics::record_rtp_event_handler_spawn(handler_started.elapsed());
 
         info!(
             "✅ Created media session with REAL RTP session: {} (port: {}, codec: {}, PT: {}, clock: {}Hz)",
@@ -662,6 +691,7 @@ impl MediaSessionController {
             payload_type,
             clock_rate
         );
+        media_start_guard.finish_success();
         Ok(())
     }
 
@@ -713,6 +743,7 @@ impl MediaSessionController {
 
     /// Stop media session for a dialog
     pub async fn stop_media(&self, dialog_id: &DialogId) -> Result<()> {
+        let stop_started = Instant::now();
         info!("Stopping media session for dialog: {}", dialog_id);
 
         // If the session is bridged, clear the partnership so the partner's
@@ -751,9 +782,11 @@ impl MediaSessionController {
             };
 
             let dialog_session_id = format!("dialog_{}", dialog_id);
+            let release_started = Instant::now();
             if let Err(e) = allocator.release_session(&dialog_session_id).await {
                 warn!("Failed to release ports for dialog {}: {}", dialog_id, e);
             }
+            diagnostics::record_port_release(release_started.elapsed());
         }
 
         // Clean up advanced processors if they exist
@@ -778,6 +811,7 @@ impl MediaSessionController {
             session_id: dialog_id.clone(),
         });
 
+        diagnostics::record_stop_media(stop_started.elapsed());
         Ok(())
     }
 

@@ -34,6 +34,7 @@ use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{Transport, TransportEvent};
 
+use crate::diagnostics;
 use crate::transaction::client::{
     ClientInviteTransaction, ClientNonInviteTransaction, ClientTransaction,
     TransactionExt as ClientTransactionExt,
@@ -874,25 +875,35 @@ impl TransactionManager {
                 .get(&key)
                 .map(|r| r.value().clone());
             if let Some(transaction) = existing {
+                if request.method() == Method::Invite {
+                    diagnostics::record_duplicate_invite_existing_transaction();
+                } else if request.method() == Method::Bye {
+                    diagnostics::record_duplicate_bye_existing_transaction();
+                }
                 let lifecycle = transaction.data().get_lifecycle();
                 if !matches!(lifecycle, TransactionLifecycle::Active) {
-                    if request.method() == Method::Invite
-                        && self
+                    if request.method() == Method::Invite {
+                        if self
                             .retransmit_cached_invite_2xx_response(&key, source)
                             .await?
-                    {
-                        return Ok(());
+                        {
+                            return Ok(());
+                        }
+                        diagnostics::record_duplicate_invite_cache_miss();
                     }
                     debug!(%key, ?lifecycle, "Skipping request processing for non-active transaction");
                     return Ok(());
                 }
                 if request.method() == Method::Invite
                     && transaction.state() == TransactionState::Terminated
-                    && self
+                {
+                    if self
                         .retransmit_cached_invite_2xx_response(&key, source)
                         .await?
-                {
-                    return Ok(());
+                    {
+                        return Ok(());
+                    }
+                    diagnostics::record_duplicate_invite_cache_miss();
                 }
                 return transaction.process_request(request).await;
             }

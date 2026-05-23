@@ -55,6 +55,7 @@ pub(crate) struct ServerInviteAckIndexEntry {
 pub(crate) struct Invite2xxResponseCacheEntry {
     pub(crate) response: Response,
     pub(crate) destination: SocketAddr,
+    pub(crate) created_at: Instant,
     pub(crate) expires_at: Instant,
     pub(crate) next_retransmit_at: Instant,
     pub(crate) retransmit_interval: Duration,

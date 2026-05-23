@@ -30,7 +30,8 @@ use crate::api::handle::{CallId, SessionHandle};
 use crate::api::incoming::{IncomingCall, IncomingCallGuard};
 use crate::api::stream_peer::{EventReceiver, PeerControl, StreamPeer};
 use crate::api::unified::{
-    Config, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus, SipTlsMode,
+    Config, MediaMode, Registration, RegistrationHandle, RegistrationInfo, RegistrationStatus,
+    SipTlsMode,
 };
 use crate::errors::{Result, SessionError};
 use crate::types::Credentials;
@@ -1179,6 +1180,8 @@ pub struct EndpointConfig {
     pub network: Option<EndpointNetworkConfig>,
     /// Media settings.
     pub media: Option<EndpointMediaConfig>,
+    /// Whether automatic `180 Ringing` is sent for inbound INVITEs.
+    pub auto_180_ringing: Option<bool>,
     /// SIP trace diagnostics.
     pub sip_trace: Option<crate::api::events::SipTraceConfig>,
     /// Whether an application should register immediately after startup.
@@ -1248,6 +1251,10 @@ pub struct EndpointNetworkConfig {
     pub tls_cert_path: Option<PathBuf>,
     /// TLS private key path.
     pub tls_key_path: Option<PathBuf>,
+    /// Optional UDP parse worker count.
+    pub udp_parse_workers: Option<usize>,
+    /// Optional per-worker UDP parse queue capacity.
+    pub udp_parse_queue_capacity: Option<usize>,
 }
 
 /// Serde-friendly media settings.
@@ -1260,6 +1267,10 @@ pub struct EndpointMediaConfig {
     pub port_start: Option<u16>,
     /// RTP media port range end.
     pub port_end: Option<u16>,
+    /// Whether real media-core RTP allocation is enabled.
+    pub enabled: Option<bool>,
+    /// SDP RTP port to advertise when media is disabled.
+    pub signaling_only_rtp_port: Option<u16>,
     /// SRTP negotiation policy.
     pub srtp: Option<EndpointSrtpMode>,
 }
@@ -1371,11 +1382,15 @@ pub struct EndpointBuilder {
     media_port_start: Option<u16>,
     media_port_end: Option<u16>,
     media_public_addr: Option<SocketAddr>,
+    media_mode: Option<MediaMode>,
     stun_server: Option<String>,
     outbound_proxy_uri: Option<String>,
     sip_instance: Option<String>,
     transport: EndpointTransport,
+    sip_udp_parse_workers: Option<usize>,
+    sip_udp_parse_queue_capacity: Option<usize>,
     srtp_mode: Option<EndpointSrtpMode>,
+    auto_180_ringing: Option<bool>,
     account_username: Option<String>,
     auth_username: Option<String>,
     password: Option<String>,
@@ -1401,11 +1416,15 @@ impl EndpointBuilder {
             media_port_start: None,
             media_port_end: None,
             media_public_addr: None,
+            media_mode: None,
             stun_server: None,
             outbound_proxy_uri: None,
             sip_instance: None,
             transport: EndpointTransport::Udp,
+            sip_udp_parse_workers: None,
+            sip_udp_parse_queue_capacity: None,
             srtp_mode: None,
+            auto_180_ringing: None,
             account_username: None,
             auth_username: None,
             password: None,
@@ -1441,6 +1460,9 @@ impl EndpointBuilder {
         if let Some(account) = config.account {
             builder = builder.endpoint_account(account.try_into()?);
         }
+        if let Some(auto_180_ringing) = config.auto_180_ringing {
+            builder = builder.auto_180_ringing(auto_180_ringing);
+        }
 
         if let Some(network) = config.network {
             if let Some(transport) = network.transport {
@@ -1464,6 +1486,12 @@ impl EndpointBuilder {
             if let Some(path) = network.tls_key_path {
                 builder = builder.tls_key_path(path);
             }
+            if let Some(workers) = network.udp_parse_workers {
+                builder = builder.sip_udp_parse_workers(workers);
+            }
+            if let Some(capacity) = network.udp_parse_queue_capacity {
+                builder = builder.sip_udp_parse_queue_capacity(capacity);
+            }
         }
 
         if let Some(media) = config.media {
@@ -1478,6 +1506,11 @@ impl EndpointBuilder {
             }
             if let Some(srtp) = media.srtp {
                 builder = builder.srtp(srtp);
+            }
+            if media.enabled == Some(false) || media.signaling_only_rtp_port.is_some() {
+                builder = builder.signaling_only_media(media.signaling_only_rtp_port.unwrap_or(9));
+            } else if media.enabled == Some(true) {
+                builder = builder.media_enabled(true);
             }
         }
 
@@ -1591,6 +1624,22 @@ impl EndpointBuilder {
         self
     }
 
+    /// Enable or disable real media-core RTP allocation.
+    pub fn media_enabled(mut self, enabled: bool) -> Self {
+        self.media_mode = Some(if enabled {
+            MediaMode::Enabled
+        } else {
+            MediaMode::SignalingOnly { sdp_rtp_port: 9 }
+        });
+        self
+    }
+
+    /// Skip media-core RTP allocation while still generating SDP.
+    pub fn signaling_only_media(mut self, sdp_rtp_port: u16) -> Self {
+        self.media_mode = Some(MediaMode::SignalingOnly { sdp_rtp_port });
+        self
+    }
+
     /// Set the public RTP media address advertised in SDP.
     pub fn media_public_addr(mut self, addr: SocketAddr) -> Self {
         self.media_public_addr = Some(addr);
@@ -1624,6 +1673,24 @@ impl EndpointBuilder {
     /// Set the preferred signalling transport for generated SIP URIs.
     pub fn transport(mut self, transport: EndpointTransport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Set the UDP parse worker count.
+    pub fn sip_udp_parse_workers(mut self, workers: usize) -> Self {
+        self.sip_udp_parse_workers = Some(workers);
+        self
+    }
+
+    /// Set the per-worker UDP parse queue capacity.
+    pub fn sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
+        self.sip_udp_parse_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Enable or disable automatic `180 Ringing` on inbound INVITEs.
+    pub fn auto_180_ringing(mut self, enabled: bool) -> Self {
+        self.auto_180_ringing = Some(enabled);
         self
     }
 
@@ -1695,6 +1762,9 @@ impl EndpointBuilder {
         if let Some(addr) = self.media_public_addr {
             config.media_public_addr = Some(addr);
         }
+        if let Some(mode) = self.media_mode {
+            config.media_mode = mode;
+        }
         if let Some(stun) = self.stun_server {
             config.stun_server = Some(stun);
         }
@@ -1720,6 +1790,15 @@ impl EndpointBuilder {
         }
         if let Some(sip_trace) = self.sip_trace {
             config.sip_trace = sip_trace;
+        }
+        if let Some(workers) = self.sip_udp_parse_workers {
+            config.sip_udp_parse_workers = Some(workers);
+        }
+        if let Some(capacity) = self.sip_udp_parse_queue_capacity {
+            config.sip_udp_parse_queue_capacity = Some(capacity);
+        }
+        if let Some(auto_180_ringing) = self.auto_180_ringing {
+            config.auto_180_ringing = auto_180_ringing;
         }
         if self.transport == EndpointTransport::Tls && config.sip_tls_mode == SipTlsMode::Disabled {
             config.sip_tls_mode = SipTlsMode::ClientOnly;
@@ -2154,6 +2233,7 @@ mod tests {
             r#"{
                 "name": "alice",
                 "profile": "asterisk-udp",
+                "auto180Ringing": false,
                 "account": {
                     "username": "1001",
                     "password": "secret",
@@ -2162,10 +2242,14 @@ mod tests {
                 "network": {
                     "bind": "127.0.0.1:5060",
                     "transport": "tcp",
-                    "stun": "stun.example.test:3478"
+                    "stun": "stun.example.test:3478",
+                    "udpParseWorkers": 4,
+                    "udpParseQueueCapacity": 8192
                 },
                 "media": {
                     "publicAddress": "192.0.2.10",
+                    "enabled": false,
+                    "signalingOnlyRtpPort": 9,
                     "srtp": "offer"
                 }
             }"#,
@@ -2183,6 +2267,13 @@ mod tests {
         );
         assert!(parts.config.offer_srtp);
         assert!(!parts.config.srtp_required);
+        assert!(!parts.config.auto_180_ringing);
+        assert_eq!(parts.config.sip_udp_parse_workers, Some(4));
+        assert_eq!(parts.config.sip_udp_parse_queue_capacity, Some(8192));
+        assert_eq!(
+            parts.config.media_mode,
+            MediaMode::SignalingOnly { sdp_rtp_port: 9 }
+        );
         assert_eq!(
             parts.config.media_public_addr,
             Some("192.0.2.10:0".parse().unwrap())

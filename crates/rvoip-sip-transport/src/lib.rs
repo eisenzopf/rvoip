@@ -4,6 +4,7 @@
 //! UDP, TCP, TLS, and WebSocket transports.
 
 // Re-export modules from the transport directory
+pub mod diagnostics;
 pub mod error;
 pub mod events;
 pub mod factory;
@@ -20,7 +21,7 @@ pub use error::{Error, Result};
 pub use resolver::{select_transport_for_uri, ResolvedTarget, Resolver, ResolverError};
 pub use transport::tcp::TcpTransport;
 pub use transport::tls::TlsTransport;
-pub use transport::udp::{UdpSocketOptions, UdpTransport};
+pub use transport::udp::{UdpParseConfig, UdpSocketOptions, UdpTransport};
 pub use transport::ws::WebSocketTransport;
 pub use transport::{Transport, TransportEvent};
 

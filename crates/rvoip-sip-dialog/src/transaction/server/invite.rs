@@ -154,7 +154,7 @@ impl ServerInviteLogic {
         &self,
         data: &Arc<ServerTransactionData>,
         timer_handles: &mut ServerInviteTimerHandles,
-        command_tx: mpsc::Sender<InternalTransactionCommand>,
+        _command_tx: mpsc::Sender<InternalTransactionCommand>,
     ) {
         let tx_id = &data.id;
         let timer_config = &data.timer_config;
@@ -162,26 +162,60 @@ impl ServerInviteLogic {
         // Start Timer 100 with 200ms interval
         let interval_100 = timer_config.timer_100_interval;
 
-        // Use timer_utils to start the timer
-        let timer_manager = self.timer_factory.timer_manager();
-        match timer_utils::start_transaction_timer(
-            &timer_manager,
-            tx_id,
-            "100",
-            TimerType::Timer100,
-            interval_100,
-            command_tx,
-        )
-        .await
-        {
-            Ok(handle) => {
-                timer_handles.timer_100 = Some(handle);
-                trace!(id=%tx_id, interval=?interval_100, "Started Timer 100 for automatic 100 Trying");
+        // Keep Timer 100 off the transaction command queue. Under high CPS,
+        // enqueuing one timer command per INVITE adds avoidable command-loop
+        // work and can race behind an already-sent final response. A direct
+        // task can check the transaction state and cached last response at the
+        // actual deadline, then quietly exit if the TU has responded.
+        let data = data.clone();
+        let tx_id_for_task = tx_id.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(interval_100).await;
+
+            if data.state.get() != TransactionState::Proceeding {
+                trace!(id=%tx_id_for_task, "Timer 100 fired after transaction left Proceeding");
+                return;
             }
-            Err(e) => {
-                error!(id=%tx_id, error=%e, "Failed to start Timer 100");
+
+            let should_send_100 = data.last_response.lock().await.is_none();
+            if !should_send_100 {
+                trace!(id=%tx_id_for_task, "Timer 100 fired but TU already sent a response");
+                return;
             }
-        }
+
+            let request = &data.request;
+            let mut trying_response =
+                rvoip_sip_core::builder::SimpleResponseBuilder::response_from_request(
+                    request,
+                    rvoip_sip_core::StatusCode::Trying,
+                    Some("Trying"),
+                )
+                .build();
+
+            crate::transaction::utils::stamp_response_via_with_source(
+                &mut trying_response,
+                data.remote_addr,
+            );
+
+            if let Err(e) = data
+                .transport
+                .send_message(Message::Response(trying_response.clone()), data.remote_addr)
+                .await
+            {
+                error!(id=%tx_id_for_task, error=%e, "Failed to send automatic 100 Trying response");
+                common_logic::send_transport_error_event(&tx_id_for_task, &data.events_tx).await;
+                return;
+            }
+
+            let mut last_response = data.last_response.lock().await;
+            if last_response.is_none() {
+                *last_response = Some(trying_response);
+                debug!(id=%tx_id_for_task, "Sent automatic 100 Trying response per RFC 3261");
+            }
+        });
+
+        timer_handles.timer_100 = Some(handle);
+        trace!(id=%tx_id, interval=?interval_100, "Started Timer 100 for automatic 100 Trying");
     }
 
     /// Cancels Timer 100 (automatic 100 Trying response timer)

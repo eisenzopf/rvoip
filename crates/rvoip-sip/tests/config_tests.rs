@@ -2,7 +2,7 @@
 //!
 //! Tests Config constructors, defaults, and field values.
 
-use rvoip_sip::{Config, SipContactMode, SipTlsMode};
+use rvoip_sip::{Config, MediaMode, SipContactMode, SipTlsMode};
 use std::net::{IpAddr, SocketAddr};
 
 // ── Config::local ───────────────────────────────────────────────────────────
@@ -75,6 +75,8 @@ fn test_config_default() {
     let c = Config::default();
     assert_eq!(c.sip_port, 5060);
     assert_eq!(c.local_uri, "sip:user@127.0.0.1:5060");
+    assert!(c.auto_180_ringing);
+    assert_eq!(c.media_mode, MediaMode::Enabled);
 }
 
 #[test]
@@ -87,6 +89,22 @@ fn test_config_media_port_validation() {
 
     c = Config::local("alice", 5060).with_media_ports(40_000, 40_000);
     assert!(c.validate().is_ok());
+}
+
+#[test]
+fn test_config_graduated_perf_knobs_are_configurable() {
+    let c = Config::local("alice", 5060)
+        .with_auto_180_ringing(false)
+        .with_sip_udp_parse_workers(4)
+        .with_sip_udp_parse_queue_capacity(8192)
+        .with_global_event_channel_capacity(16_384)
+        .with_signaling_only_media(9);
+
+    assert!(!c.auto_180_ringing);
+    assert_eq!(c.sip_udp_parse_workers, Some(4));
+    assert_eq!(c.sip_udp_parse_queue_capacity, Some(8192));
+    assert_eq!(c.global_event_channel_capacity, 16_384);
+    assert_eq!(c.media_mode, MediaMode::SignalingOnly { sdp_rtp_port: 9 });
 }
 
 // ── Different names ─────────────────────────────────────────────────────────

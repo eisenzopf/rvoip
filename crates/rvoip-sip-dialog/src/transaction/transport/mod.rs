@@ -1,16 +1,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, mpsc::error::TrySendError, Mutex};
 use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::Message;
+use rvoip_sip_transport::diagnostics as udp_diagnostics;
 use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
-    TcpTransport, Transport, TransportEvent, UdpSocketOptions, UdpTransport, WebSocketTransport,
+    TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpSocketOptions, UdpTransport,
+    WebSocketTransport,
 };
 
 use crate::transaction::error::{Error, Result};
@@ -48,6 +51,10 @@ pub struct TransportManagerConfig {
     pub udp_recv_buffer_size: Option<usize>,
     /// Optional UDP socket send buffer size (`SO_SNDBUF`) in bytes.
     pub udp_send_buffer_size: Option<usize>,
+    /// Optional UDP parse worker count.
+    pub udp_parse_workers: Option<usize>,
+    /// Optional per-worker UDP parse queue capacity.
+    pub udp_parse_queue_capacity: Option<usize>,
     /// TLS certificate path
     pub tls_cert_path: Option<String>,
     /// TLS key path
@@ -90,6 +97,8 @@ impl Default for TransportManagerConfig {
             default_channel_capacity: 10_000,
             udp_recv_buffer_size: None,
             udp_send_buffer_size: None,
+            udp_parse_workers: None,
+            udp_parse_queue_capacity: None,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
@@ -133,6 +142,8 @@ impl TransportManager {
             channel_capacity: config.default_channel_capacity,
             udp_recv_buffer_size: config.udp_recv_buffer_size,
             udp_send_buffer_size: config.udp_send_buffer_size,
+            udp_parse_workers: config.udp_parse_workers,
+            udp_parse_queue_capacity: config.udp_parse_queue_capacity,
             ..Default::default()
         }));
 
@@ -354,10 +365,17 @@ impl TransportManager {
             self.config.udp_recv_buffer_size,
             self.config.udp_send_buffer_size,
         );
-        let (transport, rx) = UdpTransport::bind_with_socket_options(
+        let parse_config = UdpParseConfig::from_optional(
+            self.config.udp_parse_workers,
+            self.config.udp_parse_queue_capacity,
+            self.config.default_channel_capacity,
+        );
+        let (transport, rx) = UdpTransport::bind_with_mtu_socket_options_and_parse_config(
             bind_addr,
             Some(self.config.default_channel_capacity),
+            rvoip_sip_transport::transport::udp::UDP_SAFE_MAX_BYTES,
             socket_options,
+            parse_config,
         )
         .await
         .map_err(|e| {
@@ -656,10 +674,24 @@ impl TransportManager {
             while let Some(event) = rx.recv().await {
                 trace!("Received event from {}: {:?}", transport_name, event);
 
-                // Forward the event to the main event channel
-                if let Err(e) = self.event_tx.send(event.clone()).await {
-                    error!("Failed to forward transport event: {}", e);
-                    break;
+                // Forward the event to the main event channel. Avoid the
+                // async send fast path unless the channel is actually full so
+                // the per-transport event bridge does not add scheduler churn
+                // to every UDP datagram under load.
+                match self.event_tx.try_send(event) {
+                    Ok(()) => {}
+                    Err(TrySendError::Full(event)) => {
+                        let started = Instant::now();
+                        if let Err(e) = self.event_tx.send(event).await {
+                            error!("Failed to forward transport event: {}", e);
+                            break;
+                        }
+                        udp_diagnostics::record_manager_channel_backpressure(started.elapsed());
+                    }
+                    Err(TrySendError::Closed(_)) => {
+                        error!("Failed to forward transport event: receiver closed");
+                        break;
+                    }
                 }
             }
 

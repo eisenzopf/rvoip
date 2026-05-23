@@ -19,6 +19,7 @@
 
 use tracing::{debug, info, warn};
 
+use crate::diagnostics;
 use crate::dialog::{Dialog, DialogId, DialogState};
 use crate::errors::{DialogError, DialogResult};
 use crate::events::SessionCoordinationEvent;
@@ -113,10 +114,13 @@ impl ByeHandler for DialogManager {
             self.process_bye_in_dialog(transaction_id, request, dialog_id)
                 .await
         } else {
-            let status_code = if matches_terminated_bye_retransmit(self, &request) {
+            let tombstone_match = matches_terminated_bye_retransmit(self, &request);
+            let status_code = if tombstone_match {
                 debug!("BYE retransmit matched recently terminated dialog");
+                diagnostics::record_duplicate_bye_tombstone_hit();
                 StatusCode::Ok
             } else {
+                diagnostics::record_duplicate_bye_tombstone_miss();
                 StatusCode::CallOrTransactionDoesNotExist
             };
 
@@ -183,6 +187,7 @@ impl DialogManager {
         self.release_bye_server_transaction(&transaction_id).await;
 
         if duplicate_terminated_bye {
+            diagnostics::record_duplicate_bye_terminated_dialog();
             debug!(
                 "Duplicate BYE processed idempotently for terminated dialog {}",
                 dialog_id

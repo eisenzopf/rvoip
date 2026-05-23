@@ -22,6 +22,8 @@ use rvoip_infra_common::events::cross_crate::{
     CrossCrateEvent, DialogToSessionEvent, MediaToSessionEvent, RvoipCrossCrateEvent, SipTraceEvent,
 };
 use rvoip_infra_common::planes::routing::RoutableEvent;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -51,6 +53,19 @@ fn map_sip_trace_session_id(
                     .map(|entry| entry.value().clone())
             })
         })
+}
+
+fn dialog_dispatch_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().saturating_mul(4))
+        .unwrap_or(16)
+        .clamp(8, 64)
+}
+
+fn session_dispatch_shard(session_id: &str, shard_count: usize) -> usize {
+    let mut hasher = DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    (hasher.finish() as usize) % shard_count.max(1)
 }
 
 /// Handler for processing cross-crate events in rvoip-sip
@@ -866,15 +881,23 @@ impl SessionCrossCrateEventHandler {
         let mut shutdown = shutdown_rx.clone();
         tokio::spawn(async move {
             info!("🔔 [session_event_handler] Started dialog-to-session event loop");
-            // Per-session dispatch: each session gets its own task that drains a
-            // dedicated mpsc, preserving in-order processing for that session
-            // while letting independent sessions run concurrently. This was
-            // previously a single `handler.handle(event).await` per loop turn,
-            // which capped per-coordinator INVITE throughput at ~2/sec.
-            let mut session_senders: std::collections::HashMap<
-                String,
-                mpsc::UnboundedSender<Arc<dyn CrossCrateEvent>>,
-            > = std::collections::HashMap::new();
+            // Sharded dispatch preserves per-session ordering without creating
+            // one task/channel per short-lived call.
+            let worker_count = dialog_dispatch_worker_count();
+            let mut shard_senders = Vec::with_capacity(worker_count);
+            for shard in 0..worker_count {
+                let (tx, mut rx) = mpsc::unbounded_channel::<Arc<dyn CrossCrateEvent>>();
+                let handler_for_shard = handler.clone();
+                tokio::spawn(async move {
+                    while let Some(ev) = rx.recv().await {
+                        if let Err(e) = handler_for_shard.handle(ev).await {
+                            error!(shard, "Error handling dialog-to-session event: {}", e);
+                        }
+                    }
+                });
+                shard_senders.push(tx);
+            }
+
             loop {
                 tokio::select! {
                     _ = shutdown.changed() => {
@@ -892,25 +915,9 @@ impl SessionCrossCrateEventHandler {
                             .map(|s| s.to_string());
                         match session_key {
                             Some(sid) => {
-                                let sender = session_senders.entry(sid.clone()).or_insert_with(|| {
-                                    let (tx, mut rx) = mpsc::unbounded_channel::<Arc<dyn CrossCrateEvent>>();
-                                    let handler_for_session = handler.clone();
-                                    let sid_for_log = sid.clone();
-                                    tokio::spawn(async move {
-                                        while let Some(ev) = rx.recv().await {
-                                            if let Err(e) = handler_for_session.handle(ev).await {
-                                                error!(
-                                                    session = %sid_for_log,
-                                                    "Error handling dialog-to-session event: {}",
-                                                    e
-                                                );
-                                            }
-                                        }
-                                    });
-                                    tx
-                                });
-                                if sender.send(event).is_err() {
-                                    session_senders.remove(&sid);
+                                let shard = session_dispatch_shard(&sid, shard_senders.len());
+                                if shard_senders[shard].send(event).is_err() {
+                                    error!(shard, session = %sid, "Dialog event shard stopped");
                                 }
                             }
                             None => {

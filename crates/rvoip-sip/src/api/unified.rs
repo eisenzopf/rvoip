@@ -154,6 +154,22 @@ impl SrtpSuitePolicy {
     }
 }
 
+/// Media allocation behavior for SIP sessions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaMode {
+    /// Allocate media-core RTP sessions and RTP ports normally.
+    Enabled,
+    /// Skip media-core RTP allocation while still emitting SDP.
+    ///
+    /// The configured `sdp_rtp_port` is advertised unless
+    /// [`Config::media_public_addr`] carries a nonzero port, in which case the
+    /// explicit public media port is advertised.
+    SignalingOnly {
+        /// RTP port to advertise in SDP when no public media port override is set.
+        sdp_rtp_port: u16,
+    },
+}
+
 /// Runtime configuration for [`UnifiedCoordinator`].
 ///
 /// `Config` controls SIP and media binding, advertised addresses, TLS,
@@ -212,6 +228,14 @@ pub struct Config {
     /// Set to `Required` when connecting to a carrier that mandates 100rel,
     /// or `NotSupported` to omit the tag entirely.
     pub use_100rel: RelUsage,
+
+    /// Whether the default inbound INVITE path sends automatic `180 Ringing`.
+    ///
+    /// Default: `true`, which is appropriate for PBX-style ringing behavior
+    /// and preserves previous API behavior. Set to `false` for IVR,
+    /// contact-center, and auto-answer services that immediately send a final
+    /// response and do not need the extra provisional response.
+    pub auto_180_ringing: bool,
 
     /// RFC 4028 `Session-Expires` value in seconds to advertise on outgoing
     /// INVITEs. `None` disables session timers entirely. Common carrier
@@ -476,6 +500,14 @@ pub struct Config {
     /// behaviour).
     pub media_public_addr: Option<SocketAddr>,
 
+    /// Media allocation behavior.
+    ///
+    /// Default: [`MediaMode::Enabled`], which allocates real media-core RTP
+    /// sessions and RTP ports. [`MediaMode::SignalingOnly`] skips media-core
+    /// RTP allocation but still emits SDP; useful for signaling-only services
+    /// and controlled tests.
+    pub media_mode: MediaMode,
+
     /// STUN server (RFC 8489 §14) to probe for the RTP-side public
     /// mapping at coordinator boot. Format: `"host:port"` or `"host"`
     /// (default port 3478). Common public servers:
@@ -583,12 +615,35 @@ pub struct Config {
     /// bursts can set this to match the receive-side sizing policy.
     pub sip_udp_send_buffer_size: Option<usize>,
 
+    /// Optional UDP parse worker count for the SIP UDP receive path.
+    ///
+    /// `None` keeps the transport default. High-CPS UDP servers can set this
+    /// when parsing/dispatch work behind the socket receive loop needs more
+    /// parallelism.
+    pub sip_udp_parse_workers: Option<usize>,
+
+    /// Optional per-worker UDP parse queue capacity.
+    ///
+    /// `None` uses the SIP transport channel capacity. When set, this bounds
+    /// how many datagrams each UDP parse worker may buffer before overload is
+    /// counted and dropped explicitly.
+    pub sip_udp_parse_queue_capacity: Option<usize>,
+
     /// Capacity for the transaction-manager event channel consumed by dialog
     /// core.
     ///
     /// A small transaction event queue can block transaction processing while
     /// dialog/session cleanup catches up. Default: `10000`.
     pub transaction_event_channel_capacity: usize,
+
+    /// Capacity for the infra-common global cross-crate event bus used inside
+    /// this coordinator.
+    ///
+    /// ACK, BYE, media, and app-session events all cross this bus before they
+    /// reach their local consumers. High-CPS server profiles should size it
+    /// with the other signaling queues so the event bridge does not drop
+    /// cleanup-driving events. Default: `10000`.
+    pub global_event_channel_capacity: usize,
 
     /// Number of async workers used to publish app-level session events onto
     /// the global infra-common event bus.
@@ -665,6 +720,7 @@ impl Config {
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
+            auto_180_ringing: true,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -694,6 +750,7 @@ impl Config {
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
+            media_mode: MediaMode::Enabled,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -703,7 +760,10 @@ impl Config {
             sip_transport_channel_capacity: 10_000,
             sip_udp_recv_buffer_size: None,
             sip_udp_send_buffer_size: None,
+            sip_udp_parse_workers: None,
+            sip_udp_parse_queue_capacity: None,
             transaction_event_channel_capacity: 10_000,
+            global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
@@ -731,6 +791,7 @@ impl Config {
             state_table_path: None,
             local_uri: format!("sip:{}@{}:{}", name, ip, port),
             use_100rel: RelUsage::default(),
+            auto_180_ringing: true,
             session_timer_secs: None,
             session_timer_min_se: 90,
             credentials: None,
@@ -760,6 +821,7 @@ impl Config {
             srtp_required: false,
             srtp_offered_suites: SrtpSuitePolicy::Default.suites(),
             media_public_addr: None,
+            media_mode: MediaMode::Enabled,
             stun_server: None,
             comfort_noise_enabled: false,
             strict_codec_matching: true,
@@ -769,7 +831,10 @@ impl Config {
             sip_transport_channel_capacity: 10_000,
             sip_udp_recv_buffer_size: None,
             sip_udp_send_buffer_size: None,
+            sip_udp_parse_workers: None,
+            sip_udp_parse_queue_capacity: None,
             transaction_event_channel_capacity: 10_000,
+            global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
@@ -1009,6 +1074,7 @@ impl Config {
         self.state_event_channel_capacity = capacity;
         self.sip_transport_channel_capacity = event_capacity;
         self.transaction_event_channel_capacity = event_capacity;
+        self.global_event_channel_capacity = event_capacity;
         self.session_event_dispatcher_channel_capacity = event_capacity;
         self
     }
@@ -1031,7 +1097,11 @@ impl Config {
 
     fn transaction_index_capacity_hint(&self) -> usize {
         self.server_call_capacity
-            .map(|capacity| capacity.saturating_mul(4))
+            // INVITE server transactions, BYE server transactions, ACK
+            // indexes, and retransmission caches can remain live beyond the
+            // active-call count. Size for the short transaction-retention
+            // window, not just simultaneous dialogs.
+            .map(|capacity| capacity.saturating_mul(16))
             .unwrap_or(self.transaction_event_channel_capacity)
             .max(1)
     }
@@ -1044,6 +1114,41 @@ impl Config {
     pub fn with_media_ports(mut self, start: u16, end: u16) -> Self {
         self.media_port_start = start;
         self.media_port_end = end;
+        self
+    }
+
+    /// Enable or disable automatic `180 Ringing` on inbound INVITEs.
+    ///
+    /// `true` is the PBX-friendly default. `false` is useful for IVR,
+    /// call-center, and benchmark listeners that answer immediately with a
+    /// final response.
+    pub fn with_auto_180_ringing(mut self, enabled: bool) -> Self {
+        self.auto_180_ringing = enabled;
+        self
+    }
+
+    /// Set media allocation behavior.
+    pub fn with_media_mode(mut self, mode: MediaMode) -> Self {
+        self.media_mode = mode;
+        self
+    }
+
+    /// Enable or disable real media-core RTP allocation.
+    ///
+    /// Disabling media switches to [`MediaMode::SignalingOnly`] with SDP port
+    /// `9`, the discard port convention used for signaling-only tests.
+    pub fn with_media_enabled(mut self, enabled: bool) -> Self {
+        self.media_mode = if enabled {
+            MediaMode::Enabled
+        } else {
+            MediaMode::SignalingOnly { sdp_rtp_port: 9 }
+        };
+        self
+    }
+
+    /// Skip media-core RTP allocation while still generating SDP.
+    pub fn with_signaling_only_media(mut self, sdp_rtp_port: u16) -> Self {
+        self.media_mode = MediaMode::SignalingOnly { sdp_rtp_port };
         self
     }
 
@@ -1092,12 +1197,44 @@ impl Config {
         self
     }
 
+    /// Set the UDP parse worker count.
+    pub fn with_sip_udp_parse_workers(mut self, workers: usize) -> Self {
+        self.sip_udp_parse_workers = Some(workers);
+        self
+    }
+
+    /// Set the per-worker UDP parse queue capacity.
+    pub fn with_sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
+        self.sip_udp_parse_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set UDP parse worker and queue overrides together.
+    pub fn with_sip_udp_parse_config(
+        mut self,
+        workers: Option<usize>,
+        queue_capacity: Option<usize>,
+    ) -> Self {
+        self.sip_udp_parse_workers = workers;
+        self.sip_udp_parse_queue_capacity = queue_capacity;
+        self
+    }
+
     /// Set the transaction-manager event channel capacity.
     ///
     /// The default is `10000`. Values below `1` are rejected by
     /// [`Config::validate`].
     pub fn with_transaction_event_channel_capacity(mut self, capacity: usize) -> Self {
         self.transaction_event_channel_capacity = capacity;
+        self
+    }
+
+    /// Set the infra-common global event bus channel capacity.
+    ///
+    /// The default is `10000`. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_global_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.global_event_channel_capacity = capacity;
         self
     }
 
@@ -1243,9 +1380,32 @@ impl Config {
                 "sip_udp_send_buffer_size must be at least 1 when set".to_string(),
             ));
         }
+        if matches!(self.sip_udp_parse_workers, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_udp_parse_workers must be at least 1 when set".to_string(),
+            ));
+        }
+        if let Some(workers) = self.sip_udp_parse_workers {
+            if workers > rvoip_sip_transport::UdpParseConfig::MAX_WORKERS {
+                return Err(SessionError::ConfigError(format!(
+                    "sip_udp_parse_workers must be <= {} when set",
+                    rvoip_sip_transport::UdpParseConfig::MAX_WORKERS
+                )));
+            }
+        }
+        if matches!(self.sip_udp_parse_queue_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_udp_parse_queue_capacity must be at least 1 when set".to_string(),
+            ));
+        }
         if self.transaction_event_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
                 "transaction_event_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if self.global_event_channel_capacity == 0 {
+            return Err(SessionError::ConfigError(
+                "global_event_channel_capacity must be at least 1".to_string(),
             ));
         }
         if self.session_event_dispatcher_workers == 0 {
@@ -1272,6 +1432,11 @@ impl Config {
         if self.media_port_start > self.media_port_end {
             return Err(SessionError::ConfigError(
                 "media_port_start must be <= media_port_end".to_string(),
+            ));
+        }
+        if let MediaMode::SignalingOnly { sdp_rtp_port: 0 } = self.media_mode {
+            return Err(SessionError::ConfigError(
+                "signaling-only media SDP RTP port must be at least 1".to_string(),
             ));
         }
         if matches!(
@@ -1688,10 +1853,18 @@ impl UnifiedCoordinator {
     pub async fn new(config: Config) -> Result<Arc<Self>> {
         config.validate()?;
 
-        // Get the global event coordinator singleton
-        let global_coordinator = rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone();
+        let global_event_config = rvoip_infra_common::events::EventCoordinatorConfig::monolithic()
+            .with_channel_capacity(config.global_event_channel_capacity);
+        let global_coordinator = Arc::new(
+            rvoip_infra_common::events::GlobalEventCoordinator::new(global_event_config)
+                .await
+                .map_err(|e| {
+                    SessionError::InternalError(format!(
+                        "Failed to create global event coordinator: {}",
+                        e
+                    ))
+                })?,
+        );
 
         // Create core components
         let store = Arc::new(
@@ -1809,6 +1982,7 @@ impl UnifiedCoordinator {
             config.media_port_start,
             config.media_port_end,
         );
+        media_adapter_inner.set_media_mode(config.media_mode);
         // Apply RFC 4568 SDES-SRTP policy from Config (Step 2B.1).
         media_adapter_inner.set_srtp_policy(
             config.offer_srtp,
@@ -1877,6 +2051,7 @@ impl UnifiedCoordinator {
             dialog_adapter.clone(),
             media_adapter.clone(),
             state_event_tx,
+            config.auto_180_ringing,
         ));
 
         // Wire the state machine into the dialog adapter (for REGISTER
@@ -3231,6 +3406,8 @@ impl UnifiedCoordinator {
             default_channel_capacity: config.sip_transport_channel_capacity,
             udp_recv_buffer_size: config.sip_udp_recv_buffer_size,
             udp_send_buffer_size: config.sip_udp_send_buffer_size,
+            udp_parse_workers: config.sip_udp_parse_workers,
+            udp_parse_queue_capacity: config.sip_udp_parse_queue_capacity,
             // Default build: `Config::tls_insecure_skip_verify` is not
             // compiled, so we always pass `false`. Only the
             // `dev-insecure-tls` build surfaces the field.

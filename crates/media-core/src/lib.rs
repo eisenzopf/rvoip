@@ -46,6 +46,7 @@
 // Core modules
 pub mod api; // NEW - API types and errors for moved functionality
 pub mod buffer; // New buffer module
+pub mod diagnostics;
 pub mod engine;
 pub mod error;
 pub mod integration; // New integration module

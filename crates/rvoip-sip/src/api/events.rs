@@ -186,8 +186,9 @@ pub enum Event {
     // ===== Call Lifecycle Events =====
     /// Incoming call received
     ///
-    /// The state machine has already sent 180 Ringing. Developer must
-    /// call `accept()` or `reject()` to complete the call handling.
+    /// The state machine has already sent 180 Ringing when
+    /// `Config::auto_180_ringing` is enabled. Developer must call
+    /// `accept()` or `reject()` to complete the call handling.
     IncomingCall {
         /// Session identifier assigned to this incoming INVITE.
         call_id: CallId,

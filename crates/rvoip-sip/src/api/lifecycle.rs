@@ -408,15 +408,7 @@ pub(crate) struct SessionEventPublisher {
 
 impl SessionEventPublisher {
     pub(crate) fn new(coordinator: Arc<GlobalEventCoordinator>, lifecycle: LifecycleIndex) -> Self {
-        let worker_count = std::env::var("RVOIP_SESSION_EVENT_DISPATCHER_WORKERS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_else(default_dispatcher_workers);
-        let channel_capacity = std::env::var("RVOIP_SESSION_EVENT_DISPATCHER_CHANNEL_CAPACITY")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(10_000);
-        Self::with_dispatcher(coordinator, lifecycle, worker_count, channel_capacity)
+        Self::with_dispatcher(coordinator, lifecycle, default_dispatcher_workers(), 10_000)
     }
 
     pub(crate) fn with_dispatcher(
