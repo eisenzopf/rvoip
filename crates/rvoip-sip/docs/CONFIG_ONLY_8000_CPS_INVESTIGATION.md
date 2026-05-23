@@ -85,6 +85,131 @@ correctness failure: many are fast-recovered duplicates. The open
 question is now response latency before the session handler's fused
 action timer starts, or loss/scheduling after responses leave rvoip.
 
+### Transaction Dispatch And Media Isolation Runs
+
+Follow-up transaction-manager work added Config-owned keyed transaction
+ingress sharding:
+
+- `Config::with_sip_transaction_dispatch_workers(N)`
+- `Config::with_sip_transaction_dispatch_queue_capacity(N)`
+- `perf_listener --transaction-dispatch-workers N`
+- `perf_listener --transaction-dispatch-queue-capacity N`
+
+The default remains the original single receive/handle loop. Additional
+workers are keyed by call/transaction identity rather than raw
+round-robin, so INVITE, ACK, BYE, and CANCEL for one call stay ordered.
+High-cardinality transaction timing diagnostics are opt-in via
+`--transaction-timing-diagnostics` because timestamp and atomic histogram
+work materially perturbs the `8000 CPS` run.
+
+The first media-enabled transaction matrix was not trustworthy as a
+transaction comparison because every run was dominated by session/media
+setup delay. A macOS `sample` capture under load showed hot samples in
+the session action path, especially `MediaAdapter::create_session`,
+`RtpSession::new`, and UDP socket `bind`, before the final INVITE 200 OK
+send. A perf-only listener flag was added to isolate this:
+`--signaling-only-media`, which keeps SDP signaling but skips media-core
+RTP allocation.
+
+Focused result:
+
+| Run | SIPp result | Achieved CPS | Avg INVITE->200 | Retransmits | Listener cleanup | Notes |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| Normal media, fast path | `118824/120000` | `2700.5` | `2289.6 ms` | `311507` | `105613/118824` | Media session/RTP bind path dominates. |
+| Signaling-only media, fast path | `120000/120000` | `8000.0` | `1.0 ms` | `0` | `120000/120000` | Same SIP path without RTP allocation. |
+
+Results from
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_dispatch_signaling_matrix_20260523_133215`:
+
+| Run | SIPp result | Achieved CPS | Avg INVITE->200 | Retransmits | Listener cleanup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Signaling-only baseline | `120000/120000` | `8000.0` | `1.0 ms` | `0` | `120000/120000` |
+| Signaling-only transaction workers 2 | `120000/120000` | `8000.0` | `0.5 ms` | `0` | `120000/120000` |
+| Signaling-only transaction workers 4 | `120000/120000` | `8000.0` | `0.0 ms` | `0` | `120000/120000` |
+| Signaling-only transaction workers 8 | `120000/120000` | `8000.0` | `0.0 ms` | `0` | `120000/120000` |
+
+Combined candidate results from
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_udp_combined_20260523_133412`:
+
+| Run | SIPp result | Achieved CPS | Avg INVITE->200 | Retransmits | Listener cleanup |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Signaling-only, UDP RR 4 + tx workers 4 | `120000/120000` | `8000.0` | `0.0 ms` | `0` | `120000/120000` |
+| Normal media, UDP RR 4 + tx workers 4 | `119118/120000` | `3054.3` | `1646.2 ms` | `261810` | `111121/119118` |
+
+The same signaling-only profile was then tested at `10000 CPS` with
+UDP parse fixed at `--udp-parse-workers 4 --udp-parse-round-robin` and
+transaction workers varied. Results from
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_fanout_10k_20260523_134716`:
+
+| Run | SIPp result | Achieved CPS | Avg INVITE->200 | P99.9 INVITE->200 | Retransmits | Listener cleanup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Signaling-only, UDP RR 4, tx workers 1 | `150000/150000` | `10000.0` | `1.0 ms` | `<75 ms` | `0` | `150000/150000` |
+| Signaling-only, UDP RR 4, tx workers 2 | `150000/150000` | `10000.0` | `1.0 ms` | `<50 ms` | `0` | `150000/150000` |
+| Signaling-only, UDP RR 4, tx workers 4 | `150000/150000` | `10000.0` | `1.0 ms` | `<25 ms` | `0` | `150000/150000` |
+| Signaling-only, UDP RR 4, tx workers 8 | `150000/150000` | `10000.0` | `1.0 ms` | `<10 ms` | `0` | `150000/150000` |
+
+At `10000 CPS`, transaction fanout does not change pass/fail behavior:
+every worker count completed successfully with zero retransmits and full
+cleanup. The only visible signal is lower p99.9 INVITE-to-200 latency as
+transaction workers increase. This suggests the next useful signaling-only
+test is to raise CPS until the baseline breaks, then compare worker counts
+near that limit.
+
+That follow-up sweep found the default transaction path starts bending
+between `15000 CPS` and `20000 CPS` with signaling-only media and UDP
+parse fixed at round-robin `4`.
+
+Baseline default transaction dispatch results from
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_breakpoint_sweep_20260523_140211`:
+
+| Run | SIPp result | Achieved CPS | Avg INVITE->200 | P99 INVITE->200 | Retransmits | Listener cleanup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Signaling-only, UDP RR 4, tx workers 1, 12000 CPS | `180000/180000` | `12000.0` | `1.0 ms` | `<10 ms` | `8` | `180000/180000` |
+| Signaling-only, UDP RR 4, tx workers 1, 15000 CPS | `225000/225000` | `15000.0` | `2.0 ms` | `<50 ms` | `85` | `225000/225000` |
+| Signaling-only, UDP RR 4, tx workers 1, 20000 CPS | `285000/285000` | `8906.2` | `1635.1 ms` | `>=2000 ms` | `534434` | listener accepted `294960`, cleaned `293797` |
+
+At `18000 CPS`, transaction fanout reduced retransmits and latency while
+keeping call/cleanup correctness intact. Results came from
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_breakpoint_18k_compare_20260523_140727`,
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_breakpoint_18k_workers_20260523_140836`,
+and
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_breakpoint_18k_tx4_repeat_20260523_140945`:
+
+| Run | SIPp result | Achieved CPS | Avg INVITE->200 | P99 INVITE->200 | Retransmits | Listener cleanup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 18000 CPS, tx workers 1 | `270000/270000` | `16875.0` | `27.9 ms` | `<1000 ms` | `25419` | `270000/270000` |
+| 18000 CPS, tx workers 2 | `270000/270000` | `16875.0` | `4.6 ms` | `<50 ms` | `1240` | `270000/270000` |
+| 18000 CPS, tx workers 4 | `270000/270000` | `16875.0` | `11.9 ms` | `<100 ms` | `6624` | `270000/270000` |
+| 18000 CPS, tx workers 4 repeat | `270000/270000` | `16875.0` | `6.4 ms` | `<50 ms` | `3929` | `270000/270000` |
+| 18000 CPS, tx workers 8 | `270000/270000` | `16875.0` | `4.3 ms` | `<25 ms` | `1298` | `270000/270000` |
+
+At `20000 CPS`, transaction fanout `4` was the least bad run but did not
+make the profile acceptable. Results from
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_tx_breakpoint_20k_workers_20260523_140406`:
+
+| Run | SIPp result | Achieved CPS | Avg INVITE->200 | P99 INVITE->200 | Retransmits | Listener cleanup |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20000 CPS, tx workers 2 | `284947/285000` | `3799.3` | `1739.9 ms` | `>=2000 ms` | `571629` | listener accepted `295882`, cleaned `294828` |
+| 20000 CPS, tx workers 4 | `285000/285000` | `10961.5` | `1387.7 ms` | `>=2000 ms` | `482051` | listener accepted `297131`, cleaned `295497` |
+| 20000 CPS, tx workers 8 | `284693/285000` | `6326.5` | `2481.7 ms` | `>=2000 ms` | `613551` | listener accepted `297156`, cleaned `295903` |
+
+Conclusion from the higher-CPS signaling-only runs: keyed transaction
+fanout is useful once the signaling path is pushed past the easy 10k
+case, and `2` to `8` workers all improve the 18k profile over the
+single-loop default. `4` workers is a reasonable conservative candidate,
+but the best worker count is not settled from one matrix because counts
+vary run to run. `20000 CPS` exposes a different saturation mode that
+transaction fanout alone does not solve.
+
+This changes the next optimization target: the SIP receive, transaction,
+dialog, and fused response path can hit zero retransmits at `8000 CPS`
+when RTP allocation is removed from the critical path. The media-enabled
+run needs a media fast path before promoting transaction or parse worker
+defaults. The next changes to test should reserve or choose the SDP RTP
+port quickly, send the 200 OK, then bind/start the RTP session
+asynchronously after the response leaves rvoip, with cleanup able to
+cancel a not-yet-started media task if BYE arrives first.
+
 ## Goal
 
 Make the media-enabled `8000 CPS` SIPp benchmark run with no server

@@ -9,6 +9,7 @@
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics --transaction-dispatch-workers 4
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics --udp-parse-workers 4 --udp-parse-round-robin
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics --diagnostic-events
 //! ```
@@ -23,6 +24,11 @@
 //! per-operation cleanup event logs. `--wire-diagnostics` enables noisy
 //! SRTP/RTP/SDP diagnostic logs. `--fast-auto-accept` enables the fused
 //! INVITE→200 OK path for validating it before making it a profile default.
+//! `--signaling-only-media` skips media-core RTP allocation while still
+//! emitting SDP, useful for isolating SIP signaling throughput from RTP bind
+//! cost.
+//! `--transaction-timing-diagnostics` adds high-cardinality transaction
+//! manager timing histograms on top of `--diagnostics`.
 //!
 //! The process runs forever; SIGINT to terminate.
 
@@ -35,7 +41,7 @@ use rvoip_media_core::diagnostics as media_setup_diag;
 use rvoip_sip::adapters::media_adapter::cleanup_session_diag;
 use rvoip_sip::api::callback_peer::{CallHandler, CallHandlerDecision, CallbackPeer};
 use rvoip_sip::api::incoming::IncomingCall;
-use rvoip_sip::api::unified::Config;
+use rvoip_sip::api::unified::{Config, MediaMode};
 use rvoip_sip::cleanup_diag;
 use rvoip_sip_dialog::diagnostics as sip_retrans_diag;
 use rvoip_sip_transport::diagnostics as sip_udp_diag;
@@ -48,6 +54,7 @@ const HIGH_CPS_RTP_PORT_CAPACITY: usize = 49_152;
 #[derive(Clone, Copy, Default)]
 struct PerfDiagnostics {
     summary: bool,
+    transaction_timing: bool,
     cleanup_events: bool,
     wire: bool,
 }
@@ -109,6 +116,9 @@ async fn main() {
     let mut fast_auto_accept = false;
     let mut udp_parse_workers = None;
     let mut udp_parse_round_robin = false;
+    let mut transaction_dispatch_workers = None;
+    let mut transaction_dispatch_queue_capacity = None;
+    let mut signaling_only_media = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--diagnostics" => {
@@ -117,6 +127,10 @@ async fn main() {
             "--diagnostic-events" => {
                 diagnostics.summary = true;
                 diagnostics.cleanup_events = true;
+            }
+            "--transaction-timing-diagnostics" => {
+                diagnostics.summary = true;
+                diagnostics.transaction_timing = true;
             }
             "--wire-diagnostics" => {
                 diagnostics.wire = true;
@@ -136,6 +150,26 @@ async fn main() {
             }
             "--udp-parse-round-robin" => {
                 udp_parse_round_robin = true;
+            }
+            "--signaling-only-media" => {
+                signaling_only_media = true;
+            }
+            "--transaction-dispatch-workers" => {
+                let value = args
+                    .next()
+                    .unwrap_or_else(|| panic!("--transaction-dispatch-workers requires a value"));
+                transaction_dispatch_workers = Some(value.parse::<usize>().unwrap_or_else(|e| {
+                    panic!("invalid --transaction-dispatch-workers '{value}': {e}")
+                }));
+            }
+            "--transaction-dispatch-queue-capacity" => {
+                let value = args.next().unwrap_or_else(|| {
+                    panic!("--transaction-dispatch-queue-capacity requires a value")
+                });
+                transaction_dispatch_queue_capacity =
+                    Some(value.parse::<usize>().unwrap_or_else(|e| {
+                        panic!("invalid --transaction-dispatch-queue-capacity '{value}': {e}")
+                    }));
             }
             _ if advertised_arg.is_none() => {
                 advertised_arg = Some(arg);
@@ -189,6 +223,9 @@ async fn main() {
         fast_auto_accept,
         udp_parse_workers,
         udp_parse_round_robin,
+        transaction_dispatch_workers,
+        transaction_dispatch_queue_capacity,
+        signaling_only_media,
     );
     print_effective_config(&config);
 
@@ -310,12 +347,16 @@ fn apply_perf_config(
     fast_auto_accept: bool,
     udp_parse_workers: Option<usize>,
     udp_parse_round_robin: bool,
+    transaction_dispatch_workers: Option<usize>,
+    transaction_dispatch_queue_capacity: Option<usize>,
+    signaling_only_media: bool,
 ) -> Config {
     let mut config = config
         .with_high_cps_udp_auto_answer(HIGH_CPS_CAPACITY)
         .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
         .with_media_session_capacity(HIGH_CPS_CAPACITY)
         .with_sip_udp_diagnostics(diagnostics.summary)
+        .with_sip_transaction_timing_diagnostics(diagnostics.transaction_timing)
         .with_media_setup_diagnostics(diagnostics.summary)
         .with_cleanup_diagnostics(diagnostics.summary)
         .with_cleanup_diagnostic_events(diagnostics.cleanup_events)
@@ -328,6 +369,15 @@ fn apply_perf_config(
     }
     if udp_parse_round_robin {
         config = config.with_sip_udp_parse_dispatch(UdpParseDispatch::RoundRobin);
+    }
+    if let Some(workers) = transaction_dispatch_workers {
+        config = config.with_sip_transaction_dispatch_workers(workers);
+    }
+    if let Some(capacity) = transaction_dispatch_queue_capacity {
+        config = config.with_sip_transaction_dispatch_queue_capacity(capacity);
+    }
+    if signaling_only_media {
+        config = config.with_media_mode(MediaMode::SignalingOnly { sdp_rtp_port: 9 });
     }
     if fast_auto_accept {
         config.with_fast_auto_accept_incoming_calls(true)
@@ -342,7 +392,9 @@ fn print_effective_config(config: &Config) {
          auto_100_trying={} \
          fast_auto_accept_incoming_calls={} \
          sip_udp_parse_workers={:?} sip_udp_parse_queue_capacity={:?} \
-         sip_udp_parse_dispatch={:?}",
+         sip_udp_parse_dispatch={:?} \
+         sip_transaction_dispatch_workers={:?} \
+         sip_transaction_dispatch_queue_capacity={:?}",
         HIGH_CPS_CAPACITY,
         config.auto_180_ringing,
         config.auto_100_trying,
@@ -350,6 +402,8 @@ fn print_effective_config(config: &Config) {
         config.sip_udp_parse_workers,
         config.sip_udp_parse_queue_capacity,
         config.sip_udp_parse_dispatch,
+        config.sip_transaction_dispatch_workers,
+        config.sip_transaction_dispatch_queue_capacity,
     );
     println!(
         "rvoip-sip perf_listener: channels incoming={} state={} sip_transport={} \
@@ -372,9 +426,10 @@ fn print_effective_config(config: &Config) {
         config.media_mode,
     );
     println!(
-        "rvoip-sip perf_listener: diagnostics sip_udp={} media_setup={} cleanup={} \
-         cleanup_events={} srtp={} rtp={} media_sdp={}",
+        "rvoip-sip perf_listener: diagnostics sip_udp={} transaction_timing={} \
+         media_setup={} cleanup={} cleanup_events={} srtp={} rtp={} media_sdp={}",
         config.sip_udp_diagnostics,
+        config.sip_transaction_timing_diagnostics,
         config.media_setup_diagnostics,
         config.cleanup_diagnostics,
         config.cleanup_diagnostic_events,

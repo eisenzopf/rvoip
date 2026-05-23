@@ -15,6 +15,11 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
     assert_eq!(Config::default().media_port_capacity, None);
     assert_eq!(Config::default().media_session_capacity, None);
     assert_eq!(Config::default().transaction_event_channel_capacity, 10_000);
+    assert_eq!(Config::default().sip_transaction_dispatch_workers, None);
+    assert_eq!(
+        Config::default().sip_transaction_dispatch_queue_capacity,
+        None
+    );
     assert_eq!(Config::default().global_event_channel_capacity, 10_000);
     assert!(Config::default().session_event_dispatcher_workers >= 1);
     assert_eq!(
@@ -23,6 +28,7 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
     );
     assert_eq!(Config::default().server_call_capacity, None);
     assert!(!Config::default().sip_udp_diagnostics);
+    assert!(!Config::default().sip_transaction_timing_diagnostics);
     assert!(!Config::default().media_setup_diagnostics);
     assert!(!Config::default().cleanup_diagnostics);
     assert!(!Config::default().cleanup_diagnostic_events);
@@ -43,6 +49,9 @@ fn incoming_call_channel_capacity_is_configurable() {
         .with_sip_udp_parse_workers(4)
         .with_sip_udp_parse_queue_capacity(32_768)
         .with_transaction_event_channel_capacity(12_288)
+        .with_sip_transaction_dispatch_workers(4)
+        .with_sip_transaction_dispatch_queue_capacity(65_536)
+        .with_sip_transaction_timing_diagnostics(true)
         .with_global_event_channel_capacity(20_000)
         .with_session_event_dispatcher_workers(4)
         .with_session_event_dispatcher_channel_capacity(16_384);
@@ -55,6 +64,9 @@ fn incoming_call_channel_capacity_is_configurable() {
     assert_eq!(config.sip_udp_parse_workers, Some(4));
     assert_eq!(config.sip_udp_parse_queue_capacity, Some(32_768));
     assert_eq!(config.transaction_event_channel_capacity, 12_288);
+    assert_eq!(config.sip_transaction_dispatch_workers, Some(4));
+    assert_eq!(config.sip_transaction_dispatch_queue_capacity, Some(65_536));
+    assert!(config.sip_transaction_timing_diagnostics);
     assert_eq!(config.global_event_channel_capacity, 20_000);
     assert_eq!(config.session_event_dispatcher_workers, 4);
     assert_eq!(config.session_event_dispatcher_channel_capacity, 16_384);
@@ -88,6 +100,8 @@ fn high_cps_udp_auto_answer_profile_sets_fast_config_without_server_capacity() {
     assert_eq!(config.session_event_dispatcher_channel_capacity, 200_000);
     assert_eq!(config.sip_udp_parse_workers, Some(1));
     assert_eq!(config.sip_udp_parse_queue_capacity, Some(20_000));
+    assert_eq!(config.sip_transaction_dispatch_workers, None);
+    assert_eq!(config.sip_transaction_dispatch_queue_capacity, None);
     assert_eq!(config.server_call_capacity, None);
 }
 
@@ -231,6 +245,29 @@ fn zero_transaction_event_channel_capacity_is_rejected() {
 }
 
 #[test]
+fn zero_transaction_dispatch_config_is_rejected_when_set() {
+    let mut config = Config::local("capacity-test", 5060);
+    config.sip_transaction_dispatch_workers = Some(0);
+
+    let err = config.validate().expect_err("zero workers must fail");
+    assert!(
+        err.to_string()
+            .contains("sip_transaction_dispatch_workers must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+
+    let mut config = Config::local("capacity-test", 5060);
+    config.sip_transaction_dispatch_queue_capacity = Some(0);
+
+    let err = config.validate().expect_err("zero capacity must fail");
+    assert!(
+        err.to_string()
+            .contains("sip_transaction_dispatch_queue_capacity must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+}
+
+#[test]
 fn zero_global_event_channel_capacity_is_rejected() {
     let mut config = Config::local("capacity-test", 5060);
     config.global_event_channel_capacity = 0;
@@ -316,6 +353,7 @@ async fn diagnostic_flags_are_independent_at_runtime() {
             .expect("sip diagnostics coordinator");
     assert!(rvoip_sip_transport::diagnostics::enabled());
     assert!(rvoip_sip_dialog::diagnostics::enabled());
+    assert!(!rvoip_sip_dialog::diagnostics::transaction_timing_enabled());
     assert!(!rvoip_media_core::diagnostics::enabled());
     assert!(!cleanup_diag::enabled());
     sip_only
@@ -323,12 +361,27 @@ async fn diagnostic_flags_are_independent_at_runtime() {
         .await
         .expect("shutdown sip diagnostics coordinator");
 
+    let transaction_timing = UnifiedCoordinator::new(
+        Config::local("diag-tx-timing", 0)
+            .with_sip_udp_diagnostics(true)
+            .with_sip_transaction_timing_diagnostics(true),
+    )
+    .await
+    .expect("transaction timing diagnostics coordinator");
+    assert!(rvoip_sip_dialog::diagnostics::enabled());
+    assert!(rvoip_sip_dialog::diagnostics::transaction_timing_enabled());
+    transaction_timing
+        .shutdown_gracefully(Some(Duration::ZERO))
+        .await
+        .expect("shutdown transaction timing diagnostics coordinator");
+
     let media_only =
         UnifiedCoordinator::new(Config::local("diag-media", 0).with_media_setup_diagnostics(true))
             .await
             .expect("media diagnostics coordinator");
     assert!(!rvoip_sip_transport::diagnostics::enabled());
     assert!(!rvoip_sip_dialog::diagnostics::enabled());
+    assert!(!rvoip_sip_dialog::diagnostics::transaction_timing_enabled());
     assert!(rvoip_media_core::diagnostics::enabled());
     assert!(!cleanup_diag::enabled());
     media_only
@@ -342,6 +395,7 @@ async fn diagnostic_flags_are_independent_at_runtime() {
             .expect("cleanup diagnostics coordinator");
     assert!(!rvoip_sip_transport::diagnostics::enabled());
     assert!(!rvoip_sip_dialog::diagnostics::enabled());
+    assert!(!rvoip_sip_dialog::diagnostics::transaction_timing_enabled());
     assert!(!rvoip_media_core::diagnostics::enabled());
     assert!(cleanup_diag::enabled());
     cleanup_only
@@ -354,6 +408,7 @@ async fn diagnostic_flags_are_independent_at_runtime() {
         .expect("default diagnostics coordinator");
     assert!(!rvoip_sip_transport::diagnostics::enabled());
     assert!(!rvoip_sip_dialog::diagnostics::enabled());
+    assert!(!rvoip_sip_dialog::diagnostics::transaction_timing_enabled());
     assert!(!rvoip_media_core::diagnostics::enabled());
     assert!(!cleanup_diag::enabled());
     defaults

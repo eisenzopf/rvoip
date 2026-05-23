@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
@@ -917,7 +918,12 @@ impl TransactionManager {
                     }
                     diagnostics::record_duplicate_invite_cache_miss();
                 }
-                return transaction.process_request(request).await;
+                let dispatch_started = diagnostics::transaction_timing_enabled().then(Instant::now);
+                let result = transaction.process_request(request).await;
+                if let Some(started) = dispatch_started {
+                    diagnostics::record_existing_transaction_dispatch(started.elapsed());
+                }
+                return result;
             }
 
             if request.method() == Method::Invite
@@ -930,21 +936,27 @@ impl TransactionManager {
         }
 
         // No existing transaction found, create a new one
+        let create_started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let transaction = self
             .create_server_transaction(request.clone(), source)
             .await?;
+        if let Some(started) = create_started {
+            diagnostics::record_server_transaction_create(started.elapsed());
+        }
 
         // Notify the transaction user about the new transaction
         match transaction.kind() {
             TransactionKind::InviteServer => {
-                self.events_tx
-                    .send(crate::transaction::TransactionEvent::InviteRequest {
+                send_transaction_event(
+                    &self.events_tx,
+                    crate::transaction::TransactionEvent::InviteRequest {
                         transaction_id: transaction.id().clone(),
                         request,
                         source,
-                    })
-                    .await
-                    .ok();
+                    },
+                )
+                .await
+                .ok();
             }
             TransactionKind::NonInviteServer => {
                 // For non-INVITE requests, notify based on the method
@@ -954,14 +966,16 @@ impl TransactionManager {
                         // to link them with the target INVITE transaction
                     }
                     _ => {
-                        self.events_tx
-                            .send(crate::transaction::TransactionEvent::NonInviteRequest {
+                        send_transaction_event(
+                            &self.events_tx,
+                            crate::transaction::TransactionEvent::NonInviteRequest {
                                 transaction_id: transaction.id().clone(),
                                 request,
                                 source,
-                            })
-                            .await
-                            .ok();
+                            },
+                        )
+                        .await
+                        .ok();
                     }
                 }
             }
@@ -1043,7 +1057,12 @@ impl TransactionManager {
                     return Ok(());
                 }
 
-                if let Err(e) = transaction.process_response(response.clone()).await {
+                let dispatch_started = diagnostics::transaction_timing_enabled().then(Instant::now);
+                let process_result = transaction.process_response(response.clone()).await;
+                if let Some(started) = dispatch_started {
+                    diagnostics::record_existing_transaction_dispatch(started.elapsed());
+                }
+                if let Err(e) = process_result {
                     warn!(id=%key, error=%e, "Error processing response");
                 } else {
                     debug!("🔍 RESPONSE HANDLER: Successfully processed response in transaction");
@@ -1064,47 +1083,55 @@ impl TransactionManager {
                 let status = response.status();
                 if key.method() == &Method::Invite && status.is_success() {
                     // Special handling for 2xx responses to INVITE
-                    self.events_tx
-                        .send(crate::transaction::TransactionEvent::SuccessResponse {
+                    send_transaction_event(
+                        &self.events_tx,
+                        crate::transaction::TransactionEvent::SuccessResponse {
                             transaction_id: key,
                             response,
                             need_ack: true,
                             source,
-                        })
-                        .await
-                        .ok();
+                        },
+                    )
+                    .await
+                    .ok();
                 } else {
                     // All other responses - classify by status code
                     let status_code = response.status_code();
                     if status_code >= 100 && status_code < 200 {
                         // 1xx provisional response
-                        self.events_tx
-                            .send(crate::transaction::TransactionEvent::ProvisionalResponse {
+                        send_transaction_event(
+                            &self.events_tx,
+                            crate::transaction::TransactionEvent::ProvisionalResponse {
                                 transaction_id: key,
                                 response,
-                            })
-                            .await
-                            .ok();
+                            },
+                        )
+                        .await
+                        .ok();
                     } else if status.is_success() && key.method() != &Method::Invite {
                         // 2xx success response for non-INVITE
-                        self.events_tx
-                            .send(crate::transaction::TransactionEvent::SuccessResponse {
+                        send_transaction_event(
+                            &self.events_tx,
+                            crate::transaction::TransactionEvent::SuccessResponse {
                                 transaction_id: key,
                                 response,
                                 need_ack: false,
                                 source,
-                            })
-                            .await
-                            .ok();
+                            },
+                        )
+                        .await
+                        .ok();
                     } else {
                         // 3xx, 4xx, 5xx, 6xx failure response
-                        self.events_tx
-                            .send(crate::transaction::TransactionEvent::FailureResponse {
+                        send_transaction_event(
+                            &self.events_tx,
+                            crate::transaction::TransactionEvent::FailureResponse {
                                 transaction_id: key,
                                 response,
-                            })
-                            .await
-                            .ok();
+                            },
+                        )
+                        .await
+                        .ok();
                     }
                 }
             }
@@ -1120,10 +1147,12 @@ impl TransactionManager {
         // This could be a response for a transaction that has already terminated
         // or a response forwarded by another SIP entity (for proxy scenarios)
         // In any case, deliver it to the transaction user
-        self.events_tx
-            .send(crate::transaction::TransactionEvent::StrayResponse { response, source })
-            .await
-            .ok();
+        send_transaction_event(
+            &self.events_tx,
+            crate::transaction::TransactionEvent::StrayResponse { response, source },
+        )
+        .await
+        .ok();
 
         Ok(())
     }
@@ -1168,7 +1197,13 @@ impl TransactionManager {
                         invite_key
                     );
                     self.remove_invite_2xx_response_cache(&invite_key);
-                    return transaction.process_request(request).await;
+                    let dispatch_started =
+                        diagnostics::transaction_timing_enabled().then(Instant::now);
+                    let result = transaction.process_request(request).await;
+                    if let Some(started) = dispatch_started {
+                        diagnostics::record_existing_transaction_dispatch(started.elapsed());
+                    }
+                    return result;
                 }
             }
         }
@@ -1185,13 +1220,15 @@ impl TransactionManager {
 
             // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
             // Instead, emit AckReceived event for dialog-core to handle
-            self.events_tx
-                .send(crate::transaction::TransactionEvent::AckReceived {
+            send_transaction_event(
+                &self.events_tx,
+                crate::transaction::TransactionEvent::AckReceived {
                     transaction_id: tx_id,
                     request,
-                })
-                .await
-                .map_err(|e| Error::Other(format!("Failed to emit AckReceived event: {}", e)))?;
+                },
+            )
+            .await
+            .map_err(|e| Error::Other(format!("Failed to emit AckReceived event: {}", e)))?;
 
             debug!("Emitted AckReceived event for dialog-core to handle 2xx ACK");
             return Ok(());
@@ -1201,10 +1238,12 @@ impl TransactionManager {
         debug!("No matching INVITE transaction found for ACK request");
 
         // Notify the transaction user about the stray ACK
-        self.events_tx
-            .send(crate::transaction::TransactionEvent::StrayAckRequest { request, source })
-            .await
-            .ok();
+        send_transaction_event(
+            &self.events_tx,
+            crate::transaction::TransactionEvent::StrayAckRequest { request, source },
+        )
+        .await
+        .ok();
 
         Ok(())
     }
@@ -1252,6 +1291,18 @@ impl TransactionManager {
             Some(entry)
         }
     }
+}
+
+async fn send_transaction_event(
+    events_tx: &mpsc::Sender<TransactionEvent>,
+    event: TransactionEvent,
+) -> std::result::Result<(), mpsc::error::SendError<TransactionEvent>> {
+    let started = diagnostics::transaction_timing_enabled().then(Instant::now);
+    let result = events_tx.send(event).await;
+    if let Some(started) = started {
+        diagnostics::record_transaction_event_broadcast(started.elapsed());
+    }
+    result
 }
 
 /// Helper function to handle stray CANCEL requests

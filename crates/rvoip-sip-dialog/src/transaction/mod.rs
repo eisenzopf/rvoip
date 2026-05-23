@@ -116,7 +116,7 @@ pub use key::*;
 pub use state::*;
 
 // Re-export manager
-pub use manager::TransactionManager;
+pub use manager::{TransactionManager, MAX_TRANSACTION_DISPATCH_WORKERS};
 
 /// Defines the core traits, types, and machinery for SIP transactions.
 ///

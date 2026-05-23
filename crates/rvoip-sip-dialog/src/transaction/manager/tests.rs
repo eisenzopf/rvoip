@@ -1,6 +1,9 @@
 #[cfg(test)]
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
+    use super::super::{
+        transaction_dispatch_worker_index, transaction_ingress_kind, TransactionIngressKind,
+    };
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
     use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
     use crate::transaction::error::{Error, Result};
@@ -16,13 +19,14 @@ mod tests {
     use rvoip_sip_core::types::Address;
     use rvoip_sip_core::types::Contact;
     use rvoip_sip_core::types::ContactParamInfo;
-    use rvoip_sip_transport::Transport;
+    use rvoip_sip_transport::transport::TransportType;
+    use rvoip_sip_transport::{Transport, TransportEvent};
     use std::collections::HashMap;
     use std::fs::File;
     use std::io::Write;
     use std::net::SocketAddr;
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::mpsc;
     use tokio::sync::Mutex;
@@ -132,6 +136,154 @@ mod tests {
             .via("127.0.0.1:5060", "UDP", Some("z9hG4bK.ackbranchvalue"))
             .max_forwards(70)
             .build())
+    }
+
+    fn create_dispatch_request(
+        method: Method,
+        branch: &str,
+        cseq: u32,
+    ) -> std::result::Result<Request, Box<dyn std::error::Error>> {
+        Ok(
+            SimpleRequestBuilder::new(method.clone(), "sip:bob@example.com")?
+                .from("Alice", "sip:alice@example.com", Some("alice-dispatch-tag"))
+                .to("Bob", "sip:bob@example.com", Some("bob-dispatch-tag"))
+                .contact("sip:alice@127.0.0.1:5060", None)
+                .call_id("dispatch-call-id-1234")
+                .cseq(cseq)
+                .via("127.0.0.1:5060", "UDP", Some(branch))
+                .max_forwards(70)
+                .build(),
+        )
+    }
+
+    fn dispatch_event(message: Message) -> TransportEvent {
+        TransportEvent::MessageReceived {
+            message,
+            source: "127.0.0.1:5060".parse().unwrap(),
+            destination: "127.0.0.1:5061".parse().unwrap(),
+            transport_type: TransportType::Udp,
+            raw_bytes: None,
+            timing: None,
+        }
+    }
+
+    #[test]
+    fn transaction_dispatch_routes_dialog_requests_to_same_worker(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 4;
+
+        let invite = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Invite,
+            "z9hG4bK.dispatch-invite",
+            101,
+        )?));
+        let ack = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Ack,
+            "z9hG4bK.dispatch-ack",
+            101,
+        )?));
+        let bye = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Bye,
+            "z9hG4bK.dispatch-bye",
+            102,
+        )?));
+        let cancel = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Cancel,
+            "z9hG4bK.dispatch-cancel",
+            101,
+        )?));
+
+        let expected = transaction_dispatch_worker_index(&invite, worker_count, &fallback_worker);
+        assert_eq!(
+            transaction_dispatch_worker_index(&ack, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(&bye, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(&cancel, worker_count, &fallback_worker),
+            expected
+        );
+        assert_eq!(fallback_worker.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            transaction_ingress_kind(&invite),
+            TransactionIngressKind::Invite
+        );
+        assert_eq!(transaction_ingress_kind(&ack), TransactionIngressKind::Ack);
+        assert_eq!(transaction_ingress_kind(&bye), TransactionIngressKind::Bye);
+        assert_eq!(
+            transaction_ingress_kind(&cancel),
+            TransactionIngressKind::Cancel
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_dispatch_routes_responses_by_transaction_key(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 4;
+        let invite_request =
+            create_dispatch_request(Method::Invite, "z9hG4bK.dispatch-response", 101)?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, None);
+        let response_event = dispatch_event(Message::Response(response));
+
+        let first =
+            transaction_dispatch_worker_index(&response_event, worker_count, &fallback_worker);
+        let second =
+            transaction_dispatch_worker_index(&response_event, worker_count, &fallback_worker);
+
+        assert_eq!(first, second);
+        assert_eq!(fallback_worker.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            transaction_ingress_kind(&response_event),
+            TransactionIngressKind::Other
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_dispatch_round_robins_unkeyed_events() {
+        let fallback_worker = AtomicUsize::new(0);
+        let worker_count = 3;
+
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            0
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            1
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            2
+        );
+        assert_eq!(
+            transaction_dispatch_worker_index(
+                &TransportEvent::Closed,
+                worker_count,
+                &fallback_worker
+            ),
+            0
+        );
     }
 
     /// Helper to create a simple 200 OK response for testing

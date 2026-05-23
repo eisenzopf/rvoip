@@ -3,6 +3,31 @@
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
 
+macro_rules! latency_buckets {
+    () => {
+        [
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+            AtomicU64::new(0),
+        ]
+    };
+}
+
 const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
     10,
     25,
@@ -25,6 +50,7 @@ const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
 ];
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+static TRANSACTION_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
 
 static DUP_INVITE_EXISTING_TX: AtomicU64 = AtomicU64::new(0);
 static DUP_INVITE_CACHE_HIT: AtomicU64 = AtomicU64::new(0);
@@ -152,6 +178,68 @@ static BYE_RECEIVE_TO_200_BUCKETS: [AtomicU64; 18] = [
     AtomicU64::new(0),
 ];
 
+struct LatencyMetric {
+    count: AtomicU64,
+    sum_us: AtomicU64,
+    max_us: AtomicU64,
+    over_500ms: AtomicU64,
+    buckets: [AtomicU64; 18],
+}
+
+impl LatencyMetric {
+    const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            sum_us: AtomicU64::new(0),
+            max_us: AtomicU64::new(0),
+            over_500ms: AtomicU64::new(0),
+            buckets: latency_buckets!(),
+        }
+    }
+
+    fn reset(&self) {
+        self.count.store(0, Ordering::Relaxed);
+        self.sum_us.store(0, Ordering::Relaxed);
+        self.max_us.store(0, Ordering::Relaxed);
+        self.over_500ms.store(0, Ordering::Relaxed);
+        for bucket in &self.buckets {
+            bucket.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn record(&self, elapsed: Duration) {
+        record_latency(
+            elapsed,
+            &self.count,
+            &self.sum_us,
+            &self.max_us,
+            &self.over_500ms,
+            &self.buckets,
+        );
+    }
+
+    fn snapshot(&self) -> LatencySnapshot {
+        latency_snapshot(
+            &self.buckets,
+            &self.count,
+            &self.sum_us,
+            &self.max_us,
+            &self.over_500ms,
+        )
+    }
+}
+
+static TRANSACTION_DISPATCH_QUEUE: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_HANDLER_TOTAL: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_HANDLER_INVITE: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_HANDLER_ACK: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_HANDLER_BYE: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_HANDLER_CANCEL: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_HANDLER_OTHER: LatencyMetric = LatencyMetric::new();
+static SERVER_TRANSACTION_CREATE: LatencyMetric = LatencyMetric::new();
+static EXISTING_TRANSACTION_DISPATCH: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_EVENT_BROADCAST: LatencyMetric = LatencyMetric::new();
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LatencySnapshot {
     pub count: u64,
@@ -208,6 +296,16 @@ pub struct Snapshot {
     pub dialog_to_session_queue_other: u64,
     pub udp_receive_to_incoming_call_emit: LatencySnapshot,
     pub bye_receive_to_200: LatencySnapshot,
+    pub transaction_dispatch_queue: LatencySnapshot,
+    pub transaction_handler_total: LatencySnapshot,
+    pub transaction_handler_invite: LatencySnapshot,
+    pub transaction_handler_ack: LatencySnapshot,
+    pub transaction_handler_bye: LatencySnapshot,
+    pub transaction_handler_cancel: LatencySnapshot,
+    pub transaction_handler_other: LatencySnapshot,
+    pub server_transaction_create: LatencySnapshot,
+    pub existing_transaction_dispatch: LatencySnapshot,
+    pub transaction_event_broadcast: LatencySnapshot,
 }
 
 pub fn enabled() -> bool {
@@ -221,9 +319,26 @@ pub fn set_enabled(enabled: bool) {
     ENABLED_OVERRIDE.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
 }
 
+pub fn transaction_timing_enabled() -> bool {
+    enabled()
+        && match TRANSACTION_TIMING_ENABLED.load(Ordering::Relaxed) {
+            2 => true,
+            _ => false,
+        }
+}
+
+pub fn set_transaction_timing_enabled(enabled: bool) {
+    TRANSACTION_TIMING_ENABLED.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+}
+
 #[cfg(test)]
 fn set_enabled_for_tests(enabled: bool) {
     set_enabled(enabled);
+}
+
+#[cfg(test)]
+fn set_transaction_timing_enabled_for_tests(enabled: bool) {
+    set_transaction_timing_enabled(enabled);
 }
 
 pub fn reset() {
@@ -241,6 +356,9 @@ pub fn reset() {
     }
     for bucket in &BYE_RECEIVE_TO_200_BUCKETS {
         bucket.store(0, Ordering::Relaxed);
+    }
+    for metric in transaction_latency_metrics() {
+        metric.reset();
     }
 }
 
@@ -336,6 +454,16 @@ pub fn snapshot() -> Snapshot {
             &BYE_RECEIVE_TO_200_MAX_US,
             &BYE_RECEIVE_TO_200_OVER_500MS,
         ),
+        transaction_dispatch_queue: TRANSACTION_DISPATCH_QUEUE.snapshot(),
+        transaction_handler_total: TRANSACTION_HANDLER_TOTAL.snapshot(),
+        transaction_handler_invite: TRANSACTION_HANDLER_INVITE.snapshot(),
+        transaction_handler_ack: TRANSACTION_HANDLER_ACK.snapshot(),
+        transaction_handler_bye: TRANSACTION_HANDLER_BYE.snapshot(),
+        transaction_handler_cancel: TRANSACTION_HANDLER_CANCEL.snapshot(),
+        transaction_handler_other: TRANSACTION_HANDLER_OTHER.snapshot(),
+        server_transaction_create: SERVER_TRANSACTION_CREATE.snapshot(),
+        existing_transaction_dispatch: EXISTING_TRANSACTION_DISPATCH.snapshot(),
+        transaction_event_broadcast: TRANSACTION_EVENT_BROADCAST.snapshot(),
     }
 }
 
@@ -359,7 +487,10 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          dialog_to_session_queue=[count={} avg_us={} p50_us={} p95_us={} p99_us={} \
          p999_us={} max_us={} over_500ms={} incoming_call={} ack_received={} \
          bye_received={} terminal={} other={}] \
-         udp_receive_to_incoming_call_emit=[{}] bye_receive_to_200=[{}]",
+         udp_receive_to_incoming_call_emit=[{}] bye_receive_to_200=[{}] \
+         transaction_dispatch_queue=[{}] transaction_handler=[total=[{}] invite=[{}] \
+         ack=[{}] bye=[{}] cancel=[{}] other=[{}]] server_transaction_create=[{}] \
+         existing_transaction_dispatch=[{}] transaction_event_broadcast=[{}]",
         snapshot.duplicate_invite_existing_transaction,
         snapshot.duplicate_invite_cache_hit,
         snapshot.duplicate_invite_cache_miss,
@@ -402,6 +533,16 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.dialog_to_session_queue_other,
         format_latency(&snapshot.udp_receive_to_incoming_call_emit),
         format_latency(&snapshot.bye_receive_to_200),
+        format_latency(&snapshot.transaction_dispatch_queue),
+        format_latency(&snapshot.transaction_handler_total),
+        format_latency(&snapshot.transaction_handler_invite),
+        format_latency(&snapshot.transaction_handler_ack),
+        format_latency(&snapshot.transaction_handler_bye),
+        format_latency(&snapshot.transaction_handler_cancel),
+        format_latency(&snapshot.transaction_handler_other),
+        format_latency(&snapshot.server_transaction_create),
+        format_latency(&snapshot.existing_transaction_dispatch),
+        format_latency(&snapshot.transaction_event_broadcast),
     )
 }
 
@@ -519,6 +660,44 @@ pub fn record_bye_receive_to_200(elapsed: Duration) {
         &BYE_RECEIVE_TO_200_OVER_500MS,
         &BYE_RECEIVE_TO_200_BUCKETS,
     );
+}
+
+pub(crate) fn record_transaction_dispatch_queue_delay(elapsed: Duration) {
+    if transaction_timing_enabled() {
+        TRANSACTION_DISPATCH_QUEUE.record(elapsed);
+    }
+}
+
+pub(crate) fn record_transaction_handler(kind: &str, elapsed: Duration) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    TRANSACTION_HANDLER_TOTAL.record(elapsed);
+    match kind {
+        "invite" => TRANSACTION_HANDLER_INVITE.record(elapsed),
+        "ack" => TRANSACTION_HANDLER_ACK.record(elapsed),
+        "bye" => TRANSACTION_HANDLER_BYE.record(elapsed),
+        "cancel" => TRANSACTION_HANDLER_CANCEL.record(elapsed),
+        _ => TRANSACTION_HANDLER_OTHER.record(elapsed),
+    }
+}
+
+pub(crate) fn record_server_transaction_create(elapsed: Duration) {
+    if transaction_timing_enabled() {
+        SERVER_TRANSACTION_CREATE.record(elapsed);
+    }
+}
+
+pub(crate) fn record_existing_transaction_dispatch(elapsed: Duration) {
+    if transaction_timing_enabled() {
+        EXISTING_TRANSACTION_DISPATCH.record(elapsed);
+    }
+}
+
+pub(crate) fn record_transaction_event_broadcast(elapsed: Duration) {
+    if transaction_timing_enabled() {
+        TRANSACTION_EVENT_BROADCAST.record(elapsed);
+    }
 }
 
 fn increment(counter: &AtomicU64) {
@@ -695,6 +874,21 @@ fn all_counters() -> [&'static AtomicU64; 40] {
     ]
 }
 
+fn transaction_latency_metrics() -> [&'static LatencyMetric; 10] {
+    [
+        &TRANSACTION_DISPATCH_QUEUE,
+        &TRANSACTION_HANDLER_TOTAL,
+        &TRANSACTION_HANDLER_INVITE,
+        &TRANSACTION_HANDLER_ACK,
+        &TRANSACTION_HANDLER_BYE,
+        &TRANSACTION_HANDLER_CANCEL,
+        &TRANSACTION_HANDLER_OTHER,
+        &SERVER_TRANSACTION_CREATE,
+        &EXISTING_TRANSACTION_DISPATCH,
+        &TRANSACTION_EVENT_BROADCAST,
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,14 +896,41 @@ mod tests {
     #[test]
     fn retransmission_diagnostics_format_counts() {
         set_enabled_for_tests(false);
+        set_transaction_timing_enabled_for_tests(false);
         reset();
         record_duplicate_invite_existing_transaction();
         record_udp_receive_to_incoming_call_emit(Duration::from_micros(125));
+        record_transaction_dispatch_queue_delay(Duration::from_micros(75));
+        record_transaction_handler("invite", Duration::from_micros(100));
+        record_server_transaction_create(Duration::from_micros(350));
+        record_existing_transaction_dispatch(Duration::from_micros(400));
+        record_transaction_event_broadcast(Duration::from_micros(450));
         let disabled = snapshot();
         assert_eq!(disabled.duplicate_invite_existing_transaction, 0);
         assert_eq!(disabled.udp_receive_to_incoming_call_emit.count, 0);
+        assert_eq!(disabled.transaction_dispatch_queue.count, 0);
+        assert_eq!(disabled.transaction_handler_total.count, 0);
+        assert_eq!(disabled.server_transaction_create.count, 0);
+        assert_eq!(disabled.existing_transaction_dispatch.count, 0);
+        assert_eq!(disabled.transaction_event_broadcast.count, 0);
 
         set_enabled_for_tests(true);
+        set_transaction_timing_enabled_for_tests(false);
+        reset();
+
+        record_transaction_dispatch_queue_delay(Duration::from_micros(75));
+        record_transaction_handler("invite", Duration::from_micros(100));
+        record_server_transaction_create(Duration::from_micros(350));
+        record_existing_transaction_dispatch(Duration::from_micros(400));
+        record_transaction_event_broadcast(Duration::from_micros(450));
+        let transaction_disabled = snapshot();
+        assert_eq!(transaction_disabled.transaction_dispatch_queue.count, 0);
+        assert_eq!(transaction_disabled.transaction_handler_total.count, 0);
+        assert_eq!(transaction_disabled.server_transaction_create.count, 0);
+        assert_eq!(transaction_disabled.existing_transaction_dispatch.count, 0);
+        assert_eq!(transaction_disabled.transaction_event_broadcast.count, 0);
+
+        set_transaction_timing_enabled_for_tests(true);
         reset();
 
         record_duplicate_invite_existing_transaction();
@@ -725,6 +946,15 @@ mod tests {
         record_duplicate_bye_terminated_dialog();
         record_udp_receive_to_incoming_call_emit(Duration::from_micros(125));
         record_bye_receive_to_200(Duration::from_micros(250));
+        record_transaction_dispatch_queue_delay(Duration::from_micros(75));
+        record_transaction_handler("invite", Duration::from_micros(100));
+        record_transaction_handler("ack", Duration::from_micros(150));
+        record_transaction_handler("bye", Duration::from_micros(200));
+        record_transaction_handler("cancel", Duration::from_micros(250));
+        record_transaction_handler("other", Duration::from_micros(300));
+        record_server_transaction_create(Duration::from_micros(350));
+        record_existing_transaction_dispatch(Duration::from_micros(400));
+        record_transaction_event_broadcast(Duration::from_micros(450));
 
         let snapshot = snapshot();
         assert_eq!(snapshot.duplicate_invite_existing_transaction, 1);
@@ -732,10 +962,22 @@ mod tests {
         assert_eq!(snapshot.duplicate_bye_tombstone_hit, 1);
         assert_eq!(snapshot.udp_receive_to_incoming_call_emit.count, 1);
         assert_eq!(snapshot.bye_receive_to_200.count, 1);
+        assert_eq!(snapshot.transaction_dispatch_queue.count, 1);
+        assert_eq!(snapshot.transaction_handler_total.count, 5);
+        assert_eq!(snapshot.transaction_handler_invite.count, 1);
+        assert_eq!(snapshot.transaction_handler_ack.count, 1);
+        assert_eq!(snapshot.transaction_handler_bye.count, 1);
+        assert_eq!(snapshot.transaction_handler_cancel.count, 1);
+        assert_eq!(snapshot.transaction_handler_other.count, 1);
+        assert_eq!(snapshot.server_transaction_create.count, 1);
+        assert_eq!(snapshot.existing_transaction_dispatch.count, 1);
+        assert_eq!(snapshot.transaction_event_broadcast.count, 1);
         let summary = format_summary(&snapshot);
         assert!(summary.contains("dup_invite_cache_hit=1"));
         assert!(summary.contains("dup_bye_tombstone_hit=1"));
         assert!(summary.contains("udp_receive_to_incoming_call_emit=[count=1"));
         assert!(summary.contains("bye_receive_to_200=[count=1"));
+        assert!(summary.contains("transaction_dispatch_queue=[count=1"));
+        assert!(summary.contains("transaction_handler=[total=[count=5"));
     }
 }

@@ -160,6 +160,12 @@ impl SessionBuilder {
         self
     }
 
+    /// Enable or disable high-cardinality transaction timing diagnostics.
+    pub fn with_sip_transaction_timing_diagnostics(mut self, enabled: bool) -> Self {
+        self.config = self.config.with_sip_transaction_timing_diagnostics(enabled);
+        self
+    }
+
     /// Enable or disable media setup/teardown timing diagnostics.
     pub fn with_media_setup_diagnostics(mut self, enabled: bool) -> Self {
         self.config = self.config.with_media_setup_diagnostics(enabled);

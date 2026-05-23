@@ -171,6 +171,7 @@ pub use utils::*;
 use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
@@ -234,6 +235,8 @@ pub(crate) type ArcClientTransaction = Arc<dyn ClientTransaction>;
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
 const MIN_TRANSACTION_INDEX_CAPACITY: usize = 1024;
+const DEFAULT_TRANSACTION_DISPATCH_WORKERS: usize = 1;
+pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
 // Keep successful INVITE responses available long enough for high-load UAC
 // retransmission windows. Entries are removed as soon as the 2xx ACK arrives,
 // so this is a tail bound for lossy/missing-ACK calls, not a full call-volume
@@ -247,6 +250,16 @@ fn transaction_index_capacity(capacity: Option<usize>) -> usize {
 
 fn invite_2xx_response_cache_capacity(index_capacity: usize) -> usize {
     index_capacity.max(MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY)
+}
+
+fn transaction_dispatch_worker_count(workers: Option<usize>) -> usize {
+    workers
+        .unwrap_or(DEFAULT_TRANSACTION_DISPATCH_WORKERS)
+        .clamp(1, MAX_TRANSACTION_DISPATCH_WORKERS)
+}
+
+fn transaction_dispatch_queue_capacity(capacity: Option<usize>, default_capacity: usize) -> usize {
+    capacity.unwrap_or(default_capacity).max(1)
 }
 
 fn transport_token_for_request(request: &Request) -> &'static str {
@@ -395,6 +408,35 @@ pub struct TransactionManager {
     /// when transport diagnostics are enabled and consumed by dialog-core
     /// instrumentation when it emits higher-level events or BYE responses.
     pub(crate) pending_inbound_timing: Arc<DashMap<TransactionKey, TransportReceiveTiming>>,
+    transaction_dispatch_workers: usize,
+    transaction_dispatch_queue_capacity: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionIngressKind {
+    Invite,
+    Ack,
+    Bye,
+    Cancel,
+    Other,
+}
+
+impl TransactionIngressKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Invite => "invite",
+            Self::Ack => "ack",
+            Self::Bye => "bye",
+            Self::Cancel => "cancel",
+            Self::Other => "other",
+        }
+    }
+}
+
+struct QueuedTransactionDispatch {
+    event: TransportEvent,
+    queued_at: Option<Instant>,
+    kind: Option<TransactionIngressKind>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -414,6 +456,151 @@ fn build_timer_settings() -> TimerSettings {
         }
     }
     settings
+}
+
+fn transaction_ingress_kind(event: &TransportEvent) -> TransactionIngressKind {
+    match event {
+        TransportEvent::MessageReceived { message, .. } => match message {
+            Message::Request(request) => match request.method() {
+                Method::Invite => TransactionIngressKind::Invite,
+                Method::Ack => TransactionIngressKind::Ack,
+                Method::Bye => TransactionIngressKind::Bye,
+                Method::Cancel => TransactionIngressKind::Cancel,
+                _ => TransactionIngressKind::Other,
+            },
+            Message::Response(_) => TransactionIngressKind::Other,
+        },
+        _ => TransactionIngressKind::Other,
+    }
+}
+
+fn request_dialog_route_hash(request: &Request) -> Option<u64> {
+    let call_id = request.call_id()?;
+    let from_tag = request.from_tag()?;
+    let mut hasher = DefaultHasher::new();
+    call_id.value().hash(&mut hasher);
+    from_tag.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn transaction_event_route_hash(event: &TransportEvent) -> Option<u64> {
+    let TransportEvent::MessageReceived { message, .. } = event else {
+        return None;
+    };
+
+    if let Message::Request(request) = message {
+        if let Some(hash) = request_dialog_route_hash(request) {
+            return Some(hash);
+        }
+    }
+
+    let key = transaction_key_from_message(message)?;
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn transaction_dispatch_worker_index(
+    event: &TransportEvent,
+    worker_count: usize,
+    fallback_worker: &AtomicUsize,
+) -> usize {
+    if worker_count <= 1 {
+        return 0;
+    }
+
+    if let Some(hash) = transaction_event_route_hash(event) {
+        return (hash as usize) % worker_count;
+    }
+
+    fallback_worker.fetch_add(1, Ordering::Relaxed) % worker_count
+}
+
+fn start_transaction_dispatch_workers(
+    manager: TransactionManager,
+    worker_count: usize,
+    queue_capacity: usize,
+) -> Arc<Vec<mpsc::Sender<QueuedTransactionDispatch>>> {
+    let worker_count = worker_count.clamp(1, MAX_TRANSACTION_DISPATCH_WORKERS);
+    let per_worker_capacity = (queue_capacity / worker_count).max(1);
+    let mut senders = Vec::with_capacity(worker_count);
+
+    for worker_id in 0..worker_count {
+        let (tx, mut rx) = mpsc::channel::<QueuedTransactionDispatch>(per_worker_capacity);
+        let manager_for_worker = manager.clone();
+        tokio::spawn(async move {
+            while let Some(queued) = rx.recv().await {
+                if let Some(queued_at) = queued.queued_at {
+                    diagnostics::record_transaction_dispatch_queue_delay(queued_at.elapsed());
+                }
+                process_transaction_dispatch_event(&manager_for_worker, queued).await;
+            }
+            debug!(worker_id, "Transaction dispatch worker terminated");
+        });
+        senders.push(tx);
+    }
+
+    info!(
+        workers = worker_count,
+        per_worker_capacity, "Transaction manager dispatch workers enabled"
+    );
+
+    Arc::new(senders)
+}
+
+async fn dispatch_transaction_event(
+    event: TransportEvent,
+    dispatch_senders: &Arc<Vec<mpsc::Sender<QueuedTransactionDispatch>>>,
+    fallback_worker: &AtomicUsize,
+) {
+    let worker_index =
+        transaction_dispatch_worker_index(&event, dispatch_senders.len(), fallback_worker);
+    let timing_enabled = diagnostics::transaction_timing_enabled();
+    let kind = timing_enabled.then(|| transaction_ingress_kind(&event));
+    let queued = QueuedTransactionDispatch {
+        event,
+        kind,
+        queued_at: timing_enabled.then(Instant::now),
+    };
+
+    match dispatch_senders[worker_index].try_send(queued) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(queued)) => {
+            warn!(
+                worker_index,
+                kind = queued.kind.map(|kind| kind.as_str()).unwrap_or("unknown"),
+                "Transaction dispatch worker queue full; applying backpressure"
+            );
+            if dispatch_senders[worker_index].send(queued).await.is_err() {
+                warn!(worker_index, "Transaction dispatch worker channel closed");
+            }
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            warn!(worker_index, "Transaction dispatch worker channel closed");
+        }
+    }
+}
+
+async fn process_transaction_dispatch_event(
+    manager: &TransactionManager,
+    queued: QueuedTransactionDispatch,
+) {
+    let timing_enabled = diagnostics::transaction_timing_enabled();
+    let kind = timing_enabled.then(|| {
+        queued
+            .kind
+            .unwrap_or_else(|| transaction_ingress_kind(&queued.event))
+    });
+    let handler_started = timing_enabled.then(Instant::now);
+    if let Err(e) = manager.handle_transport_event(queued.event).await {
+        error!("Error handling transport message: {}", e);
+    }
+    if let Some(started) = handler_started {
+        diagnostics::record_transaction_handler(
+            kind.expect("timed transaction kind").as_str(),
+            started.elapsed(),
+        );
+    }
 }
 
 impl TransactionManager {
@@ -582,6 +769,8 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
+            transaction_dispatch_queue_capacity: events_capacity,
         };
 
         // Start the message processing loop
@@ -703,6 +892,8 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
+            transaction_dispatch_queue_capacity: events_capacity,
         };
 
         // Start the message processing loop
@@ -812,6 +1003,27 @@ impl TransactionManager {
         capacity: Option<usize>,
         index_capacity: Option<usize>,
     ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
+        Self::with_transport_manager_and_index_capacity_and_dispatch(
+            transport_manager,
+            transport_rx,
+            capacity,
+            index_capacity,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Creates a transaction manager with separate event/index capacities and
+    /// optional receive-side transaction dispatch workers.
+    pub async fn with_transport_manager_and_index_capacity_and_dispatch(
+        transport_manager: crate::transaction::transport::TransportManager,
+        transport_rx: mpsc::Receiver<TransportEvent>,
+        capacity: Option<usize>,
+        index_capacity: Option<usize>,
+        dispatch_workers: Option<usize>,
+        dispatch_queue_capacity: Option<usize>,
+    ) -> Result<(Self, mpsc::Receiver<TransactionEvent>)> {
         // Wrap the manager's per-flavour registry behind a
         // `MultiplexedTransport` so outbound requests get URI-aware
         // transport selection (RFC 3261 §18.1.1, §26.2). When the
@@ -833,6 +1045,9 @@ impl TransactionManager {
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
         let index_capacity = transaction_index_capacity(index_capacity.or(Some(events_capacity)));
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
+        let transaction_dispatch_workers = transaction_dispatch_worker_count(dispatch_workers);
+        let transaction_dispatch_queue_capacity =
+            transaction_dispatch_queue_capacity(dispatch_queue_capacity, events_capacity);
 
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
@@ -881,6 +1096,8 @@ impl TransactionManager {
             sip_trace,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            transaction_dispatch_workers,
+            transaction_dispatch_queue_capacity,
         };
 
         // Start the message processing loop
@@ -981,6 +1198,8 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
+            transaction_dispatch_queue_capacity: 100,
         }
     }
 
@@ -1055,6 +1274,8 @@ impl TransactionManager {
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
+            transaction_dispatch_queue_capacity: 10,
         }
     }
 
@@ -1824,6 +2045,7 @@ impl TransactionManager {
         transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
         manager: Option<TransactionManager>,
     ) {
+        let broadcast_started = diagnostics::transaction_timing_enabled().then(Instant::now);
         // Extract transaction ID from the event for filtering
         let transaction_id = match &event {
             TransactionEvent::StateChanged { transaction_id, .. } => Some(transaction_id),
@@ -1965,6 +2187,9 @@ impl TransactionManager {
                 });
             }
         }
+        if let Some(started) = broadcast_started {
+            diagnostics::record_transaction_event_broadcast(started.elapsed());
+        }
     }
 
     /// Handle transaction termination event and clean up terminated transactions
@@ -2103,20 +2328,31 @@ impl TransactionManager {
 
     /// Start the message processing loop for handling incoming transport events
     fn start_message_loop(&self) {
-        let transport_arc = self.transport.clone();
-        let client_transactions = self.client_transactions.clone();
-        let server_transactions = self.server_transactions.clone();
         let events_tx = self.events_tx.clone();
         let transport_rx = self.transport_rx.clone();
         let event_subscribers = self.event_subscribers.clone();
         let running = self.running.clone();
         let manager_arc = self.clone();
+        let dispatch_workers = self.transaction_dispatch_workers;
+        let dispatch_queue_capacity = self.transaction_dispatch_queue_capacity;
 
         tokio::spawn(async move {
             debug!("Starting transaction message loop");
 
             // Create a separate channel to receive events from transactions
             let (internal_tx, mut internal_rx) = mpsc::channel(100);
+            let _internal_tx = internal_tx;
+
+            let dispatch_senders = if dispatch_workers > DEFAULT_TRANSACTION_DISPATCH_WORKERS {
+                Some(start_transaction_dispatch_workers(
+                    manager_arc.clone(),
+                    dispatch_workers,
+                    dispatch_queue_capacity,
+                ))
+            } else {
+                None
+            };
+            let fallback_dispatch_worker = Arc::new(AtomicUsize::new(0));
 
             // Set running flag (AtomicBool — single store instruction)
             running.store(true, Ordering::Relaxed);
@@ -2149,8 +2385,25 @@ impl TransactionManager {
                         let still_running = manager_arc.running.load(Ordering::Relaxed);
                         if still_running {
                             mark_transaction_manager_received(&mut message_event, Instant::now());
-                            if let Err(e) = manager_arc.handle_transport_event(message_event).await {
-                                error!("Error handling transport message: {}", e);
+                            if let Some(dispatch_senders) = dispatch_senders.as_ref() {
+                                dispatch_transaction_event(
+                                    message_event,
+                                    dispatch_senders,
+                                    &fallback_dispatch_worker,
+                                ).await;
+                            } else if diagnostics::transaction_timing_enabled() {
+                                process_transaction_dispatch_event(
+                                    &manager_arc,
+                                    QueuedTransactionDispatch {
+                                        kind: Some(transaction_ingress_kind(&message_event)),
+                                        event: message_event,
+                                        queued_at: None,
+                                    },
+                                ).await;
+                            } else {
+                                if let Err(e) = manager_arc.handle_transport_event(message_event).await {
+                                    error!("Error handling transport message: {}", e);
+                                }
                             }
                         } else {
                             debug!("Skipping transport event processing - shutting down");

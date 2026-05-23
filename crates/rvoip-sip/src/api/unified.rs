@@ -674,6 +674,20 @@ pub struct Config {
     /// dialog/session cleanup catches up. Default: `10000`.
     pub transaction_event_channel_capacity: usize,
 
+    /// Optional transaction-manager ingress worker count.
+    ///
+    /// `None` preserves the single receive/handle loop used by clients and
+    /// ordinary endpoints. High-CPS servers can set this above `1` to fan out
+    /// transaction handling by a stable call/transaction key while preserving
+    /// per-call request ordering.
+    pub sip_transaction_dispatch_workers: Option<usize>,
+
+    /// Optional transaction-manager ingress queue capacity.
+    ///
+    /// `None` uses [`Config::transaction_event_channel_capacity`]. When
+    /// dispatch workers are enabled, this capacity is divided across workers.
+    pub sip_transaction_dispatch_queue_capacity: Option<usize>,
+
     /// Capacity for the infra-common global cross-crate event bus used inside
     /// this coordinator.
     ///
@@ -715,6 +729,14 @@ pub struct Config {
     /// toggles. It enables UDP receive/send counters and SIP duplicate
     /// INVITE/BYE cache counters for this process.
     pub sip_udp_diagnostics: bool,
+
+    /// Enable high-cardinality transaction timing diagnostics.
+    ///
+    /// This records per-message transaction dispatch, handler, transaction
+    /// creation, existing-transaction dispatch, and event-send histograms. It
+    /// is intentionally separate from [`Config::sip_udp_diagnostics`] because
+    /// it adds hot-path timestamp and atomic work under high CPS.
+    pub sip_transaction_timing_diagnostics: bool,
 
     /// Enable media setup/teardown timing diagnostics.
     ///
@@ -841,11 +863,14 @@ impl Config {
             sip_udp_parse_queue_capacity: None,
             sip_udp_parse_dispatch: None,
             transaction_event_channel_capacity: 10_000,
+            sip_transaction_dispatch_workers: None,
+            sip_transaction_dispatch_queue_capacity: None,
             global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
             sip_udp_diagnostics: false,
+            sip_transaction_timing_diagnostics: false,
             media_setup_diagnostics: false,
             cleanup_diagnostics: false,
             cleanup_diagnostic_events: false,
@@ -924,11 +949,14 @@ impl Config {
             sip_udp_parse_queue_capacity: None,
             sip_udp_parse_dispatch: None,
             transaction_event_channel_capacity: 10_000,
+            sip_transaction_dispatch_workers: None,
+            sip_transaction_dispatch_queue_capacity: None,
             global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
             session_event_dispatcher_channel_capacity: 10_000,
             server_call_capacity: None,
             sip_udp_diagnostics: false,
+            sip_transaction_timing_diagnostics: false,
             media_setup_diagnostics: false,
             cleanup_diagnostics: false,
             cleanup_diagnostic_events: false,
@@ -1399,6 +1427,35 @@ impl Config {
         self
     }
 
+    /// Set the transaction-manager ingress dispatch worker count.
+    ///
+    /// Values above `1` enable keyed sharding of incoming transport events.
+    /// Values below `1` are rejected by [`Config::validate`].
+    pub fn with_sip_transaction_dispatch_workers(mut self, workers: usize) -> Self {
+        self.sip_transaction_dispatch_workers = Some(workers);
+        self
+    }
+
+    /// Set the transaction-manager ingress dispatch queue capacity.
+    ///
+    /// `None` uses [`Config::transaction_event_channel_capacity`]. Values below
+    /// `1` are rejected by [`Config::validate`].
+    pub fn with_sip_transaction_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
+        self.sip_transaction_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set transaction-manager ingress worker and queue overrides together.
+    pub fn with_sip_transaction_dispatch_config(
+        mut self,
+        workers: Option<usize>,
+        queue_capacity: Option<usize>,
+    ) -> Self {
+        self.sip_transaction_dispatch_workers = workers;
+        self.sip_transaction_dispatch_queue_capacity = queue_capacity;
+        self
+    }
+
     /// Set the infra-common global event bus channel capacity.
     ///
     /// The default is `10000`. Values below `1` are rejected by
@@ -1427,6 +1484,12 @@ impl Config {
     /// Enable or disable SIP UDP transport and duplicate-recovery diagnostics.
     pub fn with_sip_udp_diagnostics(mut self, enabled: bool) -> Self {
         self.sip_udp_diagnostics = enabled;
+        self
+    }
+
+    /// Enable or disable high-cardinality transaction timing diagnostics.
+    pub fn with_sip_transaction_timing_diagnostics(mut self, enabled: bool) -> Self {
+        self.sip_transaction_timing_diagnostics = enabled;
         self
     }
 
@@ -1613,6 +1676,24 @@ impl Config {
         if self.transaction_event_channel_capacity == 0 {
             return Err(SessionError::ConfigError(
                 "transaction_event_channel_capacity must be at least 1".to_string(),
+            ));
+        }
+        if matches!(self.sip_transaction_dispatch_workers, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_transaction_dispatch_workers must be at least 1 when set".to_string(),
+            ));
+        }
+        if let Some(workers) = self.sip_transaction_dispatch_workers {
+            if workers > rvoip_sip_dialog::transaction::MAX_TRANSACTION_DISPATCH_WORKERS {
+                return Err(SessionError::ConfigError(format!(
+                    "sip_transaction_dispatch_workers must be <= {} when set",
+                    rvoip_sip_dialog::transaction::MAX_TRANSACTION_DISPATCH_WORKERS
+                )));
+            }
+        }
+        if matches!(self.sip_transaction_dispatch_queue_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_transaction_dispatch_queue_capacity must be at least 1 when set".to_string(),
             ));
         }
         if self.global_event_channel_capacity == 0 {
@@ -2085,6 +2166,9 @@ impl UnifiedCoordinator {
         config.validate()?;
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
+        rvoip_sip_dialog::diagnostics::set_transaction_timing_enabled(
+            config.sip_transaction_timing_diagnostics,
+        );
         rvoip_media_core::diagnostics::set_enabled(config.media_setup_diagnostics);
         crate::cleanup_diag::set_enabled(config.cleanup_diagnostics);
         crate::cleanup_diag::set_event_logs_enabled(config.cleanup_diagnostic_events);
@@ -3727,11 +3811,13 @@ impl UnifiedCoordinator {
 
         // Create transaction manager using transport manager
         let (transaction_manager, event_rx) =
-            TransactionManager::with_transport_manager_and_index_capacity(
+            TransactionManager::with_transport_manager_and_index_capacity_and_dispatch(
                 transport_manager,
                 transport_event_rx,
                 Some(config.transaction_event_channel_capacity),
                 Some(config.transaction_index_capacity_hint()),
+                config.sip_transaction_dispatch_workers,
+                config.sip_transaction_dispatch_queue_capacity,
             )
             .await
             .map_err(|e| {
