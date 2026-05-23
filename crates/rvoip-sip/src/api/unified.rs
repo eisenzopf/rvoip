@@ -1179,16 +1179,18 @@ impl Config {
 
     /// Apply a high-CPS UDP auto-answer profile.
     ///
-    /// This keeps media enabled, suppresses automatic `180 Ringing`, sizes SIP
-    /// event queues from `capacity`, and configures the UDP receive path for a
-    /// single fast parse worker with a queue sized to the same burst capacity.
-    /// It leaves automatic `100 Trying` enabled because Timer 100 remains part
-    /// of the transaction pacing/recovery behavior under overload. It does not
-    /// enlarge socket buffers and does not set
+    /// This keeps media enabled, suppresses automatic provisional responses,
+    /// sizes SIP event queues from `capacity`, and configures the UDP receive
+    /// path for a single fast parse worker with a queue sized to the same
+    /// burst capacity. It disables automatic `100 Trying` because fixed
+    /// immediate-answer services should send the final response before Timer
+    /// 100 would fire, and avoiding the timer task/message reduces hot-path
+    /// work. It does not enlarge socket buffers and does not set
     /// [`Config::server_call_capacity`].
     pub fn with_high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
         self = self.with_channel_capacity(capacity);
         self.auto_180_ringing = false;
+        self.auto_100_trying = false;
         self.sip_udp_parse_workers = Some(1);
         self.sip_udp_parse_queue_capacity = Some(capacity);
         self.media_mode = MediaMode::Enabled;
@@ -2063,9 +2065,7 @@ impl UnifiedCoordinator {
         config.validate()?;
         rvoip_sip_transport::diagnostics::set_enabled(config.sip_udp_diagnostics);
         rvoip_sip_dialog::diagnostics::set_enabled(config.sip_udp_diagnostics);
-        rvoip_media_core::diagnostics::set_enabled(
-            config.media_setup_diagnostics || config.sip_udp_diagnostics,
-        );
+        rvoip_media_core::diagnostics::set_enabled(config.media_setup_diagnostics);
         crate::cleanup_diag::set_enabled(config.cleanup_diagnostics);
         crate::cleanup_diag::set_event_logs_enabled(config.cleanup_diagnostic_events);
         crate::adapters::media_adapter::set_sdp_diagnostics(

@@ -8,12 +8,18 @@
 //! cargo run -p rvoip-sip --release --example perf_listener -- 5060
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics --diagnostic-events
 //! ```
 //!
 //! The optional second argument sets the SIP Contact/Via fallback address and
 //! SDP `o=`/`c=` public media address. Use a container-visible host IP for
 //! Docker-sidecar SIPp runs so the 200 OK does not advertise `127.0.0.1` back
 //! to the container.
+//!
+//! `--diagnostics` enables summary counters for SIP UDP, duplicate recovery,
+//! media setup, and cleanup. `--diagnostic-events` additionally enables
+//! per-operation cleanup event logs. `--wire-diagnostics` enables noisy
+//! SRTP/RTP/SDP diagnostic logs.
 //!
 //! The process runs forever; SIGINT to terminate.
 
@@ -34,6 +40,13 @@ use rvoip_sip_transport::diagnostics as sip_udp_diag;
 const HIGH_CPS_CAPACITY: usize = 20_000;
 const HIGH_CPS_RTP_PORT_START: u16 = 16_384;
 const HIGH_CPS_RTP_PORT_CAPACITY: usize = 49_152;
+
+#[derive(Clone, Copy, Default)]
+struct PerfDiagnostics {
+    summary: bool,
+    cleanup_events: bool,
+    wire: bool,
+}
 
 #[derive(Clone)]
 struct CountingAccept {
@@ -78,6 +91,31 @@ fn sip_uri_host(ip: IpAddr) -> String {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
+    let mut args = std::env::args().skip(1);
+    let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5060);
+    let mut advertised_arg = None;
+    let mut diagnostics = PerfDiagnostics::default();
+    for arg in args {
+        match arg.as_str() {
+            "--diagnostics" => {
+                diagnostics.summary = true;
+            }
+            "--diagnostic-events" => {
+                diagnostics.summary = true;
+                diagnostics.cleanup_events = true;
+            }
+            "--wire-diagnostics" => {
+                diagnostics.wire = true;
+            }
+            _ if advertised_arg.is_none() => {
+                advertised_arg = Some(arg);
+            }
+            _ => {
+                panic!("unexpected perf_listener argument '{arg}'");
+            }
+        }
+    }
+
     // NEXT_STEPS B.1 diag — bring tracing online so the
     // `Action::CleanupMedia` info! log is visible alongside the
     // `accepted_total` / `cleaned_total` poll output. Default to
@@ -87,7 +125,7 @@ async fn main() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                if cleanup_diag::enabled() {
+                if diagnostics.cleanup_events {
                     "warn,rvoip_sip::state_machine::actions=info,rvoip_sip::cleanup_diag=info"
                         .into()
                 } else {
@@ -97,20 +135,6 @@ async fn main() {
         )
         .with_target(false)
         .try_init();
-
-    let mut args = std::env::args().skip(1);
-    let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5060);
-    let mut advertised_arg = None;
-    let mut diagnostics_enabled = false;
-    for arg in args {
-        if arg == "--diagnostics" {
-            diagnostics_enabled = true;
-        } else if advertised_arg.is_none() {
-            advertised_arg = Some(arg);
-        } else {
-            panic!("unexpected perf_listener argument '{arg}'");
-        }
-    }
 
     let config = if let Some(raw) = advertised_arg {
         let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), port);
@@ -129,7 +153,7 @@ async fn main() {
     } else {
         Config::local("rvoip-perf-listener", port)
     };
-    let config = apply_perf_config(config, diagnostics_enabled);
+    let config = apply_perf_config(config, diagnostics);
     print_effective_config(&config);
 
     let accepted = Arc::new(AtomicU64::new(0));
@@ -244,14 +268,18 @@ fn print_sip_udp_diagnostics() {
     }
 }
 
-fn apply_perf_config(config: Config, diagnostics_enabled: bool) -> Config {
+fn apply_perf_config(config: Config, diagnostics: PerfDiagnostics) -> Config {
     config
         .with_high_cps_udp_auto_answer(HIGH_CPS_CAPACITY)
         .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
         .with_media_session_capacity(HIGH_CPS_CAPACITY)
-        .with_sip_udp_diagnostics(diagnostics_enabled)
-        .with_media_setup_diagnostics(diagnostics_enabled)
-        .with_cleanup_diagnostics(diagnostics_enabled)
+        .with_sip_udp_diagnostics(diagnostics.summary)
+        .with_media_setup_diagnostics(diagnostics.summary)
+        .with_cleanup_diagnostics(diagnostics.summary)
+        .with_cleanup_diagnostic_events(diagnostics.cleanup_events)
+        .with_srtp_diagnostics(diagnostics.wire)
+        .with_rtp_diagnostics(diagnostics.wire)
+        .with_media_sdp_diagnostics(diagnostics.wire)
 }
 
 fn print_effective_config(config: &Config) {

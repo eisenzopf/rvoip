@@ -1,4 +1,7 @@
-use rvoip_sip::Config;
+use std::time::Duration;
+
+use rvoip_sip::{cleanup_diag, Config, UnifiedCoordinator};
+use serial_test::serial;
 
 #[test]
 fn incoming_call_channel_capacity_defaults_to_1000() {
@@ -75,7 +78,7 @@ fn high_cps_udp_auto_answer_profile_sets_fast_config_without_server_capacity() {
     let config = Config::local("capacity-test", 5060).with_high_cps_udp_auto_answer(20_000);
 
     assert!(!config.auto_180_ringing);
-    assert!(config.auto_100_trying);
+    assert!(!config.auto_100_trying);
     assert!(!config.fast_auto_accept_incoming_calls);
     assert_eq!(config.incoming_call_channel_capacity, 20_000);
     assert_eq!(config.state_event_channel_capacity, 20_000);
@@ -302,4 +305,59 @@ fn zero_server_call_capacity_is_rejected_when_set() {
             .contains("server_call_capacity must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn diagnostic_flags_are_independent_at_runtime() {
+    let sip_only =
+        UnifiedCoordinator::new(Config::local("diag-sip", 0).with_sip_udp_diagnostics(true))
+            .await
+            .expect("sip diagnostics coordinator");
+    assert!(rvoip_sip_transport::diagnostics::enabled());
+    assert!(rvoip_sip_dialog::diagnostics::enabled());
+    assert!(!rvoip_media_core::diagnostics::enabled());
+    assert!(!cleanup_diag::enabled());
+    sip_only
+        .shutdown_gracefully(Some(Duration::ZERO))
+        .await
+        .expect("shutdown sip diagnostics coordinator");
+
+    let media_only =
+        UnifiedCoordinator::new(Config::local("diag-media", 0).with_media_setup_diagnostics(true))
+            .await
+            .expect("media diagnostics coordinator");
+    assert!(!rvoip_sip_transport::diagnostics::enabled());
+    assert!(!rvoip_sip_dialog::diagnostics::enabled());
+    assert!(rvoip_media_core::diagnostics::enabled());
+    assert!(!cleanup_diag::enabled());
+    media_only
+        .shutdown_gracefully(Some(Duration::ZERO))
+        .await
+        .expect("shutdown media diagnostics coordinator");
+
+    let cleanup_only =
+        UnifiedCoordinator::new(Config::local("diag-cleanup", 0).with_cleanup_diagnostics(true))
+            .await
+            .expect("cleanup diagnostics coordinator");
+    assert!(!rvoip_sip_transport::diagnostics::enabled());
+    assert!(!rvoip_sip_dialog::diagnostics::enabled());
+    assert!(!rvoip_media_core::diagnostics::enabled());
+    assert!(cleanup_diag::enabled());
+    cleanup_only
+        .shutdown_gracefully(Some(Duration::ZERO))
+        .await
+        .expect("shutdown cleanup diagnostics coordinator");
+
+    let defaults = UnifiedCoordinator::new(Config::local("diag-default", 0))
+        .await
+        .expect("default diagnostics coordinator");
+    assert!(!rvoip_sip_transport::diagnostics::enabled());
+    assert!(!rvoip_sip_dialog::diagnostics::enabled());
+    assert!(!rvoip_media_core::diagnostics::enabled());
+    assert!(!cleanup_diag::enabled());
+    defaults
+        .shutdown_gracefully(Some(Duration::ZERO))
+        .await
+        .expect("shutdown default diagnostics coordinator");
 }

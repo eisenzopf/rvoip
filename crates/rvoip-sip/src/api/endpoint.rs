@@ -2347,6 +2347,7 @@ mod tests {
                 "profile": "asterisk-udp",
                 "auto180Ringing": false,
                 "auto100Trying": false,
+                "fastAutoAcceptIncomingCalls": true,
                 "cleanupDiagnostics": true,
                 "cleanupDiagnosticEvents": true,
                 "srtpDiagnostics": true,
@@ -2387,6 +2388,7 @@ mod tests {
         assert!(!parts.config.srtp_required);
         assert!(!parts.config.auto_180_ringing);
         assert!(!parts.config.auto_100_trying);
+        assert!(parts.config.fast_auto_accept_incoming_calls);
         assert!(parts.config.cleanup_diagnostics);
         assert!(parts.config.cleanup_diagnostic_events);
         assert!(parts.config.srtp_diagnostics);

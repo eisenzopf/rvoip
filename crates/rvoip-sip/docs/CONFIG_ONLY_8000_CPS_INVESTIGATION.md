@@ -6,7 +6,10 @@ The high-CPS fast-answer behavior has been moved into public
 `rvoip-sip` `Config` APIs and the benchmark listener no longer depends
 on the old `RVOIP_*` server behavior environment variables. A follow-up
 wiring audit removed the remaining env-backed runtime diagnostic toggles
-from the high-CPS server path.
+from the high-CPS server path. A quick-answer profile follow-up now also
+disables automatic Timer 100 / `100 Trying` for the high-CPS profile so
+fixed immediate-answer listeners avoid one timer task per INVITE and any
+extra provisional responses.
 
 The current branch builds and the targeted config tests pass. A fresh
 Config-only `8000 CPS` media-enabled listener accepts and cleans all
@@ -27,6 +30,8 @@ Config-only validation still has recovered INVITE/BYE retransmits:
 | Config-only, diagnostics on | `120000/120000` | `2990` | No failed calls, final `in_flight=0`, all duplicate retransmits recovered by indexed caches. |
 | Config-audit rerun, diagnostics off | `120000/120000` | `4171` | `2026-05-23 01:57`, no failed calls, warnings `0`, dead messages `0`, response `>=500 ms` count `2576`, final listener `accepted_total=120000 cleaned_total=120000`, UDP full-socket drop delta `0`. |
 | Inline fast-accept listener experiment | `119999/120000` | `3497` | `2026-05-23 02:09`, `fast_auto_accept_incoming_calls=true`; lower retransmits but failed target: one SIPp timeout/dead-call path and final listener `accepted_total=120000 cleaned_total=119999`. |
+| Auto-100-disabled rerun, diagnostics off | `120000/120000` | `3257` | `2026-05-23 02:35`, no failed calls, warnings/dead messages `7/7`, response `>=500 ms` count `2013`, final listener `accepted_total=120000 cleaned_total=120000`, UDP full-socket drop delta `0`. |
+| Auto-100-disabled rerun, diagnostics on | `120000/120000` | `3365` | `2026-05-23 02:37`, `resp_1xx=0`, `resp_2xx=243379`, duplicate cache misses `0`, cleanup `active_total=0`, UDP full-socket drop delta `0`. |
 
 This means the public Config wiring is in place, but the zero-retransmit
 performance target is not yet restored. The next
@@ -65,6 +70,7 @@ Config::local("perf-listener", port)
 The profile applies:
 
 - `auto_180_ringing = false`
+- `auto_100_trying = false`
 - `with_channel_capacity(capacity)`
 - `sip_udp_parse_workers = Some(1)`
 - `sip_udp_parse_queue_capacity = Some(capacity)`
@@ -75,7 +81,10 @@ The profile applies:
 The profile deliberately does not set `server_call_capacity`. During
 the earlier migration, using broad call capacity for media preallocation
 also inflated dialog/transaction indexes and made retransmits worse. The
-current branch keeps media capacity separate.
+current branch keeps media capacity separate. The profile also keeps
+`fast_auto_accept_incoming_calls = false`; that remains an explicit
+application opt-in because the inline fast-accept experiment reduced
+retransmits but missed the target by one completed cleanup.
 
 Relevant files:
 
@@ -132,13 +141,18 @@ Added Config flags:
 
 `UnifiedCoordinator::new` now propagates them to:
 
-- `rvoip_sip_transport::diagnostics::set_enabled`
-- `rvoip_sip_dialog::diagnostics::set_enabled`
-- `rvoip_media_core::diagnostics::set_enabled`
-- `rvoip_sip::cleanup_diag::set_enabled`
-- `rvoip_sip::cleanup_diag::set_event_logs_enabled`
-- `rvoip_sip::adapters::media_adapter::set_sdp_diagnostics`
-- `rvoip_rtp_core::transport::set_udp_diagnostics`
+- `sip_udp_diagnostics` ->
+  `rvoip_sip_transport::diagnostics::set_enabled` and
+  `rvoip_sip_dialog::diagnostics::set_enabled`
+- `media_setup_diagnostics` ->
+  `rvoip_media_core::diagnostics::set_enabled`
+- `cleanup_diagnostics` -> `rvoip_sip::cleanup_diag::set_enabled`
+- `cleanup_diagnostic_events` ->
+  `rvoip_sip::cleanup_diag::set_event_logs_enabled`
+- `srtp_diagnostics` / `media_sdp_diagnostics` ->
+  `rvoip_sip::adapters::media_adapter::set_sdp_diagnostics`
+- `srtp_diagnostics` / `rtp_diagnostics` ->
+  `rvoip_rtp_core::transport::set_udp_diagnostics`
 
 The old env-backed runtime diagnostic toggles were removed from the
 server path:
@@ -172,8 +186,13 @@ Config::local("perf-listener", port)
     .with_media_session_capacity(20_000)
 ```
 
-It also accepts an optional `--diagnostics` CLI flag that enables the
-Config diagnostics flags used by the perf listener.
+It also accepts optional diagnostics flags:
+
+- `--diagnostics` enables summary counters for SIP UDP, duplicate
+  recovery, media setup, and cleanup.
+- `--diagnostic-events` additionally enables per-operation cleanup event
+  logs and implies `--diagnostics`.
+- `--wire-diagnostics` enables noisy SRTP/RTP/SDP diagnostic logs.
 
 The listener no longer reads these old server behavior env vars:
 
@@ -226,13 +245,16 @@ Updated/added coverage in:
 Covered cases include:
 
 - high-CPS profile sets fast-answer, channel capacity, UDP parse worker,
-  UDP parse queue capacity, and media enabled.
+  UDP parse queue capacity, disabled automatic `180 Ringing`, disabled
+  automatic `100 Trying`, and media enabled.
 - high-CPS profile does not set `server_call_capacity`.
 - media session capacity is independent from `server_call_capacity`.
 - media port capacity computes `16384-65535` for capacity `49152`.
 - media port overflow/range validation fails.
 - zero media capacities are rejected.
-- Config diagnostics flags are retained.
+- Config diagnostics flags are retained and runtime propagation keeps SIP
+  and media setup diagnostics independent.
+- Endpoint JSON maps `fastAutoAcceptIncomingCalls`.
 
 Commands run and passing after the wiring audit:
 
@@ -240,6 +262,7 @@ Commands run and passing after the wiring audit:
 cargo fmt --all --check
 cargo test -p rvoip-sip --test config_channel_capacity_integration -- --nocapture
 cargo test -p rvoip-sip --test config_tests -- --nocapture
+cargo test -p rvoip-sip --test fast_auto_accept_integration -- --nocapture
 cargo test -p rvoip-sip endpoint_json_config_maps_builder_fields -- --nocapture
 cargo check -p rvoip-sip --examples
 cargo build --release -p rvoip-sip --example perf_listener
@@ -387,6 +410,68 @@ Listener final state after stop:
 
 This confirms config wiring is not the remaining blocker. The residual
 problem is first-response latency under the 8000 CPS burst.
+
+### Auto 100 Disabled Rerun
+
+After changing `Config::with_high_cps_udp_auto_answer` to set
+`auto_100_trying=false`, the production-style diagnostics-off benchmark
+was rerun:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_auto100_off_config_20260523_023519
+```
+
+Aggregate SIPp result:
+
+- `TotalCallCreated=120000`
+- `SuccessfulCall=120000`
+- `FailedCall=0`
+- `Retransmissions=3257`
+- `Warnings=7`
+- `DeadCallMsgs=7`
+- response `>=500 ms` buckets `2013`
+- host UDP full-socket-buffer drops delta `0`
+
+Listener final state after stop:
+
+- `accepted_total=120000`
+- `cleaned_total=120000`
+- `in_flight=0`
+
+The warnings/dead messages were late duplicate `200 OK` responses on
+already-successful SIPp calls, consistent with recovered retransmits
+rather than failed calls.
+
+The matching diagnostics-summary pass was rerun here:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_auto100_off_diag_20260523_023707
+```
+
+Aggregate SIPp result:
+
+- `TotalCallCreated=120000`
+- `SuccessfulCall=120000`
+- `FailedCall=0`
+- `Retransmissions=3365`
+- `Warnings=7`
+- `DeadCallMsgs=7`
+- response `>=500 ms` buckets `2075`
+- host UDP full-socket-buffer drops delta `0`
+
+Final diagnostics:
+
+- `accepted_total=120000`
+- `cleaned_total=120000`
+- cleanup `active_total=0`
+- SIP UDP `recv=363365`, `queued=363365`, `queue_full=0`,
+  `parse_ok=363365`, `parse_err=0`
+- SIP UDP `transport_backpressure_events=0`,
+  `manager_backpressure_events=0`
+- SIP UDP `sends=243379`, `send_errors=0`, `resp_1xx=0`,
+  `resp_2xx=243379`
+- Duplicate recovery `dup_invite_cache_miss=0`,
+  `dup_bye_tombstone_miss=0`
 
 ### Inline Fast-Accept Experiment
 
