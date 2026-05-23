@@ -178,15 +178,34 @@ impl EventBusAdapter for MonolithicEventBus {
                 "Starting broadcast->mpsc bridge for event type: {}",
                 event_type
             );
-            while let Ok(event) = broadcast_rx.recv().await {
-                // Forward to mpsc channel
-                if mpsc_tx.send(event).await.is_err() {
-                    // Receiver dropped, stop bridging
-                    debug!(
-                        "Stopping bridge for event type {} - receiver dropped",
-                        event_type
-                    );
-                    break;
+            loop {
+                match broadcast_rx.recv().await {
+                    Ok(event) => {
+                        // Forward to mpsc channel
+                        if mpsc_tx.send(event).await.is_err() {
+                            // Receiver dropped, stop bridging
+                            debug!(
+                                "Stopping bridge for event type {} - receiver dropped",
+                                event_type
+                            );
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        warn!(
+                            event_type,
+                            skipped,
+                            "Broadcast subscriber lagged; continuing bridge after skipped events"
+                        );
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!(
+                            "Stopping bridge for event type {} - broadcast closed",
+                            event_type
+                        );
+                        break;
+                    }
                 }
             }
             debug!("Bridge task ending for event type: {}", event_type);
@@ -620,6 +639,72 @@ pub trait CrossCrateEventHandler: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct TestLagEvent {
+        id: u64,
+    }
+
+    impl CrossCrateEvent for TestLagEvent {
+        fn event_type(&self) -> EventTypeId {
+            "test_lag"
+        }
+
+        fn source_plane(&self) -> PlaneType {
+            PlaneType::Signaling
+        }
+
+        fn target_plane(&self) -> PlaneType {
+            PlaneType::Signaling
+        }
+
+        fn priority(&self) -> EventPriority {
+            EventPriority::Normal
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_bridge_survives_lagged_and_delivers_later_events() {
+        let bus = MonolithicEventBus {
+            event_bus: Arc::new(EventSystem::new_static_fast_path(2)),
+            task_manager: Arc::new(LayerTaskManager::new("test-lag")),
+            broadcasters: Arc::new(DashMap::new()),
+            channel_capacity: 2,
+        };
+
+        let mut rx = bus.subscribe("test_lag").await.unwrap();
+        for id in 0..20 {
+            bus.publish(Arc::new(TestLagEvent { id })).await.unwrap();
+        }
+
+        let mut saw_late_event = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Some(event)) => {
+                    if event
+                        .as_any()
+                        .downcast_ref::<TestLagEvent>()
+                        .is_some_and(|event| event.id >= 18)
+                    {
+                        saw_late_event = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        assert!(
+            saw_late_event,
+            "bridge should continue after RecvError::Lagged and deliver retained later events"
+        );
+    }
 
     #[tokio::test]
     async fn test_monolithic_coordinator_creation() {

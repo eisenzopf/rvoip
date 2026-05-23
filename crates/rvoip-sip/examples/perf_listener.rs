@@ -8,6 +8,7 @@
 //! cargo run -p rvoip-sip --release --example perf_listener -- 5060
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics --diagnostic-events
 //! ```
 //!
@@ -19,7 +20,8 @@
 //! `--diagnostics` enables summary counters for SIP UDP, duplicate recovery,
 //! media setup, and cleanup. `--diagnostic-events` additionally enables
 //! per-operation cleanup event logs. `--wire-diagnostics` enables noisy
-//! SRTP/RTP/SDP diagnostic logs.
+//! SRTP/RTP/SDP diagnostic logs. `--fast-auto-accept` enables the fused
+//! INVITE→200 OK path for validating it before making it a profile default.
 //!
 //! The process runs forever; SIGINT to terminate.
 
@@ -95,6 +97,7 @@ async fn main() {
     let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5060);
     let mut advertised_arg = None;
     let mut diagnostics = PerfDiagnostics::default();
+    let mut fast_auto_accept = false;
     for arg in args {
         match arg.as_str() {
             "--diagnostics" => {
@@ -106,6 +109,9 @@ async fn main() {
             }
             "--wire-diagnostics" => {
                 diagnostics.wire = true;
+            }
+            "--fast-auto-accept" => {
+                fast_auto_accept = true;
             }
             _ if advertised_arg.is_none() => {
                 advertised_arg = Some(arg);
@@ -153,7 +159,7 @@ async fn main() {
     } else {
         Config::local("rvoip-perf-listener", port)
     };
-    let config = apply_perf_config(config, diagnostics);
+    let config = apply_perf_config(config, diagnostics, fast_auto_accept);
     print_effective_config(&config);
 
     let accepted = Arc::new(AtomicU64::new(0));
@@ -268,8 +274,12 @@ fn print_sip_udp_diagnostics() {
     }
 }
 
-fn apply_perf_config(config: Config, diagnostics: PerfDiagnostics) -> Config {
-    config
+fn apply_perf_config(
+    config: Config,
+    diagnostics: PerfDiagnostics,
+    fast_auto_accept: bool,
+) -> Config {
+    let config = config
         .with_high_cps_udp_auto_answer(HIGH_CPS_CAPACITY)
         .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
         .with_media_session_capacity(HIGH_CPS_CAPACITY)
@@ -279,7 +289,13 @@ fn apply_perf_config(config: Config, diagnostics: PerfDiagnostics) -> Config {
         .with_cleanup_diagnostic_events(diagnostics.cleanup_events)
         .with_srtp_diagnostics(diagnostics.wire)
         .with_rtp_diagnostics(diagnostics.wire)
-        .with_media_sdp_diagnostics(diagnostics.wire)
+        .with_media_sdp_diagnostics(diagnostics.wire);
+
+    if fast_auto_accept {
+        config.with_fast_auto_accept_incoming_calls(true)
+    } else {
+        config
+    }
 }
 
 fn print_effective_config(config: &Config) {

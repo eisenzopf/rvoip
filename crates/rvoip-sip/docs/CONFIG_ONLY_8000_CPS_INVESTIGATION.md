@@ -35,13 +35,18 @@ Config-only validation still has recovered INVITE/BYE retransmits:
 | Fused fast-200 path, diagnostics on | `120000/120000` | `11433` | `2026-05-23 03:02`, `fast_auto_accept_incoming_calls=true`; listener `accepted_total=120000 cleaned_total=119135`, `resp_1xx=0`, duplicate cache misses `0`, `first_invite_to_200 over_500ms=0`, max `10726 us`, UDP full-socket drop delta `0`. |
 | Fused fast-200 path, diagnostics off | `120000/120000` | `71566` | `2026-05-23 03:04`, `fast_auto_accept_incoming_calls=true`; listener `accepted_total=120000 cleaned_total=117787`, warnings/dead messages `20775/20775`, response `>=500 ms` count `25714`, UDP full-socket drop delta `0`. |
 
+| Lossless fast-200 direct dispatcher, diagnostics on | `120000/120000` | `1780` | `2026-05-23 03:36`, forced with `perf_listener --fast-auto-accept --diagnostics`; listener `accepted_total=120000 cleaned_total=120000`, `resp_1xx=0`, duplicate cache misses `0`, ACK/BYE delivered `120000/120000`, `bye_cleanup_missing=0`, `first_invite_to_200 over_500ms=0`, host UDP full-socket drop delta `0`. |
+| Lossless fast-200 direct dispatcher, diagnostics off | `120000/120000` | `4295` | `2026-05-23 03:37`, forced with `perf_listener --fast-auto-accept`; warnings/dead messages `0/0`, listener `accepted_total=120000 cleaned_total=120000`, host UDP full-socket drop delta `0`. |
+| Lossless dispatcher, current high-CPS profile, diagnostics off | `120000/120000` | `4545` | `2026-05-23 03:39`, `fast_auto_accept_incoming_calls=false`; warnings/dead messages `3/3`, listener `accepted_total=120000 cleaned_total=120000`, host UDP full-socket drop delta `0`. |
+
 This means the public Config wiring is in place, and the fused fast-200
-path now proves the handler/action segment can send the first `200 OK`
-quickly. The zero-retransmit performance target is still not restored.
-The next developer should not assume every retransmit is a correctness
-failure: many are fast-recovered duplicates. The open question is the
-latency before the fused handler starts, plus why the fast path leaves
-ACK/BYE cleanup short at 8000 CPS.
+path now proves lifecycle correctness under the `8000 CPS` SIPp run:
+ACK, BYE, and cleanup delivery all drain to `120000/120000` with no
+missing cleanup. The zero-retransmit performance target is still not
+restored. The next developer should not assume every retransmit is a
+correctness failure: many are fast-recovered duplicates. The open
+question is now response latency before the session handler's fused
+action timer starts, or loss/scheduling after responses leave rvoip.
 
 ## Goal
 
@@ -582,6 +587,73 @@ The remaining latency is earlier than the fused state-machine action, or
 outside the server after send completion. The cleanup gap also means the
 next pass must account for missing ACK/BYE observation under fast auto
 answer.
+
+### Lossless Fast 200 OK And Cleanup Wiring Rerun
+
+After replacing session-core's internal `dialog_to_session` broadcast
+subscription with a direct registered sharded dispatcher, the fast path
+was benchmarked again. `perf_listener` now has an explicit
+`--fast-auto-accept` flag so this path can be validated without changing
+the high-CPS profile default.
+
+Diagnostics-on result:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_lossless_fast200_diag_20260523_033611
+```
+
+- SIPp `TotalCallCreated=120000`
+- SIPp `SuccessfulCall=120000`
+- SIPp `FailedCall=0`
+- SIPp `Retransmissions=1780`
+- SIPp `Warnings=0`
+- SIPp `DeadCallMsgs=0`
+- listener final `accepted_total=120000 cleaned_total=120000`
+- SIP UDP `resp_1xx=0`
+- duplicate cache misses `0`
+- ACK matched/delivered `120000/120000`
+- BYE `200 OK` sent `120000`
+- BYE cleanup emitted/delivered `120000/120000`
+- BYE cleanup missing `0`
+- `first_invite_to_200 count=120000 avg_us=137 p50_us=250 p95_us=250 p99_us=500 p999_us=500 max_us=10545 over_500ms=0`
+- `dialog_to_session_queue count=360000 avg_us=11 p50_us=10 p95_us=50 p99_us=250 p999_us=500 max_us=9160 over_500ms=0`
+- host UDP full-socket-buffer drops delta `0`
+
+Diagnostics-off result with forced fast auto-accept:
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_lossless_fast200_prod_20260523_033753
+```
+
+- SIPp `TotalCallCreated=120000`
+- SIPp `SuccessfulCall=120000`
+- SIPp `FailedCall=0`
+- SIPp `Retransmissions=4295`
+- SIPp `Warnings=0`
+- SIPp `DeadCallMsgs=0`
+- listener final `accepted_total=120000 cleaned_total=120000`
+- host UDP full-socket-buffer drops delta `0`
+
+Diagnostics-off control with the current high-CPS profile default
+(`fast_auto_accept_incoming_calls=false`):
+
+```text
+crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_lossless_default_prod_20260523_033927
+```
+
+- SIPp `TotalCallCreated=120000`
+- SIPp `SuccessfulCall=120000`
+- SIPp `FailedCall=0`
+- SIPp `Retransmissions=4545`
+- SIPp `Warnings=3`
+- SIPp `DeadCallMsgs=3`
+- listener final `accepted_total=120000 cleaned_total=120000`
+- host UDP full-socket-buffer drops delta `0`
+
+The direct dispatcher fixes the fast-path cleanup loss. It does not yet
+meet the `0` retransmit target, so the high-CPS profile should remain
+`fast_auto_accept_incoming_calls=false` until true request-receive to
+response-send timing explains the remaining INVITE/BYE duplicate window.
 
 Result directory:
 

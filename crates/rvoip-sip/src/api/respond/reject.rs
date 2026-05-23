@@ -60,6 +60,10 @@ impl RejectBuilder {
     }
 
     pub async fn send(mut self) -> Result<()> {
+        if self.coord.fast_auto_accept_incoming_calls() {
+            return Ok(());
+        }
+
         let reason = self
             .reason
             .clone()

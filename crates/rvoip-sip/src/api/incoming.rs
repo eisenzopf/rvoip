@@ -396,6 +396,9 @@ impl IncomingCall {
     /// ```
     pub fn defer(mut self, timeout: Duration) -> IncomingCallGuard {
         self.resolved = true; // prevent Drop from also rejecting
+        if self.coordinator.fast_auto_accept_incoming_calls() {
+            return IncomingCallGuard::resolved(self.call_id.clone(), self.coordinator.clone());
+        }
         IncomingCallGuard::new(self.call_id.clone(), self.coordinator.clone(), timeout)
     }
 
@@ -590,6 +593,15 @@ impl IncomingCallGuard {
         }
     }
 
+    fn resolved(call_id: CallId, coordinator: Arc<UnifiedCoordinator>) -> Self {
+        Self {
+            call_id,
+            coordinator,
+            deadline: Instant::now(),
+            resolved: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
     /// The call identifier for this deferred call (use as queue key).
     ///
     /// This accessor is trivial and can be used to index a queue or map.
@@ -623,6 +635,14 @@ impl IncomingCallGuard {
     /// # }
     /// ```
     pub async fn accept(self) -> Result<SessionHandle> {
+        if self.coordinator.fast_auto_accept_incoming_calls() {
+            self.resolved.store(true, Ordering::SeqCst);
+            return Ok(SessionHandle::new(
+                self.call_id.clone(),
+                self.coordinator.clone(),
+            ));
+        }
+
         if Instant::now() >= self.deadline {
             return Err(SessionError::Timeout(
                 "IncomingCallGuard deadline exceeded before accept".to_string(),
@@ -652,6 +672,9 @@ impl IncomingCallGuard {
     /// ```
     pub fn reject(self, status: u16, reason: &str) {
         if self.resolved.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if self.coordinator.fast_auto_accept_incoming_calls() {
             return;
         }
         let coordinator = self.coordinator.clone();
@@ -700,6 +723,13 @@ impl IncomingCallGuard {
         reason: &str,
         timeout: Option<Duration>,
     ) -> Result<Event> {
+        if self.coordinator.fast_auto_accept_incoming_calls() {
+            self.resolved.store(true, Ordering::SeqCst);
+            return Ok(Event::CallAnswered {
+                call_id: self.call_id.clone(),
+                sdp: None,
+            });
+        }
         if self.resolved.swap(true, Ordering::SeqCst) {
             return Err(SessionError::InvalidTransition(format!(
                 "IncomingCallGuard for {} is already resolved",

@@ -24,6 +24,7 @@ use rvoip_infra_common::events::cross_crate::{
 use rvoip_infra_common::planes::routing::RoutableEvent;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -68,6 +69,169 @@ fn session_dispatch_shard(session_id: &str, shard_count: usize) -> usize {
     (hasher.finish() as usize) % shard_count.max(1)
 }
 
+struct QueuedDialogToSessionEvent {
+    event: Arc<dyn CrossCrateEvent>,
+    queued_at: Instant,
+    kind: &'static str,
+    route_key: Option<String>,
+}
+
+#[derive(Clone)]
+struct DialogToSessionDirectRouter {
+    shard_senders: Arc<Vec<mpsc::Sender<QueuedDialogToSessionEvent>>>,
+    fallback_shard: Arc<AtomicUsize>,
+}
+
+impl DialogToSessionDirectRouter {
+    fn new(
+        handler: SessionCrossCrateEventHandler,
+        worker_count: usize,
+        queue_capacity: usize,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    ) -> Self {
+        let per_shard_capacity = (queue_capacity / worker_count.max(1)).max(1);
+        let mut shard_senders = Vec::with_capacity(worker_count);
+
+        for shard in 0..worker_count {
+            let (tx, mut rx) = mpsc::channel::<QueuedDialogToSessionEvent>(per_shard_capacity);
+            let handler_for_shard = handler.clone();
+            let mut shutdown = shutdown_rx.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = shutdown.changed() => {
+                            if *shutdown.borrow() {
+                                info!(
+                                    shard,
+                                    "🔔 [session_event_handler] Direct dialog-to-session shard shutting down"
+                                );
+                                break;
+                            }
+                        }
+                        queued = rx.recv() => {
+                            let Some(queued) = queued else { break };
+                            let queue_delay = queued.queued_at.elapsed();
+                            cleanup_diag::record_queue_depth(
+                                CleanupStage::SessionEventDispatch,
+                                rx.len(),
+                            );
+                            rvoip_sip_dialog::diagnostics::record_dialog_to_session_queue_delay(
+                                queued.kind,
+                                queue_delay,
+                            );
+
+                            let label = queued
+                                .route_key
+                                .as_deref()
+                                .unwrap_or(queued.kind);
+                            let dispatch_guard =
+                                cleanup_diag::stage_guard(CleanupStage::SessionEventDispatch, label);
+                            match handler_for_shard.handle(queued.event).await {
+                                Ok(()) => dispatch_guard.finish_success(),
+                                Err(e) => {
+                                    error!(
+                                        shard,
+                                        kind = queued.kind,
+                                        "Error handling direct dialog-to-session event: {}",
+                                        e
+                                    );
+                                    dispatch_guard.finish_failure();
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+            shard_senders.push(tx);
+        }
+
+        info!(
+            workers = worker_count,
+            per_shard_capacity,
+            "🔔 [session_event_handler] Registered direct dialog-to-session dispatcher"
+        );
+
+        Self {
+            shard_senders: Arc::new(shard_senders),
+            fallback_shard: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn shard_for(&self, route_key: Option<&str>) -> usize {
+        match route_key {
+            Some(session_id) => session_dispatch_shard(session_id, self.shard_senders.len()),
+            None => self.fallback_shard.fetch_add(1, Ordering::Relaxed) % self.shard_senders.len(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CrossCrateEventHandler for DialogToSessionDirectRouter {
+    async fn handle(&self, event: Arc<dyn CrossCrateEvent>) -> Result<()> {
+        let kind = dialog_to_session_event_kind(&event);
+        let route_key = event
+            .as_any()
+            .downcast_ref::<RvoipCrossCrateEvent>()
+            .and_then(RoutableEvent::session_id)
+            .map(ToOwned::to_owned);
+        let shard = self.shard_for(route_key.as_deref());
+        let queued = QueuedDialogToSessionEvent {
+            event,
+            queued_at: Instant::now(),
+            kind,
+            route_key,
+        };
+
+        match self.shard_senders[shard].try_send(queued) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(queued)) => {
+                warn!(
+                    shard,
+                    kind,
+                    route_key = queued.route_key.as_deref().unwrap_or("<none>"),
+                    "Direct dialog-to-session shard is full; applying backpressure"
+                );
+                cleanup_diag::record_queue_depth(
+                    CleanupStage::SessionEventDispatch,
+                    self.shard_senders[shard].max_capacity(),
+                );
+                self.shard_senders[shard]
+                    .send(queued)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("dialog-to-session shard closed: {}", e))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(anyhow::anyhow!("dialog-to-session shard is closed"))
+            }
+        }
+    }
+}
+
+fn dialog_to_session_event_kind(event: &Arc<dyn CrossCrateEvent>) -> &'static str {
+    match event.as_any().downcast_ref::<RvoipCrossCrateEvent>() {
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::IncomingCall {
+            ..
+        })) => "incoming_call",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::AckReceived {
+            ..
+        })) => "ack_received",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::ByeReceived {
+            ..
+        })) => "bye_received",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallTerminated {
+            ..
+        })) => "call_terminated",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallFailed {
+            ..
+        })) => "call_failed",
+        Some(RvoipCrossCrateEvent::DialogToSession(DialogToSessionEvent::CallCancelled {
+            ..
+        })) => "call_cancelled",
+        Some(RvoipCrossCrateEvent::DialogToSession(_)) => "dialog_to_session_other",
+        _ => "non_dialog_to_session",
+    }
+}
+
 /// Handler for processing cross-crate events in rvoip-sip
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -92,6 +256,9 @@ pub struct SessionCrossCrateEventHandler {
 
     /// Immediately accept inbound calls after the state machine records them.
     fast_auto_accept_incoming_calls: bool,
+
+    /// Total capacity for the direct dialog-to-session dispatcher queues.
+    dialog_event_dispatch_queue_capacity: usize,
 
     /// Internal state-machine event stream owned by rvoip-sip.
     state_machine_event_rx:
@@ -720,6 +887,7 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: None,
             fast_auto_accept_incoming_calls: false,
+            dialog_event_dispatch_queue_capacity: 1024,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher: SessionEventPublisher::new(
@@ -748,6 +916,7 @@ impl SessionCrossCrateEventHandler {
             registry,
             incoming_call_tx: Some(incoming_call_tx),
             fast_auto_accept_incoming_calls: false,
+            dialog_event_dispatch_queue_capacity: 1024,
             state_machine_event_rx: None,
             outbound_flow_last_refresh: Arc::new(DashMap::new()),
             app_event_publisher,
@@ -809,9 +978,10 @@ impl SessionCrossCrateEventHandler {
     pub(crate) fn with_fast_auto_accept_incoming_calls(
         mut self,
         enabled: bool,
-        _queue_capacity: usize,
+        queue_capacity: usize,
     ) -> Self {
         self.fast_auto_accept_incoming_calls = enabled;
+        self.dialog_event_dispatch_queue_capacity = queue_capacity.max(1);
         self
     }
 
@@ -882,73 +1052,24 @@ impl SessionCrossCrateEventHandler {
         &self,
         shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) -> SessionResult<()> {
-        // Subscribe to dialog-to-session events
-        let mut dialog_sub = self
-            .global_coordinator
-            .subscribe("dialog_to_session")
+        // Session lifecycle correctness must not depend on broadcast delivery.
+        // Register a direct handler that only enqueues into bounded sharded
+        // workers; the global broadcast remains available for observers.
+        let dialog_router = DialogToSessionDirectRouter::new(
+            self.clone(),
+            dialog_dispatch_worker_count(),
+            self.dialog_event_dispatch_queue_capacity,
+            shutdown_rx.clone(),
+        );
+        self.global_coordinator
+            .register_handler("dialog_to_session", dialog_router)
             .await
             .map_err(|e| {
-                SessionError::InternalError(format!("Failed to subscribe to dialog events: {}", e))
+                SessionError::InternalError(format!(
+                    "Failed to register direct dialog event handler: {}",
+                    e
+                ))
             })?;
-
-        let handler = self.clone();
-        let mut shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
-            info!("🔔 [session_event_handler] Started dialog-to-session event loop");
-            // Sharded dispatch preserves per-session ordering without creating
-            // one task/channel per short-lived call.
-            let worker_count = dialog_dispatch_worker_count();
-            let mut shard_senders = Vec::with_capacity(worker_count);
-            for shard in 0..worker_count {
-                let (tx, mut rx) = mpsc::unbounded_channel::<Arc<dyn CrossCrateEvent>>();
-                let handler_for_shard = handler.clone();
-                tokio::spawn(async move {
-                    while let Some(ev) = rx.recv().await {
-                        if let Err(e) = handler_for_shard.handle(ev).await {
-                            error!(shard, "Error handling dialog-to-session event: {}", e);
-                        }
-                    }
-                });
-                shard_senders.push(tx);
-            }
-
-            loop {
-                tokio::select! {
-                    _ = shutdown.changed() => {
-                        if *shutdown.borrow() {
-                            info!("🔔 [session_event_handler] Dialog event loop shutting down");
-                            break;
-                        }
-                    }
-                    event = dialog_sub.recv() => {
-                        let Some(event) = event else { break };
-                        let session_key = event
-                            .as_any()
-                            .downcast_ref::<RvoipCrossCrateEvent>()
-                            .and_then(RoutableEvent::session_id)
-                            .map(|s| s.to_string());
-                        match session_key {
-                            Some(sid) => {
-                                let shard = session_dispatch_shard(&sid, shard_senders.len());
-                                if shard_senders[shard].send(event).is_err() {
-                                    error!(shard, session = %sid, "Dialog event shard stopped");
-                                }
-                            }
-                            None => {
-                                // Events without session context — process on a one-shot task.
-                                let handler = handler.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = handler.handle(event).await {
-                                        error!("Error handling dialog-to-session event: {}", e);
-                                    }
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            info!("🔔 [session_event_handler] Dialog-to-session event loop ended");
-        });
 
         // Subscribe to transport-to-session diagnostics such as SIP trace.
         let mut transport_sub = self
@@ -3104,6 +3225,7 @@ impl SessionCrossCrateEventHandler {
             .await
             .is_err()
         {
+            rvoip_sip_dialog::diagnostics::record_bye_cleanup_session_missing();
             debug!(
                 "Ignoring ByeReceived for session {} - not in our store",
                 session_id
@@ -3111,6 +3233,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        rvoip_sip_dialog::diagnostics::record_bye_cleanup_delivered();
         let bye_guard = cleanup_diag::stage_guard(CleanupStage::ByeReceivedHandling, &session_id.0);
         match self
             .state_machine
@@ -3685,6 +3808,7 @@ impl SessionCrossCrateEventHandler {
             return Ok(());
         }
 
+        rvoip_sip_dialog::diagnostics::record_ack_event_delivered();
         if let Err(e) = self
             .state_machine
             .process_event(&session_id, EventType::DialogACK)

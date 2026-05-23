@@ -32,6 +32,10 @@ impl AcceptBuilder {
     }
 
     pub async fn send(mut self) -> Result<SessionHandle> {
+        if self.coord.fast_auto_accept_incoming_calls() {
+            return Ok(SessionHandle::new(self.call_id, self.coord));
+        }
+
         let extras = take_staged(&mut self.state);
         if extras.is_empty() {
             // Preserve the legacy media-negotiating path when the

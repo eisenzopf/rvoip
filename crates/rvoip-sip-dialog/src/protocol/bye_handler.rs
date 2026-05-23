@@ -184,6 +184,7 @@ impl DialogManager {
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
             })?;
+        diagnostics::record_bye_200_sent();
         self.release_bye_server_transaction(&transaction_id).await;
 
         if duplicate_terminated_bye {
@@ -204,6 +205,7 @@ impl DialogManager {
         let cleanup_dialog_id = dialog_id.clone();
         tokio::spawn(async move {
             manager.emit_session_coordination_event(event).await;
+            diagnostics::record_bye_cleanup_event_emitted();
             manager.remove_dialog_storage(&cleanup_dialog_id);
             debug!(
                 "BYE cleanup event published for dialog {}",

@@ -741,6 +741,7 @@ impl DialogEventHub {
             } => {
                 // AckReceived is critical for UAS - dialog-core received ACK, now session must transition
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
+                    crate::diagnostics::record_ack_matched_session();
                     info!(
                         "Converting AckReceived to cross-crate event for session {}",
                         session_id
@@ -752,6 +753,7 @@ impl DialogEventHub {
                         },
                     ))
                 } else {
+                    crate::diagnostics::record_ack_unmatched_session();
                     warn!(
                         "No session ID found for dialog {:?} in AckReceived",
                         dialog_id
