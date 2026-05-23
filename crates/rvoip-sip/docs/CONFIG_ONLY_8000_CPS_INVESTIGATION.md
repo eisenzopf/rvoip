@@ -39,6 +39,43 @@ Config-only validation still has recovered INVITE/BYE retransmits:
 | Lossless fast-200 direct dispatcher, diagnostics off | `120000/120000` | `4295` | `2026-05-23 03:37`, forced with `perf_listener --fast-auto-accept`; warnings/dead messages `0/0`, listener `accepted_total=120000 cleaned_total=120000`, host UDP full-socket drop delta `0`. |
 | Lossless dispatcher, current high-CPS profile, diagnostics off | `120000/120000` | `4545` | `2026-05-23 03:39`, `fast_auto_accept_incoming_calls=false`; warnings/dead messages `3/3`, listener `accepted_total=120000 cleaned_total=120000`, host UDP full-socket drop delta `0`. |
 
+### Parse Fanout Timing Runs
+
+Follow-up timing instrumentation added receive-side spans that start at
+UDP read and carry through parse, transport forwarding, transaction
+dispatch, dialog incoming-call emit, and BYE 200 OK send. The benchmark
+listener also gained `--udp-parse-workers N` and
+`--udp-parse-round-robin` so parse fanout can be tested without changing
+the high-CPS profile default.
+
+Results from
+`crates/rvoip-sip/tests/perf/sipp_scenarios/results/codex_parse_fanout_20260523_114126`:
+
+| Run | SIPp result | Achieved CPS | Retransmits | Warnings / Dead | Listener cleanup | UDP drops | Notes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| Fast path + diagnostics baseline | `120000/120000` | `8000.0` | `3659` | `0 / 0` | `120000/120000` | `0` | ACK matched/delivered `120000/120000`, duplicate cache misses `0`, `bye_cleanup_missing=0`. |
+| Round-robin parse, 2 workers | `120000/120000` | `8000.0` | `5845` | `1645 / 1645` | `120000/120000` | `0` | Worse than baseline: ACK delivered `119779`, duplicate cache misses `4`, proactive 2xx retransmits `1818`. |
+| Round-robin parse, 4 workers | `120000/120000` | `8000.0` | `3178` | `4 / 4` | `120000/120000` | `0` | Best run in this matrix: ACK matched/delivered `120000/120000`, duplicate cache misses `0`, proactive 2xx retransmits `10`. |
+| Round-robin parse, 8 workers | `120000/120000` | `4444.4` | `164356` | `72091 / 72091` | `114981/114981` | `0` | Failed as a useful profile: ACK delivered `94880`, listener stopped with `5019` calls not cleaned, proactive 2xx retransmits `232433`. |
+
+The server-side timing spans did not expose a `>500 ms` server stall in
+the usable runs. For the best `4`-worker round-robin run:
+
+- `udp_read_to_worker_queue p999=500 us`, max `4586 us`.
+- `udp_parse p999=100 us`, max `1422 us`.
+- `parse_to_transport_manager p999=250 us`, max `1589 us`.
+- `transport_manager_to_transaction p999=25000 us`, max `37906 us`.
+- `udp_receive_to_incoming_call_emit p999=50000 us`, max `42847 us`.
+- `bye_receive_to_200 p999=50000 us`, max `42866 us`.
+
+The `4`-worker round-robin result is a useful candidate for repeat
+testing, but it still does not restore the zero-retransmit target and it
+introduced a small number of SIPp dead-call warnings. The next
+high-signal test is packet capture across host egress and the
+SIPp/container receive side while rerunning the baseline and `4`-worker
+round-robin profiles. If host egress is timely but SIPp receives late,
+the remaining latency is outside rvoip's measured receive-to-send path.
+
 This means the public Config wiring is in place, and the fused fast-200
 path now proves lifecycle correctness under the `8000 CPS` SIPp run:
 ACK, BYE, and cleanup delivery all drain to `120000/120000` with no

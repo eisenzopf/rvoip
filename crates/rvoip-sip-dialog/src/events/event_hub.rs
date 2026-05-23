@@ -279,6 +279,17 @@ impl DialogEventHub {
                 // signature-preserving SBC pass-through. Fall back to
                 // re-serialising if the cache entry is missing (e.g.,
                 // mock transports that publish `raw_bytes: None`).
+                if let Some(timing) = self
+                    .dialog_manager
+                    .transaction_manager()
+                    .take_inbound_timing(&transaction_id)
+                {
+                    if let Some(received_at) = timing.received_at {
+                        crate::diagnostics::record_udp_receive_to_incoming_call_emit(
+                            received_at.elapsed(),
+                        );
+                    }
+                }
                 let raw_request = self
                     .dialog_manager
                     .transaction_manager()

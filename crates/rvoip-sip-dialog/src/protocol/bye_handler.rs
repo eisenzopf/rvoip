@@ -109,6 +109,20 @@ impl ByeHandler for DialogManager {
 
         let transaction_id = server_transaction.id().clone();
 
+        self.handle_bye_with_transaction(transaction_id, request)
+            .await
+    }
+}
+
+/// BYE-specific helper methods for DialogManager
+impl DialogManager {
+    /// Handle a BYE using the server transaction already created by the
+    /// transaction manager.
+    pub async fn handle_bye_with_transaction(
+        &self,
+        transaction_id: TransactionKey,
+        request: Request,
+    ) -> DialogResult<()> {
         // Find the dialog for this BYE
         if let Some(dialog_id) = self.find_dialog_for_request(&request).await {
             self.process_bye_in_dialog(transaction_id, request, dialog_id)
@@ -135,9 +149,10 @@ impl ByeHandler for DialogManager {
                 .send_response(&transaction_id, response)
                 .await
                 .map_err(|e| DialogError::TransactionError {
-                    message: format!("Failed to send 481 response to BYE: {}", e),
+                    message: format!("Failed to send response to BYE: {}", e),
                 })?;
             if status_code == StatusCode::Ok {
+                self.record_bye_receive_to_200(&transaction_id);
                 self.release_bye_server_transaction(&transaction_id).await;
             }
 
@@ -148,10 +163,7 @@ impl ByeHandler for DialogManager {
             Ok(())
         }
     }
-}
 
-/// BYE-specific helper methods for DialogManager
-impl DialogManager {
     /// Process BYE within a dialog
     pub async fn process_bye_in_dialog(
         &self,
@@ -185,6 +197,7 @@ impl DialogManager {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
             })?;
         diagnostics::record_bye_200_sent();
+        self.record_bye_receive_to_200(&transaction_id);
         self.release_bye_server_transaction(&transaction_id).await;
 
         if duplicate_terminated_bye {
@@ -227,6 +240,14 @@ impl DialogManager {
                 "Failed to release completed BYE server transaction {}: {}",
                 transaction_id, e
             );
+        }
+    }
+
+    fn record_bye_receive_to_200(&self, transaction_id: &TransactionKey) {
+        if let Some(timing) = self.transaction_manager.take_inbound_timing(transaction_id) {
+            if let Some(received_at) = timing.received_at {
+                diagnostics::record_bye_receive_to_200(received_at.elapsed());
+            }
         }
     }
 }

@@ -9,6 +9,7 @@
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics
+//! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --fast-auto-accept --diagnostics --udp-parse-workers 4 --udp-parse-round-robin
 //! cargo run -p rvoip-sip --release --example perf_listener -- 35060 192.168.5.2 --diagnostics --diagnostic-events
 //! ```
 //!
@@ -38,6 +39,7 @@ use rvoip_sip::api::unified::Config;
 use rvoip_sip::cleanup_diag;
 use rvoip_sip_dialog::diagnostics as sip_retrans_diag;
 use rvoip_sip_transport::diagnostics as sip_udp_diag;
+use rvoip_sip_transport::UdpParseDispatch;
 
 const HIGH_CPS_CAPACITY: usize = 20_000;
 const HIGH_CPS_RTP_PORT_START: u16 = 16_384;
@@ -93,12 +95,21 @@ fn sip_uri_host(ip: IpAddr) -> String {
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
-    let mut args = std::env::args().skip(1);
-    let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5060);
+    let mut args = std::env::args().skip(1).peekable();
+    let port: u16 = args
+        .peek()
+        .and_then(|s| s.parse().ok())
+        .map(|port| {
+            args.next();
+            port
+        })
+        .unwrap_or(5060);
     let mut advertised_arg = None;
     let mut diagnostics = PerfDiagnostics::default();
     let mut fast_auto_accept = false;
-    for arg in args {
+    let mut udp_parse_workers = None;
+    let mut udp_parse_round_robin = false;
+    while let Some(arg) = args.next() {
         match arg.as_str() {
             "--diagnostics" => {
                 diagnostics.summary = true;
@@ -112,6 +123,19 @@ async fn main() {
             }
             "--fast-auto-accept" => {
                 fast_auto_accept = true;
+            }
+            "--udp-parse-workers" => {
+                let value = args
+                    .next()
+                    .unwrap_or_else(|| panic!("--udp-parse-workers requires a value"));
+                udp_parse_workers = Some(
+                    value
+                        .parse::<usize>()
+                        .unwrap_or_else(|e| panic!("invalid --udp-parse-workers '{value}': {e}")),
+                );
+            }
+            "--udp-parse-round-robin" => {
+                udp_parse_round_robin = true;
             }
             _ if advertised_arg.is_none() => {
                 advertised_arg = Some(arg);
@@ -159,7 +183,13 @@ async fn main() {
     } else {
         Config::local("rvoip-perf-listener", port)
     };
-    let config = apply_perf_config(config, diagnostics, fast_auto_accept);
+    let config = apply_perf_config(
+        config,
+        diagnostics,
+        fast_auto_accept,
+        udp_parse_workers,
+        udp_parse_round_robin,
+    );
     print_effective_config(&config);
 
     let accepted = Arc::new(AtomicU64::new(0));
@@ -278,8 +308,10 @@ fn apply_perf_config(
     config: Config,
     diagnostics: PerfDiagnostics,
     fast_auto_accept: bool,
+    udp_parse_workers: Option<usize>,
+    udp_parse_round_robin: bool,
 ) -> Config {
-    let config = config
+    let mut config = config
         .with_high_cps_udp_auto_answer(HIGH_CPS_CAPACITY)
         .with_media_port_capacity(HIGH_CPS_RTP_PORT_START, HIGH_CPS_RTP_PORT_CAPACITY)
         .with_media_session_capacity(HIGH_CPS_CAPACITY)
@@ -291,6 +323,12 @@ fn apply_perf_config(
         .with_rtp_diagnostics(diagnostics.wire)
         .with_media_sdp_diagnostics(diagnostics.wire);
 
+    if let Some(workers) = udp_parse_workers {
+        config = config.with_sip_udp_parse_workers(workers);
+    }
+    if udp_parse_round_robin {
+        config = config.with_sip_udp_parse_dispatch(UdpParseDispatch::RoundRobin);
+    }
     if fast_auto_accept {
         config.with_fast_auto_accept_incoming_calls(true)
     } else {
@@ -303,13 +341,15 @@ fn print_effective_config(config: &Config) {
         "rvoip-sip perf_listener: high_cps_config capacity={} auto_180_ringing={} \
          auto_100_trying={} \
          fast_auto_accept_incoming_calls={} \
-         sip_udp_parse_workers={:?} sip_udp_parse_queue_capacity={:?}",
+         sip_udp_parse_workers={:?} sip_udp_parse_queue_capacity={:?} \
+         sip_udp_parse_dispatch={:?}",
         HIGH_CPS_CAPACITY,
         config.auto_180_ringing,
         config.auto_100_trying,
         config.fast_auto_accept_incoming_calls,
         config.sip_udp_parse_workers,
         config.sip_udp_parse_queue_capacity,
+        config.sip_udp_parse_dispatch,
     );
     println!(
         "rvoip-sip perf_listener: channels incoming={} state={} sip_transport={} \

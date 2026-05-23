@@ -12,8 +12,8 @@ use rvoip_sip_transport::factory::{TransportFactory, TransportFactoryConfig};
 use rvoip_sip_transport::transport::TransportType;
 use rvoip_sip_transport::{
     error::{Error as TransportError, Result as TransportResult},
-    TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpSocketOptions, UdpTransport,
-    WebSocketTransport,
+    TcpTransport, Transport, TransportEvent, UdpParseConfig, UdpParseDispatch, UdpSocketOptions,
+    UdpTransport, WebSocketTransport,
 };
 
 use crate::transaction::error::{Error, Result};
@@ -55,6 +55,8 @@ pub struct TransportManagerConfig {
     pub udp_parse_workers: Option<usize>,
     /// Optional per-worker UDP parse queue capacity.
     pub udp_parse_queue_capacity: Option<usize>,
+    /// Optional UDP parse worker dispatch strategy.
+    pub udp_parse_dispatch: Option<UdpParseDispatch>,
     /// TLS certificate path
     pub tls_cert_path: Option<String>,
     /// TLS key path
@@ -99,6 +101,7 @@ impl Default for TransportManagerConfig {
             udp_send_buffer_size: None,
             udp_parse_workers: None,
             udp_parse_queue_capacity: None,
+            udp_parse_dispatch: None,
             tls_cert_path: None,
             tls_key_path: None,
             tls_extra_ca_path: None,
@@ -144,6 +147,7 @@ impl TransportManager {
             udp_send_buffer_size: config.udp_send_buffer_size,
             udp_parse_workers: config.udp_parse_workers,
             udp_parse_queue_capacity: config.udp_parse_queue_capacity,
+            udp_parse_dispatch: config.udp_parse_dispatch,
             ..Default::default()
         }));
 
@@ -365,9 +369,10 @@ impl TransportManager {
             self.config.udp_recv_buffer_size,
             self.config.udp_send_buffer_size,
         );
-        let parse_config = UdpParseConfig::from_optional(
+        let parse_config = UdpParseConfig::from_optional_with_dispatch(
             self.config.udp_parse_workers,
             self.config.udp_parse_queue_capacity,
+            self.config.udp_parse_dispatch,
             self.config.default_channel_capacity,
         );
         let (transport, rx) = UdpTransport::bind_with_mtu_socket_options_and_parse_config(
@@ -673,6 +678,8 @@ impl TransportManager {
 
             while let Some(event) = rx.recv().await {
                 trace!("Received event from {}: {:?}", transport_name, event);
+                let mut event = event;
+                mark_transport_manager_forwarded(&mut event, Instant::now());
 
                 // Forward the event to the main event channel. Avoid the
                 // async send fast path unless the channel is actually full so
@@ -730,6 +737,23 @@ impl TransportManager {
 
         Ok(())
     }
+}
+
+fn mark_transport_manager_forwarded(event: &mut TransportEvent, forwarded_at: Instant) {
+    let TransportEvent::MessageReceived {
+        timing: Some(timing),
+        ..
+    } = event
+    else {
+        return;
+    };
+
+    if let Some(parse_completed_at) = timing.parse_completed_at {
+        udp_diagnostics::record_parse_to_transport_manager(
+            forwarded_at.duration_since(parse_completed_at),
+        );
+    }
+    timing.transport_manager_forwarded_at = Some(forwarded_at);
 }
 
 /// Information about available transport types and capabilities

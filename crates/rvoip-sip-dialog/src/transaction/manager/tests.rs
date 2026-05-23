@@ -482,6 +482,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -823,6 +824,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -849,6 +851,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -977,6 +980,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -1213,6 +1217,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();
@@ -1550,6 +1555,7 @@ mod tests {
                 destination: transport.local_addr().unwrap(),
                 transport_type: rvoip_sip_transport::transport::TransportType::Udp,
                 raw_bytes: None,
+                timing: None,
             })
             .await
             .unwrap();

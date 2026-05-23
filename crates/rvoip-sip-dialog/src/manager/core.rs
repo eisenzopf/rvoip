@@ -1289,6 +1289,12 @@ impl DialogManager {
                     transaction_id
                 );
 
+                if request.method() == Method::Bye {
+                    return self
+                        .handle_bye_with_transaction(transaction_id.clone(), request)
+                        .await;
+                }
+
                 // For REFER requests, check if they belong to an existing dialog
                 if request.method() == Method::Refer {
                     // Try to find the dialog using Call-ID, From tag, and To tag
@@ -2679,6 +2685,7 @@ mod outbound_flow_handler_tests {
     //! loop.
     use super::*;
     use crate::manager::outbound_flow::{FlowState, OutboundFlow};
+    use rvoip_sip_core::builder::SimpleRequestBuilder;
     use rvoip_sip_transport::error::Result as TransportResult;
     use rvoip_sip_transport::{Transport, TransportEvent};
     use std::net::SocketAddr;
@@ -2804,6 +2811,58 @@ mod outbound_flow_handler_tests {
             42
         );
         assert!(!manager.dialogs.contains_key(&dialog_id));
+    }
+
+    #[tokio::test]
+    async fn non_invite_bye_uses_existing_server_transaction() {
+        let (manager, _rx) = make_manager().await;
+        let source = dest_addr(5070);
+        let mut dialog = Dialog::new(
+            "bye-existing-transaction".to_string(),
+            "sip:alice@example.com".parse().unwrap(),
+            "sip:bob@example.com".parse().unwrap(),
+            Some("alice-tag".to_string()),
+            Some("bob-tag".to_string()),
+            false,
+        );
+        dialog.state = DialogState::Confirmed;
+        dialog.remote_cseq = 1;
+        let dialog_id = dialog.id.clone();
+        manager.store_dialog(dialog).await.expect("store dialog");
+
+        let request = SimpleRequestBuilder::new(Method::Bye, "sip:alice@example.com")
+            .unwrap()
+            .from("Bob", "sip:bob@example.com", Some("bob-tag"))
+            .to("Alice", "sip:alice@example.com", Some("alice-tag"))
+            .call_id("bye-existing-transaction")
+            .cseq(2)
+            .via("127.0.0.1:5070", "UDP", Some("z9hG4bK-bye-existing"))
+            .max_forwards(70)
+            .build();
+        let transaction = manager
+            .transaction_manager()
+            .create_server_transaction(request.clone(), source)
+            .await
+            .expect("existing BYE server transaction");
+        let transaction_id = transaction.id().clone();
+
+        manager
+            .handle_unassociated_transaction_event(
+                &transaction_id,
+                TransactionEvent::NonInviteRequest {
+                    transaction_id: transaction_id.clone(),
+                    request,
+                    source,
+                },
+            )
+            .await
+            .expect("BYE handled through existing transaction");
+
+        assert_eq!(manager.transaction_manager().transaction_count().await, 0);
+        let stored = manager
+            .get_dialog(&dialog_id)
+            .expect("dialog still indexed");
+        assert_eq!(stored.state, DialogState::Terminated);
     }
 
     fn install_flow(

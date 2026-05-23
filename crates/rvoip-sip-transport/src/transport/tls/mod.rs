@@ -402,6 +402,7 @@ impl TlsTransport {
                                         destination: local_addr,
                                         transport_type: TransportType::Tls,
                                         raw_bytes: Some(raw_bytes),
+                                        timing: None,
                                     })
                                     .await;
                             }

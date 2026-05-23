@@ -660,6 +660,13 @@ pub struct Config {
     /// counted and dropped explicitly.
     pub sip_udp_parse_queue_capacity: Option<usize>,
 
+    /// Optional UDP parse worker dispatch strategy.
+    ///
+    /// `None` preserves the transport default (`SourceHash`). High-CPS perf
+    /// tests can opt into `RoundRobin` when the traffic generator sends all
+    /// calls from a single source socket and source hashing cannot fan out.
+    pub sip_udp_parse_dispatch: Option<rvoip_sip_transport::UdpParseDispatch>,
+
     /// Capacity for the transaction-manager event channel consumed by dialog
     /// core.
     ///
@@ -832,6 +839,7 @@ impl Config {
             sip_udp_send_buffer_size: None,
             sip_udp_parse_workers: None,
             sip_udp_parse_queue_capacity: None,
+            sip_udp_parse_dispatch: None,
             transaction_event_channel_capacity: 10_000,
             global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
@@ -914,6 +922,7 @@ impl Config {
             sip_udp_send_buffer_size: None,
             sip_udp_parse_workers: None,
             sip_udp_parse_queue_capacity: None,
+            sip_udp_parse_dispatch: None,
             transaction_event_channel_capacity: 10_000,
             global_event_channel_capacity: 10_000,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
@@ -1358,6 +1367,15 @@ impl Config {
     /// Set the per-worker UDP parse queue capacity.
     pub fn with_sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
         self.sip_udp_parse_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the UDP parse worker dispatch strategy.
+    pub fn with_sip_udp_parse_dispatch(
+        mut self,
+        dispatch: rvoip_sip_transport::UdpParseDispatch,
+    ) -> Self {
+        self.sip_udp_parse_dispatch = Some(dispatch);
         self
     }
 
@@ -3644,6 +3662,7 @@ impl UnifiedCoordinator {
             udp_send_buffer_size: config.sip_udp_send_buffer_size,
             udp_parse_workers: config.sip_udp_parse_workers,
             udp_parse_queue_capacity: config.sip_udp_parse_queue_capacity,
+            udp_parse_dispatch: config.sip_udp_parse_dispatch,
             // Default build: `Config::tls_insecure_skip_verify` is not
             // compiled, so we always pass `false`. Only the
             // `dev-insecure-tls` build surfaces the field.

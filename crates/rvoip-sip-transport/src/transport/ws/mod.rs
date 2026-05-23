@@ -351,6 +351,7 @@ impl WebSocketTransport {
                                 TransportType::Ws
                             },
                             raw_bytes: Some(raw_bytes),
+                            timing: None,
                         };
 
                         if let Err(e) = inner.events_tx.send(event).await {

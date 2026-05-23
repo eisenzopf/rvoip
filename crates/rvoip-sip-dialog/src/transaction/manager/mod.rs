@@ -187,8 +187,9 @@ use tracing::{debug, error, info, trace, warn};
 
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_core::{Host, TypedHeader};
+use rvoip_sip_transport::diagnostics as udp_diagnostics;
 use rvoip_sip_transport::transport::TransportType;
-use rvoip_sip_transport::{Transport, TransportEvent};
+use rvoip_sip_transport::{Transport, TransportEvent, TransportReceiveTiming};
 
 use crate::diagnostics;
 use crate::transaction::client::{
@@ -390,6 +391,10 @@ pub struct TransactionManager {
     /// form without an intermediate `Message::to_bytes()` round-trip.
     /// See `SIP_API_DESIGN_2.md` §7.5.
     pub(crate) pending_inbound_bytes: Arc<DashMap<TransactionKey, bytes::Bytes>>,
+    /// Optional receive timing diagnostics keyed by transaction. Populated only
+    /// when transport diagnostics are enabled and consumed by dialog-core
+    /// instrumentation when it emits higher-level events or BYE responses.
+    pub(crate) pending_inbound_timing: Arc<DashMap<TransactionKey, TransportReceiveTiming>>,
 }
 
 // Define RFC3261 Branch magic cookie
@@ -448,6 +453,17 @@ impl TransactionManager {
         self.pending_inbound_bytes
             .get(key)
             .map(|r| r.value().clone())
+    }
+
+    /// Take (and remove) receive timing diagnostics for an inbound message
+    /// keyed by transaction.
+    pub fn take_inbound_timing(&self, key: &TransactionKey) -> Option<TransportReceiveTiming> {
+        self.pending_inbound_timing.remove(key).map(|(_, v)| v)
+    }
+
+    /// Peek at receive timing diagnostics without removing the cache entry.
+    pub fn peek_inbound_timing(&self, key: &TransactionKey) -> Option<TransportReceiveTiming> {
+        self.pending_inbound_timing.get(key).map(|r| *r.value())
     }
 
     /// Install a forwarder for transport-side events (pong received,
@@ -565,6 +581,7 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         };
 
         // Start the message processing loop
@@ -685,6 +702,7 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         };
 
         // Start the message processing loop
@@ -862,6 +880,7 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         };
 
         // Start the message processing loop
@@ -961,6 +980,7 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         }
     }
 
@@ -1034,6 +1054,7 @@ impl TransactionManager {
             transport_rx: Arc::new(Mutex::new(transport_rx)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
         }
     }
 
@@ -1938,6 +1959,7 @@ impl TransactionManager {
                 // that never run (e.g., events filtered before the
                 // hub) so the cache cannot grow unboundedly.
                 manager_clone.pending_inbound_bytes.remove(&tx_id);
+                manager_clone.pending_inbound_timing.remove(&tx_id);
                 tokio::spawn(async move {
                     manager_clone.process_transaction_terminated(&tx_id).await;
                 });
@@ -2024,6 +2046,7 @@ impl TransactionManager {
         }
         self.terminated_transactions.remove(transaction_id);
         self.pending_inbound_bytes.remove(transaction_id);
+        self.pending_inbound_timing.remove(transaction_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
         if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(transaction_id) {
@@ -2121,10 +2144,11 @@ impl TransactionManager {
 
                 // Use tokio::select to wait for a message from either the transport or internal channel
                 tokio::select! {
-                    Some(message_event) = receiver.recv() => {
+                    Some(mut message_event) = receiver.recv() => {
                         // Check if we're still running before processing
                         let still_running = manager_arc.running.load(Ordering::Relaxed);
                         if still_running {
+                            mark_transaction_manager_received(&mut message_event, Instant::now());
                             if let Err(e) = manager_arc.handle_transport_event(message_event).await {
                                 error!("Error handling transport message: {}", e);
                             }
@@ -3280,4 +3304,21 @@ impl fmt::Debug for TransactionManager {
             .field("timer_factory", &"TimerFactory")
             .finish()
     }
+}
+
+fn mark_transaction_manager_received(event: &mut TransportEvent, received_at: Instant) {
+    let TransportEvent::MessageReceived {
+        timing: Some(timing),
+        ..
+    } = event
+    else {
+        return;
+    };
+
+    if let Some(forwarded_at) = timing.transport_manager_forwarded_at {
+        udp_diagnostics::record_transport_manager_to_transaction(
+            received_at.duration_since(forwarded_at),
+        );
+    }
+    timing.transaction_manager_received_at = Some(received_at);
 }

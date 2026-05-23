@@ -483,6 +483,7 @@ impl TransactionManager {
         self.terminated_transactions.remove(tx_id);
         self.transaction_destinations.remove(tx_id);
         self.pending_inbound_bytes.remove(tx_id);
+        self.pending_inbound_timing.remove(tx_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
         if let Some((_, subscriber_ids)) = self.transaction_to_subscribers.remove(tx_id) {
@@ -686,6 +687,7 @@ impl TransactionManager {
             if removed {
                 self.transaction_destinations.remove(&key);
                 self.pending_inbound_bytes.remove(&key);
+                self.pending_inbound_timing.remove(&key);
                 terminated_transaction_ids.push(key);
                 cleaned_count += 1;
             } else if requeue_active

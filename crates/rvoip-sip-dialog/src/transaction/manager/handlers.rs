@@ -763,10 +763,13 @@ impl TransactionManager {
                 destination,
                 transport_type,
                 raw_bytes,
+                timing,
             } => {
                 debug!("Received message from {}", source);
                 self.publish_inbound_sip_trace(&message, source, destination, transport_type)
                     .await;
+                let transaction_key =
+                    crate::transaction::utils::transaction_key_from_message(&message);
                 if let Some(bytes) = raw_bytes.as_ref() {
                     let cache_raw_bytes = match &message {
                         Message::Request(request) => {
@@ -775,12 +778,21 @@ impl TransactionManager {
                         Message::Response(_) => true,
                     };
                     if cache_raw_bytes {
-                        if let Some(key) =
-                            crate::transaction::utils::transaction_key_from_message(&message)
-                        {
+                        if let Some(key) = transaction_key.as_ref() {
                             // `Bytes::clone` is a refcount bump — no heap alloc.
-                            self.pending_inbound_bytes.insert(key, bytes.clone());
+                            self.pending_inbound_bytes
+                                .insert(key.clone(), bytes.clone());
                         }
+                    }
+                }
+                if let (Some(key), Some(timing)) = (transaction_key.as_ref(), timing) {
+                    let cache_timing = matches!(
+                        &message,
+                        Message::Request(request)
+                            if matches!(request.method(), Method::Invite | Method::Bye)
+                    );
+                    if cache_timing {
+                        self.pending_inbound_timing.insert(key.clone(), timing);
                     }
                 }
                 self.handle_message(message, source, destination).await

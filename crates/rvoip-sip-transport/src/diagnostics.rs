@@ -10,6 +10,26 @@ use std::time::Duration;
 use rvoip_sip_core::{Message, Method};
 
 const SEND_BUCKET_LABELS: [&str; 6] = ["<100us", "<500us", "<1ms", "<5ms", "<10ms", ">=10ms"];
+const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    25_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_500_000,
+    u64::MAX,
+];
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
@@ -43,6 +63,118 @@ static SEND_LT_5MS: AtomicU64 = AtomicU64::new(0);
 static SEND_LT_10MS: AtomicU64 = AtomicU64::new(0);
 static SEND_GE_10MS: AtomicU64 = AtomicU64::new(0);
 
+static UDP_READ_TO_WORKER_QUEUE_COUNT: AtomicU64 = AtomicU64::new(0);
+static UDP_READ_TO_WORKER_QUEUE_SUM_US: AtomicU64 = AtomicU64::new(0);
+static UDP_READ_TO_WORKER_QUEUE_MAX_US: AtomicU64 = AtomicU64::new(0);
+static UDP_READ_TO_WORKER_QUEUE_OVER_500MS: AtomicU64 = AtomicU64::new(0);
+static UDP_READ_TO_WORKER_QUEUE_BUCKETS: [AtomicU64; 18] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+static UDP_PARSE_COUNT: AtomicU64 = AtomicU64::new(0);
+static UDP_PARSE_SUM_US: AtomicU64 = AtomicU64::new(0);
+static UDP_PARSE_MAX_US: AtomicU64 = AtomicU64::new(0);
+static UDP_PARSE_OVER_500MS: AtomicU64 = AtomicU64::new(0);
+static UDP_PARSE_BUCKETS: [AtomicU64; 18] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+static PARSE_TO_TRANSPORT_MANAGER_COUNT: AtomicU64 = AtomicU64::new(0);
+static PARSE_TO_TRANSPORT_MANAGER_SUM_US: AtomicU64 = AtomicU64::new(0);
+static PARSE_TO_TRANSPORT_MANAGER_MAX_US: AtomicU64 = AtomicU64::new(0);
+static PARSE_TO_TRANSPORT_MANAGER_OVER_500MS: AtomicU64 = AtomicU64::new(0);
+static PARSE_TO_TRANSPORT_MANAGER_BUCKETS: [AtomicU64; 18] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+static TRANSPORT_MANAGER_TO_TRANSACTION_COUNT: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_MANAGER_TO_TRANSACTION_SUM_US: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_MANAGER_TO_TRANSACTION_MAX_US: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_MANAGER_TO_TRANSACTION_OVER_500MS: AtomicU64 = AtomicU64::new(0);
+static TRANSPORT_MANAGER_TO_TRANSACTION_BUCKETS: [AtomicU64; 18] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LatencySnapshot {
+    pub count: u64,
+    pub avg_us: u64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+    pub max_us: u64,
+    pub over_500ms: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub udp_datagrams_received: u64,
@@ -66,6 +198,10 @@ pub struct Snapshot {
     pub outbound_3xx_6xx: u64,
     pub outbound_other_response: u64,
     pub send_latency_buckets: [u64; 6],
+    pub udp_read_to_worker_queue: LatencySnapshot,
+    pub udp_parse: LatencySnapshot,
+    pub parse_to_transport_manager: LatencySnapshot,
+    pub transport_manager_to_transaction: LatencySnapshot,
 }
 
 pub fn enabled() -> bool {
@@ -87,6 +223,18 @@ fn set_enabled_for_tests(enabled: bool) {
 pub fn reset() {
     for counter in all_counters() {
         counter.store(0, Ordering::Relaxed);
+    }
+    for bucket in &UDP_READ_TO_WORKER_QUEUE_BUCKETS {
+        bucket.store(0, Ordering::Relaxed);
+    }
+    for bucket in &UDP_PARSE_BUCKETS {
+        bucket.store(0, Ordering::Relaxed);
+    }
+    for bucket in &PARSE_TO_TRANSPORT_MANAGER_BUCKETS {
+        bucket.store(0, Ordering::Relaxed);
+    }
+    for bucket in &TRANSPORT_MANAGER_TO_TRANSACTION_BUCKETS {
+        bucket.store(0, Ordering::Relaxed);
     }
 }
 
@@ -123,6 +271,34 @@ pub fn snapshot() -> Snapshot {
             SEND_LT_10MS.load(Ordering::Relaxed),
             SEND_GE_10MS.load(Ordering::Relaxed),
         ],
+        udp_read_to_worker_queue: latency_snapshot(
+            &UDP_READ_TO_WORKER_QUEUE_BUCKETS,
+            &UDP_READ_TO_WORKER_QUEUE_COUNT,
+            &UDP_READ_TO_WORKER_QUEUE_SUM_US,
+            &UDP_READ_TO_WORKER_QUEUE_MAX_US,
+            &UDP_READ_TO_WORKER_QUEUE_OVER_500MS,
+        ),
+        udp_parse: latency_snapshot(
+            &UDP_PARSE_BUCKETS,
+            &UDP_PARSE_COUNT,
+            &UDP_PARSE_SUM_US,
+            &UDP_PARSE_MAX_US,
+            &UDP_PARSE_OVER_500MS,
+        ),
+        parse_to_transport_manager: latency_snapshot(
+            &PARSE_TO_TRANSPORT_MANAGER_BUCKETS,
+            &PARSE_TO_TRANSPORT_MANAGER_COUNT,
+            &PARSE_TO_TRANSPORT_MANAGER_SUM_US,
+            &PARSE_TO_TRANSPORT_MANAGER_MAX_US,
+            &PARSE_TO_TRANSPORT_MANAGER_OVER_500MS,
+        ),
+        transport_manager_to_transaction: latency_snapshot(
+            &TRANSPORT_MANAGER_TO_TRANSACTION_BUCKETS,
+            &TRANSPORT_MANAGER_TO_TRANSACTION_COUNT,
+            &TRANSPORT_MANAGER_TO_TRANSACTION_SUM_US,
+            &TRANSPORT_MANAGER_TO_TRANSACTION_MAX_US,
+            &TRANSPORT_MANAGER_TO_TRANSACTION_OVER_500MS,
+        ),
     }
 }
 
@@ -141,7 +317,9 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          transport_backpressure_events={} transport_backpressure_ms={:.3} \
          manager_backpressure_events={} manager_backpressure_ms={:.3} \
          sends={} send_errors={} raw_sends={} req_invite={} req_ack={} req_bye={} req_other={} \
-         resp_1xx={} resp_2xx={} resp_3xx_6xx={} resp_other={} send_latency=[{}]",
+         resp_1xx={} resp_2xx={} resp_3xx_6xx={} resp_other={} send_latency=[{}] \
+         udp_read_to_worker_queue=[{}] udp_parse=[{}] parse_to_transport_manager=[{}] \
+         transport_manager_to_transaction=[{}]",
         snapshot.udp_datagrams_received,
         snapshot.udp_worker_queue_enqueued,
         snapshot.udp_worker_queue_full,
@@ -163,6 +341,10 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.outbound_3xx_6xx,
         snapshot.outbound_other_response,
         buckets,
+        format_latency(&snapshot.udp_read_to_worker_queue),
+        format_latency(&snapshot.udp_parse),
+        format_latency(&snapshot.parse_to_transport_manager),
+        format_latency(&snapshot.transport_manager_to_transaction),
     )
 }
 
@@ -184,6 +366,50 @@ pub(crate) fn record_udp_parse_ok() {
 
 pub(crate) fn record_udp_parse_failed() {
     increment(&UDP_PARSE_FAILED);
+}
+
+pub fn record_udp_read_to_worker_queue(elapsed: Duration) {
+    record_latency(
+        elapsed,
+        &UDP_READ_TO_WORKER_QUEUE_COUNT,
+        &UDP_READ_TO_WORKER_QUEUE_SUM_US,
+        &UDP_READ_TO_WORKER_QUEUE_MAX_US,
+        &UDP_READ_TO_WORKER_QUEUE_OVER_500MS,
+        &UDP_READ_TO_WORKER_QUEUE_BUCKETS,
+    );
+}
+
+pub fn record_udp_parse(elapsed: Duration) {
+    record_latency(
+        elapsed,
+        &UDP_PARSE_COUNT,
+        &UDP_PARSE_SUM_US,
+        &UDP_PARSE_MAX_US,
+        &UDP_PARSE_OVER_500MS,
+        &UDP_PARSE_BUCKETS,
+    );
+}
+
+pub fn record_parse_to_transport_manager(elapsed: Duration) {
+    record_latency(
+        elapsed,
+        &PARSE_TO_TRANSPORT_MANAGER_COUNT,
+        &PARSE_TO_TRANSPORT_MANAGER_SUM_US,
+        &PARSE_TO_TRANSPORT_MANAGER_MAX_US,
+        &PARSE_TO_TRANSPORT_MANAGER_OVER_500MS,
+        &PARSE_TO_TRANSPORT_MANAGER_BUCKETS,
+    );
+}
+
+pub fn record_transport_manager_to_transaction(elapsed: Duration) {
+    record_latency(
+        elapsed,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_COUNT,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_SUM_US,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_MAX_US,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_OVER_500MS,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_BUCKETS,
+    );
 }
 
 pub fn record_manager_channel_backpressure(wait: Duration) {
@@ -258,6 +484,96 @@ fn record_send_latency(elapsed: Duration) {
     increment_always(bucket);
 }
 
+fn record_latency(
+    elapsed: Duration,
+    count: &AtomicU64,
+    sum_us: &AtomicU64,
+    max_us: &AtomicU64,
+    over_500ms: &AtomicU64,
+    buckets: &[AtomicU64; 18],
+) {
+    if !enabled() {
+        return;
+    }
+    let elapsed_us = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+    count.fetch_add(1, Ordering::Relaxed);
+    sum_us.fetch_add(elapsed_us, Ordering::Relaxed);
+    update_max(max_us, elapsed_us);
+    if elapsed_us > 500_000 {
+        over_500ms.fetch_add(1, Ordering::Relaxed);
+    }
+    for (idx, upper) in LATENCY_BUCKET_UPPER_US.iter().enumerate() {
+        if elapsed_us <= *upper {
+            buckets[idx].fetch_add(1, Ordering::Relaxed);
+            break;
+        }
+    }
+}
+
+fn latency_snapshot(
+    buckets: &[AtomicU64; 18],
+    count: &AtomicU64,
+    sum_us: &AtomicU64,
+    max_us: &AtomicU64,
+    over_500ms: &AtomicU64,
+) -> LatencySnapshot {
+    let count = count.load(Ordering::Relaxed);
+    let sum_us = sum_us.load(Ordering::Relaxed);
+    LatencySnapshot {
+        count,
+        avg_us: if count == 0 { 0 } else { sum_us / count },
+        p50_us: percentile_us(buckets, count, 50),
+        p95_us: percentile_us(buckets, count, 95),
+        p99_us: percentile_us(buckets, count, 99),
+        p999_us: percentile_per_mille_us(buckets, count, 999),
+        max_us: max_us.load(Ordering::Relaxed),
+        over_500ms: over_500ms.load(Ordering::Relaxed),
+    }
+}
+
+fn format_latency(latency: &LatencySnapshot) -> String {
+    format!(
+        "count={} avg_us={} p50_us={} p95_us={} p99_us={} p999_us={} max_us={} over_500ms={}",
+        latency.count,
+        latency.avg_us,
+        latency.p50_us,
+        latency.p95_us,
+        latency.p99_us,
+        latency.p999_us,
+        latency.max_us,
+        latency.over_500ms,
+    )
+}
+
+fn update_max(counter: &AtomicU64, value: u64) {
+    let mut current = counter.load(Ordering::Relaxed);
+    while value > current {
+        match counter.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn percentile_us(buckets: &[AtomicU64], observed: u64, percentile: u64) -> u64 {
+    percentile_per_mille_us(buckets, observed, percentile * 10)
+}
+
+fn percentile_per_mille_us(buckets: &[AtomicU64], observed: u64, per_mille: u64) -> u64 {
+    if observed == 0 {
+        return 0;
+    }
+    let rank = observed.saturating_mul(per_mille).saturating_add(999) / 1000;
+    let mut seen = 0;
+    for (idx, bucket) in buckets.iter().enumerate() {
+        seen += bucket.load(Ordering::Relaxed);
+        if seen >= rank {
+            return LATENCY_BUCKET_UPPER_US[idx];
+        }
+    }
+    u64::MAX
+}
+
 fn increment(counter: &AtomicU64) {
     if enabled() {
         increment_always(counter);
@@ -272,7 +588,7 @@ fn ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
-fn all_counters() -> [&'static AtomicU64; 26] {
+fn all_counters() -> [&'static AtomicU64; 42] {
     [
         &UDP_DATAGRAMS_RECEIVED,
         &UDP_WORKER_QUEUE_ENQUEUED,
@@ -300,6 +616,22 @@ fn all_counters() -> [&'static AtomicU64; 26] {
         &SEND_LT_5MS,
         &SEND_LT_10MS,
         &SEND_GE_10MS,
+        &UDP_READ_TO_WORKER_QUEUE_COUNT,
+        &UDP_READ_TO_WORKER_QUEUE_SUM_US,
+        &UDP_READ_TO_WORKER_QUEUE_MAX_US,
+        &UDP_READ_TO_WORKER_QUEUE_OVER_500MS,
+        &UDP_PARSE_COUNT,
+        &UDP_PARSE_SUM_US,
+        &UDP_PARSE_MAX_US,
+        &UDP_PARSE_OVER_500MS,
+        &PARSE_TO_TRANSPORT_MANAGER_COUNT,
+        &PARSE_TO_TRANSPORT_MANAGER_SUM_US,
+        &PARSE_TO_TRANSPORT_MANAGER_MAX_US,
+        &PARSE_TO_TRANSPORT_MANAGER_OVER_500MS,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_COUNT,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_SUM_US,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_MAX_US,
+        &TRANSPORT_MANAGER_TO_TRANSACTION_OVER_500MS,
     ]
 }
 
@@ -310,6 +642,14 @@ mod tests {
 
     #[test]
     fn diagnostics_summary_includes_counter_values() {
+        set_enabled_for_tests(false);
+        reset();
+        record_udp_datagram_received();
+        record_udp_read_to_worker_queue(Duration::from_micros(25));
+        let disabled = snapshot();
+        assert_eq!(disabled.udp_datagrams_received, 0);
+        assert_eq!(disabled.udp_read_to_worker_queue.count, 0);
+
         set_enabled_for_tests(true);
         reset();
 
@@ -318,6 +658,10 @@ mod tests {
         record_udp_worker_queue_full();
         record_udp_parse_ok();
         record_udp_parse_failed();
+        record_udp_read_to_worker_queue(Duration::from_micros(25));
+        record_udp_parse(Duration::from_micros(50));
+        record_parse_to_transport_manager(Duration::from_micros(75));
+        record_transport_manager_to_transaction(Duration::from_micros(100));
         record_transport_channel_backpressure(Duration::from_millis(2));
         record_manager_channel_backpressure(Duration::from_millis(3));
 
@@ -338,11 +682,16 @@ mod tests {
         assert_eq!(snapshot.udp_worker_queue_full, 1);
         assert_eq!(snapshot.udp_parse_ok, 1);
         assert_eq!(snapshot.udp_parse_failed, 1);
+        assert_eq!(snapshot.udp_read_to_worker_queue.count, 1);
+        assert_eq!(snapshot.udp_parse.count, 1);
+        assert_eq!(snapshot.parse_to_transport_manager.count, 1);
+        assert_eq!(snapshot.transport_manager_to_transaction.count, 1);
         assert_eq!(snapshot.transport_channel_backpressure_events, 1);
         assert_eq!(snapshot.manager_channel_backpressure_events, 1);
         assert_eq!(snapshot.outbound_sends, 2);
         assert_eq!(snapshot.outbound_send_errors, 1);
         assert_eq!(snapshot.outbound_invite, 1);
         assert!(format_summary(&snapshot).contains("recv=1"));
+        assert!(format_summary(&snapshot).contains("udp_read_to_worker_queue=[count=1"));
     }
 }

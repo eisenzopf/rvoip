@@ -117,6 +117,7 @@ impl Harness {
             destination: self.transport.local_addr,
             transport_type: TransportType::Udp,
             raw_bytes: None,
+            timing: None,
         };
         self.tx.send(event).await.expect("inject");
     }

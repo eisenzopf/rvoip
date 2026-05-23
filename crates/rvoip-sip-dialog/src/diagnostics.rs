@@ -102,6 +102,68 @@ static DIALOG_TO_SESSION_QUEUE_BUCKETS: [AtomicU64; 18] = [
     AtomicU64::new(0),
 ];
 
+static UDP_RECEIVE_TO_INCOMING_CALL_EMIT_COUNT: AtomicU64 = AtomicU64::new(0);
+static UDP_RECEIVE_TO_INCOMING_CALL_EMIT_SUM_US: AtomicU64 = AtomicU64::new(0);
+static UDP_RECEIVE_TO_INCOMING_CALL_EMIT_MAX_US: AtomicU64 = AtomicU64::new(0);
+static UDP_RECEIVE_TO_INCOMING_CALL_EMIT_OVER_500MS: AtomicU64 = AtomicU64::new(0);
+static UDP_RECEIVE_TO_INCOMING_CALL_EMIT_BUCKETS: [AtomicU64; 18] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+static BYE_RECEIVE_TO_200_COUNT: AtomicU64 = AtomicU64::new(0);
+static BYE_RECEIVE_TO_200_SUM_US: AtomicU64 = AtomicU64::new(0);
+static BYE_RECEIVE_TO_200_MAX_US: AtomicU64 = AtomicU64::new(0);
+static BYE_RECEIVE_TO_200_OVER_500MS: AtomicU64 = AtomicU64::new(0);
+static BYE_RECEIVE_TO_200_BUCKETS: [AtomicU64; 18] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LatencySnapshot {
+    pub count: u64,
+    pub avg_us: u64,
+    pub p50_us: u64,
+    pub p95_us: u64,
+    pub p99_us: u64,
+    pub p999_us: u64,
+    pub max_us: u64,
+    pub over_500ms: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Snapshot {
     pub duplicate_invite_existing_transaction: u64,
@@ -144,6 +206,8 @@ pub struct Snapshot {
     pub dialog_to_session_queue_bye_received: u64,
     pub dialog_to_session_queue_terminal: u64,
     pub dialog_to_session_queue_other: u64,
+    pub udp_receive_to_incoming_call_emit: LatencySnapshot,
+    pub bye_receive_to_200: LatencySnapshot,
 }
 
 pub fn enabled() -> bool {
@@ -170,6 +234,12 @@ pub fn reset() {
         bucket.store(0, Ordering::Relaxed);
     }
     for bucket in &DIALOG_TO_SESSION_QUEUE_BUCKETS {
+        bucket.store(0, Ordering::Relaxed);
+    }
+    for bucket in &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_BUCKETS {
+        bucket.store(0, Ordering::Relaxed);
+    }
+    for bucket in &BYE_RECEIVE_TO_200_BUCKETS {
         bucket.store(0, Ordering::Relaxed);
     }
 }
@@ -252,6 +322,20 @@ pub fn snapshot() -> Snapshot {
             .load(Ordering::Relaxed),
         dialog_to_session_queue_terminal: DIALOG_TO_SESSION_QUEUE_TERMINAL.load(Ordering::Relaxed),
         dialog_to_session_queue_other: DIALOG_TO_SESSION_QUEUE_OTHER.load(Ordering::Relaxed),
+        udp_receive_to_incoming_call_emit: latency_snapshot(
+            &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_BUCKETS,
+            &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_COUNT,
+            &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_SUM_US,
+            &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_MAX_US,
+            &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_OVER_500MS,
+        ),
+        bye_receive_to_200: latency_snapshot(
+            &BYE_RECEIVE_TO_200_BUCKETS,
+            &BYE_RECEIVE_TO_200_COUNT,
+            &BYE_RECEIVE_TO_200_SUM_US,
+            &BYE_RECEIVE_TO_200_MAX_US,
+            &BYE_RECEIVE_TO_200_OVER_500MS,
+        ),
     }
 }
 
@@ -274,7 +358,8 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          p95_us={} p99_us={} p999_us={} max_us={} over_500ms={}] \
          dialog_to_session_queue=[count={} avg_us={} p50_us={} p95_us={} p99_us={} \
          p999_us={} max_us={} over_500ms={} incoming_call={} ack_received={} \
-         bye_received={} terminal={} other={}]",
+         bye_received={} terminal={} other={}] \
+         udp_receive_to_incoming_call_emit=[{}] bye_receive_to_200=[{}]",
         snapshot.duplicate_invite_existing_transaction,
         snapshot.duplicate_invite_cache_hit,
         snapshot.duplicate_invite_cache_miss,
@@ -315,6 +400,8 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.dialog_to_session_queue_bye_received,
         snapshot.dialog_to_session_queue_terminal,
         snapshot.dialog_to_session_queue_other,
+        format_latency(&snapshot.udp_receive_to_incoming_call_emit),
+        format_latency(&snapshot.bye_receive_to_200),
     )
 }
 
@@ -412,6 +499,28 @@ pub fn record_first_invite_to_200(elapsed: Duration) {
     }
 }
 
+pub fn record_udp_receive_to_incoming_call_emit(elapsed: Duration) {
+    record_latency(
+        elapsed,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_COUNT,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_SUM_US,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_MAX_US,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_OVER_500MS,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_BUCKETS,
+    );
+}
+
+pub fn record_bye_receive_to_200(elapsed: Duration) {
+    record_latency(
+        elapsed,
+        &BYE_RECEIVE_TO_200_COUNT,
+        &BYE_RECEIVE_TO_200_SUM_US,
+        &BYE_RECEIVE_TO_200_MAX_US,
+        &BYE_RECEIVE_TO_200_OVER_500MS,
+        &BYE_RECEIVE_TO_200_BUCKETS,
+    );
+}
+
 fn increment(counter: &AtomicU64) {
     if enabled() {
         counter.fetch_add(1, Ordering::Relaxed);
@@ -447,6 +556,67 @@ pub fn record_dialog_to_session_queue_delay(kind: &str, elapsed: Duration) {
     };
 }
 
+fn record_latency(
+    elapsed: Duration,
+    count: &AtomicU64,
+    sum_us: &AtomicU64,
+    max_us: &AtomicU64,
+    over_500ms: &AtomicU64,
+    buckets: &[AtomicU64; 18],
+) {
+    if !enabled() {
+        return;
+    }
+    let elapsed_us = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+    count.fetch_add(1, Ordering::Relaxed);
+    sum_us.fetch_add(elapsed_us, Ordering::Relaxed);
+    update_max(max_us, elapsed_us);
+    if elapsed_us > 500_000 {
+        over_500ms.fetch_add(1, Ordering::Relaxed);
+    }
+    for (idx, upper) in LATENCY_BUCKET_UPPER_US.iter().enumerate() {
+        if elapsed_us <= *upper {
+            buckets[idx].fetch_add(1, Ordering::Relaxed);
+            break;
+        }
+    }
+}
+
+fn latency_snapshot(
+    buckets: &[AtomicU64; 18],
+    count: &AtomicU64,
+    sum_us: &AtomicU64,
+    max_us: &AtomicU64,
+    over_500ms: &AtomicU64,
+) -> LatencySnapshot {
+    let count = count.load(Ordering::Relaxed);
+    let sum_us = sum_us.load(Ordering::Relaxed);
+    LatencySnapshot {
+        count,
+        avg_us: if count == 0 { 0 } else { sum_us / count },
+        p50_us: percentile_us(buckets, count, 50),
+        p95_us: percentile_us(buckets, count, 95),
+        p99_us: percentile_us(buckets, count, 99),
+        p999_us: percentile_per_mille_us(buckets, count, 999),
+        max_us: max_us.load(Ordering::Relaxed),
+        over_500ms: over_500ms.load(Ordering::Relaxed),
+    }
+}
+
+fn format_latency(latency: &LatencySnapshot) -> String {
+    format!(
+        "count={} avg_us={} p50_us={} p95_us={} p99_us={} p999_us={} max_us={} over_500ms={}",
+        latency.count,
+        latency.avg_us,
+        latency.p50_us,
+        latency.p95_us,
+        latency.p99_us,
+        latency.p999_us,
+        latency.max_us,
+        latency.over_500ms,
+    )
+}
+
 fn update_max(counter: &AtomicU64, value: u64) {
     let mut current = counter.load(Ordering::Relaxed);
     while value > current {
@@ -480,7 +650,7 @@ fn percentile_per_mille_us(buckets: &[AtomicU64], observed: u64, per_mille: u64)
     FIRST_INVITE_TO_200_MAX_US.load(Ordering::Relaxed)
 }
 
-fn all_counters() -> [&'static AtomicU64; 32] {
+fn all_counters() -> [&'static AtomicU64; 40] {
     [
         &DUP_INVITE_EXISTING_TX,
         &DUP_INVITE_CACHE_HIT,
@@ -514,6 +684,14 @@ fn all_counters() -> [&'static AtomicU64; 32] {
         &DIALOG_TO_SESSION_QUEUE_BYE_RECEIVED,
         &DIALOG_TO_SESSION_QUEUE_TERMINAL,
         &DIALOG_TO_SESSION_QUEUE_OTHER,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_COUNT,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_SUM_US,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_MAX_US,
+        &UDP_RECEIVE_TO_INCOMING_CALL_EMIT_OVER_500MS,
+        &BYE_RECEIVE_TO_200_COUNT,
+        &BYE_RECEIVE_TO_200_SUM_US,
+        &BYE_RECEIVE_TO_200_MAX_US,
+        &BYE_RECEIVE_TO_200_OVER_500MS,
     ]
 }
 
@@ -523,6 +701,14 @@ mod tests {
 
     #[test]
     fn retransmission_diagnostics_format_counts() {
+        set_enabled_for_tests(false);
+        reset();
+        record_duplicate_invite_existing_transaction();
+        record_udp_receive_to_incoming_call_emit(Duration::from_micros(125));
+        let disabled = snapshot();
+        assert_eq!(disabled.duplicate_invite_existing_transaction, 0);
+        assert_eq!(disabled.udp_receive_to_incoming_call_emit.count, 0);
+
         set_enabled_for_tests(true);
         reset();
 
@@ -537,13 +723,19 @@ mod tests {
         record_duplicate_bye_tombstone_hit();
         record_duplicate_bye_tombstone_miss();
         record_duplicate_bye_terminated_dialog();
+        record_udp_receive_to_incoming_call_emit(Duration::from_micros(125));
+        record_bye_receive_to_200(Duration::from_micros(250));
 
         let snapshot = snapshot();
         assert_eq!(snapshot.duplicate_invite_existing_transaction, 1);
         assert_eq!(snapshot.duplicate_invite_cache_hit, 1);
         assert_eq!(snapshot.duplicate_bye_tombstone_hit, 1);
+        assert_eq!(snapshot.udp_receive_to_incoming_call_emit.count, 1);
+        assert_eq!(snapshot.bye_receive_to_200.count, 1);
         let summary = format_summary(&snapshot);
         assert!(summary.contains("dup_invite_cache_hit=1"));
         assert!(summary.contains("dup_bye_tombstone_hit=1"));
+        assert!(summary.contains("udp_receive_to_incoming_call_emit=[count=1"));
+        assert!(summary.contains("bye_receive_to_200=[count=1"));
     }
 }

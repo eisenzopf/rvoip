@@ -174,6 +174,7 @@ impl TcpTransport {
                             destination: local_addr,
                             transport_type: TransportType::Tcp,
                             raw_bytes: Some(raw_bytes),
+                            timing: None,
                         };
 
                         if let Err(e) = events_tx.send(event).await {
