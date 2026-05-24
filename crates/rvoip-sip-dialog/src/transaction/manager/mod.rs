@@ -569,6 +569,7 @@ fn start_transaction_dispatch_workers(
             while let Some(queued) = rx.recv().await {
                 if let Some(queued_at) = queued.queued_at {
                     diagnostics::record_transaction_dispatch_queue_delay(queued_at.elapsed());
+                    diagnostics::record_transaction_dispatch_queue_depth(rx.len());
                 }
                 process_transaction_dispatch_event(&manager_for_worker, queued).await;
             }
@@ -603,6 +604,7 @@ async fn dispatch_transaction_event(
     match dispatch_senders[worker_index].try_send(queued) {
         Ok(()) => {}
         Err(mpsc::error::TrySendError::Full(queued)) => {
+            let backpressure_started = timing_enabled.then(Instant::now);
             warn!(
                 worker_index,
                 kind = queued.kind.map(|kind| kind.as_str()).unwrap_or("unknown"),
@@ -610,6 +612,8 @@ async fn dispatch_transaction_event(
             );
             if dispatch_senders[worker_index].send(queued).await.is_err() {
                 warn!(worker_index, "Transaction dispatch worker channel closed");
+            } else if let Some(started) = backpressure_started {
+                diagnostics::record_transaction_dispatch_backpressure(started.elapsed());
             }
         }
         Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -1749,6 +1753,7 @@ impl TransactionManager {
         response: Response,
     ) -> Result<()> {
         rvoip_sip_core::validation::validate_wire_response(&response)?;
+        let is_200_ok = response.status().as_u16() == 200;
 
         // Same pattern as send_request: extract the Arc<dyn ServerTransaction>
         // from the DashMap shard before awaiting `send_response()`.
@@ -1765,9 +1770,20 @@ impl TransactionManager {
 
         use crate::transaction::server::TransactionExt;
         if let Some(server_tx) = tx.as_server_transaction() {
+            let original_method = if is_200_ok {
+                server_tx
+                    .original_request_sync()
+                    .map(|request| request.method().clone())
+            } else {
+                None
+            };
             let result = server_tx.send_response(response).await;
             if result.is_ok() {
                 self.cache_invite_2xx_response_for(transaction_id).await;
+                if is_200_ok && !matches!(original_method, Some(Method::Invite) | Some(Method::Bye))
+                {
+                    diagnostics::record_200_ok_other();
+                }
             }
             result
         } else {
@@ -3282,6 +3298,7 @@ impl TransactionManager {
         }
 
         diagnostics::record_duplicate_invite_cache_hit();
+        let is_200_ok = entry.response.status().as_u16() == 200;
         let destination = if source == entry.destination {
             entry.destination
         } else {
@@ -3291,6 +3308,9 @@ impl TransactionManager {
             .send_message(Message::Response(entry.response), destination)
             .await
             .map_err(|e| Error::transport_error(e, "Failed to retransmit cached INVITE 2xx"))?;
+        if is_200_ok {
+            diagnostics::record_200_ok_invite_duplicate_cache();
+        }
 
         Ok(true)
     }
@@ -3385,6 +3405,7 @@ impl TransactionManager {
 
         let mut retransmitted = 0usize;
         for (response, destination) in sends {
+            let is_200_ok = response.status().as_u16() == 200;
             let send_started = diagnostics::transaction_timing_enabled().then(Instant::now);
             match self
                 .transport
@@ -3394,6 +3415,9 @@ impl TransactionManager {
                 Ok(()) => {
                     retransmitted += 1;
                     diagnostics::record_invite_2xx_proactive_retransmit();
+                    if is_200_ok {
+                        diagnostics::record_200_ok_invite_proactive_retransmit();
+                    }
                     if let Some(started) = send_started {
                         diagnostics::record_invite_2xx_proactive_send(started.elapsed());
                     }

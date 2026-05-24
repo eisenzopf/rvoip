@@ -157,6 +157,7 @@ impl DialogManager {
                     message: format!("Failed to send response to BYE: {}", e),
                 })?;
             if status_code == StatusCode::Ok {
+                diagnostics::record_200_ok_bye_tombstone();
                 self.record_bye_receive_to_200(&transaction_id);
                 self.release_bye_server_transaction(&transaction_id).await;
             }
@@ -202,6 +203,11 @@ impl DialogManager {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
             })?;
         diagnostics::record_bye_200_sent();
+        if duplicate_terminated_bye {
+            diagnostics::record_200_ok_bye_duplicate_terminated();
+        } else {
+            diagnostics::record_200_ok_bye_fresh();
+        }
         self.record_bye_receive_to_200(&transaction_id);
         self.release_bye_server_transaction(&transaction_id).await;
 

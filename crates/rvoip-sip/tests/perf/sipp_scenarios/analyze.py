@@ -42,6 +42,16 @@ def parse_int(value) -> int:
     return int(value or 0)
 
 
+def parse_optional_int(value) -> int | None:
+    if value is None or value == "":
+        return None
+    return int(value)
+
+
+def fmt_optional(value) -> str:
+    return "n/a" if value is None else str(value)
+
+
 def response_buckets(by_name: dict[str, str], prefix: str) -> dict[str, int]:
     buckets = {
         f"<{upper}": parse_int(by_name.get(f"{prefix}_<{upper}"))
@@ -66,6 +76,172 @@ def percentile_from_buckets(buckets: dict[str, int], quantile: float) -> str:
         if seen >= target:
             return label
     return ordered[-1][0]
+
+
+def default_supplemental() -> dict:
+    return {
+        "sipp_rc": None,
+        "udp_full_socket_drops_delta": None,
+        "listener_accepted_total": None,
+        "listener_cleaned_total": None,
+        "dead_200_total": 0,
+        "dead_200_by_cseq": Counter(),
+        "sip_udp_diag": {},
+        "sip_retrans_diag": {},
+        "sample_artifact": None,
+        "samply_profile": None,
+        "samply_log": None,
+    }
+
+
+def dead_call_200_by_cseq(path: Path) -> Counter:
+    counts = Counter()
+    text = path.read_text(errors="replace")
+    for chunk in text.split("Dead call ")[1:]:
+        if "received 'SIP/2.0 200 OK" not in chunk:
+            continue
+        match = re.search(r"(?im)^CSeq:\s*\d+\s+([A-Z]+)\s*$", chunk)
+        method = match.group(1).upper() if match else "UNKNOWN"
+        counts[method] += 1
+    return counts
+
+
+def parse_key_value_file(path: Path) -> dict[str, str]:
+    values = {}
+    for line in path.read_text(errors="replace").splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+def extract_int(line: str, key: str) -> int | None:
+    match = re.search(rf"\b{re.escape(key)}=(\d+)", line)
+    return parse_optional_int(match.group(1)) if match else None
+
+
+def extract_bracket(line: str, key: str) -> str | None:
+    match = re.search(rf"\b{re.escape(key)}=\[([^\]]*)\]", line)
+    return match.group(1) if match else None
+
+
+def parse_sip_udp_diag(line: str | None) -> dict:
+    if not line:
+        return {}
+    keys = [
+        "queue_full",
+        "send_errors",
+        "resp_2xx",
+        "manager_backpressure_events",
+        "transport_backpressure_events",
+    ]
+    out = {key: extract_int(line, key) for key in keys}
+    out["transport_manager_to_transaction"] = extract_bracket(
+        line, "transport_manager_to_transaction"
+    )
+    return out
+
+
+def parse_sip_retrans_diag(line: str | None) -> dict:
+    if not line:
+        return {}
+    keys = [
+        "dup_invite_cache_miss",
+        "ack_unmatched",
+        "worker_mismatch",
+        "invite_2xx_proactive_retx",
+        "bye_200_sent",
+    ]
+    out = {key: extract_int(line, key) for key in keys}
+    for bracket_key in [
+        "ok_200_source",
+        "transaction_dispatch_queue",
+        "transaction_dispatch_queue_depth",
+        "transaction_dispatch_backpressure",
+        "dialog_event_dispatch_queue",
+        "dialog_to_session_queue",
+        "bye_receive_to_200",
+    ]:
+        out[bracket_key] = extract_bracket(line, bracket_key)
+    return out
+
+
+def parse_listener_log(path: Path) -> dict:
+    last_udp_diag = None
+    last_retrans_diag = None
+    accepted_total = None
+    cleaned_total = None
+    for line in path.read_text(errors="replace").splitlines():
+        if "[sip_udp_diag]" in line:
+            last_udp_diag = line
+        elif "[sip_retrans_diag]" in line:
+            last_retrans_diag = line
+        if "[perf_listener]" in line and "accepted_total=" in line:
+            match = re.search(r"accepted_total=(\d+).*cleaned_total=(\d+)", line)
+            if match:
+                accepted_total = int(match.group(1))
+                cleaned_total = int(match.group(2))
+
+    return {
+        "listener_accepted_total": accepted_total,
+        "listener_cleaned_total": cleaned_total,
+        "sip_udp_diag": parse_sip_udp_diag(last_udp_diag),
+        "sip_retrans_diag": parse_sip_retrans_diag(last_retrans_diag),
+    }
+
+
+def collect_supplemental(results_dir: Path) -> dict[str, dict[int, dict]]:
+    by_run: dict[str, dict[int, dict]] = {}
+
+    def get(tag: str, cps: int) -> dict:
+        return by_run.setdefault(tag, {}).setdefault(cps, default_supplemental())
+
+    patterns = {
+        "errors": re.compile(r"^(?P<tag>.+)_(?P<cps>\d+)cps(?:_s\d+)?_errors\.log$"),
+        "host_udp": re.compile(r"^(?P<tag>.+)_(?P<cps>\d+)cps_host_udp_netstat\.txt$"),
+        "listener": re.compile(r"^(?P<tag>.+)_(?P<cps>\d+)cps_listener\.log$"),
+        "sample": re.compile(r"^(?P<tag>.+)_(?P<cps>\d+)cps_sample\.txt$"),
+        "samply_profile": re.compile(
+            r"^(?P<tag>.+)_(?P<cps>\d+)cps_samply_profile\.json\.gz$"
+        ),
+        "samply_log": re.compile(r"^(?P<tag>.+)_(?P<cps>\d+)cps_samply\.log$"),
+    }
+
+    for path in sorted(results_dir.iterdir()):
+        name = path.name
+        if match := patterns["errors"].match(name):
+            tag, cps = match.group("tag"), int(match.group("cps"))
+            counts = dead_call_200_by_cseq(path)
+            entry = get(tag, cps)
+            entry["dead_200_by_cseq"].update(counts)
+            entry["dead_200_total"] += sum(counts.values())
+        elif match := patterns["host_udp"].match(name):
+            tag, cps = match.group("tag"), int(match.group("cps"))
+            values = parse_key_value_file(path)
+            entry = get(tag, cps)
+            entry["sipp_rc"] = parse_optional_int(values.get("rc"))
+            entry["udp_full_socket_drops_delta"] = parse_optional_int(
+                values.get("udp_full_socket_drops_delta")
+            )
+        elif match := patterns["listener"].match(name):
+            tag, cps = match.group("tag"), int(match.group("cps"))
+            get(tag, cps).update(parse_listener_log(path))
+        elif match := patterns["sample"].match(name):
+            tag, cps = match.group("tag"), int(match.group("cps"))
+            get(tag, cps)["sample_artifact"] = path.as_posix()
+        elif match := patterns["samply_profile"].match(name):
+            tag, cps = match.group("tag"), int(match.group("cps"))
+            get(tag, cps)["samply_profile"] = path.as_posix()
+        elif match := patterns["samply_log"].match(name):
+            tag, cps = match.group("tag"), int(match.group("cps"))
+            get(tag, cps)["samply_log"] = path.as_posix()
+
+    for by_cps in by_run.values():
+        for entry in by_cps.values():
+            entry["dead_200_by_cseq"] = dict(entry["dead_200_by_cseq"])
+
+    return by_run
 
 
 def parse_csv(path: Path) -> dict:
@@ -180,11 +356,34 @@ def collect(results_dir: Path) -> dict:
         parsed = parse_csv(p)
         if parsed:
             runs.setdefault(tag, {}).setdefault(cps, []).append(parsed)
+    supplemental = collect_supplemental(results_dir)
     out: dict[str, dict[int, dict]] = {}
     for tag, by_cps in runs.items():
         for cps, cps_runs in by_cps.items():
-            out.setdefault(tag, {})[cps] = aggregate_runs(cps_runs)
+            aggregated = aggregate_runs(cps_runs)
+            aggregated.update(default_supplemental())
+            aggregated.update(supplemental.get(tag, {}).get(cps, {}))
+            out.setdefault(tag, {})[cps] = aggregated
     return out
+
+
+def dead_count(run: dict, method: str) -> int:
+    return int(run.get("dead_200_by_cseq", {}).get(method, 0))
+
+
+def format_dead_counts(run: dict) -> str:
+    counts = run.get("dead_200_by_cseq", {})
+    if not counts:
+        return "none"
+    return ", ".join(f"{method}={count}" for method, count in sorted(counts.items()))
+
+
+def diag_value(run: dict, group: str, key: str):
+    return run.get(group, {}).get(key)
+
+
+def format_artifact(value) -> str:
+    return value if value else "n/a"
 
 
 def render(data: dict) -> str:
@@ -213,6 +412,14 @@ def render(data: dict) -> str:
         "P95 RTT (ms)",
         "P99 RTT (ms)",
         "Retrans",
+        "SIPp rc",
+        "UDP drops",
+        "Dead 200",
+        "Dead INVITE 200",
+        "Dead BYE 200",
+        "dup miss",
+        "ack unmatched",
+        "worker mismatch",
     ]
     lines.append("| " + " | ".join(header) + " |")
     lines.append("|" + "|".join(["---"] * len(header)) + "|")
@@ -224,7 +431,14 @@ def render(data: dict) -> str:
             lines.append(
                 f"| {tag} | {cps} | {d['shards']} | {d['total']} | {d['success']} | "
                 f"{d['success_rate']:.1f}% | {d['achieved_cps']:.1f} | "
-                f"{d['rt_ms']:.1f} | {d['rt_p95']} | {d['rt_p99']} | {d['retrans']} |"
+                f"{d['rt_ms']:.1f} | {d['rt_p95']} | {d['rt_p99']} | {d['retrans']} | "
+                f"{fmt_optional(d.get('sipp_rc'))} | "
+                f"{fmt_optional(d.get('udp_full_socket_drops_delta'))} | "
+                f"{d.get('dead_200_total', 0)} | {dead_count(d, 'INVITE')} | "
+                f"{dead_count(d, 'BYE')} | "
+                f"{fmt_optional(diag_value(d, 'sip_retrans_diag', 'dup_invite_cache_miss'))} | "
+                f"{fmt_optional(diag_value(d, 'sip_retrans_diag', 'ack_unmatched'))} | "
+                f"{fmt_optional(diag_value(d, 'sip_retrans_diag', 'worker_mismatch'))} |"
             )
     lines.append("")
 
@@ -236,6 +450,8 @@ def render(data: dict) -> str:
             d = data[tag].get(cps)
             if not d:
                 continue
+            udp_diag = d.get("sip_udp_diag", {})
+            retrans_diag = d.get("sip_retrans_diag", {})
             lines.append(f"### {tag} @ {cps} CPS")
             lines.append("")
             lines.append(f"- Elapsed: **{d['elapsed_s']:.1f} s**")
@@ -253,6 +469,57 @@ def render(data: dict) -> str:
             lines.append(f"- Call length: {d['call_len_ms']:.1f} ms")
             lines.append(f"- SIPp shards: {d['shards']}")
             lines.append(f"- Retransmissions: {d['retrans']}")
+            lines.append(
+                f"- SIPp rc: {fmt_optional(d.get('sipp_rc'))}; "
+                f"host UDP full-socket drops: "
+                f"{fmt_optional(d.get('udp_full_socket_drops_delta'))}"
+            )
+            lines.append(
+                f"- Listener final: accepted "
+                f"{fmt_optional(d.get('listener_accepted_total'))}, cleaned "
+                f"{fmt_optional(d.get('listener_cleaned_total'))}"
+            )
+            lines.append(
+                f"- Dead-call 200 OK: {d.get('dead_200_total', 0)} "
+                f"({format_dead_counts(d)})"
+            )
+            lines.append(
+                "- Final sip_udp_diag: "
+                f"queue_full={fmt_optional(udp_diag.get('queue_full'))}, "
+                f"send_errors={fmt_optional(udp_diag.get('send_errors'))}, "
+                f"resp_2xx={fmt_optional(udp_diag.get('resp_2xx'))}, "
+                f"transport_manager_to_transaction=["
+                f"{udp_diag.get('transport_manager_to_transaction') or 'n/a'}]"
+            )
+            lines.append(
+                "- Final sip_retrans_diag: "
+                f"dup_invite_cache_miss="
+                f"{fmt_optional(retrans_diag.get('dup_invite_cache_miss'))}, "
+                f"ack_unmatched={fmt_optional(retrans_diag.get('ack_unmatched'))}, "
+                f"worker_mismatch={fmt_optional(retrans_diag.get('worker_mismatch'))}, "
+                f"invite_2xx_proactive_retx="
+                f"{fmt_optional(retrans_diag.get('invite_2xx_proactive_retx'))}, "
+                f"bye_200_sent={fmt_optional(retrans_diag.get('bye_200_sent'))}"
+            )
+            if retrans_diag.get("ok_200_source"):
+                lines.append(
+                    f"- 200 OK sources: [{retrans_diag['ok_200_source']}]"
+                )
+            for metric_name, label in [
+                ("transaction_dispatch_queue", "Transaction dispatch queue"),
+                ("transaction_dispatch_queue_depth", "Transaction dispatch queue depth"),
+                ("transaction_dispatch_backpressure", "Transaction dispatch backpressure"),
+                ("dialog_event_dispatch_queue", "Dialog event dispatch queue"),
+                ("dialog_to_session_queue", "Dialog-to-session queue"),
+                ("bye_receive_to_200", "BYE receive-to-200"),
+            ]:
+                if retrans_diag.get(metric_name):
+                    lines.append(f"- {label}: [{retrans_diag[metric_name]}]")
+            lines.append(
+                f"- Profile artifacts: sample={format_artifact(d.get('sample_artifact'))}; "
+                f"samply_profile={format_artifact(d.get('samply_profile'))}; "
+                f"samply_log={format_artifact(d.get('samply_log'))}"
+            )
             if d["current"] > 0:
                 lines.append(
                     f"- WARNING: {d['current']} calls still in-flight at sweep end "

@@ -429,6 +429,7 @@ pub(crate) async fn execute_action(
                         .await?;
                 }
                 if let Some(started_at) = response_started_at {
+                    rvoip_sip_dialog::diagnostics::record_200_ok_invite_first();
                     rvoip_sip_dialog::diagnostics::record_first_invite_to_200(started_at.elapsed());
                 }
             } else {

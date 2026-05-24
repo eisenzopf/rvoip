@@ -21,6 +21,25 @@ transaction fanout. The best repeated clean profile remains:
 The next target is to find and remove interference around dialog-core rather
 than increasing worker counts blindly.
 
+## Implemented Fix Finding
+
+The first fix confirmed that INVITE 2xx maintenance and cache timing were part
+of the overload amplifier. Bounding proactive INVITE 2xx retransmit
+maintenance and retaining ACKed 2xx responses briefly made the high-CPS path
+more stable:
+
+- Maintenance no longer drains the entire due backlog in one tick.
+- ACKed 2xx responses remain available for duplicate INVITE idempotence during
+  a short retention window.
+- ACKed entries no longer proactively retransmit.
+- Validation showed `dup_invite_cache_miss=0`, `ack_unmatched=0`,
+  `worker_mismatch=0`, and zero host UDP drops in the tested shapes.
+
+The important follow-up lesson is that overload-sensitive SIP correctness work
+must be bounded and should not remove idempotence state too eagerly. Remaining
+20k CPS issues should be investigated as another backlog/amplification path,
+not as a simple worker-count problem.
+
 ## Findings From Code Review
 
 ### Dialog Event Affinity Can Split A Call

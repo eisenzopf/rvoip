@@ -58,6 +58,14 @@ static BYE_CLEANUP_EVENT_EMITTED: AtomicU64 = AtomicU64::new(0);
 static BYE_CLEANUP_DELIVERED: AtomicU64 = AtomicU64::new(0);
 static BYE_CLEANUP_SESSION_MISSING: AtomicU64 = AtomicU64::new(0);
 
+static OK_200_INVITE_FIRST: AtomicU64 = AtomicU64::new(0);
+static OK_200_INVITE_DUPLICATE_CACHE: AtomicU64 = AtomicU64::new(0);
+static OK_200_INVITE_PROACTIVE_RETRANSMIT: AtomicU64 = AtomicU64::new(0);
+static OK_200_BYE_FRESH: AtomicU64 = AtomicU64::new(0);
+static OK_200_BYE_TOMBSTONE: AtomicU64 = AtomicU64::new(0);
+static OK_200_BYE_DUPLICATE_TERMINATED: AtomicU64 = AtomicU64::new(0);
+static OK_200_OTHER: AtomicU64 = AtomicU64::new(0);
+
 static DIALOG_ROUTE_REQUEST: AtomicU64 = AtomicU64::new(0);
 static DIALOG_ROUTE_STORED: AtomicU64 = AtomicU64::new(0);
 static DIALOG_ROUTE_TRANSACTION_KEY: AtomicU64 = AtomicU64::new(0);
@@ -101,6 +109,9 @@ static GLOBAL_PUBLISH_INCOMING_CALL: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_PUBLISH_ACK: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_PUBLISH_BYE: AtomicU64 = AtomicU64::new(0);
 static GLOBAL_PUBLISH_OTHER: AtomicU64 = AtomicU64::new(0);
+
+static TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
 
 static FIRST_INVITE_TO_200_COUNT: AtomicU64 = AtomicU64::new(0);
 static FIRST_INVITE_TO_200_SUM_US: AtomicU64 = AtomicU64::new(0);
@@ -268,6 +279,7 @@ static TRANSACTION_HANDLER_OTHER: LatencyMetric = LatencyMetric::new();
 static SERVER_TRANSACTION_CREATE: LatencyMetric = LatencyMetric::new();
 static EXISTING_TRANSACTION_DISPATCH: LatencyMetric = LatencyMetric::new();
 static TRANSACTION_EVENT_BROADCAST: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_DISPATCH_BACKPRESSURE: LatencyMetric = LatencyMetric::new();
 static UDP_RECEIVE_TO_INVITE_200: LatencyMetric = LatencyMetric::new();
 static DIALOG_EVENT_DISPATCH_QUEUE: LatencyMetric = LatencyMetric::new();
 static DIALOG_EVENT_DISPATCH_BACKPRESSURE: LatencyMetric = LatencyMetric::new();
@@ -324,6 +336,13 @@ pub struct Snapshot {
     pub bye_cleanup_event_emitted: u64,
     pub bye_cleanup_delivered: u64,
     pub bye_cleanup_session_missing: u64,
+    pub ok_200_invite_first: u64,
+    pub ok_200_invite_duplicate_cache: u64,
+    pub ok_200_invite_proactive_retransmit: u64,
+    pub ok_200_bye_fresh: u64,
+    pub ok_200_bye_tombstone: u64,
+    pub ok_200_bye_duplicate_terminated: u64,
+    pub ok_200_other: u64,
     pub dialog_route_request: u64,
     pub dialog_route_stored: u64,
     pub dialog_route_transaction_key: u64,
@@ -364,6 +383,8 @@ pub struct Snapshot {
     pub global_publish_ack: u64,
     pub global_publish_bye: u64,
     pub global_publish_other: u64,
+    pub transaction_dispatch_queue_depth_total: u64,
+    pub transaction_dispatch_queue_depth_max: u64,
     pub first_invite_to_200_count: u64,
     pub first_invite_to_200_avg_us: u64,
     pub first_invite_to_200_p50_us: u64,
@@ -397,6 +418,7 @@ pub struct Snapshot {
     pub server_transaction_create: LatencySnapshot,
     pub existing_transaction_dispatch: LatencySnapshot,
     pub transaction_event_broadcast: LatencySnapshot,
+    pub transaction_dispatch_backpressure: LatencySnapshot,
     pub udp_receive_to_invite_200: LatencySnapshot,
     pub dialog_event_dispatch_queue: LatencySnapshot,
     pub dialog_event_dispatch_backpressure: LatencySnapshot,
@@ -520,6 +542,14 @@ pub fn snapshot() -> Snapshot {
         bye_cleanup_event_emitted: BYE_CLEANUP_EVENT_EMITTED.load(Ordering::Relaxed),
         bye_cleanup_delivered: BYE_CLEANUP_DELIVERED.load(Ordering::Relaxed),
         bye_cleanup_session_missing: BYE_CLEANUP_SESSION_MISSING.load(Ordering::Relaxed),
+        ok_200_invite_first: OK_200_INVITE_FIRST.load(Ordering::Relaxed),
+        ok_200_invite_duplicate_cache: OK_200_INVITE_DUPLICATE_CACHE.load(Ordering::Relaxed),
+        ok_200_invite_proactive_retransmit: OK_200_INVITE_PROACTIVE_RETRANSMIT
+            .load(Ordering::Relaxed),
+        ok_200_bye_fresh: OK_200_BYE_FRESH.load(Ordering::Relaxed),
+        ok_200_bye_tombstone: OK_200_BYE_TOMBSTONE.load(Ordering::Relaxed),
+        ok_200_bye_duplicate_terminated: OK_200_BYE_DUPLICATE_TERMINATED.load(Ordering::Relaxed),
+        ok_200_other: OK_200_OTHER.load(Ordering::Relaxed),
         dialog_route_request: DIALOG_ROUTE_REQUEST.load(Ordering::Relaxed),
         dialog_route_stored: DIALOG_ROUTE_STORED.load(Ordering::Relaxed),
         dialog_route_transaction_key: DIALOG_ROUTE_TRANSACTION_KEY.load(Ordering::Relaxed),
@@ -572,6 +602,10 @@ pub fn snapshot() -> Snapshot {
         global_publish_ack: GLOBAL_PUBLISH_ACK.load(Ordering::Relaxed),
         global_publish_bye: GLOBAL_PUBLISH_BYE.load(Ordering::Relaxed),
         global_publish_other: GLOBAL_PUBLISH_OTHER.load(Ordering::Relaxed),
+        transaction_dispatch_queue_depth_total: TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL
+            .load(Ordering::Relaxed),
+        transaction_dispatch_queue_depth_max: TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX
+            .load(Ordering::Relaxed),
         first_invite_to_200_count: first_count,
         first_invite_to_200_avg_us: if first_count == 0 {
             0
@@ -649,6 +683,7 @@ pub fn snapshot() -> Snapshot {
         server_transaction_create: SERVER_TRANSACTION_CREATE.snapshot(),
         existing_transaction_dispatch: EXISTING_TRANSACTION_DISPATCH.snapshot(),
         transaction_event_broadcast: TRANSACTION_EVENT_BROADCAST.snapshot(),
+        transaction_dispatch_backpressure: TRANSACTION_DISPATCH_BACKPRESSURE.snapshot(),
         udp_receive_to_invite_200: UDP_RECEIVE_TO_INVITE_200.snapshot(),
         dialog_event_dispatch_queue: DIALOG_EVENT_DISPATCH_QUEUE.snapshot(),
         dialog_event_dispatch_backpressure: DIALOG_EVENT_DISPATCH_BACKPRESSURE.snapshot(),
@@ -689,7 +724,9 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          dup_bye_existing_tx={} dup_bye_tombstone_hit={} dup_bye_tombstone_miss={} \
          dup_bye_terminated_dialog={} ack_matched={} ack_unmatched={} \
          ack_delivered={} bye_200_sent={} bye_cleanup_emitted={} bye_cleanup_delivered={} \
-         bye_cleanup_missing={} dialog_route=[request={} stored={} transaction_key={} \
+         bye_cleanup_missing={} ok_200_source=[invite_first={} invite_duplicate_cache={} \
+         invite_proactive_retransmit={} bye_fresh={} bye_tombstone={} \
+         bye_duplicate_terminated={} other={}] dialog_route=[request={} stored={} transaction_key={} \
          fallback={} worker_mismatch={} invite={} ack={} bye={} cancel={} lifecycle={} \
          other={}] termination_cleanup=[enqueued={} queue_full={} worker_spawned={} \
          in_flight={} max_in_flight={} poll_attempts={} removed={} batches={} \
@@ -698,6 +735,7 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          cache_len_max={} due_queue_len_total={} due_queue_len_max={} scanned={} due={} \
          expired={} capped_ticks={}] global_publish=[count={} \
          handler_count_total={} handler_count_max={} incoming_call={} ack={} bye={} other={}] \
+         transaction_dispatch_queue_depth=[total={} max={}] \
          first_invite_to_200=[count={} avg_us={} p50_us={} \
          p95_us={} p99_us={} p999_us={} max_us={} over_500ms={}] \
          dialog_to_session_queue=[count={} avg_us={} p50_us={} p95_us={} p99_us={} \
@@ -707,6 +745,7 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          transaction_dispatch_queue=[{}] transaction_handler=[total=[{}] invite=[{}] \
          ack=[{}] bye=[{}] cancel=[{}] other=[{}]] server_transaction_create=[{}] \
          existing_transaction_dispatch=[{}] transaction_event_broadcast=[{}] \
+         transaction_dispatch_backpressure=[{}] \
          udp_receive_to_invite_200=[{}] dialog_event_dispatch_queue=[{}] \
          dialog_event_dispatch_backpressure=[{}] dialog_event_handler=[total=[{}] \
          invite=[{}] ack=[{}] bye=[{}] cancel=[{}] other=[{}]] \
@@ -734,6 +773,13 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.bye_cleanup_event_emitted,
         snapshot.bye_cleanup_delivered,
         snapshot.bye_cleanup_session_missing,
+        snapshot.ok_200_invite_first,
+        snapshot.ok_200_invite_duplicate_cache,
+        snapshot.ok_200_invite_proactive_retransmit,
+        snapshot.ok_200_bye_fresh,
+        snapshot.ok_200_bye_tombstone,
+        snapshot.ok_200_bye_duplicate_terminated,
+        snapshot.ok_200_other,
         snapshot.dialog_route_request,
         snapshot.dialog_route_stored,
         snapshot.dialog_route_transaction_key,
@@ -774,6 +820,8 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.global_publish_ack,
         snapshot.global_publish_bye,
         snapshot.global_publish_other,
+        snapshot.transaction_dispatch_queue_depth_total,
+        snapshot.transaction_dispatch_queue_depth_max,
         snapshot.first_invite_to_200_count,
         snapshot.first_invite_to_200_avg_us,
         snapshot.first_invite_to_200_p50_us,
@@ -807,6 +855,7 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         format_latency(&snapshot.server_transaction_create),
         format_latency(&snapshot.existing_transaction_dispatch),
         format_latency(&snapshot.transaction_event_broadcast),
+        format_latency(&snapshot.transaction_dispatch_backpressure),
         format_latency(&snapshot.udp_receive_to_invite_200),
         format_latency(&snapshot.dialog_event_dispatch_queue),
         format_latency(&snapshot.dialog_event_dispatch_backpressure),
@@ -893,6 +942,34 @@ pub fn record_ack_event_delivered() {
 
 pub(crate) fn record_bye_200_sent() {
     increment(&BYE_200_SENT);
+}
+
+pub fn record_200_ok_invite_first() {
+    increment(&OK_200_INVITE_FIRST);
+}
+
+pub(crate) fn record_200_ok_invite_duplicate_cache() {
+    increment(&OK_200_INVITE_DUPLICATE_CACHE);
+}
+
+pub(crate) fn record_200_ok_invite_proactive_retransmit() {
+    increment(&OK_200_INVITE_PROACTIVE_RETRANSMIT);
+}
+
+pub(crate) fn record_200_ok_bye_fresh() {
+    increment(&OK_200_BYE_FRESH);
+}
+
+pub(crate) fn record_200_ok_bye_tombstone() {
+    increment(&OK_200_BYE_TOMBSTONE);
+}
+
+pub(crate) fn record_200_ok_bye_duplicate_terminated() {
+    increment(&OK_200_BYE_DUPLICATE_TERMINATED);
+}
+
+pub(crate) fn record_200_ok_other() {
+    increment(&OK_200_OTHER);
 }
 
 pub(crate) fn record_bye_cleanup_event_emitted() {
@@ -1141,6 +1218,21 @@ pub(crate) fn record_transaction_dispatch_queue_delay(elapsed: Duration) {
     }
 }
 
+pub(crate) fn record_transaction_dispatch_queue_depth(depth: usize) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    let depth = depth as u64;
+    TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL.fetch_add(depth, Ordering::Relaxed);
+    update_max(&TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX, depth);
+}
+
+pub(crate) fn record_transaction_dispatch_backpressure(elapsed: Duration) {
+    if transaction_timing_enabled() {
+        TRANSACTION_DISPATCH_BACKPRESSURE.record(elapsed);
+    }
+}
+
 pub(crate) fn record_transaction_handler(kind: &str, elapsed: Duration) {
     if !transaction_timing_enabled() {
         return;
@@ -1373,6 +1465,13 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &BYE_CLEANUP_EVENT_EMITTED,
         &BYE_CLEANUP_DELIVERED,
         &BYE_CLEANUP_SESSION_MISSING,
+        &OK_200_INVITE_FIRST,
+        &OK_200_INVITE_DUPLICATE_CACHE,
+        &OK_200_INVITE_PROACTIVE_RETRANSMIT,
+        &OK_200_BYE_FRESH,
+        &OK_200_BYE_TOMBSTONE,
+        &OK_200_BYE_DUPLICATE_TERMINATED,
+        &OK_200_OTHER,
         &FIRST_INVITE_TO_200_COUNT,
         &FIRST_INVITE_TO_200_SUM_US,
         &FIRST_INVITE_TO_200_MAX_US,
@@ -1434,10 +1533,12 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &GLOBAL_PUBLISH_ACK,
         &GLOBAL_PUBLISH_BYE,
         &GLOBAL_PUBLISH_OTHER,
+        &TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL,
+        &TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX,
     ]
 }
 
-fn transaction_latency_metrics() -> [&'static LatencyMetric; 15] {
+fn transaction_latency_metrics() -> [&'static LatencyMetric; 16] {
     [
         &TRANSACTION_DISPATCH_QUEUE,
         &TRANSACTION_HANDLER_TOTAL,
@@ -1449,6 +1550,7 @@ fn transaction_latency_metrics() -> [&'static LatencyMetric; 15] {
         &SERVER_TRANSACTION_CREATE,
         &EXISTING_TRANSACTION_DISPATCH,
         &TRANSACTION_EVENT_BROADCAST,
+        &TRANSACTION_DISPATCH_BACKPRESSURE,
         &TERMINATION_CLEANUP_INDEXED_SCAN,
         &TERMINATION_CLEANUP_FULL_SCAN,
         &TERMINATION_CLEANUP_TIMER_UNREGISTER,
@@ -1508,14 +1610,20 @@ mod tests {
         record_server_transaction_create(Duration::from_micros(350));
         record_existing_transaction_dispatch(Duration::from_micros(400));
         record_transaction_event_broadcast(Duration::from_micros(450));
+        record_transaction_dispatch_backpressure(Duration::from_micros(475));
+        record_transaction_dispatch_queue_depth(13);
         record_dialog_event_dispatch_queue_delay(Duration::from_micros(80));
         record_dialog_event_handler("invite", Duration::from_micros(90));
         record_dialog_session_publish("incoming_call", Duration::from_micros(110));
+        record_200_ok_invite_first();
         let disabled = snapshot();
         assert_eq!(disabled.duplicate_invite_existing_transaction, 0);
+        assert_eq!(disabled.ok_200_invite_first, 0);
         assert_eq!(disabled.udp_receive_to_incoming_call_emit.count, 0);
         assert_eq!(disabled.udp_receive_to_invite_200.count, 0);
         assert_eq!(disabled.transaction_dispatch_queue.count, 0);
+        assert_eq!(disabled.transaction_dispatch_backpressure.count, 0);
+        assert_eq!(disabled.transaction_dispatch_queue_depth_max, 0);
         assert_eq!(disabled.transaction_handler_total.count, 0);
         assert_eq!(disabled.server_transaction_create.count, 0);
         assert_eq!(disabled.existing_transaction_dispatch.count, 0);
@@ -1534,11 +1642,18 @@ mod tests {
         record_server_transaction_create(Duration::from_micros(350));
         record_existing_transaction_dispatch(Duration::from_micros(400));
         record_transaction_event_broadcast(Duration::from_micros(450));
+        record_transaction_dispatch_backpressure(Duration::from_micros(475));
+        record_transaction_dispatch_queue_depth(13);
         record_dialog_event_dispatch_queue_delay(Duration::from_micros(80));
         record_dialog_event_handler("invite", Duration::from_micros(90));
         record_dialog_session_publish("incoming_call", Duration::from_micros(110));
         let transaction_disabled = snapshot();
         assert_eq!(transaction_disabled.transaction_dispatch_queue.count, 0);
+        assert_eq!(
+            transaction_disabled.transaction_dispatch_backpressure.count,
+            0
+        );
+        assert_eq!(transaction_disabled.transaction_dispatch_queue_depth_max, 0);
         assert_eq!(transaction_disabled.transaction_handler_total.count, 0);
         assert_eq!(transaction_disabled.server_transaction_create.count, 0);
         assert_eq!(transaction_disabled.existing_transaction_dispatch.count, 0);
@@ -1558,6 +1673,13 @@ mod tests {
         record_invite_2xx_cache_expired();
         record_invite_2xx_proactive_retransmit();
         record_invite_2xx_ack_removed(Duration::from_millis(5));
+        record_200_ok_invite_first();
+        record_200_ok_invite_duplicate_cache();
+        record_200_ok_invite_proactive_retransmit();
+        record_200_ok_bye_fresh();
+        record_200_ok_bye_tombstone();
+        record_200_ok_bye_duplicate_terminated();
+        record_200_ok_other();
         record_duplicate_bye_existing_transaction();
         record_duplicate_bye_tombstone_hit();
         record_duplicate_bye_tombstone_miss();
@@ -1574,6 +1696,8 @@ mod tests {
         record_server_transaction_create(Duration::from_micros(350));
         record_existing_transaction_dispatch(Duration::from_micros(400));
         record_transaction_event_broadcast(Duration::from_micros(450));
+        record_transaction_dispatch_backpressure(Duration::from_micros(475));
+        record_transaction_dispatch_queue_depth(9);
         record_dialog_event_dispatch_queue_delay(Duration::from_micros(75));
         record_dialog_event_dispatch_backpressure(Duration::from_micros(80));
         record_dialog_event_handler("invite", Duration::from_micros(100));
@@ -1607,6 +1731,13 @@ mod tests {
         let snapshot = snapshot();
         assert_eq!(snapshot.duplicate_invite_existing_transaction, 1);
         assert_eq!(snapshot.duplicate_invite_cache_hit, 1);
+        assert_eq!(snapshot.ok_200_invite_first, 1);
+        assert_eq!(snapshot.ok_200_invite_duplicate_cache, 1);
+        assert_eq!(snapshot.ok_200_invite_proactive_retransmit, 1);
+        assert_eq!(snapshot.ok_200_bye_fresh, 1);
+        assert_eq!(snapshot.ok_200_bye_tombstone, 1);
+        assert_eq!(snapshot.ok_200_bye_duplicate_terminated, 1);
+        assert_eq!(snapshot.ok_200_other, 1);
         assert_eq!(snapshot.duplicate_bye_tombstone_hit, 1);
         assert_eq!(snapshot.udp_receive_to_incoming_call_emit.count, 1);
         assert_eq!(snapshot.bye_receive_to_200.count, 1);
@@ -1621,6 +1752,9 @@ mod tests {
         assert_eq!(snapshot.server_transaction_create.count, 1);
         assert_eq!(snapshot.existing_transaction_dispatch.count, 1);
         assert_eq!(snapshot.transaction_event_broadcast.count, 1);
+        assert_eq!(snapshot.transaction_dispatch_backpressure.count, 1);
+        assert_eq!(snapshot.transaction_dispatch_queue_depth_total, 9);
+        assert_eq!(snapshot.transaction_dispatch_queue_depth_max, 9);
         assert_eq!(snapshot.dialog_event_dispatch_queue.count, 1);
         assert_eq!(snapshot.dialog_event_dispatch_backpressure.count, 1);
         assert_eq!(snapshot.dialog_event_handler_total.count, 5);
@@ -1662,10 +1796,13 @@ mod tests {
         assert_eq!(snapshot.global_publish_handler_count_max, 29);
         let summary = format_summary(&snapshot);
         assert!(summary.contains("dup_invite_cache_hit=1"));
+        assert!(summary.contains("ok_200_source=[invite_first=1"));
         assert!(summary.contains("dup_bye_tombstone_hit=1"));
         assert!(summary.contains("udp_receive_to_incoming_call_emit=[count=1"));
         assert!(summary.contains("bye_receive_to_200=[count=1"));
         assert!(summary.contains("transaction_dispatch_queue=[count=1"));
+        assert!(summary.contains("transaction_dispatch_queue_depth=[total=9 max=9]"));
+        assert!(summary.contains("transaction_dispatch_backpressure=[count=1"));
         assert!(summary.contains("transaction_handler=[total=[count=5"));
         assert!(summary.contains("udp_receive_to_invite_200=[count=1"));
         assert!(summary.contains("dialog_event_dispatch_queue=[count=1"));
