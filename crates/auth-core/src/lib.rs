@@ -7,6 +7,7 @@
 //! Also includes SIP Digest authentication support per RFC 2617 and RFC 3261.
 
 pub mod bearer;
+pub mod dpop;
 pub mod error;
 pub mod jwks;
 pub mod jwt;
@@ -14,6 +15,10 @@ pub mod sip_digest;
 pub mod types;
 
 pub use bearer::{bearer_stub, BearerAuthError, BearerValidator};
+pub use dpop::{
+    jwk_thumbprint, DpopError, DpopProof, DpopValidator, ValidatedDpop, DEFAULT_IAT_LEEWAY,
+    DEFAULT_JTI_CACHE_CAPACITY,
+};
 pub use jwks::{JwksJwtValidator, DEFAULT_JWKS_CACHE_TTL};
 pub use jwt::JwtValidator;
 pub use error::{AuthError, Result};

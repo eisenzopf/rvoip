@@ -1,0 +1,39 @@
+[package]
+name = "rvoip-vcon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "vCon (Virtualized Conversation) document builder + store per the IETF vCon WG draft. Builds + signs the recording artifacts UCTP / SIP / WebRTC adapters reference via Event::RecordingComplete.vcon_ref."
+
+[dependencies]
+rvoip-core.workspace = true
+rvoip-auth-core.workspace = true
+
+tokio = { workspace = true }
+async-trait.workspace = true
+parking_lot.workspace = true
+dashmap.workspace = true
+
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# JWS signing reuses the auth-core jsonwebtoken stack.
+jsonwebtoken = "9.3"
+
+thiserror = "1.0"
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

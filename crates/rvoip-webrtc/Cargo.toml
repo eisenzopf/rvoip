@@ -17,6 +17,7 @@ default = []
 signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http"]
 signaling-ws = ["dep:tokio-tungstenite"]
 client = []
+comprehensive = ["client", "signaling-ws", "dep:serde_json"]
 bridge-quic = [
     "signaling-whip",
     "dep:rvoip-quic",
@@ -25,7 +26,6 @@ bridge-quic = [
     "dep:quinn",
     "dep:rustls",
     "dep:serde_json",
-    "dep:parking_lot",
 ]
 
 [dependencies]
@@ -38,7 +38,7 @@ async-trait.workspace = true
 futures.workspace = true
 bytes.workspace = true
 dashmap.workspace = true
-parking_lot = { workspace = true, optional = true }
+parking_lot.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, optional = true }
 tracing.workspace = true
@@ -90,6 +90,26 @@ required-features = ["signaling-whip"]
 [[test]]
 name = "webrtc_quic_bridge_e2e"
 required-features = ["bridge-quic"]
+
+[[test]]
+name = "ws_dc_comprehensive"
+required-features = ["comprehensive"]
+
+[[test]]
+name = "dc_loopback"
+required-features = ["comprehensive"]
+
+[[test]]
+name = "client_server_comprehensive"
+required-features = ["comprehensive"]
+
+[[example]]
+name = "webrtc_comprehensive_server"
+required-features = ["comprehensive"]
+
+[[example]]
+name = "webrtc_comprehensive_client"
+required-features = ["comprehensive"]
 
 [[example]]
 name = "loopback_call"

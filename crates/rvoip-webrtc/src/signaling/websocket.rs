@@ -21,6 +21,9 @@ pub struct SignalingMessage {
     /// Routes `{type:"answer"}` to an outbound originate connection.
     #[serde(default, rename = "connection_id")]
     pub connection_id: String,
+    /// Trickle ICE candidate JSON (not handled in v1 — surfaces capability gap).
+    #[serde(default)]
+    pub candidate: String,
 }
 
 /// Accept WebSocket connections and exchange `{type, sdp, connection_id?}` JSON messages.
@@ -72,6 +75,7 @@ async fn handle_connection(
                     msg_type: "answer".into(),
                     sdp: answer,
                     connection_id: conn_id.to_string(),
+                    candidate: String::new(),
                 };
                 write
                     .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -94,6 +98,7 @@ async fn handle_connection(
                     msg_type: "ack".into(),
                     sdp: String::new(),
                     connection_id: parsed.connection_id,
+                    candidate: String::new(),
                 };
                 write
                     .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -101,6 +106,11 @@ async fn handle_connection(
                     ))
                     .await
                     .map_err(|e| WebRtcError::Signaling(format!("{e}")))?;
+            }
+            "ice-candidate" => {
+                return Err(WebRtcError::NotImplemented(
+                    "trickle ICE over WebSocket signaling (v1 uses full SDP gather)".into(),
+                ));
             }
             "bye" => {
                 if !parsed.connection_id.is_empty() {

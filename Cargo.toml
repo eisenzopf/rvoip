@@ -24,6 +24,7 @@ members = [
     "crates/rvoip-webtransport",
     "crates/rvoip-websocket",
     "crates/rvoip-webrtc",
+    "crates/rvoip-vcon",
     "crates/auth-core",
 ]
 
@@ -172,6 +173,9 @@ rvoip-webtransport = { path = "crates/rvoip-webtransport", version = "0.1.26" }
 rvoip-websocket = { path = "crates/rvoip-websocket", version = "0.1.26" }
 rvoip-webrtc = { path = "crates/rvoip-webrtc", version = "0.1.26" }
 rvoip-auth-core = { path = "crates/auth-core", version = "0.1.0" }
+# vCon container builder + store (plan C1) — IETF vCon WG draft impl
+# referenced by Event::RecordingComplete.vcon_ref.
+rvoip-vcon = { path = "crates/rvoip-vcon", version = "0.1.26" }
 rtc = "=0.20.0-alpha.1"
 
 # External dependencies

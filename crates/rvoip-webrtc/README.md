@@ -12,10 +12,14 @@ Built on [webrtc-rs](https://webrtc.rs) **`0.20.0-alpha.1`** (Sans-I/O `rtc` cor
 - **Dual role:** gateway/interop adapter (`WebRtcAdapter` → orchestrator) **and** WebRTC server
   (WHIP/WHEP/WS signaling surfaces feeding the same adapter). See
   [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) §1.
-- **In scope:** 1:1 audio interop, full-SDP ICE gathering (no trickle in v0), Opus + G.711,
-  `ConnectionAdapter` for `Transport::WebRtc`, optional WHIP/WHEP and WebSocket JSON signalers.
-- **Out of scope:** UCTP substrate (see `rvoip-websocket`), multi-party SFU, video/simulcast,
-  trickle ICE, Identity fingerprint binding, standalone TURN relay hosting.
+- **In scope:** 1:1 audio + VP8 video interop, full-SDP ICE gathering, Opus + G.711,
+  SCTP data channels, fixture-encoded RTP for deterministic tests, `ConnectionAdapter` for
+  `Transport::WebRtc`, optional WHIP/WHEP and WebSocket JSON signalers, external TURN via
+  [`IceServerConfig`](src/config.rs).
+- **Out of scope / v1 gaps:** UCTP substrate (see `rvoip-websocket`), multi-party SFU,
+  simulcast/SVC, trickle ICE over signaling (WS `ice-candidate` returns `NotImplemented`),
+  Identity fingerprint binding, standalone TURN relay hosting. See
+  [`WebRtcFeatureSupport`](src/peer/ice.rs) and `tests/webrtc_capability_gaps.rs`.
 
 ## Features
 
@@ -24,6 +28,7 @@ Built on [webrtc-rs](https://webrtc.rs) **`0.20.0-alpha.1`** (Sans-I/O `rtc` cor
 | `signaling-whip` | WHIP/WHEP HTTP endpoints (`signaling::whip`) |
 | `signaling-ws` | WebSocket JSON SDP signaler |
 | `client` | Native `WebRtcClient` surface |
+| `comprehensive` | `client` + WS signaling + full WebRTC basics E2E (bidirectional audio/VP8, fixture RTP, SCTP DC chat, DTMF, gap tests) |
 | `bridge-quic` | Real `rvoip-quic` cross-transport bridge demo + e2e test |
 
 Enable both signaling features for the unified [`WebRtcServer`](src/server.rs) facade.
@@ -95,6 +100,33 @@ For a full multi-adapter stack (QUIC + WT + WS + SIP), see
 [`rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs`](../rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs).
 
 Environment variables: `WHIP_BIND` (default `127.0.0.1:8080`), `WS_BIND` (default `127.0.0.1:8081`), `QUIC_BIND` (default `127.0.0.1:4433`).
+
+### Comprehensive WebRTC client + server (audio / video / data channel)
+
+Exercises [`WebRtcClient`](src/client/native.rs) against [`WebRtcServer`](src/server.rs) over
+WebSocket signaling — SDP (`m=audio`, `m=video`), full-gather ICE, ICE/DTLS connect, SCTP
+data-channel ping/pong + arbitrary chat echo (RFC 8831), fixture-encoded Opus/VP8 RTP bursts
+(server→client and client→server video), RFC 4733 DTMF, and server-side remote-track
+confirmation via `stats` JSON.
+
+Optional env: `CHAT_MESSAGE` (custom chat body), `MEDIUM` (`audio`|`video`|`audiovideo`).
+
+```bash
+./scripts/test-webrtc-comprehensive.sh
+# or separately:
+cargo run -p rvoip-webrtc --example webrtc_comprehensive_server --features comprehensive
+WS_URL=ws://127.0.0.1:8081 CHAT_MESSAGE="Hello team" \
+  cargo run -p rvoip-webrtc --example webrtc_comprehensive_client --features comprehensive -- audiovideo
+```
+
+Integration tests:
+
+```bash
+cargo test -p rvoip-webrtc --features comprehensive
+```
+
+Capability gap tests (`trickle ICE`, simulcast, TURN config, WS `ice-candidate`):
+`tests/webrtc_capability_gaps.rs`.
 
 ### Server API (`src/server.rs`)
 

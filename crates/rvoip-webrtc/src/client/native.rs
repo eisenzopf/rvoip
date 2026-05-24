@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use rvoip_core::capability::CapabilityDescriptor;
 use rvoip_core::ids::{ConnectionId, SessionId};
+use webrtc::data_channel::DataChannel;
 use webrtc::peer_connection::{RTCIceCandidateInit, RTCSdpType, RTCSessionDescription};
 
 use crate::config::WebRtcConfig;
@@ -17,7 +18,20 @@ pub struct Offer(pub String);
 
 /// Thin newtype over webrtc-rs SDP answer.
 #[derive(Clone, Debug)]
-pub struct Answer(pub String);
+pub struct Answer {
+    pub sdp: String,
+    /// Server-side [`ConnectionId`] when signaling returns one (WebSocket answer).
+    pub connection_id: Option<String>,
+}
+
+impl Answer {
+    pub fn new(sdp: impl Into<String>) -> Self {
+        Self {
+            sdp: sdp.into(),
+            connection_id: None,
+        }
+    }
+}
 
 /// Thin newtype over ICE candidate init JSON.
 #[derive(Clone, Debug)]
@@ -30,10 +44,12 @@ pub enum CallTarget {
     Participant(String),
 }
 
-/// Session medium — audio-only in v1.
+/// Session medium.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionMedium {
     Audio,
+    Video,
+    AudioVideo,
 }
 
 /// Handle returned from [`WebRtcClient::call`].
@@ -45,6 +61,7 @@ pub struct SessionHandle {
     medium: SessionMedium,
     answer: Answer,
     peer: Arc<RvoipPeerConnection>,
+    data_channel: Arc<dyn DataChannel>,
 }
 
 impl SessionHandle {
@@ -70,6 +87,10 @@ impl SessionHandle {
 
     pub fn peer(&self) -> &Arc<RvoipPeerConnection> {
         &self.peer
+    }
+
+    pub fn data_channel(&self) -> &Arc<dyn DataChannel> {
+        &self.data_channel
     }
 
     /// Wait until ICE/DTLS reaches connected.
@@ -123,20 +144,19 @@ impl WebRtcClient {
         self.config.capabilities.clone()
     }
 
-    /// Place an outbound call: create offer, exchange via signaler, apply answer.
+    /// Place an outbound call: add tracks + data channel, create offer, exchange via signaler.
     pub async fn call<S: Signaler>(
         &self,
         signaler: &S,
         target: CallTarget,
         medium: SessionMedium,
     ) -> Result<SessionHandle> {
-        if medium != SessionMedium::Audio {
-            return Err(WebRtcError::NotImplemented("video calls (audio-only v1)"));
-        }
+        let data_channel =
+            crate::client::comprehensive::prepare_offer_media(&self.peer, medium).await?;
 
         let offer_sdp = self.peer.create_offer_and_gather().await?;
         let answer = signaler.send_offer(&Offer(offer_sdp)).await?;
-        self.peer.set_remote_answer(&answer.0).await?;
+        self.peer.set_remote_answer(&answer.sdp).await?;
 
         Ok(SessionHandle {
             session_id: self.session_id.clone(),
@@ -145,6 +165,7 @@ impl WebRtcClient {
             medium,
             answer,
             peer: Arc::clone(&self.peer),
+            data_channel,
         })
     }
 

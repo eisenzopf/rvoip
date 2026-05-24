@@ -17,7 +17,7 @@ struct LoopbackSignaler {
 impl Signaler for LoopbackSignaler {
     async fn send_offer(&self, offer: &Offer) -> rvoip_webrtc::Result<Answer> {
         let answer_sdp = self.answerer.accept_offer_and_gather(&offer.0).await?;
-        Ok(Answer(answer_sdp))
+        Ok(Answer::new(answer_sdp))
     }
 
     async fn send_answer(&self, _answer: &Answer) -> rvoip_webrtc::Result<()> {

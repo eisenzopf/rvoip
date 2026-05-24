@@ -1,5 +1,6 @@
 //! `RvoipPeerConnection` — offer/answer lifecycle on webrtc-rs 0.20.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,6 +9,7 @@ use rtc::media_stream::MediaStreamTrack;
 use rtc::rtp_transceiver::rtp_sender::{RTCRtpCodec, RTCRtpCodingParameters, RTCRtpEncodingParameters};
 use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
+use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelState};
 use webrtc::media_stream::track_local::static_rtp::TrackLocalStaticRTP;
 use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::media_stream::track_remote::TrackRemote;
@@ -17,8 +19,10 @@ use webrtc::rtp_transceiver::{RtpTransceiver, RTCRtpTransceiverDirection};
 
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
-use crate::peer::builder::{self, MIME_TYPE_OPUS};
+use crate::peer::builder::{self, MIME_TYPE_OPUS, MIME_TYPE_VP8};
 use crate::peer::handler::{ConnectionHandler, HandlerChannels};
+use crate::peer::ice::IceCandidateLog;
+use crate::sdp::inspect::sdp_has_media_line;
 use crate::sdp::session::{parse_sdp, sdp_to_string};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,16 +38,23 @@ pub struct RvoipPeerConnection {
     role: PeerRole,
     gather_rx: Arc<AsyncMutex<mpsc::Receiver<()>>>,
     connected_rx: Arc<AsyncMutex<mpsc::Receiver<()>>>,
+    connected_flag: Arc<AtomicBool>,
     failed_rx: Arc<AsyncMutex<mpsc::Receiver<()>>>,
+    failed_flag: Arc<AtomicBool>,
+    ice_candidates: IceCandidateLog,
     remote_track_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn TrackRemote>>>>,
+    data_channel_rx: Arc<AsyncMutex<mpsc::Receiver<Arc<dyn DataChannel>>>>,
     local_audio: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_audio_ssrc: SyncMutex<Option<u32>>,
+    local_video: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
+    local_video_ssrc: SyncMutex<Option<u32>>,
     gather_timeout: Duration,
 }
 
 impl RvoipPeerConnection {
     pub async fn new(config: &WebRtcConfig, role: PeerRole) -> Result<Arc<Self>> {
-        let (channels, receivers) = HandlerChannels::pair(8);
+        let (channels, receivers, connected_flag, failed_flag, ice_candidates) =
+            HandlerChannels::pair(8);
         let handler = ConnectionHandler::new(channels);
         let pc = builder::build_peer_connection(config, handler).await?;
         let gather_timeout = Duration::from_secs(config.gather_timeout_secs);
@@ -53,10 +64,16 @@ impl RvoipPeerConnection {
             role,
             gather_rx: Arc::new(AsyncMutex::new(receivers.gather_complete)),
             connected_rx: Arc::new(AsyncMutex::new(receivers.connected)),
+            connected_flag,
             failed_rx: Arc::new(AsyncMutex::new(receivers.failed)),
+            failed_flag,
+            ice_candidates,
             remote_track_rx: Arc::new(AsyncMutex::new(receivers.remote_track)),
+            data_channel_rx: Arc::new(AsyncMutex::new(receivers.data_channel)),
             local_audio: SyncMutex::new(None),
             local_audio_ssrc: SyncMutex::new(None),
+            local_video: SyncMutex::new(None),
+            local_video_ssrc: SyncMutex::new(None),
             gather_timeout,
         }))
     }
@@ -67,6 +84,33 @@ impl RvoipPeerConnection {
 
     pub fn peer_connection(&self) -> &Arc<dyn PeerConnection> {
         &self.pc
+    }
+
+    /// ICE candidates observed during local gathering (full SDP embeds these inline).
+    pub fn gathered_ice_candidates(&self) -> Vec<String> {
+        self.ice_candidates.candidates()
+    }
+
+    /// Add local tracks on an answerer to mirror the remote offer's `m=` sections.
+    pub async fn prepare_answerer_media_for_offer(self: &Arc<Self>, remote_sdp: &str) -> Result<()> {
+        if sdp_has_media_line(remote_sdp, "audio") {
+            self.add_local_audio_track().await?;
+        }
+        if sdp_has_media_line(remote_sdp, "video") {
+            self.add_local_video_track().await?;
+        }
+        Ok(())
+    }
+
+    /// Apply a remote trickle ICE candidate (signaling not wired in v1).
+    pub async fn add_remote_ice_candidate(
+        self: &Arc<Self>,
+        candidate: webrtc::peer_connection::RTCIceCandidateInit,
+    ) -> Result<()> {
+        self.pc
+            .add_ice_candidate(candidate)
+            .await
+            .map_err(|e| WebRtcError::Webrtc(format!("add_ice_candidate: {e}")))
     }
 
     async fn wait_gather(&self) -> Result<()> {
@@ -125,11 +169,157 @@ impl RvoipPeerConnection {
         *self.local_audio_ssrc.lock()
     }
 
+    /// Add a local VP8 video track (call before offer/answer when video is requested).
+    pub async fn add_local_video_track(self: &Arc<Self>) -> Result<()> {
+        if self.local_video.lock().is_some() {
+            return Ok(());
+        }
+
+        let vp8 = RTCRtpCodec {
+            mime_type: MIME_TYPE_VP8.to_owned(),
+            clock_rate: 90000,
+            channels: 0,
+            sdp_fmtp_line: String::new(),
+            rtcp_feedback: vec![],
+        };
+        let ssrc = rand_ssrc();
+        let track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            format!("rvoip-vstream-{ssrc}"),
+            format!("rvoip-vtrack-{ssrc}"),
+            "rvoip-video".into(),
+            RtpCodecKind::Video,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(ssrc),
+                    ..Default::default()
+                },
+                codec: vp8,
+                ..Default::default()
+            }],
+        )));
+
+        self.pc
+            .add_track(track.clone() as Arc<dyn TrackLocal>)
+            .await?;
+
+        *self.local_video.lock() = Some(track);
+        *self.local_video_ssrc.lock() = Some(ssrc);
+        Ok(())
+    }
+
+    pub fn local_video_track(&self) -> Option<Arc<TrackLocalStaticRTP>> {
+        self.local_video.lock().clone()
+    }
+
+    pub fn local_video_ssrc(&self) -> Option<u32> {
+        *self.local_video_ssrc.lock()
+    }
+
+    /// Create a labeled SCTP data channel (must be called before offer for offerer).
+    pub async fn create_data_channel(self: &Arc<Self>, label: &str) -> Result<Arc<dyn DataChannel>> {
+        self.pc
+            .create_data_channel(label, None)
+            .await
+            .map_err(|e| WebRtcError::Webrtc(format!("create_data_channel: {e}")))
+    }
+
+    pub async fn try_recv_data_channel(&self) -> Option<Arc<dyn DataChannel>> {
+        self.data_channel_rx.lock().await.try_recv().ok()
+    }
+
+    pub async fn wait_data_channel(&self, timeout: Duration) -> Option<Arc<dyn DataChannel>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(dc) = self.try_recv_data_channel().await {
+                return Some(dc);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Poll for the next data-channel event with a bounded wait.
+    ///
+    /// webrtc-rs `DataChannel::poll` blocks on an internal channel; use this
+    /// helper so callers can enforce deadlines.
+    pub async fn poll_data_channel(
+        dc: &Arc<dyn DataChannel>,
+        timeout: Duration,
+    ) -> Option<DataChannelEvent> {
+        tokio::time::timeout(timeout, dc.poll()).await.ok().flatten()
+    }
+
+    /// Wait until a data channel reports `OnOpen`.
+    pub async fn wait_data_channel_open(dc: &Arc<dyn DataChannel>, timeout: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let state = dc
+                .ready_state()
+                .await
+                .map_err(|e| WebRtcError::Webrtc(format!("data channel ready_state: {e}")))?;
+            if state == RTCDataChannelState::Open {
+                return Ok(());
+            }
+            if matches!(
+                state,
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ) {
+                return Err(WebRtcError::Webrtc("data channel closed before open".into()));
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(WebRtcError::Timeout("data channel open"));
+            }
+            let remaining = deadline - tokio::time::Instant::now();
+            if let Some(event) =
+                Self::poll_data_channel(dc, remaining.min(Duration::from_millis(50))).await
+            {
+                match event {
+                    DataChannelEvent::OnOpen => return Ok(()),
+                    DataChannelEvent::OnError => {
+                        return Err(WebRtcError::Webrtc("data channel error".into()));
+                    }
+                    DataChannelEvent::OnClose => {
+                        return Err(WebRtcError::Webrtc("data channel closed before open".into()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Receive the next text message on a data channel.
+    pub async fn recv_data_channel_text(
+        dc: &Arc<dyn DataChannel>,
+        timeout: Duration,
+    ) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(WebRtcError::Timeout("data channel message"));
+            }
+            let remaining = deadline - tokio::time::Instant::now();
+            if let Some(event) =
+                Self::poll_data_channel(dc, remaining.min(Duration::from_millis(100))).await
+            {
+                if let DataChannelEvent::OnMessage(msg) = event {
+                    if msg.is_string {
+                        return Ok(String::from_utf8_lossy(&msg.data).into_owned());
+                    }
+                }
+            }
+        }
+    }
+
     /// Offerer: create offer, set local description, wait for ICE, return SDP string.
     pub async fn create_offer_and_gather(self: &Arc<Self>) -> Result<String> {
         assert_eq!(self.role, PeerRole::Offerer);
 
-        self.add_local_audio_track().await?;
+        if self.local_audio.lock().is_none() && self.local_video.lock().is_none() {
+            self.add_local_audio_track().await?;
+        }
 
         let offer = self.pc.create_offer(None).await?;
         self.pc.set_local_description(offer).await?;
@@ -148,7 +338,7 @@ impl RvoipPeerConnection {
     pub async fn apply_remote_offer(self: &Arc<Self>, remote_sdp: &str) -> Result<()> {
         assert_eq!(self.role, PeerRole::Answerer);
 
-        self.add_local_audio_track().await?;
+        self.prepare_answerer_media_for_offer(remote_sdp).await?;
 
         let remote = parse_sdp(remote_sdp, RTCSdpType::Offer)?;
         self.pc.set_remote_description(remote).await?;
@@ -221,24 +411,60 @@ impl RvoipPeerConnection {
         Ok(())
     }
 
+    /// Returns true once ICE/DTLS has reached `Connected`.
+    pub fn is_connected(&self) -> bool {
+        self.connected_flag.load(Ordering::Acquire)
+    }
+
     /// Wait until `RTCPeerConnectionState::Connected` or timeout.
+    ///
+    /// Multiple concurrent waiters are supported — connection state is tracked
+    /// via a shared flag in addition to the one-shot handler channel.
     pub async fn wait_connected(self: &Arc<Self>, timeout: Duration) -> Result<()> {
-        if self.connected_rx.lock().await.try_recv().is_ok() {
+        if self.is_connected() {
             return Ok(());
+        }
+        if self.failed_flag.load(Ordering::Acquire) {
+            return Err(WebRtcError::Webrtc("peer connection failed".into()));
         }
 
         let connected_rx = Arc::clone(&self.connected_rx);
         let failed_rx = Arc::clone(&self.failed_rx);
+        let connected_flag = Arc::clone(&self.connected_flag);
+        let failed_flag = Arc::clone(&self.failed_flag);
 
-        tokio::select! {
-            _ = async {
-                connected_rx.lock().await.recv().await
-            } => Ok(()),
-            _ = async {
-                failed_rx.lock().await.recv().await
-            } => Err(WebRtcError::Webrtc("peer connection failed".into())),
-            _ = tokio::time::sleep(timeout) => Err(WebRtcError::Timeout("peer connection")),
-        }
+        tokio::time::timeout(timeout, async move {
+            loop {
+                if connected_flag.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+                if failed_flag.load(Ordering::Acquire) {
+                    return Err(WebRtcError::Webrtc("peer connection failed".into()));
+                }
+
+                tokio::select! {
+                    msg = async {
+                        connected_rx.lock().await.recv().await
+                    } => {
+                        if msg.is_some() {
+                            connected_flag.store(true, Ordering::Release);
+                            return Ok(());
+                        }
+                    }
+                    msg = async {
+                        failed_rx.lock().await.recv().await
+                    } => {
+                        if msg.is_some() {
+                            failed_flag.store(true, Ordering::Release);
+                            return Err(WebRtcError::Webrtc("peer connection failed".into()));
+                        }
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| WebRtcError::Timeout("peer connection"))?
     }
 
     pub async fn close(&self) -> Result<()> {
@@ -251,9 +477,8 @@ impl RvoipPeerConnection {
         self.remote_track_rx.lock().await.try_recv().ok()
     }
 
-    /// Discover a remote audio track from transceivers (fallback when `on_track`
-    /// fired before the consumer started listening).
-    pub async fn discover_remote_audio_track(&self) -> Option<Arc<dyn TrackRemote>> {
+    /// Discover a remote track of `kind` from transceivers.
+    pub async fn discover_remote_track(&self, kind: RtpCodecKind) -> Option<Arc<dyn TrackRemote>> {
         use webrtc::media_stream::Track;
 
         for tx in self.pc.get_transceivers().await {
@@ -261,21 +486,37 @@ impl RvoipPeerConnection {
                 continue;
             };
             let track = receiver.track().clone();
-            if track.kind().await == RtpCodecKind::Audio {
+            if track.kind().await == kind {
                 return Some(track);
             }
         }
         None
     }
 
-    /// Wait up to `timeout` for the first remote audio track.
-    pub async fn wait_remote_track(&self, timeout: Duration) -> Option<Arc<dyn TrackRemote>> {
+    /// Discover a remote audio track from transceivers (fallback when `on_track`
+    /// fired before the consumer started listening).
+    pub async fn discover_remote_audio_track(&self) -> Option<Arc<dyn TrackRemote>> {
+        self.discover_remote_track(RtpCodecKind::Audio).await
+    }
+
+    pub async fn discover_remote_video_track(&self) -> Option<Arc<dyn TrackRemote>> {
+        self.discover_remote_track(RtpCodecKind::Video).await
+    }
+
+    /// Wait up to `timeout` for the first remote track of `kind`.
+    pub async fn wait_remote_track_kind(
+        &self,
+        kind: RtpCodecKind,
+        timeout: Duration,
+    ) -> Option<Arc<dyn TrackRemote>> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             if let Some(track) = self.try_recv_remote_track().await {
-                return Some(track);
+                if track.kind().await == kind {
+                    return Some(track);
+                }
             }
-            if let Some(track) = self.discover_remote_audio_track().await {
+            if let Some(track) = self.discover_remote_track(kind).await {
                 return Some(track);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -283,6 +524,24 @@ impl RvoipPeerConnection {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    /// Wait up to `timeout` for the first remote audio track.
+    pub async fn wait_remote_track(&self, timeout: Duration) -> Option<Arc<dyn TrackRemote>> {
+        self.wait_remote_track_kind(RtpCodecKind::Audio, timeout)
+            .await
+    }
+
+    pub async fn wait_remote_video_track(&self, timeout: Duration) -> Option<Arc<dyn TrackRemote>> {
+        self.wait_remote_track_kind(RtpCodecKind::Video, timeout)
+            .await
+    }
+
+    /// Returns whether a remote track of each kind has been observed.
+    pub async fn remote_media_ready(&self) -> (bool, bool) {
+        let audio = self.discover_remote_track(RtpCodecKind::Audio).await.is_some();
+        let video = self.discover_remote_track(RtpCodecKind::Video).await.is_some();
+        (audio, video)
     }
 
     /// Send silent RTP until `receiver` observes a remote track (webrtc-rs fires
@@ -314,10 +573,68 @@ impl RvoipPeerConnection {
         None
     }
 
+    /// Send silent audio + optional VP8 RTP until the receiver observes remote tracks.
+    pub async fn prime_remote_media(
+        sender: &Arc<Self>,
+        receiver: &Arc<Self>,
+        include_video: bool,
+        timeout: Duration,
+    ) -> (Option<Arc<dyn TrackRemote>>, Option<Arc<dyn TrackRemote>>) {
+        use webrtc::media_stream::track_local::TrackLocal;
+
+        let audio_local = sender.local_audio_track();
+        let audio_ssrc = sender.local_audio_ssrc();
+        let video_local = if include_video {
+            sender.local_video_track()
+        } else {
+            None
+        };
+        let video_ssrc = sender.local_video_ssrc();
+
+        let mut seq: u16 = 1;
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        while tokio::time::Instant::now() < deadline {
+            let (audio_ready, video_ready) = receiver.remote_media_ready().await;
+            if audio_ready && (!include_video || video_ready) {
+                break;
+            }
+
+            if let (Some(track), Some(ssrc)) = (&audio_local, audio_ssrc) {
+                let pkt =
+                    crate::media::pump::silent_rtp_packet_for_ssrc(ssrc, seq, seq as u32 * 960);
+                let _ = track.write_rtp(pkt).await;
+            }
+            if let (Some(track), Some(ssrc)) = (&video_local, video_ssrc) {
+                let pkt = crate::media::pump::silent_vp8_rtp_packet_for_ssrc(
+                    ssrc,
+                    seq,
+                    seq as u32 * 3000,
+                );
+                let _ = track.write_rtp(pkt).await;
+            }
+            seq = seq.wrapping_add(1);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        (
+            receiver.discover_remote_track(RtpCodecKind::Audio).await,
+            if include_video {
+                receiver.discover_remote_track(RtpCodecKind::Video).await
+            } else {
+                None
+            },
+        )
+    }
+
     /// Block until the peer connection reports `Failed` (polls; does not hold locks across await).
     pub async fn wait_failed(&self) {
         loop {
+            if self.failed_flag.load(Ordering::Acquire) {
+                break;
+            }
             if self.failed_rx.lock().await.try_recv().is_ok() {
+                self.failed_flag.store(true, Ordering::Release);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

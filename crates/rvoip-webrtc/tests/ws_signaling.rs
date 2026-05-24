@@ -54,6 +54,7 @@ async fn ws_inbound_offer_returns_answer() {
             msg_type: "offer".into(),
             sdp: offer_sdp,
             connection_id: String::new(),
+            candidate: String::new(),
         })
         .unwrap()
         .into(),
@@ -129,6 +130,7 @@ async fn ws_outbound_answer_routes_by_connection_id() {
             msg_type: "answer".into(),
             sdp: answer_sdp,
             connection_id: conn_id.to_string(),
+            candidate: String::new(),
         })
         .unwrap()
         .into(),

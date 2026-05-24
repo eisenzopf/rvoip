@@ -1,6 +1,9 @@
 //! Event fan-in from webrtc-rs `PeerConnectionEventHandler` to internal channels.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+use crate::peer::ice::IceCandidateLog;
 
 use tokio::sync::mpsc;
 use webrtc::data_channel::DataChannel;
@@ -16,23 +19,32 @@ use webrtc::peer_connection::{
 pub struct HandlerChannels {
     pub gather_complete: mpsc::Sender<()>,
     pub connected: mpsc::Sender<()>,
+    pub connected_flag: Arc<AtomicBool>,
     pub failed: mpsc::Sender<()>,
+    pub failed_flag: Arc<AtomicBool>,
+    pub ice_candidates: IceCandidateLog,
     pub remote_track: mpsc::Sender<Arc<dyn TrackRemote>>,
     pub data_channel: mpsc::Sender<Arc<dyn DataChannel>>,
 }
 
 impl HandlerChannels {
-    pub fn pair(cap: usize) -> (Self, HandlerReceivers) {
+    pub fn pair(cap: usize) -> (Self, HandlerReceivers, Arc<AtomicBool>, Arc<AtomicBool>, IceCandidateLog) {
         let (gather_complete_tx, gather_complete_rx) = mpsc::channel(cap);
         let (connected_tx, connected_rx) = mpsc::channel(cap);
+        let connected_flag = Arc::new(AtomicBool::new(false));
         let (failed_tx, failed_rx) = mpsc::channel(cap);
+        let failed_flag = Arc::new(AtomicBool::new(false));
+        let ice_candidates = IceCandidateLog::new();
         let (remote_track_tx, remote_track_rx) = mpsc::channel(cap);
         let (data_channel_tx, data_channel_rx) = mpsc::channel(cap);
         (
             Self {
                 gather_complete: gather_complete_tx,
                 connected: connected_tx,
+                connected_flag: Arc::clone(&connected_flag),
                 failed: failed_tx,
+                failed_flag: Arc::clone(&failed_flag),
+                ice_candidates: ice_candidates.clone(),
                 remote_track: remote_track_tx,
                 data_channel: data_channel_tx,
             },
@@ -43,6 +55,9 @@ impl HandlerChannels {
                 remote_track: remote_track_rx,
                 data_channel: data_channel_rx,
             },
+            connected_flag,
+            failed_flag,
+            ice_candidates,
         )
     }
 }
@@ -77,9 +92,13 @@ impl PeerConnectionEventHandler for ConnectionHandler {
     async fn on_connection_state_change(&self, state: RTCPeerConnectionState) {
         match state {
             RTCPeerConnectionState::Connected => {
+                self.channels
+                    .connected_flag
+                    .store(true, Ordering::Release);
                 let _ = self.channels.connected.try_send(());
             }
             RTCPeerConnectionState::Failed => {
+                self.channels.failed_flag.store(true, Ordering::Release);
                 let _ = self.channels.failed.try_send(());
             }
             RTCPeerConnectionState::Closed => {}
@@ -87,7 +106,12 @@ impl PeerConnectionEventHandler for ConnectionHandler {
         }
     }
 
-    async fn on_ice_candidate(&self, _event: RTCPeerConnectionIceEvent) {}
+    async fn on_ice_candidate(&self, event: RTCPeerConnectionIceEvent) {
+        self.channels.ice_candidates.record(format!(
+            "{:?} {}:{}",
+            event.candidate.typ, event.candidate.address, event.candidate.port
+        ));
+    }
 
     async fn on_ice_candidate_error(&self, _event: RTCPeerConnectionIceErrorEvent) {}
 

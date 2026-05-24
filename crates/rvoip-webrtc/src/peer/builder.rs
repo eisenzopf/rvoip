@@ -19,7 +19,9 @@ use crate::errors::{Result, WebRtcError};
 pub const MIME_TYPE_OPUS: &str = "audio/opus";
 pub const MIME_TYPE_PCMU: &str = "audio/PCMU";
 pub const MIME_TYPE_PCMA: &str = "audio/PCMA";
+pub const MIME_TYPE_VP8: &str = "video/VP8";
 pub const TELEPHONE_EVENT_PAYLOAD_TYPE: u8 = 101;
+pub const VP8_PAYLOAD_TYPE: u8 = 96;
 
 /// Build a configured `MediaEngine` with Opus + G.711 for SIP interop.
 pub fn build_media_engine() -> Result<MediaEngine> {
@@ -89,6 +91,22 @@ pub fn build_media_engine() -> Result<MediaEngine> {
         RtpCodecKind::Audio,
     )?;
 
+    let vp8 = RTCRtpCodec {
+        mime_type: MIME_TYPE_VP8.to_owned(),
+        clock_rate: 90000,
+        channels: 0,
+        sdp_fmtp_line: String::new(),
+        rtcp_feedback: vec![],
+    };
+    media_engine.register_codec(
+        RTCRtpCodecParameters {
+            rtp_codec: vp8,
+            payload_type: VP8_PAYLOAD_TYPE,
+            ..Default::default()
+        },
+        RtpCodecKind::Video,
+    )?;
+
     Ok(media_engine)
 }
 
@@ -96,8 +114,10 @@ pub fn build_rtc_configuration(config: &WebRtcConfig) -> RTCConfiguration {
     let ice_servers: Vec<RTCIceServer> = config
         .ice_servers
         .iter()
-        .map(|url| RTCIceServer {
-            urls: vec![url.clone()],
+        .map(|entry| RTCIceServer {
+            urls: entry.urls.clone(),
+            username: entry.username.clone().unwrap_or_default(),
+            credential: entry.credential.clone().unwrap_or_default(),
             ..Default::default()
         })
         .collect();

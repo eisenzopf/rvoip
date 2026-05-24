@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rtc::statistics::report::RTCStatsReport;
 
@@ -93,8 +93,12 @@ pub fn spawn_inbound_pump(
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let Some(event) = track.poll().await else {
-                tokio::task::yield_now().await;
+            let Some(event) =
+                tokio::time::timeout(Duration::from_millis(100), track.poll())
+                    .await
+                    .ok()
+                    .flatten()
+            else {
                 continue;
             };
             match event {
@@ -197,5 +201,23 @@ pub fn silent_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rtp::P
             ..Default::default()
         },
         payload: bytes::Bytes::from_static(&[0xF8, 0xFF, 0xFE]),
+    }
+}
+
+/// Parsed silent VP8 RTP packet with an explicit SSRC.
+pub fn silent_vp8_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rtp::Packet {
+    rtp::Packet {
+        header: rtp::Header {
+            version: 2,
+            padding: false,
+            extension: false,
+            marker: false,
+            payload_type: crate::peer::builder::VP8_PAYLOAD_TYPE,
+            sequence_number: seq,
+            timestamp,
+            ssrc,
+            ..Default::default()
+        },
+        payload: bytes::Bytes::from_static(&[0x10, 0x00, 0x00, 0x00]),
     }
 }

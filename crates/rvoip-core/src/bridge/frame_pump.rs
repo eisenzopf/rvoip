@@ -56,19 +56,47 @@ pub fn spawn_pump(
                 match t.transcode(&frame.payload, from_pt, to_pt).await {
                     Ok(bytes) => frame.payload = bytes.into(),
                     Err(e) => {
-                        warn!(
-                            direction,
-                            from_pt,
-                            to_pt,
-                            error = %e,
-                            "rvoip-core::frame_pump: transcode failed; dropping frame"
-                        );
-                        metrics::counter!(
-                            "rvoip_bridge_transcode_errors_total",
-                            "direction" => direction,
-                        )
-                        .increment(1);
-                        continue;
+                        // Plan C2 audio-pipeline: a transcode failure
+                        // on a 4-byte payload is almost certainly an
+                        // RFC 4733 telephone-event frame (DTMF) that
+                        // doesn't decode as audio. Pass it through
+                        // verbatim so SIP-side DTMF doesn't get
+                        // silently dropped at the bridge boundary;
+                        // the destination RTP receiver will route
+                        // by its own PT when it sees the wire packet.
+                        //
+                        // Note: this is best-effort. Full per-frame
+                        // payload-type routing requires plumbing the
+                        // RTP PT into `MediaFrame`, which touches 70+
+                        // construction sites and is deferred.
+                        if frame.payload.len() == 4 {
+                            metrics::counter!(
+                                "rvoip_bridge_dtmf_passthrough_total",
+                                "direction" => direction,
+                            )
+                            .increment(1);
+                            trace!(
+                                direction,
+                                "rvoip-core::frame_pump: 4-byte transcode failure — likely RFC 4733 DTMF; passing through"
+                            );
+                            // Fall through to the `to.send(frame)` call
+                            // below with the original payload.
+                        } else {
+                            warn!(
+                                direction,
+                                from_pt,
+                                to_pt,
+                                error = %e,
+                                bytes = frame.payload.len(),
+                                "rvoip-core::frame_pump: transcode failed; dropping frame"
+                            );
+                            metrics::counter!(
+                                "rvoip_bridge_transcode_errors_total",
+                                "direction" => direction,
+                            )
+                            .increment(1);
+                            continue;
+                        }
                     }
                 }
             }
@@ -143,6 +171,50 @@ mod tests {
             "expected cancelled task; got {:?}",
             outcome.as_ref().map(|_| "ok").unwrap_or("err")
         );
+    }
+
+    /// C2 audio-pipeline: a 4-byte payload that fails to transcode
+    /// (RFC 4733 telephone-event size) passes through to the
+    /// destination instead of being dropped. Larger transcode
+    /// failures still drop.
+    #[tokio::test]
+    async fn pump_passes_through_4byte_payload_when_transcode_fails() {
+        use rvoip_media_core::codec::transcoding::Transcoder;
+        use rvoip_media_core::processing::format::FormatConverter;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let (tx_from, rx_from) = mpsc::channel::<MediaFrame>(8);
+        let (tx_to, mut rx_to) = mpsc::channel::<MediaFrame>(8);
+        let fc = Arc::new(RwLock::new(FormatConverter::new()));
+        let transcoder = Transcoder::new(fc);
+
+        // from=Opus (111), to=PCMU (0) — different PTs, so the pump
+        // tries to transcode. Random 4-byte payload isn't a valid
+        // Opus frame → transcode fails → DTMF-passthrough kicks in.
+        let pump = spawn_pump("test_dtmf", rx_from, tx_to, Some(transcoder), 111, 0);
+
+        let dtmf_like = MediaFrame {
+            stream_id: StreamId::new(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from(vec![0x01, 0x0F, 0x00, 0x50]), // 4 bytes, looks like a telephone-event
+            timestamp_rtp: 0,
+            captured_at: Utc::now(),
+        };
+        tx_from.send(dtmf_like.clone()).await.unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_millis(500), rx_to.recv())
+            .await
+            .expect("dtmf passthrough must deliver the frame")
+            .expect("channel still open");
+        assert_eq!(
+            received.payload.as_ref(),
+            dtmf_like.payload.as_ref(),
+            "4-byte DTMF-like payload must pass through unchanged"
+        );
+
+        drop(tx_from);
+        pump.await.unwrap();
     }
 
     /// When destination closes, the pump exits without panic.
