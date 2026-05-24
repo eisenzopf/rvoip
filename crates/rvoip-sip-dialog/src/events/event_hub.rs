@@ -6,7 +6,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::transaction::TransactionKey;
 use rvoip_infra_common::events::coordinator::{CrossCrateEventHandler, GlobalEventCoordinator};
@@ -37,6 +37,15 @@ impl std::fmt::Debug for DialogEventHub {
             .field("global_coordinator", &"Arc<GlobalEventCoordinator>")
             .field("dialog_manager", &"Arc<DialogManager>")
             .finish()
+    }
+}
+
+fn session_coordination_event_kind(event: &SessionCoordinationEvent) -> &'static str {
+    match event {
+        SessionCoordinationEvent::IncomingCall { .. } => "incoming_call",
+        SessionCoordinationEvent::AckReceived { .. } => "ack_received",
+        SessionCoordinationEvent::ByeReceived { .. } => "bye_received",
+        _ => "other",
     }
 }
 
@@ -123,7 +132,7 @@ impl DialogEventHub {
                     .await
                 {
                     crate::manager::IdentityVerificationDecision::Drop => {
-                        info!("🛑 [event_hub] STIR/SHAKEN rejected event; not publishing");
+                        debug!("STIR/SHAKEN rejected event; not publishing");
                         return Ok(false);
                     }
                     crate::manager::IdentityVerificationDecision::Publish(status) => {
@@ -132,20 +141,28 @@ impl DialogEventHub {
                 }
             }
 
-            info!(
-                "🚀 [event_hub] About to publish cross-crate event for event: {:?}",
-                event
-            );
+            let publish_kind = session_coordination_event_kind(&event);
+            let publish_started =
+                crate::diagnostics::dialog_timing_enabled().then(std::time::Instant::now);
+            let handler_count = if crate::diagnostics::dialog_timing_enabled() {
+                self.global_coordinator.stats().await.registered_handlers
+            } else {
+                0
+            };
             self.global_coordinator
                 .publish(Arc::new(cross_crate_event))
                 .await?;
-            info!("✅ [event_hub] Published cross-crate event successfully");
+            if let Some(started) = publish_started {
+                crate::diagnostics::record_global_publish(
+                    publish_kind,
+                    handler_count,
+                    started.elapsed(),
+                );
+            }
+            trace!("Published cross-crate event successfully");
             Ok(true)
         } else {
-            info!(
-                "⚠️ [event_hub] convert_coordination_to_cross_crate returned None for: {:?}",
-                event
-            );
+            trace!("convert_coordination_to_cross_crate returned None");
             Ok(false)
         }
     }
@@ -328,16 +345,10 @@ impl DialogEventHub {
                 dialog_id,
                 session_answer,
             } => {
-                info!(
-                    "🔍 [event_hub] Processing CallAnswered for dialog: {}",
-                    dialog_id
-                );
+                debug!("Processing CallAnswered for dialog: {}", dialog_id);
                 match self.dialog_manager.get_session_id(&dialog_id) {
                     Some(session_id) => {
-                        info!(
-                            "✅ [event_hub] Found session ID {} for dialog {}",
-                            session_id, dialog_id
-                        );
+                        debug!("Found session ID {} for dialog {}", session_id, dialog_id);
                         Some(RvoipCrossCrateEvent::DialogToSession(
                             DialogToSessionEvent::CallEstablished {
                                 session_id,
@@ -753,7 +764,7 @@ impl DialogEventHub {
                 // AckReceived is critical for UAS - dialog-core received ACK, now session must transition
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
                     crate::diagnostics::record_ack_matched_session();
-                    info!(
+                    debug!(
                         "Converting AckReceived to cross-crate event for session {}",
                         session_id
                     );
@@ -776,7 +787,7 @@ impl DialogEventHub {
             SessionCoordinationEvent::CallTerminating { dialog_id, reason } => {
                 // When BYE completes, notify session-core that dialog is terminating
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    info!(
+                    debug!(
                         "Converting CallTerminating to CallTerminated for session {}",
                         session_id
                     );
@@ -797,7 +808,7 @@ impl DialogEventHub {
 
             SessionCoordinationEvent::ByeReceived { dialog_id } => {
                 if let Some(session_id) = self.dialog_manager.get_session_id(&dialog_id) {
-                    info!(
+                    debug!(
                         "Converting inbound BYE to cross-crate event for session {}",
                         session_id
                     );
@@ -900,7 +911,7 @@ impl DialogEventHub {
                         } else {
                             None
                         };
-                        info!(
+                        debug!(
                             "Converting ReInvite ({}) to cross-crate event for session {}",
                             method, session_id
                         );

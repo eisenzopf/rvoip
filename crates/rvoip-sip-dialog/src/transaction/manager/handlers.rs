@@ -143,7 +143,8 @@ pub async fn handle_transport_message(
                                         match result {
                                             Ok(_) => {
                                                 // Successfully processed ACK
-                                                manager.remove_invite_2xx_response_cache(&tx_id);
+                                                manager
+                                                    .mark_invite_2xx_response_cache_acked(&tx_id);
 
                                                 // Broadcast the event
                                                 TransactionManager::broadcast_event(
@@ -1196,7 +1197,7 @@ impl TransactionManager {
                         "Processing ACK for non-2xx response in transaction {}",
                         invite_key
                     );
-                    self.remove_invite_2xx_response_cache(&invite_key);
+                    self.mark_invite_2xx_response_cache_acked(&invite_key);
                     let dispatch_started =
                         diagnostics::transaction_timing_enabled().then(Instant::now);
                     let result = transaction.process_request(request).await;
@@ -1216,7 +1217,7 @@ impl TransactionManager {
                 "Found ACK for 2xx response using dialog-based matching: {}",
                 tx_id
             );
-            self.remove_invite_2xx_response_cache(&tx_id);
+            self.mark_invite_2xx_response_cache_acked(&tx_id);
 
             // RFC 3261: ACK for 2xx responses should NOT be processed in the transaction
             // Instead, emit AckReceived event for dialog-core to handle
@@ -1254,7 +1255,7 @@ impl TransactionManager {
         if let Some(entry) = self.lookup_server_invite_by_dialog_key(&exact_key) {
             debug!(call_id=%exact_key.call_id, "Found matching INVITE server transaction for ACK by dialog index");
             let transaction_id = entry.transaction_id;
-            self.remove_invite_2xx_response_cache(&transaction_id);
+            self.mark_invite_2xx_response_cache_acked(&transaction_id);
             return Some(transaction_id);
         }
 
@@ -1263,7 +1264,7 @@ impl TransactionManager {
                 debug!(call_id=%fallback_key.call_id, "Found matching INVITE server transaction for ACK by dialog index fallback");
                 let transaction_id = entry.transaction_id.clone();
                 self.insert_server_invite_dialog_index_entry(exact_key, entry);
-                self.remove_invite_2xx_response_cache(&transaction_id);
+                self.mark_invite_2xx_response_cache_acked(&transaction_id);
                 return Some(transaction_id);
             }
         }

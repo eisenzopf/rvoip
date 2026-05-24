@@ -29,24 +29,8 @@ macro_rules! latency_buckets {
 }
 
 const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
-    10,
-    25,
-    50,
-    100,
-    250,
-    500,
-    1_000,
-    2_500,
-    5_000,
-    10_000,
-    25_000,
-    50_000,
-    100_000,
-    250_000,
-    500_000,
-    1_000_000,
-    2_500_000,
-    u64::MAX,
+    10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000,
+    500_000, 1_000_000, 2_500_000, 5_000_000,
 ];
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
@@ -73,6 +57,50 @@ static BYE_200_SENT: AtomicU64 = AtomicU64::new(0);
 static BYE_CLEANUP_EVENT_EMITTED: AtomicU64 = AtomicU64::new(0);
 static BYE_CLEANUP_DELIVERED: AtomicU64 = AtomicU64::new(0);
 static BYE_CLEANUP_SESSION_MISSING: AtomicU64 = AtomicU64::new(0);
+
+static DIALOG_ROUTE_REQUEST: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_STORED: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_TRANSACTION_KEY: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_FALLBACK: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_WORKER_MISMATCH: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_INVITE: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_ACK: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_BYE: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_CANCEL: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_LIFECYCLE: AtomicU64 = AtomicU64::new(0);
+static DIALOG_ROUTE_OTHER: AtomicU64 = AtomicU64::new(0);
+
+static TERMINATION_CLEANUP_ENQUEUED: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_WORKER_SPAWNED: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_MAX_IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_POLL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_REMOVED: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_BATCHES: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_BATCH_TOTAL: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_BATCH_MAX: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_INDEXED_SCAN_KEYS: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_FULL_SCAN_CLIENT_KEYS: AtomicU64 = AtomicU64::new(0);
+static TERMINATION_CLEANUP_FULL_SCAN_SERVER_KEYS: AtomicU64 = AtomicU64::new(0);
+
+static INVITE_2XX_MAINTENANCE_TICKS: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_CACHE_LEN_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_CACHE_LEN_MAX: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_TOTAL: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_MAX: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_SCANNED: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_DUE: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_EXPIRED: AtomicU64 = AtomicU64::new(0);
+static INVITE_2XX_MAINTENANCE_CAPPED_TICKS: AtomicU64 = AtomicU64::new(0);
+
+static GLOBAL_PUBLISH_COUNT: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PUBLISH_HANDLER_COUNT_TOTAL: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PUBLISH_HANDLER_COUNT_MAX: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PUBLISH_INCOMING_CALL: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PUBLISH_ACK: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PUBLISH_BYE: AtomicU64 = AtomicU64::new(0);
+static GLOBAL_PUBLISH_OTHER: AtomicU64 = AtomicU64::new(0);
 
 static FIRST_INVITE_TO_200_COUNT: AtomicU64 = AtomicU64::new(0);
 static FIRST_INVITE_TO_200_SUM_US: AtomicU64 = AtomicU64::new(0);
@@ -256,6 +284,12 @@ static DIALOG_SESSION_PUBLISH_BYE: LatencyMetric = LatencyMetric::new();
 static DIALOG_SESSION_PUBLISH_OTHER: LatencyMetric = LatencyMetric::new();
 static DIALOG_LOOKUP: LatencyMetric = LatencyMetric::new();
 static DIALOG_INITIAL_INVITE_SETUP: LatencyMetric = LatencyMetric::new();
+static TERMINATION_CLEANUP_INDEXED_SCAN: LatencyMetric = LatencyMetric::new();
+static TERMINATION_CLEANUP_FULL_SCAN: LatencyMetric = LatencyMetric::new();
+static TERMINATION_CLEANUP_TIMER_UNREGISTER: LatencyMetric = LatencyMetric::new();
+static INVITE_2XX_MAINTENANCE: LatencyMetric = LatencyMetric::new();
+static INVITE_2XX_PROACTIVE_SEND: LatencyMetric = LatencyMetric::new();
+static GLOBAL_PUBLISH_TOTAL: LatencyMetric = LatencyMetric::new();
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LatencySnapshot {
@@ -290,6 +324,46 @@ pub struct Snapshot {
     pub bye_cleanup_event_emitted: u64,
     pub bye_cleanup_delivered: u64,
     pub bye_cleanup_session_missing: u64,
+    pub dialog_route_request: u64,
+    pub dialog_route_stored: u64,
+    pub dialog_route_transaction_key: u64,
+    pub dialog_route_fallback: u64,
+    pub dialog_route_worker_mismatch: u64,
+    pub dialog_route_invite: u64,
+    pub dialog_route_ack: u64,
+    pub dialog_route_bye: u64,
+    pub dialog_route_cancel: u64,
+    pub dialog_route_lifecycle: u64,
+    pub dialog_route_other: u64,
+    pub termination_cleanup_enqueued: u64,
+    pub termination_cleanup_queue_full: u64,
+    pub termination_cleanup_worker_spawned: u64,
+    pub termination_cleanup_in_flight: u64,
+    pub termination_cleanup_max_in_flight: u64,
+    pub termination_cleanup_poll_attempts: u64,
+    pub termination_cleanup_removed: u64,
+    pub termination_cleanup_batches: u64,
+    pub termination_cleanup_batch_total: u64,
+    pub termination_cleanup_batch_max: u64,
+    pub termination_cleanup_indexed_scan_keys: u64,
+    pub termination_cleanup_full_scan_client_keys: u64,
+    pub termination_cleanup_full_scan_server_keys: u64,
+    pub invite_2xx_maintenance_ticks: u64,
+    pub invite_2xx_maintenance_cache_len_total: u64,
+    pub invite_2xx_maintenance_cache_len_max: u64,
+    pub invite_2xx_maintenance_due_queue_len_total: u64,
+    pub invite_2xx_maintenance_due_queue_len_max: u64,
+    pub invite_2xx_maintenance_scanned: u64,
+    pub invite_2xx_maintenance_due: u64,
+    pub invite_2xx_maintenance_expired: u64,
+    pub invite_2xx_maintenance_capped_ticks: u64,
+    pub global_publish_count: u64,
+    pub global_publish_handler_count_total: u64,
+    pub global_publish_handler_count_max: u64,
+    pub global_publish_incoming_call: u64,
+    pub global_publish_ack: u64,
+    pub global_publish_bye: u64,
+    pub global_publish_other: u64,
     pub first_invite_to_200_count: u64,
     pub first_invite_to_200_avg_us: u64,
     pub first_invite_to_200_p50_us: u64,
@@ -339,6 +413,12 @@ pub struct Snapshot {
     pub dialog_session_publish_other: LatencySnapshot,
     pub dialog_lookup: LatencySnapshot,
     pub dialog_initial_invite_setup: LatencySnapshot,
+    pub termination_cleanup_indexed_scan: LatencySnapshot,
+    pub termination_cleanup_full_scan: LatencySnapshot,
+    pub termination_cleanup_timer_unregister: LatencySnapshot,
+    pub invite_2xx_maintenance: LatencySnapshot,
+    pub invite_2xx_proactive_send: LatencySnapshot,
+    pub global_publish_total: LatencySnapshot,
 }
 
 pub fn enabled() -> bool {
@@ -440,6 +520,58 @@ pub fn snapshot() -> Snapshot {
         bye_cleanup_event_emitted: BYE_CLEANUP_EVENT_EMITTED.load(Ordering::Relaxed),
         bye_cleanup_delivered: BYE_CLEANUP_DELIVERED.load(Ordering::Relaxed),
         bye_cleanup_session_missing: BYE_CLEANUP_SESSION_MISSING.load(Ordering::Relaxed),
+        dialog_route_request: DIALOG_ROUTE_REQUEST.load(Ordering::Relaxed),
+        dialog_route_stored: DIALOG_ROUTE_STORED.load(Ordering::Relaxed),
+        dialog_route_transaction_key: DIALOG_ROUTE_TRANSACTION_KEY.load(Ordering::Relaxed),
+        dialog_route_fallback: DIALOG_ROUTE_FALLBACK.load(Ordering::Relaxed),
+        dialog_route_worker_mismatch: DIALOG_ROUTE_WORKER_MISMATCH.load(Ordering::Relaxed),
+        dialog_route_invite: DIALOG_ROUTE_INVITE.load(Ordering::Relaxed),
+        dialog_route_ack: DIALOG_ROUTE_ACK.load(Ordering::Relaxed),
+        dialog_route_bye: DIALOG_ROUTE_BYE.load(Ordering::Relaxed),
+        dialog_route_cancel: DIALOG_ROUTE_CANCEL.load(Ordering::Relaxed),
+        dialog_route_lifecycle: DIALOG_ROUTE_LIFECYCLE.load(Ordering::Relaxed),
+        dialog_route_other: DIALOG_ROUTE_OTHER.load(Ordering::Relaxed),
+        termination_cleanup_enqueued: TERMINATION_CLEANUP_ENQUEUED.load(Ordering::Relaxed),
+        termination_cleanup_queue_full: TERMINATION_CLEANUP_QUEUE_FULL.load(Ordering::Relaxed),
+        termination_cleanup_worker_spawned: TERMINATION_CLEANUP_WORKER_SPAWNED
+            .load(Ordering::Relaxed),
+        termination_cleanup_in_flight: TERMINATION_CLEANUP_IN_FLIGHT.load(Ordering::Relaxed),
+        termination_cleanup_max_in_flight: TERMINATION_CLEANUP_MAX_IN_FLIGHT
+            .load(Ordering::Relaxed),
+        termination_cleanup_poll_attempts: TERMINATION_CLEANUP_POLL_ATTEMPTS
+            .load(Ordering::Relaxed),
+        termination_cleanup_removed: TERMINATION_CLEANUP_REMOVED.load(Ordering::Relaxed),
+        termination_cleanup_batches: TERMINATION_CLEANUP_BATCHES.load(Ordering::Relaxed),
+        termination_cleanup_batch_total: TERMINATION_CLEANUP_BATCH_TOTAL.load(Ordering::Relaxed),
+        termination_cleanup_batch_max: TERMINATION_CLEANUP_BATCH_MAX.load(Ordering::Relaxed),
+        termination_cleanup_indexed_scan_keys: TERMINATION_CLEANUP_INDEXED_SCAN_KEYS
+            .load(Ordering::Relaxed),
+        termination_cleanup_full_scan_client_keys: TERMINATION_CLEANUP_FULL_SCAN_CLIENT_KEYS
+            .load(Ordering::Relaxed),
+        termination_cleanup_full_scan_server_keys: TERMINATION_CLEANUP_FULL_SCAN_SERVER_KEYS
+            .load(Ordering::Relaxed),
+        invite_2xx_maintenance_ticks: INVITE_2XX_MAINTENANCE_TICKS.load(Ordering::Relaxed),
+        invite_2xx_maintenance_cache_len_total: INVITE_2XX_MAINTENANCE_CACHE_LEN_TOTAL
+            .load(Ordering::Relaxed),
+        invite_2xx_maintenance_cache_len_max: INVITE_2XX_MAINTENANCE_CACHE_LEN_MAX
+            .load(Ordering::Relaxed),
+        invite_2xx_maintenance_due_queue_len_total: INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_TOTAL
+            .load(Ordering::Relaxed),
+        invite_2xx_maintenance_due_queue_len_max: INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_MAX
+            .load(Ordering::Relaxed),
+        invite_2xx_maintenance_scanned: INVITE_2XX_MAINTENANCE_SCANNED.load(Ordering::Relaxed),
+        invite_2xx_maintenance_due: INVITE_2XX_MAINTENANCE_DUE.load(Ordering::Relaxed),
+        invite_2xx_maintenance_expired: INVITE_2XX_MAINTENANCE_EXPIRED.load(Ordering::Relaxed),
+        invite_2xx_maintenance_capped_ticks: INVITE_2XX_MAINTENANCE_CAPPED_TICKS
+            .load(Ordering::Relaxed),
+        global_publish_count: GLOBAL_PUBLISH_COUNT.load(Ordering::Relaxed),
+        global_publish_handler_count_total: GLOBAL_PUBLISH_HANDLER_COUNT_TOTAL
+            .load(Ordering::Relaxed),
+        global_publish_handler_count_max: GLOBAL_PUBLISH_HANDLER_COUNT_MAX.load(Ordering::Relaxed),
+        global_publish_incoming_call: GLOBAL_PUBLISH_INCOMING_CALL.load(Ordering::Relaxed),
+        global_publish_ack: GLOBAL_PUBLISH_ACK.load(Ordering::Relaxed),
+        global_publish_bye: GLOBAL_PUBLISH_BYE.load(Ordering::Relaxed),
+        global_publish_other: GLOBAL_PUBLISH_OTHER.load(Ordering::Relaxed),
         first_invite_to_200_count: first_count,
         first_invite_to_200_avg_us: if first_count == 0 {
             0
@@ -533,6 +665,12 @@ pub fn snapshot() -> Snapshot {
         dialog_session_publish_other: DIALOG_SESSION_PUBLISH_OTHER.snapshot(),
         dialog_lookup: DIALOG_LOOKUP.snapshot(),
         dialog_initial_invite_setup: DIALOG_INITIAL_INVITE_SETUP.snapshot(),
+        termination_cleanup_indexed_scan: TERMINATION_CLEANUP_INDEXED_SCAN.snapshot(),
+        termination_cleanup_full_scan: TERMINATION_CLEANUP_FULL_SCAN.snapshot(),
+        termination_cleanup_timer_unregister: TERMINATION_CLEANUP_TIMER_UNREGISTER.snapshot(),
+        invite_2xx_maintenance: INVITE_2XX_MAINTENANCE.snapshot(),
+        invite_2xx_proactive_send: INVITE_2XX_PROACTIVE_SEND.snapshot(),
+        global_publish_total: GLOBAL_PUBLISH_TOTAL.snapshot(),
     }
 }
 
@@ -551,7 +689,16 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          dup_bye_existing_tx={} dup_bye_tombstone_hit={} dup_bye_tombstone_miss={} \
          dup_bye_terminated_dialog={} ack_matched={} ack_unmatched={} \
          ack_delivered={} bye_200_sent={} bye_cleanup_emitted={} bye_cleanup_delivered={} \
-         bye_cleanup_missing={} first_invite_to_200=[count={} avg_us={} p50_us={} \
+         bye_cleanup_missing={} dialog_route=[request={} stored={} transaction_key={} \
+         fallback={} worker_mismatch={} invite={} ack={} bye={} cancel={} lifecycle={} \
+         other={}] termination_cleanup=[enqueued={} queue_full={} worker_spawned={} \
+         in_flight={} max_in_flight={} poll_attempts={} removed={} batches={} \
+         batch_total={} batch_max={} indexed_scan_keys={} full_scan_client_keys={} \
+         full_scan_server_keys={}] invite_2xx_maintenance=[ticks={} cache_len_total={} \
+         cache_len_max={} due_queue_len_total={} due_queue_len_max={} scanned={} due={} \
+         expired={} capped_ticks={}] global_publish=[count={} \
+         handler_count_total={} handler_count_max={} incoming_call={} ack={} bye={} other={}] \
+         first_invite_to_200=[count={} avg_us={} p50_us={} \
          p95_us={} p99_us={} p999_us={} max_us={} over_500ms={}] \
          dialog_to_session_queue=[count={} avg_us={} p50_us={} p95_us={} p99_us={} \
          p999_us={} max_us={} over_500ms={} incoming_call={} ack_received={} \
@@ -564,7 +711,10 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          dialog_event_dispatch_backpressure=[{}] dialog_event_handler=[total=[{}] \
          invite=[{}] ack=[{}] bye=[{}] cancel=[{}] other=[{}]] \
          dialog_session_publish=[total=[{}] incoming_call=[{}] ack=[{}] bye=[{}] \
-         other=[{}]] dialog_lookup=[{}] dialog_initial_invite_setup=[{}]",
+         other=[{}]] dialog_lookup=[{}] dialog_initial_invite_setup=[{}] \
+         termination_cleanup_indexed_scan=[{}] termination_cleanup_full_scan=[{}] \
+         termination_cleanup_timer_unregister=[{}] invite_2xx_maintenance_time=[{}] \
+         invite_2xx_proactive_send=[{}] global_publish_total=[{}]",
         snapshot.duplicate_invite_existing_transaction,
         snapshot.duplicate_invite_cache_hit,
         snapshot.duplicate_invite_cache_miss,
@@ -584,6 +734,46 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.bye_cleanup_event_emitted,
         snapshot.bye_cleanup_delivered,
         snapshot.bye_cleanup_session_missing,
+        snapshot.dialog_route_request,
+        snapshot.dialog_route_stored,
+        snapshot.dialog_route_transaction_key,
+        snapshot.dialog_route_fallback,
+        snapshot.dialog_route_worker_mismatch,
+        snapshot.dialog_route_invite,
+        snapshot.dialog_route_ack,
+        snapshot.dialog_route_bye,
+        snapshot.dialog_route_cancel,
+        snapshot.dialog_route_lifecycle,
+        snapshot.dialog_route_other,
+        snapshot.termination_cleanup_enqueued,
+        snapshot.termination_cleanup_queue_full,
+        snapshot.termination_cleanup_worker_spawned,
+        snapshot.termination_cleanup_in_flight,
+        snapshot.termination_cleanup_max_in_flight,
+        snapshot.termination_cleanup_poll_attempts,
+        snapshot.termination_cleanup_removed,
+        snapshot.termination_cleanup_batches,
+        snapshot.termination_cleanup_batch_total,
+        snapshot.termination_cleanup_batch_max,
+        snapshot.termination_cleanup_indexed_scan_keys,
+        snapshot.termination_cleanup_full_scan_client_keys,
+        snapshot.termination_cleanup_full_scan_server_keys,
+        snapshot.invite_2xx_maintenance_ticks,
+        snapshot.invite_2xx_maintenance_cache_len_total,
+        snapshot.invite_2xx_maintenance_cache_len_max,
+        snapshot.invite_2xx_maintenance_due_queue_len_total,
+        snapshot.invite_2xx_maintenance_due_queue_len_max,
+        snapshot.invite_2xx_maintenance_scanned,
+        snapshot.invite_2xx_maintenance_due,
+        snapshot.invite_2xx_maintenance_expired,
+        snapshot.invite_2xx_maintenance_capped_ticks,
+        snapshot.global_publish_count,
+        snapshot.global_publish_handler_count_total,
+        snapshot.global_publish_handler_count_max,
+        snapshot.global_publish_incoming_call,
+        snapshot.global_publish_ack,
+        snapshot.global_publish_bye,
+        snapshot.global_publish_other,
         snapshot.first_invite_to_200_count,
         snapshot.first_invite_to_200_avg_us,
         snapshot.first_invite_to_200_p50_us,
@@ -633,6 +823,12 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         format_latency(&snapshot.dialog_session_publish_other),
         format_latency(&snapshot.dialog_lookup),
         format_latency(&snapshot.dialog_initial_invite_setup),
+        format_latency(&snapshot.termination_cleanup_indexed_scan),
+        format_latency(&snapshot.termination_cleanup_full_scan),
+        format_latency(&snapshot.termination_cleanup_timer_unregister),
+        format_latency(&snapshot.invite_2xx_maintenance),
+        format_latency(&snapshot.invite_2xx_proactive_send),
+        format_latency(&snapshot.global_publish_total),
     )
 }
 
@@ -711,6 +907,192 @@ pub fn record_bye_cleanup_session_missing() {
     increment(&BYE_CLEANUP_SESSION_MISSING);
 }
 
+pub(crate) fn record_dialog_route(source: &str, kind: &str, mismatch: bool) {
+    if !dialog_timing_enabled() {
+        return;
+    }
+
+    match source {
+        "request" => {
+            DIALOG_ROUTE_REQUEST.fetch_add(1, Ordering::Relaxed);
+        }
+        "stored" => {
+            DIALOG_ROUTE_STORED.fetch_add(1, Ordering::Relaxed);
+        }
+        "transaction_key" => {
+            DIALOG_ROUTE_TRANSACTION_KEY.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            DIALOG_ROUTE_FALLBACK.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+
+    match kind {
+        "invite" => {
+            DIALOG_ROUTE_INVITE.fetch_add(1, Ordering::Relaxed);
+        }
+        "ack" => {
+            DIALOG_ROUTE_ACK.fetch_add(1, Ordering::Relaxed);
+        }
+        "bye" => {
+            DIALOG_ROUTE_BYE.fetch_add(1, Ordering::Relaxed);
+        }
+        "cancel" => {
+            DIALOG_ROUTE_CANCEL.fetch_add(1, Ordering::Relaxed);
+        }
+        "lifecycle" => {
+            DIALOG_ROUTE_LIFECYCLE.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            DIALOG_ROUTE_OTHER.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+
+    if mismatch {
+        DIALOG_ROUTE_WORKER_MISMATCH.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_termination_cleanup_enqueued() {
+    if transaction_timing_enabled() {
+        TERMINATION_CLEANUP_ENQUEUED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_termination_cleanup_queue_full() {
+    if transaction_timing_enabled() {
+        TERMINATION_CLEANUP_QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_termination_cleanup_worker_spawned() {
+    if transaction_timing_enabled() {
+        TERMINATION_CLEANUP_WORKER_SPAWNED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_termination_cleanup_batch(size: usize) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    let size = size as u64;
+    TERMINATION_CLEANUP_BATCHES.fetch_add(1, Ordering::Relaxed);
+    TERMINATION_CLEANUP_BATCH_TOTAL.fetch_add(size, Ordering::Relaxed);
+    update_max(&TERMINATION_CLEANUP_BATCH_MAX, size);
+}
+
+pub(crate) fn record_termination_cleanup_in_flight(delta: i64) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    let current = if delta >= 0 {
+        TERMINATION_CLEANUP_IN_FLIGHT.fetch_add(delta as u64, Ordering::Relaxed) + delta as u64
+    } else {
+        TERMINATION_CLEANUP_IN_FLIGHT
+            .fetch_sub((-delta) as u64, Ordering::Relaxed)
+            .saturating_sub((-delta) as u64)
+    };
+    update_max(&TERMINATION_CLEANUP_MAX_IN_FLIGHT, current);
+}
+
+pub(crate) fn record_termination_cleanup_poll_attempts(attempts: u64) {
+    if transaction_timing_enabled() {
+        TERMINATION_CLEANUP_POLL_ATTEMPTS.fetch_add(attempts, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_termination_cleanup_removed() {
+    if transaction_timing_enabled() {
+        TERMINATION_CLEANUP_REMOVED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_termination_cleanup_indexed_scan(scanned_keys: usize, elapsed: Duration) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    TERMINATION_CLEANUP_INDEXED_SCAN_KEYS.fetch_add(scanned_keys as u64, Ordering::Relaxed);
+    TERMINATION_CLEANUP_INDEXED_SCAN.record(elapsed);
+}
+
+pub(crate) fn record_termination_cleanup_full_scan(
+    client_keys: usize,
+    server_keys: usize,
+    elapsed: Duration,
+) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    TERMINATION_CLEANUP_FULL_SCAN_CLIENT_KEYS.fetch_add(client_keys as u64, Ordering::Relaxed);
+    TERMINATION_CLEANUP_FULL_SCAN_SERVER_KEYS.fetch_add(server_keys as u64, Ordering::Relaxed);
+    TERMINATION_CLEANUP_FULL_SCAN.record(elapsed);
+}
+
+pub(crate) fn record_termination_cleanup_timer_unregister(elapsed: Duration) {
+    if transaction_timing_enabled() {
+        TERMINATION_CLEANUP_TIMER_UNREGISTER.record(elapsed);
+    }
+}
+
+pub(crate) fn record_invite_2xx_maintenance(
+    cache_len: usize,
+    due_queue_len: usize,
+    scanned: usize,
+    due: usize,
+    expired: usize,
+    capped: bool,
+    elapsed: Duration,
+) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+    INVITE_2XX_MAINTENANCE_TICKS.fetch_add(1, Ordering::Relaxed);
+    INVITE_2XX_MAINTENANCE_CACHE_LEN_TOTAL.fetch_add(cache_len as u64, Ordering::Relaxed);
+    update_max(&INVITE_2XX_MAINTENANCE_CACHE_LEN_MAX, cache_len as u64);
+    INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_TOTAL.fetch_add(due_queue_len as u64, Ordering::Relaxed);
+    update_max(
+        &INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_MAX,
+        due_queue_len as u64,
+    );
+    INVITE_2XX_MAINTENANCE_SCANNED.fetch_add(scanned as u64, Ordering::Relaxed);
+    INVITE_2XX_MAINTENANCE_DUE.fetch_add(due as u64, Ordering::Relaxed);
+    INVITE_2XX_MAINTENANCE_EXPIRED.fetch_add(expired as u64, Ordering::Relaxed);
+    if capped {
+        INVITE_2XX_MAINTENANCE_CAPPED_TICKS.fetch_add(1, Ordering::Relaxed);
+    }
+    INVITE_2XX_MAINTENANCE.record(elapsed);
+}
+
+pub(crate) fn record_invite_2xx_proactive_send(elapsed: Duration) {
+    if transaction_timing_enabled() {
+        INVITE_2XX_PROACTIVE_SEND.record(elapsed);
+    }
+}
+
+pub(crate) fn record_global_publish(kind: &str, handler_count: usize, elapsed: Duration) {
+    if !dialog_timing_enabled() {
+        return;
+    }
+    GLOBAL_PUBLISH_COUNT.fetch_add(1, Ordering::Relaxed);
+    GLOBAL_PUBLISH_HANDLER_COUNT_TOTAL.fetch_add(handler_count as u64, Ordering::Relaxed);
+    update_max(&GLOBAL_PUBLISH_HANDLER_COUNT_MAX, handler_count as u64);
+    match kind {
+        "incoming_call" => {
+            GLOBAL_PUBLISH_INCOMING_CALL.fetch_add(1, Ordering::Relaxed);
+        }
+        "ack_received" => {
+            GLOBAL_PUBLISH_ACK.fetch_add(1, Ordering::Relaxed);
+        }
+        "bye_received" => {
+            GLOBAL_PUBLISH_BYE.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {
+            GLOBAL_PUBLISH_OTHER.fetch_add(1, Ordering::Relaxed);
+        }
+    };
+    GLOBAL_PUBLISH_TOTAL.record(elapsed);
+}
+
 pub fn record_first_invite_to_200(elapsed: Duration) {
     if !enabled() {
         return;
@@ -722,12 +1104,7 @@ pub fn record_first_invite_to_200(elapsed: Duration) {
     if elapsed_us > 500_000 {
         FIRST_INVITE_TO_200_OVER_500MS.fetch_add(1, Ordering::Relaxed);
     }
-    for (idx, upper) in LATENCY_BUCKET_UPPER_US.iter().enumerate() {
-        if elapsed_us <= *upper {
-            FIRST_INVITE_TO_200_BUCKETS[idx].fetch_add(1, Ordering::Relaxed);
-            break;
-        }
-    }
+    FIRST_INVITE_TO_200_BUCKETS[latency_bucket_index(elapsed_us)].fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn record_udp_receive_to_incoming_call_emit(elapsed: Duration) {
@@ -853,6 +1230,14 @@ fn increment(counter: &AtomicU64) {
     }
 }
 
+fn latency_bucket_index(elapsed_us: u64) -> usize {
+    let bucketed_us = elapsed_us.min(*LATENCY_BUCKET_UPPER_US.last().unwrap());
+    LATENCY_BUCKET_UPPER_US
+        .iter()
+        .position(|upper| bucketed_us <= *upper)
+        .unwrap_or(LATENCY_BUCKET_UPPER_US.len() - 1)
+}
+
 pub fn record_dialog_to_session_queue_delay(kind: &str, elapsed: Duration) {
     if !enabled() {
         return;
@@ -864,12 +1249,8 @@ pub fn record_dialog_to_session_queue_delay(kind: &str, elapsed: Duration) {
     if elapsed >= Duration::from_millis(500) {
         DIALOG_TO_SESSION_QUEUE_OVER_500MS.fetch_add(1, Ordering::Relaxed);
     }
-    for (idx, upper) in LATENCY_BUCKET_UPPER_US.iter().enumerate() {
-        if elapsed_us <= *upper {
-            DIALOG_TO_SESSION_QUEUE_BUCKETS[idx].fetch_add(1, Ordering::Relaxed);
-            break;
-        }
-    }
+    DIALOG_TO_SESSION_QUEUE_BUCKETS[latency_bucket_index(elapsed_us)]
+        .fetch_add(1, Ordering::Relaxed);
 
     match kind {
         "incoming_call" => DIALOG_TO_SESSION_QUEUE_INCOMING_CALL.fetch_add(1, Ordering::Relaxed),
@@ -900,12 +1281,7 @@ fn record_latency(
     if elapsed_us > 500_000 {
         over_500ms.fetch_add(1, Ordering::Relaxed);
     }
-    for (idx, upper) in LATENCY_BUCKET_UPPER_US.iter().enumerate() {
-        if elapsed_us <= *upper {
-            buckets[idx].fetch_add(1, Ordering::Relaxed);
-            break;
-        }
-    }
+    buckets[latency_bucket_index(elapsed_us)].fetch_add(1, Ordering::Relaxed);
 }
 
 fn latency_snapshot(
@@ -973,11 +1349,11 @@ fn percentile_per_mille_us(buckets: &[AtomicU64], observed: u64, per_mille: u64)
             return LATENCY_BUCKET_UPPER_US[idx];
         }
     }
-    FIRST_INVITE_TO_200_MAX_US.load(Ordering::Relaxed)
+    *LATENCY_BUCKET_UPPER_US.last().unwrap()
 }
 
-fn all_counters() -> [&'static AtomicU64; 40] {
-    [
+fn all_counters() -> Vec<&'static AtomicU64> {
+    vec![
         &DUP_INVITE_EXISTING_TX,
         &DUP_INVITE_CACHE_HIT,
         &DUP_INVITE_CACHE_MISS,
@@ -1018,10 +1394,50 @@ fn all_counters() -> [&'static AtomicU64; 40] {
         &BYE_RECEIVE_TO_200_SUM_US,
         &BYE_RECEIVE_TO_200_MAX_US,
         &BYE_RECEIVE_TO_200_OVER_500MS,
+        &DIALOG_ROUTE_REQUEST,
+        &DIALOG_ROUTE_STORED,
+        &DIALOG_ROUTE_TRANSACTION_KEY,
+        &DIALOG_ROUTE_FALLBACK,
+        &DIALOG_ROUTE_WORKER_MISMATCH,
+        &DIALOG_ROUTE_INVITE,
+        &DIALOG_ROUTE_ACK,
+        &DIALOG_ROUTE_BYE,
+        &DIALOG_ROUTE_CANCEL,
+        &DIALOG_ROUTE_LIFECYCLE,
+        &DIALOG_ROUTE_OTHER,
+        &TERMINATION_CLEANUP_ENQUEUED,
+        &TERMINATION_CLEANUP_QUEUE_FULL,
+        &TERMINATION_CLEANUP_WORKER_SPAWNED,
+        &TERMINATION_CLEANUP_IN_FLIGHT,
+        &TERMINATION_CLEANUP_MAX_IN_FLIGHT,
+        &TERMINATION_CLEANUP_POLL_ATTEMPTS,
+        &TERMINATION_CLEANUP_REMOVED,
+        &TERMINATION_CLEANUP_BATCHES,
+        &TERMINATION_CLEANUP_BATCH_TOTAL,
+        &TERMINATION_CLEANUP_BATCH_MAX,
+        &TERMINATION_CLEANUP_INDEXED_SCAN_KEYS,
+        &TERMINATION_CLEANUP_FULL_SCAN_CLIENT_KEYS,
+        &TERMINATION_CLEANUP_FULL_SCAN_SERVER_KEYS,
+        &INVITE_2XX_MAINTENANCE_TICKS,
+        &INVITE_2XX_MAINTENANCE_CACHE_LEN_TOTAL,
+        &INVITE_2XX_MAINTENANCE_CACHE_LEN_MAX,
+        &INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_TOTAL,
+        &INVITE_2XX_MAINTENANCE_DUE_QUEUE_LEN_MAX,
+        &INVITE_2XX_MAINTENANCE_SCANNED,
+        &INVITE_2XX_MAINTENANCE_DUE,
+        &INVITE_2XX_MAINTENANCE_EXPIRED,
+        &INVITE_2XX_MAINTENANCE_CAPPED_TICKS,
+        &GLOBAL_PUBLISH_COUNT,
+        &GLOBAL_PUBLISH_HANDLER_COUNT_TOTAL,
+        &GLOBAL_PUBLISH_HANDLER_COUNT_MAX,
+        &GLOBAL_PUBLISH_INCOMING_CALL,
+        &GLOBAL_PUBLISH_ACK,
+        &GLOBAL_PUBLISH_BYE,
+        &GLOBAL_PUBLISH_OTHER,
     ]
 }
 
-fn transaction_latency_metrics() -> [&'static LatencyMetric; 10] {
+fn transaction_latency_metrics() -> [&'static LatencyMetric; 15] {
     [
         &TRANSACTION_DISPATCH_QUEUE,
         &TRANSACTION_HANDLER_TOTAL,
@@ -1033,10 +1449,15 @@ fn transaction_latency_metrics() -> [&'static LatencyMetric; 10] {
         &SERVER_TRANSACTION_CREATE,
         &EXISTING_TRANSACTION_DISPATCH,
         &TRANSACTION_EVENT_BROADCAST,
+        &TERMINATION_CLEANUP_INDEXED_SCAN,
+        &TERMINATION_CLEANUP_FULL_SCAN,
+        &TERMINATION_CLEANUP_TIMER_UNREGISTER,
+        &INVITE_2XX_MAINTENANCE,
+        &INVITE_2XX_PROACTIVE_SEND,
     ]
 }
 
-fn dialog_latency_metrics() -> [&'static LatencyMetric; 16] {
+fn dialog_latency_metrics() -> [&'static LatencyMetric; 17] {
     [
         &UDP_RECEIVE_TO_INVITE_200,
         &DIALOG_EVENT_DISPATCH_QUEUE,
@@ -1054,12 +1475,24 @@ fn dialog_latency_metrics() -> [&'static LatencyMetric; 16] {
         &DIALOG_SESSION_PUBLISH_OTHER,
         &DIALOG_LOOKUP,
         &DIALOG_INITIAL_INVITE_SETUP,
+        &GLOBAL_PUBLISH_TOTAL,
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflow_latency_bucket_reports_finite_upper_bound() {
+        let buckets = latency_buckets!();
+        buckets[LATENCY_BUCKET_UPPER_US.len() - 1].store(1, Ordering::Relaxed);
+
+        let p999 = percentile_per_mille_us(&buckets, 1, 999);
+
+        assert_eq!(p999, 5_000_000);
+        assert_ne!(p999, u64::MAX);
+    }
 
     #[test]
     fn retransmission_diagnostics_format_counts() {
@@ -1154,6 +1587,22 @@ mod tests {
         record_dialog_session_publish("other", Duration::from_micros(275));
         record_dialog_lookup(Duration::from_micros(325));
         record_dialog_initial_invite_setup(Duration::from_micros(375));
+        record_dialog_route("request", "invite", true);
+        record_dialog_route("stored", "lifecycle", false);
+        record_termination_cleanup_enqueued();
+        record_termination_cleanup_queue_full();
+        record_termination_cleanup_worker_spawned();
+        record_termination_cleanup_batch(3);
+        record_termination_cleanup_in_flight(1);
+        record_termination_cleanup_in_flight(-1);
+        record_termination_cleanup_poll_attempts(2);
+        record_termination_cleanup_removed();
+        record_termination_cleanup_indexed_scan(5, Duration::from_micros(425));
+        record_termination_cleanup_full_scan(7, 11, Duration::from_micros(475));
+        record_termination_cleanup_timer_unregister(Duration::from_micros(525));
+        record_invite_2xx_maintenance(13, 31, 17, 19, 23, true, Duration::from_micros(575));
+        record_invite_2xx_proactive_send(Duration::from_micros(625));
+        record_global_publish("incoming_call", 29, Duration::from_micros(675));
 
         let snapshot = snapshot();
         assert_eq!(snapshot.duplicate_invite_existing_transaction, 1);
@@ -1187,6 +1636,30 @@ mod tests {
         assert_eq!(snapshot.dialog_session_publish_other.count, 1);
         assert_eq!(snapshot.dialog_lookup.count, 1);
         assert_eq!(snapshot.dialog_initial_invite_setup.count, 1);
+        assert_eq!(snapshot.dialog_route_request, 1);
+        assert_eq!(snapshot.dialog_route_stored, 1);
+        assert_eq!(snapshot.dialog_route_worker_mismatch, 1);
+        assert_eq!(snapshot.dialog_route_lifecycle, 1);
+        assert_eq!(snapshot.termination_cleanup_enqueued, 1);
+        assert_eq!(snapshot.termination_cleanup_queue_full, 1);
+        assert_eq!(snapshot.termination_cleanup_worker_spawned, 1);
+        assert_eq!(snapshot.termination_cleanup_batches, 1);
+        assert_eq!(snapshot.termination_cleanup_batch_total, 3);
+        assert_eq!(snapshot.termination_cleanup_max_in_flight, 1);
+        assert_eq!(snapshot.termination_cleanup_poll_attempts, 2);
+        assert_eq!(snapshot.termination_cleanup_removed, 1);
+        assert_eq!(snapshot.termination_cleanup_indexed_scan_keys, 5);
+        assert_eq!(snapshot.termination_cleanup_full_scan_client_keys, 7);
+        assert_eq!(snapshot.termination_cleanup_full_scan_server_keys, 11);
+        assert_eq!(snapshot.invite_2xx_maintenance_ticks, 1);
+        assert_eq!(snapshot.invite_2xx_maintenance_cache_len_max, 13);
+        assert_eq!(snapshot.invite_2xx_maintenance_due_queue_len_max, 31);
+        assert_eq!(snapshot.invite_2xx_maintenance_scanned, 17);
+        assert_eq!(snapshot.invite_2xx_maintenance_due, 19);
+        assert_eq!(snapshot.invite_2xx_maintenance_expired, 23);
+        assert_eq!(snapshot.invite_2xx_maintenance_capped_ticks, 1);
+        assert_eq!(snapshot.global_publish_count, 1);
+        assert_eq!(snapshot.global_publish_handler_count_max, 29);
         let summary = format_summary(&snapshot);
         assert!(summary.contains("dup_invite_cache_hit=1"));
         assert!(summary.contains("dup_bye_tombstone_hit=1"));
@@ -1198,5 +1671,9 @@ mod tests {
         assert!(summary.contains("dialog_event_dispatch_queue=[count=1"));
         assert!(summary.contains("dialog_event_handler=[total=[count=5"));
         assert!(summary.contains("dialog_session_publish=[total=[count=4"));
+        assert!(summary.contains("dialog_route=[request=1 stored=1"));
+        assert!(summary.contains("termination_cleanup=[enqueued=1"));
+        assert!(summary.contains("invite_2xx_maintenance=[ticks=1"));
+        assert!(summary.contains("global_publish=[count=1"));
     }
 }

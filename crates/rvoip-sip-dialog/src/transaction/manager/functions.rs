@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
@@ -10,6 +10,7 @@ use tracing::{debug, error, trace, warn};
 use rvoip_sip_core::prelude::*;
 use rvoip_sip_transport::Transport;
 
+use crate::diagnostics;
 use crate::transaction::client::ClientTransaction;
 use crate::transaction::client::TransactionExt as ClientTransactionExt;
 use crate::transaction::error::{Error, Result};
@@ -552,13 +553,18 @@ impl TransactionManager {
     /// # Returns
     /// * `Result<usize>` - The number of transactions cleaned up
     pub async fn cleanup_indexed_terminated_transactions(&self) -> Result<usize> {
+        let started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let terminated_keys: Vec<TransactionKey> = self
             .terminated_transactions
             .iter()
             .map(|entry| entry.key().clone())
             .collect();
+        let scanned_keys = terminated_keys.len();
 
         if terminated_keys.is_empty() {
+            if let Some(started) = started {
+                diagnostics::record_termination_cleanup_indexed_scan(0, started.elapsed());
+            }
             return Ok(0);
         }
 
@@ -567,11 +573,17 @@ impl TransactionManager {
             terminated_keys.len()
         );
 
-        self.cleanup_terminated_transaction_keys(terminated_keys, true)
-            .await
+        let cleaned = self
+            .cleanup_terminated_transaction_keys(terminated_keys, true)
+            .await;
+        if let Some(started) = started {
+            diagnostics::record_termination_cleanup_indexed_scan(scanned_keys, started.elapsed());
+        }
+        cleaned
     }
 
     pub async fn cleanup_terminated_transactions(&self) -> Result<usize> {
+        let started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let mut cleaned_count = 0;
 
         // Cleanup client transactions
@@ -581,6 +593,7 @@ impl TransactionManager {
             .filter(|r| r.value().state() == TransactionState::Terminated)
             .map(|r| r.key().clone())
             .collect();
+        let terminated_client_count = terminated_client_keys.len();
         debug!(
             "Found {} terminated client transactions",
             terminated_client_keys.len()
@@ -596,6 +609,7 @@ impl TransactionManager {
             .filter(|r| r.value().state() == TransactionState::Terminated)
             .map(|r| r.key().clone())
             .collect();
+        let terminated_server_count = terminated_server_keys.len();
         debug!(
             "Found {} terminated server transactions",
             terminated_server_keys.len()
@@ -646,6 +660,13 @@ impl TransactionManager {
         }
 
         debug!("Cleaned up {} terminated transactions", cleaned_count);
+        if let Some(started) = started {
+            diagnostics::record_termination_cleanup_full_scan(
+                terminated_client_count,
+                terminated_server_count,
+                started.elapsed(),
+            );
+        }
         Ok(cleaned_count)
     }
 

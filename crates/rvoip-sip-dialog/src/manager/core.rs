@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::transaction::transport::multiplexed::select_transport_for_uri;
 use crate::transaction::{TransactionEvent, TransactionKey, TransactionManager, TransactionState};
@@ -87,6 +87,25 @@ impl DialogTransactionEventKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogRouteSource {
+    Request,
+    Stored,
+    TransactionKey,
+    Fallback,
+}
+
+impl DialogRouteSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Stored => "stored",
+            Self::TransactionKey => "transaction_key",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
 struct QueuedDialogTransactionEvent {
     event: TransactionEvent,
     kind: Option<DialogTransactionEventKind>,
@@ -154,14 +173,14 @@ fn transaction_event_request(event: &TransactionEvent) -> Option<&Request> {
     }
 }
 
-fn dialog_event_route_hash(event: &TransactionEvent) -> Option<u64> {
+fn dialog_event_request_route_hash(event: &TransactionEvent) -> Option<u64> {
     if let Some(request) = transaction_event_request(event) {
         if let Some(hash) = request_dialog_route_hash(request) {
             return Some(hash);
         }
     }
 
-    transaction_event_key(event).map(transaction_key_route_hash)
+    None
 }
 
 fn dialog_event_kind(event: &TransactionEvent) -> DialogTransactionEventKind {
@@ -187,20 +206,13 @@ fn dialog_event_kind(event: &TransactionEvent) -> DialogTransactionEventKind {
     }
 }
 
-fn dialog_event_dispatch_worker_index(
-    event: &TransactionEvent,
-    worker_count: usize,
-    fallback_worker: &AtomicUsize,
-) -> usize {
-    if worker_count <= 1 {
-        return 0;
+fn dialog_event_route_kind(event: &TransactionEvent) -> &'static str {
+    match event {
+        TransactionEvent::StateChanged { .. } | TransactionEvent::TransactionTerminated { .. } => {
+            "lifecycle"
+        }
+        _ => dialog_event_kind(event).as_str(),
     }
-
-    if let Some(hash) = dialog_event_route_hash(event) {
-        return (hash as usize) % worker_count;
-    }
-
-    fallback_worker.fetch_add(1, Ordering::Relaxed) % worker_count
 }
 
 fn session_coordination_event_kind(event: &SessionCoordinationEvent) -> &'static str {
@@ -263,6 +275,11 @@ pub struct DialogManager {
 
     /// Transaction to dialog mapping
     pub(crate) transaction_to_dialog: Arc<DashMap<TransactionKey, DialogId>>,
+
+    /// Transaction to call-affinity route hash. Dialog dispatch records the
+    /// call route from request-bearing events so later lifecycle events for
+    /// the same transaction do not get sent to a different dialog worker.
+    transaction_dialog_route_hash: Arc<DashMap<TransactionKey, u64>>,
 
     /// Dialog to INVITE transaction mapping. This is the reverse hot-path
     /// index for CANCEL and authenticated-INVITE retry handling; callers
@@ -528,12 +545,13 @@ fn start_dialog_event_dispatch_workers(
 }
 
 async fn dispatch_dialog_transaction_event(
+    manager: &DialogManager,
     event: TransactionEvent,
     dispatch_senders: &Arc<Vec<mpsc::Sender<QueuedDialogTransactionEvent>>>,
     fallback_worker: &AtomicUsize,
 ) {
     let worker_index =
-        dialog_event_dispatch_worker_index(&event, dispatch_senders.len(), fallback_worker);
+        manager.dialog_event_dispatch_worker_index(&event, dispatch_senders.len(), fallback_worker);
     let timing_enabled = crate::diagnostics::dialog_timing_enabled();
     let kind = timing_enabled.then(|| dialog_event_kind(&event));
     let queued = QueuedDialogTransactionEvent {
@@ -627,6 +645,7 @@ impl DialogManager {
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
             terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
@@ -1175,6 +1194,7 @@ impl DialogManager {
             terminated_bye_insert_count: Arc::new(AtomicUsize::new(0)),
             terminated_bye_lookup_hard_max: terminated_bye_lookup_hard_max(index_capacity),
             transaction_to_dialog: Arc::new(DashMap::with_capacity(index_capacity)),
+            transaction_dialog_route_hash: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_invite_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             dialog_server_transactions: Arc::new(DashMap::with_capacity(index_capacity)),
             pending_response_transaction_by_dialog: Arc::new(DashMap::with_capacity(
@@ -1313,6 +1333,7 @@ impl DialogManager {
                     match event {
                         Some(event) => {
                             dispatch_dialog_transaction_event(
+                                self,
                                 event,
                                 &dispatch_senders,
                                 &fallback_worker,
@@ -1352,6 +1373,68 @@ impl DialogManager {
             .max(1)
     }
 
+    fn dialog_event_route_hash(
+        &self,
+        event: &TransactionEvent,
+    ) -> Option<(u64, DialogRouteSource, bool)> {
+        let transaction_id = transaction_event_key(event);
+
+        if let Some(hash) = dialog_event_request_route_hash(event) {
+            if let Some(transaction_id) = transaction_id {
+                let mismatch = self
+                    .transaction_dialog_route_hash
+                    .get(transaction_id)
+                    .is_some_and(|existing| *existing.value() != hash);
+                self.transaction_dialog_route_hash
+                    .insert(transaction_id.clone(), hash);
+                return Some((hash, DialogRouteSource::Request, mismatch));
+            }
+            return Some((hash, DialogRouteSource::Request, false));
+        }
+
+        if let Some(transaction_id) = transaction_id {
+            if let Some(hash) = self
+                .transaction_dialog_route_hash
+                .get(transaction_id)
+                .map(|entry| *entry.value())
+            {
+                return Some((hash, DialogRouteSource::Stored, false));
+            }
+
+            return Some((
+                transaction_key_route_hash(transaction_id),
+                DialogRouteSource::TransactionKey,
+                false,
+            ));
+        }
+
+        None
+    }
+
+    fn dialog_event_dispatch_worker_index(
+        &self,
+        event: &TransactionEvent,
+        worker_count: usize,
+        fallback_worker: &AtomicUsize,
+    ) -> usize {
+        if worker_count <= 1 {
+            return 0;
+        }
+
+        let route_kind = dialog_event_route_kind(event);
+        if let Some((hash, source, mismatch)) = self.dialog_event_route_hash(event) {
+            crate::diagnostics::record_dialog_route(source.as_str(), route_kind, mismatch);
+            return (hash as usize) % worker_count;
+        }
+
+        crate::diagnostics::record_dialog_route(
+            DialogRouteSource::Fallback.as_str(),
+            route_kind,
+            false,
+        );
+        fallback_worker.fetch_add(1, Ordering::Relaxed) % worker_count
+    }
+
     async fn process_timed_global_transaction_event(&self, event: TransactionEvent) {
         let timing_enabled = crate::diagnostics::dialog_timing_enabled();
         let kind = timing_enabled.then(|| dialog_event_kind(&event));
@@ -1386,6 +1469,9 @@ impl DialogManager {
         ) {
             return;
         }
+
+        let clear_route_after_processing =
+            matches!(&event, TransactionEvent::TransactionTerminated { .. });
 
         // Extract transaction ID from the event
         let transaction_id = self.extract_transaction_id(&event);
@@ -1453,6 +1539,10 @@ impl DialogManager {
                     );
                 }
             }
+        }
+
+        if clear_route_after_processing {
+            self.transaction_dialog_route_hash.remove(&transaction_id);
         }
     }
 
@@ -1556,6 +1646,7 @@ impl DialogManager {
         &self,
         transaction_id: &TransactionKey,
     ) -> Option<DialogId> {
+        self.transaction_dialog_route_hash.remove(transaction_id);
         let removed_dialog_id = self
             .transaction_to_dialog
             .remove(transaction_id)
@@ -1837,7 +1928,8 @@ impl DialogManager {
     /// SIP protocol details and session-core handles session logic.
     pub async fn emit_dialog_event(&self, event: DialogEvent) {
         // Try event hub first (new global event bus)
-        if let Some(hub) = self.event_hub.read().await.as_ref() {
+        let hub = self.event_hub.read().await.clone();
+        if let Some(hub) = hub {
             if let Err(e) = hub.publish_dialog_event(event.clone()).await {
                 warn!("Failed to publish dialog event to global bus: {}", e);
             } else {
@@ -1847,7 +1939,8 @@ impl DialogManager {
         }
 
         // Fall back to channel (legacy)
-        if let Some(sender) = self.dialog_event_sender.read().await.as_ref() {
+        let sender = self.dialog_event_sender.read().await.clone();
+        if let Some(sender) = sender {
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send dialog event to session-core: {}", e);
             } else {
@@ -1864,24 +1957,22 @@ impl DialogManager {
         let timing_enabled = crate::diagnostics::dialog_timing_enabled();
         let publish_kind = timing_enabled.then(|| session_coordination_event_kind(&event));
         let publish_started = timing_enabled.then(Instant::now);
-        info!(
-            "📤 emit_session_coordination_event called with event: {:?}",
+        trace!(
+            "emit_session_coordination_event called with event: {:?}",
             event
         );
 
         // Try event hub first (new global event bus)
-        if let Some(hub) = self.event_hub.read().await.as_ref() {
-            info!("📤 Event hub exists, publishing to global bus");
+        let hub = self.event_hub.read().await.clone();
+        if let Some(hub) = hub {
+            trace!("Event hub exists, publishing session coordination event");
             if let Err(e) = hub.publish_session_coordination_event(event.clone()).await {
                 warn!(
                     "Failed to publish session coordination event to global bus: {}",
                     e
                 );
             } else {
-                info!(
-                    "📤 Published session coordination event to global bus: {:?}",
-                    event
-                );
+                trace!("Published session coordination event to global bus");
                 if let Some(started) = publish_started {
                     crate::diagnostics::record_dialog_session_publish(
                         publish_kind.expect("timed session coordination event kind"),
@@ -1891,22 +1982,20 @@ impl DialogManager {
                 return;
             }
         } else {
-            info!("📤 Event hub is None, trying legacy channel");
+            trace!("Event hub is None, trying legacy session channel");
         }
 
         // Fall back to channel (legacy)
-        if let Some(sender) = self.session_coordinator.read().await.as_ref() {
-            info!("📤 Legacy channel exists, sending event");
+        let sender = self.session_coordinator.read().await.clone();
+        if let Some(sender) = sender {
+            trace!("Legacy session channel exists, sending event");
             if let Err(e) = sender.send(event.clone()).await {
                 warn!("Failed to send session coordination event: {}", e);
             } else {
-                info!(
-                    "📤 Emitted session coordination event to legacy channel: {:?}",
-                    event
-                );
+                trace!("Emitted session coordination event to legacy channel");
             }
         } else {
-            warn!("📤 Both event hub and legacy channel are None - event not sent!");
+            warn!("Both event hub and legacy channel are None - event not sent");
         }
         if let Some(started) = publish_started {
             crate::diagnostics::record_dialog_session_publish(
@@ -1933,7 +2022,8 @@ impl DialogManager {
         // without a session_coordinator wired, the protocol handler
         // must observe `false` here and emit a basic 200 OK locally.
         let mut delivered = false;
-        if let Some(sender) = self.session_coordinator.read().await.as_ref() {
+        let sender = self.session_coordinator.read().await.clone();
+        if let Some(sender) = sender {
             match sender.send(event.clone()).await {
                 Ok(()) => delivered = true,
                 Err(e) => {
@@ -1945,7 +2035,8 @@ impl DialogManager {
         // Best-effort fan-out via the event hub. Success here is not
         // sufficient to claim "consumer exists" because the global bus
         // accepts publishes whether or not any subscriber is wired.
-        if let Some(hub) = self.event_hub.read().await.as_ref() {
+        let hub = self.event_hub.read().await.clone();
+        if let Some(hub) = hub {
             match hub
                 .try_publish_session_coordination_event(event.clone())
                 .await
@@ -3156,8 +3247,9 @@ mod outbound_flow_handler_tests {
             .build()
     }
 
-    #[test]
-    fn dialog_event_dispatch_routes_same_call_requests_to_same_worker() {
+    #[tokio::test]
+    async fn dialog_event_dispatch_routes_same_call_requests_to_same_worker() {
+        let (manager, _rx) = make_manager().await;
         let fallback = AtomicUsize::new(0);
         let source = dest_addr(5070);
         let invite_tx = TransactionKey::new("z9hG4bK-invite".to_string(), Method::Invite, true);
@@ -3188,18 +3280,52 @@ mod outbound_flow_handler_tests {
             },
         ];
 
-        let first = dialog_event_dispatch_worker_index(&events[0], 8, &fallback);
+        let first = manager.dialog_event_dispatch_worker_index(&events[0], 8, &fallback);
         for event in &events[1..] {
             assert_eq!(
-                dialog_event_dispatch_worker_index(event, 8, &fallback),
+                manager.dialog_event_dispatch_worker_index(event, 8, &fallback),
                 first
             );
         }
         assert_eq!(fallback.load(Ordering::Relaxed), 0);
     }
 
-    #[test]
-    fn dialog_event_dispatch_round_robins_unkeyed_events() {
+    #[tokio::test]
+    async fn dialog_event_dispatch_routes_lifecycle_events_by_stored_call_route() {
+        let (manager, _rx) = make_manager().await;
+        let fallback = AtomicUsize::new(0);
+        let source = dest_addr(5070);
+        let invite_tx = TransactionKey::new("z9hG4bK-invite".to_string(), Method::Invite, true);
+
+        let invite = TransactionEvent::InviteRequest {
+            transaction_id: invite_tx.clone(),
+            request: dispatch_request(Method::Invite, "z9hG4bK-invite", 1),
+            source,
+        };
+        let state_changed = TransactionEvent::StateChanged {
+            transaction_id: invite_tx.clone(),
+            previous_state: TransactionState::Proceeding,
+            new_state: TransactionState::Terminated,
+        };
+        let terminated = TransactionEvent::TransactionTerminated {
+            transaction_id: invite_tx,
+        };
+
+        let first = manager.dialog_event_dispatch_worker_index(&invite, 8, &fallback);
+        assert_eq!(
+            manager.dialog_event_dispatch_worker_index(&state_changed, 8, &fallback),
+            first
+        );
+        assert_eq!(
+            manager.dialog_event_dispatch_worker_index(&terminated, 8, &fallback),
+            first
+        );
+        assert_eq!(fallback.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn dialog_event_dispatch_round_robins_unkeyed_events() {
+        let (manager, _rx) = make_manager().await;
         let fallback = AtomicUsize::new(0);
         let events = [
             TransactionEvent::ShutdownRequested,
@@ -3208,15 +3334,15 @@ mod outbound_flow_handler_tests {
         ];
 
         assert_eq!(
-            dialog_event_dispatch_worker_index(&events[0], 3, &fallback),
+            manager.dialog_event_dispatch_worker_index(&events[0], 3, &fallback),
             0
         );
         assert_eq!(
-            dialog_event_dispatch_worker_index(&events[1], 3, &fallback),
+            manager.dialog_event_dispatch_worker_index(&events[1], 3, &fallback),
             1
         );
         assert_eq!(
-            dialog_event_dispatch_worker_index(&events[2], 3, &fallback),
+            manager.dialog_event_dispatch_worker_index(&events[2], 3, &fallback),
             2
         );
     }

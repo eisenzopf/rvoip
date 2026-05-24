@@ -16,6 +16,12 @@
 #   RVOIP_SHARDING_DIALOG_WORKERS="1 2 4 8"
 #   RVOIP_SHARDING_CAPACITIES="20000 30000"
 #   RVOIP_SHARDING_SIP_UDP_RECV_BUFFER_SIZE=8388608
+#   RVOIP_SHARDING_SAMPLE=1
+#   RVOIP_SHARDING_SAMPLY=1
+#   RVOIP_SHARDING_SAMPLY_CSWITCH_MARKERS=1
+#
+# Notes:
+#   macOS may require `samply setup` once before PID attach works.
 
 set -euo pipefail
 
@@ -68,6 +74,14 @@ LISTENER_WARMUP_SECS="${RVOIP_SHARDING_LISTENER_WARMUP_SECS:-2}"
 TRANSACTION_TIMING="${RVOIP_SHARDING_TRANSACTION_TIMING:-0}"
 DIALOG_TIMING="${RVOIP_SHARDING_DIALOG_TIMING:-0}"
 BUILD_LISTENER="${RVOIP_SHARDING_BUILD:-auto}"
+SAMPLE_ENABLED="${RVOIP_SHARDING_SAMPLE:-0}"
+SAMPLE_SECONDS="${RVOIP_SHARDING_SAMPLE_SECONDS:-$STEADY_SECS}"
+SAMPLE_INTERVAL_MS="${RVOIP_SHARDING_SAMPLE_INTERVAL_MS:-}"
+SAMPLY_ENABLED="${RVOIP_SHARDING_SAMPLY:-0}"
+SAMPLY_SECONDS="${RVOIP_SHARDING_SAMPLY_SECONDS:-$STEADY_SECS}"
+SAMPLY_RATE="${RVOIP_SHARDING_SAMPLY_RATE:-1000}"
+SAMPLY_CSWITCH_MARKERS="${RVOIP_SHARDING_SAMPLY_CSWITCH_MARKERS:-0}"
+SAMPLY_EXTRA_ARGS="${RVOIP_SHARDING_SAMPLY_EXTRA_ARGS:-}"
 
 mkdir -p "$RESULTS_DIR"
 
@@ -96,8 +110,48 @@ append_optional_capacity_arg() {
 }
 
 CURRENT_LISTENER_PID=""
+CURRENT_SAMPLE_PID=""
+CURRENT_SAMPLY_PID=""
+CURRENT_SAMPLY_STOPPER_PID=""
+
+stop_profiler_pid() {
+  local profiler_pid="$1"
+  local profiler_name="$2"
+  if [[ -z "$profiler_pid" ]]; then
+    return
+  fi
+
+  if kill -0 "$profiler_pid" >/dev/null 2>&1; then
+    echo "[signaling_sharding_matrix] stopping $profiler_name profiler" | tee -a "$RESULTS_DIR/matrix_metadata.txt"
+    kill -INT "$profiler_pid" >/dev/null 2>&1 || true
+    (
+      sleep 4
+      kill -TERM "$profiler_pid" >/dev/null 2>&1 || true
+    ) &
+    local terminator_pid="$!"
+    wait "$profiler_pid" >/dev/null 2>&1 || true
+    kill "$terminator_pid" >/dev/null 2>&1 || true
+    wait "$terminator_pid" >/dev/null 2>&1 || true
+    return
+  fi
+
+  wait "$profiler_pid" >/dev/null 2>&1 || true
+}
 
 stop_listener() {
+  if [[ -n "$CURRENT_SAMPLE_PID" ]]; then
+    stop_profiler_pid "$CURRENT_SAMPLE_PID" "sample"
+    CURRENT_SAMPLE_PID=""
+  fi
+  if [[ -n "$CURRENT_SAMPLY_PID" ]]; then
+    stop_profiler_pid "$CURRENT_SAMPLY_PID" "samply"
+    CURRENT_SAMPLY_PID=""
+  fi
+  if [[ -n "$CURRENT_SAMPLY_STOPPER_PID" ]]; then
+    kill "$CURRENT_SAMPLY_STOPPER_PID" >/dev/null 2>&1 || true
+    wait "$CURRENT_SAMPLY_STOPPER_PID" >/dev/null 2>&1 || true
+    CURRENT_SAMPLY_STOPPER_PID=""
+  fi
   if [[ -n "$CURRENT_LISTENER_PID" ]] && kill -0 "$CURRENT_LISTENER_PID" >/dev/null 2>&1; then
     kill -INT "$CURRENT_LISTENER_PID" >/dev/null 2>&1 || true
     for _ in {1..30}; do
@@ -110,6 +164,67 @@ stop_listener() {
     kill -TERM "$CURRENT_LISTENER_PID" >/dev/null 2>&1 || true
     wait "$CURRENT_LISTENER_PID" >/dev/null 2>&1 || true
     CURRENT_LISTENER_PID=""
+  fi
+}
+
+start_sample() {
+  local sample_log="$1"
+  if [[ "$SAMPLE_ENABLED" != "1" && "$SAMPLE_ENABLED" != "true" ]]; then
+    return
+  fi
+  if ! command -v sample >/dev/null 2>&1; then
+    echo "[signaling_sharding_matrix] sample requested but macOS sample is unavailable" | tee -a "$RESULTS_DIR/matrix_metadata.txt"
+    return
+  fi
+
+  local sample_args=("$CURRENT_LISTENER_PID" "$SAMPLE_SECONDS" -file "$sample_log")
+  if [[ -n "$SAMPLE_INTERVAL_MS" ]]; then
+    sample_args+=(-i "$SAMPLE_INTERVAL_MS")
+  fi
+  echo "[signaling_sharding_matrix] sample output: $sample_log" | tee -a "$RESULTS_DIR/matrix_metadata.txt"
+  sample "${sample_args[@]}" >/dev/null 2>&1 &
+  CURRENT_SAMPLE_PID="$!"
+}
+
+start_samply() {
+  local profile_path="$1"
+  local samply_log="$2"
+  local profile_name="$3"
+  if [[ "$SAMPLY_ENABLED" != "1" && "$SAMPLY_ENABLED" != "true" ]]; then
+    return
+  fi
+  if ! command -v samply >/dev/null 2>&1; then
+    echo "[signaling_sharding_matrix] samply requested but samply is unavailable" | tee -a "$RESULTS_DIR/matrix_metadata.txt"
+    return
+  fi
+
+  local samply_args=(
+    record
+    --save-only
+    --pid "$CURRENT_LISTENER_PID"
+    --rate "$SAMPLY_RATE"
+    --output "$profile_path"
+    --profile-name "$profile_name"
+  )
+  if [[ "$SAMPLY_CSWITCH_MARKERS" == "1" || "$SAMPLY_CSWITCH_MARKERS" == "true" ]]; then
+    samply_args+=(--cswitch-markers)
+  fi
+  if [[ -n "$SAMPLY_EXTRA_ARGS" ]]; then
+    # shellcheck disable=SC2206
+    local extra_samply_args=($SAMPLY_EXTRA_ARGS)
+    samply_args+=("${extra_samply_args[@]}")
+  fi
+
+  echo "[signaling_sharding_matrix] samply profile: $profile_path (log: $samply_log)" | tee -a "$RESULTS_DIR/matrix_metadata.txt"
+  samply "${samply_args[@]}" > "$samply_log" 2>&1 &
+  CURRENT_SAMPLY_PID="$!"
+  local samply_pid="$CURRENT_SAMPLY_PID"
+  if [[ -n "$SAMPLY_SECONDS" && "$SAMPLY_SECONDS" != "0" ]]; then
+    (
+      sleep "$SAMPLY_SECONDS"
+      kill -INT "$samply_pid" >/dev/null 2>&1 || true
+    ) &
+    CURRENT_SAMPLY_STOPPER_PID="$!"
   fi
 }
 
@@ -134,6 +249,14 @@ trap 'cleanup; exit 143' TERM
   echo "sipp_shard_cps=$SIPP_SHARD_CPS"
   echo "transaction_timing=$TRANSACTION_TIMING"
   echo "dialog_timing=$DIALOG_TIMING"
+  echo "sample_enabled=$SAMPLE_ENABLED"
+  echo "sample_seconds=$SAMPLE_SECONDS"
+  echo "sample_interval_ms=$SAMPLE_INTERVAL_MS"
+  echo "samply_enabled=$SAMPLY_ENABLED"
+  echo "samply_seconds=$SAMPLY_SECONDS"
+  echo "samply_rate=$SAMPLY_RATE"
+  echo "samply_cswitch_markers=$SAMPLY_CSWITCH_MARKERS"
+  echo "samply_extra_args=$SAMPLY_EXTRA_ARGS"
   echo "listener_bin=$LISTENER_BIN"
 } > "$RESULTS_DIR/matrix_metadata.txt"
 
@@ -206,6 +329,12 @@ for capacity in $CAPACITIES; do
             CURRENT_LISTENER_PID=""
             exit 1
           fi
+
+          sample_log="$RESULTS_DIR/${tag}_${cps}cps_sample.txt"
+          start_sample "$sample_log"
+          samply_profile="$RESULTS_DIR/${tag}_${cps}cps_samply_profile.json.gz"
+          samply_log="$RESULTS_DIR/${tag}_${cps}cps_samply.log"
+          start_samply "$samply_profile" "$samply_log" "${tag}_${cps}cps"
 
           RVOIP_PERF_RESULTS="$RESULTS_DIR" \
           RVOIP_PERF_CPS="$cps" \

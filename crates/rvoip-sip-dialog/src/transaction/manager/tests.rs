@@ -2,7 +2,8 @@
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
     use super::super::{
-        transaction_dispatch_worker_index, transaction_ingress_kind, TransactionIngressKind,
+        transaction_dispatch_worker_index, transaction_ingress_kind, Invite2xxResponseCacheEntry,
+        TransactionIngressKind, INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
     };
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
     use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
@@ -28,6 +29,7 @@ mod tests {
     use std::str::FromStr;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
     use tokio::sync::Mutex;
     use tracing::{debug, info};
@@ -297,6 +299,23 @@ mod tests {
         SimpleResponseBuilder::response_from_request(request, status, reason)
             .to("Bob", "sip:bob@example.com", Some("bob-tag-resp"))
             .build()
+    }
+
+    fn cached_invite_2xx_entry(
+        response: Response,
+        destination: SocketAddr,
+        created_at: Instant,
+        next_retransmit_at: Instant,
+    ) -> Invite2xxResponseCacheEntry {
+        Invite2xxResponseCacheEntry {
+            response,
+            destination,
+            created_at,
+            acked_at: None,
+            expires_at: created_at + Duration::from_secs(90),
+            next_retransmit_at,
+            retransmit_interval: Duration::from_millis(500),
+        }
     }
 
     async fn send_through_client_transaction(request: Request) -> Result<Request> {
@@ -1444,6 +1463,118 @@ mod tests {
         assert_eq!(last_msg.1, source);
 
         manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn acked_invite_2xx_cache_stops_proactive_retransmit_but_serves_duplicates() -> Result<()>
+    {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        manager.shutdown().await;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let source: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let transaction_id =
+            TransactionKey::new("z9hG4bK.acked-cache-test".to_string(), Method::Invite, true);
+        let now = Instant::now();
+        manager.insert_invite_2xx_response_cache_entry(
+            transaction_id.clone(),
+            cached_invite_2xx_entry(
+                response,
+                source,
+                now - Duration::from_millis(10),
+                now - Duration::from_millis(1),
+            ),
+        );
+
+        manager.mark_invite_2xx_response_cache_acked(&transaction_id);
+
+        let proactive = manager.retransmit_due_invite_2xx_responses().await;
+        assert_eq!(
+            proactive, 0,
+            "ACKed 2xx cache entries should not proactively retransmit"
+        );
+        assert!(
+            transport.get_sent_messages().await.is_empty(),
+            "proactive maintenance should not send ACKed entries"
+        );
+
+        let retransmitted = manager
+            .retransmit_cached_invite_2xx_response(&transaction_id, source)
+            .await?;
+        assert!(
+            retransmitted,
+            "duplicate INVITE should still hit the ACK-retained cache"
+        );
+        let sent_messages = transport.get_sent_messages().await;
+        assert_eq!(sent_messages.len(), 1);
+        assert!(
+            matches!(sent_messages[0].0, Message::Response(ref resp) if resp.status_code() == 200)
+        );
+        assert_eq!(sent_messages[0].1, source);
+
+        {
+            let mut entry = manager
+                .invite_2xx_response_cache
+                .get_mut(&transaction_id)
+                .expect("ACK-retained entry should still exist");
+            entry.expires_at = Instant::now() - Duration::from_millis(1);
+        }
+        manager.prune_invite_2xx_response_cache();
+        assert!(
+            !manager
+                .invite_2xx_response_cache
+                .contains_key(&transaction_id),
+            "ACK-retained entry should prune once its retention expires"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invite_2xx_due_queue_processing_is_capped_per_tick() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        manager.shutdown().await;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let now = Instant::now();
+        let total_entries = INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK + 3;
+
+        for idx in 0..total_entries {
+            manager.insert_invite_2xx_response_cache_entry(
+                TransactionKey::new(format!("z9hG4bK.due-queue-cap-{idx}"), Method::Invite, true),
+                cached_invite_2xx_entry(
+                    response.clone(),
+                    destination,
+                    now - Duration::from_millis(10),
+                    now - Duration::from_millis(1),
+                ),
+            );
+        }
+
+        let first_tick = manager.retransmit_due_invite_2xx_responses().await;
+        assert_eq!(first_tick, INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK);
+        assert_eq!(
+            transport.get_sent_messages().await.len(),
+            INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK
+        );
+
+        let second_tick = manager.retransmit_due_invite_2xx_responses().await;
+        assert_eq!(
+            second_tick, 3,
+            "entries past the per-tick cap should remain queued"
+        );
+        assert_eq!(transport.get_sent_messages().await.len(), total_entries);
+
         Ok(())
     }
 

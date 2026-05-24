@@ -11,24 +11,8 @@ use rvoip_sip_core::{Message, Method};
 
 const SEND_BUCKET_LABELS: [&str; 6] = ["<100us", "<500us", "<1ms", "<5ms", "<10ms", ">=10ms"];
 const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
-    10,
-    25,
-    50,
-    100,
-    250,
-    500,
-    1_000,
-    2_500,
-    5_000,
-    10_000,
-    25_000,
-    50_000,
-    100_000,
-    250_000,
-    500_000,
-    1_000_000,
-    2_500_000,
-    u64::MAX,
+    10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000,
+    500_000, 1_000_000, 2_500_000, 5_000_000,
 ];
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
@@ -502,12 +486,15 @@ fn record_latency(
     if elapsed_us > 500_000 {
         over_500ms.fetch_add(1, Ordering::Relaxed);
     }
-    for (idx, upper) in LATENCY_BUCKET_UPPER_US.iter().enumerate() {
-        if elapsed_us <= *upper {
-            buckets[idx].fetch_add(1, Ordering::Relaxed);
-            break;
-        }
-    }
+    buckets[latency_bucket_index(elapsed_us)].fetch_add(1, Ordering::Relaxed);
+}
+
+fn latency_bucket_index(elapsed_us: u64) -> usize {
+    let bucketed_us = elapsed_us.min(*LATENCY_BUCKET_UPPER_US.last().unwrap());
+    LATENCY_BUCKET_UPPER_US
+        .iter()
+        .position(|upper| bucketed_us <= *upper)
+        .unwrap_or(LATENCY_BUCKET_UPPER_US.len() - 1)
 }
 
 fn latency_snapshot(
@@ -571,7 +558,7 @@ fn percentile_per_mille_us(buckets: &[AtomicU64], observed: u64, per_mille: u64)
             return LATENCY_BUCKET_UPPER_US[idx];
         }
     }
-    u64::MAX
+    *LATENCY_BUCKET_UPPER_US.last().unwrap()
 }
 
 fn increment(counter: &AtomicU64) {
@@ -693,5 +680,16 @@ mod tests {
         assert_eq!(snapshot.outbound_invite, 1);
         assert!(format_summary(&snapshot).contains("recv=1"));
         assert!(format_summary(&snapshot).contains("udp_read_to_worker_queue=[count=1"));
+    }
+
+    #[test]
+    fn overflow_latency_bucket_reports_finite_upper_bound() {
+        let buckets: [AtomicU64; 18] = std::array::from_fn(|_| AtomicU64::new(0));
+        buckets[LATENCY_BUCKET_UPPER_US.len() - 1].store(1, Ordering::Relaxed);
+
+        let p999 = percentile_per_mille_us(&buckets, 1, 999);
+
+        assert_eq!(p999, 5_000_000);
+        assert_ne!(p999, u64::MAX);
     }
 }

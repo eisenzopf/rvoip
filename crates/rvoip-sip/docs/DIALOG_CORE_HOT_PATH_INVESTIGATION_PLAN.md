@@ -125,10 +125,21 @@ Add these diagnostics behind existing timing/diagnostic gates:
    - time spent in registered handlers vs broadcast send.
    - event type counts for dialog-to-session events.
 
-5. Runtime hot-path capture:
-   - add an optional matrix-runner sampling mode that runs macOS `sample`
-     during the active SIPp window and saves the output beside `summary.md`.
-   - capture at least one baseline and one dialog-fanout run.
+5. Runtime hot-path and flamegraph capture:
+   - add optional matrix-runner profiling modes that attach during the active
+     SIPp window and save artifacts beside `summary.md`.
+   - use macOS `sample` for quick thread-state snapshots
+     (`RVOIP_SHARDING_SAMPLE=1`).
+   - use `samply` CPU profiles for flamegraph/icicle analysis
+     (`RVOIP_SHARDING_SAMPLY=1`); keep all worker threads visible by default
+     so transaction/dialog/Tokio scheduling distribution is inspectable.
+     On macOS, run `samply setup` once if PID attach is denied.
+   - capture at least one baseline and one dialog-fanout run before changing
+     worker-count recommendations.
+   - inspect flamegraphs for Tokio scheduler/context-switch churn, DashMap
+     shard contention, transaction cleanup work, timer unregister latency,
+     INVITE 2xx maintenance, dialog dispatch/link/unlink work, and global
+     coordinator publish handlers.
 
 ## Optimization Candidates
 
@@ -234,6 +245,8 @@ Acceptance for each run:
 - `udp queue_full=0`.
 - host UDP full-socket drops `0`.
 - retransmits improve over the same worker profile before the change.
+- when profiling is enabled, `sample`/`samply` artifacts are captured for both
+  baseline and candidate runs and compared before promoting a new worker shape.
 
 Do not promote dialog dispatch above `1` until the affinity diagnostics prove
 that lifecycle events are not split across workers and the duplicate-cache-miss

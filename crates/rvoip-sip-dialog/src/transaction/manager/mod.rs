@@ -168,14 +168,14 @@ pub use handlers::*;
 pub use types::*;
 pub use utils::*;
 
-use std::collections::HashMap;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -242,7 +242,12 @@ pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
 // so this is a tail bound for lossy/missing-ACK calls, not a full call-volume
 // retention period.
 const INVITE_2XX_RESPONSE_CACHE_TTL: Duration = Duration::from_secs(90);
+const INVITE_2XX_ACKED_RESPONSE_RETENTION: Duration = Duration::from_secs(2);
+const INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK: usize = 2048;
 const MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY: usize = 65_536;
+const TERMINATED_CLEANUP_BATCH_MAX: usize = 1024;
+const TERMINATED_CLEANUP_RETRY_DELAY: Duration = Duration::from_millis(100);
+const TERMINATED_CLEANUP_MAX_ATTEMPTS: u16 = 50;
 
 fn transaction_index_capacity(capacity: Option<usize>) -> usize {
     capacity.unwrap_or(100).max(MIN_TRANSACTION_INDEX_CAPACITY)
@@ -352,6 +357,9 @@ pub struct TransactionManager {
     invite_2xx_response_cache: Arc<DashMap<TransactionKey, Invite2xxResponseCacheEntry>>,
     invite_2xx_response_cache_capacity: usize,
     invite_2xx_response_cache_insert_count: Arc<AtomicUsize>,
+    invite_2xx_response_due_queue: Arc<std::sync::Mutex<BinaryHeap<Invite2xxDueEntry>>>,
+    invite_2xx_response_due_sequence: Arc<AtomicU64>,
+    terminated_cleanup_tx: Option<mpsc::Sender<TerminatedCleanupItem>>,
     /// Transaction destinations — `transaction_id → SocketAddr`.
     /// DashMap for sharded lock-free reads.
     transaction_destinations: Arc<DashMap<TransactionKey, SocketAddr>>,
@@ -437,6 +445,35 @@ struct QueuedTransactionDispatch {
     event: TransportEvent,
     queued_at: Option<Instant>,
     kind: Option<TransactionIngressKind>,
+}
+
+#[derive(Debug, Clone)]
+struct TerminatedCleanupItem {
+    transaction_id: TransactionKey,
+    attempts: u16,
+    due_at: Instant,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct Invite2xxDueEntry {
+    due_at: Instant,
+    sequence: u64,
+    transaction_id: TransactionKey,
+}
+
+impl Ord for Invite2xxDueEntry {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .due_at
+            .cmp(&self.due_at)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+impl PartialOrd for Invite2xxDueEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 // Define RFC3261 Branch magic cookie
@@ -603,7 +640,147 @@ async fn process_transaction_dispatch_event(
     }
 }
 
+fn drain_due_cleanup_items(
+    delayed: &mut VecDeque<TerminatedCleanupItem>,
+    batch: &mut Vec<TerminatedCleanupItem>,
+) {
+    let now = Instant::now();
+    while batch.len() < TERMINATED_CLEANUP_BATCH_MAX {
+        let Some(item) = delayed.front() else {
+            break;
+        };
+        if item.due_at > now {
+            break;
+        }
+        if let Some(item) = delayed.pop_front() {
+            batch.push(item);
+        }
+    }
+}
+
 impl TransactionManager {
+    fn start_terminated_cleanup_worker(&self, mut rx: mpsc::Receiver<TerminatedCleanupItem>) {
+        let manager = self.clone();
+        tokio::spawn(async move {
+            diagnostics::record_termination_cleanup_worker_spawned();
+            let mut delayed = VecDeque::new();
+            let mut rx_closed = false;
+            let mut retry_tick = tokio::time::interval(TERMINATED_CLEANUP_RETRY_DELAY);
+            retry_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            loop {
+                let mut batch = Vec::with_capacity(TERMINATED_CLEANUP_BATCH_MAX);
+                drain_due_cleanup_items(&mut delayed, &mut batch);
+
+                if batch.is_empty() {
+                    tokio::select! {
+                        item = rx.recv(), if !rx_closed => {
+                            match item {
+                                Some(item) => batch.push(item),
+                                None => rx_closed = true,
+                            }
+                        }
+                        _ = retry_tick.tick() => {}
+                    }
+                    drain_due_cleanup_items(&mut delayed, &mut batch);
+                }
+
+                while !rx_closed && batch.len() < TERMINATED_CLEANUP_BATCH_MAX {
+                    match rx.try_recv() {
+                        Ok(item) => batch.push(item),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => {
+                            rx_closed = true;
+                            break;
+                        }
+                    }
+                }
+
+                if batch.is_empty() {
+                    if rx_closed && delayed.is_empty() {
+                        break;
+                    }
+                    continue;
+                }
+
+                manager
+                    .process_terminated_cleanup_batch(batch, &mut delayed)
+                    .await;
+            }
+
+            debug!("Terminated transaction cleanup worker stopped");
+        });
+    }
+
+    fn enqueue_terminated_transaction_cleanup(&self, transaction_id: TransactionKey) {
+        let item = TerminatedCleanupItem {
+            transaction_id,
+            attempts: 0,
+            due_at: Instant::now(),
+        };
+
+        let Some(tx) = &self.terminated_cleanup_tx else {
+            return;
+        };
+
+        match tx.try_send(item) {
+            Ok(()) => diagnostics::record_termination_cleanup_enqueued(),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                diagnostics::record_termination_cleanup_queue_full();
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    async fn process_terminated_cleanup_batch(
+        &self,
+        batch: Vec<TerminatedCleanupItem>,
+        delayed: &mut VecDeque<TerminatedCleanupItem>,
+    ) {
+        diagnostics::record_termination_cleanup_batch(batch.len());
+
+        for mut item in batch {
+            diagnostics::record_termination_cleanup_in_flight(1);
+            let ready = self.transaction_lifecycle_destroyed(&item.transaction_id);
+            if ready || item.attempts >= TERMINATED_CLEANUP_MAX_ATTEMPTS {
+                if !ready {
+                    warn!(
+                        transaction_id = %item.transaction_id,
+                        attempts = item.attempts,
+                        "Lifecycle cleanup timeout, forcing transaction removal"
+                    );
+                }
+                diagnostics::record_termination_cleanup_poll_attempts(item.attempts as u64);
+                self.remove_terminated_transaction(&item.transaction_id)
+                    .await;
+                diagnostics::record_termination_cleanup_removed();
+            } else {
+                item.attempts += 1;
+                item.due_at = Instant::now() + TERMINATED_CLEANUP_RETRY_DELAY;
+                delayed.push_back(item);
+            }
+            diagnostics::record_termination_cleanup_in_flight(-1);
+        }
+    }
+
+    fn transaction_lifecycle_destroyed(&self, transaction_id: &TransactionKey) -> bool {
+        let client_state = self
+            .client_transactions
+            .get(transaction_id)
+            .map(|r| r.value().data().get_lifecycle());
+        let server_state = self
+            .server_transactions
+            .get(transaction_id)
+            .map(|r| r.value().data().get_lifecycle());
+
+        match (client_state, server_state) {
+            (None, None) => true,
+            (Some(TransactionLifecycle::Destroyed), _) => true,
+            (_, Some(TransactionLifecycle::Destroyed)) => true,
+            _ => false,
+        }
+    }
+
     /// Enable or disable the INVITE server transaction automatic `100 Trying`
     /// timer used by newly-created server transactions.
     pub fn set_auto_100_trying(&mut self, enabled: bool) {
@@ -721,6 +898,8 @@ impl TransactionManager {
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
         let index_capacity = transaction_index_capacity(Some(events_capacity));
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
+        let (terminated_cleanup_tx, terminated_cleanup_rx) =
+            mpsc::channel(index_capacity.max(TERMINATED_CLEANUP_BATCH_MAX));
 
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
@@ -754,6 +933,9 @@ impl TransactionManager {
             invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
             invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -774,6 +956,7 @@ impl TransactionManager {
         };
 
         // Start the message processing loop
+        manager.start_terminated_cleanup_worker(terminated_cleanup_rx);
         manager.start_message_loop();
 
         Ok((manager, events_rx))
@@ -845,6 +1028,8 @@ impl TransactionManager {
         let (events_tx, events_rx) = mpsc::channel(events_capacity);
         let index_capacity = transaction_index_capacity(Some(events_capacity));
         let invite_2xx_cache_capacity = invite_2xx_response_cache_capacity(index_capacity);
+        let (terminated_cleanup_tx, terminated_cleanup_rx) =
+            mpsc::channel(index_capacity.max(TERMINATED_CLEANUP_BATCH_MAX));
 
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
@@ -877,6 +1062,9 @@ impl TransactionManager {
             invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
             invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -897,6 +1085,7 @@ impl TransactionManager {
         };
 
         // Start the message processing loop
+        manager.start_terminated_cleanup_worker(terminated_cleanup_rx);
         manager.start_message_loop();
 
         Ok((manager, events_rx))
@@ -1048,6 +1237,8 @@ impl TransactionManager {
         let transaction_dispatch_workers = transaction_dispatch_worker_count(dispatch_workers);
         let transaction_dispatch_queue_capacity =
             transaction_dispatch_queue_capacity(dispatch_queue_capacity, events_capacity);
+        let (terminated_cleanup_tx, terminated_cleanup_rx) =
+            mpsc::channel(index_capacity.max(TERMINATED_CLEANUP_BATCH_MAX));
 
         let client_transactions = Arc::new(DashMap::with_capacity(index_capacity));
         let server_transactions = Arc::new(DashMap::with_capacity(index_capacity));
@@ -1081,6 +1272,9 @@ impl TransactionManager {
             invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
             invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            terminated_cleanup_tx: Some(terminated_cleanup_tx),
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -1101,6 +1295,7 @@ impl TransactionManager {
         };
 
         // Start the message processing loop
+        manager.start_terminated_cleanup_worker(terminated_cleanup_rx);
         manager.start_message_loop();
 
         Ok((manager, events_rx))
@@ -1183,6 +1378,9 @@ impl TransactionManager {
             invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
             invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            terminated_cleanup_tx: None,
             transaction_destinations,
             events_tx,
             event_subscribers,
@@ -1261,6 +1459,9 @@ impl TransactionManager {
             invite_2xx_response_cache: Arc::new(DashMap::with_capacity(invite_2xx_cache_capacity)),
             invite_2xx_response_cache_capacity: invite_2xx_cache_capacity,
             invite_2xx_response_cache_insert_count: Arc::new(AtomicUsize::new(0)),
+            invite_2xx_response_due_queue: Arc::new(std::sync::Mutex::new(BinaryHeap::new())),
+            invite_2xx_response_due_sequence: Arc::new(AtomicU64::new(0)),
+            terminated_cleanup_tx: None,
             timer_factory,
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             timer_manager,
@@ -2164,84 +2365,21 @@ impl TransactionManager {
                 }
                 | TransactionEvent::TransactionTerminated { transaction_id } => {
                     manager_instance.mark_transaction_terminated_indexed(transaction_id);
+                    manager_instance
+                        .pending_inbound_bytes
+                        .remove(transaction_id);
+                    manager_instance
+                        .pending_inbound_timing
+                        .remove(transaction_id);
+                    manager_instance.enqueue_terminated_transaction_cleanup(transaction_id.clone());
                 }
                 _ => {}
             }
         }
 
-        // Special handling for transaction termination
-        if let TransactionEvent::TransactionTerminated { transaction_id } = &event {
-            if let Some(manager_instance) = manager {
-                // Process the termination in a separate task to avoid deadlocks
-                let tx_id = transaction_id.clone();
-                let manager_clone = manager_instance.clone();
-                // Sweep any unconsumed raw-bytes cache entry for this
-                // transaction. The cross-crate bridges normally
-                // `take_` the entry; this guards against bridge paths
-                // that never run (e.g., events filtered before the
-                // hub) so the cache cannot grow unboundedly.
-                manager_clone.pending_inbound_bytes.remove(&tx_id);
-                manager_clone.pending_inbound_timing.remove(&tx_id);
-                tokio::spawn(async move {
-                    manager_clone.process_transaction_terminated(&tx_id).await;
-                });
-            }
-        }
         if let Some(started) = broadcast_started {
             diagnostics::record_transaction_event_broadcast(started.elapsed());
         }
-    }
-
-    /// Handle transaction termination event and clean up terminated transactions
-    /// Uses lifecycle-based removal instead of immediate cleanup
-    async fn process_transaction_terminated(&self, transaction_id: &TransactionKey) {
-        debug!(%transaction_id, "Processing transaction termination - monitoring lifecycle for cleanup");
-
-        // Start monitoring lifecycle state for proper cleanup timing
-        let manager = self.clone();
-        let tx_id = transaction_id.clone();
-
-        tokio::spawn(async move {
-            // Poll lifecycle state until Destroyed
-            let mut cleanup_attempts = 0;
-            loop {
-                // Check if transaction is ready for cleanup
-                let should_cleanup = {
-                    let client_ready = manager
-                        .client_transactions
-                        .get(&tx_id)
-                        .map(|r| {
-                            r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed
-                        })
-                        .unwrap_or(false);
-                    let server_ready = manager
-                        .server_transactions
-                        .get(&tx_id)
-                        .map(|r| {
-                            r.value().data().get_lifecycle() == TransactionLifecycle::Destroyed
-                        })
-                        .unwrap_or(false);
-                    client_ready || server_ready
-                };
-
-                if should_cleanup {
-                    debug!(%tx_id, "Transaction lifecycle is Destroyed, performing cleanup");
-                    manager.remove_terminated_transaction(&tx_id).await;
-                    break;
-                }
-
-                cleanup_attempts += 1;
-                if cleanup_attempts > 50 {
-                    // 5 second timeout
-                    warn!(%tx_id, "Lifecycle cleanup timeout, forcing removal");
-                    manager.remove_terminated_transaction(&tx_id).await;
-                    break;
-                }
-
-                // Check every 100ms
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        });
     }
 
     /// Actually remove a terminated transaction from all maps
@@ -2292,38 +2430,20 @@ impl TransactionManager {
         }
 
         // Unregister from timer manager (defensive - it should auto-unregister)
+        let unregister_started = diagnostics::transaction_timing_enabled().then(Instant::now);
         self.timer_manager
             .unregister_transaction(transaction_id)
             .await;
+        if let Some(started) = unregister_started {
+            diagnostics::record_termination_cleanup_timer_unregister(started.elapsed());
+        }
         debug!(%transaction_id, "Unregistered transaction from timer manager");
 
         if terminated {
             debug!(%transaction_id, "Successfully cleaned up terminated transaction");
         } else {
-            warn!(%transaction_id, "Transaction not found for termination - may have been already removed");
+            debug!(%transaction_id, "Transaction not found for termination - may have been already removed");
         }
-
-        // Run cleanup to catch any other terminated transactions
-        // This is a defensive measure to prevent resource leaks
-        // We use spawn to avoid blocking and make this a background task
-        let manager_clone = self.clone();
-        tokio::spawn(async move {
-            match manager_clone
-                .cleanup_indexed_terminated_transactions()
-                .await
-            {
-                Ok(count) if count > 0 => {
-                    debug!("Cleaned up {} additional terminated transactions", count);
-                }
-                Err(e) => {
-                    error!(
-                        "Error in background cleanup of terminated transactions: {}",
-                        e
-                    );
-                }
-                _ => {}
-            }
-        });
     }
 
     /// Start the message processing loop for handling incoming transport events
@@ -3110,6 +3230,7 @@ impl TransactionManager {
                 response,
                 destination: tx.data().remote_addr,
                 created_at: now,
+                acked_at: None,
                 expires_at: now + INVITE_2XX_RESPONSE_CACHE_TTL,
                 next_retransmit_at: now + self.timer_settings.t1,
                 retransmit_interval: self.timer_settings.t1,
@@ -3122,8 +3243,11 @@ impl TransactionManager {
         transaction_id: TransactionKey,
         entry: Invite2xxResponseCacheEntry,
     ) {
-        self.invite_2xx_response_cache.insert(transaction_id, entry);
+        let next_retransmit_at = entry.next_retransmit_at;
+        self.invite_2xx_response_cache
+            .insert(transaction_id.clone(), entry);
         diagnostics::record_invite_2xx_cache_insert();
+        self.schedule_invite_2xx_response_retransmit(transaction_id, next_retransmit_at);
 
         let inserts = self
             .invite_2xx_response_cache_insert_count
@@ -3171,34 +3295,97 @@ impl TransactionManager {
         Ok(true)
     }
 
+    fn schedule_invite_2xx_response_retransmit(
+        &self,
+        transaction_id: TransactionKey,
+        due_at: Instant,
+    ) {
+        let sequence = self
+            .invite_2xx_response_due_sequence
+            .fetch_add(1, Ordering::Relaxed);
+        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
+            queue.push(Invite2xxDueEntry {
+                due_at,
+                sequence,
+                transaction_id,
+            });
+        }
+    }
+
     async fn retransmit_due_invite_2xx_responses(&self) -> usize {
+        let started = diagnostics::transaction_timing_enabled().then(Instant::now);
+        let cache_len = self.invite_2xx_response_cache.len();
         let now = Instant::now();
-        let mut expired = Vec::new();
-        let mut due = Vec::new();
+        let mut due_entries = Vec::new();
+        let mut due_queue_len = 0usize;
+        let mut capped = false;
 
-        for mut entry in self.invite_2xx_response_cache.iter_mut() {
-            if entry.is_expired(now) {
-                expired.push(entry.key().clone());
-                continue;
-            }
-
-            if now >= entry.next_retransmit_at {
-                due.push((entry.response.clone(), entry.destination));
-                entry.retransmit_interval = entry
-                    .retransmit_interval
-                    .saturating_mul(2)
-                    .min(self.timer_settings.t2);
-                entry.next_retransmit_at = now + entry.retransmit_interval;
+        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
+            due_queue_len = queue.len();
+            while queue.peek().is_some_and(|entry| entry.due_at <= now) {
+                if due_entries.len() >= INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK {
+                    capped = true;
+                    break;
+                }
+                if let Some(entry) = queue.pop() {
+                    due_entries.push(entry);
+                }
             }
         }
 
-        for key in expired {
-            self.invite_2xx_response_cache.remove(&key);
-            diagnostics::record_invite_2xx_cache_expired();
+        let scanned = due_entries.len();
+        let mut expired_count = 0usize;
+        let mut sends = Vec::new();
+        let mut reschedule = Vec::new();
+
+        for due_entry in due_entries {
+            let mut expired = false;
+            let mut send = None;
+            let mut next_due = None;
+
+            if let Some(mut entry) = self
+                .invite_2xx_response_cache
+                .get_mut(&due_entry.transaction_id)
+            {
+                if entry.is_expired(now) {
+                    expired = true;
+                } else if entry.acked_at.is_some() {
+                    // ACKed 2xx responses are retained only for duplicate INVITEs.
+                    // Proactive retransmission must stop once the ACK arrives.
+                } else if entry.next_retransmit_at <= due_entry.due_at
+                    && now >= entry.next_retransmit_at
+                {
+                    send = Some((entry.response.clone(), entry.destination));
+                    entry.retransmit_interval = entry
+                        .retransmit_interval
+                        .saturating_mul(2)
+                        .min(self.timer_settings.t2);
+                    entry.next_retransmit_at = now + entry.retransmit_interval;
+                    next_due = Some(entry.next_retransmit_at);
+                }
+            }
+
+            if expired {
+                self.invite_2xx_response_cache
+                    .remove(&due_entry.transaction_id);
+                diagnostics::record_invite_2xx_cache_expired();
+                expired_count += 1;
+            }
+            if let Some((response, destination)) = send {
+                sends.push((response, destination));
+            }
+            if let Some(next_due) = next_due {
+                reschedule.push((due_entry.transaction_id, next_due));
+            }
+        }
+
+        for (transaction_id, due_at) in reschedule {
+            self.schedule_invite_2xx_response_retransmit(transaction_id, due_at);
         }
 
         let mut retransmitted = 0usize;
-        for (response, destination) in due {
+        for (response, destination) in sends {
+            let send_started = diagnostics::transaction_timing_enabled().then(Instant::now);
             match self
                 .transport
                 .send_message(Message::Response(response), destination)
@@ -3207,6 +3394,9 @@ impl TransactionManager {
                 Ok(()) => {
                     retransmitted += 1;
                     diagnostics::record_invite_2xx_proactive_retransmit();
+                    if let Some(started) = send_started {
+                        diagnostics::record_invite_2xx_proactive_send(started.elapsed());
+                    }
                 }
                 Err(e) => {
                     debug!(
@@ -3218,12 +3408,39 @@ impl TransactionManager {
             }
         }
 
+        if let Some(started) = started {
+            diagnostics::record_invite_2xx_maintenance(
+                cache_len,
+                due_queue_len,
+                scanned,
+                retransmitted,
+                expired_count,
+                capped,
+                started.elapsed(),
+            );
+        }
+
         retransmitted
     }
 
-    pub(crate) fn remove_invite_2xx_response_cache(&self, transaction_id: &TransactionKey) {
-        if let Some((_, entry)) = self.invite_2xx_response_cache.remove(transaction_id) {
-            diagnostics::record_invite_2xx_ack_removed(entry.created_at.elapsed());
+    pub(crate) fn mark_invite_2xx_response_cache_acked(&self, transaction_id: &TransactionKey) {
+        let now = Instant::now();
+        let mut ack_retention_until = None;
+
+        if let Some(mut entry) = self.invite_2xx_response_cache.get_mut(transaction_id) {
+            if entry.acked_at.is_none() {
+                diagnostics::record_invite_2xx_ack_removed(entry.created_at.elapsed());
+                let retained_until =
+                    (now + INVITE_2XX_ACKED_RESPONSE_RETENTION).min(entry.expires_at);
+                entry.acked_at = Some(now);
+                entry.expires_at = retained_until;
+                entry.next_retransmit_at = retained_until;
+                ack_retention_until = Some(retained_until);
+            }
+        }
+
+        if let Some(retained_until) = ack_retention_until {
+            self.schedule_invite_2xx_response_retransmit(transaction_id.clone(), retained_until);
         }
     }
 
