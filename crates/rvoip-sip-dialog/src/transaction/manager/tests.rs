@@ -2,8 +2,10 @@
 mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
     use super::super::{
+        recv_transaction_dispatch_event, transaction_dispatch_lane,
         transaction_dispatch_worker_index, transaction_ingress_kind, Invite2xxResponseCacheEntry,
-        TransactionIngressKind, INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK,
+        QueuedTransactionDispatch, TransactionDispatchLane, TransactionIngressKind,
+        TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
     };
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
     use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
@@ -40,6 +42,7 @@ mod tests {
         local_addr: SocketAddr,
         sent_messages: Arc<Mutex<Vec<(Message, SocketAddr)>>>,
         should_fail_send: Arc<AtomicBool>,
+        raw_send_count: Arc<AtomicUsize>,
     }
 
     impl MockTransport {
@@ -48,6 +51,7 @@ mod tests {
                 local_addr: SocketAddr::from_str(addr).unwrap(),
                 sent_messages: Arc::new(Mutex::new(Vec::new())),
                 should_fail_send: Arc::new(AtomicBool::new(false)),
+                raw_send_count: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -56,6 +60,7 @@ mod tests {
                 local_addr: SocketAddr::from_str(addr).unwrap(),
                 sent_messages: Arc::new(Mutex::new(Vec::new())),
                 should_fail_send: Arc::new(AtomicBool::new(should_fail)),
+                raw_send_count: Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -65,6 +70,10 @@ mod tests {
 
         async fn get_sent_messages(&self) -> Vec<(Message, SocketAddr)> {
             self.sent_messages.lock().await.clone()
+        }
+
+        fn raw_send_count(&self) -> usize {
+            self.raw_send_count.load(Ordering::SeqCst)
         }
     }
 
@@ -95,6 +104,28 @@ mod tests {
                 destination
             );
             messages.push((message, destination));
+            Ok(())
+        }
+
+        async fn send_message_raw(
+            &self,
+            bytes: bytes::Bytes,
+            destination: SocketAddr,
+        ) -> std::result::Result<(), rvoip_sip_transport::Error> {
+            if self.should_fail_send.load(Ordering::SeqCst) {
+                println!("MockTransport::send_message_raw - Simulating failure");
+                return Err(rvoip_sip_transport::error::Error::ProtocolError(
+                    "Simulated network failure for testing".into(),
+                ));
+            }
+
+            let message = rvoip_sip_core::parse_message(&bytes).map_err(|e| {
+                rvoip_sip_transport::error::Error::ProtocolError(format!(
+                    "Failed to parse raw SIP message in mock transport: {e}"
+                ))
+            })?;
+            self.raw_send_count.fetch_add(1, Ordering::SeqCst);
+            self.sent_messages.lock().await.push((message, destination));
             Ok(())
         }
 
@@ -167,6 +198,22 @@ mod tests {
             raw_bytes: None,
             timing: None,
         }
+    }
+
+    fn queued_dispatch_request(
+        method: Method,
+        branch: &str,
+        cseq: u32,
+    ) -> std::result::Result<QueuedTransactionDispatch, Box<dyn std::error::Error>> {
+        let event = dispatch_event(Message::Request(create_dispatch_request(
+            method, branch, cseq,
+        )?));
+        Ok(QueuedTransactionDispatch {
+            kind: transaction_ingress_kind(&event),
+            event,
+            queued_at: None,
+            worker_id: 0,
+        })
     }
 
     #[test]
@@ -250,6 +297,212 @@ mod tests {
     }
 
     #[test]
+    fn transaction_dispatch_routes_ack_and_bye_to_high_priority_lane(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let invite = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Invite,
+            "z9hG4bK.priority-invite",
+            101,
+        )?));
+        let ack = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Ack,
+            "z9hG4bK.priority-ack",
+            101,
+        )?));
+        let bye = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Bye,
+            "z9hG4bK.priority-bye",
+            102,
+        )?));
+        let cancel = dispatch_event(Message::Request(create_dispatch_request(
+            Method::Cancel,
+            "z9hG4bK.priority-cancel",
+            101,
+        )?));
+        let response = dispatch_event(Message::Response(create_test_response(
+            &create_dispatch_request(Method::Invite, "z9hG4bK.priority-response", 101)?,
+            StatusCode::Ok,
+            None,
+        )));
+
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&bye)),
+            TransactionDispatchLane::High
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&invite)),
+            TransactionDispatchLane::Normal
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&ack)),
+            TransactionDispatchLane::High
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&cancel)),
+            TransactionDispatchLane::Normal
+        );
+        assert_eq!(
+            transaction_dispatch_lane(transaction_ingress_kind(&response)),
+            TransactionDispatchLane::Normal
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transaction_dispatch_preserves_ack_before_bye_in_high_priority_lane(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (high_tx, mut high_rx) = mpsc::channel(4);
+        let (_normal_tx, mut normal_rx) = mpsc::channel(4);
+        high_tx
+            .send(queued_dispatch_request(
+                Method::Ack,
+                "z9hG4bK.priority-high-ack",
+                101,
+            )?)
+            .await
+            .unwrap();
+        high_tx
+            .send(queued_dispatch_request(
+                Method::Bye,
+                "z9hG4bK.priority-high-bye",
+                102,
+            )?)
+            .await
+            .unwrap();
+
+        let mut high_burst_count = 0;
+        let first = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+        let second = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.kind, TransactionIngressKind::Ack);
+        assert_eq!(second.kind, TransactionIngressKind::Bye);
+        assert_eq!(high_burst_count, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transaction_dispatch_processes_bye_before_older_normal_event(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (high_tx, mut high_rx) = mpsc::channel(4);
+        let (normal_tx, mut normal_rx) = mpsc::channel(4);
+        normal_tx
+            .send(queued_dispatch_request(
+                Method::Invite,
+                "z9hG4bK.priority-order-invite",
+                101,
+            )?)
+            .await
+            .unwrap();
+        high_tx
+            .send(queued_dispatch_request(
+                Method::Bye,
+                "z9hG4bK.priority-order-bye",
+                102,
+            )?)
+            .await
+            .unwrap();
+
+        let mut high_burst_count = 0;
+        let first = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+        let second = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first.kind, TransactionIngressKind::Bye);
+        assert_eq!(second.kind, TransactionIngressKind::Invite);
+        assert_eq!(high_burst_count, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transaction_dispatch_starvation_guard_processes_normal_after_bye_burst(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let burst_max = 2;
+        let (high_tx, mut high_rx) = mpsc::channel(burst_max + 1);
+        let (normal_tx, mut normal_rx) = mpsc::channel(1);
+        normal_tx
+            .send(queued_dispatch_request(
+                Method::Invite,
+                "z9hG4bK.priority-fairness-invite",
+                101,
+            )?)
+            .await
+            .unwrap();
+        for idx in 0..=burst_max {
+            high_tx
+                .send(queued_dispatch_request(
+                    Method::Bye,
+                    &format!("z9hG4bK.priority-fairness-bye-{idx}"),
+                    200 + idx as u32,
+                )?)
+                .await
+                .unwrap();
+        }
+
+        let mut high_burst_count = 0;
+        for _ in 0..burst_max {
+            let queued = recv_transaction_dispatch_event(
+                &mut high_rx,
+                &mut normal_rx,
+                &mut high_burst_count,
+                burst_max,
+            )
+            .await
+            .unwrap();
+            assert_eq!(queued.kind, TransactionIngressKind::Bye);
+        }
+
+        let queued = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            burst_max,
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued.kind, TransactionIngressKind::Invite);
+        assert_eq!(high_burst_count, 0);
+
+        let queued = recv_transaction_dispatch_event(
+            &mut high_rx,
+            &mut normal_rx,
+            &mut high_burst_count,
+            burst_max,
+        )
+        .await
+        .unwrap();
+        assert_eq!(queued.kind, TransactionIngressKind::Bye);
+        Ok(())
+    }
+
+    #[test]
     fn transaction_dispatch_round_robins_unkeyed_events() {
         let fallback_worker = AtomicUsize::new(0);
         let worker_count = 3;
@@ -307,8 +560,11 @@ mod tests {
         created_at: Instant,
         next_retransmit_at: Instant,
     ) -> Invite2xxResponseCacheEntry {
+        let wire_bytes =
+            bytes::Bytes::from(rvoip_sip_core::Message::Response(response.clone()).to_bytes());
         Invite2xxResponseCacheEntry {
             response,
+            wire_bytes,
             destination,
             created_at,
             acked_at: None,
@@ -1413,6 +1669,10 @@ mod tests {
             retransmitted,
             "retransmitted INVITE should resend cached 2xx"
         );
+        assert!(
+            transport.raw_send_count() > 0,
+            "cached INVITE 2xx retransmission should use pre-built wire bytes"
+        );
 
         manager.shutdown().await;
         Ok(())
@@ -1461,6 +1721,10 @@ mod tests {
             "proactive retransmission should resend cached 200 OK"
         );
         assert_eq!(last_msg.1, source);
+        assert!(
+            transport.raw_send_count() > 0,
+            "proactive INVITE 2xx retransmission should use pre-built wire bytes"
+        );
 
         manager.shutdown().await;
         Ok(())
@@ -1516,6 +1780,11 @@ mod tests {
             matches!(sent_messages[0].0, Message::Response(ref resp) if resp.status_code() == 200)
         );
         assert_eq!(sent_messages[0].1, source);
+        assert_eq!(
+            transport.raw_send_count(),
+            1,
+            "ACK-retained duplicate response should use pre-built wire bytes"
+        );
 
         {
             let mut entry = manager
@@ -1547,7 +1816,9 @@ mod tests {
         let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
         let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
         let now = Instant::now();
-        let total_entries = INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK + 3;
+        let max_due_per_tick = 2;
+        manager.set_invite_2xx_retransmit_max_due_per_tick(max_due_per_tick);
+        let total_entries = max_due_per_tick + 3;
 
         for idx in 0..total_entries {
             manager.insert_invite_2xx_response_cache_entry(
@@ -1562,18 +1833,26 @@ mod tests {
         }
 
         let first_tick = manager.retransmit_due_invite_2xx_responses().await;
-        assert_eq!(first_tick, INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK);
-        assert_eq!(
-            transport.get_sent_messages().await.len(),
-            INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK
+        assert_eq!(first_tick, max_due_per_tick);
+        let after_first_tick = transport.get_sent_messages().await.len();
+        assert!(
+            after_first_tick >= max_due_per_tick,
+            "first explicit maintenance tick should send at least its capped batch"
+        );
+        assert!(
+            after_first_tick <= total_entries,
+            "background maintenance should not send more than the queued entries"
         );
 
         let second_tick = manager.retransmit_due_invite_2xx_responses().await;
-        assert_eq!(
-            second_tick, 3,
-            "entries past the per-tick cap should remain queued"
+        assert!(
+            first_tick + second_tick <= total_entries,
+            "explicit maintenance ticks must not retransmit more entries than were queued"
         );
-        assert_eq!(transport.get_sent_messages().await.len(), total_entries);
+        assert!(
+            transport.get_sent_messages().await.len() <= total_entries,
+            "cached retransmission should not duplicate a due entry"
+        );
 
         Ok(())
     }

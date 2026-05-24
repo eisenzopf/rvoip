@@ -2373,6 +2373,11 @@ impl DialogManager {
             self.terminated_bye_lookup.insert(key, tombstone);
             let reverse_key = DialogUtils::create_lookup_key(&call_id, &remote_tag, &local_tag);
             self.terminated_bye_lookup.insert(reverse_key, tombstone);
+            if crate::diagnostics::dialog_timing_enabled() {
+                crate::diagnostics::record_bye_tombstone_observed_size(
+                    self.terminated_bye_lookup.len(),
+                );
+            }
 
             let insert_count = self
                 .terminated_bye_insert_count
@@ -2385,6 +2390,7 @@ impl DialogManager {
     }
 
     fn prune_terminated_bye_lookup(&self) {
+        let prune_started = crate::diagnostics::dialog_timing_enabled().then(Instant::now);
         let now = Instant::now();
         let expired_keys: Vec<_> = self
             .terminated_bye_lookup
@@ -2400,20 +2406,24 @@ impl DialogManager {
         }
 
         let len = self.terminated_bye_lookup.len();
-        if len <= self.terminated_bye_lookup_hard_max {
-            return;
+        crate::diagnostics::record_bye_tombstone_observed_size(len);
+
+        if len > self.terminated_bye_lookup_hard_max {
+            let overage = len - self.terminated_bye_lookup_hard_max;
+            let overflow_keys: Vec<_> = self
+                .terminated_bye_lookup
+                .iter()
+                .take(overage)
+                .map(|entry| entry.key().clone())
+                .collect();
+
+            for key in overflow_keys {
+                self.terminated_bye_lookup.remove(&key);
+            }
         }
 
-        let overage = len - self.terminated_bye_lookup_hard_max;
-        let overflow_keys: Vec<_> = self
-            .terminated_bye_lookup
-            .iter()
-            .take(overage)
-            .map(|entry| entry.key().clone())
-            .collect();
-
-        for key in overflow_keys {
-            self.terminated_bye_lookup.remove(&key);
+        if let Some(started) = prune_started {
+            crate::diagnostics::record_bye_tombstone_prune(started.elapsed());
         }
     }
 

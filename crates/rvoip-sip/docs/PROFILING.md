@@ -6,6 +6,8 @@
 > runbook for *finding* a performance problem with samply / dhat /
 > criterion — `BENCHMARKING.md` is the runbook for producing the
 > numbers a VoIP engineer cites when evaluating the library.
+> For workload-specific `Config` recipes and SIPp matrix knobs, see
+> [`TUNING.md`](TUNING.md).
 
 A developer runbook for measuring the SIP stack under load. Pairs three
 tools — **Criterion** (throughput / latency numbers), **samply** (CPU

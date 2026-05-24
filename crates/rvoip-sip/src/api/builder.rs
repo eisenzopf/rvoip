@@ -241,6 +241,21 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the transaction-manager ACK/BYE priority burst limit.
+    pub fn with_sip_transaction_dispatch_priority_burst_max(mut self, max_burst: usize) -> Self {
+        self.config.sip_transaction_dispatch_priority_burst_max = Some(max_burst);
+        self
+    }
+
+    /// Set the cached INVITE `2xx` retransmission maintenance budget.
+    pub fn with_sip_invite_2xx_retransmit_max_due_per_tick(
+        mut self,
+        max_due_per_tick: usize,
+    ) -> Self {
+        self.config.sip_invite_2xx_retransmit_max_due_per_tick = Some(max_due_per_tick);
+        self
+    }
+
     /// Set the dialog-core transaction-event dispatch worker count.
     pub fn with_sip_dialog_dispatch_workers(mut self, workers: usize) -> Self {
         self.config.sip_dialog_dispatch_workers = Some(workers);
@@ -328,6 +343,8 @@ mod tests {
             .with_sip_udp_parse_dispatch(rvoip_sip_transport::UdpParseDispatch::RoundRobin)
             .with_sip_transaction_dispatch_workers(4)
             .with_sip_transaction_dispatch_queue_capacity(8192)
+            .with_sip_transaction_dispatch_priority_burst_max(32)
+            .with_sip_invite_2xx_retransmit_max_due_per_tick(512)
             .with_sip_dialog_dispatch_workers(4)
             .with_sip_dialog_dispatch_queue_capacity(8192)
             .with_sip_dialog_timing_diagnostics(true);
@@ -354,6 +371,14 @@ mod tests {
         assert_eq!(
             builder.config.sip_transaction_dispatch_queue_capacity,
             Some(8192)
+        );
+        assert_eq!(
+            builder.config.sip_transaction_dispatch_priority_burst_max,
+            Some(32)
+        );
+        assert_eq!(
+            builder.config.sip_invite_2xx_retransmit_max_due_per_tick,
+            Some(512)
         );
         assert_eq!(builder.config.sip_dialog_dispatch_workers, Some(4));
         assert_eq!(

@@ -17,6 +17,8 @@
 //! - **403 Forbidden**: BYE from unauthorized party
 //! - **500 Server Internal Error**: Processing failures
 
+use std::time::Instant;
+
 use tracing::{debug, info, warn};
 
 use crate::diagnostics;
@@ -123,8 +125,11 @@ impl DialogManager {
         transaction_id: TransactionKey,
         request: Request,
     ) -> DialogResult<()> {
+        let handler_started = diagnostics::dialog_timing_enabled().then(Instant::now);
+        self.record_bye_handler_entry(&transaction_id, handler_started);
+
         // Find the dialog for this BYE
-        let lookup_started = diagnostics::dialog_timing_enabled().then(std::time::Instant::now);
+        let lookup_started = diagnostics::dialog_timing_enabled().then(Instant::now);
         let dialog_id = self.find_dialog_for_request(&request).await;
         if let Some(started) = lookup_started {
             diagnostics::record_dialog_lookup(started.elapsed());
@@ -133,7 +138,12 @@ impl DialogManager {
             self.process_bye_in_dialog(transaction_id, request, dialog_id)
                 .await
         } else {
+            let tombstone_lookup_started = diagnostics::dialog_timing_enabled().then(Instant::now);
             let tombstone_match = matches_terminated_bye_retransmit(self, &request);
+            if let Some(started) = tombstone_lookup_started {
+                diagnostics::record_bye_tombstone_lookup(started.elapsed());
+                diagnostics::record_bye_tombstone_observed_size(self.terminated_bye_lookup.len());
+            }
             let status_code = if tombstone_match {
                 debug!("BYE retransmit matched recently terminated dialog");
                 diagnostics::record_duplicate_bye_tombstone_hit();
@@ -150,12 +160,21 @@ impl DialogManager {
             // Recently terminated BYEs keep a compact tombstone so late
             // retransmits still receive the original idempotent 200 OK.
             let response = response_builders::create_response(&request, status_code);
+            let send_started = diagnostics::dialog_timing_enabled().then(Instant::now);
+            if let (Some(handler_started), Some(send_started)) = (handler_started, send_started) {
+                diagnostics::record_bye_path_handler_to_send_start(
+                    send_started.duration_since(handler_started),
+                );
+            }
             self.transaction_manager
                 .send_response(&transaction_id, response)
                 .await
                 .map_err(|e| DialogError::TransactionError {
                     message: format!("Failed to send response to BYE: {}", e),
                 })?;
+            if let Some(started) = send_started {
+                diagnostics::record_bye_path_send_response(started.elapsed());
+            }
             if status_code == StatusCode::Ok {
                 diagnostics::record_200_ok_bye_tombstone();
                 self.record_bye_receive_to_200(&transaction_id);
@@ -178,6 +197,7 @@ impl DialogManager {
         dialog_id: DialogId,
     ) -> DialogResult<()> {
         debug!("Processing BYE for dialog {}", dialog_id);
+        let handler_started = diagnostics::dialog_timing_enabled().then(Instant::now);
 
         // Update dialog and terminate. A retransmitted BYE can escape the
         // transaction layer after the original BYE has already terminated the
@@ -196,12 +216,21 @@ impl DialogManager {
 
         // Send 200 OK response
         let response = response_builders::create_response(&request, StatusCode::Ok);
+        let send_started = diagnostics::dialog_timing_enabled().then(Instant::now);
+        if let (Some(handler_started), Some(send_started)) = (handler_started, send_started) {
+            diagnostics::record_bye_path_handler_to_send_start(
+                send_started.duration_since(handler_started),
+            );
+        }
         self.transaction_manager
             .send_response(&transaction_id, response)
             .await
             .map_err(|e| DialogError::TransactionError {
                 message: format!("Failed to send 200 OK to BYE: {}", e),
             })?;
+        if let Some(started) = send_started {
+            diagnostics::record_bye_path_send_response(started.elapsed());
+        }
         diagnostics::record_bye_200_sent();
         if duplicate_terminated_bye {
             diagnostics::record_200_ok_bye_duplicate_terminated();
@@ -228,9 +257,17 @@ impl DialogManager {
         let manager = self.clone();
         let cleanup_dialog_id = dialog_id.clone();
         tokio::spawn(async move {
+            let emit_started = diagnostics::dialog_timing_enabled().then(Instant::now);
             manager.emit_session_coordination_event(event).await;
+            if let Some(started) = emit_started {
+                diagnostics::record_bye_path_cleanup_emit(started.elapsed());
+            }
             diagnostics::record_bye_cleanup_event_emitted();
+            let remove_started = diagnostics::dialog_timing_enabled().then(Instant::now);
             manager.remove_dialog_storage(&cleanup_dialog_id);
+            if let Some(started) = remove_started {
+                diagnostics::record_bye_path_cleanup_remove_storage(started.elapsed());
+            }
             debug!(
                 "BYE cleanup event published for dialog {}",
                 cleanup_dialog_id
@@ -242,11 +279,15 @@ impl DialogManager {
     }
 
     async fn release_bye_server_transaction(&self, transaction_id: &TransactionKey) {
-        if let Err(e) = self
+        let started = diagnostics::dialog_timing_enabled().then(Instant::now);
+        let result = self
             .transaction_manager
             .terminate_transaction(transaction_id)
-            .await
-        {
+            .await;
+        if let Some(started) = started {
+            diagnostics::record_bye_path_release_tx(started.elapsed());
+        }
+        if let Err(e) = result {
             warn!(
                 "Failed to release completed BYE server transaction {}: {}",
                 transaction_id, e
@@ -258,6 +299,26 @@ impl DialogManager {
         if let Some(timing) = self.transaction_manager.take_inbound_timing(transaction_id) {
             if let Some(received_at) = timing.received_at {
                 diagnostics::record_bye_receive_to_200(received_at.elapsed());
+            }
+        }
+    }
+
+    fn record_bye_handler_entry(
+        &self,
+        transaction_id: &TransactionKey,
+        handler_at: Option<Instant>,
+    ) {
+        let Some(handler_at) = handler_at else {
+            return;
+        };
+        if let Some(timing) = self.transaction_manager.peek_inbound_timing(transaction_id) {
+            if let Some(received_at) = timing.received_at {
+                diagnostics::record_bye_path_udp_to_handler(handler_at.duration_since(received_at));
+            }
+            if let Some(transaction_manager_received_at) = timing.transaction_manager_received_at {
+                diagnostics::record_bye_path_tx_received_to_handler(
+                    handler_at.duration_since(transaction_manager_received_at),
+                );
             }
         }
     }

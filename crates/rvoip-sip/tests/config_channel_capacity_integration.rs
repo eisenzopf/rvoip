@@ -26,6 +26,14 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
         Config::default().sip_transaction_dispatch_queue_capacity,
         None
     );
+    assert_eq!(
+        Config::default().sip_transaction_dispatch_priority_burst_max,
+        None
+    );
+    assert_eq!(
+        Config::default().sip_invite_2xx_retransmit_max_due_per_tick,
+        None
+    );
     assert_eq!(Config::default().sip_dialog_dispatch_workers, None);
     assert_eq!(Config::default().sip_dialog_dispatch_queue_capacity, None);
     assert_eq!(Config::default().global_event_channel_capacity, 10_000);
@@ -63,6 +71,8 @@ fn incoming_call_channel_capacity_is_configurable() {
         .with_transaction_event_channel_capacity(12_288)
         .with_sip_transaction_dispatch_workers(4)
         .with_sip_transaction_dispatch_queue_capacity(65_536)
+        .with_sip_transaction_dispatch_priority_burst_max(32)
+        .with_sip_invite_2xx_retransmit_max_due_per_tick(512)
         .with_sip_transaction_timing_diagnostics(true)
         .with_sip_dialog_dispatch_workers(4)
         .with_sip_dialog_dispatch_queue_capacity(65_536)
@@ -87,6 +97,8 @@ fn incoming_call_channel_capacity_is_configurable() {
     assert_eq!(config.transaction_event_channel_capacity, 12_288);
     assert_eq!(config.sip_transaction_dispatch_workers, Some(4));
     assert_eq!(config.sip_transaction_dispatch_queue_capacity, Some(65_536));
+    assert_eq!(config.sip_transaction_dispatch_priority_burst_max, Some(32));
+    assert_eq!(config.sip_invite_2xx_retransmit_max_due_per_tick, Some(512));
     assert!(config.sip_transaction_timing_diagnostics);
     assert_eq!(config.sip_dialog_dispatch_workers, Some(4));
     assert_eq!(config.sip_dialog_dispatch_queue_capacity, Some(65_536));
@@ -314,6 +326,28 @@ fn zero_transaction_dispatch_config_is_rejected_when_set() {
     assert!(
         err.to_string()
             .contains("sip_transaction_dispatch_queue_capacity must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+
+    let mut config = Config::local("capacity-test", 5060);
+    config.sip_transaction_dispatch_priority_burst_max = Some(0);
+
+    let err = config.validate().expect_err("zero burst max must fail");
+    assert!(
+        err.to_string()
+            .contains("sip_transaction_dispatch_priority_burst_max must be at least 1 when set"),
+        "unexpected validation error: {err}"
+    );
+
+    let mut config = Config::local("capacity-test", 5060);
+    config.sip_invite_2xx_retransmit_max_due_per_tick = Some(0);
+
+    let err = config
+        .validate()
+        .expect_err("zero retransmit budget must fail");
+    assert!(
+        err.to_string()
+            .contains("sip_invite_2xx_retransmit_max_due_per_tick must be at least 1 when set"),
         "unexpected validation error: {err}"
     );
 }

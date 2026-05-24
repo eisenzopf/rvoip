@@ -16,6 +16,8 @@
 #   RVOIP_SHARDING_DIALOG_WORKERS="1 2 4 8"
 #   RVOIP_SHARDING_CAPACITIES="20000 30000"
 #   RVOIP_SHARDING_SIP_UDP_RECV_BUFFER_SIZE=8388608
+#   RVOIP_SHARDING_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX=64
+#   RVOIP_SHARDING_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK=2048
 #   RVOIP_SHARDING_SAMPLE=1
 #   RVOIP_SHARDING_SAMPLY=1
 #   RVOIP_SHARDING_SAMPLY_CSWITCH_MARKERS=1
@@ -249,6 +251,8 @@ trap 'cleanup; exit 143' TERM
   echo "sipp_shard_cps=$SIPP_SHARD_CPS"
   echo "transaction_timing=$TRANSACTION_TIMING"
   echo "dialog_timing=$DIALOG_TIMING"
+  echo "transaction_dispatch_priority_burst_max=${RVOIP_SHARDING_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX:-}"
+  echo "invite_2xx_retransmit_max_due_per_tick=${RVOIP_SHARDING_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK:-}"
   echo "sample_enabled=$SAMPLE_ENABLED"
   echo "sample_seconds=$SAMPLE_SECONDS"
   echo "sample_interval_ms=$SAMPLE_INTERVAL_MS"
@@ -308,6 +312,8 @@ for capacity in $CAPACITIES; do
           append_optional_capacity_arg RVOIP_SHARDING_SIP_UDP_SEND_BUFFER_SIZE --sip-udp-send-buffer-size
           append_optional_capacity_arg RVOIP_SHARDING_TRANSACTION_EVENT_CHANNEL_CAPACITY --transaction-event-channel-capacity
           append_optional_capacity_arg RVOIP_SHARDING_TRANSACTION_DISPATCH_QUEUE_CAPACITY --transaction-dispatch-queue-capacity
+          append_optional_capacity_arg RVOIP_SHARDING_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX --transaction-dispatch-priority-burst-max
+          append_optional_capacity_arg RVOIP_SHARDING_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK --invite-2xx-retransmit-max-due-per-tick
           append_optional_capacity_arg RVOIP_SHARDING_DIALOG_DISPATCH_QUEUE_CAPACITY --sip-dialog-dispatch-queue-capacity
           append_optional_capacity_arg RVOIP_SHARDING_SESSION_EVENT_WORKERS --session-event-dispatcher-workers
           append_optional_capacity_arg RVOIP_SHARDING_SESSION_EVENT_QUEUE_CAPACITY --session-event-dispatcher-queue-capacity

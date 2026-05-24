@@ -39,10 +39,12 @@
 //! `--transaction-event-channel-capacity`,
 //! `--transaction-dispatch-workers`,
 //! `--transaction-dispatch-queue-capacity`,
+//! `--transaction-dispatch-priority-burst-max`,
+//! `--invite-2xx-retransmit-max-due-per-tick`,
 //! `--sip-dialog-dispatch-workers`,
 //! `--sip-dialog-dispatch-queue-capacity`, and
 //! `--session-event-dispatcher-*` expose Config-backed sharding and queue
-//! sizing knobs for perf matrix runs.
+//! sizing/pacing knobs for perf matrix runs.
 //!
 //! The process runs forever; SIGINT to terminate.
 
@@ -135,6 +137,8 @@ async fn main() {
     let mut udp_parse_round_robin = false;
     let mut transaction_dispatch_workers = None;
     let mut transaction_dispatch_queue_capacity = None;
+    let mut transaction_dispatch_priority_burst_max = None;
+    let mut invite_2xx_retransmit_max_due_per_tick = None;
     let mut sip_dialog_dispatch_workers = None;
     let mut sip_dialog_dispatch_queue_capacity = None;
     let mut sip_transport_channel_capacity = None;
@@ -208,6 +212,18 @@ async fn main() {
                     Some(value.parse::<usize>().unwrap_or_else(|e| {
                         panic!("invalid --transaction-dispatch-queue-capacity '{value}': {e}")
                     }));
+            }
+            "--transaction-dispatch-priority-burst-max" => {
+                transaction_dispatch_priority_burst_max = Some(next_usize_arg(
+                    &mut args,
+                    "--transaction-dispatch-priority-burst-max",
+                ));
+            }
+            "--invite-2xx-retransmit-max-due-per-tick" => {
+                invite_2xx_retransmit_max_due_per_tick = Some(next_usize_arg(
+                    &mut args,
+                    "--invite-2xx-retransmit-max-due-per-tick",
+                ));
             }
             "--sip-dialog-dispatch-workers" => {
                 sip_dialog_dispatch_workers =
@@ -319,6 +335,8 @@ async fn main() {
         udp_parse_round_robin,
         transaction_dispatch_workers,
         transaction_dispatch_queue_capacity,
+        transaction_dispatch_priority_burst_max,
+        invite_2xx_retransmit_max_due_per_tick,
         sip_dialog_dispatch_workers,
         sip_dialog_dispatch_queue_capacity,
         sip_transport_channel_capacity,
@@ -455,6 +473,8 @@ fn apply_perf_config(
     udp_parse_round_robin: bool,
     transaction_dispatch_workers: Option<usize>,
     transaction_dispatch_queue_capacity: Option<usize>,
+    transaction_dispatch_priority_burst_max: Option<usize>,
+    invite_2xx_retransmit_max_due_per_tick: Option<usize>,
     sip_dialog_dispatch_workers: Option<usize>,
     sip_dialog_dispatch_queue_capacity: Option<usize>,
     sip_transport_channel_capacity: Option<usize>,
@@ -496,6 +516,12 @@ fn apply_perf_config(
     }
     if let Some(capacity) = transaction_dispatch_queue_capacity {
         config = config.with_sip_transaction_dispatch_queue_capacity(capacity);
+    }
+    if let Some(max_burst) = transaction_dispatch_priority_burst_max {
+        config = config.with_sip_transaction_dispatch_priority_burst_max(max_burst);
+    }
+    if let Some(max_due_per_tick) = invite_2xx_retransmit_max_due_per_tick {
+        config = config.with_sip_invite_2xx_retransmit_max_due_per_tick(max_due_per_tick);
     }
     if let Some(workers) = sip_dialog_dispatch_workers {
         config = config.with_sip_dialog_dispatch_workers(workers);
@@ -548,6 +574,8 @@ fn print_effective_config(config: &Config, high_cps_capacity: usize) {
          sip_udp_parse_dispatch={:?} \
          sip_transaction_dispatch_workers={:?} \
          sip_transaction_dispatch_queue_capacity={:?} \
+         sip_transaction_dispatch_priority_burst_max={:?} \
+         sip_invite_2xx_retransmit_max_due_per_tick={:?} \
          sip_dialog_dispatch_workers={:?} \
          sip_dialog_dispatch_queue_capacity={:?}",
         high_cps_capacity,
@@ -563,6 +591,8 @@ fn print_effective_config(config: &Config, high_cps_capacity: usize) {
         config.sip_udp_parse_dispatch,
         config.sip_transaction_dispatch_workers,
         config.sip_transaction_dispatch_queue_capacity,
+        config.sip_transaction_dispatch_priority_burst_max,
+        config.sip_invite_2xx_retransmit_max_due_per_tick,
         config.sip_dialog_dispatch_workers,
         config.sip_dialog_dispatch_queue_capacity,
     );

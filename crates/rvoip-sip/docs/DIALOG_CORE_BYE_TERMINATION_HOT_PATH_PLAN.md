@@ -10,10 +10,19 @@ longer primarily duplicate INVITE recovery. The clean validation runs kept
 `ack_unmatched=0`, while dead-call `200 OK` traffic was mostly BYE-attributed
 and BYE receive-to-200 tails tracked backlog.
 
-Transaction dispatch queue delay also dominated the stressed `tx=2 dlg=4`
-shape. The next phase should instrument, profile, and stress test
-BYE/termination fast paths and transaction dispatch queue isolation/admission
-before changing worker-count recommendations.
+The follow-up instrumentation confirmed the first actionable issue:
+BYE requests were waiting in the shared transaction dispatch backlog before the
+BYE handler ran. BYE tombstone lookup, transaction release, response send
+segments, and cleanup removal were measurable but did not explain the largest
+tail. The first implemented fix is therefore ACK/BYE priority inside each
+transaction dispatch worker, preserving the existing worker hash and call
+affinity.
+
+The later cache/pacing experiments showed a second pressure point: INVITE 2xx
+retransmission send volume competes with teardown work under stress. Prebuilt
+cached wire bytes are worth keeping, but the resend pacing budget is workload
+sensitive and should remain tunable instead of being promoted as a single
+universal constant.
 
 ## Current Findings
 
@@ -31,82 +40,176 @@ before changing worker-count recommendations.
   transaction dispatch/dialog dispatch workers, and UDP send/serialization
   under overload.
 
-## Proposed Next Work
+## Implementation Findings
 
-### BYE And Termination Diagnostics
+- Added gated diagnostics for BYE path segments, BYE tombstones, transaction
+  dispatch queue delay by event kind, and transaction dispatch queue delay by
+  worker.
+- Analyzer output now surfaces the new bracketed BYE/dispatch diagnostics and
+  preserves `sample`/`samply` artifact paths.
+- In the clean 20k `tx=2 dlg=4` baseline, BYE receive-to-200 tails matched
+  `tx_received_to_handler`, and transaction dispatch BYE `over_500ms` accounted
+  for nearly the same tail. That identifies the queue before the BYE handler as
+  the first fix target.
+- BYE-only priority removed most BYE dispatch delay, but it starved ACKs:
+  `ack_unmatched=94495` at 20k. That shape is rejected.
+- ACK+BYE priority preserved call affinity and fixed the ACK starvation issue.
+  It reduced BYE dead-call volume, but 20k still showed UDP drops and high
+  total dead-call volume, now mostly INVITE-attributed.
+- Prebuilt raw cached INVITE 2xx sends reduced serialization/send overhead for
+  duplicate and proactive cached responses. This is worth keeping.
+- Aggressive INVITE 2xx resend pacing at `512` per 100 ms tick was excellent
+  for the clean 18k shape, reaching zero dead-call `200 OK`, zero BYE
+  over-500 ms, and zero dispatch over-500 ms. The same pacing hurt the lossy
+  20k shape: the run completed only about 91.5 percent of expected successful
+  calls and had `47214` host UDP drops. That value is not a safe default.
+- Restoring the default resend budget to `2048` kept 20k completion at
+  285000/285000 successful calls and reduced UDP drops versus priority-only,
+  but 20k was still not acceptance-clean.
 
-Add diagnostics behind the existing diagnostics and timing gates. Do not change
-public behavior or public APIs.
+## Current Tunable Parameters
 
-- Classify BYE `200 OK` sends as fresh in-dialog, tombstone retransmit,
-  duplicate terminated dialog, or late post-cleanup path.
-- Measure BYE ingress-to-dialog-handler, dialog-handler-to-transaction-send,
-  transaction-send-to-UDP-send, and cleanup-release timing.
-- Record tombstone lookup hit/miss latency, tombstone table size, BYE server
-  transaction release latency, and termination cleanup fanout.
-- Keep existing idempotence counters intact so every new BYE timing can be
-  correlated with `bye_200_sent`, BYE tombstone counters, and dead-call
-  `CSeq: BYE` analyzer output.
+These are now exposed through `rvoip_sip::Config` and surfaced by the
+`perf_listener` and SIPp sharding matrix harness.
 
-### Transaction Dispatch Queue Diagnostics
+- `sip_transaction_dispatch_priority_burst_max`
+  - Default when unset: transaction-layer default `64`.
+  - Applies only when `sip_transaction_dispatch_workers > 1`.
+  - Lower values give INVITE/CANCEL/response work more fairness during ACK/BYE
+    storms.
+  - Higher values favor ACK/BYE latency when teardown tail dominates and normal
+    lane delay is acceptable.
+  - Perf CLI: `--transaction-dispatch-priority-burst-max`.
+  - Matrix env:
+    `RVOIP_SHARDING_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX`.
+- `sip_invite_2xx_retransmit_max_due_per_tick`
+  - Default when unset: transaction-layer default `2048`.
+  - Controls proactive cached INVITE 2xx retransmits per 100 ms maintenance
+    tick.
+  - Lower values pace UDP send bursts and can protect teardown work in clean
+    high-CPS shapes.
+  - Higher values clear INVITE 2xx retransmit backlog faster when the host send
+    path has headroom or packet loss is high.
+  - Perf CLI: `--invite-2xx-retransmit-max-due-per-tick`.
+  - Matrix env:
+    `RVOIP_SHARDING_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK`.
 
-Extend queue visibility before introducing new worker topology or admission
-behavior.
+The short-lived cache TTL remains internal. Current evidence points at
+dispatch ordering and send pacing, not stale-cache lifetime or cache memory
+pressure.
 
-- Report per-worker queue depth and dequeue delay, not only aggregate max.
-- Add event-kind splits for INVITE, ACK, BYE, CANCEL, lifecycle, and other.
-- If an admission policy is prototyped, count admitted, deferred, and dropped
-  events by event kind and worker.
-- Correlate transaction queue delay with BYE receive-to-200 tails in the
-  analyzer summary.
+## Stress Results So Far
 
-### Optimization Prototypes
+- Baseline instrumented 20k `tx=2 dlg=4`:
+  - `dup_invite_cache_miss=0`, `worker_mismatch=0`, `ack_unmatched=0`.
+  - Dead-call `200 OK`: `137730` total, `120220 BYE`, `17510 INVITE`.
+  - BYE receive-to-200 `over_500ms=232608`.
+  - BYE `tx_received_to_handler over_500ms=232608`.
+  - Transaction dispatch BYE `over_500ms=232277`.
+- BYE-only priority:
+  - BYE dispatch tail improved, but `ack_unmatched=94495` at 20k.
+  - Rejected because it violates ACK correctness/clean-shape requirements.
+- ACK+BYE priority:
+  - 18k: rc `0`, host UDP drops `0`, dead-call `200 OK=14198`
+    (`3257 BYE`, `10941 INVITE`), `ack_unmatched=5`.
+  - 20k: rc `1`, host UDP drops `44958`, dead-call `200 OK=22707`
+    (`1539 BYE`, `21168 INVITE`), `ack_unmatched=0`.
+- ACK+BYE priority plus raw cached INVITE 2xx responses, default resend budget
+  `2048`:
+  - 18k: rc `0`, host UDP drops `0`, dead-call `200 OK=5315`
+    (`3533 BYE`, `1782 INVITE`), `ack_unmatched=2`, raw cached sends
+    `44534`, proactive cached sends `21379`.
+  - 20k: rc `1`, host UDP drops `35371`, success `285000/285000`,
+    dead-call `200 OK=20012` (`1968 BYE`, `18044 INVITE`),
+    `ack_unmatched=0`, raw cached sends `280289`, proactive cached sends
+    `101708`.
+- ACK+BYE priority plus raw cached INVITE 2xx responses, resend budget `512`:
+  - 18k: rc `0`, host UDP drops `0`, dead-call `200 OK=0`,
+    `ack_unmatched=0`, raw cached sends `9055`, proactive cached sends `2`,
+    BYE receive-to-200 `over_500ms=0`, transaction dispatch `over_500ms=0`.
+  - 20k: rc `1`, host UDP drops `47214`, success `260697/285000`,
+    dead-call `200 OK=5506` (`3953 BYE`, `1553 INVITE`),
+    `ack_unmatched=2`, raw cached sends `110796`, proactive cached sends
+    `2960`.
 
-Prototype only after the new counters identify the hot segment.
+## Current Conclusion
 
-- Prioritize BYE handling or isolate BYE events from INVITE duplicate/retransmit
-  work if BYE tails continue to dominate dead-call `200 OK` volume.
-- Avoid cleanup work on the BYE `200 OK` response path where correctness
-  permits; release and cleanup should be bounded and should not delay the
-  response.
-- Keep tombstone idempotence, but make tombstone lookup and reply bounded and
-  low-contention.
-- Evaluate transaction dispatch queue isolation/admission as an experiment:
-  separate lifecycle/cleanup work from request-bearing SIP events, or separate
-  BYE from INVITE pressure.
-- Do not promote a worker topology from this phase unless clean validation,
-  profiler artifacts, and diagnostics all point to the same shape.
+We have identified two real problems and one rejected approach:
+
+- Real problem: BYEs can sit behind shared transaction dispatch backlog before
+  the BYE handler runs. Fix: ACK/BYE priority lane per transaction worker with
+  starvation protection.
+- Real problem: cached INVITE 2xx retransmission send volume can compete with
+  teardown under stress. Fix: prebuilt raw cached sends plus a configurable
+  proactive resend budget.
+- Rejected approach: BYE-only priority. It improves BYE latency but breaks ACK
+  matching under stress.
+
+This is not a final 20k fix yet. The 18k shape can be made very clean with
+lower resend pacing, but the 20k shape still crosses host UDP send/receive
+limits and remains sensitive to retransmit volume.
+
+## Completed Work
+
+- BYE and termination diagnostics were added behind existing diagnostics and
+  timing gates. They classify BYE response paths, measure BYE handler segments,
+  track tombstone lookup/prune behavior, and keep the existing idempotence
+  counters intact.
+- Transaction dispatch diagnostics now report dequeue delay and depth by event
+  kind and by worker, which made the BYE pre-handler backlog visible.
+- Transaction dispatch workers now use high and normal lanes per worker. ACK
+  and BYE requests enter the high lane; INVITE, CANCEL, responses, and other
+  events enter the normal lane. Worker selection is unchanged, preserving call
+  affinity.
+- Starvation protection processes one ready normal item after the configured
+  priority burst.
+- INVITE 2xx cache entries now store prebuilt wire bytes so cached duplicate
+  and proactive retransmits can avoid rebuilding the SIP response.
+- The ACK/BYE priority burst and INVITE 2xx proactive retransmit budget are
+  configurable through `Config`, `SessionBuilder`, `perf_listener`, and the SIPp
+  sharding matrix.
+
+## Remaining Work
+
+- Tune the two new Config parameters against fixed 18k and 20k shapes.
+- Decide whether a lower INVITE 2xx resend budget should become part of a named
+  high-CPS profile, or remain only an explicit benchmark/deployment knob.
+- If 20k still drops host UDP packets after moderate resend pacing, investigate
+  UDP send admission or transaction/dialog backpressure rather than further BYE
+  handler micro-optimization.
+- If BYE tails reappear after pacing is tuned, use the existing BYE segment
+  metrics to decide whether response send, cleanup, or tombstone lookup has
+  become the new dominant segment.
+- Do not promote a worker topology or default pacing value based only on a
+  profiled run; keep same-shape clean controls.
 
 ## Investigation Runs
 
 Run repo checks before load testing:
 
 ```text
-cargo fmt
+cargo fmt --check
 cargo test -p rvoip-sip-dialog
 cargo test -p rvoip-sip-transport
 cargo test -p rvoip-sip --test config_channel_capacity_integration
-python3 -m py_compile crates/rvoip-sip/tests/perf/sipp_scenarios/analyze.py
+cargo build -p rvoip-sip --release --example perf_listener
+python3 -m py_compile crates/rvoip-sip/tests/perf/sipp_scenarios/analyze.py crates/rvoip-sip/tests/perf/sipp_scenarios/test_analyze.py
 git diff --check
 ```
 
-Run validation with diagnostics enabled and
-`--sip-udp-recv-buffer-size 8388608`:
+Run validation with diagnostics enabled, `--sip-udp-recv-buffer-size 8388608`,
+and the fixed signaling-only media shape:
 
 ```text
-18k: tx=1 dlg=4
-18k: tx=1 dlg=8
-18k: tx=2 dlg=4
-20k: tx=1 dlg=4
-20k: tx=2 dlg=4
+18k: tx=2 dlg=4, invite_2xx_due_budget=512/1024/1536/2048, priority_burst=16/32/64/128
+20k: tx=2 dlg=4, invite_2xx_due_budget=512/1024/1536/2048, priority_burst=16/32/64/128
 ```
 
 Capture profiles for these fixed-build shapes:
 
 ```text
-18k promoted baseline: UDP RR 4, transport 1, transaction 2, dialog 1, session dispatcher 4
-20k candidate A:       UDP RR 4, transport 1, transaction 1, dialog 4, session dispatcher 4
-20k candidate B:       UDP RR 4, transport 1, transaction 2, dialog 4, session dispatcher 4
+18k control/candidate: UDP RR 4, transport 1, transaction 2, dialog 4, session dispatcher 4
+20k control/candidate: UDP RR 4, transport 1, transaction 2, dialog 4, session dispatcher 4
 ```
 
 Each load summary must include SIPp rc, achieved CPS, retransmits, host UDP
@@ -126,8 +229,23 @@ diagnostics, and `sample`/`samply` artifact paths.
   dialog-to-session publication or cleanup fanout before tuning transaction
   workers.
 - If proactive or duplicate-cache INVITE 2xx counters become dominant again,
-  revisit INVITE 2xx pacing, but do not treat it as the primary hypothesis for
-  this phase.
+  tune `sip_invite_2xx_retransmit_max_due_per_tick` and compare same-shape
+  clean/profiler runs before changing the default.
+
+## Next Recommended Experiments
+
+- Sweep `sip_invite_2xx_retransmit_max_due_per_tick` between the known points:
+  `512`, `1024`, `1536`, and `2048`.
+- Sweep `sip_transaction_dispatch_priority_burst_max` around `16`, `32`, `64`,
+  and `128` for `tx=2 dlg=4`.
+- Keep the same fixed shape for comparison: UDP RR `4`, transport `1`,
+  transaction `2`, dialog `4`, session dispatcher `4`, capacity `20000`,
+  UDP receive buffer `8388608`, signaling-only media.
+- Every profiled run still needs a same-shape non-profiled control because the
+  20k shape is sensitive to host UDP drops.
+- If 20k still drops UDP with moderate pacing, investigate UDP send admission
+  or transaction/dialog backpressure rather than further optimizing BYE handler
+  internals.
 
 ## Acceptance Criteria
 
@@ -138,8 +256,8 @@ diagnostics, and `sample`/`samply` artifact paths.
 - Reduce 20k dead-call BYE `200 OK`, BYE receive-to-200 `over_500ms`, and
   transaction dispatch `over_500ms`.
 - Keep all new diagnostics gated by existing diagnostics/timing flags.
-- Do not add public API or public config changes unless counters and profiles
-  justify a production-facing knob.
+- Public config changes are now justified for the dispatch priority burst and
+  INVITE 2xx resend budget because the best values differ by stress shape.
 - Do not promote a new worker topology based only on a single profiled run.
 
 ## Assumptions

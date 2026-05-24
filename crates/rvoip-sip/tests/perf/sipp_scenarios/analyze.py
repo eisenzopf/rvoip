@@ -122,8 +122,23 @@ def extract_int(line: str, key: str) -> int | None:
 
 
 def extract_bracket(line: str, key: str) -> str | None:
-    match = re.search(rf"\b{re.escape(key)}=\[([^\]]*)\]", line)
-    return match.group(1) if match else None
+    marker = f"{key}=["
+    start = line.find(marker)
+    if start < 0:
+        return None
+    value_start = start + len(marker)
+    depth = 1
+    idx = value_start
+    while idx < len(line):
+        ch = line[idx]
+        if ch == "[":
+            depth += 1
+        elif ch == "]":
+            depth -= 1
+            if depth == 0:
+                return line[value_start:idx]
+        idx += 1
+    return None
 
 
 def parse_sip_udp_diag(line: str | None) -> dict:
@@ -132,6 +147,7 @@ def parse_sip_udp_diag(line: str | None) -> dict:
     keys = [
         "queue_full",
         "send_errors",
+        "raw_sends",
         "resp_2xx",
         "manager_backpressure_events",
         "transport_backpressure_events",
@@ -156,7 +172,11 @@ def parse_sip_retrans_diag(line: str | None) -> dict:
     out = {key: extract_int(line, key) for key in keys}
     for bracket_key in [
         "ok_200_source",
+        "bye_path",
+        "bye_tombstone",
         "transaction_dispatch_queue",
+        "transaction_dispatch_queue_by_kind",
+        "transaction_dispatch_queue_by_worker",
         "transaction_dispatch_queue_depth",
         "transaction_dispatch_backpressure",
         "dialog_event_dispatch_queue",
@@ -487,6 +507,7 @@ def render(data: dict) -> str:
                 "- Final sip_udp_diag: "
                 f"queue_full={fmt_optional(udp_diag.get('queue_full'))}, "
                 f"send_errors={fmt_optional(udp_diag.get('send_errors'))}, "
+                f"raw_sends={fmt_optional(udp_diag.get('raw_sends'))}, "
                 f"resp_2xx={fmt_optional(udp_diag.get('resp_2xx'))}, "
                 f"transport_manager_to_transaction=["
                 f"{udp_diag.get('transport_manager_to_transaction') or 'n/a'}]"
@@ -507,11 +528,15 @@ def render(data: dict) -> str:
                 )
             for metric_name, label in [
                 ("transaction_dispatch_queue", "Transaction dispatch queue"),
+                ("transaction_dispatch_queue_by_kind", "Transaction dispatch queue by kind"),
+                ("transaction_dispatch_queue_by_worker", "Transaction dispatch queue by worker"),
                 ("transaction_dispatch_queue_depth", "Transaction dispatch queue depth"),
                 ("transaction_dispatch_backpressure", "Transaction dispatch backpressure"),
                 ("dialog_event_dispatch_queue", "Dialog event dispatch queue"),
                 ("dialog_to_session_queue", "Dialog-to-session queue"),
                 ("bye_receive_to_200", "BYE receive-to-200"),
+                ("bye_path", "BYE path"),
+                ("bye_tombstone", "BYE tombstone"),
             ]:
                 if retrans_diag.get(metric_name):
                     lines.append(f"- {label}: [{retrans_diag[metric_name]}]")

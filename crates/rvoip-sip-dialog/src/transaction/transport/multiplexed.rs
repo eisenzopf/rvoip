@@ -341,6 +341,32 @@ impl Transport for MultiplexedTransport {
         transport.send_message(message, destination).await
     }
 
+    async fn send_message_raw(&self, bytes: Bytes, destination: SocketAddr) -> TransportResult<()> {
+        for kind in [
+            TransportType::Tls,
+            TransportType::Tcp,
+            TransportType::Wss,
+            TransportType::Ws,
+        ] {
+            if let Some(transport) = self.transports.get(&kind) {
+                if transport.has_connection_to(destination) {
+                    trace!(
+                        "MultiplexedTransport: routing pre-built SIP bytes to {} via {} (existing connection)",
+                        destination,
+                        kind
+                    );
+                    return transport.send_message_raw(bytes, destination).await;
+                }
+            }
+        }
+
+        trace!(
+            "MultiplexedTransport: routing pre-built SIP bytes to {} via default",
+            destination
+        );
+        self.default.send_message_raw(bytes, destination).await
+    }
+
     async fn close(&self) -> TransportResult<()> {
         let mut last_err: Option<TransportError> = None;
         for (kind, transport) in &self.transports {

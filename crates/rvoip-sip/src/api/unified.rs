@@ -701,6 +701,30 @@ pub struct Config {
     /// dispatch workers are enabled, this capacity is divided across workers.
     pub sip_transaction_dispatch_queue_capacity: Option<usize>,
 
+    /// Optional priority-lane burst limit for transaction ingress workers.
+    ///
+    /// This applies only when [`Config::sip_transaction_dispatch_workers`] is
+    /// greater than `1`. The transaction dispatcher lets ACK and BYE requests
+    /// jump ahead of older normal-lane work on their assigned worker, then
+    /// gives one ready normal item a turn after this many consecutive priority
+    /// items. `None` uses the transaction-layer default (`64`). Lower this
+    /// when INVITE/CANCEL/response work must make progress during teardown
+    /// storms; raise it when ACK/BYE latency is the dominant failure mode and
+    /// normal-lane delay is acceptable.
+    pub sip_transaction_dispatch_priority_burst_max: Option<usize>,
+
+    /// Optional cached INVITE `2xx` retransmission maintenance budget.
+    ///
+    /// The transaction manager keeps a short-lived cache of successful INVITE
+    /// responses so duplicate INVITEs can be answered without rebuilding the
+    /// SIP response. This limit controls how many cached `2xx` responses the
+    /// proactive maintenance task may retransmit per 100 ms tick. `None` uses
+    /// the transaction-layer default (`2048`). Lower this to pace retransmit
+    /// storms when UDP send pressure starves teardown work; raise it when the
+    /// host send path has headroom and UAC timeout/dead-call volume is driven
+    /// by uncleared INVITE `2xx` loss bursts.
+    pub sip_invite_2xx_retransmit_max_due_per_tick: Option<usize>,
+
     /// Optional dialog-core transaction-event dispatch worker count.
     ///
     /// `None` preserves the single dialog event processor. High-CPS servers can
@@ -901,6 +925,8 @@ impl Config {
             transaction_event_channel_capacity: 10_000,
             sip_transaction_dispatch_workers: None,
             sip_transaction_dispatch_queue_capacity: None,
+            sip_transaction_dispatch_priority_burst_max: None,
+            sip_invite_2xx_retransmit_max_due_per_tick: None,
             sip_dialog_dispatch_workers: None,
             sip_dialog_dispatch_queue_capacity: None,
             global_event_channel_capacity: 10_000,
@@ -992,6 +1018,8 @@ impl Config {
             transaction_event_channel_capacity: 10_000,
             sip_transaction_dispatch_workers: None,
             sip_transaction_dispatch_queue_capacity: None,
+            sip_transaction_dispatch_priority_burst_max: None,
+            sip_invite_2xx_retransmit_max_due_per_tick: None,
             sip_dialog_dispatch_workers: None,
             sip_dialog_dispatch_queue_capacity: None,
             global_event_channel_capacity: 10_000,
@@ -1269,7 +1297,10 @@ impl Config {
     /// work. It does not enable the fused fast-auto-accept path yet; that
     /// remains an explicit opt-in until the 8000 CPS cleanup/retransmit target
     /// is stable. It does not enlarge socket buffers and does not set
-    /// [`Config::server_call_capacity`].
+    /// [`Config::server_call_capacity`]. It also leaves
+    /// [`Config::sip_transaction_dispatch_priority_burst_max`] and
+    /// [`Config::sip_invite_2xx_retransmit_max_due_per_tick`] unset so load
+    /// tests can tune dispatch fairness and retransmit pacing explicitly.
     pub fn with_high_cps_udp_auto_answer(mut self, capacity: usize) -> Self {
         self = self.with_channel_capacity(capacity);
         self.auto_180_ringing = false;
@@ -1517,6 +1548,34 @@ impl Config {
     /// `1` are rejected by [`Config::validate`].
     pub fn with_sip_transaction_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
         self.sip_transaction_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the transaction-manager ACK/BYE priority burst limit.
+    ///
+    /// This only affects multi-worker transaction dispatch. After this many
+    /// consecutive priority-lane ACK/BYE events, a worker processes one ready
+    /// normal-lane item before resuming priority work. Use lower values when
+    /// INVITE/CANCEL/response work is being starved; use higher values when
+    /// BYE/ACK latency is the bottleneck. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_sip_transaction_dispatch_priority_burst_max(mut self, max_burst: usize) -> Self {
+        self.sip_transaction_dispatch_priority_burst_max = Some(max_burst);
+        self
+    }
+
+    /// Set the cached INVITE `2xx` retransmission maintenance budget.
+    ///
+    /// The value is the maximum number of cached INVITE `2xx` responses the
+    /// transaction manager may proactively resend per 100 ms tick. Lower values
+    /// pace UDP send bursts; higher values clear retransmission backlog faster
+    /// when the host send path has capacity. Values below `1` are rejected by
+    /// [`Config::validate`].
+    pub fn with_sip_invite_2xx_retransmit_max_due_per_tick(
+        mut self,
+        max_due_per_tick: usize,
+    ) -> Self {
+        self.sip_invite_2xx_retransmit_max_due_per_tick = Some(max_due_per_tick);
         self
     }
 
@@ -1826,6 +1885,18 @@ impl Config {
         if matches!(self.sip_transaction_dispatch_queue_capacity, Some(0)) {
             return Err(SessionError::ConfigError(
                 "sip_transaction_dispatch_queue_capacity must be at least 1 when set".to_string(),
+            ));
+        }
+        if matches!(self.sip_transaction_dispatch_priority_burst_max, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_transaction_dispatch_priority_burst_max must be at least 1 when set"
+                    .to_string(),
+            ));
+        }
+        if matches!(self.sip_invite_2xx_retransmit_max_due_per_tick, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_invite_2xx_retransmit_max_due_per_tick must be at least 1 when set"
+                    .to_string(),
             ));
         }
         if matches!(self.sip_dialog_dispatch_workers, Some(0)) {
@@ -3981,6 +4052,12 @@ impl UnifiedCoordinator {
 
         let mut transaction_manager = transaction_manager;
         transaction_manager.set_auto_100_trying(config.auto_100_trying);
+        if let Some(max_burst) = config.sip_transaction_dispatch_priority_burst_max {
+            transaction_manager.set_transaction_dispatch_priority_burst_max(max_burst);
+        }
+        if let Some(max_due_per_tick) = config.sip_invite_2xx_retransmit_max_due_per_tick {
+            transaction_manager.set_invite_2xx_retransmit_max_due_per_tick(max_due_per_tick);
+        }
         let transaction_manager = Arc::new(transaction_manager);
 
         // Create dialog config - use hybrid mode to support both incoming and outgoing calls

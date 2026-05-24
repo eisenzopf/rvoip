@@ -18,6 +18,9 @@ Every server knob used by the runner maps to a public `Config` field and
 builder method. The SIPp harness still uses environment variables for
 load generation, but the rvoip server process does not rely on hidden
 perf-only behavior.
+See [`TUNING.md`](TUNING.md) for the canonical workload recipes,
+default policy, and crosswalk between `Config`, `perf_listener` flags,
+and SIPp matrix environment variables.
 
 | Runner flag | Config API |
 | --- | --- |
@@ -35,6 +38,8 @@ perf-only behavior.
 | `--transaction-event-channel-capacity N` | `Config::with_transaction_event_channel_capacity(N)` |
 | `--transaction-dispatch-workers N` | `Config::with_sip_transaction_dispatch_workers(N)` |
 | `--transaction-dispatch-queue-capacity N` | `Config::with_sip_transaction_dispatch_queue_capacity(N)` |
+| `--transaction-dispatch-priority-burst-max N` | `Config::with_sip_transaction_dispatch_priority_burst_max(N)` |
+| `--invite-2xx-retransmit-max-due-per-tick N` | `Config::with_sip_invite_2xx_retransmit_max_due_per_tick(N)` |
 | `--sip-dialog-dispatch-workers N` | `Config::with_sip_dialog_dispatch_workers(N)` |
 | `--sip-dialog-dispatch-queue-capacity N` | `Config::with_sip_dialog_dispatch_queue_capacity(N)` |
 | `--session-event-dispatcher-workers N` | `Config::with_session_event_dispatcher_workers(N)` |
@@ -108,6 +113,13 @@ crates/rvoip-sip/tests/perf/sipp_scenarios/run_signaling_sharding_matrix.sh
 # Raise kernel UDP socket buffers when host full-socket drops appear.
 RVOIP_SHARDING_SIP_UDP_RECV_BUFFER_SIZE=8388608 \
 RVOIP_SHARDING_SIP_UDP_SEND_BUFFER_SIZE=8388608 \
+crates/rvoip-sip/tests/perf/sipp_scenarios/run_signaling_sharding_matrix.sh
+
+# Sweep ACK/BYE priority fairness and INVITE 2xx proactive resend pacing.
+RVOIP_SHARDING_TRANSACTION_DISPATCH_PRIORITY_BURST_MAX=64 \
+RVOIP_SHARDING_INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK=2048 \
+RVOIP_SHARDING_TRANSACTION_TIMING=1 \
+RVOIP_SHARDING_DIALOG_TIMING=1 \
 crates/rvoip-sip/tests/perf/sipp_scenarios/run_signaling_sharding_matrix.sh
 ```
 

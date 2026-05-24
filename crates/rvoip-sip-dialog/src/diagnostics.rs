@@ -1,6 +1,7 @@
 //! SIP transaction/dialog diagnostics for duplicate recovery under UDP load.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 macro_rules! latency_buckets {
@@ -32,6 +33,7 @@ const LATENCY_BUCKET_UPPER_US: [u64; 18] = [
     10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000,
     500_000, 1_000_000, 2_500_000, 5_000_000,
 ];
+const MAX_TRANSACTION_DISPATCH_DIAG_WORKERS: usize = 64;
 
 static ENABLED_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 static TRANSACTION_TIMING_ENABLED: AtomicU8 = AtomicU8::new(0);
@@ -218,6 +220,8 @@ static BYE_RECEIVE_TO_200_BUCKETS: [AtomicU64; 18] = [
     AtomicU64::new(0),
 ];
 
+static BYE_TOMBSTONE_TABLE_SIZE_MAX: AtomicU64 = AtomicU64::new(0);
+
 struct LatencyMetric {
     count: AtomicU64,
     sum_us: AtomicU64,
@@ -269,7 +273,40 @@ impl LatencyMetric {
     }
 }
 
+struct WorkerDispatchMetric {
+    queue: LatencyMetric,
+    depth_max: AtomicU64,
+}
+
+impl WorkerDispatchMetric {
+    fn new() -> Self {
+        Self {
+            queue: LatencyMetric::new(),
+            depth_max: AtomicU64::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.queue.reset();
+        self.depth_max.store(0, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self, worker_id: usize) -> TransactionDispatchWorkerSnapshot {
+        TransactionDispatchWorkerSnapshot {
+            worker_id,
+            queue: self.queue.snapshot(),
+            depth_max: self.depth_max.load(Ordering::Relaxed),
+        }
+    }
+}
+
 static TRANSACTION_DISPATCH_QUEUE: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_DISPATCH_QUEUE_INVITE: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_DISPATCH_QUEUE_ACK: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_DISPATCH_QUEUE_BYE: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_DISPATCH_QUEUE_CANCEL: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_DISPATCH_QUEUE_OTHER: LatencyMetric = LatencyMetric::new();
+static TRANSACTION_DISPATCH_QUEUE_WORKERS: OnceLock<Vec<WorkerDispatchMetric>> = OnceLock::new();
 static TRANSACTION_HANDLER_TOTAL: LatencyMetric = LatencyMetric::new();
 static TRANSACTION_HANDLER_INVITE: LatencyMetric = LatencyMetric::new();
 static TRANSACTION_HANDLER_ACK: LatencyMetric = LatencyMetric::new();
@@ -296,6 +333,15 @@ static DIALOG_SESSION_PUBLISH_BYE: LatencyMetric = LatencyMetric::new();
 static DIALOG_SESSION_PUBLISH_OTHER: LatencyMetric = LatencyMetric::new();
 static DIALOG_LOOKUP: LatencyMetric = LatencyMetric::new();
 static DIALOG_INITIAL_INVITE_SETUP: LatencyMetric = LatencyMetric::new();
+static BYE_PATH_UDP_TO_HANDLER: LatencyMetric = LatencyMetric::new();
+static BYE_PATH_TX_RECEIVED_TO_HANDLER: LatencyMetric = LatencyMetric::new();
+static BYE_PATH_HANDLER_TO_SEND_START: LatencyMetric = LatencyMetric::new();
+static BYE_PATH_SEND_RESPONSE: LatencyMetric = LatencyMetric::new();
+static BYE_PATH_RELEASE_TX: LatencyMetric = LatencyMetric::new();
+static BYE_PATH_CLEANUP_EMIT: LatencyMetric = LatencyMetric::new();
+static BYE_PATH_CLEANUP_REMOVE_STORAGE: LatencyMetric = LatencyMetric::new();
+static BYE_TOMBSTONE_LOOKUP: LatencyMetric = LatencyMetric::new();
+static BYE_TOMBSTONE_PRUNE: LatencyMetric = LatencyMetric::new();
 static TERMINATION_CLEANUP_INDEXED_SCAN: LatencyMetric = LatencyMetric::new();
 static TERMINATION_CLEANUP_FULL_SCAN: LatencyMetric = LatencyMetric::new();
 static TERMINATION_CLEANUP_TIMER_UNREGISTER: LatencyMetric = LatencyMetric::new();
@@ -313,6 +359,13 @@ pub struct LatencySnapshot {
     pub p999_us: u64,
     pub max_us: u64,
     pub over_500ms: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TransactionDispatchWorkerSnapshot {
+    pub worker_id: usize,
+    pub queue: LatencySnapshot,
+    pub depth_max: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -385,6 +438,7 @@ pub struct Snapshot {
     pub global_publish_other: u64,
     pub transaction_dispatch_queue_depth_total: u64,
     pub transaction_dispatch_queue_depth_max: u64,
+    pub bye_tombstone_table_size_max: u64,
     pub first_invite_to_200_count: u64,
     pub first_invite_to_200_avg_us: u64,
     pub first_invite_to_200_p50_us: u64,
@@ -408,7 +462,22 @@ pub struct Snapshot {
     pub dialog_to_session_queue_other: u64,
     pub udp_receive_to_incoming_call_emit: LatencySnapshot,
     pub bye_receive_to_200: LatencySnapshot,
+    pub bye_path_udp_to_handler: LatencySnapshot,
+    pub bye_path_tx_received_to_handler: LatencySnapshot,
+    pub bye_path_handler_to_send_start: LatencySnapshot,
+    pub bye_path_send_response: LatencySnapshot,
+    pub bye_path_release_tx: LatencySnapshot,
+    pub bye_path_cleanup_emit: LatencySnapshot,
+    pub bye_path_cleanup_remove_storage: LatencySnapshot,
+    pub bye_tombstone_lookup: LatencySnapshot,
+    pub bye_tombstone_prune: LatencySnapshot,
     pub transaction_dispatch_queue: LatencySnapshot,
+    pub transaction_dispatch_queue_invite: LatencySnapshot,
+    pub transaction_dispatch_queue_ack: LatencySnapshot,
+    pub transaction_dispatch_queue_bye: LatencySnapshot,
+    pub transaction_dispatch_queue_cancel: LatencySnapshot,
+    pub transaction_dispatch_queue_other: LatencySnapshot,
+    pub transaction_dispatch_queue_by_worker: Vec<TransactionDispatchWorkerSnapshot>,
     pub transaction_handler_total: LatencySnapshot,
     pub transaction_handler_invite: LatencySnapshot,
     pub transaction_handler_ack: LatencySnapshot,
@@ -512,6 +581,9 @@ pub fn reset() {
     for metric in transaction_latency_metrics() {
         metric.reset();
     }
+    for metric in transaction_dispatch_worker_metrics() {
+        metric.reset();
+    }
     for metric in dialog_latency_metrics() {
         metric.reset();
     }
@@ -606,6 +678,7 @@ pub fn snapshot() -> Snapshot {
             .load(Ordering::Relaxed),
         transaction_dispatch_queue_depth_max: TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX
             .load(Ordering::Relaxed),
+        bye_tombstone_table_size_max: BYE_TOMBSTONE_TABLE_SIZE_MAX.load(Ordering::Relaxed),
         first_invite_to_200_count: first_count,
         first_invite_to_200_avg_us: if first_count == 0 {
             0
@@ -673,7 +746,26 @@ pub fn snapshot() -> Snapshot {
             &BYE_RECEIVE_TO_200_MAX_US,
             &BYE_RECEIVE_TO_200_OVER_500MS,
         ),
+        bye_path_udp_to_handler: BYE_PATH_UDP_TO_HANDLER.snapshot(),
+        bye_path_tx_received_to_handler: BYE_PATH_TX_RECEIVED_TO_HANDLER.snapshot(),
+        bye_path_handler_to_send_start: BYE_PATH_HANDLER_TO_SEND_START.snapshot(),
+        bye_path_send_response: BYE_PATH_SEND_RESPONSE.snapshot(),
+        bye_path_release_tx: BYE_PATH_RELEASE_TX.snapshot(),
+        bye_path_cleanup_emit: BYE_PATH_CLEANUP_EMIT.snapshot(),
+        bye_path_cleanup_remove_storage: BYE_PATH_CLEANUP_REMOVE_STORAGE.snapshot(),
+        bye_tombstone_lookup: BYE_TOMBSTONE_LOOKUP.snapshot(),
+        bye_tombstone_prune: BYE_TOMBSTONE_PRUNE.snapshot(),
         transaction_dispatch_queue: TRANSACTION_DISPATCH_QUEUE.snapshot(),
+        transaction_dispatch_queue_invite: TRANSACTION_DISPATCH_QUEUE_INVITE.snapshot(),
+        transaction_dispatch_queue_ack: TRANSACTION_DISPATCH_QUEUE_ACK.snapshot(),
+        transaction_dispatch_queue_bye: TRANSACTION_DISPATCH_QUEUE_BYE.snapshot(),
+        transaction_dispatch_queue_cancel: TRANSACTION_DISPATCH_QUEUE_CANCEL.snapshot(),
+        transaction_dispatch_queue_other: TRANSACTION_DISPATCH_QUEUE_OTHER.snapshot(),
+        transaction_dispatch_queue_by_worker: transaction_dispatch_worker_metrics()
+            .iter()
+            .enumerate()
+            .map(|(idx, metric)| metric.snapshot(idx))
+            .collect(),
         transaction_handler_total: TRANSACTION_HANDLER_TOTAL.snapshot(),
         transaction_handler_invite: TRANSACTION_HANDLER_INVITE.snapshot(),
         transaction_handler_ack: TRANSACTION_HANDLER_ACK.snapshot(),
@@ -717,6 +809,8 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
             / snapshot.invite_2xx_ack_removed as f64
             / 1_000_000.0
     };
+    let transaction_dispatch_queue_by_worker =
+        format_transaction_dispatch_workers(&snapshot.transaction_dispatch_queue_by_worker);
     format!(
         "[sip_retrans_diag] dup_invite_existing_tx={} dup_invite_cache_hit={} \
          dup_invite_cache_miss={} invite_2xx_cache_insert={} invite_2xx_cache_expired={} \
@@ -742,7 +836,13 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
          p999_us={} max_us={} over_500ms={} incoming_call={} ack_received={} \
          bye_received={} terminal={} other={}] \
          udp_receive_to_incoming_call_emit=[{}] bye_receive_to_200=[{}] \
-         transaction_dispatch_queue=[{}] transaction_handler=[total=[{}] invite=[{}] \
+         bye_path=[udp_to_handler=[{}] tx_received_to_handler=[{}] \
+         handler_to_send_start=[{}] send_response=[{}] release_tx=[{}] \
+         cleanup_emit=[{}] cleanup_remove_storage=[{}]] \
+         bye_tombstone=[hit={} miss={} table_size_max={} lookup=[{}] prune=[{}]] \
+         transaction_dispatch_queue=[{}] transaction_dispatch_queue_by_kind=[invite=[{}] \
+         ack=[{}] bye=[{}] cancel=[{}] other=[{}]] \
+         transaction_dispatch_queue_by_worker=[{}] transaction_handler=[total=[{}] invite=[{}] \
          ack=[{}] bye=[{}] cancel=[{}] other=[{}]] server_transaction_create=[{}] \
          existing_transaction_dispatch=[{}] transaction_event_broadcast=[{}] \
          transaction_dispatch_backpressure=[{}] \
@@ -845,7 +945,25 @@ pub fn format_summary(snapshot: &Snapshot) -> String {
         snapshot.dialog_to_session_queue_other,
         format_latency(&snapshot.udp_receive_to_incoming_call_emit),
         format_latency(&snapshot.bye_receive_to_200),
+        format_latency(&snapshot.bye_path_udp_to_handler),
+        format_latency(&snapshot.bye_path_tx_received_to_handler),
+        format_latency(&snapshot.bye_path_handler_to_send_start),
+        format_latency(&snapshot.bye_path_send_response),
+        format_latency(&snapshot.bye_path_release_tx),
+        format_latency(&snapshot.bye_path_cleanup_emit),
+        format_latency(&snapshot.bye_path_cleanup_remove_storage),
+        snapshot.duplicate_bye_tombstone_hit,
+        snapshot.duplicate_bye_tombstone_miss,
+        snapshot.bye_tombstone_table_size_max,
+        format_latency(&snapshot.bye_tombstone_lookup),
+        format_latency(&snapshot.bye_tombstone_prune),
         format_latency(&snapshot.transaction_dispatch_queue),
+        format_latency(&snapshot.transaction_dispatch_queue_invite),
+        format_latency(&snapshot.transaction_dispatch_queue_ack),
+        format_latency(&snapshot.transaction_dispatch_queue_bye),
+        format_latency(&snapshot.transaction_dispatch_queue_cancel),
+        format_latency(&snapshot.transaction_dispatch_queue_other),
+        transaction_dispatch_queue_by_worker,
         format_latency(&snapshot.transaction_handler_total),
         format_latency(&snapshot.transaction_handler_invite),
         format_latency(&snapshot.transaction_handler_ack),
@@ -1206,6 +1324,66 @@ pub fn record_bye_receive_to_200(elapsed: Duration) {
     );
 }
 
+pub(crate) fn record_bye_path_udp_to_handler(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_PATH_UDP_TO_HANDLER.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_path_tx_received_to_handler(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_PATH_TX_RECEIVED_TO_HANDLER.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_path_handler_to_send_start(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_PATH_HANDLER_TO_SEND_START.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_path_send_response(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_PATH_SEND_RESPONSE.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_path_release_tx(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_PATH_RELEASE_TX.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_path_cleanup_emit(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_PATH_CLEANUP_EMIT.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_path_cleanup_remove_storage(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_PATH_CLEANUP_REMOVE_STORAGE.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_tombstone_lookup(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_TOMBSTONE_LOOKUP.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_tombstone_prune(elapsed: Duration) {
+    if dialog_timing_enabled() {
+        BYE_TOMBSTONE_PRUNE.record(elapsed);
+    }
+}
+
+pub(crate) fn record_bye_tombstone_observed_size(size: usize) {
+    if dialog_timing_enabled() {
+        update_max(&BYE_TOMBSTONE_TABLE_SIZE_MAX, size as u64);
+    }
+}
+
 pub fn record_udp_receive_to_invite_200(elapsed: Duration) {
     if enabled() {
         UDP_RECEIVE_TO_INVITE_200.record(elapsed);
@@ -1225,6 +1403,35 @@ pub(crate) fn record_transaction_dispatch_queue_depth(depth: usize) {
     let depth = depth as u64;
     TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL.fetch_add(depth, Ordering::Relaxed);
     update_max(&TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX, depth);
+}
+
+pub(crate) fn record_transaction_dispatch_queue_by_worker_and_kind(
+    worker_id: usize,
+    kind: &str,
+    elapsed: Duration,
+    depth: usize,
+) {
+    if !transaction_timing_enabled() {
+        return;
+    }
+
+    TRANSACTION_DISPATCH_QUEUE.record(elapsed);
+    match kind {
+        "invite" => TRANSACTION_DISPATCH_QUEUE_INVITE.record(elapsed),
+        "ack" => TRANSACTION_DISPATCH_QUEUE_ACK.record(elapsed),
+        "bye" => TRANSACTION_DISPATCH_QUEUE_BYE.record(elapsed),
+        "cancel" => TRANSACTION_DISPATCH_QUEUE_CANCEL.record(elapsed),
+        _ => TRANSACTION_DISPATCH_QUEUE_OTHER.record(elapsed),
+    }
+
+    let depth = depth as u64;
+    TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL.fetch_add(depth, Ordering::Relaxed);
+    update_max(&TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX, depth);
+
+    if let Some(worker) = transaction_dispatch_worker_metrics().get(worker_id) {
+        worker.queue.record(elapsed);
+        update_max(&worker.depth_max, depth);
+    }
 }
 
 pub(crate) fn record_transaction_dispatch_backpressure(elapsed: Duration) {
@@ -1411,6 +1618,36 @@ fn format_latency(latency: &LatencySnapshot) -> String {
     )
 }
 
+fn format_transaction_dispatch_workers(workers: &[TransactionDispatchWorkerSnapshot]) -> String {
+    let mut parts = Vec::new();
+    for worker in workers {
+        if worker.queue.count == 0 && worker.depth_max == 0 {
+            continue;
+        }
+        parts.push(format!(
+            "w{}=[{} depth_max={}]",
+            worker.worker_id,
+            format_latency(&worker.queue),
+            worker.depth_max
+        ));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn transaction_dispatch_worker_metrics() -> &'static [WorkerDispatchMetric] {
+    TRANSACTION_DISPATCH_QUEUE_WORKERS
+        .get_or_init(|| {
+            (0..MAX_TRANSACTION_DISPATCH_DIAG_WORKERS)
+                .map(|_| WorkerDispatchMetric::new())
+                .collect()
+        })
+        .as_slice()
+}
+
 fn update_max(counter: &AtomicU64, value: u64) {
     let mut current = counter.load(Ordering::Relaxed);
     while value > current {
@@ -1535,12 +1772,18 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &GLOBAL_PUBLISH_OTHER,
         &TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL,
         &TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX,
+        &BYE_TOMBSTONE_TABLE_SIZE_MAX,
     ]
 }
 
-fn transaction_latency_metrics() -> [&'static LatencyMetric; 16] {
+fn transaction_latency_metrics() -> [&'static LatencyMetric; 21] {
     [
         &TRANSACTION_DISPATCH_QUEUE,
+        &TRANSACTION_DISPATCH_QUEUE_INVITE,
+        &TRANSACTION_DISPATCH_QUEUE_ACK,
+        &TRANSACTION_DISPATCH_QUEUE_BYE,
+        &TRANSACTION_DISPATCH_QUEUE_CANCEL,
+        &TRANSACTION_DISPATCH_QUEUE_OTHER,
         &TRANSACTION_HANDLER_TOTAL,
         &TRANSACTION_HANDLER_INVITE,
         &TRANSACTION_HANDLER_ACK,
@@ -1559,7 +1802,7 @@ fn transaction_latency_metrics() -> [&'static LatencyMetric; 16] {
     ]
 }
 
-fn dialog_latency_metrics() -> [&'static LatencyMetric; 17] {
+fn dialog_latency_metrics() -> [&'static LatencyMetric; 26] {
     [
         &UDP_RECEIVE_TO_INVITE_200,
         &DIALOG_EVENT_DISPATCH_QUEUE,
@@ -1577,6 +1820,15 @@ fn dialog_latency_metrics() -> [&'static LatencyMetric; 17] {
         &DIALOG_SESSION_PUBLISH_OTHER,
         &DIALOG_LOOKUP,
         &DIALOG_INITIAL_INVITE_SETUP,
+        &BYE_PATH_UDP_TO_HANDLER,
+        &BYE_PATH_TX_RECEIVED_TO_HANDLER,
+        &BYE_PATH_HANDLER_TO_SEND_START,
+        &BYE_PATH_SEND_RESPONSE,
+        &BYE_PATH_RELEASE_TX,
+        &BYE_PATH_CLEANUP_EMIT,
+        &BYE_PATH_CLEANUP_REMOVE_STORAGE,
+        &BYE_TOMBSTONE_LOOKUP,
+        &BYE_TOMBSTONE_PRUNE,
         &GLOBAL_PUBLISH_TOTAL,
     ]
 }
@@ -1612,6 +1864,15 @@ mod tests {
         record_transaction_event_broadcast(Duration::from_micros(450));
         record_transaction_dispatch_backpressure(Duration::from_micros(475));
         record_transaction_dispatch_queue_depth(13);
+        record_transaction_dispatch_queue_by_worker_and_kind(
+            2,
+            "bye",
+            Duration::from_micros(500),
+            17,
+        );
+        record_bye_path_send_response(Duration::from_micros(525));
+        record_bye_tombstone_lookup(Duration::from_micros(550));
+        record_bye_tombstone_observed_size(19);
         record_dialog_event_dispatch_queue_delay(Duration::from_micros(80));
         record_dialog_event_handler("invite", Duration::from_micros(90));
         record_dialog_session_publish("incoming_call", Duration::from_micros(110));
@@ -1624,6 +1885,13 @@ mod tests {
         assert_eq!(disabled.transaction_dispatch_queue.count, 0);
         assert_eq!(disabled.transaction_dispatch_backpressure.count, 0);
         assert_eq!(disabled.transaction_dispatch_queue_depth_max, 0);
+        assert_eq!(
+            disabled.transaction_dispatch_queue_by_worker[2].depth_max,
+            0
+        );
+        assert_eq!(disabled.bye_path_send_response.count, 0);
+        assert_eq!(disabled.bye_tombstone_lookup.count, 0);
+        assert_eq!(disabled.bye_tombstone_table_size_max, 0);
         assert_eq!(disabled.transaction_handler_total.count, 0);
         assert_eq!(disabled.server_transaction_create.count, 0);
         assert_eq!(disabled.existing_transaction_dispatch.count, 0);
@@ -1644,6 +1912,15 @@ mod tests {
         record_transaction_event_broadcast(Duration::from_micros(450));
         record_transaction_dispatch_backpressure(Duration::from_micros(475));
         record_transaction_dispatch_queue_depth(13);
+        record_transaction_dispatch_queue_by_worker_and_kind(
+            2,
+            "bye",
+            Duration::from_micros(500),
+            17,
+        );
+        record_bye_path_send_response(Duration::from_micros(525));
+        record_bye_tombstone_lookup(Duration::from_micros(550));
+        record_bye_tombstone_observed_size(19);
         record_dialog_event_dispatch_queue_delay(Duration::from_micros(80));
         record_dialog_event_handler("invite", Duration::from_micros(90));
         record_dialog_session_publish("incoming_call", Duration::from_micros(110));
@@ -1654,6 +1931,13 @@ mod tests {
             0
         );
         assert_eq!(transaction_disabled.transaction_dispatch_queue_depth_max, 0);
+        assert_eq!(
+            transaction_disabled.transaction_dispatch_queue_by_worker[2].depth_max,
+            0
+        );
+        assert_eq!(transaction_disabled.bye_path_send_response.count, 0);
+        assert_eq!(transaction_disabled.bye_tombstone_lookup.count, 0);
+        assert_eq!(transaction_disabled.bye_tombstone_table_size_max, 0);
         assert_eq!(transaction_disabled.transaction_handler_total.count, 0);
         assert_eq!(transaction_disabled.server_transaction_create.count, 0);
         assert_eq!(transaction_disabled.existing_transaction_dispatch.count, 0);
@@ -1698,6 +1982,12 @@ mod tests {
         record_transaction_event_broadcast(Duration::from_micros(450));
         record_transaction_dispatch_backpressure(Duration::from_micros(475));
         record_transaction_dispatch_queue_depth(9);
+        record_transaction_dispatch_queue_by_worker_and_kind(
+            2,
+            "bye",
+            Duration::from_micros(500),
+            11,
+        );
         record_dialog_event_dispatch_queue_delay(Duration::from_micros(75));
         record_dialog_event_dispatch_backpressure(Duration::from_micros(80));
         record_dialog_event_handler("invite", Duration::from_micros(100));
@@ -1711,6 +2001,16 @@ mod tests {
         record_dialog_session_publish("other", Duration::from_micros(275));
         record_dialog_lookup(Duration::from_micros(325));
         record_dialog_initial_invite_setup(Duration::from_micros(375));
+        record_bye_path_udp_to_handler(Duration::from_micros(385));
+        record_bye_path_tx_received_to_handler(Duration::from_micros(395));
+        record_bye_path_handler_to_send_start(Duration::from_micros(405));
+        record_bye_path_send_response(Duration::from_micros(415));
+        record_bye_path_release_tx(Duration::from_micros(425));
+        record_bye_path_cleanup_emit(Duration::from_micros(435));
+        record_bye_path_cleanup_remove_storage(Duration::from_micros(445));
+        record_bye_tombstone_lookup(Duration::from_micros(455));
+        record_bye_tombstone_prune(Duration::from_micros(465));
+        record_bye_tombstone_observed_size(17);
         record_dialog_route("request", "invite", true);
         record_dialog_route("stored", "lifecycle", false);
         record_termination_cleanup_enqueued();
@@ -1742,7 +2042,16 @@ mod tests {
         assert_eq!(snapshot.udp_receive_to_incoming_call_emit.count, 1);
         assert_eq!(snapshot.bye_receive_to_200.count, 1);
         assert_eq!(snapshot.udp_receive_to_invite_200.count, 1);
-        assert_eq!(snapshot.transaction_dispatch_queue.count, 1);
+        assert_eq!(snapshot.transaction_dispatch_queue.count, 2);
+        assert_eq!(snapshot.transaction_dispatch_queue_bye.count, 1);
+        assert_eq!(
+            snapshot.transaction_dispatch_queue_by_worker[2].queue.count,
+            1
+        );
+        assert_eq!(
+            snapshot.transaction_dispatch_queue_by_worker[2].depth_max,
+            11
+        );
         assert_eq!(snapshot.transaction_handler_total.count, 5);
         assert_eq!(snapshot.transaction_handler_invite.count, 1);
         assert_eq!(snapshot.transaction_handler_ack.count, 1);
@@ -1753,8 +2062,8 @@ mod tests {
         assert_eq!(snapshot.existing_transaction_dispatch.count, 1);
         assert_eq!(snapshot.transaction_event_broadcast.count, 1);
         assert_eq!(snapshot.transaction_dispatch_backpressure.count, 1);
-        assert_eq!(snapshot.transaction_dispatch_queue_depth_total, 9);
-        assert_eq!(snapshot.transaction_dispatch_queue_depth_max, 9);
+        assert_eq!(snapshot.transaction_dispatch_queue_depth_total, 20);
+        assert_eq!(snapshot.transaction_dispatch_queue_depth_max, 11);
         assert_eq!(snapshot.dialog_event_dispatch_queue.count, 1);
         assert_eq!(snapshot.dialog_event_dispatch_backpressure.count, 1);
         assert_eq!(snapshot.dialog_event_handler_total.count, 5);
@@ -1774,6 +2083,12 @@ mod tests {
         assert_eq!(snapshot.dialog_route_stored, 1);
         assert_eq!(snapshot.dialog_route_worker_mismatch, 1);
         assert_eq!(snapshot.dialog_route_lifecycle, 1);
+        assert_eq!(snapshot.bye_path_udp_to_handler.count, 1);
+        assert_eq!(snapshot.bye_path_send_response.count, 1);
+        assert_eq!(snapshot.bye_path_cleanup_remove_storage.count, 1);
+        assert_eq!(snapshot.bye_tombstone_lookup.count, 1);
+        assert_eq!(snapshot.bye_tombstone_prune.count, 1);
+        assert_eq!(snapshot.bye_tombstone_table_size_max, 17);
         assert_eq!(snapshot.termination_cleanup_enqueued, 1);
         assert_eq!(snapshot.termination_cleanup_queue_full, 1);
         assert_eq!(snapshot.termination_cleanup_worker_spawned, 1);
@@ -1800,8 +2115,13 @@ mod tests {
         assert!(summary.contains("dup_bye_tombstone_hit=1"));
         assert!(summary.contains("udp_receive_to_incoming_call_emit=[count=1"));
         assert!(summary.contains("bye_receive_to_200=[count=1"));
-        assert!(summary.contains("transaction_dispatch_queue=[count=1"));
-        assert!(summary.contains("transaction_dispatch_queue_depth=[total=9 max=9]"));
+        assert!(summary.contains("transaction_dispatch_queue=[count=2"));
+        assert!(summary.contains("bye_path=[udp_to_handler=[count=1"));
+        assert!(summary.contains("bye_tombstone=[hit=1 miss=1 table_size_max=17"));
+        assert!(summary.contains("transaction_dispatch_queue_depth=[total=20 max=11]"));
+        assert!(summary.contains("transaction_dispatch_queue_by_kind=[invite=[count=0"));
+        assert!(summary.contains("bye=[count=1"));
+        assert!(summary.contains("transaction_dispatch_queue_by_worker=[w2=[count=1"));
         assert!(summary.contains("transaction_dispatch_backpressure=[count=1"));
         assert!(summary.contains("transaction_handler=[total=[count=5"));
         assert!(summary.contains("udp_receive_to_invite_200=[count=1"));
