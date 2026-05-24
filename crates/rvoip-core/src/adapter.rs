@@ -1,6 +1,6 @@
 use crate::capability::{CapabilityDescriptor, NegotiatedCodecs};
 use crate::connection::{Connection, Direction, Transport};
-use crate::error::Result;
+use crate::error::{Result, RvoipError};
 use crate::identity::{IdentityAssurance, Jwk};
 use crate::ids::{ConnectionId, ParticipantId, SessionId};
 use crate::message::Message;
@@ -76,6 +76,22 @@ pub enum AdapterEvent {
     Connected {
         connection_id: ConnectionId,
     },
+    /// Per-Connection auth completion. UCTP-family adapters emit this
+    /// immediately after `InboundConnection` once they've matched the
+    /// peer's auth handshake (CONVERSATION_PROTOCOL.md §5.1
+    /// `auth.hello → auth.response → auth.session`) to the just-created
+    /// Connection. Carries the server-issued `identity_id` and the
+    /// peer's `participant_id`, plus the negotiated assurance gradient
+    /// (plan §7 G1 / A1 + A3). SIP / WebRTC adapters that don't run a
+    /// UCTP-style handshake never emit this variant; consumers should
+    /// treat its absence as "auth model not applicable" rather than
+    /// "auth failed".
+    Authenticated {
+        connection_id: ConnectionId,
+        identity_id: String,
+        participant_id: String,
+        assurance: crate::identity::IdentityAssurance,
+    },
     Ended {
         connection_id: ConnectionId,
         reason: EndReason,
@@ -83,6 +99,23 @@ pub enum AdapterEvent {
     Failed {
         connection_id: ConnectionId,
         detail: String,
+    },
+    /// DTMF digits decoded from an inbound `connection.dtmf` envelope
+    /// (UCTP-family adapters) or RTP RFC 2833 event (SIP). The
+    /// orchestrator translates this into [`crate::events::Event::DtmfReceived`].
+    /// Plan C2.
+    Dtmf {
+        connection_id: ConnectionId,
+        digits: String,
+        duration_ms: u32,
+    },
+    /// Per-Stream media-quality snapshot the peer or adapter reported
+    /// (UCTP-family: from a `connection.quality` envelope; SIP: from
+    /// RTCP receiver reports). The orchestrator translates this into
+    /// [`crate::events::Event::MediaQuality`]. Plan C2.
+    Quality {
+        connection_id: ConnectionId,
+        snapshot: crate::stream::QualitySnapshot,
     },
     Native {
         kind: &'static str,
@@ -107,6 +140,41 @@ pub trait ConnectionAdapter: Send + Sync {
     async fn transfer(&self, conn: ConnectionId, target: TransferTarget) -> Result<()>;
 
     async fn streams(&self, conn: ConnectionId) -> Result<Vec<Arc<dyn MediaStream>>>;
+
+    /// Allocate a fresh per-`(subscriber, publisher_strm)` MediaStream for
+    /// the multi-party fanout path (plan §12 MP3c / G4). Required so a
+    /// subscriber in an N-party room can demultiplex datagrams from
+    /// multiple upstream publishers via distinct `stream_local_id`s on
+    /// the wire — without this, all publishers land on the subscriber's
+    /// default stream and the audio mixes at the jitter buffer.
+    ///
+    /// The default implementation returns
+    /// [`RvoipError::NotImplemented`] so non-UCTP adapters (SIP,
+    /// WebRTC) — which don't carry multi-party fanout responsibility —
+    /// can stay unchanged. UCTP-family adapters override this to:
+    /// 1. Allocate a fresh `stream_local_id` on the subscriber's
+    ///    substrate connection.
+    /// 2. Construct a directional `MediaStream` with that id.
+    /// 3. Register it in the per-peer streams map so subsequent
+    ///    [`Self::streams`] calls return it and inbound datagrams on
+    ///    that id route correctly (subscribers may publish back).
+    /// 4. Emit a `stream.opened` envelope to the peer announcing the
+    ///    new id per CONVERSATION_PROTOCOL.md §10.1 multi-party note.
+    ///
+    /// `Orchestrator::fanout_frame` falls back to the legacy
+    /// pick-by-kind behavior when this returns `NotImplemented`, so
+    /// single-publisher rooms keep working everywhere.
+    async fn allocate_subscriber_stream(
+        &self,
+        _subscriber: ConnectionId,
+        _kind: crate::stream::StreamKind,
+        _codec: crate::capability::CodecInfo,
+    ) -> Result<Arc<dyn MediaStream>> {
+        Err(RvoipError::NotImplemented(
+            "ConnectionAdapter::allocate_subscriber_stream",
+        ))
+    }
+
     async fn send_message(&self, conn: ConnectionId, message: Message) -> Result<()>;
     async fn send_dtmf(&self, conn: ConnectionId, digits: &str, duration_ms: u32) -> Result<()>;
     async fn renegotiate_media(

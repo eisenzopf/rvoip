@@ -182,7 +182,10 @@ impl SubscriptionRegistry {
 /// Rich publisher metadata. v0.x MP2 stored only the `ConnectionId`;
 /// MP2.5 extended this to support `from_participant` and `kinds`-form
 /// subscriptions by carrying the participant_id and the Stream's kind
-/// (audio/video/data) alongside.
+/// (audio/video/data) alongside. MP3c (plan B1) adds the negotiated
+/// codec so [`crate::Orchestrator::fanout_frame`] can hand the right
+/// `CodecInfo` to the subscriber-side adapter when allocating a fresh
+/// per-subscription MediaStream.
 #[derive(Clone, Debug)]
 pub struct PublisherEntry {
     pub connection: ConnectionId,
@@ -193,6 +196,12 @@ pub struct PublisherEntry {
     /// The Stream's `kind` (`"audio"`, `"video"`, `"data"`). Powers
     /// the `kinds` filter on `stream.subscribe` requests.
     pub kind: String,
+    /// The codec the publisher negotiated for this Stream. Populated
+    /// from the chosen codec in `negotiate_streams`' answer. `None`
+    /// means the publisher's coordinator never propagated codec info
+    /// (older test paths, or future stream kinds where codec doesn't
+    /// apply); fanout falls back to [`crate::capability::default_audio_codec`].
+    pub codec: Option<crate::capability::CodecInfo>,
 }
 
 /// `(SessionId, strm_id-string) -> PublisherEntry`.

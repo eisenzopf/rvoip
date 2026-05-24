@@ -23,6 +23,7 @@ members = [
     "crates/rvoip-quic",
     "crates/rvoip-webtransport",
     "crates/rvoip-websocket",
+    "crates/rvoip-webrtc",
     "crates/auth-core",
 ]
 
@@ -32,6 +33,7 @@ members = [
 # been removed. The directory stays on disk; resume membership by
 # putting `crates/orchestration-core` back in `members` once the
 # orchestrator is migrated to the new builder API.
+#
 exclude = [
     "crates/orchestration-core",
 ]
@@ -168,7 +170,9 @@ rvoip-uctp = { path = "crates/rvoip-uctp", version = "0.1.26" }
 rvoip-quic = { path = "crates/rvoip-quic", version = "0.1.26" }
 rvoip-webtransport = { path = "crates/rvoip-webtransport", version = "0.1.26" }
 rvoip-websocket = { path = "crates/rvoip-websocket", version = "0.1.26" }
+rvoip-webrtc = { path = "crates/rvoip-webrtc", version = "0.1.26" }
 rvoip-auth-core = { path = "crates/auth-core", version = "0.1.0" }
+rtc = "=0.20.0-alpha.1"
 
 # External dependencies
 tokio = { version = "1.36", features = ["full"] }

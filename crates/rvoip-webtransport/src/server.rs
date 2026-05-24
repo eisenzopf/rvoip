@@ -52,6 +52,7 @@ impl UctpWtServer {
         quinn_stats_interval: Duration,
         subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
         orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+        coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     ) -> Arc<Self> {
         tokio::spawn(async move {
             while let Some(conn) = accept_rx.recv().await {
@@ -63,6 +64,7 @@ impl UctpWtServer {
                 let routes = Arc::clone(&routes);
                 let subscription_handler = subscription_handler.clone();
                 let orchestrator = orchestrator.clone();
+                let caps = coordinator_caps.clone();
                 tokio::spawn(spawn_peer_session(
                     conn,
                     bearer,
@@ -74,6 +76,7 @@ impl UctpWtServer {
                     quinn_stats_interval,
                     subscription_handler,
                     orchestrator,
+                    caps,
                 ));
             }
             debug!("rvoip-webtransport::server: accept loop exiting");
@@ -117,6 +120,7 @@ async fn spawn_peer_session(
     quinn_stats_interval: Duration,
     subscription_handler: Option<Arc<dyn rvoip_uctp::state::SubscriptionHandler>>,
     orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
 ) {
     let peer_addr = conn.remote_address();
     info!(%peer_addr, "rvoip-webtransport: new connection");
@@ -175,7 +179,7 @@ async fn spawn_peer_session(
     let reader_spawned = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let _coord = match subscription_handler {
-        Some(handler) => UctpCoordinator::start_full(
+        Some(handler) => UctpCoordinator::start_full_with_caps(
             "webtransport",
             in_rx,
             out_tx,
@@ -183,8 +187,18 @@ async fn spawn_peer_session(
             bearer,
             Arc::new(rvoip_uctp::state::default_v0_descriptor()),
             handler,
+            coordinator_caps,
         ),
-        None => UctpCoordinator::start("webtransport", in_rx, out_tx, coord_events_tx, bearer),
+        None => UctpCoordinator::start_full_with_caps(
+            "webtransport",
+            in_rx,
+            out_tx,
+            coord_events_tx,
+            bearer,
+            Arc::new(rvoip_uctp::state::default_v0_descriptor()),
+            rvoip_uctp::state::rejecting_handler(),
+            coordinator_caps,
+        ),
     };
 
     let in_tx_for_pump = in_tx.clone();
@@ -224,12 +238,28 @@ async fn spawn_peer_session(
         let streams_router = Arc::clone(&streams_router);
         let reader_spawned = Arc::clone(&reader_spawned);
         tokio::spawn(async move {
+            // Per-peer auth state; consumed by the InboundInvite arm to
+            // emit a synthetic `AdapterEvent::Authenticated` carrying
+            // the just-created Connection's id. Plan §7 G1 / A3.
+            let mut latest_auth: Option<(
+                String,
+                String,
+                rvoip_core::identity::IdentityAssurance,
+            )> = None;
+
             while let Some(event) = coord_events_rx.recv().await {
-                let adapter_event = match event {
-                    UctpSessionEvent::Authenticated { .. } => AdapterEvent::Native {
-                        kind: "uctp.authenticated",
-                        detail: "bearer".into(),
-                    },
+                let adapter_event: Option<AdapterEvent> = match event {
+                    UctpSessionEvent::Authenticated {
+                        identity_id,
+                        participant_id,
+                        assurance,
+                    } => {
+                        latest_auth = Some((identity_id, participant_id, assurance));
+                        Some(AdapterEvent::Native {
+                            kind: "uctp.authenticated",
+                            detail: "bearer".into(),
+                        })
+                    }
                     UctpSessionEvent::InboundInvite { sid, from, .. } => {
                         let (id, mut connection) =
                             build_connection(conn_for_translator.clone(), sid.clone(), from);
@@ -275,54 +305,98 @@ async fn spawn_peer_session(
                                 sid: sid.to_string(),
                                 out_tx: route_out_tx.clone(),
                                 streams: route_streams,
+                                session: session_for_translator.clone(),
+                                next_local_id: Arc::new(
+                                    std::sync::atomic::AtomicU16::new(2),
+                                ),
+                                streams_router: Arc::clone(&streams_router),
                             },
                         );
-                        AdapterEvent::InboundConnection { connection }
+                        let _ = events_tx
+                            .send(AdapterEvent::InboundConnection { connection })
+                            .await;
+                        if let Some((identity_id, participant_id, assurance)) =
+                            latest_auth.clone()
+                        {
+                            let _ = events_tx
+                                .send(AdapterEvent::Authenticated {
+                                    connection_id: id,
+                                    identity_id,
+                                    participant_id,
+                                    assurance,
+                                })
+                                .await;
+                        }
+                        None
                     }
                     UctpSessionEvent::SessionConnected { sid } => {
                         match by_uctp_sid.get(sid.as_str()).map(|r| r.clone()) {
-                            Some(connection_id) => AdapterEvent::Connected { connection_id },
-                            None => AdapterEvent::Native {
+                            Some(connection_id) => {
+                                Some(AdapterEvent::Connected { connection_id })
+                            }
+                            None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_connected_orphan",
                                 detail: sid.to_string(),
-                            },
+                            }),
                         }
                     }
                     UctpSessionEvent::ConnectionConnected { connid, .. } => {
-                        AdapterEvent::Connected { connection_id: connid }
+                        Some(AdapterEvent::Connected { connection_id: connid })
                     }
                     UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
-                        AdapterEvent::Ended {
+                        Some(AdapterEvent::Ended {
                             connection_id: connid,
                             reason: EndReason::Failed { detail: reason },
-                        }
+                        })
                     }
                     UctpSessionEvent::SessionEnded { sid, reason } => {
                         match by_uctp_sid.remove(sid.as_str()) {
                             Some((_, connection_id)) => {
                                 by_connection.remove(&connection_id);
                                 routes.remove(&connection_id);
-                                AdapterEvent::Ended {
+                                Some(AdapterEvent::Ended {
                                     connection_id,
                                     reason: if reason == "cancelled" {
                                         EndReason::Cancelled
                                     } else {
                                         EndReason::Normal
                                     },
-                                }
+                                })
                             }
-                            None => AdapterEvent::Native {
+                            None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_ended_orphan",
                                 detail: format!("sid={} reason={}", sid, reason),
-                            },
+                            }),
                         }
                     }
-                    other => AdapterEvent::Native {
+                    UctpSessionEvent::Dtmf {
+                        connid,
+                        digits,
+                        duration_ms,
+                        method: _,
+                    } => Some(AdapterEvent::Dtmf {
+                        connection_id: connid,
+                        digits,
+                        duration_ms,
+                    }),
+                    UctpSessionEvent::Quality {
+                        connid,
+                        strm_id: _,
+                        snapshot,
+                        rtt_ms: _,
+                        bitrate_bps: _,
+                    } => Some(AdapterEvent::Quality {
+                        connection_id: connid,
+                        snapshot,
+                    }),
+                    other => Some(AdapterEvent::Native {
                         kind: "uctp.internal",
                         detail: format!("{:?}", other),
-                    },
+                    }),
                 };
-                let _ = events_tx.send(adapter_event).await;
+                if let Some(ev) = adapter_event {
+                    let _ = events_tx.send(ev).await;
+                }
             }
         })
     };

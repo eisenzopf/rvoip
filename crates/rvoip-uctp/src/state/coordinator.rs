@@ -19,6 +19,7 @@ use rvoip_auth_core::BearerValidator;
 use rvoip_core::capability::{
     negotiate_streams, CapabilityDescriptor, CodecInfo, NegotiationOutcome, StreamOffer,
 };
+use rvoip_core::identity::IdentityAssurance;
 use crate::envelope::UctpEnvelope;
 use crate::errors::{Result, UctpError};
 use crate::ids::{ConnectionId, EnvelopeId, SessionId};
@@ -38,10 +39,68 @@ pub type TransportLabel = &'static str;
 /// Channel capacities per design doc §3.5 / §4.4.
 pub const ENVELOPE_CHANNEL_CAP: usize = 256;
 
-/// Soft timeout for outbound signaling sends. If `out_tx.send` is pending
-/// for longer than this, the writer is treated as wedged and the
-/// coordinator triggers its shutdown choreography (design doc §3.5).
+/// Default soft timeout for outbound signaling sends. If `out_tx.send`
+/// is pending for longer than this, the writer is treated as wedged
+/// and the coordinator triggers its shutdown choreography (design doc
+/// §3.5). Production deployments on slow/embedded hosts may want to
+/// raise this — pass a [`UctpCoordinatorCaps`] with a different
+/// `signaling_send_timeout` to [`UctpCoordinator::start_full_with_caps`].
 pub const SIGNALING_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Default per-peer Session cap. A coordinator that has more than this
+/// many `Inviting`/`Active`/`Ending` sessions refuses further
+/// `session.invite` envelopes with `error 429 too-many-sessions`. v0.x
+/// D1 — protects the coordinator's `sessions` `DashMap` from
+/// unauthenticated- or runaway-peer flooding. 32 is generous for
+/// realistic call-center / mesh-conferencing workloads; deployments
+/// with extreme N-party rooms can override via
+/// [`UctpCoordinatorCaps`].
+pub const MAX_SESSIONS_PER_PEER: usize = 32;
+
+/// Per-peer resource caps for a [`UctpCoordinator`] instance. Exposed
+/// via [`UctpCoordinator::start_full_with_caps`] for adapters that
+/// want non-default tuning. Both fields have safe defaults from
+/// [`SIGNALING_SEND_TIMEOUT`] / [`MAX_SESSIONS_PER_PEER`], so callers
+/// that don't care can keep using the existing [`start`] /
+/// [`start_full`] entry points.
+#[derive(Clone, Debug)]
+pub struct UctpCoordinatorCaps {
+    /// Soft timeout for outbound signaling sends. See [`SIGNALING_SEND_TIMEOUT`].
+    pub signaling_send_timeout: Duration,
+    /// Maximum Sessions per peer. Excess invites get `error 429`. See
+    /// [`MAX_SESSIONS_PER_PEER`].
+    pub max_sessions_per_peer: usize,
+}
+
+impl Default for UctpCoordinatorCaps {
+    fn default() -> Self {
+        Self {
+            signaling_send_timeout: SIGNALING_SEND_TIMEOUT,
+            max_sessions_per_peer: MAX_SESSIONS_PER_PEER,
+        }
+    }
+}
+
+/// Per-peer auth state tracked on the coordinator. Every envelope other
+/// than `auth.hello` / `auth.response` (and unknown types, which are
+/// silently dropped) requires `Authenticated`; `Unauthenticated` peers
+/// get `error 401 auth/unauthenticated`.
+///
+/// With the v0 `bearer_stub` validator this is mostly cosmetic — any
+/// non-empty token authenticates. The gating exists so the day real
+/// DPoP / JWT / AAuth validators land in `auth-core`, the wire flow
+/// already refuses session/connection envelopes from peers that haven't
+/// completed the `auth.hello → auth.response → auth.session` handshake.
+/// See plan §7 / G1.
+#[derive(Clone, Debug)]
+enum PeerAuthState {
+    Unauthenticated,
+    Authenticated {
+        identity_id: String,
+        participant_id: String,
+        assurance: IdentityAssurance,
+    },
+}
 
 pub struct UctpCoordinator {
     transport: TransportLabel,
@@ -68,6 +127,17 @@ pub struct UctpCoordinator {
     /// (or similar) at construction. Default [`RejectingHandler`]
     /// preserves the legacy v0 503 reject.
     subscription_handler: Arc<dyn SubscriptionHandler>,
+    /// Per-peer auth state (plan §7 G1). Transitions
+    /// `Unauthenticated → Authenticated { .. }` in [`handle_auth_response`]
+    /// on a successful bearer validation; consulted by every non-auth
+    /// envelope dispatch to refuse traffic from un-authed peers with
+    /// `error 401 auth/unauthenticated`.
+    peer_auth: Arc<Mutex<PeerAuthState>>,
+    /// Per-coordinator resource caps. Set at construction via
+    /// [`Self::start_full_with_caps`]; defaults from
+    /// [`UctpCoordinatorCaps::default`] for the legacy entry points.
+    /// Plan D1 / D2.
+    caps: UctpCoordinatorCaps,
 }
 
 /// Default permissive v0 descriptor — supports the codecs every v0 demo
@@ -161,6 +231,34 @@ impl UctpCoordinator {
         local_descriptor: Arc<CapabilityDescriptor>,
         subscription_handler: Arc<dyn SubscriptionHandler>,
     ) -> Arc<Self> {
+        Self::start_full_with_caps(
+            transport,
+            in_rx,
+            out_tx,
+            events_tx,
+            bearer,
+            local_descriptor,
+            subscription_handler,
+            UctpCoordinatorCaps::default(),
+        )
+    }
+
+    /// Spawn the coordinator with full configuration plus per-peer
+    /// resource caps (plan D1 / D2). Adapters that want non-default
+    /// tuning — slower hosts that need a longer signaling send
+    /// timeout, or N-party rooms that exceed the default session
+    /// cap — go through this entry point. Other callers should use
+    /// [`Self::start_full`] which delegates here with defaults.
+    pub fn start_full_with_caps(
+        transport: TransportLabel,
+        in_rx: mpsc::Receiver<UctpEnvelope>,
+        out_tx: mpsc::Sender<UctpEnvelope>,
+        events_tx: mpsc::Sender<UctpSessionEvent>,
+        bearer: Arc<dyn BearerValidator>,
+        local_descriptor: Arc<CapabilityDescriptor>,
+        subscription_handler: Arc<dyn SubscriptionHandler>,
+        caps: UctpCoordinatorCaps,
+    ) -> Arc<Self> {
         let cancel = CancellationToken::new();
         let coord = Arc::new(Self {
             transport,
@@ -174,6 +272,8 @@ impl UctpCoordinator {
             local_descriptor,
             pending: Arc::new(Pending::new()),
             subscription_handler,
+            peer_auth: Arc::new(Mutex::new(PeerAuthState::Unauthenticated)),
+            caps,
         });
 
         let driver = Arc::clone(&coord);
@@ -350,23 +450,70 @@ impl UctpCoordinator {
 
     async fn dispatch_inner(&self, env: UctpEnvelope) -> Result<()> {
         match env.msg_type.clone() {
+            // Auth envelopes are the one class that runs pre-auth — the
+            // four-envelope handshake from CONVERSATION_PROTOCOL.md §5.1
+            // (`auth.hello → auth.challenge → auth.response → auth.session`)
+            // is exactly how peers establish auth state.
             MessageType::AuthHello => self.handle_auth_hello(env).await,
             MessageType::AuthResponse => self.handle_auth_response(env).await,
-            MessageType::SessionInvite => self.handle_session_invite(env).await,
-            MessageType::SessionAccept => self.handle_session_accept(env).await,
-            MessageType::SessionCancel => self.handle_session_cancel(env).await,
-            MessageType::SessionEnd | MessageType::ConnectionEnd => self.handle_end(env).await,
-            MessageType::ConnectionOffer => self.handle_connection_offer(env).await,
-            MessageType::ConnectionAnswer => self.handle_connection_answer(env).await,
-            MessageType::ConnectionReady => self.handle_connection_ready(env).await,
-            MessageType::StreamSubscribe => self.handle_stream_subscribe(env).await,
-            MessageType::StreamUnsubscribe => self.handle_stream_unsubscribe(env).await,
-            MessageType::Unknown(_) => {
-                // §3.2 of the spec: silently ignore unknown types.
-                Ok(())
+            // §3.2 of the spec: silently ignore unknown types — applies
+            // regardless of auth so a forward-compat extension envelope
+            // sent before auth completes can't be misread as a 401 trigger.
+            MessageType::Unknown(_) => Ok(()),
+            // Everything else: refuse from un-authed peers (plan §7 G1).
+            other => {
+                if !self.require_authenticated(&env).await? {
+                    return Ok(());
+                }
+                match other {
+                    MessageType::SessionInvite => self.handle_session_invite(env).await,
+                    MessageType::SessionAccept => self.handle_session_accept(env).await,
+                    MessageType::SessionCancel => self.handle_session_cancel(env).await,
+                    MessageType::SessionEnd | MessageType::ConnectionEnd => {
+                        self.handle_end(env).await
+                    }
+                    MessageType::ConnectionOffer => self.handle_connection_offer(env).await,
+                    MessageType::ConnectionAnswer => self.handle_connection_answer(env).await,
+                    MessageType::ConnectionReady => self.handle_connection_ready(env).await,
+                    MessageType::StreamSubscribe => self.handle_stream_subscribe(env).await,
+                    MessageType::StreamUnsubscribe => self.handle_stream_unsubscribe(env).await,
+                    MessageType::DtmfSend => self.handle_dtmf_send(env).await,
+                    MessageType::ConnectionQuality => self.handle_connection_quality(env).await,
+                    MessageType::AuthRefresh => self.handle_auth_refresh(env).await,
+                    _ => Ok(()),
+                }
             }
-            _ => Ok(()),
         }
+    }
+
+    /// Returns `true` if the peer has completed the auth handshake.
+    /// Otherwise emits an `error 401 auth/unauthenticated` envelope
+    /// (correlated to the offending envelope's id and carrying its sid
+    /// / connid for caller diagnostics) and returns `false` so the
+    /// caller can short-circuit the handler.
+    async fn require_authenticated(&self, env: &UctpEnvelope) -> Result<bool> {
+        let is_authed = matches!(
+            &*self.peer_auth.lock(),
+            PeerAuthState::Authenticated { .. }
+        );
+        if is_authed {
+            return Ok(true);
+        }
+        warn!(
+            transport = %self.transport,
+            envelope = %env.msg_type,
+            "uctp.coordinator: refusing envelope from un-authed peer"
+        );
+        self.emit_error_full(
+            env.id.clone(),
+            401,
+            "auth",
+            "unauthenticated",
+            env.sid.clone(),
+            env.connid.clone(),
+        )
+        .await?;
+        Ok(false)
     }
 
     async fn send_out(&self, env: UctpEnvelope) -> Result<()> {
@@ -385,9 +532,16 @@ impl UctpCoordinator {
         self.metric("uctp_envelopes_total", "out", &msg_type_label);
         // Backpressure (§3.5): signaling channel never drops; await
         // with a soft timeout. If the substrate writer is wedged for
-        // longer than SIGNALING_SEND_TIMEOUT, treat the connection as
-        // unrecoverable: log, trigger shutdown, and surface Closed.
-        match tokio::time::timeout(SIGNALING_SEND_TIMEOUT, self.out_tx.send(env)).await {
+        // longer than `caps.signaling_send_timeout`, treat the
+        // connection as unrecoverable: log, trigger shutdown, and
+        // surface Closed. (Plan D2 — was a hard-coded const; now
+        // configurable per-coordinator via [`UctpCoordinatorCaps`].)
+        match tokio::time::timeout(
+            self.caps.signaling_send_timeout,
+            self.out_tx.send(env),
+        )
+        .await
+        {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(UctpError::Closed),
             Err(_) => {
@@ -510,6 +664,14 @@ impl UctpCoordinator {
                     assurance: assurance_label(&assurance).into(),
                     reachability: Vec::new(),
                 };
+                // Flip the per-peer auth gate (plan §7 G1). Subsequent
+                // session/connection/stream envelopes from this peer now
+                // pass `require_authenticated`.
+                *self.peer_auth.lock() = PeerAuthState::Authenticated {
+                    identity_id: session.identity_id.clone(),
+                    participant_id: session.participant_id.clone(),
+                    assurance: assurance.clone(),
+                };
                 let reply = UctpEnvelope::new(
                     MessageType::AuthSession,
                     serde_json::to_value(&session)?,
@@ -537,7 +699,7 @@ impl UctpCoordinator {
             .sid
             .clone()
             .ok_or(UctpError::MissingField("sid"))?;
-        let sid = SessionId::from_string(sid_str);
+        let sid = SessionId::from_string(sid_str.clone());
 
         let span = info_span!(
             "uctp.session.invite",
@@ -545,6 +707,32 @@ impl UctpCoordinator {
             from = %payload.from,
             transport = %self.transport,
         );
+
+        // D1: per-peer Session cap. A peer that floods invites can
+        // balloon the `sessions` DashMap; refuse new sessions over the
+        // configured cap with `error 429 too-many-sessions`.
+        // Idempotency: an invite for an *existing* sid (retransmit, or
+        // mid-flight cross-traffic) is still accepted so we don't
+        // break the §7.2 lifecycle on a duplicate.
+        if !self.sessions.contains_key(&sid)
+            && self.sessions.len() >= self.caps.max_sessions_per_peer
+        {
+            warn!(
+                transport = %self.transport,
+                limit = self.caps.max_sessions_per_peer,
+                "uctp.coordinator: refusing session.invite — peer over session cap"
+            );
+            return self
+                .emit_error_full(
+                    env.id.clone(),
+                    429,
+                    "rate-limit",
+                    "too-many-sessions",
+                    Some(sid_str),
+                    None,
+                )
+                .await;
+        }
 
         self.sessions
             .entry(sid.clone())
@@ -663,6 +851,19 @@ impl UctpCoordinator {
                     .await;
             }
             NegotiationOutcome::Ok(negotiated) => {
+                // C5: open the per-Connection lifetime span here so
+                // every subsequent envelope on this connid nests under
+                // it. The span lives on the ConnectionMachine and
+                // closes when the machine is dropped from
+                // `connections` at end-of-call.
+                let lifetime_span = info_span!(
+                    "uctp.connection.lifetime",
+                    connid = %connid,
+                    sid = ?env.sid,
+                    transport = %self.transport,
+                );
+                let _lifetime_enter = lifetime_span.clone().entered();
+
                 // Enter the negotiate span synchronously — the rest of
                 // this handler does no awaits, so `.entered()` is safe.
                 let _span = info_span!(
@@ -689,10 +890,11 @@ impl UctpCoordinator {
                         participant: publisher_participant.clone(),
                     })
                     .collect();
-                let machine_ref = self
-                    .connections
-                    .entry(connid)
-                    .or_insert_with(|| Mutex::new(ConnectionMachine::new_negotiating()));
+                let machine_ref = self.connections.entry(connid).or_insert_with(|| {
+                    Mutex::new(ConnectionMachine::new_negotiating_with_span(
+                        lifetime_span.clone(),
+                    ))
+                });
                 machine_ref.lock().set_pending_streams(accepted);
                 drop(machine_ref);
                 self.refresh_gauges();
@@ -713,9 +915,17 @@ impl UctpCoordinator {
         if !self.connections.contains_key(&connid) {
             return self.not_found(&env, "unknown-connid").await;
         }
+        // C5: do the state transition inside `lifetime.in_scope` so
+        // this handler's tracing nests under the per-Connection span.
+        // No `.entered()` guard here — `in_scope` confines the span to
+        // a sync closure that holds the MutexGuard, which is safe
+        // because the closure doesn't await.
         let machine = self.connections.get(&connid).expect("just checked");
-        let mut m = machine.lock();
-        let _ = m.apply(ConnectionInput::AnswerReceived);
+        let lifetime = machine.lock().lifetime_span();
+        lifetime.in_scope(|| {
+            let mut m = machine.lock();
+            let _ = m.apply(ConnectionInput::AnswerReceived);
+        });
         Ok(())
     }
 
@@ -730,62 +940,78 @@ impl UctpCoordinator {
         // Apply the state transitions and drain pending streams while
         // holding the per-machine lock. Drop the lock before any
         // outbound send so we don't hold it across awaits.
-        let pending = {
+        // C5: capture the lifetime span at the same time so the
+        // outbound `stream.opened` emissions and the publisher
+        // registration calls below nest under it.
+        let (pending, lifetime_span) = {
             let machine = self.connections.get(&connid).expect("just checked");
             let mut m = machine.lock();
             let _ = m.apply(ConnectionInput::ReadyReceived);
             // Allocate stream_local_ids for the streams that survived
             // negotiation. The first call returns the set; subsequent
             // calls (duplicate connection.ready) return empty.
-            m.take_pending_streams()?
+            (m.take_pending_streams()?, m.lifetime_span())
         };
-        if let Some(machine) = self.sessions.get(&sid) {
-            let mut m = machine.lock();
-            // Idempotent: ConnectionReady on an already-Active session is a no-op.
-            let _ = m.apply(SessionInput::ConnectionReady);
-        }
+        // C5: wrap the async tail under the per-Connection lifetime
+        // span via `.instrument`. A sync `.entered()` guard isn't
+        // Send-safe across the `send_out(...).await` in the loop
+        // below, so the future-based approach is correct here.
+        async move {
+            if let Some(machine) = self.sessions.get(&sid) {
+                let mut m = machine.lock();
+                // Idempotent: ConnectionReady on an already-Active session
+                // is a no-op.
+                let _ = m.apply(SessionInput::ConnectionReady);
+            }
 
-        // Emit `stream.opened` per allocated stream and register the
-        // publisher in whatever subscription handler is configured.
-        // CONVERSATION_PROTOCOL.md §7.4: server announces the
-        // stream_local_id here.
-        for (stream, local_id) in pending {
-            let stream_info = payloads::stream::StreamInfo {
-                strm_id: stream.strm_id.clone(),
-                kind: stream.kind.clone(),
-                codec: stream
-                    .chosen_codec
-                    .as_ref()
-                    .map(|c| serde_json::json!({ "name": c }))
-                    .unwrap_or(serde_json::Value::Null),
-                direction: stream.direction.clone(),
-                stream_local_id: local_id,
-                opened_at: chrono::Utc::now(),
-            };
-            let opened_env = UctpEnvelope::new(
-                MessageType::StreamOpened,
-                serde_json::to_value(payloads::stream::StreamOpened {
-                    stream: stream_info,
-                })?,
-            )
-            .with_sid(sid_str.clone())
-            .with_connid(connid_str.clone());
-            self.send_out(opened_env).await?;
-            self.subscription_handler.register_publisher(
-                super::subscription::PublisherInfo {
-                    sid: &sid,
-                    strm_id: &stream.strm_id,
-                    connection: &connid,
-                    participant: &stream.participant,
-                    kind: &stream.kind,
-                },
-            );
-        }
+            // Emit `stream.opened` per allocated stream and register
+            // the publisher in whatever subscription handler is
+            // configured. CONVERSATION_PROTOCOL.md §7.4: server
+            // announces the stream_local_id here.
+            for (stream, local_id) in pending {
+                let stream_info = payloads::stream::StreamInfo {
+                    strm_id: stream.strm_id.clone(),
+                    kind: stream.kind.clone(),
+                    codec: stream
+                        .chosen_codec
+                        .as_ref()
+                        .map(|c| serde_json::json!({ "name": c }))
+                        .unwrap_or(serde_json::Value::Null),
+                    direction: stream.direction.clone(),
+                    stream_local_id: local_id,
+                    opened_at: chrono::Utc::now(),
+                };
+                let opened_env = UctpEnvelope::new(
+                    MessageType::StreamOpened,
+                    serde_json::to_value(payloads::stream::StreamOpened {
+                        stream: stream_info,
+                    })?,
+                )
+                .with_sid(sid_str.clone())
+                .with_connid(connid_str.clone());
+                self.send_out(opened_env).await?;
+                let codec = stream.chosen_codec.as_ref().map(|name| {
+                    rvoip_core::capability::CodecInfo::from_name_with_defaults(name)
+                });
+                self.subscription_handler.register_publisher(
+                    super::subscription::PublisherInfo {
+                        sid: &sid,
+                        strm_id: &stream.strm_id,
+                        connection: &connid,
+                        participant: &stream.participant,
+                        kind: &stream.kind,
+                        codec,
+                    },
+                );
+            }
 
-        self.emit_event(UctpSessionEvent::ConnectionConnected {
-            sid,
-            connid,
-        })
+            self.emit_event(UctpSessionEvent::ConnectionConnected {
+                sid,
+                connid,
+            })
+            .await
+        }
+        .instrument(lifetime_span)
         .await
     }
 
@@ -916,6 +1142,147 @@ impl UctpCoordinator {
             .await?;
         }
 
+        Ok(())
+    }
+
+    /// Handle inbound `dtmf.send` (peer pressed digits) per
+    /// CONVERSATION_PROTOCOL.md §7.5. Emits `UctpSessionEvent::Dtmf`
+    /// so the adapter can translate to `AdapterEvent::Dtmf` and the
+    /// orchestrator surfaces it on the event bus as
+    /// `Event::DtmfReceived`. Plan C2.
+    ///
+    /// An envelope addressed to an unknown connid produces `error 404
+    /// not-found/unknown-connid` to match the rest of the connection-
+    /// scoped handlers.
+    async fn handle_dtmf_send(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::control::DtmfSend = env.decode_payload()?;
+        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid = ConnectionId::from_string(connid_str);
+        if !self.connections.contains_key(&connid) {
+            return self.not_found(&env, "unknown-connid").await;
+        }
+        self.emit_event(UctpSessionEvent::Dtmf {
+            connid,
+            digits: payload.digits,
+            duration_ms: payload.duration_ms,
+            method: payload.method,
+        })
+        .await
+    }
+
+    /// Handle inbound `auth.refresh` — plan D4. Validates the new
+    /// credential, updates `PeerAuthState` on success, and replies
+    /// with a fresh `auth.session` envelope. On validation failure
+    /// the existing session is preserved (the peer can retry); a
+    /// `401 auth/refresh-failed` error is returned but the gate
+    /// stays open for envelopes still validating under the prior
+    /// token, so a momentary refresh hiccup doesn't drop the call.
+    async fn handle_auth_refresh(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::auth::AuthRefresh = env.decode_payload()?;
+        let bearer_span = info_span!(
+            "uctp.auth.refresh",
+            method = %payload.method,
+            transport = %self.transport,
+        );
+        let validation = self
+            .bearer
+            .validate(&payload.credential)
+            .instrument(bearer_span)
+            .await;
+        match validation {
+            Ok(assurance) => {
+                // Reuse identity_id / participant_id from the prior
+                // auth state if present. The wire spec treats refresh
+                // as continuity (same logical session); reissuing
+                // brand-new ids would force re-binding on consumers.
+                let (identity_id, participant_id) = match &*self.peer_auth.lock() {
+                    PeerAuthState::Authenticated {
+                        identity_id,
+                        participant_id,
+                        ..
+                    } => (identity_id.clone(), participant_id.clone()),
+                    PeerAuthState::Unauthenticated => {
+                        // Refresh without prior auth — synthesize fresh
+                        // ids. This shouldn't be reachable post-A1
+                        // because the gate refuses non-auth envelopes
+                        // from un-authed peers, but be defensive.
+                        (
+                            format!("id_{}", uuid::Uuid::new_v4().simple()),
+                            format!("part_{}", uuid::Uuid::new_v4().simple()),
+                        )
+                    }
+                };
+                let session = payloads::auth::AuthSession {
+                    identity_id: identity_id.clone(),
+                    participant_id: participant_id.clone(),
+                    session_token: format!("tok_{}", uuid::Uuid::new_v4().simple()),
+                    expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+                    assurance: assurance_label(&assurance).into(),
+                    reachability: Vec::new(),
+                };
+                // Update the auth gate with the refreshed assurance.
+                *self.peer_auth.lock() = PeerAuthState::Authenticated {
+                    identity_id: identity_id.clone(),
+                    participant_id: participant_id.clone(),
+                    assurance: assurance.clone(),
+                };
+                let reply = UctpEnvelope::new(
+                    MessageType::AuthSession,
+                    serde_json::to_value(&session)?,
+                )
+                .with_in_reply_to(env.id);
+                self.send_out(reply).await?;
+                self.emit_event(UctpSessionEvent::Authenticated {
+                    identity_id,
+                    participant_id,
+                    assurance,
+                })
+                .await
+            }
+            Err(e) => {
+                warn!(error = %e, "auth.refresh: validation failed; existing session preserved");
+                // 401 with a distinct reason so the peer can
+                // distinguish a failed refresh from a failed initial
+                // auth. Existing PeerAuthState is intentionally left
+                // alone — the peer keeps using its current token
+                // until it actually expires.
+                self.emit_error(env.id, 401, "auth", "refresh-failed").await
+            }
+        }
+    }
+
+    /// Handle inbound `connection.quality` per CONVERSATION_PROTOCOL.md
+    /// §10.3. The envelope carries a snapshot per Stream; this emits
+    /// one `UctpSessionEvent::Quality` per Stream so adapters can
+    /// translate to `AdapterEvent::Quality` and the orchestrator
+    /// publishes `Event::MediaQuality`. Plan C2.
+    ///
+    /// `loss_pct` is preserved verbatim; `mos` is wrapped in `Some`
+    /// (the wire payload's `mos` is `f32`, but the rvoip-core
+    /// `QualitySnapshot::mos` is `Option<f32>` so consumers can
+    /// distinguish "no MOS reported" from "MOS == 0.0").
+    async fn handle_connection_quality(&self, env: UctpEnvelope) -> Result<()> {
+        let payload: payloads::connection::ConnectionQuality = env.decode_payload()?;
+        let connid_str = env.connid.clone().ok_or(UctpError::MissingField("connid"))?;
+        let connid = ConnectionId::from_string(connid_str);
+        if !self.connections.contains_key(&connid) {
+            return self.not_found(&env, "unknown-connid").await;
+        }
+        for stream in payload.streams {
+            let snapshot = rvoip_core::stream::QualitySnapshot {
+                jitter_ms: stream.jitter_ms as f32,
+                packet_loss_pct: stream.loss_pct,
+                mos: Some(stream.mos),
+            };
+            self.emit_event(UctpSessionEvent::Quality {
+                connid: connid.clone(),
+                strm_id: stream.strm_id,
+                snapshot,
+                rtt_ms: stream.rtt_ms,
+                bitrate_bps: stream.bitrate_bps,
+            })
+            .await?;
+        }
         Ok(())
     }
 }

@@ -96,14 +96,21 @@ pub trait SubscriptionHandler: Send + Sync {
 
 /// Bundle passed to [`SubscriptionHandler::register_publisher`]. Carries
 /// everything the orchestrator needs to resolve `strm_id` and
-/// `from_participant` subscription forms; future fields (e.g. codec)
-/// land here without breaking the trait surface.
+/// `from_participant` subscription forms; future fields land here
+/// without breaking the trait surface.
 pub struct PublisherInfo<'a> {
     pub sid: &'a SessionId,
     pub strm_id: &'a str,
     pub connection: &'a ConnectionId,
     pub participant: &'a str,
     pub kind: &'a str,
+    /// The codec the publisher negotiated for this Stream (the chosen
+    /// codec out of [`rvoip_core::capability::negotiate_streams`]'s
+    /// answer). Propagated to the `PublisherRegistry` so
+    /// [`rvoip_core::Orchestrator::fanout_frame`] can hand the right
+    /// `CodecInfo` to the subscriber-side adapter when allocating a
+    /// fresh per-subscription MediaStream (plan B1 / MP3c).
+    pub codec: Option<rvoip_core::capability::CodecInfo>,
 }
 
 /// Default handler — every request is rejected with 503

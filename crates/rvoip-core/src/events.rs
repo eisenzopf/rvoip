@@ -1,4 +1,5 @@
 use crate::adapter::{EndReason, TransferTarget};
+use crate::identity::IdentityAssurance;
 use crate::ids::{
     AiAttachmentId, BridgeId, ConnectionId, ConversationId, IdentityId, ListenerId, MessageId,
     ParticipantId, RecordingId, SessionId, StreamId, TenantId,
@@ -59,6 +60,19 @@ pub enum Event {
     },
     ConnectionConnected {
         connection_id: ConnectionId,
+        at: DateTime<Utc>,
+    },
+    /// A peer completed the UCTP auth handshake on this Connection.
+    /// Fires immediately after `ConnectionInbound` for UCTP-family
+    /// substrates; absent for substrates that don't model peer-level
+    /// auth (SIP, WebRTC). The `participant_id` is the peer's claimed
+    /// identifier from `auth.session`; `identity_id` is the
+    /// server-issued binding. Plan §7 G1 / A3.
+    ConnectionAuthenticated {
+        connection_id: ConnectionId,
+        identity_id: String,
+        participant_id: String,
+        assurance: IdentityAssurance,
         at: DateTime<Utc>,
     },
     /// Early states (per INTERFACE_DESIGN §5).
@@ -318,6 +332,24 @@ impl Event {
             ConnectionConnected { connection_id, .. } => {
                 RvoipCoreCrossCrateEvent::ConnectionConnected {
                     connection_id: connection_id.to_string(),
+                }
+            }
+            ConnectionAuthenticated {
+                connection_id,
+                identity_id,
+                ..
+            } => {
+                // Cross-crate boundary: there's no dedicated
+                // ConnectionAuthenticated variant yet (adding one would
+                // require an infra-common change). The closest existing
+                // signal is `IdentityAssuranceChanged`, which carries
+                // the same connection_id + identity_id pair. Downstream
+                // services that need the assurance level or
+                // participant_id should subscribe to the in-process
+                // `Event::ConnectionAuthenticated` directly.
+                RvoipCoreCrossCrateEvent::IdentityAssuranceChanged {
+                    connection_id: connection_id.to_string(),
+                    identity_id: Some(identity_id.clone()),
                 }
             }
             ConnectionProgress {

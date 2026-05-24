@@ -59,6 +59,22 @@ pub struct AuthBye {
     pub reason: String,
 }
 
+/// `auth.refresh` (C→S) payload — plan D4. Sent by the peer before its
+/// current bearer token expires; the coordinator validates the new
+/// credential and, on success, updates `PeerAuthState` and replies
+/// with a fresh `auth.session` envelope. On validation failure the
+/// existing session is preserved (the peer can retry until the old
+/// token's `expires_at` actually passes).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthRefresh {
+    /// Auth method name — typically matches whatever was used at the
+    /// initial `auth.response` (`bearer`, `oauth2-dpop`, ...). The
+    /// coordinator routes to the same validator either way.
+    pub method: String,
+    /// The new credential body. Replaces the prior one on success.
+    pub credential: String,
+}
+
 /// Device descriptor sent in `auth.hello`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Device {

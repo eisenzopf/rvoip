@@ -19,6 +19,48 @@ pub struct CodecInfo {
     pub fmtp: Option<String>,
 }
 
+/// Reasonable default for adapter and orchestrator paths that need a
+/// codec descriptor before negotiation has run (e.g. `Orchestrator::fanout_frame`
+/// allocating a subscriber-side MediaStream before the publisher's
+/// negotiated codec has propagated). Matches the codec the v0 default
+/// CapabilityDescriptor advertises first.
+pub fn default_audio_codec() -> CodecInfo {
+    CodecInfo {
+        name: "opus".into(),
+        clock_rate_hz: 48_000,
+        channels: 1,
+        fmtp: None,
+    }
+}
+
+impl CodecInfo {
+    /// Build a `CodecInfo` from just the codec name, using
+    /// standards-defined defaults for `clock_rate_hz` / `channels`.
+    /// Used by the multi-party fanout path (plan B1) where the wire
+    /// catalog only records the chosen codec name; richer params would
+    /// require carrying the full negotiation result through more layers.
+    /// Falls back to the `name`/48k/mono shape for codecs not in the
+    /// table — fanout still works, the client just sees an audio stream
+    /// it may or may not be able to decode (B2 codec-mismatch refusal
+    /// is the right place to surface that).
+    pub fn from_name_with_defaults(name: &str) -> Self {
+        let (clock_rate_hz, channels) = match name {
+            "opus" => (48_000, 1),
+            "g.711-mu" | "PCMU" | "pcmu" => (8_000, 1),
+            "g.711-a" | "PCMA" | "pcma" => (8_000, 1),
+            "g.722" => (16_000, 1),
+            "g.729" => (8_000, 1),
+            _ => (48_000, 1),
+        };
+        Self {
+            name: name.to_string(),
+            clock_rate_hz,
+            channels,
+            fmtp: None,
+        }
+    }
+}
+
 /// One codec entry on the wire, matching CONVERSATION_PROTOCOL.md §8's
 /// `{"name": "opus", "params": {"sample_rate": 48000, ...}}` shape.
 /// Distinct from [`CodecInfo`] — the flat-fields shape can't represent

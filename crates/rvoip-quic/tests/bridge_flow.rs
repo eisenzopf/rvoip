@@ -35,7 +35,7 @@ use rvoip_quic::{
     spawn_datagram_reader, QuicDatagramMediaStream, UctpQuicAdapter, UctpQuicClient, UctpQuicConfig,
 };
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::payloads::session::SessionInvite;
+use rvoip_uctp::payloads::{auth, session::SessionInvite};
 use rvoip_uctp::substrate::{dev_client_config_trusting, dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
 
@@ -94,6 +94,57 @@ async fn dial_and_invite(
         .await
         .expect("client connect");
 
+    // A1: drive the auth handshake before sending session.invite.
+    let mut inbound = client.take_inbound().expect("take_inbound");
+    let hello = UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::AuthHello,
+        id: format!("env_{}", rand_hex()),
+        ts: Utc::now(),
+        cid: None,
+        sid: None,
+        connid: None,
+        in_reply_to: None,
+        payload: serde_json::to_value(auth::AuthHello {
+            device: auth::Device {
+                id: "dev_test".into(),
+                kind: "desktop".into(),
+                platform: "test-platform".into(),
+                sdk_version: "test/0.1".into(),
+            },
+            auth_methods: vec!["bearer".into()],
+            capabilities: serde_json::Value::Object(Default::default()),
+        })
+        .unwrap(),
+    };
+    client.send(hello).await.expect("send hello");
+    let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("auth.challenge timeout")
+        .expect("inbound closed");
+    assert_eq!(challenge.msg_type, MessageType::AuthChallenge);
+    let response = UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::AuthResponse,
+        id: format!("env_{}", rand_hex()),
+        ts: Utc::now(),
+        cid: None,
+        sid: None,
+        connid: None,
+        in_reply_to: Some(challenge.id),
+        payload: serde_json::to_value(auth::AuthResponse {
+            method: "bearer".into(),
+            credential: "test-token".into(),
+        })
+        .unwrap(),
+    };
+    client.send(response).await.expect("send response");
+    let session_reply = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("auth.session timeout")
+        .expect("inbound closed");
+    assert_eq!(session_reply.msg_type, MessageType::AuthSession);
+
     let env = UctpEnvelope {
         v: 1,
         msg_type: MessageType::SessionInvite,
@@ -143,20 +194,47 @@ async fn quic_bridge_flows_real_audio_frame_end_to_end() {
     let client_b =
         dial_and_invite(&client_ep_b, server_addr, &cert_der, "sess_b", "part_bob").await;
 
-    // --- Wait for two InboundConnection events ---
+    // --- Wait for two InboundConnection events + paired ConnectionAuthenticated ---
+    // A3: every UCTP InboundConnection should now be followed by a
+    // ConnectionAuthenticated carrying the auth handshake's identity_id
+    // / participant_id / assurance triple. We accumulate both and
+    // assert pairing after the loop.
     let mut conn_ids: Vec<ConnectionId> = Vec::new();
-    for _ in 0..30 {
-        if conn_ids.len() == 2 {
+    let mut authenticated: Vec<(ConnectionId, String, String)> = Vec::new();
+    for _ in 0..60 {
+        if conn_ids.len() == 2 && authenticated.len() == 2 {
             break;
         }
         match tokio::time::timeout(Duration::from_millis(200), events.recv()).await {
             Ok(Ok(Event::ConnectionInbound { connection_id, .. })) => {
                 conn_ids.push(connection_id);
             }
+            Ok(Ok(Event::ConnectionAuthenticated {
+                connection_id,
+                identity_id,
+                participant_id,
+                ..
+            })) => {
+                authenticated.push((connection_id, identity_id, participant_id));
+            }
             _ => continue,
         }
     }
     assert_eq!(conn_ids.len(), 2, "expected two ConnectionInbound events");
+    assert_eq!(
+        authenticated.len(),
+        2,
+        "A3: expected a ConnectionAuthenticated event paired with each InboundConnection"
+    );
+    // Each ConnectionAuthenticated must match one of the inbound
+    // connection_ids — no orphan auth events.
+    for (auth_connid, _id_id, _part_id) in &authenticated {
+        assert!(
+            conn_ids.contains(auth_connid),
+            "ConnectionAuthenticated connection_id {:?} does not match any InboundConnection",
+            auth_connid
+        );
+    }
 
     // --- Bridge ---
     let _bridge_id = orchestrator

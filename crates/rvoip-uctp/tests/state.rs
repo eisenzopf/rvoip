@@ -80,3 +80,36 @@ fn illegal_transitions_return_error() {
     let mut c = ConnectionMachine::new_negotiating();
     assert!(c.apply(ConnectionInput::HoldRequested).is_err());
 }
+
+#[test]
+fn connection_machine_carries_lifetime_span() {
+    // C5: the ConnectionMachine stores a per-Connection lifetime span
+    // that the coordinator builds at offer time and re-enters at every
+    // subsequent envelope. The default constructor produces a no-op
+    // span (`Span::none()`); the spanned constructor stores whatever
+    // the caller passes, retrievable via `lifetime_span()`.
+    //
+    // We compare the returned span's `id()` to the original to prove
+    // the same span is roundtripped — span IDs are subscriber-assigned
+    // and only present when a subscriber is installed, so we install
+    // a fmt subscriber locally with `with_default`.
+    use tracing::subscriber::with_default;
+    use tracing_subscriber::fmt;
+    with_default(fmt::Subscriber::builder().finish(), || {
+        let m = ConnectionMachine::new_negotiating();
+        assert!(
+            m.lifetime_span().is_none(),
+            "default constructor must produce Span::none() (no id assigned)"
+        );
+
+        let real_span = tracing::info_span!("uctp.connection.lifetime", connid = "conn_x");
+        let original_id = real_span.id();
+        let m_with = ConnectionMachine::new_negotiating_with_span(real_span);
+        let returned = m_with.lifetime_span();
+        assert_eq!(
+            returned.id(),
+            original_id,
+            "spanned constructor must propagate the same span (matching id)"
+        );
+    });
+}

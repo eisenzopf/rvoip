@@ -18,7 +18,14 @@ pub struct Config {
     /// streams lazily (typically on `connection.ready`), so a caller
     /// that triggers a bridge from `Event::ConnectionInbound` may race
     /// the stream registration. Setting this to zero disables the wait
-    /// (strict legacy behavior). Default: 2 seconds.
+    /// (strict legacy behavior).
+    ///
+    /// **Default raised to 5 seconds** (plan §7 architectural concern
+    /// #7 / D3): the previous 2 seconds was tight for cold WebTransport
+    /// dials on a high-latency mobile link, where the TLS + HTTP/3 +
+    /// extended-CONNECT handshake routinely exceeds 2s. 5s covers
+    /// realistic mobile network jitter without holding admission for
+    /// pathologically dead peers.
     pub bridge_stream_deadline: Duration,
 }
 
@@ -31,7 +38,7 @@ impl Default for Config {
             max_concurrent_setups: 256 * cpus,
             conversation_store: Arc::new(MemoryConversationStore::new()),
             vcon_store: Arc::new(MemoryVconStore::new()),
-            bridge_stream_deadline: Duration::from_secs(2),
+            bridge_stream_deadline: Duration::from_secs(5),
         }
     }
 }

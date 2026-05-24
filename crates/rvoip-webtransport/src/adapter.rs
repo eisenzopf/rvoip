@@ -40,6 +40,17 @@ pub(crate) struct Route {
     pub sid: String,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
     pub streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn MediaStream>>>,
+    /// The WT session; cloned into per-Stream pumps allocated by
+    /// `allocate_subscriber_stream` (plan B1 / MP3c).
+    pub session: web_transport_quinn::Session,
+    /// Next free `stream_local_id` on this connection. Default audio
+    /// stream claims `1`; allocator starts at `2`.
+    pub next_local_id: Arc<std::sync::atomic::AtomicU16>,
+    /// Per-Connection inbound routing table — the WT datagram reader
+    /// consults it to dispatch by `stream_local_id`.
+    pub streams_router: Arc<
+        parking_lot::RwLock<Vec<Arc<crate::media_stream::WebTransportDatagramMediaStream>>>,
+    >,
 }
 
 pub struct UctpWtConfig {
@@ -59,6 +70,10 @@ pub struct UctpWtConfig {
     /// Orchestrator reference for multi-party media fanout (v0.x MP3b).
     /// See [`UctpQuicConfig`](rvoip_quic::UctpQuicConfig::orchestrator).
     pub orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    /// Per-peer resource caps (plan D1 / D2). See
+    /// [`rvoip_quic::UctpQuicConfig::coordinator_caps`] for semantics —
+    /// identical wiring.
+    pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
 }
 
 impl UctpWtConfig {
@@ -78,6 +93,7 @@ impl UctpWtConfig {
             client_tls: None,
             subscription_handler: None,
             orchestrator: None,
+            coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
         }
     }
 
@@ -101,6 +117,16 @@ impl UctpWtConfig {
 
     pub fn with_orchestrator(mut self, orch: Arc<rvoip_core::Orchestrator>) -> Self {
         self.orchestrator = Some(orch);
+        self
+    }
+
+    /// Override the per-peer Session/timeout caps (plan D1 / D2). See
+    /// [`rvoip_uctp::state::UctpCoordinatorCaps`].
+    pub fn with_coordinator_caps(
+        mut self,
+        caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    ) -> Self {
+        self.coordinator_caps = caps;
         self
     }
 }
@@ -140,6 +166,7 @@ impl UctpWtAdapter {
             config.quinn_stats_interval,
             config.subscription_handler,
             config.orchestrator,
+            config.coordinator_caps,
         );
 
         Ok(Arc::new(Self {
@@ -296,6 +323,80 @@ impl ConnectionAdapter for UctpWtAdapter {
             .collect())
     }
 
+    async fn allocate_subscriber_stream(
+        &self,
+        subscriber: ConnectionId,
+        kind: rvoip_core::stream::StreamKind,
+        codec: rvoip_core::capability::CodecInfo,
+    ) -> RvoipResult<Arc<dyn MediaStream>> {
+        // Mirrors `rvoip_quic::UctpQuicAdapter::allocate_subscriber_stream`
+        // (plan B1 / MP3c). Only differences: uses
+        // `WebTransportDatagramMediaStream` (WT session datagrams) and
+        // the WT-specific `streams_router` shape.
+        let route = self
+            .route(&subscriber)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(subscriber.clone()))?;
+
+        let local_id = loop {
+            let next = route
+                .next_local_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if next == 0 || next == 1 {
+                continue;
+            }
+            break next;
+        };
+
+        let stream = crate::media_stream::WebTransportDatagramMediaStream::start(
+            rvoip_core::ids::StreamId::new(),
+            kind,
+            codec.clone(),
+            rvoip_core::connection::Direction::Outbound,
+            local_id,
+            route.session.clone(),
+        );
+
+        route.streams_router.write().push(Arc::clone(&stream));
+        let stream_dyn: Arc<dyn MediaStream> = Arc::clone(&stream) as Arc<dyn MediaStream>;
+        route.streams.insert(stream.id(), Arc::clone(&stream_dyn));
+
+        let strm_id = format!("strm_sub_{}", rvoip_core::ids::StreamId::new().to_string());
+        let stream_info = payloads::stream::StreamInfo {
+            strm_id,
+            kind: match kind {
+                rvoip_core::stream::StreamKind::Audio => "audio".into(),
+                rvoip_core::stream::StreamKind::Video => "video".into(),
+                rvoip_core::stream::StreamKind::Data => "data".into(),
+            },
+            codec: serde_json::json!({
+                "name": codec.name,
+                "params": {
+                    "sample_rate": codec.clock_rate_hz,
+                    "channels": codec.channels,
+                }
+            }),
+            direction: "recvonly".into(),
+            stream_local_id: local_id,
+            opened_at: chrono::Utc::now(),
+        };
+        let opened_env = UctpEnvelope::new(
+            MessageType::StreamOpened,
+            serde_json::to_value(payloads::stream::StreamOpened {
+                stream: stream_info,
+            })
+            .map_err(|e| RvoipError::Adapter(format!("encode stream.opened: {e}")))?,
+        )
+        .with_sid(route.sid.clone())
+        .with_connid(subscriber.to_string());
+        route
+            .out_tx
+            .send(opened_env)
+            .await
+            .map_err(|_| RvoipError::Adapter("peer signaling channel closed".into()))?;
+
+        Ok(stream_dyn)
+    }
+
     async fn send_message(&self, conn: ConnectionId, message: Message) -> RvoipResult<()> {
         let route = self
             .route(&conn)
@@ -320,8 +421,31 @@ impl ConnectionAdapter for UctpWtAdapter {
             .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
     }
 
-    async fn send_dtmf(&self, _conn: ConnectionId, _digits: &str, _dur: u32) -> RvoipResult<()> {
-        Err(RvoipError::NotImplemented("rvoip-webtransport::send_dtmf"))
+    async fn send_dtmf(
+        &self,
+        conn: ConnectionId,
+        digits: &str,
+        duration_ms: u32,
+    ) -> RvoipResult<()> {
+        // Plan C2 — see `rvoip_quic::UctpQuicAdapter::send_dtmf` for
+        // the wire semantics. Identical implementation; the substrate
+        // difference doesn't show up at this layer.
+        let route = self
+            .route(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let payload = payloads::control::DtmfSend {
+            digits: digits.into(),
+            duration_ms,
+            method: "rfc4733".into(),
+        };
+        let env = UctpEnvelope::new(MessageType::DtmfSend, serde_json::to_value(payload).unwrap())
+            .with_sid(route.sid.clone())
+            .with_connid(conn.to_string());
+        route
+            .out_tx
+            .send(env)
+            .await
+            .map_err(|_| RvoipError::Adapter("peer signaling channel closed".into()))
     }
 
     async fn renegotiate_media(

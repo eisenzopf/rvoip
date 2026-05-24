@@ -138,6 +138,9 @@ async fn bridge_smoke_three_adapters_register_and_fire_events() {
     .await
     .expect("client connect");
 
+    // A1: drive the bearer auth handshake before sending session.invite.
+    drive_quic_auth(&client).await;
+
     let invite = UctpEnvelope::new(
         MessageType::SessionInvite,
         serde_json::to_value(session::SessionInvite {
@@ -173,6 +176,7 @@ async fn bridge_smoke_three_adapters_register_and_fire_events() {
     // --- 6. Dial via WebSocket too; assert another ConnectionInbound ---
     let ws_url = Url::parse(&format!("ws://{}", ws_addr)).expect("parse ws url");
     let ws_client = UctpWsClient::connect(&ws_url).await.expect("ws connect");
+    drive_ws_auth(&ws_client).await;
     let ws_invite = UctpEnvelope::new(
         MessageType::SessionInvite,
         serde_json::to_value(session::SessionInvite {
@@ -210,18 +214,89 @@ async fn bridge_smoke_three_adapters_register_and_fire_events() {
         "expected second Event::ConnectionInbound (from WS) within 6s"
     );
 
-    // Touch the auth ID field to silence the unused import lint when the
-    // test bypasses auth (we send session.invite without auth.hello first;
-    // the coordinator still routes it because v0 doesn't enforce ordering).
-    let _ = auth::AuthHello {
-        device: auth::Device {
-            id: "".into(),
-            kind: "".into(),
-            platform: "".into(),
-            sdk_version: "".into(),
-        },
-        auth_methods: vec![],
-        capabilities: serde_json::Value::Object(Default::default()),
-    };
     let _ = Utc::now();
+}
+
+/// Drive the bearer auth handshake against the coordinator over a QUIC
+/// client. Required after A1: the coordinator refuses non-auth envelopes
+/// from un-authed peers with 401.
+async fn drive_quic_auth(client: &Arc<UctpQuicClient>) {
+    let mut inbound = client.take_inbound().expect("take_inbound");
+    let hello = UctpEnvelope::new(
+        MessageType::AuthHello,
+        serde_json::to_value(auth::AuthHello {
+            device: auth::Device {
+                id: "dev_smoke".into(),
+                kind: "desktop".into(),
+                platform: "test".into(),
+                sdk_version: "smoke/0.1".into(),
+            },
+            auth_methods: vec!["bearer".into()],
+            capabilities: serde_json::Value::Object(Default::default()),
+        })
+        .unwrap(),
+    );
+    let hello_id = hello.id.clone();
+    client.send(hello).await.expect("send hello");
+    let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("challenge timeout")
+        .expect("inbound closed");
+    assert_eq!(challenge.msg_type, MessageType::AuthChallenge);
+    assert_eq!(challenge.in_reply_to.as_deref(), Some(hello_id.as_str()));
+    let response = UctpEnvelope::new(
+        MessageType::AuthResponse,
+        serde_json::to_value(auth::AuthResponse {
+            method: "bearer".into(),
+            credential: "test-token".into(),
+        })
+        .unwrap(),
+    )
+    .with_in_reply_to(challenge.id);
+    client.send(response).await.expect("send response");
+    let session = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("session timeout")
+        .expect("inbound closed");
+    assert_eq!(session.msg_type, MessageType::AuthSession);
+}
+
+/// WebSocket-flavored equivalent of [`drive_quic_auth`].
+async fn drive_ws_auth(client: &Arc<UctpWsClient>) {
+    let mut inbound = client.take_inbound().expect("take_inbound");
+    let hello = UctpEnvelope::new(
+        MessageType::AuthHello,
+        serde_json::to_value(auth::AuthHello {
+            device: auth::Device {
+                id: "dev_smoke_ws".into(),
+                kind: "browser".into(),
+                platform: "test".into(),
+                sdk_version: "smoke/0.1".into(),
+            },
+            auth_methods: vec!["bearer".into()],
+            capabilities: serde_json::Value::Object(Default::default()),
+        })
+        .unwrap(),
+    );
+    client.send(hello).await.expect("send hello");
+    let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("ws challenge timeout")
+        .expect("ws inbound closed");
+    assert_eq!(challenge.msg_type, MessageType::AuthChallenge);
+    let response = UctpEnvelope::new(
+        MessageType::AuthResponse,
+        serde_json::to_value(auth::AuthResponse {
+            method: "bearer".into(),
+            credential: "test-token".into(),
+        })
+        .unwrap(),
+    )
+    .with_in_reply_to(challenge.id);
+    client.send(response).await.expect("send response");
+    let session = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("ws session timeout")
+        .expect("ws inbound closed");
+    assert_eq!(session.msg_type, MessageType::AuthSession);
 }

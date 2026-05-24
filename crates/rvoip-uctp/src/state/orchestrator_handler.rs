@@ -18,6 +18,7 @@
 //! recognized but rejected with `404 from-participant-resolution-not-implemented`
 //! until v0.x MP2.5 lands Session-aware Participant tracking.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use rvoip_core::ids::{ConnectionId, SessionId, StreamId};
@@ -28,16 +29,58 @@ use crate::payloads::stream::{StreamSubscribe, StreamUnsubscribe};
 
 use super::subscription::{PublisherInfo, SubscriptionHandler, SubscriptionOutcome};
 
+/// Default set of audio codecs the orchestrator will fan out to
+/// subscribers (plan B2). Restricted to the codecs UCTP-family
+/// subscribers actually have decoders for in v0 — anything outside
+/// this set means we'd be sending the subscriber bytes it can't play.
+/// Tune via [`OrchestratorSubscriptionHandler::with_accepted_codecs`]
+/// for deployments with custom decoder pipelines.
+pub const DEFAULT_ACCEPTED_CODECS: &[&str] =
+    &["opus", "g.711-mu", "g.711-a", "g.722", "g.729"];
+
 /// Production handler that routes inbound subscribe/unsubscribe envelopes
 /// through `rvoip-core::Orchestrator`'s subscription registry.
 pub struct OrchestratorSubscriptionHandler {
     orch: Arc<Orchestrator>,
     publishers: Arc<PublisherRegistry>,
+    /// Audio codecs the orchestrator will accept on subscribe (plan B2).
+    /// Publishers with codecs outside this set get their subscriptions
+    /// refused with `error 488`. Defaults to
+    /// [`DEFAULT_ACCEPTED_CODECS`]; deployments override via
+    /// [`Self::with_accepted_codecs`].
+    accepted_codecs: HashSet<String>,
 }
 
 impl OrchestratorSubscriptionHandler {
     pub fn new(orch: Arc<Orchestrator>, publishers: Arc<PublisherRegistry>) -> Arc<Self> {
-        Arc::new(Self { orch, publishers })
+        Arc::new(Self {
+            orch,
+            publishers,
+            accepted_codecs: DEFAULT_ACCEPTED_CODECS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        })
+    }
+
+    /// Variant of [`Self::new`] with an explicit accepted-codecs set.
+    /// Empty set disables the check (accept everything — useful for
+    /// experimental codecs that don't appear in
+    /// [`DEFAULT_ACCEPTED_CODECS`] yet).
+    pub fn with_accepted_codecs<I, S>(
+        orch: Arc<Orchestrator>,
+        publishers: Arc<PublisherRegistry>,
+        codecs: I,
+    ) -> Arc<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Arc::new(Self {
+            orch,
+            publishers,
+            accepted_codecs: codecs.into_iter().map(|s| s.into()).collect(),
+        })
     }
 
     /// Borrow the publisher registry so adapters can call
@@ -46,6 +89,21 @@ impl OrchestratorSubscriptionHandler {
     /// the orchestrator's `forget_connection` path.
     pub fn publishers(&self) -> Arc<PublisherRegistry> {
         Arc::clone(&self.publishers)
+    }
+
+    /// Returns `true` if the publisher's recorded codec is acceptable
+    /// for fanout. Publishers with `codec: None` get the benefit of
+    /// the doubt (older test paths, or stream kinds where codec
+    /// negotiation doesn't apply). Empty `accepted_codecs` disables
+    /// the check entirely.
+    fn codec_acceptable(&self, entry: &PublisherEntry) -> bool {
+        if self.accepted_codecs.is_empty() {
+            return true;
+        }
+        match &entry.codec {
+            None => true,
+            Some(codec) => self.accepted_codecs.contains(&codec.name),
+        }
     }
 }
 
@@ -67,16 +125,35 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
         for sub in &request.subscriptions {
             match (&sub.strm_id, &sub.from_participant) {
                 (Some(strm_id), _) => {
-                    let Some(publisher) = self.publishers.publisher(sid, strm_id) else {
+                    let Some(entry) = self.publishers.entry(sid, strm_id) else {
                         return SubscriptionOutcome::reject(
                             404,
                             format!("unknown strm_id: {strm_id}"),
                         );
                     };
+                    // B2: codec gate. If the publisher's negotiated
+                    // codec isn't in the orchestrator's accepted set,
+                    // refuse — the subscriber would otherwise receive
+                    // frames it can't decode. Publishers with no
+                    // codec recorded (legacy paths) get the benefit
+                    // of the doubt.
+                    if !self.codec_acceptable(&entry) {
+                        let codec_name = entry
+                            .codec
+                            .as_ref()
+                            .map(|c| c.name.as_str())
+                            .unwrap_or("unknown");
+                        return SubscriptionOutcome::reject(
+                            488,
+                            format!(
+                                "unsupported codec for fanout: strm_id={strm_id} codec={codec_name}"
+                            ),
+                        );
+                    }
                     self.orch.add_subscription(
                         sid.clone(),
                         subscriber.clone(),
-                        publisher,
+                        entry.connection,
                         StreamId::from_string(strm_id.clone()),
                     );
                 }
@@ -115,6 +192,18 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
                                 continue;
                             }
                         }
+                        // B2: silently skip streams with unsupported
+                        // codecs. Unlike the strm_id case (which
+                        // refuses 488), from_participant is a
+                        // best-effort enumeration — subscribing to
+                        // "alice's streams" shouldn't fail entirely
+                        // because one of her streams uses an exotic
+                        // codec. If NO streams pass both filters,
+                        // we fall through to the same 488 path the
+                        // kinds-mismatch case uses.
+                        if !self.codec_acceptable(&entry) {
+                            continue;
+                        }
                         self.orch.add_subscription(
                             sid.clone(),
                             subscriber.clone(),
@@ -125,13 +214,14 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
                     }
                     if !matched_any {
                         // Participant has streams but none match the
-                        // kinds filter. Per spec §7.7 this is a 488
-                        // (incompatible capabilities) rather than 404,
-                        // because the participant exists.
+                        // kinds filter (or codec filter). Per spec §7.7
+                        // this is a 488 (incompatible capabilities)
+                        // rather than 404, because the participant
+                        // exists.
                         return SubscriptionOutcome::reject(
                             488,
                             format!(
-                                "no streams from {participant} match the requested kinds filter"
+                                "no streams from {participant} match the requested kinds/codec filters"
                             ),
                         );
                     }
@@ -176,6 +266,7 @@ impl SubscriptionHandler for OrchestratorSubscriptionHandler {
                 connection: info.connection.clone(),
                 participant: info.participant.to_string(),
                 kind: info.kind.to_string(),
+                codec: info.codec.clone(),
             },
         );
     }

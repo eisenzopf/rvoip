@@ -33,6 +33,7 @@ impl UctpWsServer {
         by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
         routes: Arc<DashMap<ConnectionId, Route>>,
         _max_concurrent: usize,
+        coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
     ) -> Arc<Self> {
         tokio::spawn(async move {
             loop {
@@ -48,6 +49,7 @@ impl UctpWsServer {
                 let by_connection = Arc::clone(&by_connection);
                 let by_uctp_sid = Arc::clone(&by_uctp_sid);
                 let routes = Arc::clone(&routes);
+                let caps = coordinator_caps.clone();
                 tokio::spawn(async move {
                     let ws = match tokio_tungstenite::accept_async(tcp).await {
                         Ok(ws) => ws,
@@ -57,8 +59,16 @@ impl UctpWsServer {
                         }
                     };
                     info!(%peer_addr, "rvoip-websocket: peer connected");
-                    spawn_peer_session(ws, bearer, events_tx, by_connection, by_uctp_sid, routes)
-                        .await;
+                    spawn_peer_session(
+                        ws,
+                        bearer,
+                        events_tx,
+                        by_connection,
+                        by_uctp_sid,
+                        routes,
+                        caps,
+                    )
+                    .await;
                     info!(%peer_addr, "rvoip-websocket: peer disconnected");
                 });
             }
@@ -98,6 +108,7 @@ async fn spawn_peer_session(
     by_connection: Arc<DashMap<ConnectionId, String>>,
     by_uctp_sid: Arc<DashMap<String, ConnectionId>>,
     routes: Arc<DashMap<ConnectionId, Route>>,
+    coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
 ) {
     let (mut sink, mut stream) = ws.split();
 
@@ -108,7 +119,16 @@ async fn spawn_peer_session(
 
     let route_out_tx = out_tx.clone();
 
-    let _coord = UctpCoordinator::start("websocket", in_rx, out_tx, coord_events_tx, bearer);
+    let _coord = UctpCoordinator::start_full_with_caps(
+        "websocket",
+        in_rx,
+        out_tx,
+        coord_events_tx,
+        bearer,
+        Arc::new(rvoip_uctp::state::default_v0_descriptor()),
+        rvoip_uctp::state::rejecting_handler(),
+        coordinator_caps,
+    );
 
     // Inbound: WS text frames → coordinator.
     let in_tx_for_pump = in_tx.clone();
@@ -167,12 +187,28 @@ async fn spawn_peer_session(
         let routes = Arc::clone(&routes);
         let route_out_tx = route_out_tx.clone();
         tokio::spawn(async move {
+            // Per-peer auth state; consumed by InboundInvite to emit a
+            // synthetic `AdapterEvent::Authenticated` follow-up. Plan
+            // §7 G1 / A3.
+            let mut latest_auth: Option<(
+                String,
+                String,
+                rvoip_core::identity::IdentityAssurance,
+            )> = None;
+
             while let Some(event) = coord_events_rx.recv().await {
-                let adapter_event = match event {
-                    UctpSessionEvent::Authenticated { .. } => AdapterEvent::Native {
-                        kind: "uctp.authenticated",
-                        detail: "bearer".into(),
-                    },
+                let adapter_event: Option<AdapterEvent> = match event {
+                    UctpSessionEvent::Authenticated {
+                        identity_id,
+                        participant_id,
+                        assurance,
+                    } => {
+                        latest_auth = Some((identity_id, participant_id, assurance));
+                        Some(AdapterEvent::Native {
+                            kind: "uctp.authenticated",
+                            detail: "bearer".into(),
+                        })
+                    }
                     UctpSessionEvent::InboundInvite { sid, from, .. } => {
                         let (id, connection) = build_connection(sid.clone(), from);
                         // MediaStream population intentionally deferred for
@@ -196,54 +232,93 @@ async fn spawn_peer_session(
                                 streams: Arc::new(DashMap::new()),
                             },
                         );
-                        AdapterEvent::InboundConnection { connection }
+                        let _ = events_tx
+                            .send(AdapterEvent::InboundConnection { connection })
+                            .await;
+                        if let Some((identity_id, participant_id, assurance)) =
+                            latest_auth.clone()
+                        {
+                            let _ = events_tx
+                                .send(AdapterEvent::Authenticated {
+                                    connection_id: id,
+                                    identity_id,
+                                    participant_id,
+                                    assurance,
+                                })
+                                .await;
+                        }
+                        None
                     }
                     UctpSessionEvent::SessionConnected { sid } => {
                         match by_uctp_sid.get(sid.as_str()).map(|r| r.clone()) {
-                            Some(connection_id) => AdapterEvent::Connected { connection_id },
-                            None => AdapterEvent::Native {
+                            Some(connection_id) => {
+                                Some(AdapterEvent::Connected { connection_id })
+                            }
+                            None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_connected_orphan",
                                 detail: sid.to_string(),
-                            },
+                            }),
                         }
                     }
                     UctpSessionEvent::ConnectionConnected { connid, .. } => {
-                        AdapterEvent::Connected {
+                        Some(AdapterEvent::Connected {
                             connection_id: connid,
-                        }
+                        })
                     }
                     UctpSessionEvent::ConnectionEnded { connid, reason, .. } => {
-                        AdapterEvent::Ended {
+                        Some(AdapterEvent::Ended {
                             connection_id: connid,
                             reason: EndReason::Failed { detail: reason },
-                        }
+                        })
                     }
                     UctpSessionEvent::SessionEnded { sid, reason } => {
                         match by_uctp_sid.remove(sid.as_str()) {
                             Some((_, connection_id)) => {
                                 by_connection.remove(&connection_id);
                                 routes.remove(&connection_id);
-                                AdapterEvent::Ended {
+                                Some(AdapterEvent::Ended {
                                     connection_id,
                                     reason: if reason == "cancelled" {
                                         EndReason::Cancelled
                                     } else {
                                         EndReason::Normal
                                     },
-                                }
+                                })
                             }
-                            None => AdapterEvent::Native {
+                            None => Some(AdapterEvent::Native {
                                 kind: "uctp.session_ended_orphan",
                                 detail: format!("sid={} reason={}", sid, reason),
-                            },
+                            }),
                         }
                     }
-                    other => AdapterEvent::Native {
+                    UctpSessionEvent::Dtmf {
+                        connid,
+                        digits,
+                        duration_ms,
+                        method: _,
+                    } => Some(AdapterEvent::Dtmf {
+                        connection_id: connid,
+                        digits,
+                        duration_ms,
+                    }),
+                    UctpSessionEvent::Quality {
+                        connid,
+                        strm_id: _,
+                        snapshot,
+                        rtt_ms: _,
+                        bitrate_bps: _,
+                    } => Some(AdapterEvent::Quality {
+                        connection_id: connid,
+                        snapshot,
+                    }),
+                    other => Some(AdapterEvent::Native {
                         kind: "uctp.internal",
                         detail: format!("{:?}", other),
-                    },
+                    }),
                 };
-                let _ = events_tx.send(adapter_event).await;
+                if let Some(ev) = adapter_event {
+                    let _ = events_tx.send(ev).await;
+                }
             }
         })
     };

@@ -12,10 +12,10 @@
 //!    Structurally identical to `rvoip-quic` but uses `tokio-tungstenite`.
 //!    No ALPN involvement (WS uses HTTP Upgrade).
 //!
-//! 2. **Media**: per-Connection `webrtc::peer_connection::RTCPeerConnection`.
-//!    SDP/ICE/DTLS exchange rides inside `connection.offer.substrate_setup`.
-//!    `MediaFrame.payload` (already RTP-shaped) bridges to
-//!    `TrackLocalStaticRTP::write_rtp` and back via `TrackRemote::read_rtp`.
+//! 2. **Media**: per-Connection WebRTC peer (via [`rvoip_webrtc`] when the
+//!    `media-webrtc` feature is enabled). SDP/ICE/DTLS exchange rides inside
+//!    `connection.offer.substrate_setup`. `MediaFrame.payload` (already RTP-shaped)
+//!    bridges to outbound tracks and back via inbound pumps.
 //!
 //! See `crates/rvoip-uctp/UCTP_IMPLEMENTATION_PLAN.md` for the design.
 
@@ -28,4 +28,5 @@ pub mod server;
 pub use adapter::{UctpWsAdapter, UctpWsConfig, ADAPTER_EVENT_CAP};
 pub use client::UctpWsClient;
 pub use errors::{Result, UctpWsError};
+pub use media_bridge::{BridgeRole, WebRtcMediaBridge};
 pub use server::UctpWsServer;

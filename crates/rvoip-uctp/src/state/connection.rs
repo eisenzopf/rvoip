@@ -72,17 +72,47 @@ pub struct ConnectionMachine {
     /// idempotent on repeated `connection.ready` envelopes (the spec
     /// §7.3 allows duplicate ready as a no-op).
     streams_announced: bool,
+    /// `uctp.connection.lifetime` span (plan §3.9 / C5). Opened by the
+    /// coordinator at `connection.offer` time via
+    /// [`Self::new_negotiating_with_span`] and re-entered by every
+    /// subsequent handler that touches this Connection
+    /// (`handle_connection_answer`, `handle_connection_ready`,
+    /// `handle_end`) so per-Connection tracing context spans the whole
+    /// offer → ready → end lifecycle. Spans dropped here close
+    /// automatically when the last clone goes out of scope (which
+    /// happens when the Connection is removed from the coordinator's
+    /// `connections` map at end-of-call). Defaults to
+    /// [`tracing::Span::none`] for the no-tracing constructor so test
+    /// code stays unchanged.
+    lifetime_span: tracing::Span,
 }
 
 impl ConnectionMachine {
     pub fn new_negotiating() -> Self {
+        Self::new_negotiating_with_span(tracing::Span::none())
+    }
+
+    /// Construct a `ConnectionMachine` with an explicit
+    /// `uctp.connection.lifetime` span. Production callers (the
+    /// coordinator's `handle_connection_offer`) build the span with
+    /// `connid` / `sid` / `transport` fields; tests can use the
+    /// no-span [`Self::new_negotiating`] constructor.
+    pub fn new_negotiating_with_span(lifetime_span: tracing::Span) -> Self {
         Self {
             state: UctpConnectionState::Negotiating,
             allocator: StreamLocalIdAllocator::new(),
             streams: HashMap::new(),
             pending_streams: Vec::new(),
             streams_announced: false,
+            lifetime_span,
         }
+    }
+
+    /// Clone of the per-Connection lifetime span. The coordinator
+    /// re-enters this on every handler that operates on the Connection
+    /// so per-envelope spans nest cleanly under it.
+    pub fn lifetime_span(&self) -> tracing::Span {
+        self.lifetime_span.clone()
     }
 
     pub fn state(&self) -> UctpConnectionState {

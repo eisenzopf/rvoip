@@ -465,6 +465,66 @@ async fn remove_subscription_stops_fanout() {
 }
 
 #[tokio::test]
+async fn authenticated_adapter_event_emits_connection_authenticated_event() {
+    // A3 regression: the orchestrator must translate
+    // `AdapterEvent::Authenticated` into a top-level
+    // `Event::ConnectionAuthenticated` on its event bus so external
+    // consumers (admission controllers, SIP-bridge routers) can react
+    // to auth completion without subscribing to adapter internals.
+    use rvoip_core::events::Event;
+    use rvoip_core::identity::IdentityAssurance;
+
+    let orch = Orchestrator::new(Config::default());
+    let (adapter, events_tx) = StubAdapter::new();
+    orch.register(adapter.clone() as Arc<dyn ConnectionAdapter>)
+        .unwrap();
+    let mut events = orch.subscribe_events();
+
+    let connid = ConnectionId::new();
+
+    // Adapter emits Authenticated for the new Connection.
+    events_tx
+        .send(AdapterEvent::Authenticated {
+            connection_id: connid.clone(),
+            identity_id: "id_test_42".into(),
+            participant_id: "part_alice".into(),
+            assurance: IdentityAssurance::Anonymous,
+        })
+        .await
+        .expect("send");
+
+    // Orchestrator should publish a typed ConnectionAuthenticated event
+    // — not a generic Native passthrough.
+    let event = loop {
+        let ev = tokio::time::timeout(Duration::from_millis(500), events.recv())
+            .await
+            .expect("event timeout")
+            .expect("event bus closed");
+        // Skip any unrelated events from the orchestrator's
+        // adapter-registration bookkeeping.
+        if matches!(&ev, Event::ConnectionAuthenticated { .. }) {
+            break ev;
+        }
+    };
+
+    match event {
+        Event::ConnectionAuthenticated {
+            connection_id,
+            identity_id,
+            participant_id,
+            assurance,
+            ..
+        } => {
+            assert_eq!(connection_id, connid);
+            assert_eq!(identity_id, "id_test_42");
+            assert_eq!(participant_id, "part_alice");
+            assert!(matches!(assurance, IdentityAssurance::Anonymous));
+        }
+        other => panic!("expected ConnectionAuthenticated, got {:?}", other),
+    }
+}
+
+#[tokio::test]
 async fn ended_connection_clears_publisher_registry_rows() {
     // A2 regression: `Orchestrator::forget_connection` must mirror the
     // cleanup into `PublisherRegistry`. Without this, a publisher that
@@ -494,7 +554,7 @@ async fn ended_connection_clears_publisher_registry_rows() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "alice".to_string(),
-            kind: "audio".to_string(),
+            kind: "audio".to_string(), codec: None,
         },
     );
     // A second publisher on a different Connection in the same Session
@@ -506,7 +566,7 @@ async fn ended_connection_clears_publisher_registry_rows() {
         PublisherEntry {
             connection: other_publisher.clone(),
             participant: "bob".to_string(),
-            kind: "audio".to_string(),
+            kind: "audio".to_string(), codec: None,
         },
     );
     assert!(registry.entry(&sid, "strm_audio").is_some());

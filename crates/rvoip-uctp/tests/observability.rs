@@ -19,6 +19,9 @@ use rvoip_uctp::{
 };
 use tokio::sync::mpsc;
 
+mod common;
+use common::drive_auth_handshake;
+
 #[derive(Default, Clone)]
 struct CaptureState {
     counters: Arc<Mutex<Vec<(String, Vec<(String, String)>, u64)>>>,
@@ -176,10 +179,12 @@ async fn observability_emits_counter_gauge_histogram() {
     let capture = install_capture();
 
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
-    let (out_tx, _out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
     let _coord = UctpCoordinator::start("quic", in_rx, out_tx, events_tx, bearer_stub());
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
 
     in_tx.send(invite_env("sess_observ")).await.unwrap();
     in_tx.send(accept_env("sess_observ")).await.unwrap();

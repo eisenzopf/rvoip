@@ -31,7 +31,7 @@ use rvoip_quic::{
     UctpQuicClient, UctpQuicConfig,
 };
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::payloads::session::SessionInvite;
+use rvoip_uctp::payloads::{auth, session::SessionInvite};
 use rvoip_uctp::state::OrchestratorSubscriptionHandler;
 use rvoip_uctp::substrate::{dev_client_config_trusting, dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
@@ -80,6 +80,73 @@ fn default_codec() -> rvoip_core::capability::CodecInfo {
         channels: 1,
         fmtp: None,
     }
+}
+
+/// A1: drive the bearer auth handshake on a freshly-opened QUIC client
+/// so subsequent session.invite/connection.offer envelopes aren't
+/// refused with 401. Caller passes `client` and the inbound channel it
+/// already extracted via `take_inbound()`.
+async fn drive_auth_quic(
+    client: &Arc<UctpQuicClient>,
+    inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
+) {
+    let hello = UctpEnvelope::new(
+        MessageType::AuthHello,
+        serde_json::to_value(auth::AuthHello {
+            device: auth::Device {
+                id: "dev_mp".into(),
+                kind: "desktop".into(),
+                platform: "test".into(),
+                sdk_version: "mp/0.1".into(),
+            },
+            auth_methods: vec!["bearer".into()],
+            capabilities: serde_json::Value::Object(Default::default()),
+        })
+        .unwrap(),
+    );
+    client.send(hello).await.expect("send hello");
+    let challenge = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("auth.challenge timeout")
+        .expect("inbound closed");
+    assert_eq!(challenge.msg_type, MessageType::AuthChallenge);
+    let response = UctpEnvelope::new(
+        MessageType::AuthResponse,
+        serde_json::to_value(auth::AuthResponse {
+            method: "bearer".into(),
+            credential: "test-token".into(),
+        })
+        .unwrap(),
+    )
+    .with_in_reply_to(challenge.id);
+    client.send(response).await.expect("send response");
+    let session = tokio::time::timeout(Duration::from_secs(5), inbound.recv())
+        .await
+        .expect("auth.session timeout")
+        .expect("inbound closed");
+    assert_eq!(session.msg_type, MessageType::AuthSession);
+}
+
+/// Drain the inbound envelope channel until a `stream.opened` envelope
+/// arrives; return its `stream_local_id`. The MP3c fanout path
+/// (plan B1) announces the subscriber's per-publisher local_id this
+/// way so the subscriber's client can build a matching MediaStream.
+async fn wait_for_stream_opened(
+    inbound: &mut tokio::sync::mpsc::Receiver<UctpEnvelope>,
+) -> u16 {
+    for _ in 0..30 {
+        let env = tokio::time::timeout(Duration::from_millis(500), inbound.recv())
+            .await
+            .expect("stream.opened timeout")
+            .expect("inbound closed");
+        if env.msg_type != MessageType::StreamOpened {
+            continue;
+        }
+        let payload: rvoip_uctp::payloads::stream::StreamOpened =
+            env.decode_payload().expect("decode stream.opened");
+        return payload.stream.stream_local_id;
+    }
+    panic!("no stream.opened envelope arrived");
 }
 
 fn invite(sid: &str, participant: &str) -> UctpEnvelope {
@@ -147,6 +214,13 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
         UctpQuicClient::connect(&client_b_ep, server_addr, "localhost", Arc::new(cfg))
             .await
             .expect("client b");
+
+    // A1: drive bearer auth on both clients before inviting.
+    let mut in_a = client_a.take_inbound().expect("a take_inbound");
+    let mut in_b = client_b.take_inbound().expect("b take_inbound");
+    drive_auth_quic(&client_a, &mut in_a).await;
+    drive_auth_quic(&client_b, &mut in_b).await;
+
     // Send invites sequentially so the orchestrator's ConnectionInbound
     // ordering is deterministic — client A is always the publisher.
     client_a.send(invite("sess_a", "part_a_publisher")).await.unwrap();
@@ -199,7 +273,7 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
         publisher_strm_id.clone(),
     );
 
-    // --- Client-side stream setup so we can inject + observe ---
+    // --- Publisher-side client stream so we can inject ---
     let publisher_client_stream = QuicDatagramMediaStream::start(
         rvoip_core::ids::StreamId::new(),
         StreamKind::Audio,
@@ -208,27 +282,55 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
         1,
         client_a.connection.clone(),
     );
+    let publisher_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(
+        &publisher_client_stream,
+    )]));
+    quic_spawn_datagram_reader(client_a.connection.clone(), publisher_router, None);
+    let publisher_out =
+        rvoip_core::stream::MediaStream::frames_out(publisher_client_stream.as_ref());
+
+    // --- Trigger the lazy MP3c allocation by injecting a priming frame.
+    // The first fanout call into the subscriber's adapter sends
+    // `stream.opened` announcing the new subscriber-side local_id; we
+    // listen for that envelope before building the matching client-side
+    // MediaStream. The priming frame itself may not be received (the
+    // subscriber's reader isn't running yet) — that's expected. ---
+    publisher_out
+        .send(MediaFrame {
+            stream_id: publisher_client_stream.id(),
+            kind: StreamKind::Audio,
+            payload: Bytes::from(vec![0x00, 0x00, 0x00, 0x00, 0xFF]),
+            timestamp_rtp: 0,
+            captured_at: Utc::now(),
+        })
+        .await
+        .expect("prime frame");
+
+    // MP3c: server allocates a fresh stream_local_id (>= 2) for this
+    // subscription and emits `stream.opened` announcing it. Build the
+    // subscriber-side MediaStream with whatever id the server picked,
+    // mirroring how a real client would learn it.
+    let subscriber_local_id = wait_for_stream_opened(&mut in_b).await;
+    assert!(
+        subscriber_local_id >= 2,
+        "MP3c must allocate a fresh local_id (got {})",
+        subscriber_local_id
+    );
     let subscriber_client_stream = QuicDatagramMediaStream::start(
         rvoip_core::ids::StreamId::new(),
         StreamKind::Audio,
         default_codec(),
         rvoip_core::connection::Direction::Inbound,
-        1,
+        subscriber_local_id,
         client_b.connection.clone(),
     );
 
-    let publisher_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(
-        &publisher_client_stream,
-    )]));
     let subscriber_router = Arc::new(parking_lot::RwLock::new(vec![Arc::clone(
         &subscriber_client_stream,
     )]));
-    quic_spawn_datagram_reader(client_a.connection.clone(), publisher_router, None);
     quic_spawn_datagram_reader(client_b.connection.clone(), subscriber_router, None);
 
     // --- Inject 5 frames at publisher; observe arrival at subscriber ---
-    let publisher_out =
-        rvoip_core::stream::MediaStream::frames_out(publisher_client_stream.as_ref());
     let mut subscriber_in =
         rvoip_core::stream::MediaStream::frames_in(subscriber_client_stream.as_ref());
 
@@ -249,6 +351,11 @@ async fn fanout_routes_media_from_publisher_to_subscriber_over_quic() {
             .await
             .expect("timed out waiting for fanout frame on subscriber")
             .expect("subscriber stream closed");
+        // Skip the priming frame's payload if it happens to slip through
+        // after the reader started (depends on QUIC scheduling).
+        if frame.payload.as_ref() == &[0x00, 0x00, 0x00, 0x00, 0xFF] {
+            continue;
+        }
         received.push(frame.payload.to_vec());
     }
 
@@ -302,6 +409,10 @@ async fn fanout_with_no_subscription_does_not_leak_frames() {
         UctpQuicClient::connect(&client_b_ep, server_addr, "localhost", Arc::new(cfg))
             .await
             .expect("client b");
+    let mut in_a = client_a.take_inbound().expect("a take_inbound");
+    let mut in_b = client_b.take_inbound().expect("b take_inbound");
+    drive_auth_quic(&client_a, &mut in_a).await;
+    drive_auth_quic(&client_b, &mut in_b).await;
     client_a.send(invite("sess_a", "part_a")).await.unwrap();
     client_b.send(invite("sess_b", "part_b")).await.unwrap();
 

@@ -69,6 +69,24 @@ pub struct Orchestrator {
     /// `stream.subscribe` requests. Lazily initialized via
     /// [`publisher_registry`].
     publisher_registry: std::sync::OnceLock<Arc<crate::subscriptions::PublisherRegistry>>,
+    /// Per-(sid, subscriber, publisher, publisher_strm_id) →
+    /// subscriber-side MediaStream allocated lazily by
+    /// [`Self::fanout_frame`] (plan §12 MP3c / G4). The MediaStream is
+    /// obtained via [`crate::adapter::ConnectionAdapter::allocate_subscriber_stream`]
+    /// the first time a frame is fanned out on that subscription;
+    /// subsequent fanouts reuse the same stream so the subscriber sees
+    /// each publisher's media on a stable `stream_local_id`.
+    ///
+    /// For adapters that return `NotImplemented` (SIP, WebRTC, anything
+    /// not UCTP-family) the map stays unused and `fanout_frame` falls
+    /// back to the legacy pick-by-kind path so single-publisher rooms
+    /// keep working everywhere.
+    subscriber_streams: Arc<
+        DashMap<
+            (SessionId, ConnectionId, ConnectionId, StreamId),
+            Arc<dyn crate::stream::MediaStream>,
+        >,
+    >,
 }
 
 impl Orchestrator {
@@ -86,6 +104,7 @@ impl Orchestrator {
             coordinator: None,
             subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
             publisher_registry: std::sync::OnceLock::new(),
+            subscriber_streams: Arc::new(DashMap::new()),
         })
     }
 
@@ -106,6 +125,7 @@ impl Orchestrator {
             coordinator: Some(coordinator),
             subscriptions: Arc::new(crate::subscriptions::SubscriptionRegistry::new()),
             publisher_registry: std::sync::OnceLock::new(),
+            subscriber_streams: Arc::new(DashMap::new()),
         })
     }
 
@@ -175,6 +195,13 @@ impl Orchestrator {
         if let Some(reg) = self.publisher_registry.get() {
             reg.drop_publisher(conn);
         }
+        // MP3c subscriber-stream map: drop rows that name this
+        // Connection as subscriber OR publisher so the per-subscription
+        // MediaStream goes out of scope along with the substrate-level
+        // Connection. Without this, the per-publisher MediaStreams keep
+        // a strong reference to the dead Connection's quinn handle.
+        self.subscriber_streams
+            .retain(|(_, sub, pubr, _), _| sub != conn && pubr != conn);
     }
 
     // --- Multi-party subscription routing (v0.x MP1) -------------------
@@ -239,33 +266,41 @@ impl Orchestrator {
         if let Some(reg) = self.publisher_registry.get() {
             reg.drop_session(sid);
         }
+        // MP3c: drop all per-subscription MediaStreams owned by this
+        // Session.
+        self.subscriber_streams
+            .retain(|(s, _, _, _), _| s != sid);
     }
 
     /// Fan a publisher's `MediaFrame` out to every subscriber of
     /// `(sid, publisher, strm_id)`. v0.x MP3a primitive — adapter
-    /// datagram-receive loops will call this after unpacking a
-    /// publisher's datagram, after MP3b wires the publisher-side
-    /// trigger.
+    /// datagram-receive loops call this after unpacking a publisher's
+    /// datagram (MP3b wires the publisher-side trigger).
     ///
-    /// For each subscriber: looks up its `ConnectionAdapter` (via the
-    /// connections map populated at registration), queries the
-    /// adapter's `streams(connid)`, finds the first `MediaStream`
-    /// matching `frame.kind`, and pushes the frame into its
-    /// `frames_out` channel. Returns the number of subscribers a
-    /// frame was successfully delivered to (best-effort: a single
-    /// subscriber's failed delivery does not block the others).
+    /// Per-subscriber stream resolution (plan §12 MP3c / G4):
+    /// 1. Try the cached subscriber-side MediaStream for
+    ///    `(sid, subscriber, publisher, strm_id)`. Reuses prior
+    ///    allocation so each publisher's frames keep landing on the
+    ///    same `stream_local_id`.
+    /// 2. If absent, ask the subscriber's adapter to allocate a fresh
+    ///    one via [`crate::adapter::ConnectionAdapter::allocate_subscriber_stream`].
+    ///    The adapter picks the next free `stream_local_id`, registers
+    ///    the MediaStream for inbound routing, and emits a
+    ///    `stream.opened` envelope so the peer learns the new id.
+    /// 3. If the adapter doesn't support allocation (returns
+    ///    `NotImplemented` — e.g. SIP, WebRTC, or any adapter that
+    ///    doesn't own the multi-party wire surface), fall back to the
+    ///    legacy "first matching MediaStream by kind" path. Keeps
+    ///    single-publisher rooms working unchanged.
     ///
-    /// Refinements deferred to MP3b/MP3c:
-    /// - Per-subscriber `stream_local_id` allocation + datagram
-    ///   header rewriting (CONVERSATION_PROTOCOL.md §10.1 multi-party
-    ///   note). Today the subscriber's `frames_out` consumer (its
-    ///   adapter pump) re-frames with whatever local id its
-    ///   MediaStream owns.
-    /// - Codec mismatch validation. Today `add_subscription` accepts
-    ///   any pair; if codecs disagree, the subscriber receives frames
-    ///   it can't decode. Validation should land alongside
-    ///   storing the publisher's negotiated codec on the
-    ///   `PublisherRegistry`.
+    /// Returns the number of subscribers a frame was successfully
+    /// delivered to. Best-effort: per-subscriber failures (channel
+    /// full, adapter error) are logged at `debug` and do not block the
+    /// remaining subscribers.
+    ///
+    /// Refinement still deferred: codec mismatch validation.
+    /// `add_subscription` accepts any pair today; codec checking
+    /// alongside `PublisherRegistry` codec metadata is plan B2.
     pub async fn fanout_frame(
         &self,
         sid: &SessionId,
@@ -279,13 +314,68 @@ impl Orchestrator {
             let Ok(adapter) = self.adapter_for(&subscriber_connid) else {
                 continue;
             };
-            let Ok(streams) = adapter.streams(subscriber_connid).await else {
+            let key = (
+                sid.clone(),
+                subscriber_connid.clone(),
+                publisher.clone(),
+                strm_id.clone(),
+            );
+            // (1) Cached per-subscription stream — MP3c path.
+            let target_opt: Option<Arc<dyn crate::stream::MediaStream>> = self
+                .subscriber_streams
+                .get(&key)
+                .map(|entry| Arc::clone(entry.value()));
+            let target = if let Some(s) = target_opt {
+                Some(s)
+            } else {
+                // (2) Try to allocate a fresh per-subscription stream.
+                // Adapters that don't carry multi-party responsibility
+                // (SIP, WebRTC) return NotImplemented; we fall through
+                // to (3) for them.
+                let codec = self
+                    .publisher_registry
+                    .get()
+                    .and_then(|reg| reg.entry(sid, &strm_id.to_string()))
+                    .and_then(|entry| entry.codec.clone())
+                    .unwrap_or_else(crate::capability::default_audio_codec);
+                match adapter
+                    .allocate_subscriber_stream(
+                        subscriber_connid.clone(),
+                        frame.kind,
+                        codec,
+                    )
+                    .await
+                {
+                    Ok(stream) => {
+                        self.subscriber_streams.insert(key.clone(), Arc::clone(&stream));
+                        Some(stream)
+                    }
+                    Err(RvoipError::NotImplemented(_)) => {
+                        // (3) Legacy fallback — pick first MediaStream
+                        // by kind. Single-publisher rooms / non-UCTP
+                        // substrates keep working unchanged.
+                        adapter
+                            .streams(subscriber_connid.clone())
+                            .await
+                            .ok()
+                            .and_then(|streams| {
+                                streams.into_iter().find(|s| s.kind() == frame.kind)
+                            })
+                    }
+                    Err(e) => {
+                        debug!(
+                            error = %e,
+                            ?subscriber_connid,
+                            "fanout_frame: allocate_subscriber_stream failed"
+                        );
+                        None
+                    }
+                }
+            };
+            let Some(stream) = target else {
                 continue;
             };
-            let Some(target) = streams.into_iter().find(|s| s.kind() == frame.kind) else {
-                continue;
-            };
-            let tx = target.frames_out();
+            let tx = stream.frames_out();
             if tx.send(frame.clone()).await.is_ok() {
                 delivered += 1;
             }
@@ -343,6 +433,20 @@ impl Orchestrator {
                     at: Utc::now(),
                 });
             }
+            AdapterEvent::Authenticated {
+                connection_id,
+                identity_id,
+                participant_id,
+                assurance,
+            } => {
+                self.emit(Event::ConnectionAuthenticated {
+                    connection_id,
+                    identity_id,
+                    participant_id,
+                    assurance,
+                    at: Utc::now(),
+                });
+            }
             AdapterEvent::Ended {
                 connection_id,
                 reason,
@@ -362,6 +466,37 @@ impl Orchestrator {
                 self.emit(Event::ConnectionFailed {
                     connection_id,
                     detail,
+                    at: Utc::now(),
+                });
+            }
+            AdapterEvent::Dtmf {
+                connection_id,
+                digits,
+                duration_ms: _,
+            } => {
+                // `Event::DtmfReceived` carries digits + connection_id
+                // only — duration_ms is dropped at the orchestrator
+                // boundary (it's transport-detail). Consumers that need
+                // per-digit timing subscribe to the adapter event
+                // stream directly. Plan C2.
+                self.emit(Event::DtmfReceived {
+                    connection_id,
+                    digits,
+                    at: Utc::now(),
+                });
+            }
+            AdapterEvent::Quality {
+                connection_id,
+                snapshot,
+            } => {
+                // Plan C2. Per-stream RTT and bitrate are dropped at
+                // the orchestrator boundary because `QualitySnapshot`
+                // doesn't carry them today. Consumers needing the
+                // full per-stream report subscribe to the adapter
+                // event stream directly.
+                self.emit(Event::MediaQuality {
+                    connection_id,
+                    snapshot,
                     at: Utc::now(),
                 });
             }

@@ -23,7 +23,7 @@ use rvoip_quic::{
     UctpQuicClient, UctpQuicConfig,
 };
 use rvoip_uctp::envelope::UctpEnvelope;
-use rvoip_uctp::payloads::session::SessionInvite;
+use rvoip_uctp::payloads::{auth, session::SessionInvite};
 use rvoip_uctp::substrate::{dev_client_config_trusting, dispatch_by_alpn, self_signed_for_dev};
 use rvoip_uctp::types::MessageType;
 use rvoip_webtransport::{
@@ -77,6 +77,40 @@ fn default_codec() -> rvoip_core::capability::CodecInfo {
         channels: 1,
         fmtp: None,
     }
+}
+
+fn auth_hello() -> UctpEnvelope {
+    UctpEnvelope::new(
+        MessageType::AuthHello,
+        serde_json::to_value(auth::AuthHello {
+            device: auth::Device {
+                id: "dev_xt".into(),
+                kind: "desktop".into(),
+                platform: "test".into(),
+                sdk_version: "xt/0.1".into(),
+            },
+            auth_methods: vec!["bearer".into()],
+            capabilities: serde_json::Value::Object(Default::default()),
+        })
+        .unwrap(),
+    )
+}
+
+fn auth_response(in_reply_to: String) -> UctpEnvelope {
+    UctpEnvelope::new(
+        MessageType::AuthResponse,
+        serde_json::to_value(auth::AuthResponse {
+            method: "bearer".into(),
+            credential: "test-token".into(),
+        })
+        .unwrap(),
+    )
+    .with_in_reply_to(in_reply_to)
+}
+
+/// Two-step assertion that an inbound envelope has the expected type.
+fn assert_msg(env: &UctpEnvelope, expected: MessageType) {
+    assert_eq!(env.msg_type, expected, "expected {:?} got {:?}", expected, env.msg_type);
 }
 
 fn invite(sid: &str, participant: &str) -> UctpEnvelope {
@@ -149,6 +183,24 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
     )
     .await
     .expect("quic client connect");
+    // A1: drive bearer auth on the QUIC client before sending session.invite.
+    let mut quic_in = quic_client.take_inbound().expect("quic take_inbound");
+    quic_client.send(auth_hello()).await.expect("quic hello");
+    let challenge = tokio::time::timeout(Duration::from_secs(5), quic_in.recv())
+        .await
+        .expect("quic challenge timeout")
+        .expect("quic inbound closed");
+    assert_msg(&challenge, MessageType::AuthChallenge);
+    quic_client
+        .send(auth_response(challenge.id))
+        .await
+        .expect("quic response");
+    let qs = tokio::time::timeout(Duration::from_secs(5), quic_in.recv())
+        .await
+        .expect("quic session timeout")
+        .expect("quic inbound closed");
+    assert_msg(&qs, MessageType::AuthSession);
+
     quic_client
         .send(invite("sess_quic", "part_quic_alice"))
         .await
@@ -166,6 +218,25 @@ async fn quic_to_wt_bridge_flows_frames_end_to_end() {
     )
     .await
     .expect("wt client connect");
+
+    // A1: drive bearer auth on the WT client too.
+    let mut wt_in = wt_client.take_inbound().expect("wt take_inbound");
+    wt_client.send(auth_hello()).await.expect("wt hello");
+    let wt_challenge = tokio::time::timeout(Duration::from_secs(5), wt_in.recv())
+        .await
+        .expect("wt challenge timeout")
+        .expect("wt inbound closed");
+    assert_msg(&wt_challenge, MessageType::AuthChallenge);
+    wt_client
+        .send(auth_response(wt_challenge.id))
+        .await
+        .expect("wt response");
+    let ws = tokio::time::timeout(Duration::from_secs(5), wt_in.recv())
+        .await
+        .expect("wt session timeout")
+        .expect("wt inbound closed");
+    assert_msg(&ws, MessageType::AuthSession);
+
     wt_client
         .send(invite("sess_wt", "part_wt_bob"))
         .await
@@ -320,6 +391,35 @@ async fn wt_to_wt_bridge_flows_frames_end_to_end() {
     let client_b = UctpWtClient::connect(&client_b_ep, server_addr, &url, Arc::new(client_cfg))
         .await
         .expect("client b");
+
+    // A1: drive bearer auth on both WT clients before inviting.
+    let mut in_a = client_a.take_inbound().expect("client_a take_inbound");
+    let mut in_b = client_b.take_inbound().expect("client_b take_inbound");
+    client_a.send(auth_hello()).await.expect("a hello");
+    client_b.send(auth_hello()).await.expect("b hello");
+    let ca = tokio::time::timeout(Duration::from_secs(5), in_a.recv())
+        .await
+        .expect("a challenge timeout")
+        .expect("a closed");
+    let cb = tokio::time::timeout(Duration::from_secs(5), in_b.recv())
+        .await
+        .expect("b challenge timeout")
+        .expect("b closed");
+    assert_msg(&ca, MessageType::AuthChallenge);
+    assert_msg(&cb, MessageType::AuthChallenge);
+    client_a.send(auth_response(ca.id)).await.expect("a resp");
+    client_b.send(auth_response(cb.id)).await.expect("b resp");
+    let sa = tokio::time::timeout(Duration::from_secs(5), in_a.recv())
+        .await
+        .expect("a session timeout")
+        .expect("a closed");
+    let sb = tokio::time::timeout(Duration::from_secs(5), in_b.recv())
+        .await
+        .expect("b session timeout")
+        .expect("b closed");
+    assert_msg(&sa, MessageType::AuthSession);
+    assert_msg(&sb, MessageType::AuthSession);
+
     client_a.send(invite("sess_a", "part_a")).await.unwrap();
     client_b.send(invite("sess_b", "part_b")).await.unwrap();
 

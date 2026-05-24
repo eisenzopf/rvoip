@@ -61,4 +61,35 @@ pub enum UctpSessionEvent {
 
     /// Capability negotiation failed with code 488.
     NegotiationFailed { sid: SessionId, reason: String },
+
+    /// Peer sent `dtmf.send` (CONVERSATION_PROTOCOL.md §7.5). Adapters
+    /// translate this into `AdapterEvent::Dtmf` so the orchestrator
+    /// surfaces it as `Event::DtmfReceived`. Plan C2.
+    Dtmf {
+        connid: ConnectionId,
+        digits: String,
+        duration_ms: u32,
+        /// `"rfc4733"` or `"info"`. Echoed from the inbound payload's
+        /// `method` field so downstream consumers can distinguish how
+        /// the DTMF was carried (RTP events vs SIP INFO bridging).
+        method: String,
+    },
+
+    /// Peer sent `connection.quality` (CONVERSATION_PROTOCOL.md §10.3) —
+    /// one event per Stream entry in the envelope (the coordinator
+    /// emits N events for N-stream reports). Adapters translate to
+    /// `AdapterEvent::Quality` so the orchestrator publishes
+    /// `Event::MediaQuality`. Plan C2.
+    Quality {
+        connid: ConnectionId,
+        /// Wire-level Stream id the snapshot is for. Carried through
+        /// so consumers that need per-stream attribution can join
+        /// back against the publisher registry.
+        strm_id: String,
+        snapshot: rvoip_core::stream::QualitySnapshot,
+        /// Round-trip estimate in milliseconds (separate from
+        /// `QualitySnapshot` which doesn't carry RTT today).
+        rtt_ms: u32,
+        bitrate_bps: u32,
+    },
 }

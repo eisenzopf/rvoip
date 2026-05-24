@@ -1,0 +1,111 @@
+[package]
+name = "rvoip-webrtc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+documentation.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+categories.workspace = true
+keywords.workspace = true
+description = "rvoip-core WebRTC interop adapter built on webrtc-rs 0.20.0-alpha.1"
+
+[features]
+default = []
+signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http"]
+signaling-ws = ["dep:tokio-tungstenite"]
+client = []
+bridge-quic = [
+    "signaling-whip",
+    "dep:rvoip-quic",
+    "dep:rvoip-uctp",
+    "dep:rvoip-auth-core",
+    "dep:quinn",
+    "dep:rustls",
+    "dep:serde_json",
+    "dep:parking_lot",
+]
+
+[dependencies]
+rvoip-core.workspace = true
+webrtc = { workspace = true, features = ["runtime-tokio"] }
+rtc.workspace = true
+
+tokio = { workspace = true }
+async-trait.workspace = true
+futures.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+parking_lot = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
+tracing.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+url = "2"
+
+rvoip-quic = { workspace = true, optional = true }
+rvoip-uctp = { workspace = true, optional = true }
+rvoip-auth-core = { workspace = true, optional = true }
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+
+axum = { workspace = true, optional = true }
+hyper = { version = "1", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["trace"], optional = true }
+tokio-tungstenite = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tracing-subscriber.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio-tungstenite = { workspace = true }
+rustls.workspace = true
+rvoip-quic.workspace = true
+rvoip-uctp.workspace = true
+rvoip-auth-core.workspace = true
+quinn.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+
+[[test]]
+name = "webrtc_bridge_e2e"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "orchestrator_e2e"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "server"
+required-features = ["signaling-whip", "signaling-ws"]
+
+[[test]]
+name = "whip_ice_restart"
+required-features = ["signaling-whip"]
+
+[[test]]
+name = "webrtc_quic_bridge_e2e"
+required-features = ["bridge-quic"]
+
+[[example]]
+name = "loopback_call"
+required-features = ["client"]
+
+[[example]]
+name = "webrtc_bridge_demo"
+required-features = ["signaling-whip"]
+
+[[example]]
+name = "webrtc_quic_bridge_demo"
+required-features = ["bridge-quic"]
+
+[[example]]
+name = "webrtc_server"
+required-features = ["signaling-whip", "signaling-ws"]
+
+[lints]
+workspace = true

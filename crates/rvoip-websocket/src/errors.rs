@@ -27,3 +27,10 @@ pub enum UctpWsError {
 }
 
 pub type Result<T> = std::result::Result<T, UctpWsError>;
+
+#[cfg(feature = "media-webrtc")]
+impl From<rvoip_webrtc::WebRtcError> for UctpWsError {
+    fn from(e: rvoip_webrtc::WebRtcError) -> Self {
+        Self::WebRtc(format!("{e}"))
+    }
+}

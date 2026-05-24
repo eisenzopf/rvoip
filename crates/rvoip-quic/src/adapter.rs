@@ -38,13 +38,31 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 
 /// Routing entry shared between the server's event-pump and the
 /// adapter's `ConnectionAdapter` method handlers. The server populates
-/// `out_tx` and `sid` at `InboundInvite` time; adapter methods look up
-/// the matching entry to dispatch envelopes back to the peer.
+/// `out_tx`, `sid`, `conn`, and the allocators at `InboundInvite` time;
+/// adapter methods look up the matching entry to dispatch envelopes
+/// back to the peer or to allocate per-subscriber MediaStreams.
 #[derive(Clone)]
 pub(crate) struct Route {
     pub sid: String,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
     pub streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn MediaStream>>>,
+    /// The underlying `quinn::Connection` for this peer. Plumbed in so
+    /// the adapter's `allocate_subscriber_stream` (plan B1 / MP3c) can
+    /// construct a fresh `QuicDatagramMediaStream` without re-asking
+    /// the server task.
+    pub conn: quinn::Connection,
+    /// Next free `stream_local_id` on this connection. The default
+    /// audio stream created at `InboundInvite` claims `1`; the
+    /// allocator starts at `2`. Wraps to 1 on overflow — bounded by
+    /// `u16::MAX` so practical sessions never approach the limit, but
+    /// guarding against wrap is cheap.
+    pub next_local_id: Arc<std::sync::atomic::AtomicU16>,
+    /// Inbound routing table — the `spawn_datagram_reader` task on
+    /// this connection consults it on every inbound datagram. Shared
+    /// so the adapter can register newly-allocated subscriber-side
+    /// streams here for round-trip support.
+    pub streams_router:
+        Arc<parking_lot::RwLock<Vec<Arc<crate::media_stream::QuicDatagramMediaStream>>>>,
 }
 
 pub struct UctpQuicConfig {
@@ -80,6 +98,12 @@ pub struct UctpQuicConfig {
     /// practice (no explicit shutdown); a future cleanup may swap to
     /// `Weak<Orchestrator>`.
     pub orchestrator: Option<Arc<rvoip_core::Orchestrator>>,
+    /// Per-peer resource caps (plan D1 / D2). Threaded into every
+    /// `UctpCoordinator` constructed on this adapter so deployments
+    /// can tune the session cap and signaling timeout without
+    /// recompiling. Defaults are the safe values from
+    /// `UctpCoordinatorCaps::default()`.
+    pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
 }
 
 impl UctpQuicConfig {
@@ -98,7 +122,20 @@ impl UctpQuicConfig {
             client_tls: None,
             subscription_handler: None,
             orchestrator: None,
+            coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
         }
+    }
+
+    /// Override the per-peer Session/timeout caps for this adapter's
+    /// coordinator instances (plan D1 / D2). Most deployments should
+    /// leave the defaults alone; embedded/mobile hosts or extreme N-party
+    /// rooms can tune up.
+    pub fn with_coordinator_caps(
+        mut self,
+        caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    ) -> Self {
+        self.coordinator_caps = caps;
+        self
     }
 
     pub fn with_outbound(
@@ -171,6 +208,7 @@ impl UctpQuicAdapter {
             config.quinn_stats_interval,
             config.subscription_handler,
             config.orchestrator,
+            config.coordinator_caps,
         );
 
         Ok(Arc::new(Self {
@@ -325,6 +363,95 @@ impl ConnectionAdapter for UctpQuicAdapter {
             .collect())
     }
 
+    async fn allocate_subscriber_stream(
+        &self,
+        subscriber: ConnectionId,
+        kind: rvoip_core::stream::StreamKind,
+        codec: rvoip_core::capability::CodecInfo,
+    ) -> RvoipResult<Arc<dyn MediaStream>> {
+        let route = self
+            .route(&subscriber)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(subscriber.clone()))?;
+
+        // Allocate a fresh stream_local_id. Skip 1 (the default audio
+        // stream's slot) and 0 (reserved). Wrap-around to 2 keeps the
+        // u16 namespace fully usable but practical sessions never come
+        // close.
+        let local_id = loop {
+            let next = route
+                .next_local_id
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if next == 0 || next == 1 {
+                continue;
+            }
+            break next;
+        };
+
+        // The stream is outbound from the server's perspective: the
+        // server packs MediaFrames from the publisher and sends them on
+        // this stream to the subscriber. Direction::Outbound makes the
+        // outbound pump the active path.
+        let stream = crate::media_stream::QuicDatagramMediaStream::start(
+            rvoip_core::ids::StreamId::new(),
+            kind,
+            codec.clone(),
+            rvoip_core::connection::Direction::Outbound,
+            local_id,
+            route.conn.clone(),
+        );
+
+        // Register in the per-Connection streams_router so inbound
+        // datagrams the subscriber might send back on this local_id
+        // route correctly. Without this, the subscriber could not
+        // publish on the new stream (one-way fanout otherwise).
+        route.streams_router.write().push(Arc::clone(&stream));
+
+        // Also expose via `adapter.streams(connid)` for consumers that
+        // enumerate streams (bridge_connections, ad-hoc routing).
+        let stream_dyn: Arc<dyn MediaStream> = Arc::clone(&stream) as Arc<dyn MediaStream>;
+        route.streams.insert(stream.id(), Arc::clone(&stream_dyn));
+
+        // Announce the new stream to the peer via `stream.opened` per
+        // CONVERSATION_PROTOCOL.md §7.4 / §10.1 multi-party note.
+        // strm_id is a fresh wire-level identifier — the peer treats it
+        // as opaque; what matters is the stream_local_id pairing.
+        let strm_id = format!("strm_sub_{}", rvoip_core::ids::StreamId::new().to_string());
+        let stream_info = payloads::stream::StreamInfo {
+            strm_id,
+            kind: match kind {
+                rvoip_core::stream::StreamKind::Audio => "audio".into(),
+                rvoip_core::stream::StreamKind::Video => "video".into(),
+                rvoip_core::stream::StreamKind::Data => "data".into(),
+            },
+            codec: serde_json::json!({
+                "name": codec.name,
+                "params": {
+                    "sample_rate": codec.clock_rate_hz,
+                    "channels": codec.channels,
+                }
+            }),
+            direction: "recvonly".into(), // server → subscriber
+            stream_local_id: local_id,
+            opened_at: chrono::Utc::now(),
+        };
+        let opened_env = UctpEnvelope::new(
+            MessageType::StreamOpened,
+            serde_json::to_value(payloads::stream::StreamOpened {
+                stream: stream_info,
+            })
+            .map_err(|e| RvoipError::Adapter(format!("encode stream.opened: {e}")))?,
+        )
+        .with_sid(route.sid.clone())
+        .with_connid(subscriber.to_string());
+        route
+            .out_tx
+            .send(opened_env)
+            .await
+            .map_err(|_| RvoipError::Adapter("peer signaling channel closed".into()))?;
+
+        Ok(stream_dyn)
+    }
+
     async fn send_message(&self, conn: ConnectionId, message: Message) -> RvoipResult<()> {
         let route = self
             .route(&conn)
@@ -349,8 +476,32 @@ impl ConnectionAdapter for UctpQuicAdapter {
             .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
     }
 
-    async fn send_dtmf(&self, _conn: ConnectionId, _digits: &str, _dur: u32) -> RvoipResult<()> {
-        Err(RvoipError::NotImplemented("rvoip-quic::send_dtmf"))
+    async fn send_dtmf(
+        &self,
+        conn: ConnectionId,
+        digits: &str,
+        duration_ms: u32,
+    ) -> RvoipResult<()> {
+        // Plan C2: build a `dtmf.send` envelope and push it on the
+        // peer's signaling channel. Default `method` is `"rfc4733"`
+        // (RTP events) — the SIP/UCTP gateway transcodes if the peer's
+        // negotiated mode is `"info"`.
+        let route = self
+            .route(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let payload = payloads::control::DtmfSend {
+            digits: digits.into(),
+            duration_ms,
+            method: "rfc4733".into(),
+        };
+        let env = UctpEnvelope::new(MessageType::DtmfSend, serde_json::to_value(payload).unwrap())
+            .with_sid(route.sid.clone())
+            .with_connid(conn.to_string());
+        route
+            .out_tx
+            .send(env)
+            .await
+            .map_err(|_| RvoipError::Adapter("peer signaling channel closed".into()))
     }
 
     async fn renegotiate_media(

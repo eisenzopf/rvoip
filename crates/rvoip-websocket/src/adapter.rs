@@ -56,6 +56,9 @@ pub struct UctpWsConfig {
     pub max_concurrent_connections: usize,
     /// Optional client config for outbound `originate` dials.
     pub client_url: Option<Url>,
+    /// Per-peer resource caps (plan D1 / D2). See
+    /// [`rvoip_quic::UctpQuicConfig::coordinator_caps`].
+    pub coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps,
 }
 
 impl UctpWsConfig {
@@ -65,11 +68,22 @@ impl UctpWsConfig {
             bearer_validator,
             max_concurrent_connections: 1024,
             client_url: None,
+            coordinator_caps: rvoip_uctp::state::UctpCoordinatorCaps::default(),
         }
     }
 
     pub fn with_outbound_url(mut self, url: Url) -> Self {
         self.client_url = Some(url);
+        self
+    }
+
+    /// Override the per-peer Session/timeout caps (plan D1 / D2). See
+    /// [`rvoip_uctp::state::UctpCoordinatorCaps`].
+    pub fn with_coordinator_caps(
+        mut self,
+        caps: rvoip_uctp::state::UctpCoordinatorCaps,
+    ) -> Self {
+        self.coordinator_caps = caps;
         self
     }
 }
@@ -101,6 +115,7 @@ impl UctpWsAdapter {
             Arc::clone(&by_uctp_sid),
             Arc::clone(&routes),
             config.max_concurrent_connections,
+            config.coordinator_caps,
         );
 
         Ok(Arc::new(Self {
@@ -247,6 +262,25 @@ impl ConnectionAdapter for UctpWsAdapter {
             .collect())
     }
 
+    async fn allocate_subscriber_stream(
+        &self,
+        _subscriber: ConnectionId,
+        _kind: rvoip_core::stream::StreamKind,
+        _codec: rvoip_core::capability::CodecInfo,
+    ) -> RvoipResult<Arc<dyn MediaStream>> {
+        // Multi-party MP3c local_id rewriting on WS rides on the
+        // `webrtc-rs` co-located PeerConnection (see media_bridge.rs)
+        // — that integration is v0.x-deferred pending webrtc-rs 1.0.
+        // Until then, fanout to WS subscribers falls back to the
+        // legacy first-by-kind path in `Orchestrator::fanout_frame`,
+        // which handles single-publisher rooms correctly. Multi-
+        // publisher rooms with a WS subscriber will see the symptom
+        // documented in the plan (B1 / G4) until webrtc-rs lands.
+        Err(RvoipError::NotImplemented(
+            "rvoip-websocket::allocate_subscriber_stream (pending webrtc-rs media plane)",
+        ))
+    }
+
     async fn send_message(&self, conn: ConnectionId, message: Message) -> RvoipResult<()> {
         let route = self
             .route(&conn)
@@ -271,8 +305,33 @@ impl ConnectionAdapter for UctpWsAdapter {
             .map_err(|_| RvoipError::Adapter("peer channel closed".into()))
     }
 
-    async fn send_dtmf(&self, _conn: ConnectionId, _digits: &str, _dur: u32) -> RvoipResult<()> {
-        Err(RvoipError::NotImplemented("rvoip-websocket::send_dtmf"))
+    async fn send_dtmf(
+        &self,
+        conn: ConnectionId,
+        digits: &str,
+        duration_ms: u32,
+    ) -> RvoipResult<()> {
+        // Plan C2. WS carries DTMF as a regular `dtmf.send` envelope
+        // on the text-frame signaling channel; the co-located WebRTC
+        // PeerConnection (once webrtc-rs lands per C3) handles the
+        // actual RTP RFC 2833 events for media-side DTMF emission.
+        // For now the wire-level signaling works end-to-end.
+        let route = self
+            .route(&conn)
+            .ok_or_else(|| RvoipError::ConnectionNotFound(conn.clone()))?;
+        let payload = payloads::control::DtmfSend {
+            digits: digits.into(),
+            duration_ms,
+            method: "rfc4733".into(),
+        };
+        let env = UctpEnvelope::new(MessageType::DtmfSend, serde_json::to_value(payload).unwrap())
+            .with_sid(route.sid.clone())
+            .with_connid(conn.to_string());
+        route
+            .out_tx
+            .send(env)
+            .await
+            .map_err(|_| RvoipError::Adapter("peer signaling channel closed".into()))
     }
 
     async fn renegotiate_media(

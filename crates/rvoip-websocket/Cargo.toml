@@ -12,10 +12,15 @@ categories.workspace = true
 keywords.workspace = true
 description = "rvoip-core ConnectionAdapter implementation over WebSocket (signaling) + co-located WebRTC PeerConnection (media) for the UCTP application protocol"
 
+[features]
+default = []
+media-webrtc = ["dep:rvoip-webrtc"]
+
 [dependencies]
 rvoip-core.workspace = true
 rvoip-uctp.workspace = true
 rvoip-auth-core.workspace = true
+rvoip-webrtc = { workspace = true, optional = true }
 
 tokio = { workspace = true }
 async-trait.workspace = true
@@ -29,7 +34,6 @@ serde.workspace = true
 serde_json.workspace = true
 
 tokio-tungstenite.workspace = true
-webrtc.workspace = true
 url = "2"
 
 tracing.workspace = true
@@ -37,7 +41,13 @@ metrics.workspace = true
 
 thiserror.workspace = true
 
+[[test]]
+name = "media_bridge_loopback"
+required-features = ["media-webrtc"]
+
 [dev-dependencies]
+rvoip-webrtc.workspace = true
+rustls.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
 

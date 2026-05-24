@@ -24,6 +24,9 @@ use rvoip_uctp::{
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+mod common;
+use common::drive_auth_handshake;
+
 fn subscribe_env(sid: &str, connid: &str, strm_ids: &[&str]) -> UctpEnvelope {
     let payload = StreamSubscribe {
         by_participant: "part_subscriber".into(),
@@ -80,7 +83,7 @@ async fn subscribe_with_registered_publisher_emits_ack_and_records_row() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "part_publisher".into(),
-            kind: "audio".into(),
+            kind: "audio".into(), codec: None,
         },
     );
 
@@ -99,6 +102,8 @@ async fn subscribe_with_registered_publisher_emits_ack_and_records_row() {
         Arc::new(CapabilityDescriptor::default()),
         handler,
     );
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
 
     in_tx
         .send(subscribe_env("sess_a", "conn_subscriber", &["strm_x"]))
@@ -134,6 +139,8 @@ async fn subscribe_with_unknown_strm_id_emits_404() {
         handler,
     );
 
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+
     in_tx
         .send(subscribe_env(
             "sess_a",
@@ -163,7 +170,7 @@ async fn unsubscribe_is_idempotent_and_removes_row() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "part_publisher".into(),
-            kind: "audio".into(),
+            kind: "audio".into(), codec: None,
         },
     );
 
@@ -182,6 +189,8 @@ async fn unsubscribe_is_idempotent_and_removes_row() {
         Arc::new(CapabilityDescriptor::default()),
         handler,
     );
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
 
     // Subscribe first.
     in_tx
@@ -213,8 +222,10 @@ async fn unsubscribe_is_idempotent_and_removes_row() {
 }
 
 // Helper: spin up a coordinator + handler with a pre-populated
-// publisher registry covering Alice's audio and video streams.
-fn setup_with_alice_streams() -> (
+// publisher registry covering Alice's audio and video streams. The
+// coordinator is already past the auth handshake when this returns —
+// callers can dispatch session/stream envelopes directly.
+async fn setup_with_alice_streams() -> (
     Arc<Orchestrator>,
     Arc<PublisherRegistry>,
     tokio::sync::mpsc::Sender<UctpEnvelope>,
@@ -231,7 +242,7 @@ fn setup_with_alice_streams() -> (
         PublisherEntry {
             connection: alice_conn.clone(),
             participant: "part_alice".into(),
-            kind: "audio".into(),
+            kind: "audio".into(), codec: None,
         },
     );
     publishers.register(
@@ -240,13 +251,13 @@ fn setup_with_alice_streams() -> (
         PublisherEntry {
             connection: alice_conn.clone(),
             participant: "part_alice".into(),
-            kind: "video".into(),
+            kind: "video".into(), codec: None,
         },
     );
 
     let handler = OrchestratorSubscriptionHandler::new(Arc::clone(&orch), Arc::clone(&publishers));
     let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
-    let (out_tx, out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
     let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
 
     let _coord = UctpCoordinator::start_full(
@@ -259,6 +270,8 @@ fn setup_with_alice_streams() -> (
         handler,
     );
     std::mem::forget(_coord); // keep driver task alive for the test duration
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
 
     (orch, publishers, in_tx, out_rx)
 }
@@ -292,7 +305,7 @@ fn from_participant_env(
 
 #[tokio::test]
 async fn from_participant_subscribes_to_all_streams_when_no_kinds_filter() {
-    let (orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams();
+    let (orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams().await;
 
     in_tx
         .send(from_participant_env("sess_x", "conn_bob", "part_alice", &[]))
@@ -314,7 +327,7 @@ async fn from_participant_subscribes_to_all_streams_when_no_kinds_filter() {
 
 #[tokio::test]
 async fn from_participant_with_kinds_filter_only_subscribes_matching_streams() {
-    let (orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams();
+    let (orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams().await;
 
     // Subscribe only to Alice's audio.
     in_tx
@@ -343,7 +356,7 @@ async fn from_participant_with_kinds_filter_only_subscribes_matching_streams() {
 
 #[tokio::test]
 async fn from_participant_with_unknown_participant_yields_404() {
-    let (_orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams();
+    let (_orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams().await;
 
     in_tx
         .send(from_participant_env(
@@ -363,7 +376,7 @@ async fn from_participant_with_unknown_participant_yields_404() {
 
 #[tokio::test]
 async fn from_participant_with_kinds_that_match_nothing_yields_488() {
-    let (_orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams();
+    let (_orch, _publishers, in_tx, mut out_rx) = setup_with_alice_streams().await;
 
     // Alice publishes audio + video; subscribe with kinds=["data"] →
     // participant exists but no streams match → 488 incompatible.
@@ -381,4 +394,227 @@ async fn from_participant_with_kinds_that_match_nothing_yields_488() {
     let payload: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
     assert_eq!(payload.code, 488);
     assert!(payload.reason.contains("part_alice"));
+}
+
+#[tokio::test]
+async fn subscribe_refuses_unsupported_codec_with_488() {
+    // B2: a publisher with a codec outside DEFAULT_ACCEPTED_CODECS
+    // (e.g. "exotic-codec") triggers `error 488` on subscribe so the
+    // subscriber doesn't receive frames it can't decode.
+    use rvoip_core::capability::CodecInfo;
+
+    let orch = Orchestrator::new(Config::default());
+    let publishers = Arc::new(PublisherRegistry::new());
+
+    let sid = SessionId::from_string("sess_b2");
+    let publisher_connid = ConnectionId::from_string("conn_exotic");
+    publishers.register(
+        sid.clone(),
+        "strm_exotic".into(),
+        PublisherEntry {
+            connection: publisher_connid.clone(),
+            participant: "part_publisher".into(),
+            kind: "audio".into(),
+            codec: Some(CodecInfo {
+                name: "exotic-codec".into(),
+                clock_rate_hz: 48_000,
+                channels: 1,
+                fmtp: None,
+            }),
+        },
+    );
+    let handler = OrchestratorSubscriptionHandler::new(Arc::clone(&orch), publishers);
+
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+
+    let _coord = UctpCoordinator::start_full(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        Arc::new(CapabilityDescriptor::default()),
+        handler,
+    );
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+
+    in_tx
+        .send(subscribe_env("sess_b2", "conn_subscriber", &["strm_exotic"]))
+        .await
+        .unwrap();
+    let reply = out_rx.recv().await.expect("expected 488");
+    assert_eq!(reply.msg_type, MessageType::Error);
+    let payload: rvoip_uctp::payloads::control::Error = reply.decode_payload().unwrap();
+    assert_eq!(payload.code, 488);
+    assert!(
+        payload.reason.contains("unsupported codec") && payload.reason.contains("exotic-codec"),
+        "488 reason must identify the offending codec; got {:?}",
+        payload.reason
+    );
+
+    let subs = orch.subscribers_for(
+        &sid,
+        &publisher_connid,
+        &StreamId::from_string("strm_exotic"),
+    );
+    assert!(subs.is_empty(), "refused subscription must not record a row");
+}
+
+#[tokio::test]
+async fn subscribe_accepts_when_codec_in_default_set() {
+    // B2 inverse: opus is in DEFAULT_ACCEPTED_CODECS → subscribe passes.
+    use rvoip_core::capability::CodecInfo;
+
+    let orch = Orchestrator::new(Config::default());
+    let publishers = Arc::new(PublisherRegistry::new());
+
+    let sid = SessionId::from_string("sess_b2_ok");
+    let publisher_connid = ConnectionId::from_string("conn_opus");
+    publishers.register(
+        sid.clone(),
+        "strm_opus".into(),
+        PublisherEntry {
+            connection: publisher_connid.clone(),
+            participant: "part_publisher".into(),
+            kind: "audio".into(),
+            codec: Some(CodecInfo {
+                name: "opus".into(),
+                clock_rate_hz: 48_000,
+                channels: 1,
+                fmtp: None,
+            }),
+        },
+    );
+    let handler = OrchestratorSubscriptionHandler::new(Arc::clone(&orch), publishers);
+
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+
+    let _coord = UctpCoordinator::start_full(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        Arc::new(CapabilityDescriptor::default()),
+        handler,
+    );
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+
+    in_tx
+        .send(subscribe_env("sess_b2_ok", "conn_sub", &["strm_opus"]))
+        .await
+        .unwrap();
+    let reply = out_rx.recv().await.expect("expected ack");
+    assert_eq!(reply.msg_type, MessageType::Ack);
+
+    let subs = orch.subscribers_for(
+        &sid,
+        &publisher_connid,
+        &StreamId::from_string("strm_opus"),
+    );
+    assert_eq!(subs.len(), 1, "opus subscription must succeed");
+}
+
+#[tokio::test]
+async fn from_participant_skips_unsupported_codec_streams() {
+    // B2 from_participant variant: best-effort enumeration. A
+    // participant publishing one opus stream and one exotic-codec
+    // stream — subscribing by from_participant subscribes only to
+    // the opus stream; the exotic one is silently skipped.
+    use rvoip_core::capability::CodecInfo;
+    use rvoip_uctp::payloads::stream::{StreamSubscribe, StreamSubscription};
+
+    let orch = Orchestrator::new(Config::default());
+    let publishers = Arc::new(PublisherRegistry::new());
+    let sid = SessionId::from_string("sess_b2_mix");
+    let alice_conn = ConnectionId::from_string("conn_alice");
+    publishers.register(
+        sid.clone(),
+        "strm_alice_opus".into(),
+        PublisherEntry {
+            connection: alice_conn.clone(),
+            participant: "part_alice".into(),
+            kind: "audio".into(),
+            codec: Some(CodecInfo {
+                name: "opus".into(),
+                clock_rate_hz: 48_000,
+                channels: 1,
+                fmtp: None,
+            }),
+        },
+    );
+    publishers.register(
+        sid.clone(),
+        "strm_alice_exotic".into(),
+        PublisherEntry {
+            connection: alice_conn.clone(),
+            participant: "part_alice".into(),
+            kind: "audio".into(),
+            codec: Some(CodecInfo {
+                name: "exotic-codec".into(),
+                clock_rate_hz: 48_000,
+                channels: 1,
+                fmtp: None,
+            }),
+        },
+    );
+    let handler =
+        OrchestratorSubscriptionHandler::new(Arc::clone(&orch), Arc::clone(&publishers));
+
+    let (in_tx, in_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (out_tx, mut out_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+    let (events_tx, _events_rx) = mpsc::channel(ENVELOPE_CHANNEL_CAP);
+
+    let _coord = UctpCoordinator::start_full(
+        "quic",
+        in_rx,
+        out_tx,
+        events_tx,
+        bearer_stub(),
+        Arc::new(CapabilityDescriptor::default()),
+        handler,
+    );
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+
+    let env = UctpEnvelope {
+        v: 1,
+        msg_type: MessageType::StreamSubscribe,
+        id: format!("env_{}", uuid::Uuid::new_v4().simple()),
+        ts: Utc::now(),
+        cid: None,
+        sid: Some("sess_b2_mix".into()),
+        connid: Some("conn_bob".into()),
+        in_reply_to: None,
+        payload: serde_json::to_value(StreamSubscribe {
+            by_participant: "part_bob".into(),
+            subscriptions: vec![StreamSubscription {
+                strm_id: None,
+                from_participant: Some("part_alice".into()),
+                kinds: Vec::new(),
+            }],
+        })
+        .unwrap(),
+    };
+    in_tx.send(env).await.unwrap();
+
+    let reply = out_rx.recv().await.expect("expected ack");
+    assert_eq!(reply.msg_type, MessageType::Ack);
+
+    let opus_subs =
+        orch.subscribers_for(&sid, &alice_conn, &StreamId::from_string("strm_alice_opus"));
+    assert_eq!(opus_subs.len(), 1, "opus stream must be subscribed");
+
+    let exotic_subs = orch.subscribers_for(
+        &sid,
+        &alice_conn,
+        &StreamId::from_string("strm_alice_exotic"),
+    );
+    assert!(
+        exotic_subs.is_empty(),
+        "exotic-codec stream must be silently skipped, not subscribed"
+    );
 }

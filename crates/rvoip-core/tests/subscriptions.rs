@@ -117,7 +117,7 @@ async fn drop_session_subscriptions_also_clears_publisher_registry() {
         PublisherEntry {
             connection: publisher_connid.clone(),
             participant: "alice".to_string(),
-            kind: "audio".to_string(),
+            kind: "audio".to_string(), codec: None,
         },
     );
     registry.register(
@@ -126,7 +126,7 @@ async fn drop_session_subscriptions_also_clears_publisher_registry() {
         PublisherEntry {
             connection: publisher_connid,
             participant: "alice".to_string(),
-            kind: "video".to_string(),
+            kind: "video".to_string(), codec: None,
         },
     );
     assert!(registry.entry(&sid, "strm_audio").is_some());

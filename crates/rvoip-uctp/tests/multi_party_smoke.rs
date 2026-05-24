@@ -33,6 +33,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+mod common;
+use common::drive_auth_handshake;
+
 fn descriptor_with_opus() -> Arc<CapabilityDescriptor> {
     Arc::new(CapabilityDescriptor {
         audio_codecs: vec![CodecInfo {
@@ -147,6 +150,8 @@ async fn connection_ready_emits_stream_opened_and_registers_publisher() {
         handler,
     );
 
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
+
     // 1. Send connection.offer — coordinator runs negotiation (passes;
     //    descriptor has opus, offer has opus) and stores accepted streams.
     in_tx
@@ -231,6 +236,8 @@ async fn duplicate_connection_ready_does_not_re_emit_stream_opened() {
         descriptor_with_opus(),
         handler,
     );
+
+    drive_auth_handshake(&in_tx, &mut out_rx).await;
 
     in_tx
         .send(offer_env("sess_b", "conn_b", "strm_x"))
