@@ -1536,16 +1536,11 @@ impl SipHeaderView for IncomingRegister {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::SessionApiCrossCrateEvent;
     use crate::api::unified::Config;
 
-    async fn publish_synthetic(event: Event) {
-        let wrapped = SessionApiCrossCrateEvent::new(event);
-        let coord = rvoip_infra_common::events::global_coordinator()
-            .await
-            .clone();
-        coord
-            .publish(wrapped)
+    async fn publish_synthetic(coordinator: &UnifiedCoordinator, event: Event) {
+        coordinator
+            .publish_app_event_for_test(event)
             .await
             .expect("publish synthetic event");
     }
@@ -1605,7 +1600,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        publish_synthetic(Event::CallCancelled { call_id }).await;
+        publish_synthetic(&coordinator, Event::CallCancelled { call_id }).await;
 
         waiter.await.unwrap().unwrap();
         assert!(resolved.load(Ordering::SeqCst));
@@ -1628,7 +1623,7 @@ mod tests {
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        publish_synthetic(Event::CallAnswered { call_id, sdp: None }).await;
+        publish_synthetic(&coordinator, Event::CallAnswered { call_id, sdp: None }).await;
 
         let err = waiter.await.unwrap().unwrap_err();
         assert!(err.to_string().contains("answered before cancellation"));

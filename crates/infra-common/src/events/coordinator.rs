@@ -36,14 +36,27 @@ static GLOBAL_COORDINATOR: OnceCell<Arc<GlobalEventCoordinator>> = OnceCell::con
 /// Panics if the coordinator fails to initialize (should only happen on first call)
 ///
 /// # Example
-/// ```rust
+/// ```rust,no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use std::sync::Arc;
 /// use rvoip_infra_common::events::coordinator::global_coordinator;
+/// use rvoip_infra_common::events::cross_crate::{
+///     CrossCrateEvent, RvoipCrossCrateEvent, SessionToDialogEvent,
+/// };
 ///
 /// // Get the global instance - initialized on first access
 /// let coordinator = global_coordinator().await;
 ///
 /// // Publish an event
-/// coordinator.publish(my_event).await?;
+/// let event: Arc<dyn CrossCrateEvent> = Arc::new(RvoipCrossCrateEvent::SessionToDialog(
+///     SessionToDialogEvent::TerminateSession {
+///         session_id: "session-1".into(),
+///         reason: "normal clearing".into(),
+///     },
+/// ));
+/// coordinator.publish(event).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn global_coordinator() -> &'static Arc<GlobalEventCoordinator> {
     GLOBAL_COORDINATOR

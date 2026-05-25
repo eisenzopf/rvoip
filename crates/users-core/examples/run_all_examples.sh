@@ -92,11 +92,11 @@ print_info "Starting example runs..."
 declare -a passed=()
 declare -a failed=()
 
-# Run basic_usage example
-if run_example "basic_usage" "Basic user management and authentication"; then
-    passed+=("basic_usage")
+# Run users_core_basic_usage example
+if run_example "users_core_basic_usage" "Basic user management and authentication"; then
+    passed+=("users_core_basic_usage")
 else
-    failed+=("basic_usage")
+    failed+=("users_core_basic_usage")
 fi
 
 # Run api_key_service example

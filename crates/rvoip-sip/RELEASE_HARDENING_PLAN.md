@@ -3,8 +3,9 @@
 This tracks the work needed before the next `rvoip-sip` release that highlights
 the unified, stream, and callback API surfaces. The crate was carved out of the
 legacy `session-core` crate and now lives at `crates/rvoip-sip/` with package
-name `rvoip-sip` (see [`docs/RELEASE_NOTES_NEXT.md`](docs/RELEASE_NOTES_NEXT.md)
-for migration guidance).
+name `rvoip-sip`. The current production-readiness assessment and release gap
+plan is tracked in
+[`docs/PRODUCTION_READINESS_GAP_PLAN.md`](docs/PRODUCTION_READINESS_GAP_PLAN.md).
 
 ## Goals
 
@@ -29,10 +30,11 @@ for migration guidance).
 | Typed cross-crate event handling | Done | Normal dialog/media event routing uses typed `RvoipCrossCrateEvent` dispatch. |
 | REFER metadata propagation | Done | `Referred-By` and `Replaces` flow from dialog-core to public `Event::ReferReceived`. |
 | README & module rustdoc | Done | `crates/rvoip-sip/README.md` plus all `//!`/`///` module headers use the new name. |
-| Compatibility matrix | Done | `docs/COMPATIBILITY_MATRIX.md` covers validated/planned profiles. |
-| Topology profiles | Done | `docs/TOPOLOGY_PROFILES.md` covers LAN, Asterisk, proxy, carrier, and WebRTC edge profiles. |
-| Release notes draft | Done | `docs/RELEASE_NOTES_NEXT.md` framed around API surfaces and Asterisk evidence. |
-| Interop CI plan | Done | `docs/INTEROP_CI_PLAN.md` defines SIPp/Asterisk/FreeSWITCH/proxy lab phases. |
+| Production readiness gap plan | Added | `docs/PRODUCTION_READINESS_GAP_PLAN.md` defines the release requirements, RFC audit, interop, performance, media, security, and packaging gates for wide adoption. |
+| Compatibility matrix | Needs refresh | `docs/COMPATIBILITY_MATRIX.md` is referenced by older notes but is not present in this checkout. Regenerate it from the RFC and interop audit before release. |
+| Topology profiles | Needs refresh | `docs/TOPOLOGY_PROFILES.md` is referenced by older notes but is not present in this checkout. Recreate it from validated deployment profiles. |
+| Release notes draft | Needs refresh | `docs/RELEASE_NOTES_NEXT.md` is referenced by older notes but is not present in this checkout. Keep release notes limited to tested claims. |
+| Interop CI plan | Needs refresh | `docs/INTEROP_CI_PLAN.md` is referenced by older notes but is not present in this checkout. Recreate it with SIPp, Asterisk, FreeSWITCH, proxy, and client matrices. |
 | Tests | Done | `cargo check -p rvoip-sip` and `cargo test -p rvoip-sip --doc` pass (217 doctests). |
 
 ## Verification before release

@@ -651,7 +651,7 @@ impl StateMachine {
                 continue;
             }
             let action_start = Instant::now();
-            let result = actions::execute_action(
+            let result = Box::pin(actions::execute_action(
                 action,
                 &mut session,
                 &self.dialog_adapter,
@@ -659,7 +659,7 @@ impl StateMachine {
                 &self.store,
                 self.auto_180_ringing,
                 &None, // No SimplePeer event channel - handled by SessionCrossCrateEventHandler
-            )
+            ))
             .await;
             let action_duration = action_start.elapsed().as_millis() as u64;
 

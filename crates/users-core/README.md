@@ -280,7 +280,7 @@ Check out the `examples/` directory for complete working examples:
 
 ```bash
 # Run a specific example
-cargo run --example basic_usage
+cargo run --example users_core_basic_usage
 
 # Run all examples with detailed output
 ./examples/run_all_examples.sh

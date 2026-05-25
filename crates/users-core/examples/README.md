@@ -12,7 +12,7 @@ cargo run --example <example_name>
 
 For example:
 ```bash
-cargo run --example basic_usage
+cargo run --example users_core_basic_usage
 ```
 
 ## Configuration

@@ -1741,6 +1741,16 @@ impl TransactionManager {
 
             let current_state = tx.state();
             if current_state == TransactionState::Terminated {
+                if tx_kind == TransactionKind::InviteClient {
+                    if tx
+                        .last_response()
+                        .await
+                        .is_some_and(|response| response.status().is_success())
+                    {
+                        debug!(%transaction_id, "INVITE client terminated during initiate - treating as success (fast 2xx)");
+                        return Ok(());
+                    }
+                }
                 debug!(%transaction_id, "Transaction terminated immediately during initiate - likely transport error");
                 return Err(Error::transport_error(
                     rvoip_sip_transport::Error::ProtocolError(

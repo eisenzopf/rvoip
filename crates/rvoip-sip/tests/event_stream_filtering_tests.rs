@@ -2,13 +2,12 @@
 //!
 //! Verifies that `UnifiedCoordinator::events_for_session(&id)` yields only
 //! events whose `call_id` matches `id`, while `UnifiedCoordinator::events()`
-//! yields all events. Publishes synthetic session API events directly to
-//! the global event bus rather than driving a full SIP handshake, so the
+//! yields all events. Publishes synthetic session API events through the
+//! coordinator under test rather than driving a full SIP handshake, so the
 //! test is hermetic and runs in milliseconds.
 
 use std::time::Duration;
 
-use rvoip_sip::adapters::SessionApiCrossCrateEvent;
 use rvoip_sip::api::unified::{Config, UnifiedCoordinator};
 use rvoip_sip::{Event, MediaSecurityKeying, MediaSecurityProfile, SessionId};
 use rvoip_sip_core::types::sdp::CryptoSuite;
@@ -21,13 +20,9 @@ fn test_config(port: u16) -> Config {
     config
 }
 
-async fn publish_synthetic(event: Event) {
-    let wrapped = SessionApiCrossCrateEvent::new(event);
-    let coord = rvoip_infra_common::events::global_coordinator()
-        .await
-        .clone();
+async fn publish_synthetic(coord: &UnifiedCoordinator, event: Event) {
     coord
-        .publish(wrapped)
+        .publish_app_event_for_test(event)
         .await
         .expect("failed to publish synthetic event");
 }
@@ -46,15 +41,21 @@ async fn events_for_session_only_yields_matching_call() {
     let mut rx_b = coord.events_for_session(&id_b).await.unwrap();
 
     // Publish one event for A and one for B.
-    publish_synthetic(Event::CallAnswered {
-        call_id: id_a.clone(),
-        sdp: None,
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallAnswered {
+            call_id: id_a.clone(),
+            sdp: None,
+        },
+    )
     .await;
-    publish_synthetic(Event::CallAnswered {
-        call_id: id_b.clone(),
-        sdp: None,
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallAnswered {
+            call_id: id_b.clone(),
+            sdp: None,
+        },
+    )
     .await;
 
     // rx_a must see A's event; B's event must be filtered out. The filter
@@ -80,10 +81,13 @@ async fn events_for_session_only_yields_matching_call() {
     }
 
     // Publish another A event — rx_b must not observe it.
-    publish_synthetic(Event::CallEnded {
-        call_id: id_a.clone(),
-        reason: "hangup".into(),
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallEnded {
+            call_id: id_a.clone(),
+            reason: "hangup".into(),
+        },
+    )
     .await;
 
     let stray = timeout(Duration::from_millis(400), rx_b.next()).await;
@@ -115,20 +119,25 @@ async fn events_unfiltered_sees_every_session() {
     let id_a = SessionId::new();
     let id_b = SessionId::new();
 
-    publish_synthetic(Event::CallAnswered {
-        call_id: id_a.clone(),
-        sdp: None,
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallAnswered {
+            call_id: id_a.clone(),
+            sdp: None,
+        },
+    )
     .await;
-    publish_synthetic(Event::CallAnswered {
-        call_id: id_b.clone(),
-        sdp: None,
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallAnswered {
+            call_id: id_b.clone(),
+            sdp: None,
+        },
+    )
     .await;
 
-    // Integration tests share the global event coordinator singleton, so
-    // other tests' synthetic events may interleave. Skip any event whose
-    // call_id isn't one of ours, and collect until we've seen both.
+    // Other events may still interleave on the coordinator stream. Skip any
+    // event whose call_id isn't one of ours, and collect until we've seen both.
     let targets = [id_a.clone(), id_b.clone()];
     let mut seen = std::collections::HashSet::new();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
@@ -163,19 +172,28 @@ async fn events_for_session_helpers_filter_dtmf_and_incoming() {
     // Interleave DTMF and a non-matching lifecycle event; the filter should
     // drop the non-matching call_id, and the DTMF helper should drop the
     // lifecycle event.
-    publish_synthetic(Event::CallAnswered {
-        call_id: SessionId::new(), // different call_id
-        sdp: None,
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallAnswered {
+            call_id: SessionId::new(), // different call_id
+            sdp: None,
+        },
+    )
     .await;
-    publish_synthetic(Event::CallOnHold {
-        call_id: id.clone(),
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallOnHold {
+            call_id: id.clone(),
+        },
+    )
     .await;
-    publish_synthetic(Event::DtmfReceived {
-        call_id: id.clone(),
-        digit: '7',
-    })
+    publish_synthetic(
+        &coord,
+        Event::DtmfReceived {
+            call_id: id.clone(),
+            digit: '7',
+        },
+    )
     .await;
 
     let (call_id, digit) = timeout(Duration::from_secs(2), rx.next_dtmf())
@@ -196,20 +214,26 @@ async fn event_receiver_exposes_progress_and_media_security_helpers() {
     let mut progress_rx = coord.events_for_session(&id).await.unwrap();
     let mut security_rx = coord.events_for_session(&id).await.unwrap();
 
-    publish_synthetic(Event::CallProgress {
-        call_id: id.clone(),
-        status_code: 180,
-        reason: "Ringing".into(),
-        sdp: None,
-    })
+    publish_synthetic(
+        &coord,
+        Event::CallProgress {
+            call_id: id.clone(),
+            status_code: 180,
+            reason: "Ringing".into(),
+            sdp: None,
+        },
+    )
     .await;
-    publish_synthetic(Event::MediaSecurityNegotiated {
-        call_id: id.clone(),
-        keying: MediaSecurityKeying::Sdes,
-        suite: CryptoSuite::AesCm128HmacSha1_80,
-        profile: MediaSecurityProfile::RtpSavp,
-        contexts_installed: true,
-    })
+    publish_synthetic(
+        &coord,
+        Event::MediaSecurityNegotiated {
+            call_id: id.clone(),
+            keying: MediaSecurityKeying::Sdes,
+            suite: CryptoSuite::AesCm128HmacSha1_80,
+            profile: MediaSecurityProfile::RtpSavp,
+            contexts_installed: true,
+        },
+    )
     .await;
 
     let (call_id, status_code, reason, sdp) =

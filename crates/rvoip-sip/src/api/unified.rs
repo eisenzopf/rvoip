@@ -3000,11 +3000,8 @@ impl UnifiedCoordinator {
         self.lifecycle.watcher(id)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn publish_app_event_for_test(
-        &self,
-        event: crate::api::events::Event,
-    ) -> Result<()> {
+    #[doc(hidden)]
+    pub async fn publish_app_event_for_test(&self, event: crate::api::events::Event) -> Result<()> {
         self.app_event_publisher.publish_now(event).await
     }
 
