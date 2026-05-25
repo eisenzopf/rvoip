@@ -1,9 +1,7 @@
-# G8 — nightly browser-interop workflow (reference copy).
+# G8 — nightly browser-interop workflow for rvoip-webrtc.
 #
-# This file is a reference / documentation copy. The active workflow lives at
-# `.github/workflows/nightly-interop.yml` at the rvoip repo root.
-# The interop test is `#[ignore]`'d by default because it requires a Chromium
-# binary on PATH and a working WebRTC stack.
+# This is the active workflow. The reference copy at
+# `crates/rvoip-webrtc/docs/ci/nightly-interop.yml` is documentation only.
 #
 # What it does:
 #   1. Installs Chromium on the runner.

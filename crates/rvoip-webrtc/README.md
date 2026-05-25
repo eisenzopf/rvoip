@@ -135,6 +135,26 @@ Capability gap tests (`trickle ICE`, simulcast, TURN config, WS `ice-candidate`)
 | `WebRtcServerBuilder` | `new`, `with_whip`, `with_ws`, `build` |
 | `WebRtcServer` | `adapter`, `whip_addr`, `ws_addr`, `shutdown` |
 
+## Limitations
+
+This crate is a **1:1 WebRTC gateway/server adapter**. It deliberately does not
+implement SFU/MCU fan-out — every connection is an independent peer.
+
+- **WHEP routing is one-connection-per-subscriber.** `POST /whep/{tag}` creates
+  a fresh `PeerConnection` per subscriber. The crate does not share a single
+  ingest publisher across multiple subscribers — each `whep_post` allocates its
+  own `connection_id` and answers with its own SDP. Use [`mediasoup`](https://mediasoup.org),
+  [`Galène`](https://galene.org), or [LiveKit](https://livekit.io) when you
+  need one-to-many media fan-out.
+- **No simulcast layer selection.** Simulcast offers are detected (see
+  `sdp_indicates_simulcast()`) but not forwarded — there is no layer-picking
+  logic because there is no fan-out.
+- **No mixing / MCU.** Multi-party audio mixing belongs in a media server
+  layered on top.
+
+See [`docs/GAP_PLAN.md`](docs/GAP_PLAN.md) §4 for the complete
+out-of-scope list.
+
 ## Future integration
 
 [`rvoip-websocket`](../rvoip-websocket) may replace its stub `WebRtcMediaBridge` with types

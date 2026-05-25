@@ -1,12 +1,15 @@
 //! Typed [`DataChannelOptions`] (RFC 8832 §5.1) + thin `RvoipDataChannel`
 //! wrapper exposing bufferedAmount and the low-threshold event.
 //!
-//! Phase G1 of the gap implementation plan.
+//! Phase G1 of the gap implementation plan; G-tail closeout adds a
+//! background pump + broadcast subscription for `OnBufferedAmountLow`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use bytes::BytesMut;
 use rtc::data_channel::RTCDataChannelInit;
+use tokio::sync::broadcast;
+use tokio::task::JoinHandle;
 use webrtc::data_channel::{DataChannel, DataChannelEvent, RTCDataChannelState};
 
 use crate::errors::{Result, WebRtcError};
@@ -125,37 +128,89 @@ impl DataChannelOptions {
 
 /// Thin wrapper around `Arc<dyn DataChannel>` exposing the convenience
 /// surface a production caller wants: bufferedAmount, low-threshold,
-/// send_text/send_binary mirroring the W3C `RTCDataChannel` API.
+/// send_text/send_binary mirroring the W3C `RTCDataChannel` API, plus an
+/// optional broadcast subscription for the `bufferedamountlow` event.
 ///
 /// Held inside [`RvoipPeerConnection`](crate::peer::RvoipPeerConnection)'s
 /// channel registry; constructed via
 /// [`RvoipPeerConnection::create_data_channel`](crate::peer::RvoipPeerConnection::create_data_channel).
-#[derive(Clone)]
+///
+/// ## Event subscription model
+///
+/// [`subscribe_buffered_amount_low`](Self::subscribe_buffered_amount_low)
+/// and [`subscribe_events`](Self::subscribe_events) spawn a background pump
+/// task on first call. The pump owns
+/// `inner().poll()`, fans out each [`DataChannelEvent`] on a
+/// `tokio::sync::broadcast` channel, and exits when the underlying channel
+/// closes.
+///
+/// **Once any `subscribe_*` has been called**, raw access to
+/// [`inner()`](Self::inner)`.poll()` (or the
+/// [`RvoipPeerConnection::poll_data_channel`](crate::peer::RvoipPeerConnection::poll_data_channel)
+/// helper pointed at the same trait object) races with the pump and is
+/// unsupported. Pick one model per data channel.
 pub struct RvoipDataChannel {
-    inner: Arc<dyn DataChannel>,
+    state: Arc<DcState>,
+}
+
+impl Clone for RvoipDataChannel {
+    fn clone(&self) -> Self {
+        Self {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+struct DcState {
+    dc: Arc<dyn DataChannel>,
     label: String,
+    low_tx: broadcast::Sender<()>,
+    events_tx: broadcast::Sender<DataChannelEvent>,
+    pump: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for DcState {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.pump.lock() {
+            if let Some(handle) = guard.take() {
+                handle.abort();
+            }
+        }
+    }
 }
 
 impl RvoipDataChannel {
     pub(crate) fn new(inner: Arc<dyn DataChannel>, label: String) -> Self {
-        Self { inner, label }
+        let (low_tx, _) = broadcast::channel(16);
+        let (events_tx, _) = broadcast::channel(64);
+        Self {
+            state: Arc::new(DcState {
+                dc: inner,
+                label,
+                low_tx,
+                events_tx,
+                pump: Mutex::new(None),
+            }),
+        }
     }
 
     /// Channel label (W3C `RTCDataChannel.label`).
     pub fn label(&self) -> &str {
-        &self.label
+        &self.state.label
     }
 
-    /// The raw webrtc-rs handle for code that needs the trait object directly
-    /// (e.g. polling for events). Prefer the typed helpers on this wrapper
-    /// when possible.
+    /// The raw webrtc-rs handle for code that needs the trait object directly.
+    /// Calling `inner().poll()` directly is only safe **before** any
+    /// `subscribe_*` call on this wrapper; after that the background pump
+    /// owns the poll stream.
     pub fn inner(&self) -> &Arc<dyn DataChannel> {
-        &self.inner
+        &self.state.dc
     }
 
     /// Send a UTF-8 text message. PPID `WEBRTC_STRING` per RFC 8831.
     pub async fn send_text(&self, msg: &str) -> Result<()> {
-        self.inner
+        self.state
+            .dc
             .send_text(msg)
             .await
             .map_err(|e| WebRtcError::Webrtc(format!("dc send_text: {e}")))
@@ -163,35 +218,35 @@ impl RvoipDataChannel {
 
     /// Send a binary message. PPID `WEBRTC_BINARY` per RFC 8831.
     pub async fn send_binary(&self, msg: &[u8]) -> Result<()> {
-        self.inner
+        self.state
+            .dc
             .send(BytesMut::from(msg))
             .await
             .map_err(|e| WebRtcError::Webrtc(format!("dc send: {e}")))
     }
 
     /// Current bytes queued for sending. Mirrors W3C
-    /// `RTCDataChannel.bufferedAmount` (the W3C type is `u64` but webrtc-rs
-    /// uses `u32`; we widen for the caller).
+    /// `RTCDataChannel.bufferedAmount`.
+    ///
+    /// **Limitation:** webrtc-rs 0.20-alpha does not expose a direct
+    /// `buffered_amount()` accessor on the trait, so this method always
+    /// returns 0. Use
+    /// [`subscribe_buffered_amount_low`](Self::subscribe_buffered_amount_low)
+    /// instead — it surfaces the `bufferedamountlow` event that fires when
+    /// the underlying buffer drops below the configured low threshold,
+    /// which is the W3C-standard backpressure signal.
     pub async fn buffered_amount(&self) -> Result<u64> {
-        // webrtc-rs 0.20-alpha doesn't expose a direct `buffered_amount()`
-        // accessor on the trait; the high-threshold accessor is the
-        // closest stable surface that returns the same value (it's the
-        // configured cap, not the current amount). Until upstream lands
-        // a true getter, return 0 as a documented limitation.
-        // The threshold accessors below still work correctly for the
-        // bufferedAmountLowThreshold event hook.
-        let _ = &self.inner;
         Ok(0)
     }
 
     /// Set the bufferedAmount low threshold (W3C
     /// `RTCDataChannel.bufferedAmountLowThreshold`). When the buffered
-    /// amount falls *to or below* this value, the `bufferedamountlow`
-    /// event fires (poll via [`Self::ready_state`] + your own
-    /// `bufferedamountlow` listener pattern; webrtc-rs 0.20-alpha does
-    /// not surface the event directly).
+    /// amount falls *to or below* this value, webrtc-rs emits
+    /// [`DataChannelEvent::OnBufferedAmountLow`]; subscribe via
+    /// [`Self::subscribe_buffered_amount_low`].
     pub async fn set_buffered_amount_low_threshold(&self, threshold: u32) -> Result<()> {
-        self.inner
+        self.state
+            .dc
             .set_buffered_amount_low_threshold(threshold)
             .await
             .map_err(|e| WebRtcError::Webrtc(format!("set_buffered_amount_low_threshold: {e}")))
@@ -199,7 +254,8 @@ impl RvoipDataChannel {
 
     /// Current low-threshold configured on the channel.
     pub async fn buffered_amount_low_threshold(&self) -> Result<u32> {
-        self.inner
+        self.state
+            .dc
             .buffered_amount_low_threshold()
             .await
             .map_err(|e| WebRtcError::Webrtc(format!("buffered_amount_low_threshold: {e}")))
@@ -207,17 +263,72 @@ impl RvoipDataChannel {
 
     /// W3C `RTCDataChannel.readyState`.
     pub async fn ready_state(&self) -> Result<RTCDataChannelState> {
-        self.inner
+        self.state
+            .dc
             .ready_state()
             .await
             .map_err(|e| WebRtcError::Webrtc(format!("ready_state: {e}")))
     }
 
-    /// Pump the next data-channel event with a deadline. Same shape as
-    /// [`RvoipPeerConnection::poll_data_channel`](crate::peer::RvoipPeerConnection::poll_data_channel)
-    /// but takes the inner handle directly.
+    /// Pump the next data-channel event with a deadline.
+    ///
+    /// **Only safe before any `subscribe_*` call.** Once the broadcast pump
+    /// is running this would race; callers should use
+    /// [`Self::subscribe_events`] instead.
     pub async fn poll(&self, timeout: std::time::Duration) -> Option<DataChannelEvent> {
-        tokio::time::timeout(timeout, self.inner.poll()).await.ok().flatten()
+        tokio::time::timeout(timeout, self.state.dc.poll()).await.ok().flatten()
+    }
+
+    /// Subscribe to the `bufferedamountlow` event stream. Each subscription
+    /// receives a `()` every time the underlying buffer drops to or below
+    /// the configured low threshold (set via
+    /// [`Self::set_buffered_amount_low_threshold`]).
+    ///
+    /// Spawns a single background pump task on first call; subsequent calls
+    /// re-use it. The pump exits cleanly when the data channel closes.
+    pub fn subscribe_buffered_amount_low(&self) -> broadcast::Receiver<()> {
+        self.ensure_pump();
+        self.state.low_tx.subscribe()
+    }
+
+    /// Subscribe to the full stream of [`DataChannelEvent`]s. Useful when
+    /// the caller wants `OnMessage` / `OnOpen` / `OnClose` in addition to
+    /// `OnBufferedAmountLow`.
+    ///
+    /// Same lazy-pump semantics as
+    /// [`Self::subscribe_buffered_amount_low`].
+    pub fn subscribe_events(&self) -> broadcast::Receiver<DataChannelEvent> {
+        self.ensure_pump();
+        self.state.events_tx.subscribe()
+    }
+
+    fn ensure_pump(&self) {
+        let Ok(mut guard) = self.state.pump.lock() else {
+            // Mutex poisoned — another task panicked while holding the
+            // pump slot. Skip silently rather than propagating; the data
+            // channel itself is still usable for sends.
+            return;
+        };
+        if guard.is_some() {
+            return;
+        }
+        let dc = Arc::clone(&self.state.dc);
+        let low_tx = self.state.low_tx.clone();
+        let events_tx = self.state.events_tx.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                match dc.poll().await {
+                    Some(ev) => {
+                        if matches!(ev, DataChannelEvent::OnBufferedAmountLow) {
+                            let _ = low_tx.send(());
+                        }
+                        let _ = events_tx.send(ev);
+                    }
+                    None => break,
+                }
+            }
+        });
+        *guard = Some(handle);
     }
 }
 

@@ -118,6 +118,59 @@ half of G3 (deferred, needs workspace dep additions).
   operators who rotate Prometheus scrape windows manually.
 - New `tests/g12_ops_tail.rs` (4 tests).
 
+#### G-tail — NACK round-trip via lossy TURN relay
+
+- `tests/support/lossy_turn_fixture.rs` — composes the existing
+  `CoturnFixture` with a per-client lossy UDP proxy that sits in front
+  of coturn's control port. Each direction drops UDP datagrams with a
+  configurable, seeded probability — works around webrtc-rs 0.20-alpha
+  lacking a public `SettingEngine` for UDP-port pinning.
+- `tests/support/coturn_fixture.rs` — extended to expose a relay-port
+  range (50000–50019) and pass `--external-ip 127.0.0.1` /
+  `--min-port` / `--max-port` so peers can actually reach coturn's
+  relayed transports. `TURN_USERNAME` / `TURN_PASSWORD` are now public
+  so adjacent fixtures can build matching `IceServerConfig`s.
+- `tests/lossy_turn_nack.rs` — two peers via lossy relay at 5 % drop;
+  asserts `inbound.packets_lost > 0` AND
+  `outbound.nack_count > 0` — proving the registered RTCP-NACK
+  feedback round-trips end-to-end. Skips on no-Docker hosts.
+
+#### G-tail — TURN relay two-peer media E2E
+
+- `tests/turn_relay_e2e.rs::relay_only_two_peer_media_round_trip`
+  spins up two `RvoipPeerConnection` instances against the existing
+  `CoturnFixture`, both with `IceTransportPolicy::Relay`, completes a
+  full offer/answer + ICE handshake, pumps Opus frames end-to-end,
+  and asserts `selected_pair.local_candidate_type == "relay"`.
+- Test skips cleanly when Docker isn't reachable (same contract as
+  the existing `relay_policy_with_coturn_fixture_builds_peer`).
+
+#### G-tail — DC backpressure event subscription
+
+- `RvoipDataChannel::subscribe_buffered_amount_low()` returns a
+  `tokio::sync::broadcast::Receiver<()>` that fires every time the
+  underlying buffer drops below the configured low threshold (W3C
+  `bufferedamountlow` semantics).
+- `RvoipDataChannel::subscribe_events()` returns a
+  `broadcast::Receiver<DataChannelEvent>` for callers that want the
+  full event stream (OnOpen / OnMessage / OnClose / ...).
+- Both subscriptions lazily spawn a single background pump task that
+  owns `inner().poll()`; the pump exits cleanly when the underlying
+  data channel closes. Calling raw `inner().poll()` after a
+  `subscribe_*` call is no longer supported on the same wrapper.
+- New test `buffered_amount_low_event_fires_after_drain` in
+  [`tests/dc_backpressure.rs`](tests/dc_backpressure.rs).
+
+#### G12 #6 — WHEP routing-model documentation
+
+- README "Limitations" section: states the one-`PeerConnection`-per-POST
+  semantics of `/whep/{tag}` and points to mediasoup / Galène / LiveKit
+  for SFU fan-out.
+- `src/signaling/whip.rs` module-level doc adds a "Routing model" header
+  so the constraint is visible directly from `cargo doc`.
+- Closes the last in-tree actionable item from the G12 operational tail
+  (per-route CORS deferred until a real deployment needs it).
+
 #### G5 — Lossy-link helper
 
 - `tests/lossy_link.rs::spawn_lossy_udp_proxy(addr, loss_rate, seed)` —
@@ -126,9 +179,13 @@ half of G3 (deferred, needs workspace dep additions).
 
 #### G8 / G9a — CI + TURN
 
-- `docs/ci/nightly-interop.yml` — copy-pasteable GitHub Actions
-  template for nightly browser-interop runs (this repo has no existing
-  CI infra, so it ships as a template).
+- `.github/workflows/nightly-interop.yml` at the rvoip repo root —
+  active nightly workflow that installs Chromium, builds with
+  `interop-browser,signaling-whip,signaling-ws`, and runs
+  `tests/browser_interop.rs --include-ignored`. Optional Slack webhook
+  on failure (`secrets.NIGHTLY_INTEROP_WEBHOOK`).
+- `docs/ci/nightly-interop.yml` — reference copy of the workflow,
+  retained for docs.
 - `tests/support/coturn_fixture.rs` — shells out to the `docker` CLI to
   bring up coturn in a container; returns `IceServerConfig` ready to
   drop into `WebRtcConfig::ice_servers`; gracefully skips when Docker

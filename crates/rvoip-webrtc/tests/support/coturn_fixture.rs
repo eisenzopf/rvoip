@@ -30,8 +30,14 @@ use rvoip_webrtc::IceServerConfig;
 use tokio::process::Command;
 
 const COTURN_IMAGE: &str = "coturn/coturn:latest";
-const TURN_USERNAME: &str = "webrtctest";
-const TURN_PASSWORD: &str = "turnsecret";
+pub const TURN_USERNAME: &str = "webrtctest";
+pub const TURN_PASSWORD: &str = "turnsecret";
+
+/// Fixed relay-port range exposed by the container so peers can actually
+/// reach coturn's relayed transports (not just the control channel on
+/// 3478). Picked deliberately small so the `-p` mapping stays cheap.
+const RELAY_MIN_PORT: u16 = 50_000;
+const RELAY_MAX_PORT: u16 = 50_019;
 
 pub struct CoturnFixture {
     container_id: String,
@@ -59,6 +65,11 @@ impl CoturnFixture {
         let host_port = pick_free_port().await?;
 
         // 3. Start the container in detached mode with credential-based auth.
+        // We expose both the control channel (3478) and a small relay-port
+        // range (50000–50019) so peers can actually reach coturn's relayed
+        // transports. `--external-ip 127.0.0.1` makes coturn advertise the
+        // localhost address in its relay candidates so the host-bound peer
+        // can reach them.
         let realm = "rvoip-test";
         let user = format!("{TURN_USERNAME}:{TURN_PASSWORD}");
         let cmd_args = vec![
@@ -67,6 +78,8 @@ impl CoturnFixture {
             "--rm".to_string(),
             "-p".to_string(),
             format!("{host_port}:3478/udp"),
+            "-p".to_string(),
+            format!("{RELAY_MIN_PORT}-{RELAY_MAX_PORT}:{RELAY_MIN_PORT}-{RELAY_MAX_PORT}/udp"),
             COTURN_IMAGE.to_string(),
             "-n".to_string(),
             "--realm".to_string(),
@@ -77,6 +90,12 @@ impl CoturnFixture {
             "--no-dtls".to_string(),
             "--no-cli".to_string(),
             "--no-stun".to_string(),
+            "--external-ip".to_string(),
+            "127.0.0.1".to_string(),
+            "--min-port".to_string(),
+            RELAY_MIN_PORT.to_string(),
+            "--max-port".to_string(),
+            RELAY_MAX_PORT.to_string(),
         ];
         let out = Command::new("docker").args(&cmd_args).output().await.ok()?;
         if !out.status.success() {

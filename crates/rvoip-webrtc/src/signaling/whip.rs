@@ -3,6 +3,14 @@
 //! Implements the subset of RFC 9725 (WHIP) needed for production browser
 //! interop, plus RFC 8840 trickle ICE.
 //!
+//! ## Routing model — one connection per request
+//!
+//! Both WHIP and WHEP are **one-`PeerConnection`-per-HTTP-POST**. There is no
+//! ingest-to-subscriber fan-out: every `POST /whep/{tag}` allocates a fresh
+//! `connection_id` and runs an independent ICE / DTLS / SDP negotiation.
+//! Multi-subscriber fan-out is SFU territory — see the crate-level README
+//! "Limitations" section.
+//!
 //! ## Endpoints
 //!
 //! | Verb     | Path           | Body                                  | Success |

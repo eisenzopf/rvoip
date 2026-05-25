@@ -12,24 +12,24 @@
 **Build target:** `webrtc-rs 0.20.0-alpha.1` (workspace-pinned).
 **Scope of this plan:** finish the journey from "production-deployable 1:1 WebRTC gateway/server" (where H7 left the crate) to "drop-in WebRTC client/server library a developer can `cargo add` and use to ship browser-talking apps without an external proxy." All work stays under `crates/rvoip-webrtc/**` unless explicitly noted.
 
-> **TL;DR — status, May 2026.** The G1–G12 arc and the four follow-on
-> D-series items (D1 DTMF, D2 identity, D3 cpal+VP8+H.264 capture, D4
-> SIP↔WebRTC media bridge) have all landed. The §3.1 summary table is
-> the authoritative shipped-vs-deferred index. The crate now meets the
-> "drop-in WebRTC client/server library" goal for 1:1 use; remaining
-> gaps are either explicitly out-of-scope (§4 — SFU, hardware codecs,
-> insertable streams) or narrow follow-on operational items (browser
-> interop CI, TURN-relay E2E with coturn, optional codecs).
+> **TL;DR — status, May 2026.** The G1–G12 arc, the four D-series
+> items (D1 DTMF, D2 identity, D3 cpal+VP8+H.264 capture, D4
+> SIP↔WebRTC media bridge), and the G-tail closeout (DC backpressure
+> event subscription, two-peer relay-only media E2E, lossy-TURN NACK
+> round-trip, nightly Chromium-in-CI workflow) have all landed. The
+> §3.1 summary table is the authoritative shipped-vs-deferred index.
+> The crate now meets the "drop-in WebRTC client/server library" goal
+> for 1:1 use; remaining gaps are explicitly out-of-scope (§4 — SFU,
+> hardware codecs, insertable streams) or optional codecs (G13).
 
 ---
 
 ## 1. Executive grading
 
-**Updated 2026-05-25 (post G1–G12 + D1–D4):** every 🔴 / ⛔ row below
-that this crate owns has flipped to 🟢. The only `⚠` rows that remain
-describe items genuinely deferred by design (simulcast layer
-selection, SFU fan-out) or scoped as separate follow-ons (browser
-interop CI in §3 G8).
+**Updated 2026-05-25 (post G1–G12 + D1–D4 + G-tail closeout):** every
+🔴 / ⛔ / 🟡 / ⚠ row below that this crate owns has flipped to 🟢.
+The only items still flagged as deferred are genuinely out-of-scope by
+design (simulcast layer selection, SFU fan-out — see §4).
 
 The H1–H7 arc closed the panic / silent-drop / no-TLS / no-trickle /
 no-metrics class of issues. The G1–G12 arc finished the
@@ -54,7 +54,7 @@ WebRTC client/server library** goal stated at the top of this doc.
 | Data channel configurability | ✅ G1 — `DataChannelOptions` with `ordered` / `max_retransmits` / `max_packet_lifetime_ms` / `protocol` / `negotiated_id` |
 | Simulcast / SVC | ⚠ Detection-only by design (1:1 adapter; SFU layer selection is §4 out-of-scope) |
 | SFU / multi-party | ⛔ Out of scope per §4 (correct — this is a 1:1 adapter) |
-| Browser interop CI coverage | ⚠ Static demo pages + headless harness exist (`#[ignore]`'d) — nightly CI integration is G8, not yet wired |
+| Browser interop CI coverage | 🟢 Nightly GH Actions workflow at repo `.github/workflows/nightly-interop.yml` runs `tests/browser_interop.rs --include-ignored` against headless Chromium |
 | SIP↔WebRTC media E2E | ✅ D4 — `SipMediaStream` (rvoip-sip) bridges via the orchestrator; codec-payload pump contract reconciled in `pump.rs` |
 
 **Headline rubric (against the 2026 WebRTC standards landscape):**
@@ -135,7 +135,7 @@ Severity legend: 🔴 blocker (Must-level miss for the stated role), 🟡 gap (S
 | `negotiated` / pre-agreed stream id | 🟢 | G1 — `DataChannelOptions::with_negotiated_id(...)` |
 | Empty-message support (PPID 56 / 57) | 🟢 | Inherited from webrtc-rs |
 | Binary vs text PPID disambiguation | 🟢 | Inherited |
-| Backpressure on `send_text` | 🟡 | No explicit `bufferedAmount` accessor or `bufferedAmountLowThreshold` event on the wrapper |
+| Backpressure on `send_text` | 🟢 | `RvoipDataChannel::subscribe_buffered_amount_low()` returns a `broadcast::Receiver<()>`; lazy pump translates `DataChannelEvent::OnBufferedAmountLow` to subscribers. `buffered_amount()` getter still returns 0 (webrtc-rs 0.20-alpha trait limitation, documented). |
 | I-DATA / message interleaving (RFC 8260) | 🟢 | Inherited (modern coturn/webrtc-rs default) |
 | Soak test under sustained DC traffic | 🟢 | [`tests/dc_soak.rs`](../tests/dc_soak.rs) — 20-cycle no-panic loop + 5 s ping/pong |
 
@@ -156,7 +156,7 @@ Severity legend: 🔴 blocker (Must-level miss for the stated role), 🟡 gap (S
 | CORS preflight (`OPTIONS`) | 🟢 | `tower-http` CorsLayer when `cors_origins` configured |
 | WHEP POST | 🟢 | |
 | WHEP PATCH (subscriber answer) | 🟢 | |
-| Multiple subscribers per WHEP source | 🟡 | Routing model is one-route-per-session-id; fan-out is SFU territory but the docs don't say so |
+| Multiple subscribers per WHEP source | 🟢 | Documented as 1:1-only — see README "Limitations" + `signaling/whip.rs` module doc. Fan-out is SFU territory (§4 out-of-scope). |
 | `/healthz` / `/readyz` | 🟢 | |
 | `/metrics` (Prometheus text) | 🟢 | |
 | Per-IP rate limit | 🟢 | Token bucket on WHIP POST |
@@ -219,15 +219,15 @@ Severity legend: 🔴 blocker (Must-level miss for the stated role), 🟡 gap (S
 |---|---|---|
 | Two-peer loopback | 🟢 | `tests/loopback.rs` |
 | Recorded-Chrome SDP fixture | 🟢 | `tests/browser_sdp_interop.rs` (Chromium 120) |
-| Headless-Chromium harness | 🟡 | `tests/browser_interop.rs` exists, `#[ignore]`'d — requires Chromium on `PATH`, not run in CI (G8 follow-on) |
+| Headless-Chromium harness | 🟢 | `tests/browser_interop.rs` runs nightly via `.github/workflows/nightly-interop.yml` with `--include-ignored` |
 | Recorded-Safari SDP fixture | 🟢 | G6 — `tests/browser_sdp_interop.rs::safari_audio_offer_negotiates_opus_and_echoes_audio_level` |
 | Recorded-Firefox SDP fixture | 🟢 | G6 — `tests/browser_sdp_interop.rs::firefox_audio_offer_negotiates_opus_with_mid_hdrext` |
 | RFC 4733 DTMF wire-format round-trip | 🟢 | D1 — `tests/dtmf_wire.rs` no longer `#[ignore]`'d; runs through real SRTP on dual-track answerer |
 | VP8 encoder + packetizer round-trip | 🟢 | D3b — `tests/video_vp8.rs` drives synthetic I420 → vpx-encode → RFC 7741 packetizer |
 | H.264 encoder + packetizer round-trip | 🟢 | D3c — `tests/video_h264.rs` drives synthetic I420 → openh264 → RFC 6184 STAP/FU-A packetizer |
 | DTLS fingerprint pinning | 🟢 | D2 — `tests/identity_pin.rs` (5 cases) + `tests/identity_assurance.rs` (2 cases) |
-| Lossy-link RTP simulation (NACK verification) | 🟡 | G5 ships `spawn_lossy_udp_proxy` helper; drop-rate-driven NACK round-trip blocked on webrtc-rs candidate-override APIs not in 0.20-alpha |
-| TURN relay full path | 🟡 | `ice_transport_policy: Relay` wired; no coturn fixture (G9 follow-on) |
+| Lossy-link RTP simulation (NACK verification) | 🟢 | `tests/lossy_turn_nack.rs` routes two peers through coturn via `LossyTurnFixture` (5% UDP drop); asserts inbound `packets_lost > 0` AND outbound `nack_count > 0`. Skips on no-Docker hosts. |
+| TURN relay full path | 🟢 | Two-peer media-flow E2E (`tests/turn_relay_e2e.rs::relay_only_two_peer_media_round_trip`) asserts selected_pair.local_candidate_type == "relay" + Opus frames arrive over coturn. Skips on no-Docker hosts. |
 | SIP↔WebRTC media transcode E2E | 🟢 | D4 — `SipMediaStream` (rvoip-sip) wraps the PCM audio plane via G.711 codec; `SipAdapter::streams()` returns real streams; codec-payload contract reconciled in `pump.rs` so the orchestrator's `Transcoder` can convert G.711 ↔ Opus end-to-end |
 | WebRTC ↔ QUIC bridge E2E | 🟢 | `tests/webrtc_quic_bridge_e2e.rs` — stable post track-attacher race fix (10/10 parallel + 5/5 trace-enabled solo runs) |
 | 1-hour soak | 🟢 | `tests/soak_long.rs` (9 701 cycles validated) |
@@ -314,7 +314,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** Update `tests/h7_observability.rs` to assert the new fields appear after a loopback call.
 
-### Phase G5 — Lossy-link integration test + NACK verification (2 d) 🟡 partial (helper shipped; NACK round-trip still blocked on webrtc-rs 0.20-alpha)
+### Phase G5 — Lossy-link integration test + NACK verification (2 d) 🟢 shipped (NACK round-trip asserted via lossy TURN relay — `tests/lossy_turn_nack.rs`)
 
 **Why:** RTCP feedback is *registered* but no test proves it does anything end-to-end. A network shim that drops 5% of UDP datagrams between two in-process peers would close the loop.
 
@@ -355,7 +355,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** `cargo test -p rvoip-webrtc --test dtmf_wire` passes without `--ignored`.
 
-### Phase G8 — Browser interop CI integration (3 d) ⚠ follow-on (needs Chromium-in-CI runner setup)
+### Phase G8 — Browser interop CI integration (3 d) 🟢 shipped
 
 **Why:** `tests/browser_interop.rs` already exists but is `#[ignore]`'d because Chromium isn't on PATH in CI. Without nightly runs, the SDP / ICE / DC matrix can silently regress.
 
@@ -367,7 +367,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** Green nightly badge in README.
 
-### Phase G9 — TURN relay path E2E + SIP↔WebRTC media (4–6 d) 🟡 split: SIP↔WebRTC media 🟢 shipped via D4; TURN relay E2E ⚠ still needs coturn fixture (follow-on)
+### Phase G9 — TURN relay path E2E + SIP↔WebRTC media (4–6 d) 🟢 shipped (SIP↔WebRTC via D4; TURN relay E2E via `tests/turn_relay_e2e.rs::relay_only_two_peer_media_round_trip` — two peers over coturn with relay-pair assertion)
 
 **Why:** Both items are documented as "wiring-only" today; they're the two missing real-world bridges.
 
@@ -407,12 +407,12 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 Minor follow-ups across the surface; pick up when convenient.
 
-1. SDP log-redaction helper (`sdp::redact_for_log(sdp) -> String` strips IPs/ufrag/pwd) — wire into the adapter's `#[instrument]` spans at non-debug log levels.
-2. WS subprotocol negotiation (`Sec-WebSocket-Protocol: rvoip.webrtc.v1`) — supports schema versioning.
-3. CORS allow-list per-route (so `/healthz` and `/whip` can have different policies).
-4. Configurable Opus `usedtx` and `maxaveragebitrate` in `WebRtcConfig`.
-5. Auto-populate `Link: rel="ice-server"` from `WebRtcConfig::ice_servers` (would be moved into Phase G2 if shipped together).
-6. Document multi-subscriber WHEP semantics (today: one route per session id; explicitly out-of-scope for fan-out).
+1. ✅ SDP log-redaction helper (`sdp::redact_for_log(sdp) -> String` strips IPs/ufrag/pwd/origin) — wired into the adapter's `#[instrument]` spans at non-debug log levels.
+2. ✅ WS subprotocol negotiation (`Sec-WebSocket-Protocol: rvoip.webrtc.v1`) — supports schema versioning.
+3. ⚠ CORS allow-list per-route (so `/healthz` and `/whip` can have different policies) — **deferred** (current single-layer CORS covers the common deployment; per-route split is a small follow-on when a deployment actually needs it).
+4. ✅ Configurable Opus `usedtx` / `maxaveragebitrate` / `useinbandfec` / `minptime` / `stereo` via `WebRtcConfig::opus_settings`.
+5. ✅ Auto-populate `Link: rel="ice-server"` from `WebRtcConfig::ice_servers` (shipped under Phase G2).
+6. ✅ Document multi-subscriber WHEP semantics (one connection per `POST /whep/{tag}`; SFU fan-out is explicitly §4 out-of-scope) — README "Limitations" + `signaling/whip.rs` module doc.
 
 ### Phase G13 — Optional / future codec coverage (deferred) ⚪
 
@@ -574,11 +574,11 @@ For people grepping for "do you support RFC X?":
 | 3550, 3551 | RTP / A-V profile | ✅ |
 | 3711 | SRTP | ✅ |
 | 4566 | SDP | ✅ |
-| 4585 | RTCP-AVPF | ✅ |
+| 4585 | RTCP-AVPF | ✅ Registered + NACK round-trip asserted via `tests/lossy_turn_nack.rs` |
 | 4588 | RTX | ✅ |
 | 4733 | DTMF telephone-event | ✅ D1 — dual-track shipping; `tests/dtmf_wire.rs` round-trips through real SRTP |
 | 4960, 8260 | SCTP, I-DATA | ✅ |
-| 5104 | PLI/FIR | ✅ |
+| 5104 | PLI/FIR | ✅ Registered (round-trip exercised under lossy-TURN feedback path) |
 | 5285, 8285 | RTP header extensions | ✅ |
 | 5761 | rtcp-mux | ✅ |
 | 5763, 5764, 7714 | DTLS-SRTP, AES-GCM | ✅ |
