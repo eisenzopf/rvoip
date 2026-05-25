@@ -187,7 +187,10 @@ mod bridge {
         }
 
         pub async fn close(&self) -> Result<()> {
-            if let Some(stream) = self.media.lock().take() {
+            // Drop the parking_lot guard before any .await — guards are
+            // !Send and would prevent close() from being .spawn()ed.
+            let media = self.media.lock().take();
+            if let Some(stream) = media {
                 stream.close().await.ok();
             }
             self.peer.close().await?;
@@ -195,8 +198,9 @@ mod bridge {
         }
 
         async fn ensure_media_stream(&self) -> Result<()> {
-            let mut guard = self.media.lock();
-            if guard.is_some() {
+            // Take any potentially-blocking work (track waits) outside the
+            // sync mutex; only hold the guard for the actual slot mutation.
+            if self.media.lock().is_some() {
                 return Ok(());
             }
 
@@ -204,6 +208,10 @@ mod bridge {
                 .peer
                 .local_audio_track()
                 .ok_or_else(|| UctpWsError::WebRtc("no local audio track".into()))?;
+            let local_ssrc = self
+                .peer
+                .local_audio_ssrc()
+                .ok_or_else(|| UctpWsError::WebRtc("no local audio ssrc".into()))?;
 
             let remote = self
                 .peer
@@ -211,10 +219,21 @@ mod bridge {
                 .await
                 .or(self.peer.try_recv_remote_track().await);
 
+            // PT 111 is the Opus default carried by `default_webrtc_capabilities`
+            // and registered in `peer::builder`; aligned with the QUIC/WT
+            // adapters' codec_to_pt mapping.
+            const OPUS_PT: u8 = 111;
+
+            let mut guard = self.media.lock();
+            if guard.is_some() {
+                return Ok(());
+            }
             *guard = Some(from_tracks(
                 self.stream_id.clone(),
                 self.codec.clone(),
                 local,
+                local_ssrc,
+                OPUS_PT,
                 remote,
             ));
             Ok(())

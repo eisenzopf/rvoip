@@ -43,11 +43,21 @@ pub const ADAPTER_EVENT_CAP: usize = 256;
 /// `UctpSessionEvent::InboundInvite`. Adapter methods (`accept`, `end`,
 /// `send_message`, …) look up the matching `out_tx` to dispatch envelopes
 /// back to the peer.
+///
+/// Under the `media-webrtc` feature, `bridge` slot holds the per-Connection
+/// answerer `WebRtcMediaBridge` (constructed asynchronously after
+/// InboundInvite). Tests + downstream code can pull this handle via
+/// [`UctpWsAdapter::bridge_for`] to drive the SDP exchange directly. Once
+/// the bridge connects and exposes a `WebRtcMediaStream`, the server's
+/// ready-watcher pushes the stream into `streams`, which makes
+/// `Orchestrator::bridge_connections` resolve a real audio path.
 #[derive(Clone)]
 pub(crate) struct Route {
     pub sid: String,
     pub out_tx: mpsc::Sender<UctpEnvelope>,
     pub streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn MediaStream>>>,
+    #[cfg(feature = "media-webrtc")]
+    pub bridge: Arc<parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>>,
 }
 
 pub struct UctpWsConfig {
@@ -135,6 +145,46 @@ impl UctpWsAdapter {
 
     fn route(&self, conn: &ConnectionId) -> Option<Route> {
         self.routes.get(conn).map(|r| r.clone())
+    }
+
+    /// Public accessor for the per-Connection `WebRtcMediaBridge` (answerer
+    /// side). Returns `None` if the connection isn't known, or if the bridge
+    /// is still being constructed (construction is async post-InboundInvite).
+    ///
+    /// Test + application code uses this handle to drive the
+    /// `connection.offer` → `connection.answer` SDP exchange against a
+    /// peer-side offerer bridge, then wait on `wait_connected` to confirm
+    /// the WebRTC handshake landed.
+    #[cfg(feature = "media-webrtc")]
+    pub fn bridge_for(
+        &self,
+        conn: &ConnectionId,
+    ) -> Option<Arc<crate::media_bridge::WebRtcMediaBridge>> {
+        let route = self.routes.get(conn)?;
+        let guard = route.bridge.lock();
+        let cloned = guard.clone();
+        cloned
+    }
+
+    /// Poll for the bridge slot to be populated; returns `None` on timeout.
+    /// Useful when the bridge is created asynchronously after InboundInvite
+    /// and the caller wants to await its existence.
+    #[cfg(feature = "media-webrtc")]
+    pub async fn wait_bridge_for(
+        &self,
+        conn: &ConnectionId,
+        timeout: std::time::Duration,
+    ) -> Option<Arc<crate::media_bridge::WebRtcMediaBridge>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(bridge) = self.bridge_for(conn) {
+                return Some(bridge);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     }
 }
 

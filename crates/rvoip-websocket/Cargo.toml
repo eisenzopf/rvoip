@@ -45,11 +45,16 @@ thiserror.workspace = true
 name = "media_bridge_loopback"
 required-features = ["media-webrtc"]
 
+[[test]]
+name = "ws_bridge_flow"
+required-features = ["media-webrtc"]
+
 [dev-dependencies]
 rvoip-webrtc.workspace = true
 rustls.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-subscriber.workspace = true
+uuid = { workspace = true, features = ["v4"] }
 
 [lints]
 workspace = true

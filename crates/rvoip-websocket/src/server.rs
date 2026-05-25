@@ -211,27 +211,39 @@ async fn spawn_peer_session(
                     }
                     UctpSessionEvent::InboundInvite { sid, from, .. } => {
                         let (id, connection) = build_connection(sid.clone(), from);
-                        // MediaStream population intentionally deferred for
-                        // WebSocket: media rides a co-located WebRTC
-                        // PeerConnection (see media_bridge.rs, stubbed
-                        // pending webrtc-rs stable release). `Route.streams`
-                        // and `Connection.streams` stay empty here; bridges
-                        // to WS connections will return
-                        // `AdmissionRejected("no audio stream")` until the
-                        // WebRTC integration lands. The QUIC + WT adapters
-                        // create default audio streams at this point — see
-                        // their `server.rs` for the pattern to mirror once
-                        // webrtc-rs is ready.
                         by_connection.insert(id.clone(), sid.to_string());
                         by_uctp_sid.insert(sid.to_string(), id.clone());
-                        routes.insert(
-                            id.clone(),
-                            Route {
-                                sid: sid.to_string(),
-                                out_tx: route_out_tx.clone(),
-                                streams: Arc::new(DashMap::new()),
-                            },
-                        );
+
+                        // Per-Connection routing record. Under `media-webrtc`
+                        // the `bridge` slot is initialized empty and populated
+                        // asynchronously by `spawn_bridge_setup` below — we
+                        // can't `.await` `WebRtcMediaBridge::new_answerer()`
+                        // inline because that would stall envelope dispatch.
+                        let route_streams = Arc::new(DashMap::new());
+                        #[cfg(feature = "media-webrtc")]
+                        let bridge_slot: Arc<
+                            parking_lot::Mutex<
+                                Option<Arc<crate::media_bridge::WebRtcMediaBridge>>,
+                            >,
+                        > = Arc::new(parking_lot::Mutex::new(None));
+                        let route = Route {
+                            sid: sid.to_string(),
+                            out_tx: route_out_tx.clone(),
+                            streams: Arc::clone(&route_streams),
+                            #[cfg(feature = "media-webrtc")]
+                            bridge: Arc::clone(&bridge_slot),
+                        };
+                        routes.insert(id.clone(), route);
+
+                        // Under `media-webrtc`, fire-and-forget the
+                        // answerer-bridge construction + ready-watcher.
+                        // Once `wait_connected` succeeds the watcher pushes
+                        // the WebRtcMediaStream into `Route.streams` so that
+                        // `adapter.streams(conn_id)` resolves to a real
+                        // audio path for cross-transport bridging.
+                        #[cfg(feature = "media-webrtc")]
+                        spawn_bridge_setup(bridge_slot, route_streams);
+
                         let _ = events_tx
                             .send(AdapterEvent::InboundConnection { connection })
                             .await;
@@ -275,7 +287,29 @@ async fn spawn_peer_session(
                         match by_uctp_sid.remove(sid.as_str()) {
                             Some((_, connection_id)) => {
                                 by_connection.remove(&connection_id);
-                                routes.remove(&connection_id);
+                                // Close + drop the per-Connection bridge
+                                // before dropping the Route. Removing the
+                                // Route drops the bridge Arc, but proactive
+                                // close() releases the WebRTC PeerConnection
+                                // (DTLS, ICE agents) cleanly rather than
+                                // waiting on Drop.
+                                #[cfg(feature = "media-webrtc")]
+                                {
+                                    let removed = routes.remove(&connection_id);
+                                    let bridge_opt = removed.and_then(|(_, route)| {
+                                        let guard = route.bridge.lock();
+                                        guard.clone()
+                                    });
+                                    if let Some(bridge) = bridge_opt {
+                                        tokio::spawn(async move {
+                                            let _ = bridge.close().await;
+                                        });
+                                    }
+                                }
+                                #[cfg(not(feature = "media-webrtc"))]
+                                {
+                                    routes.remove(&connection_id);
+                                }
                                 Some(AdapterEvent::Ended {
                                     connection_id,
                                     reason: if reason == "cancelled" {
@@ -326,4 +360,58 @@ async fn spawn_peer_session(
     let _ = inbound_pump.await;
     let _ = outbound_pump.await;
     let _ = event_pump.await;
+}
+
+/// Spawn the per-Connection WebRTC answerer-bridge setup task.
+///
+/// The construction (`WebRtcMediaBridge::new_answerer`) does ICE prep + DTLS
+/// material gathering and may take ~50–200 ms — too long to await inline in
+/// the event-translator loop. We spawn it off, store the resulting Arc in
+/// the route's `bridge_slot`, and then spawn a ready-watcher that calls
+/// `wait_connected` (30s deadline) and on success pushes the bridge's
+/// `WebRtcMediaStream` into `Route.streams`.
+///
+/// Two paths advance the bridge to "connected":
+/// 1. Test / application code drives the SDP exchange via
+///    [`crate::UctpWsAdapter::bridge_for`] (direct access), calling
+///    `set_remote_substrate_setup` + `local_substrate_setup` against a
+///    peer-side offerer bridge.
+/// 2. (v0.x) Server intercepts `connection.offer`/`connection.answer`
+///    envelopes and drives the exchange transparently. Not implemented in
+///    v0 — see plan G1 simplification notes.
+#[cfg(feature = "media-webrtc")]
+fn spawn_bridge_setup(
+    bridge_slot: Arc<
+        parking_lot::Mutex<Option<Arc<crate::media_bridge::WebRtcMediaBridge>>>,
+    >,
+    route_streams: Arc<DashMap<rvoip_core::ids::StreamId, Arc<dyn rvoip_core::stream::MediaStream>>>,
+) {
+    use std::time::Duration;
+    tokio::spawn(async move {
+        let bridge = match crate::media_bridge::WebRtcMediaBridge::new_answerer().await {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+                warn!(error = %e, "rvoip-websocket: WebRTC answerer bridge construction failed");
+                return;
+            }
+        };
+        *bridge_slot.lock() = Some(Arc::clone(&bridge));
+
+        // Ready-watcher: wait_connected and surface the media stream.
+        let bridge_for_watcher = Arc::clone(&bridge);
+        tokio::spawn(async move {
+            if let Err(e) = bridge_for_watcher
+                .wait_connected(Duration::from_secs(30))
+                .await
+            {
+                debug!(error = %e, "rvoip-websocket: bridge wait_connected timed out / failed");
+                return;
+            }
+            if let Some(stream) = bridge_for_watcher.media_stream() {
+                let id = rvoip_core::stream::MediaStream::id(stream.as_ref());
+                route_streams.insert(id, stream as Arc<dyn rvoip_core::stream::MediaStream>);
+                debug!("rvoip-websocket: WebRTC bridge connected; stream registered");
+            }
+        });
+    });
 }
