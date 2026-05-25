@@ -79,7 +79,7 @@ use super::TransactionManager;
 ///
 /// # Returns
 /// * `Result<()>` - Success or error depending on message processing outcome
-pub async fn handle_transport_message(
+pub(crate) async fn handle_transport_message(
     event: TransportEvent,
     transport: &Arc<dyn Transport>,
     client_transactions: &Arc<
@@ -87,7 +87,7 @@ pub async fn handle_transport_message(
     >,
     server_transactions: &Arc<dashmap::DashMap<TransactionKey, Arc<dyn ServerTransaction>>>,
     events_tx: &mpsc::Sender<TransactionEvent>,
-    event_subscribers: &Arc<arc_swap::ArcSwap<Vec<mpsc::Sender<TransactionEvent>>>>,
+    event_subscribers: &Arc<arc_swap::ArcSwap<Vec<super::EventSubscriber>>>,
     manager: &TransactionManager,
 ) -> Result<()> {
     match event {
@@ -154,7 +154,8 @@ pub async fn handle_transport_message(
                                                     },
                                                     events_tx,
                                                     event_subscribers,
-                                                    None,
+                                                    Some(&manager.subscriber_to_transactions),
+                                                    Some(&manager.transaction_to_subscribers),
                                                     None,
                                                 )
                                                 .await;
@@ -187,7 +188,8 @@ pub async fn handle_transport_message(
                                 },
                                 events_tx,
                                 event_subscribers,
-                                None,
+                                Some(&manager.subscriber_to_transactions),
+                                Some(&manager.transaction_to_subscribers),
                                 None,
                             )
                             .await;
@@ -203,7 +205,8 @@ pub async fn handle_transport_message(
                             },
                             events_tx,
                             event_subscribers,
-                            None,
+                            Some(&manager.subscriber_to_transactions),
+                            Some(&manager.transaction_to_subscribers),
                             None,
                         )
                         .await;
@@ -229,7 +232,8 @@ pub async fn handle_transport_message(
                                         TransactionEvent::StrayCancel { request, source },
                                         events_tx,
                                         event_subscribers,
-                                        None,
+                                        Some(&manager.subscriber_to_transactions),
+                                        Some(&manager.transaction_to_subscribers),
                                         None,
                                     )
                                     .await;
@@ -248,7 +252,8 @@ pub async fn handle_transport_message(
                                     TransactionEvent::StrayCancel { request, source },
                                     events_tx,
                                     event_subscribers,
-                                    None,
+                                    Some(&manager.subscriber_to_transactions),
+                                    Some(&manager.transaction_to_subscribers),
                                     None,
                                 )
                                 .await;
@@ -287,7 +292,8 @@ pub async fn handle_transport_message(
                                 },
                                 events_tx,
                                 event_subscribers,
-                                None,
+                                Some(&manager.subscriber_to_transactions),
+                                Some(&manager.transaction_to_subscribers),
                                 None,
                             )
                             .await;
@@ -383,7 +389,8 @@ pub async fn handle_transport_message(
                             TransactionEvent::StrayCancel { request, source },
                             events_tx,
                             event_subscribers,
-                            None,
+                            Some(&manager.subscriber_to_transactions),
+                            Some(&manager.transaction_to_subscribers),
                             None,
                         )
                         .await;
@@ -516,7 +523,8 @@ pub async fn handle_transport_message(
                         TransactionEvent::StrayResponse { response, source },
                         events_tx,
                         event_subscribers,
-                        None,
+                        Some(&manager.subscriber_to_transactions),
+                        Some(&manager.transaction_to_subscribers),
                         None,
                     )
                     .await;
@@ -784,6 +792,8 @@ impl TransactionManager {
                             // `Bytes::clone` is a refcount bump — no heap alloc.
                             self.pending_inbound_bytes
                                 .insert(key.clone(), bytes.clone());
+                            self.pending_inbound_inserted_at
+                                .insert(key.clone(), Instant::now());
                         }
                     }
                 }

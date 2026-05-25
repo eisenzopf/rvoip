@@ -986,16 +986,19 @@ impl RtpSession {
         // Stop the receive task
         if let Some(handle) = self.recv_task.take() {
             handle.abort();
+            let _ = handle.await;
         }
 
         // Stop the send task
         if let Some(handle) = self.send_task.take() {
             handle.abort();
+            let _ = handle.await;
         }
 
         // Stop the RTCP task
         if let Some(handle) = self.rtcp_task.take() {
             handle.abort();
+            let _ = handle.await;
         }
 
         // Close the transport

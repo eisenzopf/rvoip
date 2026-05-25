@@ -114,6 +114,12 @@ static GLOBAL_PUBLISH_OTHER: AtomicU64 = AtomicU64::new(0);
 
 static TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL: AtomicU64 = AtomicU64::new(0);
 static TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_RUNNER_STARTED: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_RUNNER_EXITED: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_RUNNER_ACTIVE: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_RUNNER_ACTIVE_MAX: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_RUNNER_DESTROY_WAKE_SENT: AtomicU64 = AtomicU64::new(0);
+static TRANSACTION_RUNNER_DESTROY_WAKE_FAILED: AtomicU64 = AtomicU64::new(0);
 
 static FIRST_INVITE_TO_200_COUNT: AtomicU64 = AtomicU64::new(0);
 static FIRST_INVITE_TO_200_SUM_US: AtomicU64 = AtomicU64::new(0);
@@ -438,6 +444,12 @@ pub struct Snapshot {
     pub global_publish_other: u64,
     pub transaction_dispatch_queue_depth_total: u64,
     pub transaction_dispatch_queue_depth_max: u64,
+    pub transaction_runner_started: u64,
+    pub transaction_runner_exited: u64,
+    pub transaction_runner_active: u64,
+    pub transaction_runner_active_max: u64,
+    pub transaction_runner_destroy_wake_sent: u64,
+    pub transaction_runner_destroy_wake_failed: u64,
     pub bye_tombstone_table_size_max: u64,
     pub first_invite_to_200_count: u64,
     pub first_invite_to_200_avg_us: u64,
@@ -677,6 +689,14 @@ pub fn snapshot() -> Snapshot {
         transaction_dispatch_queue_depth_total: TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL
             .load(Ordering::Relaxed),
         transaction_dispatch_queue_depth_max: TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX
+            .load(Ordering::Relaxed),
+        transaction_runner_started: TRANSACTION_RUNNER_STARTED.load(Ordering::Relaxed),
+        transaction_runner_exited: TRANSACTION_RUNNER_EXITED.load(Ordering::Relaxed),
+        transaction_runner_active: TRANSACTION_RUNNER_ACTIVE.load(Ordering::Relaxed),
+        transaction_runner_active_max: TRANSACTION_RUNNER_ACTIVE_MAX.load(Ordering::Relaxed),
+        transaction_runner_destroy_wake_sent: TRANSACTION_RUNNER_DESTROY_WAKE_SENT
+            .load(Ordering::Relaxed),
+        transaction_runner_destroy_wake_failed: TRANSACTION_RUNNER_DESTROY_WAKE_FAILED
             .load(Ordering::Relaxed),
         bye_tombstone_table_size_max: BYE_TOMBSTONE_TABLE_SIZE_MAX.load(Ordering::Relaxed),
         first_invite_to_200_count: first_count,
@@ -1405,6 +1425,28 @@ pub(crate) fn record_transaction_dispatch_queue_depth(depth: usize) {
     update_max(&TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX, depth);
 }
 
+pub(crate) fn record_transaction_runner_started() {
+    TRANSACTION_RUNNER_STARTED.fetch_add(1, Ordering::Relaxed);
+    let active = TRANSACTION_RUNNER_ACTIVE.fetch_add(1, Ordering::Relaxed) + 1;
+    update_max(&TRANSACTION_RUNNER_ACTIVE_MAX, active);
+}
+
+pub(crate) fn record_transaction_runner_exited() {
+    TRANSACTION_RUNNER_EXITED.fetch_add(1, Ordering::Relaxed);
+    let _ =
+        TRANSACTION_RUNNER_ACTIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_sub(1)
+        });
+}
+
+pub(crate) fn record_transaction_runner_destroy_wake_sent() {
+    TRANSACTION_RUNNER_DESTROY_WAKE_SENT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_transaction_runner_destroy_wake_failed() {
+    TRANSACTION_RUNNER_DESTROY_WAKE_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) fn record_transaction_dispatch_queue_by_worker_and_kind(
     worker_id: usize,
     kind: &str,
@@ -1772,6 +1814,12 @@ fn all_counters() -> Vec<&'static AtomicU64> {
         &GLOBAL_PUBLISH_OTHER,
         &TRANSACTION_DISPATCH_QUEUE_DEPTH_TOTAL,
         &TRANSACTION_DISPATCH_QUEUE_DEPTH_MAX,
+        &TRANSACTION_RUNNER_STARTED,
+        &TRANSACTION_RUNNER_EXITED,
+        &TRANSACTION_RUNNER_ACTIVE,
+        &TRANSACTION_RUNNER_ACTIVE_MAX,
+        &TRANSACTION_RUNNER_DESTROY_WAKE_SENT,
+        &TRANSACTION_RUNNER_DESTROY_WAKE_FAILED,
         &BYE_TOMBSTONE_TABLE_SIZE_MAX,
     ]
 }

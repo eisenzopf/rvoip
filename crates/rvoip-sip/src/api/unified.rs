@@ -699,6 +699,16 @@ pub struct Config {
     /// dispatch workers are enabled, this capacity is divided across workers.
     pub sip_transaction_dispatch_queue_capacity: Option<usize>,
 
+    /// Optional per-transaction command channel capacity.
+    ///
+    /// Each SIP transaction owns a private command queue for timer and
+    /// state-machine messages. This is not a global call burst queue; raising it
+    /// increases per-transaction memory. `None` uses
+    /// [`Config::DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY`]. High-CPS
+    /// tuned profiles may raise it when measured timer/state command pressure
+    /// proves the default is too small.
+    pub sip_transaction_command_channel_capacity: Option<usize>,
+
     /// Optional priority-lane burst limit for transaction ingress workers.
     ///
     /// This applies only when [`Config::sip_transaction_dispatch_workers`] is
@@ -740,9 +750,11 @@ pub struct Config {
     /// this coordinator.
     ///
     /// ACK, BYE, media, and app-session events all cross this bus before they
-    /// reach their local consumers. High-CPS server profiles should size it
-    /// with the other signaling queues so the event bridge does not drop
-    /// cleanup-driving events. Default: `10000`.
+    /// reach their local consumers. The default is intentionally modest so
+    /// ordinary clients and PBX apps do not retain a large app-event ring.
+    /// High-CPS server profiles should size it with the other signaling queues
+    /// so the event bridge does not drop cleanup-driving events.
+    /// Default: [`Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY`].
     pub global_event_channel_capacity: usize,
 
     /// Number of async workers used to publish app-level session events onto
@@ -759,7 +771,8 @@ pub struct Config {
     /// This queue sits in front of the global event coordinator only for
     /// non-terminal fire-and-forget publishes. Terminal publishes still use
     /// the synchronous `publish_now` path so session cleanup happens after
-    /// the terminal event is visible. Default: `10000`.
+    /// the terminal event is visible.
+    /// Default: [`Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY`].
     pub session_event_dispatcher_channel_capacity: usize,
 
     /// Expected server-side active call capacity for hot lookup indexes.
@@ -813,6 +826,14 @@ pub struct Config {
     /// expensive under load.
     pub cleanup_diagnostic_events: bool,
 
+    /// Maximum allowed RSS growth in MB/hour for perf soak release gates.
+    ///
+    /// This is compiled only with the `perf-tests` feature because it is a
+    /// benchmark/release-gate control, not a production runtime memory limit.
+    /// `None` uses [`Config::DEFAULT_PERF_MAX_RSS_GROWTH_MB_PER_HR`].
+    #[cfg(feature = "perf-tests")]
+    pub perf_max_rss_growth_mb_per_hr: Option<f64>,
+
     /// Enable SRTP negotiation diagnostic log lines.
     pub srtp_diagnostics: bool,
 
@@ -849,6 +870,20 @@ impl Config {
 
     /// Default RTP media port range end.
     pub const DEFAULT_MEDIA_PORT_END: u16 = DEFAULT_RTP_PORT_RANGE_END;
+
+    /// Default RSS growth threshold for perf soak release gates.
+    pub const DEFAULT_PERF_MAX_RSS_GROWTH_MB_PER_HR: f64 = 10.0;
+
+    /// Default app-facing event buffer capacity.
+    ///
+    /// This is intentionally smaller than the lower-level SIP transport and
+    /// transaction defaults so ordinary client/server apps do not reserve a
+    /// large broadcast ring unless they opt into a high-CPS profile.
+    pub const DEFAULT_APP_EVENT_CHANNEL_CAPACITY: usize = 256;
+
+    /// Default per-transaction command channel capacity.
+    pub const DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY: usize =
+        rvoip_sip_dialog::transaction::DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY;
 
     /// Create a config for local development/testing on 127.0.0.1.
     ///
@@ -923,13 +958,14 @@ impl Config {
             transaction_event_channel_capacity: 10_000,
             sip_transaction_dispatch_workers: None,
             sip_transaction_dispatch_queue_capacity: None,
+            sip_transaction_command_channel_capacity: None,
             sip_transaction_dispatch_priority_burst_max: None,
             sip_invite_2xx_retransmit_max_due_per_tick: None,
             sip_dialog_dispatch_workers: None,
             sip_dialog_dispatch_queue_capacity: None,
-            global_event_channel_capacity: 10_000,
+            global_event_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
-            session_event_dispatcher_channel_capacity: 10_000,
+            session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
@@ -937,6 +973,8 @@ impl Config {
             media_setup_diagnostics: false,
             cleanup_diagnostics: false,
             cleanup_diagnostic_events: false,
+            #[cfg(feature = "perf-tests")]
+            perf_max_rss_growth_mb_per_hr: None,
             srtp_diagnostics: false,
             rtp_diagnostics: false,
             media_sdp_diagnostics: false,
@@ -1016,13 +1054,14 @@ impl Config {
             transaction_event_channel_capacity: 10_000,
             sip_transaction_dispatch_workers: None,
             sip_transaction_dispatch_queue_capacity: None,
+            sip_transaction_command_channel_capacity: None,
             sip_transaction_dispatch_priority_burst_max: None,
             sip_invite_2xx_retransmit_max_due_per_tick: None,
             sip_dialog_dispatch_workers: None,
             sip_dialog_dispatch_queue_capacity: None,
-            global_event_channel_capacity: 10_000,
+            global_event_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             session_event_dispatcher_workers: default_session_event_dispatcher_workers(),
-            session_event_dispatcher_channel_capacity: 10_000,
+            session_event_dispatcher_channel_capacity: Self::DEFAULT_APP_EVENT_CHANNEL_CAPACITY,
             server_call_capacity: None,
             sip_udp_diagnostics: false,
             sip_transaction_timing_diagnostics: false,
@@ -1030,6 +1069,8 @@ impl Config {
             media_setup_diagnostics: false,
             cleanup_diagnostics: false,
             cleanup_diagnostic_events: false,
+            #[cfg(feature = "perf-tests")]
+            perf_max_rss_growth_mb_per_hr: None,
             srtp_diagnostics: false,
             rtp_diagnostics: false,
             media_sdp_diagnostics: false,
@@ -1305,6 +1346,8 @@ impl Config {
         self.auto_100_trying = false;
         self.sip_udp_parse_workers = Some(1);
         self.sip_udp_parse_queue_capacity = Some(capacity);
+        self.sip_transaction_command_channel_capacity
+            .get_or_insert_with(|| (capacity / 8).clamp(128, 1000));
         self.media_mode = MediaMode::Enabled;
         self
     }
@@ -1549,6 +1592,16 @@ impl Config {
         self
     }
 
+    /// Set the per-transaction command channel capacity.
+    ///
+    /// Values below `1` are rejected by [`Config::validate`]. This should be
+    /// tuned only for measured high-CPS profiles because it is allocated per
+    /// live transaction, not once per endpoint.
+    pub fn with_sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
+        self.sip_transaction_command_channel_capacity = Some(capacity);
+        self
+    }
+
     /// Set the transaction-manager ACK/BYE priority burst limit.
     ///
     /// This only affects multi-worker transaction dispatch. After this many
@@ -1628,6 +1681,18 @@ impl Config {
         self
     }
 
+    /// Set the app-facing event buffering capacity as one knob.
+    ///
+    /// This sets both [`Config::global_event_channel_capacity`] and
+    /// [`Config::session_event_dispatcher_channel_capacity`]. Use the lower
+    /// level setters when a deployment needs different capacities for the
+    /// global cross-crate broadcast ring and the app-session publish queue.
+    pub fn with_app_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.global_event_channel_capacity = capacity;
+        self.session_event_dispatcher_channel_capacity = capacity;
+        self
+    }
+
     /// Set the app-session event dispatcher worker count.
     ///
     /// Values below `1` are rejected by [`Config::validate`].
@@ -1677,6 +1742,16 @@ impl Config {
     /// Enable or disable per-operation cleanup diagnostic event logs.
     pub fn with_cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
         self.cleanup_diagnostic_events = enabled;
+        self
+    }
+
+    /// Set the RSS growth threshold used by perf soak release gates.
+    ///
+    /// Compiled only with `perf-tests`; ordinary application builds do not
+    /// expose benchmark gate controls.
+    #[cfg(feature = "perf-tests")]
+    pub fn with_perf_max_rss_growth_mb_per_hr(mut self, limit: f64) -> Self {
+        self.perf_max_rss_growth_mb_per_hr = Some(limit);
         self
     }
 
@@ -1885,6 +1960,11 @@ impl Config {
                 "sip_transaction_dispatch_queue_capacity must be at least 1 when set".to_string(),
             ));
         }
+        if matches!(self.sip_transaction_command_channel_capacity, Some(0)) {
+            return Err(SessionError::ConfigError(
+                "sip_transaction_command_channel_capacity must be at least 1 when set".to_string(),
+            ));
+        }
         if matches!(self.sip_transaction_dispatch_priority_burst_max, Some(0)) {
             return Err(SessionError::ConfigError(
                 "sip_transaction_dispatch_priority_burst_max must be at least 1 when set"
@@ -1944,6 +2024,14 @@ impl Config {
             return Err(SessionError::ConfigError(
                 "media_port_capacity must be at least 1 when set".to_string(),
             ));
+        }
+        #[cfg(feature = "perf-tests")]
+        if let Some(limit) = self.perf_max_rss_growth_mb_per_hr {
+            if !limit.is_finite() || limit <= 0.0 {
+                return Err(SessionError::ConfigError(
+                    "perf_max_rss_growth_mb_per_hr must be finite and greater than 0".to_string(),
+                ));
+            }
         }
         if self.media_port_start < MIN_PORT {
             return Err(SessionError::ConfigError(format!(
@@ -2138,6 +2226,83 @@ impl Default for Config {
     }
 }
 
+#[cfg(test)]
+mod config_tests {
+    use super::Config;
+
+    #[test]
+    fn transaction_command_channel_default_is_small_and_configurable() {
+        assert_eq!(Config::DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY, 32);
+        let config =
+            Config::local("alice", 5060).with_sip_transaction_command_channel_capacity(256);
+        assert_eq!(config.sip_transaction_command_channel_capacity, Some(256));
+        config.validate().expect("valid command channel capacity");
+    }
+
+    #[test]
+    fn transaction_command_channel_capacity_rejects_zero() {
+        let error = Config::local("alice", 5060)
+            .with_sip_transaction_command_channel_capacity(0)
+            .validate()
+            .expect_err("zero transaction command channel capacity should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("sip_transaction_command_channel_capacity"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn high_cps_profile_sets_tunable_transaction_command_capacity() {
+        let config = Config::local("alice", 5060).with_high_cps_udp_auto_answer(8000);
+        assert_eq!(config.sip_transaction_command_channel_capacity, Some(1000));
+
+        let overridden = Config::local("alice", 5060)
+            .with_sip_transaction_command_channel_capacity(64)
+            .with_high_cps_udp_auto_answer(8000);
+        assert_eq!(
+            overridden.sip_transaction_command_channel_capacity,
+            Some(64)
+        );
+    }
+}
+
+#[cfg(all(test, feature = "perf-tests"))]
+mod perf_config_tests {
+    use super::Config;
+
+    #[test]
+    fn perf_rss_growth_default_is_ten_mb_per_hour() {
+        assert_eq!(Config::DEFAULT_PERF_MAX_RSS_GROWTH_MB_PER_HR, 10.0);
+        assert_eq!(
+            Config::local("alice", 5060).perf_max_rss_growth_mb_per_hr,
+            None
+        );
+    }
+
+    #[test]
+    fn perf_rss_growth_override_validates() {
+        let config = Config::local("alice", 5060).with_perf_max_rss_growth_mb_per_hr(2.5);
+        assert_eq!(config.perf_max_rss_growth_mb_per_hr, Some(2.5));
+        config.validate().expect("valid perf rss threshold");
+    }
+
+    #[test]
+    fn perf_rss_growth_rejects_invalid_values() {
+        for limit in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let config = Config::local("alice", 5060).with_perf_max_rss_growth_mb_per_hr(limit);
+            let error = config
+                .validate()
+                .expect_err("invalid perf rss threshold should fail");
+            assert!(
+                error.to_string().contains("perf_max_rss_growth_mb_per_hr"),
+                "unexpected error: {error}"
+            );
+        }
+    }
+}
+
 fn default_session_event_dispatcher_workers() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
@@ -2217,6 +2382,123 @@ impl UnifiedCoordinator {
     /// did not stage per-call credentials via `with_credentials(..)`.
     pub fn config_credentials(&self) -> Option<crate::types::Credentials> {
         self.config.credentials.clone()
+    }
+
+    /// Feature-gated retained-object counts for perf leak investigations.
+    ///
+    /// This is intentionally not a stable application API. It exists so
+    /// release-gate tests can prove that completed call churn is not retaining
+    /// per-call state.
+    #[cfg(feature = "perf-tests")]
+    #[doc(hidden)]
+    pub async fn perf_diagnostic_snapshot(&self) -> serde_json::Value {
+        let session_stats = self.helpers.state_machine.store.get_stats().await;
+        let helper_counts = self.helpers.perf_diagnostic_counts().await;
+        let registry_sessions = self.session_registry.session_count().await;
+        let cleanup = crate::cleanup_diag::snapshot();
+        let dialog_diag = rvoip_sip_dialog::diagnostics::snapshot();
+        let dialog_core = self.dialog_adapter.dialog_api.dialog_manager().core();
+        let transaction_counts = dialog_core.transaction_manager().retention_counts();
+        let dialog_counts = dialog_core.retention_counts();
+
+        serde_json::json!({
+            "config": {
+                "sip_transaction_command_channel_capacity": self
+                    .config
+                    .sip_transaction_command_channel_capacity
+                    .unwrap_or(Config::DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY),
+            },
+            "session_store": {
+                "total": session_stats.total,
+                "idle": session_stats.idle,
+                "initiating": session_stats.initiating,
+                "ringing": session_stats.ringing,
+                "active": session_stats.active,
+                "on_hold": session_stats.on_hold,
+                "terminating": session_stats.terminating,
+                "terminated": session_stats.terminated,
+                "failed": session_stats.failed,
+            },
+            "session_registry": {
+                "sessions": registry_sessions,
+            },
+            "lifecycle": self.lifecycle.perf_diagnostic_counts(),
+            "state_machine_helpers": helper_counts,
+            "transaction_manager": {
+                "client_transactions": transaction_counts.client_transactions,
+                "server_transactions": transaction_counts.server_transactions,
+                "total": transaction_counts.active_transactions_total,
+                "terminated_transactions": transaction_counts.terminated_transactions,
+                "server_invite_dialog_index": transaction_counts.server_invite_dialog_index,
+                "server_invite_dialog_keys_by_tx": transaction_counts.server_invite_dialog_keys_by_tx,
+                "invite_2xx_response_cache": transaction_counts.invite_2xx_response_cache,
+                "invite_2xx_response_due_queue": transaction_counts.invite_2xx_response_due_queue,
+                "transaction_destinations": transaction_counts.transaction_destinations,
+                "event_subscribers": transaction_counts.event_subscribers,
+                "subscriber_to_transactions": transaction_counts.subscriber_to_transactions,
+                "transaction_to_subscribers": transaction_counts.transaction_to_subscribers,
+                "pending_inbound_bytes": transaction_counts.pending_inbound_bytes,
+                "pending_inbound_timing": transaction_counts.pending_inbound_timing,
+            },
+            "dialog_manager": {
+                "dialogs": dialog_counts.dialogs,
+                "dialog_lookup": dialog_counts.dialog_lookup,
+                "early_dialog_lookup": dialog_counts.early_dialog_lookup,
+                "terminated_bye_lookup": dialog_counts.terminated_bye_lookup,
+                "transaction_to_dialog": dialog_counts.transaction_to_dialog,
+                "transaction_dialog_route_hash": dialog_counts.transaction_dialog_route_hash,
+                "dialog_invite_transactions": dialog_counts.dialog_invite_transactions,
+                "dialog_server_transactions": dialog_counts.dialog_server_transactions,
+                "pending_response_transaction_by_dialog": dialog_counts.pending_response_transaction_by_dialog,
+                "session_to_dialog": dialog_counts.session_to_dialog,
+                "dialog_to_session": dialog_counts.dialog_to_session,
+                "reliable_provisional_tasks": dialog_counts.reliable_provisional_tasks,
+                "session_refresh_tasks": dialog_counts.session_refresh_tasks,
+                "outbound_flows": dialog_counts.outbound_flows,
+                "outbound_flow_tasks": dialog_counts.outbound_flow_tasks,
+                "flow_by_destination": dialog_counts.flow_by_destination,
+                "flow_by_aor": dialog_counts.flow_by_aor,
+            },
+            "dialog_adapter": self.dialog_adapter.perf_diagnostic_counts(),
+            "media_adapter": self.media_adapter.perf_diagnostic_counts(),
+            "sip_dialog_diagnostics": {
+                "transaction_runner": {
+                    "started": dialog_diag.transaction_runner_started,
+                    "exited": dialog_diag.transaction_runner_exited,
+                    "active": dialog_diag.transaction_runner_active,
+                    "active_max": dialog_diag.transaction_runner_active_max,
+                    "destroy_wake_sent": dialog_diag.transaction_runner_destroy_wake_sent,
+                    "destroy_wake_failed": dialog_diag.transaction_runner_destroy_wake_failed,
+                },
+                "transaction_cleanup": {
+                    "enqueued": dialog_diag.termination_cleanup_enqueued,
+                    "queue_full": dialog_diag.termination_cleanup_queue_full,
+                    "in_flight": dialog_diag.termination_cleanup_in_flight,
+                    "max_in_flight": dialog_diag.termination_cleanup_max_in_flight,
+                    "removed": dialog_diag.termination_cleanup_removed,
+                    "poll_attempts": dialog_diag.termination_cleanup_poll_attempts,
+                },
+                "invite_2xx_cache": {
+                    "insert": dialog_diag.invite_2xx_cache_insert,
+                    "expired": dialog_diag.invite_2xx_cache_expired,
+                    "ack_removed": dialog_diag.invite_2xx_ack_removed,
+                    "maintenance_cache_len_max": dialog_diag.invite_2xx_maintenance_cache_len_max,
+                    "maintenance_due_queue_len_max": dialog_diag.invite_2xx_maintenance_due_queue_len_max,
+                    "maintenance_due": dialog_diag.invite_2xx_maintenance_due,
+                    "maintenance_expired": dialog_diag.invite_2xx_maintenance_expired,
+                    "maintenance_capped_ticks": dialog_diag.invite_2xx_maintenance_capped_ticks,
+                },
+                "bye_tombstone": {
+                    "hit": dialog_diag.duplicate_bye_tombstone_hit,
+                    "miss": dialog_diag.duplicate_bye_tombstone_miss,
+                    "table_size_max": dialog_diag.bye_tombstone_table_size_max,
+                },
+            },
+            "cleanup": {
+                "enabled": cleanup.enabled,
+                "active_total": cleanup.active_total,
+            },
+        })
     }
 
     /// SIP_API_DESIGN_2 Phase C — internal accessor to the
@@ -3179,7 +3461,89 @@ impl UnifiedCoordinator {
     /// # }
     /// ```
     pub async fn hangup(&self, session_id: &SessionId) -> Result<()> {
-        self.helpers.hangup(session_id).await
+        let initial_state = self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+            .ok()
+            .map(|session| session.call_state);
+        self.helpers.hangup(session_id).await?;
+        if matches!(initial_state, Some(CallState::Active)) {
+            self.finalize_local_bye(session_id, "Local hangup").await?;
+        }
+        Ok(())
+    }
+
+    /// Complete local BYE teardown when dialog-core accepts the outbound BYE.
+    ///
+    /// Dialog-core does not currently emit a per-session `DialogTerminated`
+    /// event for every successful outbound BYE transaction, so the public BYE
+    /// paths release rvoip-sip state explicitly after the BYE has been
+    /// dispatched. Inbound BYE/CANCEL/failure paths still release through the
+    /// dialog event handler.
+    pub(crate) async fn finalize_local_bye(
+        &self,
+        session_id: &SessionId,
+        reason: impl Into<String>,
+    ) -> Result<()> {
+        if self
+            .helpers
+            .state_machine
+            .store
+            .get_session(session_id)
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
+
+        let release_guard = crate::cleanup_diag::stage_guard(
+            crate::cleanup_diag::CleanupStage::TerminalRelease,
+            &session_id.0,
+        );
+
+        if let Err(err) = self.dialog_adapter.cleanup_session(session_id).await {
+            tracing::debug!(
+                "dialog cleanup during local BYE finalization for {}: {}",
+                session_id,
+                err
+            );
+        }
+        if let Err(err) = self.media_adapter.cleanup_session(session_id).await {
+            tracing::debug!(
+                "media cleanup during local BYE finalization for {}: {}",
+                session_id,
+                err
+            );
+        }
+        self.helpers.cleanup_session(session_id).await;
+
+        let api_event = crate::api::events::Event::CallEnded {
+            call_id: session_id.clone(),
+            reason: reason.into(),
+        };
+        if let Err(err) = self.app_event_publisher.publish_now(api_event).await {
+            release_guard.finish_failure();
+            return Err(err);
+        }
+        if let Err(err) = self
+            .helpers
+            .state_machine
+            .store
+            .remove_session(session_id)
+            .await
+        {
+            tracing::debug!(
+                "session store removal during local BYE finalization for {}: {}",
+                session_id,
+                err
+            );
+        }
+        self.session_registry.remove_session(session_id).await;
+        release_guard.finish_success();
+        Ok(())
     }
 
     /// Bridge the RTP streams of two active sessions at the media layer.
@@ -4112,6 +4476,11 @@ impl UnifiedCoordinator {
 
         let mut transaction_manager = transaction_manager;
         transaction_manager.set_auto_100_trying(config.auto_100_trying);
+        transaction_manager.set_transaction_command_channel_capacity(
+            config
+                .sip_transaction_command_channel_capacity
+                .unwrap_or(Config::DEFAULT_SIP_TRANSACTION_COMMAND_CHANNEL_CAPACITY),
+        );
         if let Some(max_burst) = config.sip_transaction_dispatch_priority_burst_max {
             transaction_manager.set_transaction_dispatch_priority_burst_max(max_burst);
         }

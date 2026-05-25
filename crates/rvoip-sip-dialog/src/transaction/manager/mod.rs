@@ -168,7 +168,7 @@ pub use handlers::*;
 pub use types::*;
 pub use utils::*;
 
-use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -219,7 +219,7 @@ use crate::transaction::utils::{
 };
 use crate::transaction::{
     InternalTransactionCommand, Transaction, TransactionAsync, TransactionEvent, TransactionKey,
-    TransactionKind, TransactionState,
+    TransactionKind, TransactionState, DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 
 // Type aliases without Sync requirement
@@ -236,6 +236,32 @@ pub(crate) type ArcClientTransaction = Arc<dyn ClientTransaction>;
 /// Type alias for an Arc wrapped server transaction
 type BoxedServerTransaction = Arc<dyn ServerTransaction>;
 
+/// Retained transaction-manager state counts used by release-gate leak checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TransactionManagerRetentionCounts {
+    pub client_transactions: usize,
+    pub server_transactions: usize,
+    pub active_transactions_total: usize,
+    pub terminated_transactions: usize,
+    pub server_invite_dialog_index: usize,
+    pub server_invite_dialog_keys_by_tx: usize,
+    pub invite_2xx_response_cache: usize,
+    pub invite_2xx_response_due_queue: usize,
+    pub transaction_destinations: usize,
+    pub event_subscribers: usize,
+    pub subscriber_to_transactions: usize,
+    pub transaction_to_subscribers: usize,
+    pub pending_inbound_bytes: usize,
+    pub pending_inbound_timing: usize,
+}
+
+#[derive(Clone)]
+pub(crate) struct EventSubscriber {
+    id: usize,
+    sender: mpsc::Sender<TransactionEvent>,
+    global: bool,
+}
+
 const MIN_TRANSACTION_INDEX_CAPACITY: usize = 1024;
 const DEFAULT_TRANSACTION_DISPATCH_WORKERS: usize = 1;
 pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
@@ -245,6 +271,7 @@ pub const MAX_TRANSACTION_DISPATCH_WORKERS: usize = 64;
 // retention period.
 const INVITE_2XX_RESPONSE_CACHE_TTL: Duration = Duration::from_secs(90);
 const INVITE_2XX_ACKED_RESPONSE_RETENTION: Duration = Duration::from_secs(2);
+const PENDING_INBOUND_BYTES_TTL: Duration = Duration::from_secs(30);
 const INVITE_2XX_RETRANSMIT_MAX_DUE_PER_TICK: usize = 2048;
 const MIN_INVITE_2XX_RESPONSE_CACHE_CAPACITY: usize = 65_536;
 const TERMINATED_CLEANUP_BATCH_MAX: usize = 1024;
@@ -372,7 +399,7 @@ pub struct TransactionManager {
     /// (every transaction state change, every retransmit) reads via a
     /// single atomic load instead of acquiring an async mutex. Writes
     /// (subscribe/unsubscribe) use copy-on-write RCU.
-    event_subscribers: Arc<ArcSwap<Vec<mpsc::Sender<TransactionEvent>>>>,
+    event_subscribers: Arc<ArcSwap<Vec<EventSubscriber>>>,
     /// Maps subscribers to transactions they're interested in.
     /// DashMap — guards never held across `.await`.
     subscriber_to_transactions: Arc<DashMap<usize, Vec<TransactionKey>>>,
@@ -415,12 +442,14 @@ pub struct TransactionManager {
     /// form without an intermediate `Message::to_bytes()` round-trip.
     /// See `SIP_API_DESIGN_2.md` §7.5.
     pub(crate) pending_inbound_bytes: Arc<DashMap<TransactionKey, bytes::Bytes>>,
+    pending_inbound_inserted_at: Arc<DashMap<TransactionKey, Instant>>,
     /// Optional receive timing diagnostics keyed by transaction. Populated only
     /// when transport diagnostics are enabled and consumed by dialog-core
     /// instrumentation when it emits higher-level events or BYE responses.
     pub(crate) pending_inbound_timing: Arc<DashMap<TransactionKey, TransportReceiveTiming>>,
     transaction_dispatch_workers: usize,
     transaction_dispatch_queue_capacity: usize,
+    transaction_command_channel_capacity: usize,
     transaction_dispatch_priority_burst_max: Arc<AtomicUsize>,
     invite_2xx_retransmit_max_due_per_tick: Arc<AtomicUsize>,
 }
@@ -928,11 +957,59 @@ impl TransactionManager {
             .store(max_burst.max(1), Ordering::Relaxed);
     }
 
+    /// Set the capacity used for newly-created transaction command channels.
+    ///
+    /// The command channel is private to one transaction runner. Values below
+    /// `1` are clamped to `1`; callers should prefer the default unless a
+    /// measured high-CPS profile proves a larger per-transaction timer/state
+    /// command buffer is needed.
+    pub fn set_transaction_command_channel_capacity(&mut self, capacity: usize) {
+        self.transaction_command_channel_capacity = capacity.max(1);
+    }
+
+    /// Return the capacity used for newly-created transaction command channels.
+    pub fn transaction_command_channel_capacity(&self) -> usize {
+        self.transaction_command_channel_capacity
+    }
+
     /// Set the maximum number of cached INVITE 2xx responses retransmitted by
     /// each proactive maintenance tick. Values below `1` are clamped to `1`.
     pub fn set_invite_2xx_retransmit_max_due_per_tick(&self, max_due_per_tick: usize) {
         self.invite_2xx_retransmit_max_due_per_tick
             .store(max_due_per_tick.max(1), Ordering::Relaxed);
+    }
+
+    /// Return retained transaction-manager state counts for perf leak gates.
+    ///
+    /// This prunes expired short-lived indexes first so idle post-drain samples
+    /// reflect live retention rather than expired tombstone/cache residue.
+    pub fn retention_counts(&self) -> TransactionManagerRetentionCounts {
+        self.maintenance_prune_retained_state();
+
+        let invite_2xx_response_due_queue = self
+            .invite_2xx_response_due_queue
+            .lock()
+            .map(|queue| queue.len())
+            .unwrap_or(0);
+        let client_transactions = self.client_transactions.len();
+        let server_transactions = self.server_transactions.len();
+
+        TransactionManagerRetentionCounts {
+            client_transactions,
+            server_transactions,
+            active_transactions_total: client_transactions + server_transactions,
+            terminated_transactions: self.terminated_transactions.len(),
+            server_invite_dialog_index: self.server_invite_dialog_index.len(),
+            server_invite_dialog_keys_by_tx: self.server_invite_dialog_keys_by_tx.len(),
+            invite_2xx_response_cache: self.invite_2xx_response_cache.len(),
+            invite_2xx_response_due_queue,
+            transaction_destinations: self.transaction_destinations.len(),
+            event_subscribers: self.event_subscribers.load().len(),
+            subscriber_to_transactions: self.subscriber_to_transactions.len(),
+            transaction_to_subscribers: self.transaction_to_subscribers.len(),
+            pending_inbound_bytes: self.pending_inbound_bytes.len(),
+            pending_inbound_timing: self.pending_inbound_timing.len(),
+        }
     }
 
     /// Returns the timer settings in effect for this manager. Session-timer
@@ -949,6 +1026,7 @@ impl TransactionManager {
     /// response-side variants so STIR/SHAKEN consumers see the
     /// upstream byte form. See `SIP_API_DESIGN_2.md` §7.5.
     pub fn take_inbound_bytes(&self, key: &TransactionKey) -> Option<bytes::Bytes> {
+        self.pending_inbound_inserted_at.remove(key);
         self.pending_inbound_bytes.remove(key).map(|(_, v)| v)
     }
 
@@ -1094,9 +1172,11 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
+            transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -1229,9 +1309,11 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: events_capacity,
+            transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -1445,9 +1527,11 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers,
             transaction_dispatch_queue_capacity,
+            transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -1557,9 +1641,11 @@ impl TransactionManager {
             flow_event_sender: Arc::new(tokio::sync::RwLock::new(None)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 100,
+            transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -1642,9 +1728,11 @@ impl TransactionManager {
             transport_rx: Arc::new(Mutex::new(transport_rx)),
             sip_trace: None,
             pending_inbound_bytes: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
+            pending_inbound_inserted_at: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             pending_inbound_timing: Arc::new(dashmap::DashMap::with_capacity(index_capacity)),
             transaction_dispatch_workers: DEFAULT_TRANSACTION_DISPATCH_WORKERS,
             transaction_dispatch_queue_capacity: 10,
+            transaction_command_channel_capacity: DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
             transaction_dispatch_priority_burst_max: Arc::new(AtomicUsize::new(
                 TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
             )),
@@ -2187,25 +2275,21 @@ impl TransactionManager {
     /// * `mpsc::Receiver<TransactionEvent>` - The event receiver
     pub fn subscribe(&self) -> mpsc::Receiver<TransactionEvent> {
         let (tx, rx) = mpsc::channel(100);
+        let id = self.next_subscriber_id.fetch_add(1, Ordering::Relaxed);
 
-        std::mem::drop(tokio::spawn({
-            let subscribers = self.event_subscribers.clone();
-            let next_subscriber_id = self.next_subscriber_id.clone();
+        // ArcSwap RCU.
+        self.event_subscribers.rcu(|current| {
+            let mut next = Vec::with_capacity(current.len() + 1);
+            next.extend(current.iter().cloned());
+            next.push(EventSubscriber {
+                id,
+                sender: tx.clone(),
+                global: true,
+            });
+            next
+        });
 
-            async move {
-                let id = next_subscriber_id.fetch_add(1, Ordering::Relaxed);
-
-                // ArcSwap RCU.
-                subscribers.rcu(|current| {
-                    let mut next = Vec::with_capacity(current.len() + 1);
-                    next.extend(current.iter().cloned());
-                    next.push(tx.clone());
-                    next
-                });
-
-                debug!("Added global subscriber with ID {}", id);
-            }
-        }));
+        debug!("Added global subscriber with ID {}", id);
 
         rx
     }
@@ -2241,7 +2325,11 @@ impl TransactionManager {
         self.event_subscribers.rcu(|current| {
             let mut next = Vec::with_capacity(current.len() + 1);
             next.extend(current.iter().cloned());
-            next.push(tx.clone());
+            next.push(EventSubscriber {
+                id: subscriber_id,
+                sender: tx.clone(),
+                global: false,
+            });
             next
         });
 
@@ -2292,7 +2380,11 @@ impl TransactionManager {
         self.event_subscribers.rcu(|current| {
             let mut next = Vec::with_capacity(current.len() + 1);
             next.extend(current.iter().cloned());
-            next.push(tx.clone());
+            next.push(EventSubscriber {
+                id: subscriber_id,
+                sender: tx.clone(),
+                global: false,
+            });
             next
         });
 
@@ -2402,7 +2494,14 @@ impl TransactionManager {
         self.terminated_transactions.clear();
         self.server_invite_dialog_index.clear();
         self.server_invite_dialog_keys_by_tx.clear();
+        self.invite_2xx_response_cache.clear();
+        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
+            queue.clear();
+        }
         self.transaction_destinations.clear();
+        self.pending_inbound_bytes.clear();
+        self.pending_inbound_inserted_at.clear();
+        self.pending_inbound_timing.clear();
 
         // Step 5: Emit TransactionEvent::ShutdownComplete
         // Broadcast to all event subscribers
@@ -2410,6 +2509,7 @@ impl TransactionManager {
             TransactionEvent::ShutdownComplete,
             &self.events_tx,
             &self.event_subscribers,
+            Some(&self.subscriber_to_transactions),
             Some(&self.transaction_to_subscribers),
             Some(self.clone()),
         )
@@ -2438,7 +2538,8 @@ impl TransactionManager {
     async fn broadcast_event(
         event: TransactionEvent,
         primary_tx: &mpsc::Sender<TransactionEvent>,
-        subscribers: &Arc<ArcSwap<Vec<mpsc::Sender<TransactionEvent>>>>,
+        subscribers: &Arc<ArcSwap<Vec<EventSubscriber>>>,
+        subscriber_to_transactions: Option<&Arc<DashMap<usize, Vec<TransactionKey>>>>,
         transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
         manager: Option<TransactionManager>,
     ) {
@@ -2507,50 +2608,59 @@ impl TransactionManager {
         // Send to interested subscribers only. ArcSwap::load is a
         // single atomic load — no mutex acquire on the hot path.
         let subs_snapshot = subscribers.load();
-        let subs: &Vec<mpsc::Sender<TransactionEvent>> = &subs_snapshot;
+        let subs: &Vec<EventSubscriber> = &subs_snapshot;
+        let mut closed_subscribers = Vec::new();
 
         // If we have transaction-specific subscribers, filter events
-        if let Some(tx_to_subs_map) = transaction_to_subscribers {
-            for (idx, sub) in subs.iter().enumerate() {
+        if transaction_to_subscribers.is_some() {
+            for sub in subs.iter() {
                 // Send to this subscriber if:
-                // 1. It's a global event (no transaction ID)
-                // 2. This subscriber is interested in this transaction
-                // 3. There are no interested subscribers specified (backward compatibility)
-                let should_send = transaction_id.is_none()
-                    || interested_subscribers.contains(&idx)
-                    || interested_subscribers.is_empty();
+                // 1. It subscribed globally
+                // 2. It is explicitly interested in this transaction
+                // 3. The event is not tied to a transaction and the subscriber is global
+                let should_send = sub.global
+                    || transaction_id.is_some_and(|_| interested_subscribers.contains(&sub.id));
 
                 if should_send {
-                    if let Err(e) = sub.send(event.clone()).await {
+                    if let Err(e) = sub.sender.send(event.clone()).await {
+                        closed_subscribers.push(sub.id);
                         // During shutdown, channel closed errors are expected - use debug level
                         // Check if this is a channel closed error during shutdown
                         if e.to_string().contains("channel closed") {
                             debug!(
                                 "Subscriber {} channel closed during shutdown (expected)",
-                                idx
+                                sub.id
                             );
                         } else {
-                            warn!("Failed to send event to subscriber {}: {}", idx, e);
+                            warn!("Failed to send event to subscriber {}: {}", sub.id, e);
                         }
                     }
                 }
             }
         } else {
             // No transaction filtering, send to all (backward compatibility)
-            for (idx, sub) in subs.iter().enumerate() {
-                if let Err(e) = sub.send(event.clone()).await {
+            for sub in subs.iter() {
+                if let Err(e) = sub.sender.send(event.clone()).await {
+                    closed_subscribers.push(sub.id);
                     // During shutdown, channel closed errors are expected - use debug level
                     if e.to_string().contains("channel closed") {
                         debug!(
                             "Subscriber {} channel closed during shutdown (expected)",
-                            idx
+                            sub.id
                         );
                     } else {
-                        warn!("Failed to send event to subscriber {}: {}", idx, e);
+                        warn!("Failed to send event to subscriber {}: {}", sub.id, e);
                     }
                 }
             }
         }
+
+        Self::prune_event_subscribers(
+            subscribers,
+            subscriber_to_transactions,
+            transaction_to_subscribers,
+            &closed_subscribers,
+        );
 
         if let Some(manager_instance) = manager.as_ref() {
             match &event {
@@ -2565,6 +2675,9 @@ impl TransactionManager {
                         .pending_inbound_bytes
                         .remove(transaction_id);
                     manager_instance
+                        .pending_inbound_inserted_at
+                        .remove(transaction_id);
+                    manager_instance
                         .pending_inbound_timing
                         .remove(transaction_id);
                     manager_instance.enqueue_terminated_transaction_cleanup(transaction_id.clone());
@@ -2575,6 +2688,76 @@ impl TransactionManager {
 
         if let Some(started) = broadcast_started {
             diagnostics::record_transaction_event_broadcast(started.elapsed());
+        }
+    }
+
+    fn prune_event_subscribers(
+        subscribers: &Arc<ArcSwap<Vec<EventSubscriber>>>,
+        subscriber_to_transactions: Option<&Arc<DashMap<usize, Vec<TransactionKey>>>>,
+        transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
+        closed_subscriber_ids: &[usize],
+    ) {
+        let explicit_closed: HashSet<usize> = closed_subscriber_ids.iter().copied().collect();
+        let snapshot = subscribers.load();
+        let removed_ids: Vec<usize> = snapshot
+            .iter()
+            .filter(|subscriber| {
+                explicit_closed.contains(&subscriber.id) || subscriber.sender.is_closed()
+            })
+            .map(|subscriber| subscriber.id)
+            .collect();
+
+        if removed_ids.is_empty() {
+            return;
+        }
+
+        let removed: HashSet<usize> = removed_ids.iter().copied().collect();
+        subscribers.rcu(|current| {
+            let mut next = Vec::with_capacity(current.len().saturating_sub(removed.len()));
+            next.extend(
+                current
+                    .iter()
+                    .filter(|subscriber| !removed.contains(&subscriber.id))
+                    .cloned(),
+            );
+            next
+        });
+
+        for subscriber_id in removed_ids {
+            Self::remove_subscriber_indexes(
+                subscriber_id,
+                subscriber_to_transactions,
+                transaction_to_subscribers,
+            );
+        }
+    }
+
+    fn remove_subscriber_indexes(
+        subscriber_id: usize,
+        subscriber_to_transactions: Option<&Arc<DashMap<usize, Vec<TransactionKey>>>>,
+        transaction_to_subscribers: Option<&Arc<DashMap<TransactionKey, Vec<usize>>>>,
+    ) {
+        let Some(subscriber_to_transactions) = subscriber_to_transactions else {
+            return;
+        };
+
+        let Some((_, transaction_ids)) = subscriber_to_transactions.remove(&subscriber_id) else {
+            return;
+        };
+
+        let Some(transaction_to_subscribers) = transaction_to_subscribers else {
+            return;
+        };
+
+        for transaction_id in transaction_ids {
+            let mut empty = false;
+            if let Some(mut entry) = transaction_to_subscribers.get_mut(&transaction_id) {
+                entry.value_mut().retain(|id| *id != subscriber_id);
+                empty = entry.value().is_empty();
+            }
+            if empty {
+                transaction_to_subscribers.remove(&transaction_id);
+            }
         }
     }
 
@@ -2605,6 +2788,7 @@ impl TransactionManager {
         }
         self.terminated_transactions.remove(transaction_id);
         self.pending_inbound_bytes.remove(transaction_id);
+        self.pending_inbound_inserted_at.remove(transaction_id);
         self.pending_inbound_timing.remove(transaction_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
@@ -2734,6 +2918,7 @@ impl TransactionManager {
                             transaction_event,
                             &events_tx,
                             &event_subscribers,
+                            Some(&manager_arc.subscriber_to_transactions),
                             Some(&manager_arc.transaction_to_subscribers),
                             Some(manager_arc.clone()),
                         ).await;
@@ -2748,6 +2933,7 @@ impl TransactionManager {
                             let manager_clone = manager_arc.clone();
                             let cleanup_running = cleanup_running.clone();
                             tokio::spawn(async move {
+                                manager_clone.maintenance_prune_retained_state();
                                 let cleanup_result = if full_sweep {
                                     manager_clone.cleanup_terminated_transactions().await
                                 } else {
@@ -2906,13 +3092,14 @@ impl TransactionManager {
         let transaction: ArcClientTransaction = match modified_request.method() {
             Method::Invite => {
                 tracing::trace!("Creating ClientInviteTransaction: {}", key);
-                let tx = ClientInviteTransaction::new(
+                let tx = ClientInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
+                    self.transaction_command_channel_capacity,
                 )?;
                 tracing::trace!("Created ClientInviteTransaction: {}", key);
                 Arc::new(tx)
@@ -2921,13 +3108,14 @@ impl TransactionManager {
                 if let Err(e) = cancel::validate_cancel_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for CANCEL with possible validation issues");
                 }
-                let tx = ClientNonInviteTransaction::new(
+                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
+                    self.transaction_command_channel_capacity,
                 )?;
                 Arc::new(tx)
             }
@@ -2935,24 +3123,26 @@ impl TransactionManager {
                 if let Err(e) = update::validate_update_request(&modified_request) {
                     warn!(method = %modified_request.method(), error = %e, "Creating transaction for UPDATE with possible validation issues");
                 }
-                let tx = ClientNonInviteTransaction::new(
+                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
+                    self.transaction_command_channel_capacity,
                 )?;
                 Arc::new(tx)
             }
             _ => {
-                let tx = ClientNonInviteTransaction::new(
+                let tx = ClientNonInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
                     modified_request.clone(),
                     destination,
                     self.transport.clone(),
                     self.events_tx.clone(),
                     self.timer_settings_for_request(&modified_request),
+                    self.transaction_command_channel_capacity,
                 )?;
                 Arc::new(tx)
             }
@@ -3217,13 +3407,14 @@ impl TransactionManager {
         // Create a new transaction based on the request method
         let transaction: Arc<dyn ServerTransaction> = match request.method() {
             Method::Invite => {
-                let tx = Arc::new(ServerInviteTransaction::new(
+                let tx = Arc::new(ServerInviteTransaction::new_with_command_channel_capacity(
                     key.clone(),
                     request.clone(),
                     remote_addr,
                     self.transport.clone(),
                     self.events_tx.clone(),
                     Some(self.timer_settings.clone()),
+                    self.transaction_command_channel_capacity,
                 )?);
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerInviteTransaction");
@@ -3251,14 +3442,17 @@ impl TransactionManager {
                 };
 
                 // Create a non-INVITE server transaction for CANCEL
-                let tx = Arc::new(ServerNonInviteTransaction::new(
-                    key.clone(),
-                    request.clone(),
-                    remote_addr,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    Some(self.timer_settings.clone()),
-                )?);
+                let tx = Arc::new(
+                    ServerNonInviteTransaction::new_with_command_channel_capacity(
+                        key.clone(),
+                        request.clone(),
+                        remote_addr,
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        Some(self.timer_settings.clone()),
+                        self.transaction_command_channel_capacity,
+                    )?,
+                );
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for CANCEL");
 
@@ -3284,27 +3478,33 @@ impl TransactionManager {
                 }
 
                 // Create a non-INVITE server transaction for UPDATE
-                let tx = Arc::new(ServerNonInviteTransaction::new(
-                    key.clone(),
-                    request.clone(),
-                    remote_addr,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    Some(self.timer_settings.clone()),
-                )?);
+                let tx = Arc::new(
+                    ServerNonInviteTransaction::new_with_command_channel_capacity(
+                        key.clone(),
+                        request.clone(),
+                        remote_addr,
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        Some(self.timer_settings.clone()),
+                        self.transaction_command_channel_capacity,
+                    )?,
+                );
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction for UPDATE");
                 tx
             }
             _ => {
-                let tx = Arc::new(ServerNonInviteTransaction::new(
-                    key.clone(),
-                    request.clone(),
-                    remote_addr,
-                    self.transport.clone(),
-                    self.events_tx.clone(),
-                    Some(self.timer_settings.clone()),
-                )?);
+                let tx = Arc::new(
+                    ServerNonInviteTransaction::new_with_command_channel_capacity(
+                        key.clone(),
+                        request.clone(),
+                        remote_addr,
+                        self.transport.clone(),
+                        self.events_tx.clone(),
+                        Some(self.timer_settings.clone()),
+                        self.transaction_command_channel_capacity,
+                    )?,
+                );
 
                 info!(id=%tx.id(), method=%request.method(), "Created new ServerNonInviteTransaction");
                 tx
@@ -3551,6 +3751,103 @@ impl TransactionManager {
         }
     }
 
+    fn maintenance_prune_retained_state(&self) {
+        self.prune_server_invite_dialog_index();
+        self.prune_invite_2xx_response_cache();
+        self.compact_invite_2xx_response_due_queue();
+        self.prune_closed_event_subscribers_now();
+        self.prune_stale_pending_inbound_bytes();
+    }
+
+    fn prune_closed_event_subscribers_now(&self) {
+        Self::prune_event_subscribers(
+            &self.event_subscribers,
+            Some(&self.subscriber_to_transactions),
+            Some(&self.transaction_to_subscribers),
+            &[],
+        );
+    }
+
+    fn prune_stale_pending_inbound_bytes(&self) {
+        if self.pending_inbound_bytes.is_empty() {
+            return;
+        }
+
+        let now = Instant::now();
+        let stale_keys: Vec<TransactionKey> = self
+            .pending_inbound_bytes
+            .iter()
+            .filter(|entry| {
+                self.pending_inbound_inserted_at
+                    .get(entry.key())
+                    .map(|inserted_at| {
+                        now.saturating_duration_since(*inserted_at.value())
+                            >= PENDING_INBOUND_BYTES_TTL
+                    })
+                    .unwrap_or(true)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in stale_keys {
+            let should_remove = self
+                .pending_inbound_inserted_at
+                .get(&key)
+                .map(|inserted_at| {
+                    now.saturating_duration_since(*inserted_at.value()) >= PENDING_INBOUND_BYTES_TTL
+                })
+                .unwrap_or(true);
+            if should_remove {
+                self.pending_inbound_bytes.remove(&key);
+                self.pending_inbound_inserted_at.remove(&key);
+                self.pending_inbound_timing.remove(&key);
+            }
+        }
+    }
+
+    fn compact_invite_2xx_response_due_queue(&self) {
+        let now = Instant::now();
+        let mut expired_cache_keys = Vec::new();
+
+        if let Ok(mut queue) = self.invite_2xx_response_due_queue.lock() {
+            if queue.is_empty() {
+                return;
+            }
+
+            let mut retained = BinaryHeap::with_capacity(queue.len());
+            while let Some(due_entry) = queue.pop() {
+                let keep = self
+                    .invite_2xx_response_cache
+                    .get(&due_entry.transaction_id)
+                    .map(|entry| {
+                        if entry.is_expired(now) {
+                            expired_cache_keys.push(due_entry.transaction_id.clone());
+                            false
+                        } else {
+                            due_entry.due_at == entry.next_retransmit_at
+                        }
+                    })
+                    .unwrap_or(false);
+
+                if keep {
+                    retained.push(due_entry);
+                }
+            }
+            *queue = retained;
+        }
+
+        for key in expired_cache_keys {
+            if self
+                .invite_2xx_response_cache
+                .get(&key)
+                .is_some_and(|entry| entry.value().is_expired(now))
+            {
+                self.invite_2xx_response_cache.remove(&key);
+                diagnostics::record_invite_2xx_cache_expired();
+            }
+        }
+    }
+
     async fn retransmit_due_invite_2xx_responses(&self) -> usize {
         let started = diagnostics::transaction_timing_enabled().then(Instant::now);
         let cache_len = self.invite_2xx_response_cache.len();
@@ -3697,6 +3994,10 @@ impl TransactionManager {
         if let Some(retained_until) = ack_retention_until {
             self.schedule_invite_2xx_response_retransmit(transaction_id.clone(), retained_until);
         }
+    }
+
+    pub(crate) fn remove_invite_2xx_response_cache(&self, transaction_id: &TransactionKey) {
+        self.invite_2xx_response_cache.remove(transaction_id);
     }
 
     pub(crate) fn mark_transaction_terminated_indexed(&self, transaction_id: &TransactionKey) {

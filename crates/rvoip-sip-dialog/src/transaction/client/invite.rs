@@ -85,6 +85,7 @@ use crate::transaction::utils;
 use crate::transaction::{
     AtomicTransactionState, InternalTransactionCommand, Transaction, TransactionAsync,
     TransactionEvent, TransactionKey, TransactionKind, TransactionState,
+    DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
 };
 // Add imports for our utility modules
 use crate::transaction::common_logic;
@@ -724,6 +725,28 @@ impl ClientInviteTransaction {
         events_tx: mpsc::Sender<TransactionEvent>,
         timer_config_override: Option<TimerSettings>,
     ) -> Result<Self> {
+        Self::new_with_command_channel_capacity(
+            id,
+            request,
+            remote_addr,
+            transport,
+            events_tx,
+            timer_config_override,
+            DEFAULT_TRANSACTION_COMMAND_CHANNEL_CAPACITY,
+        )
+    }
+
+    /// Create a new client INVITE transaction with a configured command-channel
+    /// capacity.
+    pub fn new_with_command_channel_capacity(
+        id: TransactionKey,
+        request: Request,
+        remote_addr: SocketAddr,
+        transport: Arc<dyn Transport>,
+        events_tx: mpsc::Sender<TransactionEvent>,
+        timer_config_override: Option<TimerSettings>,
+        command_channel_capacity: usize,
+    ) -> Result<Self> {
         tracing::trace!("Creating new ClientInviteTransaction: {}", id);
 
         if request.method() != Method::Invite {
@@ -733,8 +756,7 @@ impl ClientInviteTransaction {
         }
 
         let timer_config = timer_config_override.unwrap_or_default();
-        // Use larger channel capacity for high-concurrency scenarios (e.g., 500+ concurrent calls)
-        let (cmd_tx, local_cmd_rx) = mpsc::channel(1000); // Increased from 32 for high-concurrency support
+        let (cmd_tx, local_cmd_rx) = mpsc::channel(command_channel_capacity.max(1));
 
         let data = Arc::new(ClientTransactionData {
             id: id.clone(),

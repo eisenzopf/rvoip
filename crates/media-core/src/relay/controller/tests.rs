@@ -5,7 +5,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use crate::types::DialogId;
+    use crate::types::{DialogId, MediaDirection, MediaSessionId};
     use rvoip_rtp_core::transport::AllocationStrategy;
     use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket as StdUdpSocket};
@@ -39,6 +39,75 @@ mod tests {
         // Check session is removed
         let session_info = controller.get_session_info(&DialogId::new("dialog1")).await;
         assert!(session_info.is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_media_clears_per_dialog_side_state_and_is_idempotent() {
+        let controller = MediaSessionController::new();
+        let dialog_id = DialogId::new("cleanup-dialog");
+        let config = MediaConfig {
+            local_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            remote_addr: None,
+            preferred_codec: None,
+            parameters: HashMap::new(),
+        };
+
+        controller
+            .start_media(dialog_id.clone(), config)
+            .await
+            .expect("start media");
+
+        let (audio_tx, _audio_rx) = tokio::sync::mpsc::channel(1);
+        controller
+            .set_audio_frame_callback(dialog_id.clone(), audio_tx)
+            .await
+            .expect("set audio callback");
+
+        let (dtmf_tx, mut dtmf_rx) = tokio::sync::mpsc::channel(1);
+        controller
+            .set_dtmf_callback(dialog_id.clone(), dtmf_tx)
+            .await
+            .expect("set dtmf callback");
+
+        controller.store_session_mapping(
+            "session-cleanup".to_string(),
+            MediaSessionId::from_dialog(&dialog_id),
+        );
+        controller
+            .media_directions
+            .insert(dialog_id.clone(), MediaDirection::SendRecv);
+
+        let rtp_session = controller
+            .rtp_sessions
+            .get(&dialog_id)
+            .expect("rtp session")
+            .session
+            .clone();
+        let cn_gate = crate::relay::controller::cn_gate::CnGate::new(rtp_session).expect("cn gate");
+        controller.cn_gate_state.insert(
+            dialog_id.clone(),
+            Arc::new(tokio::sync::Mutex::new(cn_gate)),
+        );
+
+        controller.stop_media(&dialog_id).await.expect("stop media");
+        controller
+            .stop_media(&dialog_id)
+            .await
+            .expect("second stop is idempotent");
+
+        assert!(controller.sessions.is_empty());
+        assert!(controller.rtp_sessions.is_empty());
+        assert!(controller.audio_frame_callbacks.is_empty());
+        assert!(controller.dtmf_callbacks.is_empty());
+        assert!(controller.session_to_media.is_empty());
+        assert!(controller.media_to_session.is_empty());
+        assert!(controller.cn_gate_state.is_empty());
+        assert!(controller.media_directions.is_empty());
+
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(1), dtmf_rx.recv())
+            .await
+            .expect("dtmf receiver should close");
+        assert!(closed.is_none());
     }
 
     #[tokio::test]

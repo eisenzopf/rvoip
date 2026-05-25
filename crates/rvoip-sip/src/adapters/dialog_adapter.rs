@@ -221,6 +221,18 @@ impl DialogAdapter {
         guard.finish_success();
     }
 
+    /// Feature-gated retained-object counts for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "session_to_dialog": self.session_to_dialog.len(),
+            "dialog_to_session": self.dialog_to_session.len(),
+            "callid_to_session": self.callid_to_session.len(),
+            "outgoing_invite_tx": self.outgoing_invite_tx.len(),
+            "registration_refresh_tasks": self.registration_refresh_tasks.len(),
+        })
+    }
+
     pub(crate) fn abort_all_registration_refreshes(&self) {
         let guard = cleanup_diag::stage_guard(CleanupStage::TimerTaskShutdown, "all");
         let handles: Vec<_> = self
@@ -2041,6 +2053,10 @@ impl DialogAdapter {
         // Remove from all mappings
         if let Some(dialog_id) = self.session_to_dialog.remove(session_id) {
             self.dialog_to_session.remove(&dialog_id.1);
+            self.dialog_api
+                .dialog_manager()
+                .core()
+                .cleanup_dialog_storage(&dialog_id.1);
         }
 
         let call_ids_to_remove: Vec<_> = self

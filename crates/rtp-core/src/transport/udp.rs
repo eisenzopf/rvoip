@@ -794,6 +794,7 @@ impl UdpRtpTransport {
         let mut receiver_task = self.receiver_task.lock().await;
         if let Some(task) = receiver_task.take() {
             task.abort();
+            let _ = task.await;
         }
 
         Ok(())

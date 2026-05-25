@@ -380,7 +380,7 @@ tokio-console = ["dep:console-subscriber"]
 # tests/perf/. Pulls in hdrhistogram for latency percentiles and sysinfo
 # for environment-block capture. Off by default so `cargo build` /
 # `cargo test` are untouched. See `crates/rvoip-sip/docs/BENCHMARKING.md`.
-perf-tests = ["dep:hdrhistogram", "dep:sysinfo"]
+perf-tests = ["dep:hdrhistogram", "dep:sysinfo", "rvoip-media-core/perf-diagnostics"]
 
 [[test]]
 name = "generated_sip_compliance"

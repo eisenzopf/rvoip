@@ -376,6 +376,24 @@ impl MediaSessionController {
             .map(|e| e.value().clone())
     }
 
+    /// Feature-gated retained-object counts for perf leak investigations.
+    #[cfg(feature = "perf-diagnostics")]
+    #[doc(hidden)]
+    pub fn diagnostic_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sessions": self.sessions.len(),
+            "rtp_sessions": self.rtp_sessions.len(),
+            "session_to_media": self.session_to_media.len(),
+            "media_to_session": self.media_to_session.len(),
+            "audio_frame_callbacks": self.audio_frame_callbacks.len(),
+            "dtmf_callbacks": self.dtmf_callbacks.len(),
+            "bridge_partners": self.bridge_partners.len(),
+            "cn_gate_state": self.cn_gate_state.len(),
+            "advanced_processors": self.advanced_processors.len(),
+            "media_directions": self.media_directions.len(),
+        })
+    }
+
     /// Emit a media event through both channel and event hub
     async fn emit_event(&self, event: MediaSessionEvent) {
         // Send to channel (legacy)
@@ -741,7 +759,38 @@ impl MediaSessionController {
         Ok(())
     }
 
-    /// Stop media session for a dialog
+    fn cleanup_per_dialog_side_state(&self, dialog_id: &DialogId) {
+        self.media_directions.remove(dialog_id);
+        self.advanced_processors.remove(dialog_id);
+        self.audio_frame_callbacks.remove(dialog_id);
+        self.dtmf_callbacks.remove(dialog_id);
+        self.cn_gate_state.remove(dialog_id);
+
+        let media_id = MediaSessionId::from_dialog(dialog_id);
+        if let Some((_, session_id)) = self.media_to_session.remove(&media_id) {
+            self.session_to_media.remove(&session_id);
+        }
+
+        let stale_session_ids: Vec<String> = self
+            .session_to_media
+            .iter()
+            .filter_map(|entry| {
+                if entry.value() == &media_id {
+                    Some(entry.key().clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for session_id in stale_session_ids {
+            self.session_to_media.remove(&session_id);
+        }
+    }
+
+    /// Stop media session for a dialog.
+    ///
+    /// Idempotent: repeated cleanup attempts still clear callbacks and side
+    /// maps and then return `Ok(())`.
     pub async fn stop_media(&self, dialog_id: &DialogId) -> Result<()> {
         let stop_started = Instant::now();
         info!("Stopping media session for dialog: {}", dialog_id);
@@ -753,10 +802,18 @@ impl MediaSessionController {
 
         // Remove session and get info for cleanup. DashMap removes
         // are sharded; no outer guard.
-        let (_, session_info) = self
-            .sessions
-            .remove(dialog_id)
-            .ok_or_else(|| Error::session_not_found(dialog_id.as_str()))?;
+        let session_info = match self.sessions.remove(dialog_id) {
+            Some((_, info)) => info,
+            None => {
+                self.cleanup_per_dialog_side_state(dialog_id);
+                diagnostics::record_stop_media(stop_started.elapsed());
+                debug!(
+                    "Media session for dialog {} was already stopped; cleared side state",
+                    dialog_id
+                );
+                return Ok(());
+            }
+        };
 
         // Stop and remove RTP session. Extract the wrapper out of the
         // shard, drop the guard, then close the underlying session
@@ -769,7 +826,6 @@ impl MediaSessionController {
             let _ = rtp_session.close().await;
             info!("✅ Stopped RTP session for dialog: {}", dialog_id);
         }
-        self.media_directions.remove(dialog_id);
 
         // Release port via the appropriate allocator
         if session_info.rtp_port.is_some() {
@@ -789,21 +845,7 @@ impl MediaSessionController {
             diagnostics::record_port_release(release_started.elapsed());
         }
 
-        // Clean up advanced processors if they exist
-        if self.advanced_processors.remove(dialog_id).is_some() {
-            info!(
-                "🧹 Cleaned up advanced processors for dialog: {}",
-                dialog_id
-            );
-        }
-
-        // Clean up audio frame callback if it exists
-        if self.audio_frame_callbacks.remove(dialog_id).is_some() {
-            info!(
-                "🧹 Cleaned up audio frame callback for dialog: {}",
-                dialog_id
-            );
-        }
+        self.cleanup_per_dialog_side_state(dialog_id);
 
         // Send event
         let _ = self.event_tx.send(MediaSessionEvent::SessionDestroyed {

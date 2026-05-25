@@ -82,6 +82,12 @@ impl SessionBuilder {
         self
     }
 
+    /// Set app-facing event buffer capacity.
+    pub fn with_app_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_app_event_channel_capacity(capacity);
+        self
+    }
+
     /// Set a server-side active-call capacity profile.
     pub fn with_server_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_server_capacity(capacity);
@@ -205,6 +211,13 @@ impl SessionBuilder {
         self
     }
 
+    /// Set the RSS growth threshold used by perf soak release gates.
+    #[cfg(feature = "perf-tests")]
+    pub fn with_perf_max_rss_growth_mb_per_hr(mut self, limit: f64) -> Self {
+        self.config = self.config.with_perf_max_rss_growth_mb_per_hr(limit);
+        self
+    }
+
     /// Enable or disable SRTP negotiation diagnostic log lines.
     pub fn with_srtp_diagnostics(mut self, enabled: bool) -> Self {
         self.config = self.config.with_srtp_diagnostics(enabled);
@@ -238,6 +251,14 @@ impl SessionBuilder {
     /// Set the transaction-manager ingress dispatch queue capacity.
     pub fn with_sip_transaction_dispatch_queue_capacity(mut self, capacity: usize) -> Self {
         self.config.sip_transaction_dispatch_queue_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the per-transaction command channel capacity.
+    pub fn with_sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self
+            .config
+            .with_sip_transaction_command_channel_capacity(capacity);
         self
     }
 
@@ -347,6 +368,7 @@ mod tests {
             .with_sip_invite_2xx_retransmit_max_due_per_tick(512)
             .with_sip_dialog_dispatch_workers(4)
             .with_sip_dialog_dispatch_queue_capacity(8192)
+            .with_app_event_channel_capacity(2048)
             .with_sip_dialog_timing_diagnostics(true);
 
         assert_eq!(builder.config.incoming_call_channel_capacity, 256);
@@ -388,7 +410,8 @@ mod tests {
         assert!(builder.config.sip_dialog_timing_diagnostics);
         assert_eq!(
             builder.config.session_event_dispatcher_channel_capacity,
-            2560
+            2048
         );
+        assert_eq!(builder.config.global_event_channel_capacity, 2048);
     }
 }

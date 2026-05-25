@@ -87,6 +87,7 @@ default = ["pcmu", "pcma"]
 pcmu = []
 pcma = []
 g722 = []
+perf-diagnostics = []
 # g729 = ["dep:g729"]  # Commented out due to missing dependency
 opus = ["dep:opus"]
 all-codecs = ["pcmu", "pcma", "g722", "opus"]  # removed g729 due to missing dependency

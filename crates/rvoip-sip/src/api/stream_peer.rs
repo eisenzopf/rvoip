@@ -1117,6 +1117,12 @@ impl StreamPeerBuilder {
         self
     }
 
+    /// Set app-facing event buffer capacity.
+    pub fn app_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_app_event_channel_capacity(capacity);
+        self
+    }
+
     /// Enable or disable automatic `180 Ringing` on inbound INVITEs.
     pub fn auto_180_ringing(mut self, enabled: bool) -> Self {
         self.config = self.config.with_auto_180_ringing(enabled);
@@ -1161,6 +1167,14 @@ impl StreamPeerBuilder {
         self
     }
 
+    /// Set the per-transaction command channel capacity.
+    pub fn sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self
+            .config
+            .with_sip_transaction_command_channel_capacity(capacity);
+        self
+    }
+
     /// Enable or disable SIP UDP transport and duplicate-recovery diagnostics.
     pub fn sip_udp_diagnostics(mut self, enabled: bool) -> Self {
         self.config = self.config.with_sip_udp_diagnostics(enabled);
@@ -1182,6 +1196,13 @@ impl StreamPeerBuilder {
     /// Enable or disable per-operation cleanup diagnostic event logs.
     pub fn cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
         self.config = self.config.with_cleanup_diagnostic_events(enabled);
+        self
+    }
+
+    /// Set the RSS growth threshold used by perf soak release gates.
+    #[cfg(feature = "perf-tests")]
+    pub fn perf_max_rss_growth_mb_per_hr(mut self, limit: f64) -> Self {
+        self.config = self.config.with_perf_max_rss_growth_mb_per_hr(limit);
         self
     }
 

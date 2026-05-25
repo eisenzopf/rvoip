@@ -3,9 +3,9 @@ mod tests {
     use super::super::RFC3261_BRANCH_MAGIC_COOKIE;
     use super::super::{
         recv_transaction_dispatch_event, transaction_dispatch_lane,
-        transaction_dispatch_worker_index, transaction_ingress_kind, Invite2xxResponseCacheEntry,
-        QueuedTransactionDispatch, TransactionDispatchLane, TransactionIngressKind,
-        TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
+        transaction_dispatch_worker_index, transaction_ingress_kind, Invite2xxDueEntry,
+        Invite2xxResponseCacheEntry, QueuedTransactionDispatch, TransactionDispatchLane,
+        TransactionIngressKind, TRANSACTION_DISPATCH_PRIORITY_BURST_MAX,
     };
     use crate::transaction::client::builders::{ByeBuilder, InviteBuilder, RegisterBuilder};
     use crate::transaction::client::{ClientInviteTransaction, ClientNonInviteTransaction};
@@ -1857,6 +1857,67 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn invite_2xx_due_queue_compaction_drops_stale_entries() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(16);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(16)).await?;
+        manager.shutdown().await;
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let response = create_test_response(&invite_request, StatusCode::Ok, Some("OK"));
+        let destination: SocketAddr = "192.0.2.100:5060".parse().unwrap();
+        let now = Instant::now();
+        let transaction_id = TransactionKey::new(
+            "z9hG4bK.due-queue-compact".to_string(),
+            Method::Invite,
+            true,
+        );
+        let current_due = now + Duration::from_secs(10);
+
+        manager.insert_invite_2xx_response_cache_entry(
+            transaction_id.clone(),
+            cached_invite_2xx_entry(response, destination, now, current_due),
+        );
+
+        {
+            let mut queue = manager
+                .invite_2xx_response_due_queue
+                .lock()
+                .expect("due queue lock");
+            queue.push(Invite2xxDueEntry {
+                due_at: now - Duration::from_secs(1),
+                sequence: 999,
+                transaction_id: transaction_id.clone(),
+            });
+            queue.push(Invite2xxDueEntry {
+                due_at: now + Duration::from_secs(5),
+                sequence: 1000,
+                transaction_id: TransactionKey::new(
+                    "z9hG4bK.missing-cache".to_string(),
+                    Method::Invite,
+                    true,
+                ),
+            });
+            assert_eq!(queue.len(), 3);
+        }
+
+        manager.compact_invite_2xx_response_due_queue();
+
+        let queue = manager
+            .invite_2xx_response_due_queue
+            .lock()
+            .expect("due queue lock");
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.peek().map(|entry| entry.transaction_id.clone()),
+            Some(transaction_id)
+        );
+
+        Ok(())
+    }
+
     /// Test find_related_transactions and special lookups
     #[tokio::test]
     async fn test_transaction_relationships() -> Result<()> {
@@ -1957,18 +2018,7 @@ mod tests {
 
         // Custom subscriber that forwards events to our test channel
         {
-            // Create a subscription directly
-            let (hook_tx, mut hook_rx) = mpsc::channel(20);
-
-            // Register our subscription manually for more control.
-            // ArcSwap RCU (was a Mutex<Vec<Sender>> before the perf pass).
-            let subscribers = manager.event_subscribers.clone();
-            subscribers.rcu(|current| {
-                let mut next = Vec::with_capacity(current.len() + 1);
-                next.extend(current.iter().cloned());
-                next.push(hook_tx.clone());
-                next
-            });
+            let mut hook_rx = manager.subscribe();
 
             // Create a background task to forward events
             tokio::spawn(async move {
@@ -2059,6 +2109,65 @@ mod tests {
         // Clean up
         manager.shutdown().await;
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_counts_prunes_closed_event_subscribers() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+
+        let global_rx = manager.subscribe();
+        assert_eq!(manager.retention_counts().event_subscribers, 1);
+
+        drop(global_rx);
+        let counts = manager.retention_counts();
+        assert_eq!(counts.event_subscribers, 0);
+
+        let invite_request = create_test_invite().map_err(|e| Error::Other(e.to_string()))?;
+        let destination = SocketAddr::from_str("192.168.1.100:5060").unwrap();
+        let tx_id = manager
+            .create_client_transaction(invite_request, destination)
+            .await?;
+        let tx_rx = manager.subscribe_to_transaction(&tx_id).await?;
+        assert_eq!(manager.retention_counts().event_subscribers, 1);
+        assert_eq!(manager.retention_counts().subscriber_to_transactions, 1);
+        assert_eq!(manager.retention_counts().transaction_to_subscribers, 1);
+
+        drop(tx_rx);
+        let counts = manager.retention_counts();
+        assert_eq!(counts.event_subscribers, 0);
+        assert_eq!(counts.subscriber_to_transactions, 0);
+        assert_eq!(counts.transaction_to_subscribers, 0);
+
+        manager.shutdown().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn retention_counts_prunes_stale_pending_inbound_bytes() -> Result<()> {
+        let transport = Arc::new(MockTransport::new("127.0.0.1:5060"));
+        let (_transport_tx, transport_rx) = mpsc::channel(10);
+        let (manager, _event_rx) =
+            TransactionManager::new(transport.clone(), transport_rx, Some(10)).await?;
+        let tx_id = TransactionKey::new("z9hG4bK-stale-pending".to_string(), Method::Invite, true);
+
+        manager.pending_inbound_bytes.insert(
+            tx_id.clone(),
+            bytes::Bytes::from_static(b"INVITE sip:bob SIP/2.0\r\n\r\n"),
+        );
+        manager.pending_inbound_inserted_at.insert(
+            tx_id.clone(),
+            Instant::now() - super::super::PENDING_INBOUND_BYTES_TTL - Duration::from_secs(1),
+        );
+
+        let counts = manager.retention_counts();
+        assert_eq!(counts.pending_inbound_bytes, 0);
+        assert!(manager.pending_inbound_inserted_at.get(&tx_id).is_none());
+
+        manager.shutdown().await;
         Ok(())
     }
 

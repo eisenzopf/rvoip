@@ -498,6 +498,21 @@ impl MediaAdapter {
         self.offered_codecs = codecs;
     }
 
+    /// Feature-gated retained-object counts for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub(crate) fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        serde_json::json!({
+            "session_to_dialog": self.session_to_dialog.len(),
+            "dialog_to_session": self.dialog_to_session.len(),
+            "media_sessions": self.media_sessions.len(),
+            "audio_receivers": self.audio_receivers.len(),
+            "pending_srtp_offerers": self.pending_srtp_offerers.len(),
+            "negotiated_srtp": self.negotiated_srtp.len(),
+            "audio_mixers": self.audio_mixers.len(),
+            "controller": self.controller.diagnostic_counts(),
+        })
+    }
+
     /// Compose the effective offer-format list: configured
     /// `offered_codecs` with comfort-noise (PT 13) inserted in front
     /// of DTMF (PT 101) when enabled, preserving the legacy ordering

@@ -52,7 +52,7 @@
 #![deny(missing_docs)]
 
 use async_trait::async_trait;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -312,6 +312,12 @@ impl CallbackPeerBuilder {
         self
     }
 
+    /// Set app-facing event buffer capacity.
+    pub fn app_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self.config.with_app_event_channel_capacity(capacity);
+        self
+    }
+
     /// Set the UDP parse worker count.
     pub fn sip_udp_parse_workers(mut self, workers: usize) -> Self {
         self.config = self.config.with_sip_udp_parse_workers(workers);
@@ -321,6 +327,14 @@ impl CallbackPeerBuilder {
     /// Set the per-worker UDP parse queue capacity.
     pub fn sip_udp_parse_queue_capacity(mut self, capacity: usize) -> Self {
         self.config = self.config.with_sip_udp_parse_queue_capacity(capacity);
+        self
+    }
+
+    /// Set the per-transaction command channel capacity.
+    pub fn sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
+        self.config = self
+            .config
+            .with_sip_transaction_command_channel_capacity(capacity);
         self
     }
 
@@ -345,6 +359,13 @@ impl CallbackPeerBuilder {
     /// Enable or disable per-operation cleanup diagnostic event logs.
     pub fn cleanup_diagnostic_events(mut self, enabled: bool) -> Self {
         self.config = self.config.with_cleanup_diagnostic_events(enabled);
+        self
+    }
+
+    /// Set the RSS growth threshold used by perf soak release gates.
+    #[cfg(feature = "perf-tests")]
+    pub fn perf_max_rss_growth_mb_per_hr(mut self, limit: f64) -> Self {
+        self.config = self.config.with_perf_max_rss_growth_mb_per_hr(limit);
         self
     }
 
@@ -1350,8 +1371,48 @@ pub struct CallbackPeer<H: CallHandler> {
     shutdown_tx: tokio::sync::watch::Sender<bool>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     established_callbacks: Arc<tokio::sync::Mutex<HashSet<CallId>>>,
-    terminal_callbacks: Arc<tokio::sync::Mutex<HashSet<CallId>>>,
+    terminal_callbacks: Arc<tokio::sync::Mutex<BoundedCallDedupe>>,
     deferred_calls: Arc<tokio::sync::Mutex<HashMap<CallId, IncomingCallGuard>>>,
+}
+
+const TERMINAL_CALLBACK_DEDUPE_CAPACITY: usize = 8192;
+
+struct BoundedCallDedupe {
+    set: HashSet<CallId>,
+    order: VecDeque<CallId>,
+    capacity: usize,
+}
+
+impl BoundedCallDedupe {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            set: HashSet::with_capacity(capacity),
+            order: VecDeque::with_capacity(capacity),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn insert(&mut self, call_id: CallId) -> bool {
+        if self.set.contains(&call_id) {
+            return false;
+        }
+
+        self.set.insert(call_id.clone());
+        self.order.push_back(call_id);
+
+        while self.order.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.set.remove(&oldest);
+            }
+        }
+
+        true
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.set.len()
+    }
 }
 
 impl CallbackPeer<CallbackBuilderHandler> {
@@ -1411,7 +1472,9 @@ impl<H: CallHandler> CallbackPeer<H> {
             shutdown_tx,
             shutdown_rx,
             established_callbacks: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
-            terminal_callbacks: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
+            terminal_callbacks: Arc::new(tokio::sync::Mutex::new(
+                BoundedCallDedupe::with_capacity(TERMINAL_CALLBACK_DEDUPE_CAPACITY),
+            )),
             deferred_calls: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
     }
@@ -1611,6 +1674,7 @@ impl<H: CallHandler> CallbackPeer<H> {
         let mut handlers: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
         loop {
+            reap_ready_handlers(&mut handlers, "completed");
             tokio::select! {
                 // Check for shutdown signal
                 _ = shutdown_rx.changed() => {
@@ -1646,6 +1710,7 @@ impl<H: CallHandler> CallbackPeer<H> {
 
                     let event = session_event.event.clone();
                     self.dispatch(event, &mut handlers).await;
+                    reap_ready_handlers(&mut handlers, "post-dispatch");
                 }
             }
         }
@@ -2202,6 +2267,16 @@ impl<H: CallHandler> CallbackPeer<H> {
     }
 }
 
+fn reap_ready_handlers(handlers: &mut tokio::task::JoinSet<()>, context: &str) {
+    while let Some(join_result) = handlers.try_join_next() {
+        if let Err(e) = join_result {
+            if !e.is_cancelled() {
+                tracing::warn!("[CallbackPeer] Handler task panicked or errored ({context}): {e}");
+            }
+        }
+    }
+}
+
 fn callback_stage_for_event(event: &Event) -> CleanupStage {
     match event {
         Event::IncomingCall { .. } => CleanupStage::CallbackIncomingDispatch,
@@ -2361,6 +2436,18 @@ mod tests {
     use rvoip_sip_core::types::sdp::CryptoSuite;
     use std::sync::Mutex;
     use tokio::task::JoinSet;
+
+    #[test]
+    fn bounded_terminal_callback_dedupe_evicts_oldest_entries() {
+        let mut dedupe = BoundedCallDedupe::with_capacity(2);
+        assert!(dedupe.insert(SessionId("call-1".to_string())));
+        assert!(!dedupe.insert(SessionId("call-1".to_string())));
+        assert!(dedupe.insert(SessionId("call-2".to_string())));
+        assert_eq!(dedupe.len(), 2);
+        assert!(dedupe.insert(SessionId("call-3".to_string())));
+        assert_eq!(dedupe.len(), 2);
+        assert!(dedupe.insert(SessionId("call-1".to_string())));
+    }
 
     #[derive(Default)]
     struct RecordingHandler {

@@ -56,6 +56,28 @@ const TERMINATED_BYE_PRUNE_INTERVAL: usize = 8_192;
 const MIN_DIALOG_INDEX_CAPACITY: usize = 1024;
 const DEFAULT_DIALOG_EVENT_DISPATCH_WORKERS: usize = 1;
 
+/// Retained dialog-manager state counts used by release-gate leak checks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DialogManagerRetentionCounts {
+    pub dialogs: usize,
+    pub dialog_lookup: usize,
+    pub early_dialog_lookup: usize,
+    pub terminated_bye_lookup: usize,
+    pub transaction_to_dialog: usize,
+    pub transaction_dialog_route_hash: usize,
+    pub dialog_invite_transactions: usize,
+    pub dialog_server_transactions: usize,
+    pub pending_response_transaction_by_dialog: usize,
+    pub session_to_dialog: usize,
+    pub dialog_to_session: usize,
+    pub reliable_provisional_tasks: usize,
+    pub session_refresh_tasks: usize,
+    pub outbound_flows: usize,
+    pub outbound_flow_tasks: usize,
+    pub flow_by_destination: usize,
+    pub flow_by_aor: usize,
+}
+
 fn dialog_index_capacity(max_dialogs: Option<usize>) -> usize {
     max_dialogs.unwrap_or(10_000).max(MIN_DIALOG_INDEX_CAPACITY)
 }
@@ -1290,6 +1312,9 @@ impl DialogManager {
             return;
         }
 
+        let mut maintenance_interval = tokio::time::interval(Duration::from_secs(1));
+        maintenance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 // Process transaction events
@@ -1304,6 +1329,10 @@ impl DialogManager {
                             break;
                         }
                     }
+                },
+
+                _ = maintenance_interval.tick() => {
+                    self.prune_terminated_bye_lookup();
                 },
 
                 // Wait for shutdown signal
@@ -1326,6 +1355,8 @@ impl DialogManager {
         let dispatch_senders =
             start_dialog_event_dispatch_workers(self.clone(), worker_count, queue_capacity);
         let fallback_worker = AtomicUsize::new(0);
+        let mut maintenance_interval = tokio::time::interval(Duration::from_secs(1));
+        maintenance_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
             tokio::select! {
@@ -1345,6 +1376,10 @@ impl DialogManager {
                             break;
                         }
                     }
+                }
+
+                _ = maintenance_interval.tick() => {
+                    self.prune_terminated_bye_lookup();
                 }
 
                 _ = self.shutdown_signal.notified() => {
@@ -2234,9 +2269,22 @@ impl DialogManager {
         self.terminated_bye_lookup.clear();
         self.terminated_bye_insert_count.store(0, Ordering::Relaxed);
         self.transaction_to_dialog.clear();
+        self.transaction_dialog_route_hash.clear();
         self.dialog_invite_transactions.clear();
         self.dialog_server_transactions.clear();
         self.pending_response_transaction_by_dialog.clear();
+        self.session_to_dialog.clear();
+        self.dialog_to_session.clear();
+        for entry in self.reliable_provisional_tasks.iter() {
+            entry.value().abort();
+        }
+        self.reliable_provisional_tasks.clear();
+        for entry in self.session_refresh_tasks.iter() {
+            entry.value().abort();
+        }
+        self.session_refresh_tasks.clear();
+        self.outbound_flows.clear();
+        self.outbound_flow_tasks.clear();
         self.flow_by_destination.clear();
         self.flow_by_aor.clear();
 
@@ -2263,6 +2311,36 @@ impl DialogManager {
         self.dialogs.len()
     }
 
+    /// Return retained dialog-manager state counts for perf leak gates.
+    ///
+    /// This prunes expired BYE tombstones first so idle post-drain samples
+    /// reflect live retransmission protection, not expired cache residue.
+    pub fn retention_counts(&self) -> DialogManagerRetentionCounts {
+        self.prune_terminated_bye_lookup();
+
+        DialogManagerRetentionCounts {
+            dialogs: self.dialogs.len(),
+            dialog_lookup: self.dialog_lookup.len(),
+            early_dialog_lookup: self.early_dialog_lookup.len(),
+            terminated_bye_lookup: self.terminated_bye_lookup.len(),
+            transaction_to_dialog: self.transaction_to_dialog.len(),
+            transaction_dialog_route_hash: self.transaction_dialog_route_hash.len(),
+            dialog_invite_transactions: self.dialog_invite_transactions.len(),
+            dialog_server_transactions: self.dialog_server_transactions.len(),
+            pending_response_transaction_by_dialog: self
+                .pending_response_transaction_by_dialog
+                .len(),
+            session_to_dialog: self.session_to_dialog.len(),
+            dialog_to_session: self.dialog_to_session.len(),
+            reliable_provisional_tasks: self.reliable_provisional_tasks.len(),
+            session_refresh_tasks: self.session_refresh_tasks.len(),
+            outbound_flows: self.outbound_flows.len(),
+            outbound_flow_tasks: self.outbound_flow_tasks.len(),
+            flow_by_destination: self.flow_by_destination.len(),
+            flow_by_aor: self.flow_by_aor.len(),
+        }
+    }
+
     /// Check if a dialog exists
     ///
     /// # Arguments
@@ -2272,6 +2350,16 @@ impl DialogManager {
     /// true if the dialog exists, false otherwise
     pub fn has_dialog(&self, dialog_id: &DialogId) -> bool {
         self.dialogs.contains_key(dialog_id)
+    }
+
+    /// Remove a completed dialog and all hot lookup/index entries.
+    ///
+    /// This is intended for upper layers that already emitted a terminal
+    /// application event and are releasing per-call resources. It is
+    /// idempotent: if dialog-core already removed the storage on an inbound
+    /// BYE cleanup path, the method returns `false`.
+    pub fn cleanup_dialog_storage(&self, dialog_id: &DialogId) -> bool {
+        self.remove_dialog_storage(dialog_id).is_some()
     }
 
     /// Clean up completed transaction event receivers
@@ -2353,7 +2441,12 @@ impl DialogManager {
         }
         self.pending_response_transaction_by_dialog
             .remove(dialog_id);
-        self.dialog_invite_transactions.remove(dialog_id);
+        if let Some((_, invite_transactions)) = self.dialog_invite_transactions.remove(dialog_id) {
+            for transaction_id in invite_transactions {
+                self.transaction_manager
+                    .remove_invite_2xx_response_cache(&transaction_id);
+            }
+        }
         self.dialog_server_transactions.remove(dialog_id);
 
         Some(dialog)

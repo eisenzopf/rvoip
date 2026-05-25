@@ -1190,6 +1190,13 @@ pub struct EndpointConfig {
     pub cleanup_diagnostics: Option<bool>,
     /// Per-operation cleanup diagnostic event logs.
     pub cleanup_diagnostic_events: Option<bool>,
+    /// App-facing event buffer capacity.
+    pub app_event_channel_capacity: Option<usize>,
+    /// Per-transaction command channel capacity.
+    pub sip_transaction_command_channel_capacity: Option<usize>,
+    /// RSS growth threshold used by perf soak release gates.
+    #[cfg(feature = "perf-tests")]
+    pub perf_max_rss_growth_mb_per_hr: Option<f64>,
     /// SRTP negotiation diagnostic log lines.
     pub srtp_diagnostics: Option<bool>,
     /// RTP packet diagnostic log lines.
@@ -1409,6 +1416,10 @@ pub struct EndpointBuilder {
     fast_auto_accept_incoming_calls: Option<bool>,
     cleanup_diagnostics: Option<bool>,
     cleanup_diagnostic_events: Option<bool>,
+    app_event_channel_capacity: Option<usize>,
+    sip_transaction_command_channel_capacity: Option<usize>,
+    #[cfg(feature = "perf-tests")]
+    perf_max_rss_growth_mb_per_hr: Option<f64>,
     srtp_diagnostics: Option<bool>,
     rtp_diagnostics: Option<bool>,
     media_sdp_diagnostics: Option<bool>,
@@ -1450,6 +1461,10 @@ impl EndpointBuilder {
             fast_auto_accept_incoming_calls: None,
             cleanup_diagnostics: None,
             cleanup_diagnostic_events: None,
+            app_event_channel_capacity: None,
+            sip_transaction_command_channel_capacity: None,
+            #[cfg(feature = "perf-tests")]
+            perf_max_rss_growth_mb_per_hr: None,
             srtp_diagnostics: None,
             rtp_diagnostics: None,
             media_sdp_diagnostics: None,
@@ -1502,6 +1517,16 @@ impl EndpointBuilder {
         }
         if let Some(cleanup_diagnostic_events) = config.cleanup_diagnostic_events {
             builder = builder.cleanup_diagnostic_events(cleanup_diagnostic_events);
+        }
+        if let Some(capacity) = config.app_event_channel_capacity {
+            builder = builder.app_event_channel_capacity(capacity);
+        }
+        if let Some(capacity) = config.sip_transaction_command_channel_capacity {
+            builder = builder.sip_transaction_command_channel_capacity(capacity);
+        }
+        #[cfg(feature = "perf-tests")]
+        if let Some(limit) = config.perf_max_rss_growth_mb_per_hr {
+            builder = builder.perf_max_rss_growth_mb_per_hr(limit);
         }
         if let Some(srtp_diagnostics) = config.srtp_diagnostics {
             builder = builder.srtp_diagnostics(srtp_diagnostics);
@@ -1767,6 +1792,25 @@ impl EndpointBuilder {
         self
     }
 
+    /// Set app-facing event buffer capacity.
+    pub fn app_event_channel_capacity(mut self, capacity: usize) -> Self {
+        self.app_event_channel_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the per-transaction command channel capacity.
+    pub fn sip_transaction_command_channel_capacity(mut self, capacity: usize) -> Self {
+        self.sip_transaction_command_channel_capacity = Some(capacity);
+        self
+    }
+
+    /// Set the RSS growth threshold used by perf soak release gates.
+    #[cfg(feature = "perf-tests")]
+    pub fn perf_max_rss_growth_mb_per_hr(mut self, limit: f64) -> Self {
+        self.perf_max_rss_growth_mb_per_hr = Some(limit);
+        self
+    }
+
     /// Enable or disable SRTP negotiation diagnostic log lines.
     pub fn srtp_diagnostics(mut self, enabled: bool) -> Self {
         self.srtp_diagnostics = Some(enabled);
@@ -1902,6 +1946,16 @@ impl EndpointBuilder {
         }
         if let Some(cleanup_diagnostic_events) = self.cleanup_diagnostic_events {
             config.cleanup_diagnostic_events = cleanup_diagnostic_events;
+        }
+        if let Some(capacity) = self.app_event_channel_capacity {
+            config = config.with_app_event_channel_capacity(capacity);
+        }
+        if let Some(capacity) = self.sip_transaction_command_channel_capacity {
+            config = config.with_sip_transaction_command_channel_capacity(capacity);
+        }
+        #[cfg(feature = "perf-tests")]
+        if let Some(limit) = self.perf_max_rss_growth_mb_per_hr {
+            config.perf_max_rss_growth_mb_per_hr = Some(limit);
         }
         if let Some(srtp_diagnostics) = self.srtp_diagnostics {
             config.srtp_diagnostics = srtp_diagnostics;
@@ -2350,6 +2404,7 @@ mod tests {
                 "fastAutoAcceptIncomingCalls": true,
                 "cleanupDiagnostics": true,
                 "cleanupDiagnosticEvents": true,
+                "appEventChannelCapacity": 512,
                 "srtpDiagnostics": true,
                 "rtpDiagnostics": true,
                 "mediaSdpDiagnostics": true,
@@ -2391,6 +2446,8 @@ mod tests {
         assert!(parts.config.fast_auto_accept_incoming_calls);
         assert!(parts.config.cleanup_diagnostics);
         assert!(parts.config.cleanup_diagnostic_events);
+        assert_eq!(parts.config.global_event_channel_capacity, 512);
+        assert_eq!(parts.config.session_event_dispatcher_channel_capacity, 512);
         assert!(parts.config.srtp_diagnostics);
         assert!(parts.config.rtp_diagnostics);
         assert!(parts.config.media_sdp_diagnostics);

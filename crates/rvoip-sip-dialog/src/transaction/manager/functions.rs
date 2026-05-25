@@ -484,6 +484,7 @@ impl TransactionManager {
         self.terminated_transactions.remove(tx_id);
         self.transaction_destinations.remove(tx_id);
         self.pending_inbound_bytes.remove(tx_id);
+        self.pending_inbound_inserted_at.remove(tx_id);
         self.pending_inbound_timing.remove(tx_id);
 
         // **CRITICAL FIX**: Clean up subscriber mappings to prevent memory leak
@@ -518,6 +519,7 @@ impl TransactionManager {
                 event,
                 &self.events_tx,
                 &self.event_subscribers,
+                Some(&self.subscriber_to_transactions),
                 Some(&self.transaction_to_subscribers),
                 None,
             )
@@ -708,6 +710,7 @@ impl TransactionManager {
             if removed {
                 self.transaction_destinations.remove(&key);
                 self.pending_inbound_bytes.remove(&key);
+                self.pending_inbound_inserted_at.remove(&key);
                 self.pending_inbound_timing.remove(&key);
                 terminated_transaction_ids.push(key);
                 cleaned_count += 1;

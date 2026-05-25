@@ -8,6 +8,8 @@
 //! - `peak_rss_mb` (max across samples),
 //! - `rss_growth_mb_per_min` (linear-regression slope across samples —
 //!   the leak indicator that backs the "no leaks" Rust pitch),
+//! - `rss_tail_growth_mb_per_min` (same slope over the final tail window,
+//!   used as the sustained-growth release gate),
 //! - `rss_samples` (the raw time series, suitable for plotting),
 //! - `avg_cpu_pct` (mean process-level CPU across samples).
 //!
@@ -38,6 +40,8 @@ pub struct ResourceSummary {
     pub baseline_rss_mb: f64,
     pub peak_rss_mb: f64,
     pub rss_growth_mb_per_min: f64,
+    pub rss_tail_growth_mb_per_min: f64,
+    pub rss_tail_window_secs: f64,
     pub avg_cpu_pct: f64,
     pub samples: Vec<ResourceSample>,
 }
@@ -115,6 +119,9 @@ impl ResourceSampler {
 
         // Linear-regression slope of RSS over time, normalised to MB/min.
         let rss_growth_mb_per_min = linear_slope_mb_per_sec(&samples) * 60.0;
+        let tail_window_secs = rss_tail_window_secs();
+        let tail_samples = tail_samples(&samples, tail_window_secs);
+        let rss_tail_growth_mb_per_min = linear_slope_mb_per_sec(tail_samples) * 60.0;
 
         // CPU average: drop the first sample (always 0, sysinfo
         // semantics) and average the rest. Falls back to 0 if there
@@ -130,9 +137,41 @@ impl ResourceSampler {
             baseline_rss_mb,
             peak_rss_mb,
             rss_growth_mb_per_min,
+            rss_tail_growth_mb_per_min,
+            rss_tail_window_secs: tail_window_secs,
             avg_cpu_pct,
             samples,
         }
+    }
+}
+
+fn tail_samples(samples: &[ResourceSample], tail_window_secs: f64) -> &[ResourceSample] {
+    let Some(last) = samples.last() else {
+        return samples;
+    };
+    let min_t = (last.t_secs - tail_window_secs).max(0.0);
+    let start = samples
+        .iter()
+        .position(|sample| sample.t_secs >= min_t)
+        .unwrap_or(0);
+    &samples[start..]
+}
+
+fn rss_tail_window_secs() -> f64 {
+    const DEFAULT_TAIL_WINDOW_SECS: f64 = 60.0;
+    match std::env::var("RVOIP_PERF_RSS_TAIL_WINDOW_SECS") {
+        Ok(raw) => {
+            let value: f64 = raw.parse().unwrap_or_else(|_| {
+                panic!("RVOIP_PERF_RSS_TAIL_WINDOW_SECS must be finite and greater than 0")
+            });
+            assert!(
+                value.is_finite() && value > 0.0,
+                "RVOIP_PERF_RSS_TAIL_WINDOW_SECS must be finite and greater than 0"
+            );
+            value
+        }
+        Err(std::env::VarError::NotPresent) => DEFAULT_TAIL_WINDOW_SECS,
+        Err(err) => panic!("RVOIP_PERF_RSS_TAIL_WINDOW_SECS could not be read: {err}"),
     }
 }
 

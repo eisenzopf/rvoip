@@ -63,6 +63,13 @@ Environment:
   BETA_RUN_STRICT_UA=0           Disable the baresip strict-UA gate; fails with --require-external.
   BETA_RUN_LONG_SOAK=0           Disable the ignored soak test; fails with --require-external.
   RVOIP_PERF_SOAK_DURATION_SECS  Soak duration. Defaults to the perf test default.
+  RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR
+                                  Soak RSS growth threshold. Defaults to Config's 10 MB/hr.
+  RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY
+                                  App-facing event buffer capacity for perf soaks.
+                                  Defaults to Config's beta profile value.
+  RVOIP_PERF_RSS_TAIL_WINDOW_SECS
+                                  Sustained RSS slope window. Defaults to 60.
 EOF
 }
 
@@ -425,6 +432,9 @@ write_summary_gate_table_header() {
 - beta_run_strict_ua: \`${BETA_RUN_STRICT_UA:-1}\`
 - beta_run_long_soak: \`${BETA_RUN_LONG_SOAK:-1}\`
 - rvoip_perf_soak_duration_secs: \`${RVOIP_PERF_SOAK_DURATION_SECS:-perf test default}\`
+- rvoip_perf_max_rss_growth_mb_per_hr: \`${RVOIP_PERF_MAX_RSS_GROWTH_MB_PER_HR:-Config default (10)}\`
+- rvoip_perf_app_event_channel_capacity: \`${RVOIP_PERF_APP_EVENT_CHANNEL_CAPACITY:-Config default}\`
+- rvoip_perf_rss_tail_window_secs: \`${RVOIP_PERF_RSS_TAIL_WINDOW_SECS:-60}\`
 
 Full environment evidence, Docker state, redacted runtime variables, and local
 PBX config snapshots are in \`environment/environment.md\`.
@@ -756,8 +766,9 @@ run_perf_gates() {
   run_gate "perf RTP steady state" cargo test -p rvoip-sip --release --features perf-tests --test perf_rtp_steady_state -- --nocapture
   run_gate "perf backpressure step" cargo test -p rvoip-sip --release --features perf-tests --test perf_backpressure_step -- --nocapture
   run_gate "perf transport recovery" cargo test -p rvoip-sip --release --features perf-tests --test perf_transport_recovery -- --nocapture
+  run_gate "perf session churn leak" cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_session_churn_leak -- --ignored --nocapture
   if [ "${BETA_RUN_LONG_SOAK:-1}" = "1" ]; then
-    run_gate "perf soak candidate" cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min -- --ignored --nocapture
+    run_gate "perf soak candidate" cargo test -p rvoip-sip --release --features perf-tests --test perf_soak_30min perf_soak_30min -- --ignored --nocapture
   else
     skip_gate "perf soak" "BETA_RUN_LONG_SOAK=0 disables release-candidate soak evidence."
   fi

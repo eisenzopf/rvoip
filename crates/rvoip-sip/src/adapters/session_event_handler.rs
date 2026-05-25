@@ -1013,12 +1013,28 @@ impl SessionCrossCrateEventHandler {
         let publisher = self.app_event_publisher.clone();
         let store = self.state_machine.store.clone();
         let registry = self.registry.clone();
+        let dialog_adapter = self.dialog_adapter.clone();
+        let media_adapter = self.media_adapter.clone();
         tokio::spawn(async move {
             let release_guard =
                 cleanup_diag::stage_guard(CleanupStage::TerminalRelease, &session_id.0);
             if let Err(e) = publisher.publish_now(api_event).await {
                 tracing::warn!(
                     "Failed to publish terminal event to global coordinator: {}",
+                    e
+                );
+            }
+            if let Err(e) = dialog_adapter.cleanup_session(&session_id).await {
+                tracing::debug!(
+                    "dialog cleanup during terminal release for {}: {}",
+                    session_id,
+                    e
+                );
+            }
+            if let Err(e) = media_adapter.cleanup_session(&session_id).await {
+                tracing::debug!(
+                    "media cleanup during terminal release for {}: {}",
+                    session_id,
                     e
                 );
             }

@@ -36,11 +36,14 @@ fn incoming_call_channel_capacity_defaults_to_1000() {
     );
     assert_eq!(Config::default().sip_dialog_dispatch_workers, None);
     assert_eq!(Config::default().sip_dialog_dispatch_queue_capacity, None);
-    assert_eq!(Config::default().global_event_channel_capacity, 10_000);
+    assert_eq!(
+        Config::default().global_event_channel_capacity,
+        Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY
+    );
     assert!(Config::default().session_event_dispatcher_workers >= 1);
     assert_eq!(
         Config::default().session_event_dispatcher_channel_capacity,
-        10_000
+        Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY
     );
     assert_eq!(Config::default().server_call_capacity, None);
     assert!(!Config::default().sip_udp_diagnostics);
@@ -109,6 +112,16 @@ fn incoming_call_channel_capacity_is_configurable() {
 }
 
 #[test]
+fn app_event_channel_capacity_sets_app_facing_queues() {
+    let config = Config::local("capacity-test", 5060).with_app_event_channel_capacity(512);
+
+    assert_eq!(config.global_event_channel_capacity, 512);
+    assert_eq!(config.session_event_dispatcher_channel_capacity, 512);
+    assert_eq!(config.sip_transport_channel_capacity, 10_000);
+    assert_eq!(config.transaction_event_channel_capacity, 10_000);
+}
+
+#[test]
 fn channel_capacity_sets_related_signaling_queues() {
     let config = Config::local("capacity-test", 5060).with_channel_capacity(512);
 
@@ -154,8 +167,14 @@ fn server_capacity_sets_hot_index_capacity_only() {
     assert_eq!(config.state_event_channel_capacity, 1000);
     assert_eq!(config.sip_transport_channel_capacity, 10_000);
     assert_eq!(config.transaction_event_channel_capacity, 10_000);
-    assert_eq!(config.global_event_channel_capacity, 10_000);
-    assert_eq!(config.session_event_dispatcher_channel_capacity, 10_000);
+    assert_eq!(
+        config.global_event_channel_capacity,
+        Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY
+    );
+    assert_eq!(
+        config.session_event_dispatcher_channel_capacity,
+        Config::DEFAULT_APP_EVENT_CHANNEL_CAPACITY
+    );
 }
 
 #[test]

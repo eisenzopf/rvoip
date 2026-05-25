@@ -366,6 +366,17 @@ impl StateMachineHelpers {
             .collect()
     }
 
+    /// Feature-gated retained-object counts for perf leak investigations.
+    #[cfg(feature = "perf-tests")]
+    pub async fn perf_diagnostic_counts(&self) -> serde_json::Value {
+        let active_sessions = self.active_sessions.read().await.len();
+        let subscribers = self.subscribers.read().await.len();
+        serde_json::json!({
+            "active_sessions": active_sessions,
+            "subscriber_sessions": subscribers,
+        })
+    }
+
     /// Get current state of a session
     pub async fn get_state(&self, session_id: &SessionId) -> Result<CallState> {
         let session = self.state_machine.store.get_session(session_id).await?;
