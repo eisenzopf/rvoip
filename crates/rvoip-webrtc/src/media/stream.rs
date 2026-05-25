@@ -89,10 +89,16 @@ impl WebRtcMediaStream {
 }
 
 /// Build a bidirectional audio stream from local + optional remote track.
+///
+/// D4 follow-up — `local_ssrc` and `payload_type` are passed to the
+/// outbound pump so it can wrap codec-payload `MediaFrame`s (the
+/// orchestrator-side `Transcoder` output) in fresh RTP headers.
 pub fn from_tracks(
     id: StreamId,
     codec: CodecInfo,
     local: Arc<TrackLocalStaticRTP>,
+    local_ssrc: u32,
+    payload_type: u8,
     remote: Option<Arc<dyn TrackRemote>>,
 ) -> Arc<WebRtcMediaStream> {
     let (frames_in_tx, frames_in_rx) = mpsc::channel(FRAME_CHANNEL_CAP);
@@ -102,7 +108,7 @@ pub fn from_tracks(
     let send_deadline_ms = DEFAULT_INBOUND_SEND_DEADLINE_MS;
 
     let mut pumps = Vec::new();
-    pumps.push(spawn_outbound_pump(local, frames_out_rx));
+    pumps.push(spawn_outbound_pump(local, frames_out_rx, local_ssrc, payload_type));
 
     let remote_attached = AtomicBool::new(false);
     if let Some(remote_track) = remote {

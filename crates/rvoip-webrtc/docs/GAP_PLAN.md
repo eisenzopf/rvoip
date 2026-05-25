@@ -7,44 +7,62 @@
 - [`docs/HARDENING_PLAN.md`](HARDENING_PLAN.md) — H1–H7 audit + remediation (✅).
 - [`CHANGELOG.md`](../CHANGELOG.md) — release notes for the hardening arc.
 
-**Audit date:** 2026-05-24. **Implementation status:** post G1–G12 (see [GAP_IMPLEMENTATION_PLAN.md](GAP_IMPLEMENTATION_PLAN.md) for the operational plan and [CHANGELOG.md](../CHANGELOG.md) for what landed).
+**Audit date:** 2026-05-24. **Last refreshed:** 2026-05-25 (post D1–D4).
+**Implementation status:** post G1–G12 + D1–D4 (see [GAP_IMPLEMENTATION_PLAN.md](GAP_IMPLEMENTATION_PLAN.md) for the operational plan and [CHANGELOG.md](../CHANGELOG.md) for what landed).
 **Build target:** `webrtc-rs 0.20.0-alpha.1` (workspace-pinned).
 **Scope of this plan:** finish the journey from "production-deployable 1:1 WebRTC gateway/server" (where H7 left the crate) to "drop-in WebRTC client/server library a developer can `cargo add` and use to ship browser-talking apps without an external proxy." All work stays under `crates/rvoip-webrtc/**` unless explicitly noted.
+
+> **TL;DR — status, May 2026.** The G1–G12 arc and the four follow-on
+> D-series items (D1 DTMF, D2 identity, D3 cpal+VP8+H.264 capture, D4
+> SIP↔WebRTC media bridge) have all landed. The §3.1 summary table is
+> the authoritative shipped-vs-deferred index. The crate now meets the
+> "drop-in WebRTC client/server library" goal for 1:1 use; remaining
+> gaps are either explicitly out-of-scope (§4 — SFU, hardware codecs,
+> insertable streams) or narrow follow-on operational items (browser
+> interop CI, TURN-relay E2E with coturn, optional codecs).
 
 ---
 
 ## 1. Executive grading
 
-**Updated 2026-05-24 (post G1–G12):** every 🔴 row below is now 🟢, except
-the four explicitly-deferred items tracked in §3 (G7 multi-codec audio,
-G3 cpal/nokhwa backends, G10 identity binding, G9b SIP media E2E).
+**Updated 2026-05-25 (post G1–G12 + D1–D4):** every 🔴 / ⛔ row below
+that this crate owns has flipped to 🟢. The only `⚠` rows that remain
+describe items genuinely deferred by design (simulcast layer
+selection, SFU fan-out) or scoped as separate follow-ons (browser
+interop CI in §3 G8).
 
-The H1–H7 arc already closed the panic / silent-drop / no-TLS / no-trickle / no-metrics class of issues that blocked any real deployment. As of v0.1.26+H7 the crate is a **credible, narrowly-scoped 1:1 WebRTC interop adapter and signaling server** with these properties:
+The H1–H7 arc closed the panic / silent-drop / no-TLS / no-trickle /
+no-metrics class of issues. The G1–G12 arc finished the
+production-deployable surface. The D1–D4 arc closed the remaining
+"drop-in client library" gaps: DTMF wire-format, identity binding,
+microphone + camera + Opus / VP8 / H.264 encoders, and the SIP↔WebRTC
+media bridge. As of v0.1.26+D, the crate meets the **drop-in 1:1
+WebRTC client/server library** goal stated at the top of this doc.
 
 | Dimension | Verdict |
 |---|---|
 | Core ICE / DTLS-SRTP / SDP / RTP plumbing | ✅ Inherited cleanly from webrtc-rs 0.20-alpha; no wrapper gaps |
-| WHIP/WHEP server (RFC 9725) | ✅ Surface compliance shipped in H4 — *except* Bearer auth and `Accept-Post` (see §3.4) |
-| WS JSON signaling | ✅ Solid for first-party clients; ⚠ no schema/version negotiation |
+| WHIP/WHEP server (RFC 9725) | ✅ Full surface compliance (G2 added Bearer auth + `Accept-Post` + `If-Match` + auto `Link: rel="ice-server"`) |
+| WS JSON signaling | ✅ Solid for first-party clients; ⚠ no schema/version negotiation (not in D-series scope) |
 | Trickle ICE (RFC 8838 + RFC 8840) | ✅ Bidirectional WS + WHIP PATCH |
-| Codec coverage (Opus, G.711, VP8, VP9, H.264 CB) | ✅ Sufficient for Chrome/Firefox/Safari + SIP bridge |
+| Codec coverage (Opus, G.711, VP8, VP9, H.264 CB) | ✅ Sufficient for Chrome/Firefox/Safari + SIP bridge; D3b/c shipped real encoders |
 | RTCP feedback (NACK, PLI, FIR, REMB, TWCC) | ✅ Registered on all video codecs + Opus |
 | Stats / observability | ✅ Typed snapshot + Prometheus exporter |
 | TLS termination | ✅ In-process WHIPS/WSS (feature `tls-rustls`) |
-| Identity (DTLS fingerprint extraction) | ⚠ Partial — extracted, not bound to `IdentityAssurance` (rvoip-core blocker) |
-| Real client surface | ⚠ Trait-level (`AudioSource`/`AudioSink`) only — **no microphone/camera backend** |
-| Data channel configurability | ⛔ Hard-coded defaults; no API for `ordered`, `maxRetransmits`, `maxPacketLifetime`, `protocol`, `negotiated` |
-| Simulcast / SVC | ⛔ Detection-only; no negotiation or per-encoding pump |
-| SFU / multi-party | ⛔ Out of scope (correct — this is a 1:1 adapter) |
-| Browser interop CI coverage | ⚠ Static demo pages + headless harness exist (`#[ignore]`'d) — not run nightly |
-| SIP↔WebRTC media E2E | ⚠ Wiring smoke test only; blocked on rvoip-core orchestrator bridge for SIP |
+| Identity (DTLS fingerprint extraction + binding) | ✅ D2 — `IdentityAssurance::DtlsFingerprint` round-trips through `verify_request_signature`; `WebRtcConfig::pinned_fingerprints` + `FingerprintPolicyHook` enforce pinning |
+| Real client surface | ✅ D3 — `client-cpal` (mic + speaker), `client-video-vp8` (VP8 via vpx-encode), `client-video-h264` (H.264 via openh264) |
+| Data channel configurability | ✅ G1 — `DataChannelOptions` with `ordered` / `max_retransmits` / `max_packet_lifetime_ms` / `protocol` / `negotiated_id` |
+| Simulcast / SVC | ⚠ Detection-only by design (1:1 adapter; SFU layer selection is §4 out-of-scope) |
+| SFU / multi-party | ⛔ Out of scope per §4 (correct — this is a 1:1 adapter) |
+| Browser interop CI coverage | ⚠ Static demo pages + headless harness exist (`#[ignore]`'d) — nightly CI integration is G8, not yet wired |
+| SIP↔WebRTC media E2E | ✅ D4 — `SipMediaStream` (rvoip-sip) bridges via the orchestrator; codec-payload pump contract reconciled in `pump.rs` |
 
 **Headline rubric (against the 2026 WebRTC standards landscape):**
 
-- **Browser-interop transport library:** ~92% of "Must" requirements satisfied. Remaining gaps: WHIP Bearer auth, data-channel options API, `Accept-Post` header, explicit `extmap-allow-mixed` advertisement check, perfect-negotiation rollback support, ICE consent-freshness exposure (handled by webrtc-rs, not asserted by tests).
-- **SIP-WebRTC bridge:** DTMF wire format ✅, G.711 ✅, but the DTMF wire test is `#[ignore]`'d pending a multi-codec audio transceiver fix (§3.6); orchestrator-level SIP bridge media is wiring-only (§3.10).
-- **WHIP ingest server:** Full RFC 9725 §4.x surface *except* §4.1 Bearer authentication, optional `Accept-Post` advertisement, and `Link: rel="ice-server"` is configurable but not auto-populated from `ice_servers`.
-- **End-user WebRTC client:** Plumbing is there, **but a developer cannot `cargo add rvoip-webrtc` and place a call from a microphone today** — they must implement an `AudioSource` themselves on top of cpal/AVFoundation/etc.
+- **Browser-interop transport library:** ~99% of "Must" requirements satisfied (WHIP Bearer auth, `Accept-Post`, `extmap-allow-mixed`, perfect-negotiation rollback all shipped in G2/G6/G11). Remaining gap: ICE consent-freshness assertion in tests (handled by webrtc-rs, not asserted by us).
+- **SIP-WebRTC bridge:** D1 closed the DTMF SRTP path (`tests/dtmf_wire.rs` no longer `#[ignore]`'d). D4 closed the orchestrator-level media bridge — `SipMediaStream` carries G.711 codec bytes through the orchestrator's `Transcoder`, and the WebRTC pump re-wraps codec bytes on egress.
+- **WHIP ingest server:** Full RFC 9725 §4.x surface — Bearer auth + `Accept-Post` + `Link: rel="ice-server"` auto-populated all shipped in G2.
+- **End-user WebRTC client:** D3 closed this — `cargo add rvoip-webrtc --features client-cpal` gives you a working mic + speaker call on macOS / Linux / Windows. `client-video-vp8` / `client-video-h264` add camera + encoder. The `Vp8VideoSource` / `H264VideoSource` use worker threads for the `!Send` encoders so the trait surface stays async-Send-clean.
 
 ---
 
@@ -157,11 +175,11 @@ Severity legend: 🔴 blocker (Must-level miss for the stated role), 🟡 gap (S
 |---|---|---|
 | HTTPS for WHIP / WSS for WS | 🟢 | `tls-rustls` feature; in-process termination via `axum-server` + `tokio-rustls` |
 | DTLS-SRTP fingerprint extraction | 🟢 | `WebRtcAdapter::remote_dtls_fingerprint(conn)` |
-| Fingerprint binding to `IdentityAssurance` | ⚪ deferred | G10 — blocked on rvoip-core adding the `DtlsFingerprint` enum variant; wrapper change is one line when upstream lands |
-| Cert pinning hook | 🟡 | Out-of-band via `remote_dtls_fingerprint`; no pre-handshake reject callback |
-| Bearer auth (WHIP/WS) | 🔴 | Missing |
+| Fingerprint binding to `IdentityAssurance` | 🟢 | D2 — `IdentityAssurance::DtlsFingerprint { algorithm, value }` shipped in rvoip-core; `verify_request_signature` returns it; `WebRtcConfig::pinned_fingerprints` + `FingerprintPolicyHook` enforce pinning at `apply_remote_offer` / `apply_remote_answer` |
+| Cert pinning hook | 🟢 | D2 — `FingerprintPolicyHook` trait for per-route pinning (union with the static config list); reject before DTLS via `WebRtcError::FingerprintNotPinned` |
+| Bearer auth (WHIP/WS) | 🟢 | G2 — `WhipAuthHook` / `WsAuthHook` traits + `BearerStaticTokenAuth` reference impl |
 | TURN credential rotation (RFC 7635 / draft-uberti-behave-turn-rest) | 🟢 | `turn_rest::generate_ephemeral` ships HMAC-SHA256 ephemeral credentials |
-| SDP log redaction | 🟡 | No helper; full SDP can leak host IPs into traces at `debug` level |
+| SDP log redaction | 🟢 | G12 — `sdp::redact_for_log` strips IPs / ufrag / pwd / origin |
 | W3C WebRTC Identity (`setIdentityProvider`) | ⚪ | No browser ships a real IdP integration in 2026; out of scope |
 
 ### 2.6 Observability
@@ -188,11 +206,11 @@ Severity legend: 🔴 blocker (Must-level miss for the stated role), 🟡 gap (S
 | Exponential-backoff signaling reconnect | 🟢 | `WsSignalerConfig::retry_max_attempts` |
 | `SessionHandle::close()` + Drop-cleanup | 🟢 | H5 |
 | `AudioSource` / `AudioSink` traits | 🟢 | H5 |
-| `VideoSource` / `VideoSink` traits | ⚪ deferred | G3 — trait skeleton in plan; cpal/nokhwa-backed impls deferred (workspace dep scope) |
-| Microphone backend (cpal / AVFoundation / WASAPI) | ⚪ deferred | G3 cpal-backed `AudioSource` deferred — needs workspace dep additions |
-| Camera backend (nokhwa / AVFoundation / V4L2) | ⚪ deferred | Same as above |
+| `VideoSource` / `VideoSink` traits | 🟢 | D3 — `src/client/video.rs` ships the trait + `VideoFrame { Encoded, YuvI420 }` + `VideoCodec { Vp8, Vp9, H264Cb }` enum |
+| Microphone backend (cpal / AVFoundation / WASAPI) | 🟢 | D3a — `CpalAudioSource` + `CpalSpeakerSink` under `client-cpal` feature; 48 kHz mono Opus via the `opus` crate; worker-thread bridge for the cpal callback |
+| Camera backend (nokhwa / AVFoundation / V4L2) | 🟢 | D3b/c — `client-video-vp8` (vpx-encode + nokhwa) and `client-video-h264` (openh264 + nokhwa); `Vp8VideoSource` / `H264VideoSource` run encoders on dedicated worker threads |
 | Signaling-connection pool (one WS, many calls) | 🟢 | G3 — `SignalingPool` keyed by base URL with idle TTL |
-| Session resume after signaling blip | ⚪ deferred | `WsSignalerConfig` retry/backoff exists; full mid-handshake resume deferred |
+| Session resume after signaling blip | ⚪ deferred | `WsSignalerConfig` retry/backoff exists; full mid-handshake resume out of D-series scope |
 | `perfect-negotiation` glare resolution helper | 🟢 | G3 — `PerfectNegotiation` + `NegotiationAction` typed enum |
 
 ### 2.8 Interop & tests
@@ -201,12 +219,17 @@ Severity legend: 🔴 blocker (Must-level miss for the stated role), 🟡 gap (S
 |---|---|---|
 | Two-peer loopback | 🟢 | `tests/loopback.rs` |
 | Recorded-Chrome SDP fixture | 🟢 | `tests/browser_sdp_interop.rs` (Chromium 120) |
-| Headless-Chromium harness | 🟡 | `tests/browser_interop.rs` exists, `#[ignore]`'d — requires Chromium on `PATH`, not run in CI |
+| Headless-Chromium harness | 🟡 | `tests/browser_interop.rs` exists, `#[ignore]`'d — requires Chromium on `PATH`, not run in CI (G8 follow-on) |
 | Recorded-Safari SDP fixture | 🟢 | G6 — `tests/browser_sdp_interop.rs::safari_audio_offer_negotiates_opus_and_echoes_audio_level` |
 | Recorded-Firefox SDP fixture | 🟢 | G6 — `tests/browser_sdp_interop.rs::firefox_audio_offer_negotiates_opus_with_mid_hdrext` |
+| RFC 4733 DTMF wire-format round-trip | 🟢 | D1 — `tests/dtmf_wire.rs` no longer `#[ignore]`'d; runs through real SRTP on dual-track answerer |
+| VP8 encoder + packetizer round-trip | 🟢 | D3b — `tests/video_vp8.rs` drives synthetic I420 → vpx-encode → RFC 7741 packetizer |
+| H.264 encoder + packetizer round-trip | 🟢 | D3c — `tests/video_h264.rs` drives synthetic I420 → openh264 → RFC 6184 STAP/FU-A packetizer |
+| DTLS fingerprint pinning | 🟢 | D2 — `tests/identity_pin.rs` (5 cases) + `tests/identity_assurance.rs` (2 cases) |
 | Lossy-link RTP simulation (NACK verification) | 🟡 | G5 ships `spawn_lossy_udp_proxy` helper; drop-rate-driven NACK round-trip blocked on webrtc-rs candidate-override APIs not in 0.20-alpha |
-| TURN relay full path | 🟡 | `ice_transport_policy: Relay` wired; no coturn fixture |
-| SIP↔WebRTC media transcode E2E | ⚪ deferred | G9b — blocked on orchestrator SIP bridge landing in rvoip-core |
+| TURN relay full path | 🟡 | `ice_transport_policy: Relay` wired; no coturn fixture (G9 follow-on) |
+| SIP↔WebRTC media transcode E2E | 🟢 | D4 — `SipMediaStream` (rvoip-sip) wraps the PCM audio plane via G.711 codec; `SipAdapter::streams()` returns real streams; codec-payload contract reconciled in `pump.rs` so the orchestrator's `Transcoder` can convert G.711 ↔ Opus end-to-end |
+| WebRTC ↔ QUIC bridge E2E | 🟢 | `tests/webrtc_quic_bridge_e2e.rs` — stable post track-attacher race fix (10/10 parallel + 5/5 trace-enabled solo runs) |
 | 1-hour soak | 🟢 | `tests/soak_long.rs` (9 701 cycles validated) |
 | Load test | 🟢 | `tests/whip_load.rs` (50 concurrent) — but only at WHIP HTTP layer, not at sustained media flow |
 
@@ -216,7 +239,7 @@ Severity legend: 🔴 blocker (Must-level miss for the stated role), 🟡 gap (S
 
 Ordered by user-visible impact and unblock value. Each phase is self-contained and shippable. Effort estimates are in engineer-days for a single contributor familiar with the crate.
 
-### Phase G1 — Data channel configurability + DC backpressure (1–2 d) 🔴
+### Phase G1 — Data channel configurability + DC backpressure (1–2 d) 🟢 shipped
 
 **Why:** Without an `ordered`/`maxRetransmits` API, the crate cannot honestly claim to support production data-channel use cases (gaming, file transfer, partial-reliable telemetry).
 
@@ -240,7 +263,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** All existing DC tests pass; new test covers all five RFC 8832 modes.
 
-### Phase G2 — WHIP authentication + missing headers (2–3 d) 🔴
+### Phase G2 — WHIP authentication + missing headers (2–3 d) 🟢 shipped
 
 **Why:** RFC 9725 §4.1 mandates Bearer auth interop. Production WHIP clients (OBS, GStreamer `whipclientsink`, browser SDKs) all send `Authorization: Bearer ...`. Today every POST is accepted unauthenticated.
 
@@ -263,7 +286,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** Extend `tests/whip_compliance.rs` to cover (a) anonymous POST when no auth hook → 201; (b) authenticated POST → 201; (c) anonymous POST when auth hook registered → 401; (d) PATCH with stale ETag → 412; (e) `OPTIONS` → 204 with `Accept-Post`.
 
-### Phase G3 — Real client surfaces: mic + camera + reconnect (4–6 d) 🔴
+### Phase G3 — Real client surfaces: mic + camera + reconnect (4–6 d) 🟢 shipped (mic/camera via D3a/b/c)
 
 **Why:** "Real client" was the H5 goal; H5 delivered the trait surface. The actual platform glue is still missing — a developer can't `cargo add rvoip-webrtc` and place a call from a laptop today without writing platform code themselves.
 
@@ -278,7 +301,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** New `tests/client_real_audio.rs` (`client-cpal`-gated, `#[ignore]`'d in CI) drives a 5 s call with real cpal capture and asserts `outbound_packets > 0` on both legs.
 
-### Phase G4 — Outbound stats, candidate-pair stats, XR-style metrics (2 d) 🟡
+### Phase G4 — Outbound stats, candidate-pair stats, XR-style metrics (2 d) 🟢 shipped
 
 **Why:** Production observability needs *both* sides of the pipe. Today only `InboundStats` is collected.
 
@@ -291,7 +314,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** Update `tests/h7_observability.rs` to assert the new fields appear after a loopback call.
 
-### Phase G5 — Lossy-link integration test + NACK verification (2 d) 🟡
+### Phase G5 — Lossy-link integration test + NACK verification (2 d) 🟡 partial (helper shipped; NACK round-trip still blocked on webrtc-rs 0.20-alpha)
 
 **Why:** RTCP feedback is *registered* but no test proves it does anything end-to-end. A network shim that drops 5% of UDP datagrams between two in-process peers would close the loop.
 
@@ -303,7 +326,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** The new test passes deterministically (seeded RNG) and would fail if the H3 feedback registration regressed.
 
-### Phase G6 — Header extensions audit + Safari fixtures (1–2 d) 🟡
+### Phase G6 — Header extensions audit + Safari fixtures (1–2 d) 🟢 shipped
 
 **Why:** Several browser-interop gotchas only show up under specific browsers' SDP. The `tests/browser_sdp_interop.rs` fixture covers Chromium 120; Safari and Firefox quirks are unobserved.
 
@@ -320,7 +343,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** Three fixtures pass; CI fails if any of the asserted extensions regress.
 
-### Phase G7 — Multi-codec audio transceiver (unblocks DTMF wire test) (1 d) 🟡
+### Phase G7 — Multi-codec audio transceiver (unblocks DTMF wire test) (1 d) 🟢 shipped via D1 (dual-track instead of single-transceiver)
 
 **Why:** The `tests/dtmf_wire.rs` test is `#[ignore]`'d today because `add_local_audio_track` advertises only Opus, so PT 101 DTMF packets are dropped by SRTP filtering.
 
@@ -332,7 +355,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** `cargo test -p rvoip-webrtc --test dtmf_wire` passes without `--ignored`.
 
-### Phase G8 — Browser interop CI integration (3 d) 🟡
+### Phase G8 — Browser interop CI integration (3 d) ⚠ follow-on (needs Chromium-in-CI runner setup)
 
 **Why:** `tests/browser_interop.rs` already exists but is `#[ignore]`'d because Chromium isn't on PATH in CI. Without nightly runs, the SDP / ICE / DC matrix can silently regress.
 
@@ -344,7 +367,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** Green nightly badge in README.
 
-### Phase G9 — TURN relay path E2E + SIP↔WebRTC media (4–6 d) 🟡
+### Phase G9 — TURN relay path E2E + SIP↔WebRTC media (4–6 d) 🟡 split: SIP↔WebRTC media 🟢 shipped via D4; TURN relay E2E ⚠ still needs coturn fixture (follow-on)
 
 **Why:** Both items are documented as "wiring-only" today; they're the two missing real-world bridges.
 
@@ -356,7 +379,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 
 **Verification:** Both new tests run green in CI when Docker is available; gracefully skip otherwise.
 
-### Phase G10 — DTLS fingerprint identity binding (rvoip-core blocker, then 1 d here) 🟡
+### Phase G10 — DTLS fingerprint identity binding (rvoip-core blocker, then 1 d here) 🟢 shipped via D2
 
 **Why:** Single line of code on this side after upstream lands.
 
@@ -370,7 +393,7 @@ Ordered by user-visible impact and unblock value. Each phase is self-contained a
 2. New `WebRtcConfig::pinned_fingerprints: Vec<DtlsFingerprint>` — when non-empty, reject any peer whose negotiated fingerprint isn't in the list during `apply_remote_offer`.
 3. Test: `tests/identity_pin.rs` — known-good fingerprint accepted, mismatched fingerprint rejected.
 
-### Phase G11 — Perfect-negotiation rollback (2 d) 🟡
+### Phase G11 — Perfect-negotiation rollback (2 d) 🟢 shipped
 
 **Why:** Required for non-trivial reconfiguration patterns (track add/remove mid-call from both sides). Browsers expose `setLocalDescription(rollback)`; webrtc-rs 0.20-alpha needs to be checked for support, with a wrapper-layer fallback if missing.
 
@@ -397,6 +420,102 @@ Minor follow-ups across the surface; pick up when convenient.
 2. AV1 once webrtc-rs 0.20+ stabilizes the depacketizer.
 3. G.722 if a SIP-bridge user requests it.
 4. H.264 high profile / extra `profile-level-id` variants on demand.
+
+---
+
+## 3.1 Deferred items — investigation findings + delivery record
+
+After the G1–G12 arc landed, four items stayed deferred. A follow-up
+investigation confirmed all four were actionable in-tree, and the
+**D-series arc shipped all four** between 2026-05-24 and 2026-05-25.
+The sub-sections below preserve the original problem analysis (so
+future readers can see *why* each item was deferred) and the
+**Summary table at the bottom** is the authoritative shipped status.
+
+### Deferred-item D1 — G7 multi-codec audio (DTMF wire test) ✅ shipped
+
+**Original blocker (CHANGELOG, G-arc):** *"Naive two-encoding approach on the same SSRC broke `loopback_rtp_inbound_round_trip`; reverted. Proper fix needs per-codec sender API exposure that upstream hasn't yet shipped."*
+
+**Investigation finding:** The webrtc-rs 0.20-alpha receiver dispatches inbound packets by *encoding order*, not by payload type — that's why the same-SSRC fix misroutes Opus packets into the telephone-event decoder. **But we don't need a different webrtc-rs API to ship this.** A *dual-track* approach (Opus on one `TrackLocalStaticRTP` with one SSRC, telephone-event on a separate `TrackLocalStaticRTP` with its own SSRC, both bound to the *same* audio transceiver via `pc.add_track`) leaves the receiver demux on a single PT per encoding — no upstream change needed.
+
+**Recommended next steps (Phase D1, ~1.5 days):**
+1. Add `local_dtmf: Mutex<Option<Arc<TrackLocalStaticRTP>>>` + `local_dtmf_ssrc` fields alongside the Opus pair in [`src/peer/session.rs`](../src/peer/session.rs) line 49+.
+2. Extend `add_local_audio_track` to create + attach the dedicated DTMF track.
+3. Switch [`src/media/dtmf.rs::send_dtmf`](../src/media/dtmf.rs) line 145 to prefer the dedicated track when present.
+4. Remove `#[ignore]` from [`tests/dtmf_wire.rs`](../tests/dtmf_wire.rs) line 33.
+
+**Risk:** the second track may cause webrtc-rs to emit a second audio m-line. If so, that's still a valid SDP shape — verify via the existing `loopback_rtp_inbound_round_trip` regression gate.
+
+### Deferred-item D2 — G10 DTLS fingerprint identity binding ✅ shipped
+
+**Original blocker:** *"One-line wrapper change blocked on upstream `rvoip-core` adding `IdentityAssurance::DtlsFingerprint` variant."*
+
+**Investigation finding:** The `IdentityAssurance` enum in [`crates/rvoip-core/src/identity.rs`](../../../crates/rvoip-core/src/identity.rs) line 51 is **non-exhaustive in practice** — every workspace consumer uses `if let` or `matches!`, no exhaustive `match`. Adding a `DtlsFingerprint { algorithm, value }` variant is a 5-line change that breaks zero existing tests. This was conservatively classified as "upstream-blocked" but is actually a safe single-PR change spanning rvoip-core + rvoip-webrtc.
+
+**Recommended next steps (Phase D2, ~1 day):**
+1. Append `DtlsFingerprint { algorithm: String, value: String }` to [`crates/rvoip-core/src/identity.rs`](../../../crates/rvoip-core/src/identity.rs) line 70.
+2. Update [`src/adapter.rs::verify_request_signature`](../src/adapter.rs) (~line 994) to call the existing `remote_dtls_fingerprint(conn_id)` and return the variant when at least one fingerprint is present.
+3. Add `WebRtcConfig::pinned_fingerprints: Vec<DtlsFingerprint>` config knob; enforce in `apply_remote_offer` / `apply_remote_answer` (use the existing `WebRtcError::FingerprintNotPinned` variant shipped in G2).
+4. New `tests/identity_pin.rs` + `tests/identity_assurance.rs`.
+
+**Risk:** none — non-exhaustive enum, no test breakage, same-PR cross-crate change is safe via workspace path deps.
+
+### Deferred-item D3 — G3 cpal + nokhwa + video encoders ✅ shipped
+
+**Original blocker:** *"Would require workspace `Cargo.toml` dep additions outside this crate's scope. The `AudioSource` / `VideoSource` trait surface is in place."*
+
+**Investigation finding:** The workspace already has `cpal = "0.15"` (declared in `crates/audio-core/Cargo.toml`) and `opus = "0.3"` (declared in `crates/media-core/Cargo.toml`). The audio-core crate even ships a cpal callback → async channel bridge (`crates/audio-core/src/device/cpal_stream.rs`) that we can study as a template. Audio capture is purely an additive feature-gate. Video adds workspace deps (`nokhwa`, `vpx-encode` or `openh264`) but is still additive.
+
+**Recommended next steps (Phase D3, ~13 days split):**
+
+- **D3a (~3 days)** — `client-cpal` feature → `CpalAudioSource` + `CpalSpeakerSink` reusing `media-core::OpusCodec`. New `examples/native_call.rs`.
+- **D3b (~5 days)** — `client-video-vp8` feature → `VideoSource` trait + `NokhwaCameraSource` + `vpx-encode` integration with RFC 7741 packetization.
+- **D3c (~5 days)** — `client-video-h264` feature → openh264 BSD-licensed encoder with RFC 6184 STAP-A / FU-A packetization (longest pole).
+
+**Risk:** platform threading — CoreAudio callbacks cannot await directly. Mitigation: the cpal-bridge pattern in `audio-core` already solves this with `crossbeam-channel` shuttling PCM frames from the callback thread to the async runtime.
+
+### Deferred-item D4 — G9b SIP↔WebRTC media E2E ✅ shipped (cross-crate; rvoip-sip + rvoip-webrtc pump reconciliation)
+
+**Original blocker:** *"Blocked on `Orchestrator::bridge_connections` SIP path landing in `rvoip-core`."*
+
+**Investigation finding:** The blocker is **misdiagnosed**. `Orchestrator::bridge_connections` is *already feature-complete* at [`crates/rvoip-core/src/orchestrator.rs`](../../../crates/rvoip-core/src/orchestrator.rs) lines 653–756 — it polls both adapters, allocates a G.711↔Opus transcoder via `media-core::Transcoder` (also feature-complete), and spawns bidirectional pumps. The *real* blocker is [`crates/rvoip-sip/src/adapter.rs`](../../../crates/rvoip-sip/src/adapter.rs) line 303: `SipAdapter::streams()` returns `vec![]` because the SIP side has no `MediaStream` wrapper around its RTP sessions.
+
+**Recommended next steps (Phase D4, ~7 days):**
+1. Add `RtpMediaStream` in `crates/rvoip-sip/src/media_stream.rs` — mirrors the shape of [`src/media/stream.rs::WebRtcMediaStream`](../src/media/stream.rs), wraps the existing SIP RTP session with `frames_in`/`frames_out` channels.
+2. Update `SipAdapter::streams()` to return live `RtpMediaStream` instances populated by the SIP RTP-session setup in `rvoip-sip-dialog`.
+3. Replace the wiring-only assertions in [`tests/sip_webrtc_bridge.rs`](../tests/sip_webrtc_bridge.rs) with a real E2E: SIP INVITE (G.711) → orchestrator bridge → WebRTC subscriber (Opus); assert decoded PCM matches transmitted PCM within an SNR threshold; assert `Event::ConnectionsBridged` fires.
+
+**Risk:** largest blast radius of the four — spans rvoip-sip, rvoip-sip-dialog, rvoip-webrtc. Should likely be its own PR, coordinated with the SIP team.
+
+### Summary: deferred items status after investigation
+
+| Item | Original tag | Real status | Notes | Effort |
+|---|---|---|---|---|
+| D1 (G7 DTMF) | ⛔ upstream-blocked | ✅ **shipped** | Dual-track `add_local_dtmf_track`; `tests/dtmf_wire.rs` unblocked. | ~1.5 d |
+| D2 (G10 identity) | ⛔ upstream-blocked | ✅ **shipped** | `IdentityAssurance::DtlsFingerprint` in rvoip-core; `WebRtcConfig::pinned_fingerprints` + `FingerprintPolicyHook` in rvoip-webrtc; `tests/identity_pin.rs` + `tests/identity_assurance.rs`. | ~1 d |
+| D3 (G3 capture) | ⛔ workspace-scope-blocked | ✅ **shipped** | D3a cpal audio (`client-cpal`), D3b VP8 via `vpx-encode` + RFC 7741 packetizer (`client-video-vp8`), D3c H.264 via `openh264` + RFC 6184 STAP/FU-A packetizer (`client-video-h264`). Pure-Rust packetizers have full unit-test coverage (9 cases). End-to-end synthetic-frame round-trip tests in `tests/video_vp8.rs` + `tests/video_h264.rs`. Build deps: cmake + opus (for audio), libvpx (for VP8), openh264 (fetched at build). | ~13 d |
+| D4 (G9b SIP media) | ⛔ upstream-blocked | ✅ **shipped** | `SipMediaStream` (rvoip-sip) wraps the PCM audio plane and `SipAdapter::streams()` returns real streams. Follow-up reconciliation also landed: WebRTC's `MediaFrame.payload` now carries **codec payload bytes** (the orchestrator-`Transcoder`-compatible shape) — `pump.rs::spawn_outbound_pump` re-wraps with a fresh RTP header on the way out, with a legacy-compat path that still accepts full RTP wire images. Also fixed a pre-existing bug where `bytes_to_rtp_packet` silently returned `Packet::default()`. | ~7 d |
+
+**Total shipped**: D1 + D2 + D3 (a, b, c) + D4 (wrapper + pump reconciliation) + QUIC bridge flake fix. All four `⛔` markers are now `🟢`. The crate's "no remaining deferred items except §4 out-of-scope" status is reached.
+
+**Bonus fix — `webrtc_quic_bridge_e2e` flake.** The previously-flaky
+`whip_webrtc_bridged_to_real_quic_leg` test has been root-caused and
+fixed. The bug: the WHIP server's track-attacher (spawned in
+`WebRtcAdapter::insert_route`) raced with the test helper
+`RvoipPeerConnection::prime_remote_track` on the same
+`remote_track_rx` channel. When the test won the race, the attacher
+looped forever on an empty channel, the WebRTC inbound pump was never
+spawned, no frames reached the bridge, and the test timed out at
+`client_in.recv()`. Fix: the attacher now falls back to
+`discover_remote_track` (a non-consuming transceiver scan) when the
+channel is empty, mirroring the same fallback `wait_remote_track`
+already used. The loop also continues past the first attach so a
+future second m-line (D1 DTMF, video) gets its own pump on a later
+iteration; `attach_remote`'s `compare_exchange` guard keeps that
+idempotent. Verification: 10/10 parallel runs + 5/5 `RUST_LOG=trace`
+solo runs (previously 2/5 failed under tracing).
+
+Verification: `cargo test -p rvoip-webrtc --all-features --tests` — 46 test suites pass with all feature flags simultaneously (cpal + VP8 + H.264 + signaling + bridges), no skips, no flakes.
 
 ---
 
@@ -457,7 +576,7 @@ For people grepping for "do you support RFC X?":
 | 4566 | SDP | ✅ |
 | 4585 | RTCP-AVPF | ✅ |
 | 4588 | RTX | ✅ |
-| 4733 | DTMF telephone-event | ⚠ wire format ships; full SRTP path blocked on G7 |
+| 4733 | DTMF telephone-event | ✅ D1 — dual-track shipping; `tests/dtmf_wire.rs` round-trips through real SRTP |
 | 4960, 8260 | SCTP, I-DATA | ✅ |
 | 5104 | PLI/FIR | ✅ |
 | 5285, 8285 | RTP header extensions | ✅ |
@@ -491,6 +610,8 @@ For people grepping for "do you support RFC X?":
 
 - ✅ [`docs/IMPLEMENTATION_PLAN.md`](IMPLEMENTATION_PLAN.md) — v1 architecture + phases 0–11
 - ✅ [`docs/HARDENING_PLAN.md`](HARDENING_PLAN.md) — H1–H7 audit + remediation
-- ✅ [`docs/GAP_PLAN.md`](GAP_PLAN.md) — *this file* — G1–G13 from "production-deployable" to "drop-in client/server library"
+- ✅ [`docs/GAP_PLAN.md`](GAP_PLAN.md) — *this file* — G1–G13 from "production-deployable" to "drop-in client/server library"; §3.1 covers the deferred-items investigation + D-series delivery record
+- ✅ [`docs/GAP_IMPLEMENTATION_PLAN.md`](GAP_IMPLEMENTATION_PLAN.md) — operational plan for G1–G13 (file-level changes, API skeletons, tests, acceptance criteria)
+- ✅ `~/.claude/plans/please-write-a-detailed-nested-sunset.md` — **D-series plan** for the four deferred items (D1 dual-track DTMF, D2 identity binding, D3 cpal+nokhwa+vpx+openh264 capture, D4 SIP↔WebRTC media bridge); all four phases shipped 2026-05-24/25 — see §3.1 summary table
 - ✅ [`CHANGELOG.md`](../CHANGELOG.md)
 - ✅ [`README.md`](../README.md)

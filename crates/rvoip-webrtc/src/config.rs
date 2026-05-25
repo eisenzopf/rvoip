@@ -1,6 +1,8 @@
 use rvoip_core::capability::CapabilityDescriptor;
 use serde::{Deserialize, Serialize};
 
+use crate::identity::DtlsFingerprint;
+
 /// Policy applied to inbound trickle ICE candidates whose hostname ends in
 /// `.local` (RFC 8839 mDNS-style anonymized candidates).
 ///
@@ -153,6 +155,17 @@ pub struct WebRtcConfig {
     /// at media-engine build time.
     #[serde(default)]
     pub opus_settings: OpusSettings,
+
+    /// D2 — Static list of DTLS-SRTP certificate fingerprints the adapter
+    /// will accept as remote peer identities. Default empty = no pinning
+    /// (every fingerprint is allowed; current behavior). When non-empty,
+    /// `apply_remote_offer` / `apply_remote_answer` reject any peer whose
+    /// `a=fingerprint:` doesn't match an entry here — see also the
+    /// runtime-set
+    /// [`FingerprintPolicyHook`](crate::adapter::FingerprintPolicyHook)
+    /// for per-route overrides (e.g. multi-tenant pinning).
+    #[serde(default)]
+    pub pinned_fingerprints: Vec<DtlsFingerprint>,
 }
 
 /// G12 — Opus encoder/decoder hints carried in the SDP fmtp line for
@@ -282,6 +295,7 @@ impl Default for WebRtcConfig {
             mdns_candidate_policy: MdnsCandidatePolicy::Drop,
             ice_transport_policy: IceTransportPolicy::All,
             opus_settings: OpusSettings::default(),
+            pinned_fingerprints: Vec::new(),
         }
     }
 }
@@ -309,6 +323,7 @@ impl WebRtcConfig {
             mdns_candidate_policy: MdnsCandidatePolicy::Drop,
             ice_transport_policy: IceTransportPolicy::All,
             opus_settings: OpusSettings::default(),
+            pinned_fingerprints: Vec::new(),
         }
     }
 

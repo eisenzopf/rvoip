@@ -40,6 +40,12 @@ pub struct SipAdapter {
     out_tx: mpsc::Sender<AdapterEvent>,
     /// Single-take receiver for [`ConnectionAdapter::subscribe_events`].
     out_rx: StdMutex<Option<mpsc::Receiver<AdapterEvent>>>,
+    /// D4 — lazy cache of `SipMediaStream` instances built by `streams()`.
+    /// One stream per connection — the orchestrator-side
+    /// `frames_in() / frames_out()` channels are single-take, so caching
+    /// the stream lets the orchestrator hand the same handle to the
+    /// bridge pump and to a stats reader.
+    streams_cache: Arc<DashMap<ConnectionId, Arc<crate::media_stream::SipMediaStream>>>,
 }
 
 impl SipAdapter {
@@ -54,6 +60,7 @@ impl SipAdapter {
             by_session: Arc::new(DashMap::new()),
             out_tx: out_tx.clone(),
             out_rx: StdMutex::new(Some(out_rx)),
+            streams_cache: Arc::new(DashMap::new()),
         });
 
         // Subscribe to the coordinator's typed event stream and spawn the
@@ -300,12 +307,28 @@ impl ConnectionAdapter for SipAdapter {
             .map_err(Self::map_session_err)
     }
 
-    async fn streams(&self, _conn: ConnectionId) -> CoreResult<Vec<Arc<dyn MediaStream>>> {
-        // Wrapping SIP RTP streams as `dyn MediaStream` lands in step 8+
-        // alongside `RtpMediaStream`. Step-7 returns an empty set so the
-        // trait is satisfied; consumers that don't need direct stream access
-        // (the common case for B2BUA / gateway flows) work today.
-        Ok(vec![])
+    async fn streams(&self, conn: ConnectionId) -> CoreResult<Vec<Arc<dyn MediaStream>>> {
+        // D4 — return a `SipMediaStream` wrapping the active SIP session's
+        // PCM audio plane. We cache the stream per ConnectionId so the
+        // orchestrator's `bridge_connections` can take the inbound /
+        // outbound channels exactly once each.
+        let session_id = self.lookup_session(&conn)?;
+        if let Some(entry) = self.streams_cache.get(&conn) {
+            return Ok(vec![Arc::clone(entry.value()) as Arc<dyn MediaStream>]);
+        }
+        // Establish direction from the connection table — we don't have a
+        // dedicated field, so derive from the api event log entry order.
+        // Outbound by default; the orchestrator only consults direction
+        // for stats labelling.
+        let stream = crate::media_stream::SipMediaStream::new(
+            Arc::clone(&self.coordinator),
+            session_id,
+            Direction::Outbound,
+        )
+        .await
+        .map_err(|e| RvoipError::Adapter(format!("SipMediaStream::new: {e}")))?;
+        self.streams_cache.insert(conn, Arc::clone(&stream));
+        Ok(vec![stream as Arc<dyn MediaStream>])
     }
 
     async fn send_message(&self, _conn: ConnectionId, _message: Message) -> CoreResult<()> {

@@ -288,6 +288,9 @@ impl AssuranceLevel {
             IdentityAssurance::Identified { .. } => AssuranceLevel::Identified,
             IdentityAssurance::TaskScoped { .. } => AssuranceLevel::TaskScoped,
             IdentityAssurance::UserAuthorized { .. } => AssuranceLevel::UserAuthorized,
+            // D2 — DTLS fingerprint is key-binding without a real-world
+            // identity, so the closest wire level is Pseudonymous.
+            IdentityAssurance::DtlsFingerprint { .. } => AssuranceLevel::Pseudonymous,
         }
     }
 }

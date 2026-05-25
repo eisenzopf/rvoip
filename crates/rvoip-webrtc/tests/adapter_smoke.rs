@@ -93,10 +93,16 @@ async fn adapter_smoke_all_methods() {
         )
         .await
         .expect("verify signature");
-    assert!(matches!(
-        assurance,
-        rvoip_core::identity::IdentityAssurance::Anonymous
-    ));
+    // D2 — adapter surfaces the negotiated peer's DTLS fingerprint as the
+    // assurance. (Used to be Anonymous before rvoip-core gained the
+    // DtlsFingerprint variant.)
+    assert!(
+        matches!(
+            assurance,
+            rvoip_core::identity::IdentityAssurance::DtlsFingerprint { .. }
+        ),
+        "expected DtlsFingerprint assurance, got {assurance:?}"
+    );
 
     assert!(
         adapter

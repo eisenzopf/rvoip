@@ -1,18 +1,17 @@
-//! H3: RFC 4733 DTMF wire-format capture — confirms `send_dtmf` actually
-//! generates correct telephone-event RTP packets on the wire.
+//! H3 + D1: RFC 4733 DTMF wire-format capture — confirms `send_dtmf` actually
+//! generates correct telephone-event RTP packets on the wire, end-to-end
+//! through SRTP on a real loopback.
 //!
-//! Known limitation (tracked for follow-up): the current `add_local_audio_track`
-//! only advertises the Opus encoding to the remote, so PT 101 (telephone-event)
-//! packets sent via `send_dtmf` do not survive SDP-driven SRTP filtering on a
-//! real loopback. The byte-layout assertions in `encode_telephone_event` cover
-//! the wire format; a future change will register a multi-codec audio
-//! transceiver so DTMF round-trips through real peers as well.
+//! D1 attached a dedicated `TrackLocalStaticRTP` for PT 101 on its own SSRC.
+//! The offerer's SDP carries two audio m-lines (Opus stream + DTMF stream),
+//! and PT 101 packets arrive on the answerer's dedicated DTMF remote track —
+//! so the test discovers all audio remote tracks and captures from each.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use rvoip_webrtc::media::dtmf::send_dtmf;
-use rvoip_webrtc::peer::{connect_loopback, RvoipPeerConnection};
+use rvoip_webrtc::peer::connect_loopback;
 use rvoip_webrtc::WebRtcConfig;
 use webrtc::media_stream::track_remote::TrackRemoteEvent;
 
@@ -30,7 +29,6 @@ fn decode_event(payload: &[u8]) -> Option<(u8, bool, u8, u16)> {
 }
 
 #[tokio::test]
-#[ignore = "needs multi-codec audio transceiver before PT 101 survives SRTP — see module docs"]
 async fn send_dtmf_emits_rfc4733_telephone_events() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -38,49 +36,66 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
         .await
         .expect("loopback");
 
-    // Prime the answerer's `on_track` so it has a TrackRemote we can poll.
-    let remote = RvoipPeerConnection::prime_remote_track(
-        &offerer,
-        &answerer,
-        Duration::from_secs(5),
-    )
-    .await
-    .expect("answerer received remote track");
-
-    // Spawn an RTP capture task that filters PT 101 events.
+    // D1 — the answerer has *two* audio transceivers after negotiation
+    // (Opus stream + DTMF stream). PT 101 arrives only on the DTMF
+    // transceiver's receiver, so we spawn a watcher that drains every
+    // remote audio track from the handler's on_track channel and polls
+    // each one. New tracks may appear after we start sending PT 101
+    // (webrtc-rs fires on_track on first inbound RTP), so the watcher
+    // keeps polling until the deadline.
     let captured: Arc<parking_lot::Mutex<Vec<(u8, bool, u8, u16, bool)>>> =
         Arc::new(parking_lot::Mutex::new(Vec::new()));
     let cap_clone = Arc::clone(&captured);
-    let capture = tokio::spawn(async move {
+    let answerer_watch = Arc::clone(&answerer);
+    let watcher = tokio::spawn(async move {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            let Some(event) =
-                tokio::time::timeout(Duration::from_millis(100), remote.poll())
-                    .await
-                    .ok()
-                    .flatten()
-            else {
-                continue;
-            };
-            if let TrackRemoteEvent::OnRtpPacket(pkt) = event {
-                if pkt.header.payload_type == TELEPHONE_EVENT_PT {
-                    if let Some((ev, eoe, vol, dur)) = decode_event(&pkt.payload) {
-                        cap_clone.lock().push((ev, eoe, vol, dur, pkt.header.marker));
+        let mut pollers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        while tokio::time::Instant::now() < deadline {
+            if let Some(track) = answerer_watch.try_recv_remote_track().await {
+                let cap = Arc::clone(&cap_clone);
+                pollers.push(tokio::spawn(async move {
+                    loop {
+                        let Some(event) = tokio::time::timeout(
+                            Duration::from_millis(100),
+                            track.poll(),
+                        )
+                        .await
+                        .ok()
+                        .flatten() else {
+                            continue;
+                        };
+                        if let TrackRemoteEvent::OnRtpPacket(pkt) = event {
+                            if pkt.header.payload_type == TELEPHONE_EVENT_PT {
+                                if let Some((ev, eoe, vol, dur)) =
+                                    decode_event(&pkt.payload)
+                                {
+                                    cap.lock().push((
+                                        ev,
+                                        eoe,
+                                        vol,
+                                        dur,
+                                        pkt.header.marker,
+                                    ));
+                                }
+                            }
+                        }
                     }
-                }
+                }));
             }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        for h in pollers {
+            h.abort();
         }
     });
 
-    // Send DTMF "5" for 100ms.
+    // Send DTMF "5" for 100ms — first PT 101 packet triggers on_track
+    // on the answerer's DTMF transceiver.
     send_dtmf(&offerer, "5", 100).await.expect("send_dtmf");
 
     // Wait long enough for end-of-event retransmissions to arrive.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    capture.abort();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    watcher.abort();
 
     let events = captured.lock().clone();
     assert!(
@@ -106,7 +121,6 @@ async fn send_dtmf_emits_rfc4733_telephone_events() {
     // Duration must monotonically increase (cumulative samples across the tone).
     let mut last = 0u16;
     for (_, _, _, dur, _) in &events {
-        // duration should never go backwards
         assert!(*dur >= last, "duration regressed: {dur} < {last}");
         last = *dur;
     }

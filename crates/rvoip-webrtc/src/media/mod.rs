@@ -1,5 +1,7 @@
 pub mod dtmf;
 pub mod fixtures;
+/// D3b/c — RFC 7741 (VP8) and RFC 6184 (H.264) RTP packetizers.
+pub mod packetize;
 pub mod pump;
 pub mod stats;
 pub mod stream;

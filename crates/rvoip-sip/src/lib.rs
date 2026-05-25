@@ -427,6 +427,9 @@
 pub mod adapter;
 pub mod api;
 pub mod errors;
+/// D4 — `MediaStream` wrapper that bridges a SIP audio session into
+/// `rvoip_core::ConnectionAdapter::streams`. See module docs.
+pub mod media_stream;
 pub mod server;
 
 // These modules remain public for existing internal-style integrations, but

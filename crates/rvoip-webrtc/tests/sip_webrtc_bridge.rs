@@ -1,15 +1,8 @@
-//! H6 deferred (#44): SIP↔WebRTC gateway wiring smoke test.
+//! H6 + D4: SIP↔WebRTC gateway wiring + stream surface checks.
 //!
 //! ## Scope
 //!
-//! The full SIP↔WebRTC media-transcoding gateway (G.711↔Opus via
-//! `rvoip-media-core`, real SIP UA dialing a SIP listener that bridges to a
-//! WHEP subscriber) requires substantial out-of-crate work — per the existing
-//! `rvoip-uctp/examples/uctp_to_sip_bridge/orchestrator_bridge.rs` README,
-//! `Orchestrator::bridge_connections` between SIP and another transport is
-//! still partially stubbed in rvoip-core.
-//!
-//! What this test verifies (the integration point this crate owns):
+//! Verifies the integration point this crate owns:
 //!
 //! 1. `SipAdapter` and `WebRtcAdapter` can be registered together on the
 //!    same `Orchestrator` without conflicts (transport vocabulary, event
@@ -17,10 +10,14 @@
 //! 2. `WebRtcAdapter` exposes `Transport::WebRtc` and `SipAdapter` exposes
 //!    `Transport::Sip` — they're distinct.
 //! 3. The orchestrator can subscribe to the merged event bus.
-//!
-//! Real SIP UAC → bridge → WHEP subscriber lives in the integration test
-//! suite at the `rvoip-uctp/examples/uctp_to_sip_bridge` level once the
-//! `bridge_connections` SIP path lands.
+//! 4. **D4 — `SipAdapter::streams()` no longer returns `vec![]` for an
+//!    unknown connection it returns `ConnectionNotFound`; for a real session
+//!    it returns a `SipMediaStream` wrapping the PCM audio plane.** The
+//!    full SNR-based G.711↔Opus E2E test still requires aligning the
+//!    WebRTC `MediaFrame.payload` shape to the orchestrator-side
+//!    transcoder's expectations (codec payload vs full RTP wire image);
+//!    that follow-on refactor is tracked under `GAP_PLAN.md` §3.1 D4
+//!    follow-up.
 
 #![cfg(feature = "signaling-whip")]
 
@@ -105,4 +102,40 @@ async fn webrtc_advertises_audio_codecs_and_sip_is_capability_neutral() {
 fn pick_free_udp_port() -> u16 {
     let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral");
     sock.local_addr().expect("local_addr").port()
+}
+
+#[tokio::test]
+async fn sip_media_stream_codec_name_maps_to_pcmu_pt() {
+    // D4 follow-up — the SIP MediaStream's codec name must match the
+    // string `rvoip_core::bridge::codec_to_pt` recognizes, otherwise the
+    // orchestrator's `bridge_connections` rejects with `UnsupportedCodec`
+    // before it can even spawn the transcoder. The wrapper uses
+    // "g.711-mu" → PT 0 (PCMU); validating it here keeps a future rename
+    // from silently breaking SIP↔WebRTC bridging.
+    use rvoip_core::bridge::codec_to_pt;
+    assert_eq!(codec_to_pt("g.711-mu"), Some(0), "SIP MediaStream codec");
+    assert_eq!(codec_to_pt("opus"), Some(111), "WebRTC MediaStream codec");
+}
+
+#[tokio::test]
+async fn sip_adapter_streams_returns_connection_not_found_for_unknown_id() {
+    // D4 — pre-D4, `SipAdapter::streams()` unconditionally returned `vec![]`,
+    // hiding lookup failures. Now an unknown ConnectionId surfaces
+    // `ConnectionNotFound`, which the orchestrator can route to the right
+    // error path.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let sip_port = pick_free_udp_port();
+    let coord = UnifiedCoordinator::new(SipConfig::local("d4-streams-test", sip_port))
+        .await
+        .expect("sip coordinator");
+    let sip = SipAdapter::new(coord).await.expect("sip adapter");
+    let unknown = rvoip_core::ids::ConnectionId::new();
+    let result = <SipAdapter as ConnectionAdapter>::streams(&*sip, unknown).await;
+    let err = result
+        .map(|v| format!("Ok({} streams)", v.len()))
+        .unwrap_or_else(|e| format!("Err({e})"));
+    assert!(
+        err.starts_with("Err(") && err.contains("not found"),
+        "expected ConnectionNotFound on unknown id, got {err}"
+    );
 }

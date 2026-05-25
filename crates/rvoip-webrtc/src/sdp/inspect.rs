@@ -15,6 +15,17 @@ pub fn sdp_indicates_simulcast(sdp: &str) -> bool {
         || sdp.contains("a=rid:")
 }
 
+/// Returns true when SDP advertises RFC 4733 telephone-event in any audio
+/// m-section (case-insensitive rtpmap match). Used by D1 to decide whether
+/// the answerer should attach a local PT 101 track in response to a remote
+/// offer.
+pub fn sdp_advertises_telephone_event(sdp: &str) -> bool {
+    sdp.lines().any(|line| {
+        let l = line.trim();
+        l.starts_with("a=rtpmap:") && l.to_ascii_lowercase().contains("telephone-event")
+    })
+}
+
 /// Returns true when ICE candidates are embedded in SDP (full gather, not trickle-only).
 pub fn sdp_has_inline_ice_candidates(sdp: &str) -> bool {
     sdp.lines()

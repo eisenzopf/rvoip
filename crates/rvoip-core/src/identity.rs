@@ -67,6 +67,17 @@ pub enum IdentityAssurance {
         user_id: IdentityId,
         scopes: Vec<String>,
     },
+    /// D2 — the remote peer is bound to a specific DTLS certificate by
+    /// hash. `algorithm` is the IANA hash name (e.g. `"sha-256"`) per RFC
+    /// 8122 §5; `value` is the colon-separated hex digest as it appears
+    /// in the SDP `a=fingerprint:` attribute. This is a key-binding form
+    /// of pseudonymous identity — the peer has proven control of the
+    /// private key matching the fingerprint, but no real-world identity
+    /// is asserted.
+    DtlsFingerprint {
+        algorithm: String,
+        value: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

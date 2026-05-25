@@ -357,11 +357,16 @@ pub fn spawn_inbound_pump(
             match event {
                 TrackRemoteEvent::OnRtpPacket(pkt) => {
                     stats.record_packet();
-                    let payload = rtp_packet_to_bytes(&pkt);
+                    // D4 follow-up — emit codec payload bytes only (no RTP
+                    // header). The orchestrator's `Transcoder` consumes
+                    // codec bytes; the local outbound pump re-wraps with
+                    // a fresh header. Preserve the timestamp in the
+                    // `MediaFrame.timestamp_rtp` field so it survives the
+                    // transcode pass.
                     let frame = MediaFrame {
                         stream_id: stream_id.clone(),
                         kind: rvoip_core::stream::StreamKind::Audio,
-                        payload,
+                        payload: pkt.payload.clone(),
                         timestamp_rtp: pkt.header.timestamp,
                         captured_at: Utc::now(),
                     };
@@ -390,20 +395,61 @@ pub fn spawn_inbound_pump(
 }
 
 /// Spawn a task that reads `frames_out` and writes RTP to a local track.
+///
+/// D4 follow-up — `MediaFrame.payload` is expected to be **codec payload
+/// bytes** (no RTP header). The pump wraps each frame in a fresh RTP
+/// packet using the supplied `ssrc` and `payload_type` and an internal
+/// sequence counter. `MediaFrame.timestamp_rtp` is honored when non-zero;
+/// otherwise the pump derives a monotonically-increasing timestamp from
+/// the codec's expected frame duration.
+///
+/// Legacy callers that put full RTP wire bytes in `MediaFrame.payload`
+/// (pre-D4) are still tolerated — if the payload parses as a valid RTP
+/// packet, we forward it verbatim (the test fixtures
+/// `silent_rtp_payload_for_ssrc` use this path).
 pub fn spawn_outbound_pump(
     track: Arc<TrackLocalStaticRTP>,
     mut frames_out_rx: mpsc::Receiver<MediaFrame>,
+    ssrc: u32,
+    payload_type: u8,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
+        let mut seq: u16 = 1;
+        let mut next_timestamp: u32 = 0;
         while let Some(frame) = frames_out_rx.recv().await {
-            let pkt = match bytes_to_rtp_packet(&frame.payload) {
-                Ok(mut pkt) => {
-                    if pkt.header.timestamp == 0 {
-                        pkt.header.timestamp = frame.timestamp_rtp;
-                    }
-                    pkt
+            // Try the legacy "full RTP wire image" path first — preserves
+            // the long-standing semantics of `silent_rtp_payload_for_ssrc`
+            // and the `loopback_rtp_inbound_round_trip` test gate.
+            let pkt = if let Ok(mut legacy) = bytes_to_rtp_packet(&frame.payload) {
+                if legacy.header.timestamp == 0 {
+                    legacy.header.timestamp = frame.timestamp_rtp;
                 }
-                Err(_) => continue,
+                legacy
+            } else {
+                // New contract — codec bytes only, wrap in a fresh RTP header.
+                let ts = if frame.timestamp_rtp != 0 {
+                    frame.timestamp_rtp
+                } else {
+                    let t = next_timestamp;
+                    next_timestamp = next_timestamp.wrapping_add(960); // 20 ms @ 48 kHz default
+                    t
+                };
+                let pkt = rtp::Packet {
+                    header: rtp::Header {
+                        version: 2,
+                        padding: false,
+                        extension: false,
+                        marker: false,
+                        payload_type,
+                        sequence_number: seq,
+                        timestamp: ts,
+                        ssrc,
+                        ..Default::default()
+                    },
+                    payload: frame.payload,
+                };
+                seq = seq.wrapping_add(1);
+                pkt
             };
 
             loop {
@@ -432,8 +478,14 @@ fn rtp_packet_to_bytes(pkt: &rtp::Packet) -> bytes::Bytes {
 
 fn bytes_to_rtp_packet(data: &bytes::Bytes) -> Result<rtp::Packet, rtc::shared::error::Error> {
     let mut buf = data.clone();
-    let mut pkt = rtp::Packet::default();
-    rtp::Packet::unmarshal(&mut buf)?;
+    // Pre-D4 this function discarded the unmarshal result and always
+    // returned `Packet::default()` (PT=0, SSRC=0, empty payload), which
+    // meant the legacy outbound-pump path silently wrote zero-byte
+    // PCMU packets instead of the caller's RTP bytes. Tests only ever
+    // asserted `!payload.is_empty()` after a remote round-trip, so the
+    // regression hid in plain sight. Fixed here as part of the D4
+    // contract reconciliation.
+    let pkt = rtp::Packet::unmarshal(&mut buf)?;
     Ok(pkt)
 }
 
@@ -470,6 +522,36 @@ pub fn silent_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rtp::P
     }
 }
 
+/// D3a — wrap an arbitrary Opus payload in a marshalled RTP packet.
+///
+/// Used by [`CpalAudioSource`](crate::client::CpalAudioSource) to hand
+/// already-encoded Opus frames to the outbound pump. The PT is fixed at
+/// 111 to match the codec registered by
+/// [`build_media_engine`](crate::peer::builder::build_media_engine).
+pub fn opus_rtp_payload(
+    ssrc: u32,
+    seq: u16,
+    timestamp: u32,
+    marker: bool,
+    opus_bytes: bytes::Bytes,
+) -> bytes::Bytes {
+    let pkt = rtp::Packet {
+        header: rtp::Header {
+            version: 2,
+            padding: false,
+            extension: false,
+            marker,
+            payload_type: OPUS_PT_DEFAULT,
+            sequence_number: seq,
+            timestamp,
+            ssrc,
+            ..Default::default()
+        },
+        payload: opus_bytes,
+    };
+    rtp_packet_to_bytes(&pkt)
+}
+
 /// Parsed silent VP8 RTP packet with an explicit SSRC.
 pub fn silent_vp8_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rtp::Packet {
     rtp::Packet {
@@ -485,5 +567,36 @@ pub fn silent_vp8_rtp_packet_for_ssrc(ssrc: u32, seq: u16, timestamp: u32) -> rt
             ..Default::default()
         },
         payload: bytes::Bytes::from_static(&[0x10, 0x00, 0x00, 0x00]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D4 follow-up — the legacy-compat path on the outbound pump must
+    /// detect a full RTP wire image in `MediaFrame.payload` and forward it
+    /// verbatim, so the long-standing `silent_rtp_payload_for_ssrc` fixture
+    /// (used by `loopback_rtp_inbound_round_trip` and the QUIC bridge
+    /// test) keeps working.
+    #[test]
+    fn legacy_rtp_payload_round_trips_through_bytes_to_rtp_packet() {
+        let bytes = silent_rtp_payload_for_ssrc(0xCAFEBABE, 42, 9600);
+        let pkt = bytes_to_rtp_packet(&bytes).expect("legacy RTP must parse");
+        assert_eq!(pkt.header.payload_type, OPUS_PT_DEFAULT);
+        assert_eq!(pkt.header.ssrc, 0xCAFEBABE);
+    }
+
+    /// D4 follow-up — codec payload bytes must NOT happen to parse as a
+    /// valid RTP packet (otherwise the legacy-compat path would
+    /// mis-trigger). The 3-byte silent Opus payload (`F8 FF FE`) has
+    /// version bits `11` (≠ 2), so it's reliably rejected.
+    #[test]
+    fn opus_silence_codec_bytes_do_not_parse_as_rtp() {
+        let raw_opus = bytes::Bytes::from_static(&[0xF8, 0xFF, 0xFE]);
+        assert!(
+            bytes_to_rtp_packet(&raw_opus).is_err(),
+            "Opus codec bytes must be rejected as RTP — otherwise the outbound pump's legacy path mis-fires"
+        );
     }
 }

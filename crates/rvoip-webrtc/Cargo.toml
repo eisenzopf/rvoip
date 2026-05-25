@@ -18,6 +18,26 @@ signaling-whip = ["dep:axum", "dep:hyper", "dep:tower", "dep:tower-http", "dep:s
 signaling-ws = ["dep:tokio-tungstenite", "dep:serde_json"]
 client = []
 comprehensive = ["client", "signaling-ws", "dep:serde_json"]
+# D3a — cpal-backed microphone capture + speaker playback, real Opus encoder.
+# Use to ship a "cargo add rvoip-webrtc; place a call from a laptop"
+# experience without writing platform glue. Pulls in `comprehensive`
+# (the existing client base — `client` alone has unsatisfied serde_json
+# uses in `client::native`).
+client-cpal = ["comprehensive", "dep:cpal", "dep:opus"]
+# D3 — `VideoSource` / `VideoSink` trait surface + RFC 7741/6184 packetizers
+# (pure Rust). Concrete encoder backends are gated separately so users
+# can pick the codec they need without pulling both native deps.
+client-video = ["comprehensive"]
+# D3b — VP8 encoder via `vpx-encode` (libvpx). Camera capture via `nokhwa`.
+# Native deps: `libvpx` on the build machine (e.g. `brew install libvpx`).
+# `env-libvpx-sys` is pulled in with the `generate` feature so bindgen
+# adapts to whichever libvpx version is installed locally.
+client-video-vp8 = ["client-video", "dep:vpx-encode", "dep:env-libvpx-sys", "dep:nokhwa"]
+# D3c — H.264 encoder via `openh264`. Camera capture via `nokhwa`.
+# Native deps: `nokhwa` requires platform camera frameworks (AVFoundation
+# on macOS, V4L2 on Linux). `openh264` fetches a BSD-licensed binary at
+# build time — see <https://github.com/cisco/openh264>.
+client-video-h264 = ["client-video", "dep:openh264", "dep:nokhwa"]
 tls-rustls = ["dep:axum-server", "dep:tokio-rustls", "dep:rustls", "dep:rustls-pemfile"]
 # Headless-Chromium driven interop test (dev-only; needs Chromium binary on PATH).
 interop-browser = ["signaling-whip", "signaling-ws", "dep:chromiumoxide"]
@@ -71,6 +91,25 @@ axum-server = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 chromiumoxide = { workspace = true, optional = true }
+
+# D3a — cpal microphone/speaker + opus encoder. Both pinned to the same
+# versions audio-core (`cpal = "0.15"`) and media-core (`opus = "0.3"`)
+# already use, so cargo resolves a single copy across the workspace.
+cpal = { version = "0.15", optional = true }
+opus = { version = "0.3", optional = true }
+
+# D3b/c — video encoder + camera capture (all optional).
+# `nokhwa` 0.10 with `input-native` for cross-platform camera capture.
+# `vpx-encode` 0.7 wraps libvpx for VP8/VP9 encoding.
+# `openh264` 0.6 wraps Cisco's BSD-licensed H.264 encoder.
+nokhwa = { version = "0.10", default-features = false, features = ["input-native"], optional = true }
+vpx-encode = { version = "0.6", optional = true }
+# `env-libvpx-sys` ships pre-generated bindings only for older libvpx
+# versions; on macOS we install libvpx 1.16 from homebrew which doesn't
+# match. Force the `generate` feature so the build runs bindgen against
+# whatever libvpx is installed locally.
+env-libvpx-sys = { version = "5", features = ["generate"], optional = true }
+openh264 = { version = "0.6", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
@@ -219,6 +258,14 @@ required-features = ["soak-1h"]
 [[test]]
 name = "dc_loopback"
 required-features = ["comprehensive"]
+
+[[test]]
+name = "video_vp8"
+required-features = ["client-video-vp8"]
+
+[[test]]
+name = "video_h264"
+required-features = ["client-video-h264"]
 
 [[test]]
 name = "client_server_comprehensive"

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
-use parking_lot::Mutex as SyncMutex;
+use parking_lot::{Mutex as SyncMutex, RwLock as SyncRwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use rvoip_core::adapter::{
     AdapterEvent, AdapterKind, ConnectionAdapter, ConnectionHandle, EndReason, OriginateRequest,
@@ -85,6 +85,27 @@ pub struct Route {
     pub failed_at: Arc<SyncMutex<Option<Instant>>>,
 }
 
+/// D2 — per-route DTLS fingerprint pinning policy.
+///
+/// Implementations return the set of fingerprints allowed for a given
+/// session. The adapter takes the **union** of this list with
+/// [`WebRtcConfig::pinned_fingerprints`](crate::config::WebRtcConfig::pinned_fingerprints)
+/// and, if the union is non-empty, rejects any peer whose negotiated
+/// fingerprint isn't in the union with
+/// [`WebRtcError::FingerprintNotPinned`](crate::errors::WebRtcError::FingerprintNotPinned).
+///
+/// `session_hint` is a free-form identifier the caller can use to scope
+/// pinning per tenant / per call (e.g. a WHIP `session_id` or a UCTP
+/// request id). Pass `None` when no hint is available.
+#[async_trait]
+pub trait FingerprintPolicyHook: Send + Sync {
+    async fn allowed_fingerprints(
+        &self,
+        conn: &ConnectionId,
+        session_hint: Option<&str>,
+    ) -> Vec<crate::identity::DtlsFingerprint>;
+}
+
 pub struct WebRtcAdapter {
     config: WebRtcConfig,
     routes: Arc<DashMap<ConnectionId, Route>>,
@@ -101,6 +122,10 @@ pub struct WebRtcAdapter {
     /// decremented on route removal. Replaces `routes.len()` for cap checks
     /// so concurrent originate/apply_remote_offer can't race past the cap.
     live_sessions: Arc<std::sync::atomic::AtomicUsize>,
+    /// D2 — optional per-route fingerprint pinning hook. Set via
+    /// [`WebRtcAdapter::set_fingerprint_policy`]; `None` means "use only
+    /// the static `WebRtcConfig::pinned_fingerprints` list".
+    fingerprint_policy: SyncRwLock<Option<Arc<dyn FingerprintPolicyHook>>>,
 }
 
 impl WebRtcAdapter {
@@ -120,6 +145,7 @@ impl WebRtcAdapter {
             metrics_rejected: Arc::new(AtomicU64::new(0)),
             metrics_reaped: Arc::clone(&metrics_reaped),
             live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fingerprint_policy: SyncRwLock::new(None),
         });
 
         // Spawn session reaper (idempotent: TTL=0 disables in-loop work).
@@ -216,10 +242,9 @@ impl WebRtcAdapter {
     /// such route, or `Ok(vec![])` if the route has no remote SDP yet (e.g.
     /// outbound originate before the answer arrives).
     ///
-    /// Callers can pin or verify these against a trust store. The trait
-    /// method [`ConnectionAdapter::verify_request_signature`] still returns
-    /// `Anonymous` until rvoip-core gains a `DtlsFingerprint` variant on
-    /// [`IdentityAssurance`].
+    /// D2 — [`ConnectionAdapter::verify_request_signature`] now surfaces
+    /// the first canonical fingerprint here as
+    /// [`IdentityAssurance::DtlsFingerprint`].
     pub fn remote_dtls_fingerprint(
         &self,
         conn: &ConnectionId,
@@ -230,6 +255,54 @@ impl WebRtcAdapter {
             .as_deref()
             .map(crate::identity::extract_fingerprints)
             .unwrap_or_default())
+    }
+
+    /// D2 — register a per-route fingerprint pinning hook. The hook's
+    /// returned list is unioned with [`WebRtcConfig::pinned_fingerprints`];
+    /// when the union is non-empty, peers whose `a=fingerprint:` doesn't
+    /// match are rejected with
+    /// [`WebRtcError::FingerprintNotPinned`](crate::errors::WebRtcError::FingerprintNotPinned).
+    pub fn set_fingerprint_policy(&self, hook: Arc<dyn FingerprintPolicyHook>) {
+        *self.fingerprint_policy.write() = Some(hook);
+    }
+
+    /// D2 — clear any previously-registered policy hook. Static
+    /// `WebRtcConfig::pinned_fingerprints` still applies.
+    pub fn clear_fingerprint_policy(&self) {
+        *self.fingerprint_policy.write() = None;
+    }
+
+    /// D2 — evaluate the union of static + dynamic pin lists against the
+    /// remote SDP's fingerprints. `Ok(())` when allowed (including when no
+    /// pinning is in effect); `Err(FingerprintNotPinned)` when the remote
+    /// has at least one fingerprint and none match.
+    async fn enforce_fingerprint_policy(
+        &self,
+        conn: &ConnectionId,
+        remote_sdp: &str,
+        session_hint: Option<&str>,
+    ) -> Result<()> {
+        let mut allowed: Vec<crate::identity::DtlsFingerprint> =
+            self.config.pinned_fingerprints.clone();
+        // Drop the read guard before awaiting — parking_lot guards are not Send.
+        let hook = self.fingerprint_policy.read().clone();
+        if let Some(hook) = hook {
+            allowed.extend(hook.allowed_fingerprints(conn, session_hint).await);
+        }
+        if allowed.is_empty() {
+            return Ok(());
+        }
+        let remote = crate::identity::extract_fingerprints(remote_sdp);
+        if remote.is_empty() {
+            return Err(WebRtcError::FingerprintNotPinned);
+        }
+        let normalize =
+            |fp: &crate::identity::DtlsFingerprint| (fp.algorithm.to_ascii_lowercase(), fp.value.to_ascii_lowercase());
+        let allowed_norm: std::collections::HashSet<_> = allowed.iter().map(normalize).collect();
+        if !remote.iter().any(|r| allowed_norm.contains(&normalize(r))) {
+            return Err(WebRtcError::FingerprintNotPinned);
+        }
+        Ok(())
     }
 
     /// Atomically reserve a session slot. Returns a guard that releases the
@@ -431,6 +504,11 @@ impl WebRtcAdapter {
             .peer
             .local_audio_track()
             .ok_or_else(|| WebRtcError::Adapter("no local audio track".into()))?;
+        let local_ssrc = route
+            .peer
+            .local_audio_ssrc()
+            .ok_or_else(|| WebRtcError::Adapter("no local audio SSRC".into()))?;
+        let payload_type = payload_type_for_audio_codec(&codec);
 
         let remote = route
             .peer
@@ -440,7 +518,7 @@ impl WebRtcAdapter {
 
         let stream_id = StreamId::new();
         let has_remote = remote.is_some();
-        let media = from_tracks(stream_id.clone(), codec, local, remote);
+        let media = from_tracks(stream_id.clone(), codec, local, local_ssrc, payload_type, remote);
         if has_remote {
             media.enable_webrtc_stats(
                 Arc::clone(route.peer.peer_connection()),
@@ -458,25 +536,77 @@ impl WebRtcAdapter {
             .ok_or(WebRtcError::ConnectionNotFound)
     }
 
+    /// D2 — update the stored remote SDP for an existing route (e.g. after
+    /// `apply_remote_answer` lands the offerer's answer). No-op when the
+    /// route has already been reaped.
+    fn update_remote_sdp(&self, conn: &ConnectionId, sdp: &str) {
+        if let Some(mut entry) = self.routes.get_mut(conn) {
+            entry.remote_sdp = Some(sdp.to_owned());
+        }
+    }
+
     fn insert_route(&self, conn_id: ConnectionId, route: Route) {
-        // BISECT: mimic the original spawn_route_watchers semantics — single
-        // task that polls try_recv_remote_track until it sees one track, then
-        // breaks. A second task waits for failure and removes the route.
+        // Track-attacher: wire the answerer's inbound RTP into each
+        // `WebRtcMediaStream`'s frames_in pump once a remote track is
+        // observed.
+        //
+        // The attacher *used* to only consume the `remote_track_rx`
+        // channel (`try_recv_remote_track`) and `break` after the first
+        // hit. That race-loses against any other caller that also reads
+        // the channel — notably the test helper
+        // `RvoipPeerConnection::prime_remote_track`, which calls
+        // `wait_remote_track` (also consumes the channel). When the test
+        // won the race the attacher looped forever and the inbound pump
+        // was never spawned, so the QUIC bridge test
+        // (`webrtc_quic_bridge_e2e::whip_webrtc_bridged_to_real_quic_leg`)
+        // would time out at `client_in.recv()`.
+        //
+        // Fix: fall back to `discover_remote_track` (transceiver scan,
+        // non-consuming) when the channel poll returns None. The
+        // attacher also keeps looping after the first attach so a second
+        // m-line (e.g. D1's DTMF or a future video track) gets its own
+        // pump on a later iteration; `attach_remote`'s `compare_exchange`
+        // guard makes the call idempotent per stream.
         let routes_track = Arc::clone(&self.routes);
         let conn_track = conn_id.clone();
         let peer_track = route.peer.clone();
         tokio::spawn(async move {
+            use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
+            use rvoip_core::stream::StreamKind;
             loop {
                 if !routes_track.contains_key(&conn_track) {
                     break;
                 }
-                if let Some(track) = peer_track.try_recv_remote_track().await {
-                    if let Some(route) = routes_track.get(&conn_track) {
-                        for entry in route.streams.iter() {
-                            entry.value().attach_remote(track.clone());
-                        }
-                    }
-                    break;
+                // 1) Fast path: drain anything sitting in the handler
+                //    channel from `on_track` firings.
+                while let Some(track) = peer_track.try_recv_remote_track().await {
+                    attach_track_to_streams(&routes_track, &conn_track, &track).await;
+                }
+                // 2) Fallback: even if another consumer drained the
+                //    channel, the underlying transceiver still exposes
+                //    the receiver's track. Scan and attach. Idempotent
+                //    via `WebRtcMediaStream::attach_remote`.
+                if let Some(audio) =
+                    peer_track.discover_remote_track(RtpCodecKind::Audio).await
+                {
+                    attach_track_to_streams_matching(
+                        &routes_track,
+                        &conn_track,
+                        &audio,
+                        StreamKind::Audio,
+                    )
+                    .await;
+                }
+                if let Some(video) =
+                    peer_track.discover_remote_track(RtpCodecKind::Video).await
+                {
+                    attach_track_to_streams_matching(
+                        &routes_track,
+                        &conn_track,
+                        &video,
+                        StreamKind::Video,
+                    )
+                    .await;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -568,8 +698,16 @@ impl WebRtcAdapter {
         conn: ConnectionId,
         answer_sdp: &str,
     ) -> Result<()> {
+        // D2 — enforce pinned fingerprints against the answer's `a=fingerprint:`
+        // lines before handing it to webrtc-rs. Rejecting here avoids
+        // completing the DTLS handshake with an un-pinned peer.
+        self.enforce_fingerprint_policy(&conn, answer_sdp, None)
+            .await?;
         let route = self.route(&conn)?;
         route.peer.set_remote_answer(answer_sdp).await?;
+        // Update the stored remote SDP so subsequent verify_request_signature
+        // / remote_dtls_fingerprint calls see the answer's fingerprint.
+        self.update_remote_sdp(&conn, answer_sdp);
         Ok(())
     }
 
@@ -579,6 +717,11 @@ impl WebRtcAdapter {
         let slot = self.reserve_session_slot()?;
         self.metrics_inbound.fetch_add(1, Ordering::Relaxed);
         let conn_id = ConnectionId::new();
+        // D2 — enforce pinned fingerprints against the offer's
+        // `a=fingerprint:` lines BEFORE allocating a peer connection, so
+        // an un-pinned peer never triggers DTLS negotiation costs.
+        self.enforce_fingerprint_policy(&conn_id, offer_sdp, None)
+            .await?;
         let peer = RvoipPeerConnection::new(&self.config, PeerRole::Answerer).await?;
         let answer_sdp = peer.accept_offer_and_gather(offer_sdp).await?;
 
@@ -993,10 +1136,26 @@ impl ConnectionAdapter for WebRtcAdapter {
 
     async fn verify_request_signature(
         &self,
-        _conn: ConnectionId,
+        conn: ConnectionId,
         _signature: SignatureHeaders,
     ) -> RvoipResult<IdentityAssurance> {
-        Ok(IdentityAssurance::Anonymous)
+        // D2 — surface the negotiated peer's DTLS fingerprint as the
+        // assurance. The variant is key-binding without a real-world
+        // identity (see `IdentityAssurance::DtlsFingerprint` docs); higher
+        // assurance levels require a credential flow handled by auth-core
+        // before this point. Returns `Anonymous` when there's no remote SDP
+        // yet (outbound originate before the answer lands) or the route is
+        // unknown.
+        let fps = self
+            .remote_dtls_fingerprint(&conn)
+            .unwrap_or_default();
+        match fps.into_iter().next() {
+            Some(fp) => Ok(IdentityAssurance::DtlsFingerprint {
+                algorithm: fp.algorithm,
+                value: fp.value,
+            }),
+            None => Ok(IdentityAssurance::Anonymous),
+        }
     }
 }
 
@@ -1033,6 +1192,58 @@ impl Drop for WebRtcAdapter {
         for entry in self.routes.iter() {
             entry.value().cancel.notify_waiters();
         }
+    }
+}
+
+/// QUIC-bridge-flake fix — attach `track` to **every** stream in the
+/// route. Idempotent via [`WebRtcMediaStream::attach_remote`]'s
+/// `compare_exchange` guard.
+async fn attach_track_to_streams(
+    routes: &Arc<DashMap<ConnectionId, Route>>,
+    conn: &ConnectionId,
+    track: &Arc<dyn webrtc::media_stream::track_remote::TrackRemote>,
+) {
+    if let Some(route) = routes.get(conn) {
+        for entry in route.streams.iter() {
+            entry.value().attach_remote(track.clone());
+        }
+    }
+}
+
+/// QUIC-bridge-flake fix — same as above but only attach to streams of
+/// the matching kind, so a future video track doesn't end up wired into
+/// the audio inbound pump (and vice versa).
+async fn attach_track_to_streams_matching(
+    routes: &Arc<DashMap<ConnectionId, Route>>,
+    conn: &ConnectionId,
+    track: &Arc<dyn webrtc::media_stream::track_remote::TrackRemote>,
+    kind: rvoip_core::stream::StreamKind,
+) {
+    if let Some(route) = routes.get(conn) {
+        for entry in route.streams.iter() {
+            if entry.value().kind() == kind {
+                entry.value().attach_remote(track.clone());
+            }
+        }
+    }
+}
+
+/// D4 follow-up — map a negotiated audio `CodecInfo` to the RTP payload
+/// type the outbound pump should stamp on each packet. Matches the codec
+/// table registered by
+/// [`build_media_engine`](crate::peer::builder::build_media_engine).
+fn payload_type_for_audio_codec(codec: &CodecInfo) -> u8 {
+    let name = codec.name.to_ascii_lowercase();
+    if name.contains("opus") {
+        crate::media::pump::OPUS_PT_DEFAULT
+    } else if name.contains("pcmu") || name.starts_with("g.711") && !name.contains("a-law") {
+        0 // PCMU
+    } else if name.contains("pcma") || name.contains("a-law") {
+        8 // PCMA
+    } else {
+        // Fall back to Opus PT — the engine only registers a handful of
+        // audio codecs and the negotiation path narrows to Opus by default.
+        crate::media::pump::OPUS_PT_DEFAULT
     }
 }
 

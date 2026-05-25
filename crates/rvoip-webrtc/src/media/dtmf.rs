@@ -142,18 +142,28 @@ async fn send_single_digit(
 }
 
 /// Send one or more DTMF digits using RFC 4733 telephone-event on PT 101.
+///
+/// D1 — prefers the dedicated DTMF track (separate SSRC, advertised in SDP
+/// alongside the Opus track) so PT 101 packets survive SRTP filtering on the
+/// remote. Falls back to the Opus audio track if no DTMF track was attached
+/// (e.g. when an older `add_local_audio_track` call ran before D1 landed).
 pub async fn send_dtmf(
     peer: &Arc<RvoipPeerConnection>,
     digits: &str,
     duration_ms: u32,
 ) -> Result<()> {
-    let track = peer
-        .local_audio_track()
-        .ok_or_else(|| WebRtcError::Adapter("no local audio track for DTMF".into()))?;
-
-    let ssrc = peer
-        .local_audio_ssrc()
-        .ok_or_else(|| WebRtcError::Adapter("no local audio SSRC for DTMF".into()))?;
+    let (track, ssrc) = match (peer.local_dtmf_track(), peer.local_dtmf_ssrc()) {
+        (Some(track), Some(ssrc)) => (track, ssrc),
+        _ => {
+            let track = peer
+                .local_audio_track()
+                .ok_or_else(|| WebRtcError::Adapter("no local audio track for DTMF".into()))?;
+            let ssrc = peer
+                .local_audio_ssrc()
+                .ok_or_else(|| WebRtcError::Adapter("no local audio SSRC for DTMF".into()))?;
+            (track, ssrc)
+        }
+    };
 
     let duration_ms = duration_ms.clamp(40, 6000);
 

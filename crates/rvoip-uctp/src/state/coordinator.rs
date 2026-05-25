@@ -1297,6 +1297,10 @@ fn assurance_label(a: &rvoip_core::identity::IdentityAssurance) -> &'static str 
         Identified { .. } => "identified",
         TaskScoped { .. } => "task-scoped",
         UserAuthorized { .. } => "user-authorized",
+        // D2 — DTLS fingerprint binding is key-binding without a
+        // real-world identity, so on the wire it maps to "pseudonymous"
+        // (matches `AssuranceLevel::from_core`).
+        DtlsFingerprint { .. } => "pseudonymous",
     }
 }
 

@@ -22,11 +22,12 @@ use webrtc::rtp_transceiver::{RtpTransceiver, RTCRtpTransceiverDirection};
 use crate::config::WebRtcConfig;
 use crate::errors::{Result, WebRtcError};
 use crate::peer::builder::{
-    self, audio_track_rtcp_feedback, video_track_rtcp_feedback, MIME_TYPE_OPUS, MIME_TYPE_VP8,
+    self, audio_track_rtcp_feedback, video_track_rtcp_feedback, MIME_TYPE_OPUS,
+    MIME_TYPE_TELEPHONE_EVENT, MIME_TYPE_VP8,
 };
 use crate::peer::handler::{ConnectionHandler, HandlerChannels, HandlerDropCounters};
 use crate::peer::ice::IceCandidateLog;
-use crate::sdp::inspect::sdp_has_media_line;
+use crate::sdp::inspect::{sdp_advertises_telephone_event, sdp_has_media_line};
 use crate::sdp::session::{parse_sdp, sdp_to_string};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +61,8 @@ pub struct RvoipPeerConnection {
     local_ice_rx: Arc<AsyncMutex<mpsc::Receiver<RTCIceCandidate>>>,
     local_audio: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_audio_ssrc: SyncMutex<Option<u32>>,
+    local_dtmf: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
+    local_dtmf_ssrc: SyncMutex<Option<u32>>,
     local_video: SyncMutex<Option<Arc<TrackLocalStaticRTP>>>,
     local_video_ssrc: SyncMutex<Option<u32>>,
     gather_timeout: Duration,
@@ -89,6 +92,8 @@ impl RvoipPeerConnection {
             local_ice_rx: Arc::new(AsyncMutex::new(receivers.local_ice)),
             local_audio: SyncMutex::new(None),
             local_audio_ssrc: SyncMutex::new(None),
+            local_dtmf: SyncMutex::new(None),
+            local_dtmf_ssrc: SyncMutex::new(None),
             local_video: SyncMutex::new(None),
             local_video_ssrc: SyncMutex::new(None),
             gather_timeout,
@@ -132,9 +137,18 @@ impl RvoipPeerConnection {
     }
 
     /// Add local tracks on an answerer to mirror the remote offer's `m=` sections.
+    ///
+    /// D1 — also attaches the dedicated PT 101 track when the offer
+    /// advertises `telephone-event`, so the answerer can send DTMF back to
+    /// the offerer. When the offer is Opus-only (typical Firefox / Chrome
+    /// audio-only offer) we skip the DTMF attach to keep the local
+    /// transceiver count matched to the offer's m-lines.
     pub async fn prepare_answerer_media_for_offer(self: &Arc<Self>, remote_sdp: &str) -> Result<()> {
         if sdp_has_media_line(remote_sdp, "audio") {
             self.add_local_audio_track().await?;
+            if sdp_advertises_telephone_event(remote_sdp) {
+                self.add_local_dtmf_track().await?;
+            }
         }
         if sdp_has_media_line(remote_sdp, "video") {
             self.add_local_video_track().await?;
@@ -206,17 +220,13 @@ impl RvoipPeerConnection {
 
     /// Add a local Opus audio track (required before offer/answer for media).
     ///
-    /// G7 (deferred): a future change should advertise both Opus (PT 111)
-    /// and the RFC 4733 telephone-event codec (PT 101) on the same
-    /// transceiver so DTMF generated via [`crate::media::dtmf::send_dtmf`]
-    /// survives SRTP filtering on the remote side. The naive two-encoding
-    /// approach (one per codec on the same SSRC) breaks the inbound RTP
-    /// round-trip in webrtc-rs 0.20-alpha — the receiver picks the second
-    /// encoding's codec for inbound packets even when the wire PT matches
-    /// the first. The proper fix needs a separate sender per codec on the
-    /// same transceiver (mirroring the JS `transceiver.sender.setParameters`
-    /// surface), which 0.20-alpha doesn't yet expose. See
-    /// [`tests/dtmf_wire.rs`] for the test that this unblocks.
+    /// D1 — this attaches **only the Opus** track. The dedicated RFC 4733
+    /// telephone-event track (PT 101, separate SSRC) is opt-in via
+    /// [`Self::add_local_dtmf_track`] — it's auto-attached on the offerer's
+    /// `create_offer_and_gather` (so outbound DTMF works by default) and on
+    /// the answerer when the remote offer advertises `telephone-event`.
+    /// Splitting these keeps the local-transceiver count matched to the
+    /// remote m-lines when the peer offers Opus-only (typical browser).
     pub async fn add_local_audio_track(self: &Arc<Self>) -> Result<()> {
         if self.local_audio.lock().is_some() {
             return Ok(());
@@ -254,6 +264,55 @@ impl RvoipPeerConnection {
         Ok(())
     }
 
+    /// D1 — attach a dedicated RFC 4733 telephone-event track (PT 101) on
+    /// its own SSRC, bound to the peer connection via a second `add_track`
+    /// call. This is what [`crate::media::dtmf::send_dtmf`] writes to, so
+    /// PT 101 packets carry their negotiated codec on the wire and survive
+    /// SRTP filtering on the remote side.
+    ///
+    /// The naive two-encoding-per-track approach broke the inbound
+    /// round-trip because webrtc-rs 0.20-alpha dispatches inbound packets
+    /// by encoding order, not payload type; using separate tracks keeps
+    /// receive-side demux one-PT-per-encoding.
+    ///
+    /// Idempotent — safe to call multiple times.
+    pub async fn add_local_dtmf_track(self: &Arc<Self>) -> Result<()> {
+        if self.local_dtmf.lock().is_some() {
+            return Ok(());
+        }
+
+        let telephone_event = RTCRtpCodec {
+            mime_type: MIME_TYPE_TELEPHONE_EVENT.to_owned(),
+            clock_rate: 8000,
+            channels: 1,
+            sdp_fmtp_line: "0-15".into(),
+            rtcp_feedback: vec![],
+        };
+        let dtmf_ssrc = rand_ssrc();
+        let dtmf_track = Arc::new(TrackLocalStaticRTP::new(MediaStreamTrack::new(
+            format!("rvoip-dtmf-stream-{dtmf_ssrc}"),
+            format!("rvoip-dtmf-track-{dtmf_ssrc}"),
+            "rvoip-audio".into(),
+            RtpCodecKind::Audio,
+            vec![RTCRtpEncodingParameters {
+                rtp_coding_parameters: RTCRtpCodingParameters {
+                    ssrc: Some(dtmf_ssrc),
+                    ..Default::default()
+                },
+                codec: telephone_event,
+                ..Default::default()
+            }],
+        )));
+
+        self.pc
+            .add_track(dtmf_track.clone() as Arc<dyn TrackLocal>)
+            .await?;
+
+        *self.local_dtmf.lock() = Some(dtmf_track);
+        *self.local_dtmf_ssrc.lock() = Some(dtmf_ssrc);
+        Ok(())
+    }
+
     pub fn local_audio_track(&self) -> Option<Arc<TrackLocalStaticRTP>> {
         self.local_audio.lock().clone()
     }
@@ -261,6 +320,18 @@ impl RvoipPeerConnection {
     /// SSRC of the local audio encoding (for RFC 4733 DTMF).
     pub fn local_audio_ssrc(&self) -> Option<u32> {
         *self.local_audio_ssrc.lock()
+    }
+
+    /// D1 — the dedicated RFC 4733 telephone-event track (PT 101). Returns
+    /// `None` when no audio has been negotiated yet, or when the underlying
+    /// `add_track` for the secondary track was rejected by webrtc-rs.
+    pub fn local_dtmf_track(&self) -> Option<Arc<TrackLocalStaticRTP>> {
+        self.local_dtmf.lock().clone()
+    }
+
+    /// D1 — SSRC of the dedicated RFC 4733 track.
+    pub fn local_dtmf_ssrc(&self) -> Option<u32> {
+        *self.local_dtmf_ssrc.lock()
     }
 
     /// Add a local VP8 video track (call before offer/answer when video is requested).
@@ -436,6 +507,13 @@ impl RvoipPeerConnection {
 
         if self.local_audio.lock().is_none() && self.local_video.lock().is_none() {
             self.add_local_audio_track().await?;
+            // D1 — auto-attach the DTMF track on the offerer so outbound
+            // PT 101 telephone-event packets are advertised in the offer.
+            // Best-effort: a webrtc-rs build that rejects the second audio
+            // track must still ship Opus, so we log + carry on.
+            if let Err(e) = self.add_local_dtmf_track().await {
+                tracing::warn!(target: "rvoip_webrtc", error = %e, "failed to attach DTMF track; outbound DTMF will use the Opus track and may not survive SRTP filtering");
+            }
         }
 
         let offer = self.pc.create_offer(None).await?;

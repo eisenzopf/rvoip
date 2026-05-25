@@ -1,7 +1,7 @@
 //! `PeerConnectionBuilder` wiring — MediaEngine, interceptors, configuration.
 
 use rtc::interceptor::Registry;
-use rtc::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT;
+pub use rtc::peer_connection::configuration::media_engine::MIME_TYPE_TELEPHONE_EVENT;
 use rtc::peer_connection::configuration::interceptor_registry::register_default_interceptors;
 use rtc::peer_connection::configuration::media_engine::MediaEngine;
 use rtc::peer_connection::configuration::{

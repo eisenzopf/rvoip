@@ -40,10 +40,25 @@ async fn loopback_rtp_inbound_round_trip() {
 
     let offerer_ssrc = offerer.local_audio_ssrc().expect("offerer ssrc");
     let offerer_local = offerer.local_audio_track().expect("offerer local track");
-    let offerer_stream = from_tracks(StreamId::new(), codec.clone(), offerer_local, None);
+    let offerer_stream = from_tracks(
+        StreamId::new(),
+        codec.clone(),
+        offerer_local,
+        offerer_ssrc,
+        /* Opus PT */ 111,
+        None,
+    );
 
+    let answerer_ssrc = answerer.local_audio_ssrc().expect("answerer ssrc");
     let answerer_local = answerer.local_audio_track().expect("answerer local track");
-    let answerer_stream = from_tracks(StreamId::new(), codec, answerer_local, None);
+    let answerer_stream = from_tracks(
+        StreamId::new(),
+        codec,
+        answerer_local,
+        answerer_ssrc,
+        /* Opus PT */ 111,
+        None,
+    );
     answerer_stream
         .enable_webrtc_stats(Arc::clone(answerer.peer_connection()), Arc::new(Notify::new()));
 
